@@ -203,14 +203,22 @@ describe("claim lifecycle and TTL", () => {
       targetId: secondTarget,
       now: at(1_000),
     });
-    await store.createOrRefreshClaim({ userId: otherUserId, workspaceId: WS, targetId, now: at(2_000) });
+    // The other user claims the SAME target: the partial unique index is per
+    // (user, target), so both rows are live and only the user id separates them.
+    const otherClaim = await store.createOrRefreshClaim({
+      userId: otherUserId,
+      workspaceId: WS,
+      targetId,
+      now: at(2_000),
+    });
 
     const live = await store.listLiveClaims(userId, NOW);
     expect(live.map((row) => row.id)).toEqual([first.id, second.id]);
     expect(live.map((row) => row.target_id)).toEqual([targetId, secondTarget]);
-    expect(live.every((row) => row.workspace_id === WS)).toBe(true);
-    // The other user's claim is not this session's.
-    expect((await store.listLiveClaims(userId, NOW)).some((row) => row.workspace_id !== WS)).toBe(false);
+    // The other session's claim is not listed: dropping the `user_id` filter
+    // would put this id in the array.
+    expect(live.map((row) => row.id)).not.toContain(otherClaim.id);
+    expect(await store.listLiveClaims(otherUserId, NOW)).toMatchObject([{ id: otherClaim.id }]);
   });
 });
 

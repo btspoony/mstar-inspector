@@ -505,6 +505,10 @@ async function assignBotScope(c: AdminContext): Promise<Response> {
  * Idempotent by design: a target that holds no binding answers 200 with
  * `unbound: false`, so a retried repair converges instead of reporting an
  * error. An unknown or soft-deleted target is `404 target not found`.
+ *
+ * The store writes the audit row (`bot.target_unbind`, carrying the cleared
+ * before-state) in the same batch as the clear, so a refused repair appends
+ * nothing and an accepted one cannot lose its evidence.
  */
 async function unbindTargetBinding(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
@@ -515,6 +519,7 @@ async function unbindTargetBinding(c: AdminContext): Promise<Response> {
   if (!targetId) return c.notFound();
   const outcome = await createInstallClaimsStore(db).unbindTarget({
     targetId,
+    actor: login,
     now: new Date().toISOString(),
   });
   if (outcome.outcome === "target_not_found") return c.json({ error: "target not found" }, 404);

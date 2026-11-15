@@ -84,7 +84,7 @@ export type InstallClaimsStore = {
     installationId: number;
     now: string;
   }): Promise<InstallBindOutcome>;
-  unbindTarget(input: { targetId: string; now: string }): Promise<UnbindOutcome>;
+  unbindTarget(input: { targetId: string; actor: string; now: string }): Promise<UnbindOutcome>;
 };
 
 /** Insert, or refresh the live row the partial unique index already holds. */
@@ -162,6 +162,25 @@ const BIND_TARGET_SQL = `
      AND (installation_id IS NULL OR installation_id = ?)
      AND EXISTS (SELECT 1 FROM install_claims
                   WHERE id = ? AND consumed_token = ? AND user_id = ?)`;
+
+/**
+ * The repair path's audit row, in the same batch as the clear and carrying the
+ * same guard, so a refused repair appends nothing (the `runtime.bot_scope.set`
+ * precedent). `before` is a subquery against the not-yet-cleared row: the bind
+ * it describes is what the operator removed.
+ */
+const UNBIND_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'bot.target_unbind', 'target', ?3,
+         json_object(
+           'before', json_object(
+             'installation_id', (SELECT installation_id FROM review_targets WHERE id = ?3),
+             'account_login', (SELECT account_login FROM review_targets WHERE id = ?3)),
+           'after', NULL),
+         ?4
+   WHERE EXISTS (SELECT 1 FROM review_targets t
+                  WHERE t.id = ?3 AND t.deleted_at IS NULL AND t.installation_id IS NOT NULL)`;
 
 /**
  * The repair path: clear the binding and the login it copied. Guarded on the
@@ -284,9 +303,14 @@ export function createInstallClaimsStore(db: DashboardD1): InstallClaimsStore {
       return { outcome: "bound", targetId };
     },
 
-    async unbindTarget({ targetId, now }) {
-      const res = await db.prepare(UNBIND_TARGET_SQL).bind(now, targetId).run();
-      if (res.meta.changes > 0) return { outcome: "unbound" };
+    async unbindTarget({ targetId, actor, now }) {
+      // ONE batch: a repair that cannot clear the column must not leave an
+      // audit row claiming it did, and an accepted one cannot lose its row.
+      const [, res] = await db.batch([
+        db.prepare(UNBIND_AUDIT_SQL).bind(crypto.randomUUID(), actor, targetId, now),
+        db.prepare(UNBIND_TARGET_SQL).bind(now, targetId),
+      ]);
+      if ((res?.meta.changes ?? 0) > 0) return { outcome: "unbound" };
       // Nothing changed: say whether the target exists at all, so the operator
       // can tell a retry from a typo.
       const live = await db.prepare(TARGET_LIVE_SQL).bind(targetId).first<{ id: string }>();

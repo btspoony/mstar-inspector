@@ -48,11 +48,11 @@ function envFor(db: TestD1, overrides: Partial<Env> = {}): Env {
   } as unknown as Env;
 }
 
-/** One live bot, its workspace mapping, one bound target and the installation row. */
+/** One bot, its workspace mapping, one target (bound unless asked otherwise) and the installation row. */
 function seededTarget(
   db: TestD1,
   options: { bound?: boolean; deleted?: boolean } = {},
-): { botId: string; targetId: string; installationId: number } {
+): { targetId: string } {
   const botId = "bot-unbind";
   const targetId = "target-unbind";
   const installationId = 4242;
@@ -75,9 +75,10 @@ function seededTarget(
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, installation_id, account_login, created_by, created_at, updated_at)
+         (id, workspace_id, bot_id, name, installation_id, account_login, created_by,
+          created_at, updated_at, deleted_at)
        VALUES (?, 'default', ?, ?, ?, ?, 'acme',
-               '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+               '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ?)`,
     )
     .run(
       targetId,
@@ -85,8 +86,9 @@ function seededTarget(
       targetId,
       options.bound === false ? null : installationId,
       options.bound === false ? null : "acme",
+      options.deleted === true ? "2026-02-01T00:00:00.000Z" : null,
     );
-  return { botId, targetId, installationId };
+  return { targetId };
 }
 
 async function postUnbind(
@@ -120,6 +122,38 @@ async function unknownPath(db: TestD1, login: string | null): Promise<Response> 
     new Request("https://worker.local/_internal_admin/api/not-a-route", { method: "POST", headers }),
     envFor(db),
   );
+}
+
+type Audit = {
+  action: string;
+  actor_login: string;
+  target_type: string;
+  target_id: string;
+  detail: unknown;
+};
+
+/** The platform ledger, in write order — one row per accepted write. */
+function auditRows(db: TestD1): Audit[] {
+  return (
+    db.raw
+      .prepare(
+        `SELECT action, actor_login, target_type, target_id, detail_json
+           FROM platform_audit_events ORDER BY rowid`,
+      )
+      .all() as Array<{
+      action: string;
+      actor_login: string;
+      target_type: string;
+      target_id: string;
+      detail_json: string | null;
+    }>
+  ).map((row) => ({
+    action: row.action,
+    actor_login: row.actor_login,
+    target_type: row.target_type,
+    target_id: row.target_id,
+    detail: JSON.parse(row.detail_json ?? "null"),
+  }));
 }
 
 function binding(db: TestD1, targetId: string): { installation_id: number | null; account_login: string | null } {
@@ -164,10 +198,7 @@ describe("POST /_internal_admin/api/targets/:targetId/unbind", () => {
   test("an unknown or soft-deleted target answers 404 target not found", async () => {
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);
-    const { targetId } = seededTarget(db);
-    db.raw
-      .prepare("UPDATE review_targets SET deleted_at = '2026-02-01T00:00:00.000Z' WHERE id = ?")
-      .run(targetId);
+    const { targetId } = seededTarget(db, { deleted: true });
 
     const unknown = await postUnbind(db, OPERATOR, "no-such-target");
     expect(unknown.status).toBe(404);
@@ -176,6 +207,9 @@ describe("POST /_internal_admin/api/targets/:targetId/unbind", () => {
     const deleted = await postUnbind(db, OPERATOR, targetId);
     expect(deleted.status).toBe(404);
     expect(await deleted.json()).toEqual({ error: "target not found" });
+    // Nothing was written for either refusal: the binding and the ledger agree.
+    expect(binding(db, targetId)).toEqual({ installation_id: 4242, account_login: "acme" });
+    expect(auditRows(db)).toEqual([]);
   });
 
   test("an operator clears the binding and the copied login, leaving the installation row", async () => {
@@ -191,6 +225,17 @@ describe("POST /_internal_admin/api/targets/:targetId/unbind", () => {
     // The bot still has that installation; it is only no target's binding, so
     // a later claim of the same installation needs no webhook replay.
     expect(installationRow(db)).toEqual({ account_login: "acme", removed_at: null });
+    // The repair audits in lockstep with the clear: the cleared binding is the
+    // evidence, and it names the operator who removed it.
+    expect(auditRows(db)).toEqual([
+      {
+        action: "bot.target_unbind",
+        actor_login: OPERATOR,
+        target_type: "target",
+        target_id: targetId,
+        detail: { before: { installation_id: 4242, account_login: "acme" }, after: null },
+      },
+    ]);
   });
 
   test("a second repair is idempotent and reports unbound: false", async () => {
@@ -204,6 +249,9 @@ describe("POST /_internal_admin/api/targets/:targetId/unbind", () => {
     expect(again.status).toBe(200);
     expect(await again.json()).toEqual({ targetId, unbound: false });
     expect(binding(db, targetId)).toEqual({ installation_id: null, account_login: null });
+    // A repair that changed nothing appends nothing: the ledger keeps exactly
+    // the one row the accepted clear wrote.
+    expect(auditRows(db)).toHaveLength(1);
   });
 
   test("a target that never held a binding answers unbound: false", async () => {
@@ -215,5 +263,6 @@ describe("POST /_internal_admin/api/targets/:targetId/unbind", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ targetId, unbound: false });
+    expect(auditRows(db)).toEqual([]);
   });
 });

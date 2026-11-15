@@ -56,7 +56,7 @@ A target that already holds a binding cannot start a new claim (`409 target alre
 
 | Request | Behaviour |
 |---|---|
-| `POST /_internal_admin/api/targets/:targetId/unbind` | Operator only (`404` for anyone else), saas only. Clears `review_targets.installation_id` **and** the `account_login` copied from it, leaving the `bot_installations` row (the bot still has that installation). `200 {"targetId","unbound":true}`; a target that holds no binding answers `200 … "unbound":false`; an unknown or soft-deleted target is `404 {"error":"target not found"}`. After it, the target is claimable again.
+| `POST /_internal_admin/api/targets/:targetId/unbind` | Operator only (`404` for anyone else), saas only. Clears `review_targets.installation_id` **and** the `account_login` copied from it, leaving the `bot_installations` row (the bot still has that installation), and appends one `bot.target_unbind` audit row in the same batch carrying the cleared before-state. `200 {"targetId","unbound":true}`; a target that holds no binding answers `200 … "unbound":false` and writes nothing; an unknown or soft-deleted target is `404 {"error":"target not found"}` and writes nothing. After it, the target is claimable again.
 
 The webhook **never** writes a binding. An installation no target references is invisible to review.
 
