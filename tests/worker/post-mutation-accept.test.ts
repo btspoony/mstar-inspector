@@ -11,7 +11,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../../src/spa/post-form-headers";
 import type { Env } from "../../src/worker/env";
-import { createTestD1 } from "../store/helpers";
+import { createTestD1, execMigrationScript } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -68,7 +68,7 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0056_review_bots_rename.sql",
     "0057_review_targets.sql",
   ]) {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
   return db;
 }

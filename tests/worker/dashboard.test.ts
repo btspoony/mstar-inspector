@@ -66,6 +66,7 @@ import {
   removedPage,
 } from "../../src/dashboard/views";
 import { createSecretbox } from "../../src/dashboard/secretbox";
+import { execMigrationScript } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
@@ -2730,7 +2731,7 @@ describe("existing routes unaffected", () => {
 // `review_bots` — with a `through` index kept for pre-manifest DB premises.
 
 function applyMigrationFile(db: Database, name: string): void {
-  db.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
+  execMigrationScript(db, readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
 }
 
 /**

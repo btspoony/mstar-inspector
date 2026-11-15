@@ -123,8 +123,9 @@ export function targetlessVerdict(stdout: string): AttributionVerdict {
     count: read.count,
     message:
       `tenant attribution: ${read.count} bot(s) have no live review target — review configuration and the ` +
-      `installation binding live on that row, so they cannot review. 0057_review_targets.sql leaves every bot ` +
-      `exactly one target, so a target-less bot means that file did not finish — replay it, then re-run this gate.`,
+      `installation binding live on that row, so they cannot review. 0057_review_targets.sql cannot be replayed ` +
+      `whole on a half-applied database: inspect its partial application and restore the missing target rows, ` +
+      `then re-run this gate.`,
   };
 }
 

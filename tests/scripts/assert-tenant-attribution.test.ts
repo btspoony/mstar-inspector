@@ -146,7 +146,8 @@ describe("targetlessVerdict", () => {
       expect(verdict.ok).toBe(false);
       expect(verdict.count).toBe(1);
       expect(verdict.message).toContain("1 bot(s) have no live review target");
-      expect(verdict.message).toContain("0057_review_targets.sql");
+      expect(verdict.message).toContain("0057_review_targets.sql cannot be replayed whole");
+      expect(verdict.message).toContain("restore the missing target rows");
     } finally {
       db.raw.close();
     }
