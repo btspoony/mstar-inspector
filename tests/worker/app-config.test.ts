@@ -4738,10 +4738,9 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       const covered = coveredCatalogModel();
       if (covered === null) return;
       const { db, app } = await seededWorld();
-      // The catalog's ID, the App's own endpoint: the vendor's numbers
-      // describe the vendor, not this endpoint — so they are neither required
-      // nor copied here. The endpoint gate itself lives on the read side
-      // (catalogLimitsFor and the SPA pre-fill), not on this save.
+      // The catalog's ID, the App's own endpoint: the read side resolves the
+      // model's sizes by id alone (catalogLimitsFor and the SPA pre-fill), but
+      // this save stores only what the operator states — nothing is copied.
       const declared = await postForm(SETTINGS, await mallory(), makeEnv(db), {
         op: "add-custom-provider",
         provider_id: covered.provider,

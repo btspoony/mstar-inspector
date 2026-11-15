@@ -171,7 +171,7 @@ export type CatalogProvider = {
    * posts no override for a value the operator leaves untouched.
    */
   model_limits?: Record<string, CatalogModelLimit>;
-  /** The catalog row's own endpoint — the SPA's base-URL predicate input. */
+  /** The catalog row's own endpoint. */
   catalog_base_url?: string | null;
   verifiable: boolean;
   /** The provider answers a per-key usage probe (`/keys/usage`). */
@@ -191,21 +191,6 @@ export type CatalogProvider = {
    */
   protocols?: CatalogProtocolOption[];
 };
-
-/** The endpoints a catalog row owns — its default protocol's plus every
- *  option's. A declaration's base URL is trusted for catalog numbers only when
- *  it equals one of them (the same predicate the Worker evaluates). */
-export function catalogEndpoints(provider: CatalogProvider | undefined): readonly (string | null)[] {
-  if (provider === undefined) return [];
-  // The default protocol's endpoint is also protocols[0], so the set folds the
-  // repeat instead of matching the same URL twice.
-  return [
-    ...new Set<string | null>([
-      provider.catalog_base_url ?? provider.base_url,
-      ...(provider.protocols ?? []).map((option) => option.base_url),
-    ]),
-  ];
-}
 
 /** The row's vocabulary for the protocol a declaration materialized: the
  *  matching option's list, else the row's own (the default protocol's). */

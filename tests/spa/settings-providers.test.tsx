@@ -580,7 +580,7 @@ describe("a declaration stored under a collapsed per-protocol id", () => {
     }
   });
 
-  test("the model dialog pre-fills a catalog size when the declaration sits on the protocol's endpoint", async () => {
+  test("the model dialog pre-fills the catalog size for the stored declaration", async () => {
     const view = await mountSection(legacyPayload("https://api.merged.test/anthropic"));
     try {
       await view.clickText(t("en", "settings.providers.models.trigger"));
@@ -594,7 +594,7 @@ describe("a declaration stored under a collapsed per-protocol id", () => {
     }
   });
 
-  test("a private endpoint reusing the stored id pre-fills nothing — the gate matches the row's own URLs", async () => {
+  test("a private endpoint reusing the stored id still pre-fills the row's size — the id is the key", async () => {
     const view = await mountSection(legacyPayload("https://private.example.com/v1"));
     try {
       await view.clickText(t("en", "settings.providers.models.trigger"));
@@ -602,9 +602,9 @@ describe("a declaration stored under a collapsed per-protocol id", () => {
       const field = view.win.document.querySelector(
         `input[aria-label="${t("en", "settings.providers.models.fields.contextWindow", { model: "anthropic-a" })}"]`,
       ) as HTMLInputElement | null;
-      // The dialog really opened: the field exists and carries no number.
-      expect(field).not.toBeNull();
-      expect(field?.value).toBe("");
+      // The sizes are the model's, not the endpoint's: the same row answers
+      // whatever URL the declaration points at.
+      expect(field?.value).toBe("4242");
     } finally {
       await view.cleanup();
     }

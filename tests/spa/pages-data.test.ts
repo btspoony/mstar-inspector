@@ -14,7 +14,6 @@ import {
   INSIGHTS_REPO_ALL,
   inviteLoginNoticeKey,
   isPaused,
-  catalogEndpoints,
   modelChainTabs,
   modelsForProtocol,
   parseApps,
@@ -912,7 +911,7 @@ describe("provider catalog rows + add selection", () => {
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...merged, protocols: [] }] })).toBeNull();
   });
 
-  test("the protocol lookups: a declaration's vocabulary and the row's endpoints", () => {
+  test("the protocol lookups: a declaration's vocabulary", () => {
     const merged: CatalogProvider = {
       ...catalogRow,
       tier: "template",
@@ -931,10 +930,6 @@ describe("provider catalog rows + add selection", () => {
     expect(modelsForProtocol(merged, "typesafe")).toEqual(["a"]);
     expect(modelsForProtocol(merged, null)).toEqual(["a"]);
     expect(modelsForProtocol(undefined, "anthropic-messages")).toEqual([]);
-    // Every protocol endpoint is the row's own; nothing else is.
-    expect(catalogEndpoints(merged)).toEqual(["https://api.merged.test/v1", "https://api.merged.test/anthropic"]);
-    expect(catalogEndpoints(catalogRow)).toEqual([null]);
-    expect(catalogEndpoints(undefined)).toEqual([]);
   });
 
   test("add selection maps the picked catalog id to its configuration form kind", () => {
