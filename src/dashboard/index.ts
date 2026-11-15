@@ -5471,6 +5471,71 @@ const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
 };
 
 /**
+ * `POST /api/apps/:appId/bind-installation` — the target page's bind action:
+ * a workspace manager picks one pending installation of the bot and binds it to
+ * the workspace's target without leaving the dashboard.
+ *
+ * The write is the setup callback's OWN batch — `claimAndBind` records the
+ * caller's claim and consumes it in this request — so the unique index, the
+ * one-installation-per-target rule and the shared-bot guard all still decide.
+ * This route adds one guard of its own: the installation must answer the
+ * pending read, because the batch's upsert is conflict-tolerant and would
+ * accept an id the bot never reported.
+ *
+ * Refusals keep the family's vocabulary: an unknown, foreign or soft-deleted
+ * App is `404 unknown app`; a caller who cannot manage it is `403 forbidden`;
+ * a bot that is not `shared` advertises nothing (`404 bot is not shared`); no
+ * single live target is `404 no target`; an unreadable id is `400`; an id the
+ * pending read does not answer is `404 unknown installation`; a target that
+ * already holds a binding is `409 target already bound`, and a losing race for
+ * the same installation is the batch's `409 installation already bound`.
+ */
+const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const apps = createReviewBotsStore(member.db);
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
+  const target = await createTargetsStore(member.db).resolveInWorkspace(
+    member.scope.workspaceId,
+    app.id,
+  );
+  if (!target) return c.json({ error: "no target" }, 404);
+  if (target.installation_id !== null) return c.json({ error: "target already bound" }, 409);
+  const form = await c.req.parseBody();
+  const raw = form["installationId"];
+  const installationId = typeof raw === "string" ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(installationId) || installationId <= 0) {
+    return c.json({ error: "installationId required" }, 400);
+  }
+  const pending = await apps.listPendingInstallations(app.id, member.scope.workspaceId);
+  if (!pending.some((row) => row.installation_id === installationId)) {
+    return c.json({ error: "unknown installation" }, 404);
+  }
+  const bound = await createInstallClaimsStore(member.db).claimAndBind({
+    userId: member.user.id,
+    workspaceId: member.scope.workspaceId,
+    targetId: target.id,
+    installationId,
+    now: new Date().toISOString(),
+  });
+  switch (bound.outcome) {
+    case "bound":
+      return c.json({ targetId: bound.targetId });
+    case "installation_already_bound":
+      return c.json({ error: "installation already bound" }, 409);
+    case "target_not_bindable":
+      return c.json({ error: "target already bound" }, 409);
+    case "bot_not_shared":
+      return c.json({ error: "bot is not shared" }, 404);
+    case "claim_not_found":
+      return c.json({ error: "claim not found" }, 404);
+  }
+};
+
+/**
  * `POST /apps/:appId/park` — the workspace manager's repair for an overlapping
  * owner claim: pause the target and retire its `account_login`, with one
  * `target.park` audit row, all in one batch.
@@ -5880,6 +5945,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/claim", handler: appClaimRoute, access: "write" },
+  { method: "post", path: "/api/apps/:appId/bind-installation", handler: appBindInstallationRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/usage", handler: appKeyUsageRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
