@@ -315,6 +315,9 @@ export function createTargetsStore(db: TargetsStoreD1) {
         }
       }
       const rows = await db
+        // shortcut: tenant-bypass — the execution path's single-target fallback
+        // reads the bot's scope instead of binding a workspace; the webhook and
+        // the Check lanes resolve before any workspace is known.
         .prepare(
           `SELECT t.* FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
             WHERE t.bot_id = ? AND t.deleted_at IS NULL AND b.scope <> 'shared'

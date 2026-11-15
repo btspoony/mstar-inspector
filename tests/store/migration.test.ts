@@ -1,8 +1,11 @@
 /**
  * Migration tests — the DDL in
  * `migrations/0001_reviews.sql` + `0002_mstar_review_v1.sql` is the single
- * source of truth; these tests execute it verbatim through the bun:sqlite
- * test double and assert the schema contract:
+ * source of truth; these tests execute it statement by statement through
+ * `execMigrationScript` (`./helpers`) on the bun:sqlite test double, which is
+ * fail-fast: a statement that fails aborts the file instead of being skipped,
+ * so a schema that cannot be built is never half-applied here. They assert the
+ * schema contract:
  *   - reviews / findings tables + indexes exist
  *   - UNIQUE (installation_id, owner, repo, pr_number, head_sha) rejects a
  *     second row for the same sha (authoritative dedup, must not weaken)

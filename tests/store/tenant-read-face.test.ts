@@ -148,8 +148,8 @@ function prepareStatements(src: string): { line: number; sql: string }[] {
   }
 }
 
-/** Every `.prepare(…)` statement that reads `review_bots`, with its start line. */
-function readSites(src: string): { line: number }[] {
+/** Every `.prepare(…)` statement that reads `review_bots`, with its SQL. */
+function readSites(src: string): { line: number; sql: string }[] {
   return prepareStatements(src).filter((s) => DIRECT_READ.test(s.sql));
 }
 
@@ -180,6 +180,9 @@ const MAINTENANCE_SITES: Record<string, number> = {
   "worker/check-reconcile.ts": 3,
   "pipeline/review-threads.ts": 1,
   "store/review-checks.ts": 1,
+  // The execution path's shared-bot fallback suppressions: a delivery resolves
+  // a bot before any workspace is known, so `scope` is read without one.
+  "dashboard/targets-store.ts": 1,
 };
 
 describe("tenant read face allowlist", () => {
@@ -190,7 +193,7 @@ describe("tenant read face allowlist", () => {
     }
   });
 
-  test("only apps-store plus the four maintenance files read review_bots", () => {
+  test("only apps-store plus the declared maintenance files read review_bots", () => {
     expect(directReadFiles()).toEqual([
       "dashboard/apps-store.ts",
       ...Object.keys(MAINTENANCE_SITES).sort(),
@@ -227,14 +230,16 @@ describe("tenant read face allowlist", () => {
    * Migration 0036 replaced it with `github_slug` (0038 later dropped the
    * local route key outright); the cached slug stays off a maintenance read
    * exactly as `slug` did.
-   * Every maintenance SELECT must stay off the identity/ownership columns
-   * (`private_key_enc` is frozen plan-scope maintenance credential routing, not
-   * a response field).
+   * Every maintenance read of `review_bots` must stay off the identity/ownership
+   * columns (`private_key_enc` is frozen plan-scope maintenance credential
+   * routing, not a response field). The scan is the read's own statement, not
+   * every statement in the file: a mixed file (a store that also serves tenant
+   * faces of `review_targets`) selects those columns for its own rows.
    */
   test("a maintenance read selects no identity or ownership column", () => {
     const TENANT_FACING = /\b(?:github_slug|name|workspace_id)\b/i;
     for (const rel of Object.keys(MAINTENANCE_SITES)) {
-      for (const site of prepareStatements(readFileSync(join(SRC_DIR, rel), "utf8"))) {
+      for (const site of readSites(readFileSync(join(SRC_DIR, rel), "utf8"))) {
         expect({ file: rel, line: site.line + 1, tenantFacing: TENANT_FACING.test(site.sql) }).toEqual({
           file: rel,
           line: site.line + 1,

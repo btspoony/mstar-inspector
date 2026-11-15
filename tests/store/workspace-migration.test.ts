@@ -11,7 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createMigratedTestD1, createTestD1, migrationsAfter } from "./helpers";
+import { createMigratedTestD1, createTestD1, execMigrationScript, migrationsAfter } from "./helpers";
 import type { TestD1 } from "./helpers";
 import { deleteWorkspaceMember, signInDashboardUser } from "../../src/dashboard/users";
 
@@ -25,9 +25,13 @@ const MEMBERSHIP_CUTOVER = "0030_workspace_membership_cutover.sql";
 /** The open-sign-in instant 0030 scopes on (see the migration header). */
 const CUTOVER = "2026-10-22T11:13:45.000Z";
 
-/** Apply a SQL file as `wrangler d1 execute --file` would (verbatim). */
+/**
+ * Apply a SQL file the way `wrangler d1 execute --file` does on D1: statement
+ * by statement, fail-fast. Reused for the deploy replay, which is the same
+ * shape of file.
+ */
 function runFile(db: TestD1, name: string, dir = MIGRATIONS_DIR): void {
-  db.raw.exec(readFileSync(join(dir, name), "utf8"));
+  execMigrationScript(db.raw, readFileSync(join(dir, name), "utf8"));
 }
 
 /**
