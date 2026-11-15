@@ -114,7 +114,9 @@ export function BotSettingsPage({ boot, appId }: { boot: SpaBoot; appId: string 
     };
   }, [load]);
 
-  const detailHref = `${base}/apps/${encodeURIComponent(appId)}`;
+  // Wayfinding returns to the target detail the bot page was opened from —
+  // that page owns everything this page does not configure.
+  const detailHref = `${base}/targets/${encodeURIComponent(appId)}`;
   return (
     <BotSettingsShell locale={locale} detailHref={detailHref}>
       {state === "loading" ? <PageSkeleton locale={locale} kind="forms" /> : null}

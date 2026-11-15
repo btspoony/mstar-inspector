@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import type { ReactElement } from "react";
 import worker from "../../src/worker/index";
-import { requireMember, type DashboardVariables } from "../../src/dashboard/index";
+import { requireMember, WORKSPACE_SEGMENTS, type DashboardVariables } from "../../src/dashboard/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -34,7 +34,7 @@ import {
 import { apiBase } from "../../src/spa/workspace-base";
 import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import type { SpaBoot } from "../../src/spa/boot";
-import { RESERVED_WORKSPACE_SLUGS } from "../../src/spa/routes";
+import { RESERVED_WORKSPACE_SLUGS, WORKSPACE_FAMILY_SEGMENTS, matchSpaRoute } from "../../src/spa/routes";
 import { t } from "../../src/i18n";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -541,7 +541,7 @@ describe("manage is the workspace role", () => {
 describe("success redirects stay in the workspace route family", () => {
   const SETTINGS_BODY = "op=save-sandbox-image&sandbox_image_id=omp";
 
-  test("a native settings form post answers 302 to the workspace-prefixed settings URL", async () => {
+  test("a native settings form post answers 302 to the workspace-prefixed target URL", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
     const res = await worker.fetch(
@@ -553,7 +553,7 @@ describe("success redirects stay in the workspace route family", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/acme/apps/${ACME_APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/acme/targets/${ACME_APP_ID}`);
   });
 
   test("a native validation 400 keeps the same workspace-prefixed target", async () => {
@@ -568,7 +568,7 @@ describe("success redirects stay in the workspace route family", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/acme/apps/${ACME_APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/acme/targets/${ACME_APP_ID}`);
   });
 
   test("a native pause form post redirects to the workspace apps list (Referer-derived)", async () => {
@@ -834,6 +834,36 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
       );
       expect(res.status, path).toBe(404);
       expect(await res.text(), path).not.toContain("window.__BOOT__");
+    }
+  });
+});
+
+describe("the review-target surface is a page family, not a Worker route family", () => {
+  test("targets is in the SPA family but excluded from the Worker's admission list", () => {
+    // ONE edit (the family) makes `workspaceRefOf`, the SPA matcher, `apiBase`
+    // and the sidebar follow the segment; the gate's admission list must NOT
+    // follow, or a page-only path would be routed as a Worker family member.
+    // The pin is constant-level on purpose: SPA page GETs are served by
+    // `spaDispatch` before the scope middleware, so a runtime assertion cannot
+    // observe the gate's answer directly. This constant pin plus
+    // `matchSpaRoute("/dashboard/targets") === null` is the strongest feasible
+    // evidence.
+    expect(WORKSPACE_FAMILY_SEGMENTS).toContain("targets");
+    expect(WORKSPACE_SEGMENTS.has("targets")).toBe(false);
+    expect([...WORKSPACE_SEGMENTS].sort()).toEqual(["api", "apps", "members"]);
+    // Evidence companion: the bare spelling is no page, so a page-only segment
+    // never masquerades as a family root.
+    expect(matchSpaRoute("/dashboard/targets")).toBeNull();
+  });
+
+  test("both target paths serve the shell scoped to their workspace", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db));
+    for (const path of ["/dashboard/acme/targets", `/dashboard/acme/targets/${ACME_APP_ID}`]) {
+      const res = await worker.fetch(await authedRequest(path, "dana", { accept: "text/html" }), env);
+      expect(res.status, path).toBe(200);
+      const boot = bootOf(await res.text());
+      expect(boot.workspaceRef, path).toBe("acme");
     }
   });
 });
@@ -1109,8 +1139,8 @@ describe("the onboarding CTA stays inside the workspace", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     // GitHub's slug is NULL in this fixture (never synced), so the page shows
-    // the App id; the Settings link addresses the App by that id.
-    expect(body).toContain(`href="/dashboard/acme/apps/${appAcmeId(db)}/settings"`);
+    // the App id; the Settings CTA opens the review-target page by that id.
+    expect(body).toContain(`href="/dashboard/acme/targets/${appAcmeId(db)}"`);
     expect(body).not.toContain('href=`/dashboard/apps/${ACME_APP_ID}/settings`');
   });
 

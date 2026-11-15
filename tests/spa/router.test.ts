@@ -1,12 +1,20 @@
 /**
- * Enumerated client router (pathname + params). App detail IA:
- * ONE page id (`app-detail`) serves both `/dashboard/apps/:appId` (default
- * tab 应用设置) and the legacy `/dashboard/apps/:appId/settings` permanent
- * settings-tab deep link.
+ * Enumerated client router (pathname + params). The four workspace surfaces
+ * (apps, targets, members, settings) plus the App detail and the bot page.
+ * The app detail's retired settings-tab spellings are not routes: they answer
+ * one redirect to the review-target detail.
  */
 import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
-import { RESERVED_WORKSPACE_SLUGS, isSpaAssetPath, matchSpaRoute, wantsHtml, workspaceRefOf } from "../../src/spa/routes";
+import {
+  RESERVED_WORKSPACE_SLUGS,
+  WORKSPACE_FAMILY_SEGMENTS,
+  isSpaAssetPath,
+  matchSpaRoute,
+  settingsTabRedirect,
+  wantsHtml,
+  workspaceRefOf,
+} from "../../src/spa/routes";
 
 /** True when the matched route is workspace-scoped (legacy variants carry no field). */
 function isWorkspaceRoute(pathname: string): boolean {
@@ -50,10 +58,13 @@ describe("matchSpaRoute", () => {
     });
   });
 
-  test("the legacy /dashboard/apps/:appId/settings path lands on the SAME detail page id (permanent settings-tab deep link)", () => {
-    expect(matchSpaRoute("/dashboard/apps/12345/settings")).toEqual({
+  test("the retired settings-tab address is no page — it redirects once (legacy family is already a 404)", () => {
+    // No page id serves the old tab address: `settingsTabRedirect` owns it.
+    expect(matchSpaRoute("/dashboard/apps/12345/settings")).toBeNull();
+    expect(settingsTabRedirect("/dashboard/apps/12345/settings", "")).toBeNull();
+    expect(matchSpaRoute("/dashboard/apps/12345")).toEqual({
       page: "app-detail",
-      pathname: "/dashboard/apps/12345/settings",
+      pathname: "/dashboard/apps/12345",
       appId: "12345",
     });
   });
@@ -76,13 +87,15 @@ describe("matchSpaRoute", () => {
       appId: "12345",
       workspaceRef: "acme",
     });
-    // The detail and its settings deep link stay on the detail page id.
+    // The detail stays on the detail page id; the retired settings address
+    // matches no page at all.
     expect(matchSpaRoute("/dashboard/apps/12345")?.page).toBe("app-detail");
-    expect(matchSpaRoute("/dashboard/apps/12345/settings")?.page).toBe("app-detail");
+    expect(matchSpaRoute("/dashboard/apps/12345/settings")).toBeNull();
   });
 
   test("does not match nested extras beyond the detail paths", () => {
     expect(matchSpaRoute("/dashboard/apps/acme/settings/key/delete")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/targets/12345/onboarding")).toBeNull();
     expect(matchSpaRoute("/dashboard/api/insights/summary")).toBeNull();
     // The global insights page is retired: its path is no longer a SPA page.
     expect(matchSpaRoute("/dashboard/insights")).toBeNull();
@@ -90,27 +103,71 @@ describe("matchSpaRoute", () => {
   });
 });
 
-describe("matchSpaRoute — workspace-scoped App pages", () => {
-  test("the workspace Apps page and its App detail routes carry the appId", () => {
+describe("matchSpaRoute — workspace-scoped surfaces", () => {
+  test("the four workspace surfaces carry their own paths", () => {
     expect(matchSpaRoute("/dashboard/acme/apps")).toEqual({
       page: "apps",
       pathname: "/dashboard/acme/apps",
       workspaceRef: "acme",
     });
+    expect(matchSpaRoute("/dashboard/acme/targets")).toEqual({
+      page: "targets",
+      pathname: "/dashboard/acme/targets",
+      workspaceRef: "acme",
+    });
+    expect(matchSpaRoute("/dashboard/acme/targets/12345")).toEqual({
+      page: "targets",
+      pathname: "/dashboard/acme/targets/12345",
+      workspaceRef: "acme",
+      appId: "12345",
+    });
+    expect(matchSpaRoute("/dashboard/acme/members")?.page).toBe("members");
+    expect(matchSpaRoute("/dashboard/acme/settings")?.page).toBe("settings");
+    // The targets surface is workspace-scoped only: no root spelling exists.
+    expect(matchSpaRoute("/dashboard/targets")).toBeNull();
+  });
+
+  test("the workspace App detail keeps its path; the retired settings-tab spellings redirect", () => {
     expect(matchSpaRoute("/dashboard/acme/apps/12345")).toEqual({
       page: "app-detail",
       pathname: "/dashboard/acme/apps/12345",
       appId: "12345",
       workspaceRef: "acme",
     });
-    // The permanent settings-tab deep link exists on the workspace family too
-    // (the settings POST family's HTML-nav 302 targets it under strict).
-    expect(matchSpaRoute("/dashboard/acme/apps/12345/settings")).toEqual({
-      page: "app-detail",
-      pathname: "/dashboard/acme/apps/12345/settings",
-      appId: "12345",
-      workspaceRef: "acme",
-    });
+    expect(matchSpaRoute("/dashboard/acme/apps/12345/settings")).toBeNull();
+    expect(settingsTabRedirect("/dashboard/acme/apps/12345/settings", "")).toBe(
+      "/dashboard/acme/targets/12345",
+    );
+    expect(settingsTabRedirect("/dashboard/acme/apps/12345", "?tab=settings")).toBe(
+      "/dashboard/acme/targets/12345",
+    );
+  });
+
+  test("settingsTabRedirect leaves every other address alone", () => {
+    for (const [path, search] of [
+      ["/dashboard/acme/apps/12345", ""],
+      ["/dashboard/acme/apps/12345", "?tab=insights"],
+      ["/dashboard/acme/apps/12345/bot", ""],
+      ["/dashboard/acme/targets/12345", ""],
+      ["/dashboard/acme/apps", ""],
+      ["/dashboard/acme/api/apps/12345/settings", ""],
+      ["/dashboard/acme/api/targets", ""],
+      ["/dashboard/apps/12345/settings", ""],
+    ] as const) {
+      expect(settingsTabRedirect(path, search), `${path}${search}`).toBeNull();
+    }
+    // The API read the target page consumes is not a page and never matches:
+    // widening either WORKSPACE_APP_PATH or WORKSPACE_APP_SETTINGS_PATH would
+    // 302 the settings JSON read to an HTML page.
+    expect(matchSpaRoute("/dashboard/acme/api/apps/12345")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/api/apps/12345/settings")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/api/targets")).toBeNull();
+  });
+
+  test("targets is in the one workspace family (and not a reserved slug)", () => {
+    expect(WORKSPACE_FAMILY_SEGMENTS).toContain("targets");
+    expect(RESERVED_WORKSPACE_SLUGS.has("targets")).toBe(false);
+    expect(workspaceRefOf("/dashboard/acme/targets/12345")).toBe("acme");
   });
 
   test("a reserved first segment is never a workspace", () => {

@@ -1,7 +1,7 @@
 /**
- * Enumerated SPA pages (the `SPA_PAGES` interface; apps route,
- * apps-default root, app-detail two-tab detail page, and their
- * workspace-scoped twins).
+ * Enumerated SPA pages (the `SPA_PAGES` interface; the four workspace
+ * surfaces — apps, targets, members, settings — the App detail, the bot
+ * settings page, and login).
  *
  * `/dashboard` and `/dashboard/apps` are one root-routing rule: both render
  * the Apps workbench (the insights home at the root is retired, as is the
@@ -10,7 +10,15 @@
  * admits those paths and this matcher serves their shell. History fallback is
  * this matcher, not wrangler `not_found_handling`.
  */
-export const SPA_PAGES = ["apps", "members", "settings", "login", "app-detail", "bot-settings"] as const;
+export const SPA_PAGES = [
+  "apps",
+  "targets",
+  "members",
+  "settings",
+  "login",
+  "app-detail",
+  "bot-settings",
+] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
 
@@ -21,6 +29,7 @@ export type SpaPageId = (typeof SPA_PAGES)[number];
  */
 export type SpaRoute =
   | { page: "apps"; pathname: string; workspaceRef?: string }
+  | { page: "targets"; pathname: string; workspaceRef: string; appId?: string }
   | { page: "members"; pathname: string; workspaceRef: string }
   | { page: "settings"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
@@ -34,9 +43,10 @@ export type SpaRoute =
  * workspace on either side of the bundle boundary.
  *
  * Reserved words occupy the FIRST segment after the mount; the route family
- * below is the SECOND. The Worker admits three of the family's four members
- * (`settings` has no Worker route under `/<ref>/`), so the two lists are not
- * interchangeable — only the reserved set is shared verbatim.
+ * below is the SECOND. The Worker admits only `apps`, `members` and `api` —
+ * `targets` and `settings` are SPA page paths with no Worker route under
+ * `/<ref>/` — so the two lists are not interchangeable; only the reserved set
+ * is shared verbatim.
  */
 export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
   "apps",
@@ -55,7 +65,7 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
  * route to a workspace. ONE source for the SPA matcher below and the Worker's
  * route-family gate (`src/dashboard/index.ts`), which derives from it.
  */
-export const WORKSPACE_FAMILY_SEGMENTS = ["apps", "members", "settings", "api"] as const;
+export const WORKSPACE_FAMILY_SEGMENTS = ["apps", "targets", "members", "settings", "api"] as const;
 
 /**
  * The non-reserved workspace ref (an id or a slug) a `/dashboard/<ref>/<family
@@ -86,11 +96,15 @@ export function replaceWorkspaceRef(pathname: string, nextRef: string): string |
   return `/dashboard/${nextRef}${match[2] ?? ""}`;
 }
 
-const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/settings|\/bot)?$/;
+const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/bot)?$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
+const WORKSPACE_TARGETS_PATH = /^\/dashboard\/([^/]+)\/targets$/;
+const WORKSPACE_TARGET_PATH = /^\/dashboard\/([^/]+)\/targets\/([^/]+)$/;
 const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;
 const WORKSPACE_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/settings$/;
-const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/settings|\/bot)?$/;
+const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/bot)?$/;
+const WORKSPACE_APP_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)$/;
+const WORKSPACE_APP_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)\/settings$/;
 
 /** The page an App sub-path opens: the bot page, else the detail page. */
 function appPageOf(pathname: string): "app-detail" | "bot-settings" {
@@ -98,15 +112,31 @@ function appPageOf(pathname: string): "app-detail" | "bot-settings" {
 }
 
 /**
- * ONE matcher entry / page id serves both detail paths: the bare
- * `/dashboard/apps/:appId` (default tab 应用设置) and the legacy
- * `/dashboard/apps/:appId/settings` — a PERMANENT settings-tab deep link
- * (the settings POST family's HTML-nav 302 targets are pinned to it,
- * spec § IA), not a compat shim. The workspace twin
- * (`/dashboard/<workspaceRef>/apps/:appId`, `/settings` likewise) is the same
- * page under that workspace's route family. The active tab is query-derived
- * (`?tab=insights`), so every path lands on the same page and the default
- * settings tab.
+ * The target surface address a retired app-detail settings address resolves
+ * to, or null for any other path. The settings tab's content — the target's
+ * review policy and its ops zone — moved to the target detail, so both
+ * spellings of the old address (`…/apps/:appId/settings` and
+ * `…/apps/:appId?tab=settings`) answer ONE redirect. Nothing is duplicated:
+ * the app detail and the bot page keep their own paths, and only the
+ * workspace-scoped family can match (the legacy `/dashboard/apps…` family is
+ * a 404 before SPA dispatch).
+ */
+export function settingsTabRedirect(pathname: string, search: string): string | null {
+  const [, ref, appId] = WORKSPACE_APP_SETTINGS_PATH.exec(pathname) ?? [];
+  if (ref !== undefined && appId !== undefined) return `/dashboard/${ref}/targets/${appId}`;
+  const [, detailRef, detailAppId] = WORKSPACE_APP_PATH.exec(pathname) ?? [];
+  if (detailRef === undefined || detailAppId === undefined) return null;
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  if (params.get("tab") !== "settings") return null;
+  return `/dashboard/${detailRef}/targets/${detailAppId}`;
+}
+
+/**
+ * ONE matcher entry / page id serves `/dashboard/apps/:appId` and its
+ * workspace twin `/dashboard/<workspaceRef>/apps/:appId` — the App detail,
+ * whose tabs are query-derived (`?tab=insights|installations|pull-requests`).
+ * The settings tab's address is NOT a page: `settingsTabRedirect` sends both
+ * of its spellings to the target surface, whose detail is the tab's new home.
  */
 export function matchSpaRoute(pathname: string): SpaRoute | null {
   switch (pathname) {
@@ -121,6 +151,9 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceRef };
     if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceRef };
     if (WORKSPACE_SETTINGS_PATH.test(pathname)) return { page: "settings", pathname, workspaceRef };
+    if (WORKSPACE_TARGETS_PATH.test(pathname)) return { page: "targets", pathname, workspaceRef };
+    const targetId = WORKSPACE_TARGET_PATH.exec(pathname)?.[2];
+    if (targetId) return { page: "targets", pathname, workspaceRef, appId: targetId };
     const appId = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
     if (appId) return { page: appPageOf(pathname), pathname, appId, workspaceRef };
     return null;

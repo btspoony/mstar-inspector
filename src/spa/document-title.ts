@@ -35,6 +35,7 @@ export function documentFaceOf(boot: {
 
 const PAGE_LABELS: Record<SpaPageId, DictionaryKey> = {
   apps: "nav.apps",
+  targets: "nav.targets",
   members: "nav.members",
   settings: "nav.settings",
   login: "login.heading",

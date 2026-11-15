@@ -44,7 +44,7 @@ import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
 import { documentFaceOf, pageDocumentTitle } from "../spa/document-title";
 import { localizeDocument } from "./document-locale";
-import { isSpaAssetPath, matchSpaRoute, wantsHtml } from "../spa/routes";
+import { isSpaAssetPath, matchSpaRoute, settingsTabRedirect, wantsHtml } from "../spa/routes";
 import { deploymentModeOf, type DeploymentMode, type Env } from "./env";
 
 type SpaContext = Context<{ Bindings: Env }>;
@@ -334,9 +334,16 @@ export function spaDispatch(): MiddlewareHandler<{ Bindings: Env }> {
   return async (c, next) => {
     const method = c.req.method;
     if (method !== "GET" && method !== "HEAD") return next();
+    const url = new URL(c.req.url);
+    const pathname = url.pathname;
+    // The app-detail settings tab moved to the review-target surface, so both
+    // spellings of its address answer ONE 302 before anything else reads them
+    // (the address is dead, not a page). The redirect needs no session: the
+    // destination enforces its own access.
+    const settingsTarget = settingsTabRedirect(pathname, url.search);
+    if (settingsTarget !== null) return c.redirect(settingsTarget, 302);
     const assets = c.env.ASSETS;
     if (!assets) return next();
-    const pathname = new URL(c.req.url).pathname;
     const accept = c.req.header("Accept") ?? null;
     // `/dashboard` is the SPA workbench for EVERY Accept variant (the
     // legacy SSR home is retired). Other enumerated pages keep the

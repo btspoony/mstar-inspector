@@ -1510,16 +1510,14 @@ describe("ops danger zone: one row per action", () => {
    */
   const opsSectionHtml = (locale: SpaBoot["locale"], app: Partial<SettingsAppMeta> = {}): string => {
     const payload = detailPayload();
-    const html = withLocation("/dashboard/apps/1", () =>
+    // The ops zone is the review-target surface's body now (the moved
+    // settings tab); render it where it lives.
+    const html = withLocation("/dashboard/acme/targets/1", () =>
       renderToStaticMarkup(
-        createElement(AppDetailView, {
+        createElement(SettingsView, {
           locale,
-          appId: "1",
           payload: { ...payload, app: { ...payload.app, ...app } },
-          notice: null,
-          search: { tab: "settings", window: "30", repo: "", pr: "" },
           onReload: async () => true,
-          onSearch: () => {},
         }),
       ),
     );
@@ -1959,7 +1957,7 @@ describe("settings header typography", () => {
           appId: "1",
           payload: detailPayload(),
           notice: null,
-          search: { tab: "settings", window: "30", repo: "", pr: "" },
+          search: { tab: "insights", window: "30", repo: "", pr: "" },
           onReload: async () => true,
           onSearch: () => {},
         }),

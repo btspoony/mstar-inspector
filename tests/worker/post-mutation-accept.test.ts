@@ -169,19 +169,19 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     expect(await res.text()).toBe("ok");
   });
 
-  test("HTML-nav pause from settings Referer redirects to the SPA settings URL", async () => {
+  test("HTML-nav pause from a target Referer redirects to the target URL", async () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
     const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
       Accept: "text/html",
-      Referer: `https://worker.local/dashboard/default/apps/${DEMO_APP_ID}/settings`,
+      Referer: `https://worker.local/dashboard/default/targets/${DEMO_APP_ID}`,
     });
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${DEMO_APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${DEMO_APP_ID}`);
   });
 
-  test("HTML-nav resume from settings Referer redirects to the SPA settings URL", async () => {
+  test("HTML-nav resume from a target Referer redirects to the target URL", async () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
@@ -190,10 +190,10 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     expect(paused.status).toBe(200);
     const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/resume`, env, cookieHeader, {
       Accept: "text/html",
-      Referer: `https://worker.local/dashboard/default/apps/${DEMO_APP_ID}/settings`,
+      Referer: `https://worker.local/dashboard/default/targets/${DEMO_APP_ID}`,
     });
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${DEMO_APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${DEMO_APP_ID}`);
   });
 
   test("HTML-nav pause with apps-list Referer redirects to the workspace Apps list", async () => {
@@ -221,7 +221,7 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     expect(await res.text()).toBe("ok");
   });
 
-  test("settings POST with Accept: text/html redirects to the SPA settings URL", async () => {
+  test("settings POST with Accept: text/html redirects to the target URL", async () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
@@ -238,6 +238,6 @@ describe("POST mutation Accept routing (QC W-2)", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${DEMO_APP_ID}/settings`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${DEMO_APP_ID}`);
   });
 });
