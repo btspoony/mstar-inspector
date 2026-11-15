@@ -67,6 +67,9 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0048_comment_trigger_claims.sql",
     "0056_review_bots_rename.sql",
     "0057_review_targets.sql",
+    // 0058: bot-scope authorization reads `review_bots.scope`, so the fixture
+    // must carry the column or every bot-scoped write reads it as absent.
+    "0058_review_bot_scope.sql",
   ]) {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
