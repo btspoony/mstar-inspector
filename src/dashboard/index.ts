@@ -4228,6 +4228,32 @@ const REVIEW_LEVEL_INHERIT = "inherit";
  * (400s are keyed JSON via settings400Response — native form
  * posts keep the 302); the re-rendered HTML page is retired.
  */
+/**
+ * The BOT-scoped settings ops. A `shared` bot accepts none of them: its
+ * configuration belongs to its owning workspace, and every other workspace —
+ * the owner included, while the bot is shared — reads it. The target-scoped
+ * ops (review level, Check gate, owner allowlist) stay available, because the
+ * target is what this workspace owns.
+ */
+const BOT_SCOPED_SETTINGS_OPS: ReadonlySet<string> = new Set([
+  "add-key",
+  "save-chain",
+  "save-roles",
+  "add-chain",
+  "remove-chain",
+  "add-custom-provider",
+  "add-custom-provider-key",
+  "add-template-provider",
+  "update-provider-models",
+  "remove-custom-provider",
+  "save-sandbox-image",
+]);
+
+/** The read-only refusal, in the keyed body the SPA resolves in its locale. */
+function botReadOnlyResponse(c: DashboardContext): Response {
+  return c.json({ key: "settings.error.botReadOnly", message: t("en", "settings.error.botReadOnly") }, 403);
+}
+
 const appSettingsSaveRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
@@ -4238,6 +4264,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
   // exact current behavior.
   const form = await c.req.parseBody({ all: true });
   const op = typeof form.op === "string" ? form.op : "";
+  if (gate.app.scope === "shared" && BOT_SCOPED_SETTINGS_OPS.has(op)) return botReadOnlyResponse(c);
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   if (op === "add-key") {
     const provider = typeof form.provider === "string" ? form.provider.trim() : "";
@@ -5117,6 +5144,8 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
 const appKeyDeleteRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
+  // Removing a stored key is a bot-scoped write like any other.
+  if (gate.app.scope === "shared") return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   // The key identity is the delete target: the (App, provider) pool holds one

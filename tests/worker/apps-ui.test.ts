@@ -791,6 +791,38 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     }
   });
 
+  test("a bot-scoped op posted for a shared bot is refused server-side, and a target-scoped op still saves", async () => {
+    const db = await seededWorld();
+    shareBot(db, MALLORY_APP_ID);
+    // The owning workspace's manager still cannot configure a shared bot: the
+    // refusal is the route's, not the page's.
+    const refused = await postForm(
+      `/dashboard/default/apps/${MALLORY_APP_ID}/settings`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      { op: "save-sandbox-image", sandbox_image_id: "omp" },
+    );
+    expect(refused.status).toBe(403);
+    const body = (await refused.json()) as { key: unknown };
+    expect(body.key).toBe("settings.error.botReadOnly");
+    // The target-scoped ops stay available: the target is what this workspace
+    // owns, whatever the bot's scope.
+    const saved = await postForm(
+      `/dashboard/default/apps/${MALLORY_APP_ID}/settings`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      { op: "save-review-level", level: "quick" },
+    );
+    expect(saved.status).toBe(200);
+    const target = db.raw
+      .prepare(
+        `SELECT t.review_level FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
+          WHERE b.github_app_id = ?`,
+      )
+      .get(MALLORY_APP_ID) as { review_level: string };
+    expect(target.review_level).toBe("quick");
+  });
+
   test("no session → 302 to login", async () => {
     const db = await seededWorld();
     const res = await get(botFace("default", MALLORY_APP_ID), "", makeEnv(db));

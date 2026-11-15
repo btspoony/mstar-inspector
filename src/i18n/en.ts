@@ -702,6 +702,8 @@ export const en = {
       fieldDuplicated:
         "The {field} field was submitted more than once — resubmit the form with one value. Nothing was saved.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
+      /** A bot-scoped write against a `shared` bot: the page is read-only. */
+      botReadOnly: "This bot is shared — its configuration is read-only here.",
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
       concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",

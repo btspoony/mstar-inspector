@@ -598,6 +598,8 @@ export const zhCN: Dictionary = {
         "{owner} 不是有效的 GitHub 登录名 — 请使用 1–39 个字母、数字或连字符。未存储任何内容。",
       fieldDuplicated: "{field} 字段被提交了多次 — 请以单个值重新提交表单。未保存任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
+      /** 对 `shared` 机器人发起的机器人级写入：该页只读。 */
+      botReadOnly: "该机器人已共享——其配置在此只读。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
       usageProbeOffVendorHost:
