@@ -5,7 +5,7 @@
  * path is retired) + per-App management UI (/dashboard/apps list,
  * POST …/disable|enable|delete — workspace owner/admin) + per-App review
  * pause/resume (POST …/pause|/resume — the same action
- * pattern) + per-App AI config settings (GET/POST
+ * pattern) + per-App AI config settings (POST
  * /dashboard/apps/:appId/settings — BYOK provider keys, masked, + model chain
  * — and POST …/settings/key/delete, workspace owner/admin; plus the
  * settings Review switch and the read-only install-health panel, and
@@ -2925,11 +2925,13 @@ async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response
 // actions above (owner-or-admin, Clarify #6); unknown/soft-deleted App → 404;
 // the per-request guard has already verified membership. POSTs ride the
 // session cookie (same discipline as the members and apps action routes — no
-// new token scheme). Route shapes per the plan brief: GET/POST
+// new token scheme). Route shapes per the plan brief: POST
 // /dashboard/apps/:appId/settings — the POST carries an explicit `op`
 // discriminator (add-key | save-chain | save-roles) because the zero-JS page
 // has three forms on one action path — and the delete-key action path
 // …/settings/key/delete (the HTML-form convention cannot emit a DELETE verb).
+// The family's GET is a 302 to /dashboard/<ref>/targets/:appId (the review
+// policy moved to the target surface); the POST family keeps its own paths.
 //
 // Encryption-dependent reads AND writes: masking needs plaintext (the last-4
 // tail), so a missing/malformed DASHBOARD_ENCRYPTION_KEY fails the whole

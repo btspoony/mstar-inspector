@@ -34,7 +34,7 @@ import {
 import { apiBase } from "../../src/spa/workspace-base";
 import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import type { SpaBoot } from "../../src/spa/boot";
-import { RESERVED_WORKSPACE_SLUGS, WORKSPACE_FAMILY_SEGMENTS } from "../../src/spa/routes";
+import { RESERVED_WORKSPACE_SLUGS, WORKSPACE_FAMILY_SEGMENTS, matchSpaRoute } from "../../src/spa/routes";
 import { t } from "../../src/i18n";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -843,9 +843,17 @@ describe("the review-target surface is a page family, not a Worker route family"
     // ONE edit (the family) makes `workspaceRefOf`, the SPA matcher, `apiBase`
     // and the sidebar follow the segment; the gate's admission list must NOT
     // follow, or a page-only path would be routed as a Worker family member.
+    // The pin is constant-level on purpose: SPA page GETs are served by
+    // `spaDispatch` before the scope middleware, so a runtime assertion cannot
+    // observe the gate's answer directly. This constant pin plus
+    // `matchSpaRoute("/dashboard/targets") === null` is the strongest feasible
+    // evidence.
     expect(WORKSPACE_FAMILY_SEGMENTS).toContain("targets");
     expect(WORKSPACE_SEGMENTS.has("targets")).toBe(false);
     expect([...WORKSPACE_SEGMENTS].sort()).toEqual(["api", "apps", "members"]);
+    // Evidence companion: the bare spelling is no page, so a page-only segment
+    // never masquerades as a family root.
+    expect(matchSpaRoute("/dashboard/targets")).toBeNull();
   });
 
   test("both target paths serve the shell scoped to their workspace", async () => {

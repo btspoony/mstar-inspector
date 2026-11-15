@@ -150,10 +150,18 @@ describe("matchSpaRoute — workspace-scoped surfaces", () => {
       ["/dashboard/acme/apps/12345/bot", ""],
       ["/dashboard/acme/targets/12345", ""],
       ["/dashboard/acme/apps", ""],
+      ["/dashboard/acme/api/apps/12345/settings", ""],
+      ["/dashboard/acme/api/targets", ""],
       ["/dashboard/apps/12345/settings", ""],
     ] as const) {
       expect(settingsTabRedirect(path, search), `${path}${search}`).toBeNull();
     }
+    // The API read the target page consumes is not a page and never matches:
+    // widening either WORKSPACE_APP_PATH or WORKSPACE_APP_SETTINGS_PATH would
+    // 302 the settings JSON read to an HTML page.
+    expect(matchSpaRoute("/dashboard/acme/api/apps/12345")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/api/apps/12345/settings")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/api/targets")).toBeNull();
   });
 
   test("targets is in the one workspace family (and not a reserved slug)", () => {

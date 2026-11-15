@@ -13,6 +13,7 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { AppsList } from "../../src/spa/pages/AppsPage";
+import { BotSettingsPage } from "../../src/spa/pages/BotSettingsPage";
 import { parseApps, type AppsPayload, type SettingsManagePayload } from "../../src/spa/pages/data";
 import { TargetDetailPage, TargetsView } from "../../src/spa/pages/TargetsPage";
 import { installDom } from "./dom";
@@ -177,5 +178,17 @@ describe("review-target detail (mounted)", () => {
     // the same parser.
     expect(parseApps(oneTarget())?.apps[0]?.github_app_id).toBe(1);
     expect(parseApps(emptyList())?.apps).toEqual([]);
+  });
+});
+
+describe("bot page wayfinding", () => {
+  test("the bot page returns to the target detail, not the App page", () => {
+    // The target page links across to the bot page; the return link must land
+    // where that visit started (the shell's initial loading face carries it).
+    const markup = withLocation("/dashboard/acme/apps/1/bot", () =>
+      renderToStaticMarkup(createElement(BotSettingsPage, { boot, appId: "1" })),
+    );
+    expect(markup).toContain('href="/dashboard/acme/targets/1"');
+    expect(markup).not.toContain('href="/dashboard/acme/apps/1"');
   });
 });
