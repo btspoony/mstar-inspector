@@ -30,6 +30,8 @@
 import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
+import type { DeploymentMode } from "../worker/env";
+import { assertSharedBotAllowed } from "./entitlement";
 
 /**
  * The per-target auto-trigger vocabulary (exact enum spelling is wire-visible:
@@ -176,7 +178,10 @@ type TargetsStoreStatement = {
   bind(...values: unknown[]): TargetsStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
   all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
-  run(): Promise<{ results: unknown[]; meta: { changes: number; last_row_id: number } }>;
+  // Generic like `WorkspaceStoreD1`'s statement, so this face stays
+  // structurally assignable to it (the shared-bot capability reads the plan
+  // through `assertSharedBotAllowed`).
+  run<T = Record<string, unknown>>(): Promise<{ results: T[]; meta: { changes: number; last_row_id: number } }>;
 };
 
 type TargetsStoreD1 = {
@@ -231,7 +236,9 @@ export type ParkRefusal = "unknown-target" | "only-live-target" | "no-overlap";
 export type CreateSharedTargetOutcome =
   | { outcome: "created"; target: ReviewTargetRow }
   | { outcome: "bot_not_shared" }
-  | { outcome: "target_exists" };
+  | { outcome: "target_exists" }
+  /** The workspace's plan does not include the shared bot; nothing was written. */
+  | { outcome: "plan_refused"; planId: string };
 
 /**
  * The guarded insert behind `createOnSharedBot`: ONE statement decides and
@@ -298,17 +305,22 @@ export function createTargetsStore(db: TargetsStoreD1) {
 
     /**
      * Create one target on a `shared` bot — the workspace's own target on a
-     * bot the platform shares. ONE guarded statement decides and writes (see
-     * the SQL), then the row it wrote is read back. Refusals are values so the
-     * route owns their statuses.
+     * bot the platform shares. The shared-bot capability is decided BEFORE
+     * anything is written, through the one decision function; ONE guarded
+     * statement then decides and writes (see the SQL), and the row it wrote is
+     * read back. Refusals are values so the route owns their statuses.
      */
     async createOnSharedBot(input: {
       workspaceId: string;
       botId: string;
       createdBy: string;
+      /** The deployment mode the capability resolves under (`self-hosted` skips the read). */
+      mode: DeploymentMode;
       /** The workspace's floor, read by the route; omitted → the product default. */
       checkMinScore?: number;
     }): Promise<CreateSharedTargetOutcome> {
+      const refusal = await assertSharedBotAllowed(db, input.workspaceId, input.mode);
+      if (refusal !== null) return { outcome: "plan_refused", planId: refusal.planId };
       const id = crypto.randomUUID();
       const minScore = isCheckMinScoreValue(input.checkMinScore)
         ? input.checkMinScore
