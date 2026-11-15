@@ -608,3 +608,50 @@ describe("bot scope transitions (contract § 7.1)", () => {
     expect(rows[1]).toMatchObject({ id: "bot-a", name: "Zulu" });
   });
 });
+
+// --- the creation chooser's shared-bot list --------------------------------
+
+describe("shared bots a workspace may create a target on", () => {
+  /** One target on `botId` in `workspaceId`, stamped when `deleted`. */
+  function seedTargetIn(db: TestD1, botId: string, workspaceId: string, deleted = false): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, created_by, created_at, updated_at, deleted_at)
+         VALUES (?, ?, ?, ?, 'fixture', datetime('now'), datetime('now'),
+                 ${deleted ? "datetime('now')" : "NULL"})`,
+      )
+      .run(crypto.randomUUID(), workspaceId, botId, botId);
+  }
+
+  test("each live shared bot carries the ADDRESSED workspace's live target count", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-other");
+    seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW, name: "Alpha" });
+    db.raw.prepare("UPDATE review_bots SET github_slug = 'alpha-app' WHERE id = 'bot-shared'").run();
+    // One live target here, one soft-deleted here, one live in the owner's own
+    // workspace: only the first is the count this workspace reads.
+    seedTargetIn(db, "bot-shared", WS);
+    seedTargetIn(db, "bot-shared", WS, true);
+    seedTargetIn(db, "bot-shared", "ws-other");
+    seedTargetIn(db, "bot-shared", "ws-other");
+
+    const store = createReviewBotsStore(db);
+    expect(await store.listSharedBots(WS)).toEqual([
+      { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 1 },
+    ]);
+    // The same bot reads the other workspace's own count, not WS's.
+    expect(await store.listSharedBots("ws-other")).toEqual([
+      { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 2 },
+    ]);
+  });
+
+  test("an owned, soft-deleted or absent bot is never offered", async () => {
+    const db = createMigratedTestD1();
+    seedScopedBot(db, "bot-owned", { workspaceId: WS, name: "Owned" });
+    seedScopedBot(db, "bot-gone", { workspaceId: WS, deleted: true, scope: "shared", sharedAt: NOW, name: "Gone" });
+    seedScopedBot(db, "bot-offered", { workspaceId: WS, scope: "shared", sharedAt: NOW, name: "Offered" });
+
+    expect((await createReviewBotsStore(db).listSharedBots(WS)).map((row) => row.id)).toEqual(["bot-offered"]);
+  });
+});

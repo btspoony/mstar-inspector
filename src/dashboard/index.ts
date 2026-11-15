@@ -2652,7 +2652,8 @@ async function appsListWithHealth(
 const appListRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const rows = await appsListWithHealth(createReviewBotsStore(gate.db), gate.scope);
+  const apps = createReviewBotsStore(gate.db);
+  const rows = await appsListWithHealth(apps, gate.scope);
   // The pause the list renders is the TARGET's business pause — the one the
   // pause/resume routes write. A bot has one target today, so the map is
   // one-to-one. A bot with no live target emits NO `review_enabled`: the row
@@ -2691,6 +2692,10 @@ const appListRoute = async (c: DashboardContext) => {
         },
       };
     }),
+    // The creation chooser's official mode: the `shared` bots this workspace
+    // may put a target on, each with its own live-target count here. Additive
+    // and always present — `[]` when the platform shares none.
+    shared_bots: await apps.listSharedBots(gate.scope.workspaceId),
   });
 };
 

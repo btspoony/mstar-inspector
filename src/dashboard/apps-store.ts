@@ -674,6 +674,31 @@ const UPSERT_INSTALLATION_SQL = {
       seen_at = strftime('%Y-%m-%d %H:%M:%f','now')`,
 } as const;
 
+/**
+ * One `shared` bot as a workspace's creation chooser lists it (contract § 7.1).
+ * `target_count` is the ADDRESSED workspace's live targets on that bot, so the
+ * same bot reads a different number in each workspace that may use it.
+ */
+export type SharedBotRow = {
+  id: string;
+  github_slug: string | null;
+  name: string;
+  target_count: number;
+};
+
+/**
+ * Every live `shared` bot with that per-workspace count. `owned` and
+ * soft-deleted bots are not offered: the set is the platform-wide share, which
+ * is the same for every workspace by contract. One D1 read, no GitHub call.
+ */
+const SHARED_BOT_LIST_SQL = `
+  SELECT b.id, b.github_slug, b.name,
+         (SELECT COUNT(*) FROM review_targets t
+           WHERE t.bot_id = b.id AND t.workspace_id = ?1 AND t.deleted_at IS NULL) AS target_count
+    FROM review_bots b
+   WHERE b.scope = 'shared' AND b.deleted_at IS NULL
+   ORDER BY b.name, b.id`;
+
 /** Create the review_bots / bot_installations store over one D1 handle. */
 export function createReviewBotsStore(db: AppsStoreD1) {
   /**
@@ -920,6 +945,16 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .prepare(APP_READ_SQL.getVisibleBotByGithubId)
         .bind(githubAppId, workspaceId)
         .first<GithubAppTenantRow>();
+    },
+
+    /**
+     * The `shared` bots this workspace may create a target on, each carrying
+     * how many live targets the workspace already holds on it. The chooser's
+     * list: a read, never a `review_bots` write.
+     */
+    async listSharedBots(workspaceId: string): Promise<SharedBotRow[]> {
+      const res = await db.prepare(SHARED_BOT_LIST_SQL).bind(workspaceId).all<SharedBotRow>();
+      return res.results;
     },
 
     /**

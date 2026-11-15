@@ -954,3 +954,72 @@ describe("POST /dashboard/:ref/apps/:appId/park", () => {
     ).toBe(0);
   });
 });
+
+/**
+ * The list's shared-bot block — the creation chooser's official mode. It is
+ * additive: every existing key keeps its value, and the new key is always
+ * present, `[]` when the platform shares nothing.
+ */
+describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
+  type SharedBotPayload = { id: string; github_slug: string | null; name: string; target_count: number };
+  type ListBody = {
+    viewer: { login: string; role: string };
+    apps: Array<{ github_app_id: number }>;
+    shared_bots: SharedBotPayload[];
+  };
+
+  test("the payload is additive and an empty shared set is [], never omitted", async () => {
+    const db = await seededWorld();
+    const res = await get(
+      "/dashboard/default/api/apps",
+      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListBody;
+    expect(body.viewer).toEqual({ login: "hubot", role: "member" });
+    expect(body.apps.map((app) => app.github_app_id).sort()).toEqual([MALLORY_APP_ID, ADA_APP_ID]);
+    expect(body.shared_bots).toEqual([]);
+  });
+
+  test("a shared bot is offered with this workspace's count and never joins the apps list", async () => {
+    const db = await seededWorld();
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', 'hubot', datetime('now'))`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+            created_by, status, scope, shared_at, created_at, updated_at)
+         VALUES ('app-platform', 'platform-app', 1099, 'Platform App', 'enc', 'enc', 'hubot',
+                 'active', 'shared', datetime('now'), datetime('now'), datetime('now'))`,
+      )
+      .run();
+    db.raw
+      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-platform', 'ws-other')")
+      .run();
+
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      const res = await get(
+        "/dashboard/default/api/apps",
+        `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+        makeEnv(db),
+      );
+      const body = (await res.json()) as ListBody;
+      expect(body.shared_bots).toEqual([
+        { id: "app-platform", github_slug: "platform-app", name: "Platform App", target_count: 0 },
+      ]);
+      // Reading the chooser's list never puts another workspace's bot in
+      // `apps`, and never reaches GitHub for it.
+      expect(body.apps.map((app) => app.github_app_id).sort()).toEqual([MALLORY_APP_ID, ADA_APP_ID]);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
