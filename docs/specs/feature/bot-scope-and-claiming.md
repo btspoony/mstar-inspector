@@ -154,8 +154,12 @@ workspace.
 | No target | A review with no `target_id` has no bot either (migration `0057_review_targets.sql` attributes history only where `bot_id` is NOT NULL), so it names no workspace and is **excluded from both counts**. This sentence is the rule; the row is not dropped silently. |
 | Soft deletion | `workspaces.deleted_at` filters the row (a retired tenant has no face). `review_targets.deleted_at` and `review_bots.deleted_at` do **not**: the count is what happened, and a parked target keeps its month. |
 | Visibility | `?3` is the caller's workspace id on the settings card and `NULL` (every live workspace) on the operator face — one shape, two bindings. The workspace face cannot read another tenant's row, and the operator face lists live workspaces with zero reviews as well. |
-| Order | Shared-bot reviews descending, then own-bot reviews descending, then the workspace name ascending: the operator opens the page to ask who is consuming the shared bot. |
+| Order | Shared-bot reviews descending, then own-bot reviews descending, then the workspace name ascending, then the workspace id ascending — `workspaces.name` is not unique, so the id closes the last key and two same-named workspaces cannot swap places between reloads. |
 | Paging | None. The route answers every live workspace in one statement and the page filters the loaded rows client-side. If a measured read ever exceeds that bounded read, server paging is a new stated contract — never a silent cap that hides rows the counter still counts. |
+
+Heading placement: a page's title names the surface, and the window sits in
+the description line under it — the month is only known once the read has
+answered, so a title carrying it would render blank and then reflow.
 
 The card's labels say `reviews` and never `attempts`: the members page's
 "this workspace" meter counts review attempts (`usage_events`), a different

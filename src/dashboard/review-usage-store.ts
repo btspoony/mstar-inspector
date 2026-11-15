@@ -67,6 +67,10 @@ export function reviewUsageMonth(now: Date): ReviewUsageMonth {
  * target, or a target with no review this month, still answers a row with
  * zeros instead of disappearing — the operator face must list every live
  * workspace, including the ones that spent nothing.
+ *
+ * The order is total: `workspaces.name` is not UNIQUE (only `slug` is,
+ * migration 0026), so the id closes the last key and two same-named
+ * workspaces cannot swap places between reloads.
  */
 const REVIEW_USAGE_SQL = `
   SELECT w.id   AS workspace_id,
@@ -83,7 +87,7 @@ const REVIEW_USAGE_SQL = `
    WHERE w.deleted_at IS NULL
      AND (?3 IS NULL OR w.id = ?3)
    GROUP BY w.id, w.name, w.slug
-   ORDER BY shared_reviews DESC, own_reviews DESC, w.name ASC`;
+   ORDER BY shared_reviews DESC, own_reviews DESC, w.name ASC, w.id ASC`;
 
 /** The statement's row shape (SQLite's snake_case aliases). */
 type ReviewUsageRow = {

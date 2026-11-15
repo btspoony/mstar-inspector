@@ -152,6 +152,21 @@ describe("readReviewUsage", () => {
     ]);
   });
 
+  test("two same-named workspaces keep a stable order: the id closes the last key", async () => {
+    const db = fixture();
+    // `workspaces.name` is not UNIQUE (only `slug` is), so a name tiebreak
+    // alone would let these two swap places between reloads. Inserted in the
+    // reverse of the expected order to prove the id decides, not luck.
+    seedWorkspace(db, "ws-twin-b", "Twin");
+    seedWorkspace(db, "ws-twin-a", "Twin");
+    const twins = async () =>
+      (await readReviewUsage(db, NOVEMBER, null))
+        .map((row) => row.workspaceId)
+        .filter((id) => id.startsWith("ws-twin"));
+    expect(await twins()).toEqual(["ws-twin-a", "ws-twin-b"]);
+    expect(await twins()).toEqual(["ws-twin-a", "ws-twin-b"]);
+  });
+
   test("a retired workspace disappears; a parked target keeps its month", async () => {
     const db = fixture();
     seedWorkspace(db, "ws-retired", "Retired", "2026-11-20T00:00:00.000Z");
