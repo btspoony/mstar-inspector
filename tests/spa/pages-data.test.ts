@@ -14,7 +14,9 @@ import {
   INSIGHTS_REPO_ALL,
   inviteLoginNoticeKey,
   isPaused,
+  catalogEndpoints,
   modelChainTabs,
+  modelsForProtocol,
   parseApps,
   parseInsights,
   parseInvites,
@@ -866,6 +868,59 @@ describe("provider catalog rows + add selection", () => {
     const { model_limits_snapshot: _droppedSnapshot, ...withoutSnapshot } = manageBase;
     expect(parseSettings(withoutSnapshot)).toBeNull();
     expect(parseSettings({ ...manageBase, model_limits_snapshot: "" })).toBeNull();
+  });
+
+  test("a merged catalog row's protocol options are row-validated; a single-protocol row omits them", () => {
+    const merged: CatalogProvider = {
+      ...catalogRow,
+      tier: "template",
+      base_url: "https://api.merged.test/v1",
+      api: "openai-completions",
+      protocols: [
+        { api: "openai-completions", base_url: "https://api.merged.test/v1", models: ["a"] },
+        { api: "anthropic-messages", base_url: "https://api.merged.test/anthropic", models: ["b"] },
+      ],
+    };
+    expect(parseSettings({ ...manageBase, provider_catalog: [merged] })).not.toBeNull();
+    // Absent is the single-protocol shape — the pre-merge rows keep parsing.
+    expect(parseSettings({ ...manageBase, provider_catalog: [catalogRow] })).not.toBeNull();
+    // The add form renders a control per option, so a drifted option fails the
+    // parse instead of reaching a select that cannot materialize it.
+    expect(
+      parseSettings({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ api: "anthropic-messages", base_url: 5, models: ["b"] }] }] }),
+    ).toBeNull();
+    expect(
+      parseSettings({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ base_url: "https://x.test", models: [] }] }] }),
+    ).toBeNull();
+    expect(
+      parseSettings({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ api: "anthropic-messages", base_url: null, models: "b" }] }] }),
+    ).toBeNull();
+    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...merged, protocols: [] }] })).toBeNull();
+  });
+
+  test("the protocol lookups: a declaration's vocabulary and the row's endpoints", () => {
+    const merged: CatalogProvider = {
+      ...catalogRow,
+      tier: "template",
+      base_url: "https://api.merged.test/v1",
+      catalog_base_url: "https://api.merged.test/v1",
+      api: "openai-completions",
+      models: ["a"],
+      protocols: [
+        { api: "openai-completions", base_url: "https://api.merged.test/v1", models: ["a"] },
+        { api: "anthropic-messages", base_url: "https://api.merged.test/anthropic", models: ["b"] },
+      ],
+    };
+    // The matching option's list, the row's own as the fallback.
+    expect(modelsForProtocol(merged, "anthropic-messages")).toEqual(["b"]);
+    expect(modelsForProtocol(merged, "openai-completions")).toEqual(["a"]);
+    expect(modelsForProtocol(merged, "typesafe")).toEqual(["a"]);
+    expect(modelsForProtocol(merged, null)).toEqual(["a"]);
+    expect(modelsForProtocol(undefined, "anthropic-messages")).toEqual([]);
+    // Every protocol endpoint is the row's own; nothing else is.
+    expect(catalogEndpoints(merged)).toEqual(["https://api.merged.test/v1", "https://api.merged.test/anthropic"]);
+    expect(catalogEndpoints(catalogRow)).toEqual([null]);
+    expect(catalogEndpoints(undefined)).toEqual([]);
   });
 
   test("add selection maps the picked catalog id to its configuration form kind", () => {

@@ -483,3 +483,128 @@ describe("remove routes stay intact", () => {
     expect(header.split(`>${t("en", "settings.remove")}</button>`).length - 1).toBe(1);
   });
 });
+
+/**
+ * A merged (multi-protocol) catalog row + a declaration stored under one of
+ * its collapsed per-protocol ids — the compatibility shape this view reads
+ * through `legacy_of`.
+ */
+const mergedRow = (): CatalogProvider =>
+  catalogEntry("merged-vendor", "template", {
+    label: "Merged Vendor",
+    base_url: "https://api.merged.test/v1",
+    catalog_base_url: "https://api.merged.test/v1",
+    api: "openai-completions",
+    models: ["default-a"],
+    model_limits: { "anthropic-a": { contextWindow: 4242, maxTokens: 424 } },
+    protocols: [
+      { api: "openai-completions", base_url: "https://api.merged.test/v1", models: ["default-a"] },
+      { api: "anthropic-messages", base_url: "https://api.merged.test/anthropic", models: ["anthropic-a"] },
+    ],
+  });
+
+const legacyPayload = (baseUrl: string): SettingsManagePayload =>
+  managePayload({
+    provider_catalog: [mergedRow()],
+    keys: [keyRow("merged-vendor-anthropic", "k1")],
+    custom_providers: [
+      {
+        provider_id: "merged-vendor-anthropic",
+        base_url: baseUrl,
+        api: "anthropic-messages",
+        model_ids: ["anthropic-a"],
+        legacy_of: "merged-vendor",
+      },
+    ],
+  });
+
+async function mountSection(payload: SettingsManagePayload) {
+  const { win, cleanup } = installDom("http://localhost/dashboard/ws/settings");
+  const container = win.document.createElement("div");
+  win.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  await act(async () => {
+    root.render(
+      createElement(ProvidersSection, {
+        locale: "en" as const,
+        payload,
+        onVerify: async () => ({ kind: "success" as const, message: "" }),
+        onSettings: async () => ({ kind: "success" as const, message: "" }),
+        onPending: () => {},
+        notice: null,
+        removeOutcome: null,
+        onOutcome: () => {},
+      }),
+    );
+  });
+  await act(async () => {});
+  const clickText = async (text: string) => {
+    const button = [...win.document.querySelectorAll("button")].find((node) => node.textContent === text);
+    if (!(button instanceof win.HTMLElement)) throw new Error(`no button labelled ${text}`);
+    await act(async () => {
+      button.click();
+    });
+    await act(async () => {});
+  };
+  return {
+    win,
+    container,
+    clickText,
+    cleanup: async () => {
+      await act(async () => root.unmount());
+      cleanup();
+    },
+  };
+}
+
+describe("a declaration stored under a collapsed per-protocol id", () => {
+  test("the card takes the provider's label, not the stored id, and states the stored endpoint", () => {
+    const html = render(legacyPayload("https://api.merged.test/anthropic"));
+    const group = groupOf(html, "Merged Vendor");
+    expect(group).toContain("anthropic-messages");
+    expect(group).toContain("https://api.merged.test/anthropic");
+    // The collapsed id is the stored identity, never the display name.
+    expect(html).not.toContain("merged-vendor-anthropic");
+  });
+
+  test("the disclosure lists the matching protocol's vocabulary, not the row's default", async () => {
+    const view = await mountSection(legacyPayload("https://api.merged.test/anthropic"));
+    try {
+      await view.clickText(t("en", "settings.providers.expand"));
+      const region = [...view.container.querySelectorAll("li")].map((li) => li.textContent);
+      expect(region).toEqual(["anthropic-a"]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("the model dialog pre-fills a catalog size when the declaration sits on the protocol's endpoint", async () => {
+    const view = await mountSection(legacyPayload("https://api.merged.test/anthropic"));
+    try {
+      await view.clickText(t("en", "settings.providers.models.trigger"));
+      await view.clickText(t("en", "settings.providers.models.detailsToggle"));
+      const field = view.win.document.querySelector(
+        `input[aria-label="${t("en", "settings.providers.models.fields.contextWindow", { model: "anthropic-a" })}"]`,
+      ) as HTMLInputElement | null;
+      expect(field?.value).toBe("4242");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a private endpoint reusing the stored id pre-fills nothing — the gate matches the row's own URLs", async () => {
+    const view = await mountSection(legacyPayload("https://private.example.com/v1"));
+    try {
+      await view.clickText(t("en", "settings.providers.models.trigger"));
+      await view.clickText(t("en", "settings.providers.models.detailsToggle"));
+      const field = view.win.document.querySelector(
+        `input[aria-label="${t("en", "settings.providers.models.fields.contextWindow", { model: "anthropic-a" })}"]`,
+      ) as HTMLInputElement | null;
+      // The dialog really opened: the field exists and carries no number.
+      expect(field).not.toBeNull();
+      expect(field?.value).toBe("");
+    } finally {
+      await view.cleanup();
+    }
+  });
+});

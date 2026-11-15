@@ -391,6 +391,183 @@ describe("AddProviderDialog — the console-only builtins expose an endpoint pat
   });
 });
 
+describe("AddProviderDialog — a merged provider's protocol is a choice on add", () => {
+  const merged = catalogEntry("merged-vendor", {
+    label: "Merged Vendor",
+    tier: "template",
+    eligibility: "template",
+    base_url: "https://api.merged.test/v1",
+    api: "openai-completions",
+    models: ["default-a"],
+    protocols: [
+      { api: "openai-completions", base_url: "https://api.merged.test/v1", models: ["default-a"] },
+      { api: "anthropic-messages", base_url: "https://api.merged.test/anthropic", models: ["anthropic-a"] },
+    ],
+  });
+  const single = catalogEntry("single-vendor", {
+    label: "Single Vendor",
+    tier: "template",
+    eligibility: "template",
+    base_url: "https://api.single.test/v1",
+    api: "openai-completions",
+    models: ["only-a"],
+  });
+
+  const factory =
+    (
+      catalog: CatalogProvider[],
+      options: {
+        customProviders?: SettingsManagePayload["custom_providers"];
+        onSettings?: (fields: Record<string, string>) => Promise<OpNotice>;
+      } = {},
+    ) =>
+    (open: boolean, onOpenChange: (open: boolean) => void) =>
+      createElement(AddProviderDialog, {
+        locale,
+        open,
+        onOpenChange,
+        payload: managePayload({
+          provider_catalog: catalog,
+          ...(options.customProviders === undefined ? {} : { custom_providers: options.customProviders }),
+        }),
+        onVerify: async () => notice("success", "added"),
+        onSettings: options.onSettings ?? (async () => notice("success", "added")),
+        onOutcome: () => {},
+      });
+
+  /** Open the protocol control and choose the option whose text is `label`. */
+  async function chooseProtocol(view: Awaited<ReturnType<typeof mount>>, label: string): Promise<void> {
+    const trigger = view.dialog()?.querySelector('[role="combobox"]') ?? null;
+    await act(async () => {
+      trigger?.dispatchEvent(
+        new view.win.PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }) as unknown as Event,
+      );
+      trigger?.dispatchEvent(
+        new view.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as unknown as Event,
+      );
+    });
+    const option = [...view.win.document.querySelectorAll('[role="option"]')].find(
+      (node) => node.textContent === label,
+    ) as unknown as Element | undefined;
+    if (option === undefined) throw new Error(`no protocol option ${label}`);
+    await act(async () => {
+      option.dispatchEvent(
+        new view.win.PointerEvent("pointerup", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }) as unknown as Event,
+      );
+      option.dispatchEvent(
+        new view.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as unknown as Event,
+      );
+    });
+  }
+
+  const endpoint = (view: Awaited<ReturnType<typeof mount>>): string =>
+    (view.dialog()?.querySelector("input") as HTMLInputElement | undefined)?.value ?? "";
+
+  test("choosing a protocol repoints the endpoint and the submit posts that pair", async () => {
+    const calls: Array<Record<string, string>> = [];
+    const view = await mount(
+      factory([merged], {
+        onSettings: async (fields) => {
+          calls.push(fields);
+          return notice("success", "added");
+        },
+      }),
+    );
+    try {
+      await view.pick("Merged Vendor");
+      // The default protocol's endpoint is what the field starts on.
+      expect(endpoint(view)).toBe("https://api.merged.test/v1");
+      await chooseProtocol(view, "anthropic-messages");
+      expect(endpoint(view)).toBe("https://api.merged.test/anthropic");
+      await view.type(view.dialog()?.querySelector('input[type="password"]') ?? null, "sk-merged-key");
+      await view.submit();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        op: "add-template-provider",
+        template_id: "merged-vendor",
+        api: "anthropic-messages",
+        base_url: "https://api.merged.test/anthropic",
+      });
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("an untouched choice posts the default protocol with its own endpoint", async () => {
+    const calls: Array<Record<string, string>> = [];
+    const view = await mount(
+      factory([merged], {
+        onSettings: async (fields) => {
+          calls.push(fields);
+          return notice("success", "added");
+        },
+      }),
+    );
+    try {
+      await view.pick("Merged Vendor");
+      await view.type(view.dialog()?.querySelector('input[type="password"]') ?? null, "sk-merged-key");
+      await view.submit();
+      expect(calls[0]).toMatchObject({
+        op: "add-template-provider",
+        template_id: "merged-vendor",
+        api: "openai-completions",
+        base_url: "https://api.merged.test/v1",
+      });
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a single-protocol row renders no protocol control and posts no api", async () => {
+    const calls: Array<Record<string, string>> = [];
+    const view = await mount(
+      factory([single], {
+        onSettings: async (fields) => {
+          calls.push(fields);
+          return notice("success", "added");
+        },
+      }),
+    );
+    try {
+      await view.pick("Single Vendor");
+      expect(view.dialog()?.querySelector('[role="combobox"]')).toBeNull();
+      await view.type(view.dialog()?.querySelector('input[type="password"]') ?? null, "sk-single-key");
+      await view.submit();
+      expect(calls[0]).not.toHaveProperty("api");
+      expect(calls[0]).toMatchObject({
+        op: "add-template-provider",
+        template_id: "single-vendor",
+        base_url: "https://api.single.test/v1",
+      });
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a provider that already holds a declaration renders no control — the stored protocol wins", async () => {
+    const view = await mount(
+      factory([merged], {
+        customProviders: [
+          {
+            provider_id: "merged-vendor",
+            base_url: "https://api.merged.test/anthropic",
+            api: "anthropic-messages",
+            model_ids: ["anthropic-a"],
+          },
+        ],
+      }),
+    );
+    try {
+      await view.pick("Merged Vendor");
+      // Showing a chooser the save would ignore is the one thing to avoid.
+      expect(view.dialog()?.querySelector('[role="combobox"]')).toBeNull();
+      expect(endpoint(view)).toBe("https://api.merged.test/anthropic");
+    } finally {
+      await view.cleanup();
+    }
+  });
+});
+
 describe("AddProviderDialog — submit contract (AC-6, AC-19)", () => {
   test("a second submit in flight sends one request, disables the trigger and swaps its copy", async () => {
     const pending = deferred<OpNotice>();

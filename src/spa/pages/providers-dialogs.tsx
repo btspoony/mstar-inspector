@@ -542,6 +542,12 @@ export function ProviderConfigForm({
   // while adding a key would only trip the store's endpoint lock (the
   // backstop for a hand-typed override). Catalog prefill covers the first key.
   const [baseUrl, setBaseUrl] = useState(custom?.base_url ?? provider.base_url ?? "");
+  // The protocol this declaration materializes. A stored declaration's api is a
+  // stored fact (another protocol means remove-then-add), so the control only
+  // appears on the first-time create; the default is the row's own protocol.
+  const protocolOptions = provider.protocols ?? [];
+  const [api, setApi] = useState<string>(custom?.api ?? provider.api ?? "");
+  const showProtocol = custom === undefined && protocolOptions.length > 1;
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
   const formKind = providerFormKind(provider);
@@ -560,6 +566,9 @@ export function ProviderConfigForm({
           template_id: provider.id,
           base_url: baseUrl,
           account_id: accountId,
+          // Only a multi-protocol row names one; a single-protocol row's save
+          // takes the server's default protocol.
+          ...(showProtocol ? { api } : {}),
           key,
         });
       } catch {
@@ -633,6 +642,32 @@ export function ProviderConfigForm({
               </p>
             ))}
           </div>
+        ) : null}
+        {showProtocol ? (
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
+            {t(locale, "settings.protocol")}
+            <Select
+              value={api}
+              onValueChange={(next) => {
+                setApi(next);
+                // The endpoint follows the protocol; the field below stays
+                // editable for a gateway in front of it.
+                const option = protocolOptions.find((candidate) => candidate.api === next);
+                setBaseUrl(option?.base_url ?? "");
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder={t(locale, "settings.selectApi")} />
+              </SelectTrigger>
+              <SelectContent>
+                {protocolOptions.map((option) => (
+                  <SelectItem key={option.api} value={option.api}>
+                    {option.api}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
         ) : null}
         <label className="flex flex-col gap-1.5 text-sm font-medium">
           {t(locale, "settings.baseUrl")}
