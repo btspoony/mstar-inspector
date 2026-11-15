@@ -1577,14 +1577,21 @@ describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
 });
 
 /**
- * A re-seen finding follows its TARGET.
+ * A re-seen finding follows its TARGET when the installation moves.
  *
  * `review_findings` is keyed by (bot, installation, owner, repo, pr, finding) —
- * the fingerprint — while every tenant face binds `target_id`. A documented
- * rebind moves the installation to another workspace's target, so the next
- * review of the same PR re-sees the same fingerprint and MUST move the row
- * with it: otherwise the new workspace never sees its own finding while the
- * old workspace inherits a foreign row.
+ * the fingerprint — while every tenant face binds `target_id`. A rebind is a
+ * real product path: the operator unbinds an installation from one target and
+ * another workspace claims the SAME installation for its own target
+ * (`/_internal_admin/api/targets/:id/unbind` + the claim/bind batch), so the
+ * fingerprint survives the move. The next review of the same PR then MUST move
+ * the row with it.
+ *
+ * Invariant pinned: the INSTALLATION moves — A's target releases it and B's
+ * target holds it, so this fixture describes a rebind rather than two live
+ * targets competing for one fingerprint. A's target and its PR ledger row both
+ * stay live, so A's empty read proves the ATTRIBUTION moved, not that the
+ * ledger vanished.
  */
 describe("target attribution on a re-seen finding (rebind)", () => {
   const TARGET_B_ID = "11111111-2222-3333-4444-888888888888";
@@ -1603,6 +1610,10 @@ describe("target attribution on a re-seen finding (rebind)", () => {
       .run(WORKSPACE_B, WORKSPACE_B, WORKSPACE_B);
     seedTarget(db, APP_ID, { id: TARGET_ID });
     seedTarget(db, APP_ID, { id: TARGET_B_ID, workspaceId: WORKSPACE_B });
+    // Round 1 runs while workspace A's target holds the installation.
+    db.raw
+      .prepare("UPDATE review_targets SET installation_id = ? WHERE id = ?")
+      .run(SCOPE.installationId, TARGET_ID);
     for (const targetId of [TARGET_ID, TARGET_B_ID]) {
       db.raw
         .prepare(
@@ -1613,6 +1624,21 @@ describe("target attribution on a re-seen finding (rebind)", () => {
         .run(`pr-${targetId}`, APP_ID, targetId);
     }
     return db;
+  }
+
+  /**
+   * The rebind itself: the installation stops serving workspace A (its target
+   * releases it) and serves workspace B (its target holds it). The product's
+   * resolution routes a delivery only through the target that holds the
+   * installation, so after this point no publication can be composed for A.
+   */
+  function rebindInstallation(db: TestD1): void {
+    db.raw
+      .prepare("UPDATE review_targets SET installation_id = NULL WHERE id = ?")
+      .run(TARGET_ID);
+    db.raw
+      .prepare("UPDATE review_targets SET installation_id = ? WHERE id = ?")
+      .run(SCOPE.installationId, TARGET_B_ID);
   }
 
   test("the re-seen row moves to the new target and the ledger follows it", async () => {
@@ -1628,8 +1654,17 @@ describe("target attribution on a re-seen finding (rebind)", () => {
       (db.raw.prepare("SELECT target_id FROM review_findings WHERE id = 'row-1'").get() as { target_id: string }).target_id,
     ).toBe(TARGET_ID);
 
-    // The rebind: the installation now serves workspace B's target, and the
-    // next review of the same PR re-sees the same fingerprint.
+    // The rebind, in the data the product itself resolves from: the
+    // installation leaves A's target and lands on B's, then the next review of
+    // the same PR re-sees the same fingerprint.
+    rebindInstallation(db);
+    expect(
+      db.raw.query("SELECT installation_id FROM review_targets WHERE id = ?").get(TARGET_ID),
+    ).toEqual({ installation_id: null });
+    expect(
+      db.raw.query("SELECT installation_id FROM review_targets WHERE id = ?").get(TARGET_B_ID),
+    ).toEqual({ installation_id: SCOPE.installationId });
+
     const pay2 = payload({
       headSha: SHA2,
       round: 2,
@@ -1662,6 +1697,12 @@ describe("target attribution on a re-seen finding (rebind)", () => {
     expect(
       (await store.listPullRequestFindings(scopeB, "acme", "widgets", 42, PAGE))!.items.map((row) => row.finding_id),
     ).toEqual(["f-1"]);
+    // A's ledger row for the PR is still on the books (nothing deletes it on a
+    // rebind), so its empty finding read is the attribution moving — not the
+    // ledger disappearing.
+    expect(
+      db.raw.query("SELECT COUNT(*) AS n FROM pull_requests WHERE target_id = ?").get(TARGET_ID),
+    ).toEqual({ n: 1 });
     expect((await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).findings).toBe(0);
     expect((await store.listPullRequestFindings(scopeA, "acme", "widgets", 42, PAGE))!.items).toEqual([]);
   });

@@ -686,12 +686,21 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  * Order inside the batch matters and is replay-safe:
  *   1. Seen upserts — new rows insert open at the current time; existing
  *      rows update last-seen tracking AND re-attribute to this publication's
- *      target (a documented rebind moves the finding with the installation —
- *      the fingerprint never changes, the tenant does); a row closed
- *      (addressed/dismissed) under an OLDER publication reopens with
+ *      target. A rebind is the product path that needs it: the operator
+ *      unbinds an installation (`/_internal_admin/api/targets/:id/unbind`) and
+ *      another workspace claims the SAME installation for its own target, so
+ *      the fingerprint survives the move and the row must follow it. A row
+ *      closed (addressed/dismissed) under an OLDER publication reopens with
  *      reopen_count+1 ("retain original and assessment history"); rows
  *      already updated by THIS publication (replay) are skipped by the
  *      last_publication guard.
+ *
+ *      Known limit (not addressed here): re-attribution rewrites only the rows
+ *      THIS publication re-sees, and the bound target is the one frozen in
+ *      `payload_json`, so an older still-confirmed publication applied late
+ *      can point re-seen rows back. Both close only with a batch-level
+ *      scope move plus an apply-order/binding re-check — a product decision,
+ *      not a comment.
  *   2. Per assessment — state transition (addressed/dismissed closes,
  *      unverifiable/identity-drift keeps the row open) guarded by the
  *      rounds row NOT existing yet, then the round-history insert
