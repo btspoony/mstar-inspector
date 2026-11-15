@@ -369,9 +369,21 @@ function CreateAppChooser({
   );
 }
 
-/** One App row — exported so its links are asserted on rendered markup. */
-export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: AppsPayload }) {
-  const hrefOf = (appId: number): string => `${apiBase()}/apps/${appId}`;
+/**
+ * One App row — exported so its links are asserted on rendered markup.
+ * `detailSegment` picks the surface a row opens: the App detail (`apps`) on
+ * the Apps page, the target detail (`targets`) on the review-target surface.
+ */
+export function AppsList({
+  locale,
+  payload,
+  detailSegment = "apps",
+}: {
+  locale: SpaBoot["locale"];
+  payload: AppsPayload;
+  detailSegment?: "apps" | "targets";
+}) {
+  const hrefOf = (appId: number): string => `${apiBase()}/${detailSegment}/${appId}`;
 
   const columns: DataTableColumn<AppsPayload["apps"][number]>[] = [
     {

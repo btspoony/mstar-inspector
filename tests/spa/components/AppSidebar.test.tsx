@@ -75,7 +75,7 @@ describe("AppSidebar platform-operations entry", () => {
 });
 
 describe("product nav containment (I-000253)", () => {
-  test("the nav is the three product items, with no group label of any kind", async () => {
+  test("the nav is the four product items, with no group label of any kind", async () => {
     const { container, cleanup } = await mountSidebar(operatorModel);
     try {
       // Scoped to the product menu: the footer's own menu holds the operator
@@ -83,7 +83,12 @@ describe("product nav containment (I-000253)", () => {
       const labels = [...container.querySelectorAll('[data-slot="sidebar-content"] [data-slot="sidebar-menu-button"]')].map(
         (button) => button.textContent,
       );
-      expect(labels).toEqual([t("en", "nav.apps"), t("en", "nav.members"), t("en", "nav.settings")]);
+      expect(labels).toEqual([
+        t("en", "nav.apps"),
+        t("en", "nav.targets"),
+        t("en", "nav.members"),
+        t("en", "nav.settings"),
+      ]);
       // No group heading, whichever slot a future one would take.
       expect(container.querySelectorAll('[data-slot="sidebar-group-label"]')).toHaveLength(0);
     } finally {

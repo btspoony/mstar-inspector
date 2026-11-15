@@ -283,21 +283,23 @@ export const dashboardApp = new Hono<{ Bindings: Env; Variables: DashboardVariab
 /** SPA shell entry for members/apps list mutations (QC W-2, apps route). */
 const DASHBOARD_SHELL_REDIRECT = "/dashboard";
 const APPS_LIST_REDIRECT = "/dashboard/apps";
+/** The review-target surface's list entry; its detail path is the one the
+ * moved settings tab redirects to. */
+const TARGETS_LIST_REDIRECT = "/dashboard/targets";
 
 /**
- * An Apps path (`/dashboard/apps…`) rewritten under the request's workspace
- * ref: the pre-workspace App family answers 404, so a redirect to the bare
- * path would land on a dead URL. Requests with no workspace context and
- * non-Apps paths are returned unchanged.
+ * An Apps or review-targets path rewritten under the request's workspace ref:
+ * the pre-workspace App family answers 404, so a redirect to the bare path
+ * would land on a dead URL. Requests with no workspace context and paths
+ * outside those two families are returned unchanged.
  */
 function scopedAppPath(c: DashboardContext, path: string): string {
   const tenant = c.get("tenant");
   if (!tenant) return path;
-  if (path === APPS_LIST_REDIRECT) return `/dashboard/${tenant.ref}/apps`;
-  if (path.startsWith(`${APPS_LIST_REDIRECT}/`)) {
-    return `/dashboard/${tenant.ref}${path.slice(DASHBOARD_MOUNT.length)}`;
-  }
-  return path;
+  const inFamily = [APPS_LIST_REDIRECT, TARGETS_LIST_REDIRECT].some(
+    (base) => path === base || path.startsWith(`${base}/`),
+  );
+  return inFamily ? `/dashboard/${tenant.ref}${path.slice(DASHBOARD_MOUNT.length)}` : path;
 }
 
 /**
@@ -752,13 +754,15 @@ function isRetiredAppPath(pathname: string): boolean {
  * The workspace ref a mount-pinned /dashboard path addresses, else null.
  *
  * Derived from the ONE SPA family (`WORKSPACE_FAMILY_SEGMENTS`) so a new
- * segment cannot drift across the bundle boundary. `settings` is excluded
- * because no Worker route lives at `/<ref>/settings` — admitting it would route
- * a page path through this gate. This exclusion list IS the gate's admission
- * list: a new SPA-only segment has to be excluded here too.
+ * segment cannot drift across the bundle boundary. The two SPA-only segments
+ * are excluded: `settings` and `targets` are page paths with no Worker route
+ * under `/<ref>/`, and admitting either would route a page path through this
+ * gate. This exclusion list IS the gate's admission list: a new SPA-only
+ * segment has to be excluded here too. Exported for the route-table pin: the
+ * admission list, not the SPA family, is what a Worker route family may be.
  */
-const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
-  WORKSPACE_FAMILY_SEGMENTS.filter((segment) => segment !== "settings"),
+export const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
+  WORKSPACE_FAMILY_SEGMENTS.filter((segment) => segment !== "settings" && segment !== "targets"),
 );
 
 /**
@@ -766,8 +770,9 @@ const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
  * step 1 of the request-path ordering contract. Both sides read the ONE family
  * export (`WORKSPACE_FAMILY_SEGMENTS` in `src/spa/routes.ts`): the SPA's
  * `workspaceRefOf` builds its alternation from it, and `WORKSPACE_SEGMENTS`
- * above is its derivation, not a second list. The family has four members; this
- * gate admits three because `settings` is an SPA page path with no Worker route.
+ * above is its derivation, not a second list. The family has five members;
+ * this gate admits three because `settings` and `targets` are SPA page paths
+ * with no Worker route.
  * A reserved first segment is never a workspace, so `:workspaceRef` cannot
  * capture a real route (`/apps`, `/api/apps`, `/login`, `/members`, …).
  */
@@ -2810,19 +2815,19 @@ async function appStatusAction(
 // the JSON face rather than re-rendering HTML.
 
 /**
- * HTML-nav 302 target for pause/resume. Settings is the only native-form
- * caller (`<form method="post">` on the Review card); Apps-list uses fetch
- * `postForm`. Origin is a sanitized Referer pathname — never echoed as
- * Location. Settings-origin → `/dashboard/apps/:appId/settings` (GitHub App
- * id); apps-list origin → `/dashboard/apps`; anything else → `/dashboard`. Both
- * App targets carry the request's workspace prefix (`scopedAppPath`).
+ * HTML-nav 302 target for pause/resume. The target page is the only
+ * native-form caller (`<form method="post">` on the Review card); Apps-list
+ * uses fetch `postForm`. Origin is a sanitized Referer pathname — never echoed
+ * as Location. Target-origin → `/dashboard/targets/:appId` (GitHub App id);
+ * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`. Both
+ * targets carry the request's workspace prefix (`scopedAppPath`).
  */
 function reviewActionRedirect(c: DashboardContext, appId: number): string {
-  const settingsPath = scopedAppPath(c, `/dashboard/apps/${appId}/settings`);
+  const targetPath = scopedAppPath(c, `/dashboard/targets/${appId}`);
   const listPath = scopedAppPath(c, APPS_LIST_REDIRECT);
   const origin = new URL(c.req.raw.url).origin;
   const refererPath = new URL(safeLocaleRedirect(c.req.header("Referer"), origin), origin).pathname;
-  if (refererPath === settingsPath) return settingsPath;
+  if (refererPath === targetPath) return targetPath;
   if (refererPath === listPath) return listPath;
   return DASHBOARD_SHELL_REDIRECT;
 }
@@ -3036,6 +3041,8 @@ function isOmpRuntimeImage(sandboxImageId: string): boolean {
  * SPA-owned and read-only today — its forms POST here; the pinned POST
  * paths keep their full validation and mutation, and answer the SPA's
  * postForm contract: 2xx → refetch the JSON face, 4xx/5xx → client error).
+ * Native form navigation answers 302 to the review-target page, where the
+ * controls live.
  * The family's 400s moved to settings400Response (keyed JSON),
  * so this helper now carries only the 2xx faces and the
  * settingsFailureNotice 500s.
@@ -3046,7 +3053,7 @@ function settingsPostResponse(
   message: string,
   status: 200 | 500 = 200,
 ): Response {
-  return pinnedPostMutationResponse(c, `/dashboard/apps/${appId}/settings`, message, status);
+  return pinnedPostMutationResponse(c, `/dashboard/targets/${appId}`, message, status);
 }
 
 /**
@@ -3063,7 +3070,7 @@ function settingsRemoveResponse(
   message: string,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/apps/${appId}/settings`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/targets/${appId}`), 302);
   }
   return c.json({ changed, message }, 200);
 }
@@ -3238,7 +3245,7 @@ function parseCustomProviderModelsMeta(
 
 /**
  * Keyed 400 for the settings POST family: native `<form>`
- * navigation keeps the pinned-POST contract — 302 to the settings page, the
+ * navigation keeps the pinned-POST contract — 302 to the target page, the
  * body is never seen; the SPA's postForm fetch gets the keyed JSON face
  * (`message` = the en dictionary face, so existing English-substring pins
  * keep passing; `params` = the interpolation data for the SPA's t()).
@@ -3250,7 +3257,7 @@ function settings400Response(
   params?: Record<string, string | number>,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/apps/${appId}/settings`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/targets/${appId}`), 302);
   }
   return keyed400(c, key, params);
 }
@@ -3322,7 +3329,7 @@ function settingsVerifyFailResponse(
   const mapped = mapVerifyReason(reason);
   const message = verifyFailCopy(mapped);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/apps/${appId}/settings`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/targets/${appId}`), 302);
   }
   return c.json({ ok: false, reason: mapped, message }, 400);
 }
@@ -3341,7 +3348,7 @@ function settingsMembershipFailResponse(
 ): Response {
   const message = membershipFailCopy(selector);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/apps/${appId}/settings`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/targets/${appId}`), 302);
   }
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }
@@ -5680,14 +5687,14 @@ const appParkRoute = async (c: DashboardContext): Promise<Response> => {
   if (parked.outcome === "refused") {
     return pinnedPostMutationResponse(
       c,
-      scopedAppPath(c, `/dashboard/apps/${app.github_app_id}/settings`),
+      scopedAppPath(c, `/dashboard/targets/${app.github_app_id}`),
       parked.reason,
       409,
     );
   }
   return pinnedPostMutationResponse(
     c,
-    scopedAppPath(c, `/dashboard/apps/${app.github_app_id}/settings`),
+    scopedAppPath(c, `/dashboard/targets/${app.github_app_id}`),
     "ok",
   );
 };

@@ -1639,10 +1639,11 @@ export function pullRequestStatePill(
 }
 
 /**
- * The App detail page's tabs (应用设置 / 已安装 / 洞察 / Pull requests). The
- * last three are manager-only — they render from the manage payload.
+ * The App detail page's manager tabs (已安装 / 洞察 / Pull requests). The
+ * target-owned review policy that used to be the fourth (settings) tab lives
+ * on the review-target surface's detail page.
  */
-export type AppDetailTab = "settings" | "installations" | "insights" | "pull-requests";
+export type AppDetailTab = "installations" | "insights" | "pull-requests";
 
 /**
  * URL-derived detail state: the active tab, the insights filters, and the
@@ -1674,23 +1675,22 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
  * The search string as the detail page states it — the ONE derivation
  * shared by the mount initializer and the popstate re-sync (the
  * spa-url-state-resync contract), built on the pinned insights helpers
- * (off-set windows resolve to the default segment). The manager-gated tab
- * values (`installations`, `insights`, `pull-requests`) are honored only for
- * managers; a non-manager — or any other tab value — always resolves to the
- * settings tab. `pr` rides verbatim only when `pullRequestRefOf` resolves it —
- * the same predicate the detail face reads — so the address bar never
- * advertises an open detail that can never open.
+ * (off-set windows resolve to the default segment). The three tab values are
+ * honored only for managers; a non-manager — or any other tab value — always
+ * resolves to the default insights tab. `pr` rides verbatim only when
+ * `pullRequestRefOf` resolves it — the same predicate the detail face reads —
+ * so the address bar never advertises an open detail that can never open.
  */
 export function parseAppDetailSearch(search: string, canManage: boolean): AppDetailSearch {
   const insights = parseInsightsSearch(search);
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const rawTab = params.get("tab");
-  // The bare path IS settings — the only legal non-settings values are the
-  // three manager tabs, gated by the payload's can_manage.
+  // The bare path IS insights — the only legal values are the three manager
+  // tabs, gated by the payload's can_manage.
   const tab: AppDetailTab =
     canManage && (rawTab === "installations" || rawTab === "insights" || rawTab === "pull-requests")
       ? rawTab
-      : "settings";
+      : "insights";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
@@ -1701,15 +1701,15 @@ export function parseAppDetailSearch(search: string, canManage: boolean): AppDet
 
 /**
  * The query string for a detail state — the inverse of
- * {@link parseAppDetailSearch}: the tab param on every non-settings tab
- * (the bare path IS the settings tab), the window param only off the 30
+ * {@link parseAppDetailSearch}: the tab param on every non-default tab
+ * (the bare path IS the insights tab), the window param only off the 30
  * default, the repo param only when set, the pr param only when a detail
  * is open. Loop-free by construction: consumers write it with replaceState
  * only.
  */
 export function appDetailSearchQuery(search: AppDetailSearch): string {
   const params = new URLSearchParams();
-  if (search.tab !== "settings") params.set("tab", search.tab);
+  if (search.tab !== "insights") params.set("tab", search.tab);
   if (search.window !== "30") params.set("window", search.window);
   if (search.repo !== "") params.set("repo", search.repo);
   if (search.pr !== "") params.set("pr", search.pr);

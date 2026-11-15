@@ -8,6 +8,7 @@ import { BotSettingsPage } from "./pages/BotSettingsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { MembersPage } from "./pages/MembersPage";
 import { SupportPage } from "./pages/SupportPage";
+import { TargetDetailPage, TargetsPage } from "./pages/TargetsPage";
 import { WorkspaceSetupPage } from "./pages/WorkspaceSetupPage";
 import { WorkspaceSettingsPage } from "./pages/WorkspaceSettingsPage";
 
@@ -26,6 +27,12 @@ export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBo
   switch (route.page) {
     case "apps":
       return <AppsPage boot={boot} />;
+    case "targets":
+      return route.appId ? (
+        <TargetDetailPage boot={boot} appId={route.appId} />
+      ) : (
+        <TargetsPage boot={boot} />
+      );
     case "members":
       return <MembersPage boot={boot} />;
     case "settings":

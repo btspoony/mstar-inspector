@@ -23,6 +23,7 @@ export const en = {
     brand: "Morning Star Inspector",
     primary: "Primary navigation",
     apps: "Apps",
+    targets: "Review targets",
     members: "Members",
     settings: "Settings",
     /** Sidebar-footer entry to the platform console (operators on `saas`). */
@@ -132,14 +133,17 @@ export const en = {
       revokeFailed: "Could not revoke {login}'s invitation — try again.",
     },
   },
-  /** App detail page (App detail IA): the tabbed shell. */
+  /**
+   * App detail page: the tabbed shell. The review policy that used to be its
+   * settings tab lives on the review-target surface (`targets.*`), so the
+   * tabs here are the App's own faces only.
+   */
   appDetail: {
     /** The page's name in the document title (`common.pageTitle` slot). */
     documentPage: "App",
     backToApps: "Back to Apps",
-    /** The link from the target detail to the bot's own settings page. */
+    /** The link from the App detail and the target detail to the bot's own settings page. */
     botSettingsLink: "Bot settings",
-    tabSettings: "Settings",
     tabInstallations: "Installed",
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
@@ -147,6 +151,19 @@ export const en = {
     // target's workspace on every read, so the copy names the one cause.
     blockedBotNotShared:
       "This bot is no longer shared with this workspace, so this target reviews nothing. Ask the platform operator to share it again.",
+  },
+  /**
+   * The review-target surface (`/dashboard/<ref>/targets`): a workspace's
+   * claim on a bot, listed and edited on its own page. Its detail body keeps
+   * the `settings.*` labels of the tab it was moved from.
+   */
+  targets: {
+    heading: "Review targets",
+    backToList: "Back to review targets",
+    /** Composed empty state (EmptyState title + description). */
+    emptyTitle: "No review targets yet",
+    emptyDescription:
+      "Review targets come from GitHub Apps — create one, or attach the shared bot if your plan includes it.",
   },
   /**
    * The bot settings page: the bot-owned configuration (credentials health,

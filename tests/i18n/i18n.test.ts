@@ -226,11 +226,26 @@ describe("document title + login copy", () => {
 });
 
 describe("App detail IA copy", () => {
-  test("the two tab labels exist atomically in both locales — 应用设置 / 洞察", () => {
-    expect(t("en", "appDetail.tabSettings")).toBe("Settings");
-    expect(t("zh_CN", "appDetail.tabSettings")).toBe("应用设置");
+  test("the App detail tab labels exist atomically in both locales — 洞察 / 已安装 / Pull requests", () => {
     expect(t("en", "appDetail.tabInsights")).toBe("Insights");
     expect(t("zh_CN", "appDetail.tabInsights")).toBe("洞察");
+    expect(t("en", "appDetail.tabInstallations")).toBe("Installed");
+    expect(t("zh_CN", "appDetail.tabInstallations")).toBe("已安装");
+    // The settings tab moved to the review-target surface: its label is gone,
+    // not aliased.
+    expect(isDictionaryKey("appDetail.tabSettings")).toBe(false);
+  });
+
+  test("the review-target surface copy exists atomically in both locales", () => {
+    expect(t("en", "nav.targets")).toBe("Review targets");
+    expect(t("zh_CN", "nav.targets")).toBe("审查目标");
+    expect(t("en", "targets.emptyTitle")).toBe("No review targets yet");
+    expect(t("en", "targets.emptyDescription")).toBe(
+      "Review targets come from GitHub Apps — create one, or attach the shared bot if your plan includes it.",
+    );
+    expect(t("zh_CN", "targets.heading")).toBe("审查目标");
+    expect(t("zh_CN", "targets.emptyTitle").length).toBeGreaterThan(0);
+    expect(t("zh_CN", "targets.emptyDescription").length).toBeGreaterThan(0);
   });
 
   test("the back-to-apps wayfinding key lives under appDetail atomically; the old settings key is removed, not aliased", () => {
