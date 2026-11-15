@@ -191,6 +191,39 @@ type TargetsStoreD1 = {
  */
 const LIVE_TARGET = "id = ? AND workspace_id = ? AND deleted_at IS NULL";
 
+/**
+ * The park predicate: a live target IN the addressed workspace whose account
+ * claim another live target in that workspace duplicates, on a bot that owns
+ * more than one live target. Every statement of the park batch repeats it, so a
+ * concurrent delete, a workspace mix-up or a claim that stopped overlapping
+ * fails the whole park instead of writing half of it.
+ */
+const PARKABLE_TARGET = `id = ? AND workspace_id = ? AND deleted_at IS NULL
+   AND account_login IS NOT NULL
+   AND EXISTS (SELECT 1 FROM review_targets o
+                WHERE o.workspace_id = review_targets.workspace_id
+                  AND o.id <> review_targets.id
+                  AND o.deleted_at IS NULL
+                  AND o.account_login = review_targets.account_login)
+   AND EXISTS (SELECT 1 FROM review_targets s
+                WHERE s.bot_id = review_targets.bot_id
+                  AND s.id <> review_targets.id
+                  AND s.deleted_at IS NULL)`;
+
+/**
+ * The park's audit row. It runs FIRST in the batch: its predicate reads the
+ * pre-park `account_login`, which the UPDATE clears.
+ */
+const PARK_AUDIT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_login, action, target_id, created_at)
+  SELECT ?, ?, ?, 'target.park', id, ? FROM review_targets WHERE ${PARKABLE_TARGET}`;
+
+const PARK_TARGET_SQL = `UPDATE review_targets
+   SET review_enabled = 0, account_login = NULL, updated_at = datetime('now')
+   WHERE ${PARKABLE_TARGET}`;
+
+/** Why a park refused — the reasons the route maps onto its own vocabulary. */
+export type ParkRefusal = "unknown-target" | "only-live-target" | "no-overlap";
+
 /** Create the review_targets / target_owner_allowlist store over one D1 handle. */
 export function createTargetsStore(db: TargetsStoreD1) {
   return {
@@ -359,6 +392,66 @@ export function createTargetsStore(db: TargetsStoreD1) {
         .bind(enabled ? 1 : 0, targetId, workspaceId)
         .run();
       return res.meta.changes > 0;
+    },
+
+    /**
+     * Park an overlapping target: pause it and retire its account claim, with
+     * ONE `audit_events` row naming the target — all in one batch. Parking is
+     * the repair `scripts/audit-owner-overlap.sql` names for a workspace where
+     * one account owns more than one live target; it deletes nothing, so the
+     * bot keeps its target and the pause stays reversible through the resume
+     * route.
+     *
+     * Refusals write nothing and name their reason: a target that is not live
+     * in this workspace, a bot whose only live target this is (parking it would
+     * disable the bot rather than repair a claim), and a target whose claim no
+     * other live target in the workspace duplicates.
+     */
+    async park(
+      workspaceId: string,
+      targetId: string,
+      actorLogin: string,
+      now: string,
+    ): Promise<{ outcome: "parked" } | { outcome: "refused"; reason: ParkRefusal }> {
+      const state = await db
+        .prepare(
+          `SELECT t.account_login,
+                  (SELECT COUNT(*) FROM review_targets s
+                    WHERE s.bot_id = t.bot_id AND s.deleted_at IS NULL) AS live_targets,
+                  EXISTS (SELECT 1 FROM review_targets o
+                           WHERE o.workspace_id = t.workspace_id
+                             AND o.id <> t.id
+                             AND o.deleted_at IS NULL
+                             AND o.account_login = t.account_login) AS overlapped
+             FROM review_targets t
+            WHERE ${LIVE_TARGET}`,
+        )
+        .bind(targetId, workspaceId)
+        .first<{ account_login: string | null; live_targets: number; overlapped: number }>();
+      if (!state) return { outcome: "refused", reason: "unknown-target" };
+      if (state.live_targets <= 1) return { outcome: "refused", reason: "only-live-target" };
+      if (state.account_login === null || state.overlapped === 0) {
+        return { outcome: "refused", reason: "no-overlap" };
+      }
+      const [, update] = await db.batch([
+        db.prepare(PARK_AUDIT_SQL).bind(crypto.randomUUID(), workspaceId, actorLogin, now, targetId, workspaceId),
+        db.prepare(PARK_TARGET_SQL).bind(targetId, workspaceId),
+      ]);
+      // Both statements share the predicate, so the UPDATE's change count is
+      // the park's only success signal: zero means a concurrent delete or an
+      // already-cleared claim, and the audit insert matched nothing either.
+      return update!.meta.changes === 1
+        ? { outcome: "parked" }
+        : { outcome: "refused", reason: "no-overlap" };
+    },
+
+    /** Whether `park` would accept this target — the target face's affordance. */
+    async hasOwnerOverlap(workspaceId: string, targetId: string): Promise<boolean> {
+      const row = await db
+        .prepare(`SELECT 1 AS parkable FROM review_targets WHERE ${PARKABLE_TARGET}`)
+        .bind(targetId, workspaceId)
+        .first<{ parkable: number }>();
+      return row !== null;
     },
 
     /**

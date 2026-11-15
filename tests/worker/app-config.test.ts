@@ -2743,6 +2743,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       can_manage: boolean;
       check_gate: { min_score: number; pass_verdicts: string[] };
       allowlist: { enabled: boolean; owners: string[] };
+      owner_overlap: false,
       app: { github_visibility: string | null };
     };
     expect(body.can_manage).toBe(true);
@@ -2774,6 +2775,7 @@ describe("review gate + owner allowlist (payload and ops)", () => {
       can_manage: boolean;
       check_gate: unknown;
       allowlist: { enabled: boolean; owners: string[] };
+      owner_overlap: false,
       app: { id: string };
     };
     expect(body.can_manage).toBe(true);

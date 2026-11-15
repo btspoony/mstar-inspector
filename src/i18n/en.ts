@@ -724,6 +724,14 @@ export const en = {
     opsDeliveryTitle: "Delivery responses",
     opsDeliveryCopy:
       "A disabled App answers 404 to every delivery, so nothing is reviewed. Enabling it puts this App back to reviewing.",
+    opsParkTitle: "Park this target",
+    opsParkCopy:
+      "Another live target in this workspace claims the same owner. Park pauses this target and clears its account claim, in one audited step; the target and its settings stay.",
+    opsParkAction: "Park target",
+    confirmParkTitle: "Park {name}?",
+    confirmParkBody:
+      "This target is paused and its account claim is cleared, so the owner overlap is gone. Nothing is deleted, and resuming reviews is available afterwards.",
+    confirmParkAction: "Park",
     opsDeleteTitle: "Delete this App",
     opsDeleteCopy: "A soft delete — the App leaves this list and every installation is closed.",
     // Review trigger mode (spec review-trigger-policy §2/§3): segment

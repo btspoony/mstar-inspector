@@ -3820,6 +3820,12 @@ const appSettingsRoute = async (c: DashboardContext) => {
           ? null
           : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
       allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
+      // Whether the park action would be accepted for this target: its account
+      // claim is duplicated by another live target of a multi-target bot.
+      owner_overlap: await createTargetsStore(gate.db).hasOwnerOverlap(
+        gate.scope.workspaceId,
+        gate.target.id,
+      ),
     });
   } catch (err) {
     logSettingsFailure("api_render", gate.app.id, err);
@@ -5404,6 +5410,59 @@ const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
   });
 };
 
+/**
+ * `POST /apps/:appId/park` — the workspace manager's repair for an overlapping
+ * owner claim: pause the target and retire its `account_login`, with one
+ * `target.park` audit row, all in one batch.
+ *
+ * The refusals keep the pinned-post vocabulary: an unknown, foreign,
+ * soft-deleted or non-numeric App is `404 unknown app`; a caller who cannot
+ * manage it is the family's 403; a target the store refused (not live here, the
+ * bot's only live target, or a claim nobody duplicates) answers that reason as
+ * `409`, and wrote nothing.
+ */
+const appParkRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const app = await resolveScopedApp(
+    createReviewBotsStore(member.db),
+    c.req.param("appId") ?? "",
+    member.scope,
+  );
+  if (!app) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  }
+  if (!canManageApp(member.scope)) {
+    return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
+  }
+  const target = await createTargetsStore(member.db).resolveInWorkspace(
+    member.scope.workspaceId,
+    app.id,
+  );
+  if (!target) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  }
+  const parked = await createTargetsStore(member.db).park(
+    member.scope.workspaceId,
+    target.id,
+    member.user.github_login,
+    new Date().toISOString(),
+  );
+  if (parked.outcome === "refused") {
+    return pinnedPostMutationResponse(
+      c,
+      scopedAppPath(c, `/dashboard/apps/${app.github_app_id}/settings`),
+      parked.reason,
+      409,
+    );
+  }
+  return pinnedPostMutationResponse(
+    c,
+    scopedAppPath(c, `/dashboard/apps/${app.github_app_id}/settings`),
+    "ok",
+  );
+};
+
 /** The ledger scope the PR faces bind: the resolved target, its workspace, its bot. */
 function ledgerScopeOf(gate: {
   app: GithubAppRow;
@@ -5705,6 +5764,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/delete", handler: (c) => appStatusAction(c, "delete"), access: "write" },
   { method: "post", path: "/apps/:appId/pause", handler: (c) => appReviewAction(c, "pause"), access: "write" },
   { method: "post", path: "/apps/:appId/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
+  { method: "post", path: "/apps/:appId/park", handler: appParkRoute, access: "write" },
   { method: "post", path: "/apps/:appId/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },

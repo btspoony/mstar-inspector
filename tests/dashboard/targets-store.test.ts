@@ -25,6 +25,8 @@
  * assertions run against the real DDL rather than a hand-built table.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createMigratedTestD1 } from "../store/helpers";
 import type { TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
@@ -581,5 +583,181 @@ describe("delete", () => {
     expect(await store.getById(WS, targetId)).toBeNull();
     expect(await store.resolve(botId, null)).toBeNull();
     expect(await store.delete(WS, targetId)).toBe(false);
+  });
+});
+
+/**
+ * Park: the audited repair for an owner overlap. It writes the business pause
+ * and the retired account claim plus ONE `target.park` audit row in one batch,
+ * deletes nothing, and refuses — with zero writes — a target that is not live
+ * in the addressed workspace, a bot's only live target, or a claim no other
+ * live target in the workspace duplicates.
+ */
+describe("park an overlapping target", () => {
+  const NOW = "2026-06-01T00:00:00.000Z";
+  /** The read-only audit the operator runs; parking must empty its row. */
+  const OVERLAP_SQL = readFileSync(join(import.meta.dir, "../../scripts/audit-owner-overlap.sql"), "utf8");
+
+  type TargetShape = {
+    review_enabled: number;
+    account_login: string | null;
+    installation_id: number | null;
+    deleted_at: string | null;
+  };
+
+  function targetOf(db: TestD1, targetId: string): TargetShape {
+    const row = db.raw
+      .query(
+        `SELECT review_enabled, account_login, installation_id, deleted_at
+           FROM review_targets WHERE id = ?`,
+      )
+      .get(targetId) as TargetShape | null;
+    if (row === null) throw new Error(`target ${targetId} is missing`);
+    return row;
+  }
+
+  function counts(db: TestD1): { targets: number; bots: number; audits: number } {
+    const one = (sql: string) => (db.raw.query(sql).get() as { n: number }).n;
+    return {
+      targets: one("SELECT COUNT(*) AS n FROM review_targets"),
+      bots: one("SELECT COUNT(*) AS n FROM review_bots"),
+      audits: one("SELECT COUNT(*) AS n FROM audit_events"),
+    };
+  }
+
+  /** A second live target on the same bot, carrying the account claim. */
+  function seedSiblingTarget(
+    db: TestD1,
+    input: { id: string; botId: string; workspaceId?: string; accountLogin: string | null; deleted?: boolean },
+  ): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, installation_id, account_login,
+            review_enabled, review_trigger_mode, review_level,
+            check_min_score, check_pass_verdicts, allowlist_enabled,
+            created_by, created_at, updated_at, deleted_at)
+         VALUES (?, ?, ?, ?, NULL, ?, 1, 'every_push', NULL, 70, '["ship it"]', 0,
+                 'acme', datetime('now'), datetime('now'), ?)`,
+      )
+      .run(
+        input.id,
+        input.workspaceId ?? WS,
+        input.botId,
+        input.id,
+        input.accountLogin,
+        input.deleted ? "2026-01-01 00:00:00" : null,
+      );
+  }
+
+  test("a park pauses the target, retires its claim and audits it in one batch", async () => {
+    const db = createMigratedTestD1();
+    const { botId, targetId } = seedBackfilledBot(db, "bot-park", {
+      githubAppId: 6101,
+      installationId: 501,
+    });
+    seedSiblingTarget(db, { id: "target-sibling", botId, accountLogin: "acme" });
+    expect(targetOf(db, targetId).account_login).toBe("acme");
+    expect(OVERLAP_SQL).toContain("HAVING COUNT(*) > 1");
+    expect((db.raw.query(OVERLAP_SQL).all() as Array<{ account_login: string }>).map((row) => row.account_login)).toEqual([
+      "acme",
+    ]);
+    const before = counts(db);
+    const store = createTargetsStore(db);
+    expect(await store.hasOwnerOverlap(WS, targetId)).toBe(true);
+
+    expect(await store.park(WS, targetId, "octocat", NOW)).toEqual({ outcome: "parked" });
+
+    const parked = targetOf(db, targetId);
+    expect(parked.review_enabled).toBe(0);
+    expect(parked.account_login).toBeNull();
+    // Parking is not a delete and not an unbind: the target, its bot and its
+    // installation binding all stay.
+    expect(parked.deleted_at).toBeNull();
+    expect(parked.installation_id).toBe(501);
+    expect(counts(db).targets).toBe(before.targets);
+    expect(counts(db).bots).toBe(before.bots);
+
+    // Exactly one audit row, naming the target it parked.
+    expect(counts(db).audits).toBe(before.audits + 1);
+    const audits = db.raw
+      .query("SELECT workspace_id, actor_login, action, target_id, created_at FROM audit_events ORDER BY rowid")
+      .all() as Array<{
+      workspace_id: string;
+      actor_login: string;
+      action: string;
+      target_id: string | null;
+      created_at: string;
+    }>;
+    expect(audits).toEqual([
+      { workspace_id: WS, actor_login: "octocat", action: "target.park", target_id: targetId, created_at: NOW },
+    ]);
+    // The sibling target — the claim the park left in place — is untouched.
+    expect(targetOf(db, "target-sibling")).toMatchObject({
+      review_enabled: 1,
+      account_login: "acme",
+    });
+    // The audit query's healthy state for this workspace/owner.
+    expect(db.raw.query(OVERLAP_SQL).all()).toEqual([]);
+    expect(await store.hasOwnerOverlap(WS, "target-sibling")).toBe(false);
+  });
+
+  test("the bot's only live target is refused with zero writes", async () => {
+    const db = createMigratedTestD1();
+    const { targetId } = seedBackfilledBot(db, "bot-solo", { githubAppId: 6102, installationId: 502 });
+    // Another BOT's target claims the same owner: the workspace overlap exists,
+    // but parking the solo bot's only target would disable the bot rather than
+    // repair a duplicate.
+    const other = seedBackfilledBot(db, "bot-neighbour", { githubAppId: 6103, installationId: 503 });
+    expect(targetOf(db, other.targetId).account_login).toBe("acme");
+    const before = counts(db);
+    const store = createTargetsStore(db);
+
+    expect(await store.park(WS, targetId, "octocat", NOW)).toEqual({
+      outcome: "refused",
+      reason: "only-live-target",
+    });
+    expect(await store.hasOwnerOverlap(WS, targetId)).toBe(false);
+    expect(targetOf(db, targetId)).toMatchObject({ review_enabled: 1, account_login: "acme" });
+    expect(counts(db)).toEqual(before);
+  });
+
+  test("a target outside the caller's workspace is refused with zero writes", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER_WS);
+    const foreign = seedBackfilledBot(db, "bot-foreign", {
+      githubAppId: 6104,
+      workspaceId: OTHER_WS,
+      installationId: 504,
+    });
+    seedSiblingTarget(db, { id: "foreign-sibling", botId: "bot-foreign", workspaceId: OTHER_WS, accountLogin: "acme" });
+    const before = counts(db);
+    const store = createTargetsStore(db);
+
+    expect(await store.park(WS, foreign.targetId, "octocat", NOW)).toEqual({
+      outcome: "refused",
+      reason: "unknown-target",
+    });
+    expect(await store.hasOwnerOverlap(WS, foreign.targetId)).toBe(false);
+    expect(targetOf(db, foreign.targetId)).toMatchObject({ review_enabled: 1, account_login: "acme" });
+    expect(counts(db)).toEqual(before);
+  });
+
+  test("a target whose claim nobody duplicates is refused with zero writes", async () => {
+    const db = createMigratedTestD1();
+    // No installation → no account claim; a second live target makes the bot
+    // multi-target, so only the overlap guard can refuse this one.
+    const { botId, targetId } = seedBackfilledBot(db, "bot-no-claim", { githubAppId: 6105 });
+    seedSiblingTarget(db, { id: "no-claim-sibling", botId, accountLogin: "someone-else" });
+    const before = counts(db);
+    const store = createTargetsStore(db);
+
+    expect(await store.park(WS, targetId, "octocat", NOW)).toEqual({
+      outcome: "refused",
+      reason: "no-overlap",
+    });
+    expect(await store.hasOwnerOverlap(WS, targetId)).toBe(false);
+    expect(targetOf(db, targetId).review_enabled).toBe(1);
+    expect(counts(db)).toEqual(before);
   });
 });

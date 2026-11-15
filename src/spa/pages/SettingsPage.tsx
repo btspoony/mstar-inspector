@@ -81,7 +81,7 @@ import { LoadingNotice, LoadFailedNotice, NoticeRegion, PageNotice, SaveInFlight
 import { ProvidersSection } from "./settings-providers";
 
 export type PendingAction =
-  | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
+  | { kind: "pause" | "resume" | "disable" | "enable" | "delete" | "park" }
   | { kind: "remove-chain"; name: string }
   | { kind: "remove-key"; provider: string; keyId: string; last4: string }
   | { kind: "remove-custom"; providerId: string };
@@ -386,6 +386,14 @@ export function pendingConfirmCopy(
   pending: PendingAction | null,
 ): { title: string; body: string; action: string; destructive: boolean } | null {
   if (!pending) return null;
+  if (pending.kind === "park") {
+    return {
+      title: t(locale, "settings.confirmParkTitle", { name }),
+      body: t(locale, "settings.confirmParkBody"),
+      action: t(locale, "settings.confirmParkAction"),
+      destructive: true,
+    };
+  }
   if (pending.kind === "remove-chain") {
     return {
       title: t(locale, "settings.confirmRemoveChainTitle", { name: pending.name }),
@@ -1392,6 +1400,16 @@ function OpsSection({
               </Button>
             )}
           </OpsRow>
+          {payload.owner_overlap ? (
+            // Park is the repair for an overlapping owner claim, and the route
+            // refuses it when the claim no longer overlaps — so the control
+            // renders only while the payload proves it would land.
+            <OpsRow title={t(locale, "settings.opsParkTitle")} copy={t(locale, "settings.opsParkCopy")}>
+              <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "park" })}>
+                {t(locale, "settings.opsParkAction")}
+              </Button>
+            </OpsRow>
+          ) : null}
           <OpsRow title={t(locale, "settings.opsDeleteTitle")} copy={t(locale, "settings.opsDeleteCopy")}>
             <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
               {t(locale, "apps.actions.delete")}

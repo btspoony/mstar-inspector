@@ -35,13 +35,16 @@
  * Closed `audit_events.action` vocabulary (free TEXT in the DDL, checked
  * here). The two `support.grant.*` rows are the console's grant maintenance:
  * the actor is the operator who wrote, the workspace is the grant's target.
+ * `target.park` is the workspace manager's overlapping-claim repair — its row
+ * also names the target it parked.
  */
 export type SupportAuditAction =
   | "support.read"
   | "support.forbidden"
   | "support.denied"
   | "support.grant.create"
-  | "support.grant.delete";
+  | "support.grant.delete"
+  | "target.park";
 
 /** A `support_grants` row (migration 0029). */
 export type SupportGrantRow = {

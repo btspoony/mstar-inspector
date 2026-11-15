@@ -729,6 +729,12 @@ export type SettingsManagePayload = {
   check_gate: CheckGateSettings | null;
   /** The owner allowlist switch + accepted owner logins (migration 0045). */
   allowlist: AllowlistSettings;
+  /**
+   * Whether the park action would be accepted: this target's account claim is
+   * duplicated by another live target of a multi-target bot. The route refuses
+   * it otherwise, so the affordance never offers a write that cannot land.
+   */
+  owner_overlap: boolean;
 } & BotConfigSections;
 
 export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload;
@@ -2045,6 +2051,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // rendering a control that cannot round-trip.
   if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
   if (!isAllowlistSettings(data.allowlist)) return null;
+  if (typeof data.owner_overlap !== "boolean") return null;
   // Cached visibility is nullable (null = the row read failed); any other
   // value must be on the probe's own vocabulary.
   if (!isNullableGithubVisibility(data.app.github_visibility)) return null;

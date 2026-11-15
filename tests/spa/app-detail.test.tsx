@@ -84,6 +84,7 @@ const managePayload = {
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
   allowlist: { enabled: false, owners: [] },
+  owner_overlap: false,
   keys: [],
   model_chain: null,
   model_limits_snapshot: "2026-01-01",
@@ -336,6 +337,27 @@ describe("tab shell rendering (static SSR)", () => {
     }
   });
 
+  test("the park action renders only while the owner claim overlaps", () => {
+    const parked = renderToStaticMarkup(
+      createElement(SettingsView, {
+        locale: "en",
+        payload: { ...managePayload, owner_overlap: true },
+        onReload: noReload,
+      }),
+    );
+    // The row names the overlap and offers the action; the confirm copy exists
+    // in the dictionary for the dialog it opens.
+    expect(parked).toContain(t("en", "settings.opsParkTitle"));
+    expect(parked).toContain(t("en", "settings.opsParkAction"));
+    expect(t("en", "settings.confirmParkTitle", { name: "Demo" })).toContain("Demo");
+    expect(t("zh_CN", "settings.opsParkTitle").length).toBeGreaterThan(0);
+    // No overlap → no park affordance (the route would refuse it anyway).
+    const quiet = renderToStaticMarkup(
+      createElement(SettingsView, { locale: "en", payload: managePayload, onReload: noReload }),
+    );
+    expect(quiet).not.toContain(t("en", "settings.opsParkTitle"));
+  });
+
   test("the identity status pill renders the shared primitive from the single derivation", () => {
     // The adapter that used to live in AppsPage is gone; the page and the
     // list both read this one derivation, and the pill face is the shared
@@ -412,6 +434,7 @@ describe("installed tab configuration surface (static SSR)", () => {
       {
         ...managePayload,
         allowlist: { enabled: true, owners: ["acme"] },
+        owner_overlap: false,
         installations: [
           { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
           { installation_id: 456, account_login: "intruder", seen_at: "2026-01-01 00:00:00" },
@@ -428,6 +451,7 @@ describe("installed tab configuration surface (static SSR)", () => {
       {
         ...managePayload,
         allowlist: { enabled: true, owners: ["ACME"] },
+        owner_overlap: false,
         installations: [
           { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
         ],
@@ -443,6 +467,7 @@ describe("installed tab configuration surface (static SSR)", () => {
       {
         ...managePayload,
         allowlist: { enabled: false, owners: ["someone-else"] },
+        owner_overlap: false,
         installations: [
           { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
           { installation_id: 456, account_login: null, seen_at: "2026-01-01 00:00:00" },

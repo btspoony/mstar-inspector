@@ -830,3 +830,97 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 });
+
+/**
+ * `POST /dashboard/:ref/apps/:appId/park` — the manager's repair for an owner
+ * overlap. The route is a thin shell over the store's batch; the store's own
+ * guards are pinned in tests/dashboard/targets-store.test.ts.
+ */
+describe("POST /dashboard/:ref/apps/:appId/park", () => {
+  /**
+   * The overlap the park repairs: this App's target claims `acme` in `default`,
+   * ANOTHER bot's target claims it too, and the bot keeps a second live target
+   * in a second workspace — so this workspace's target is not the bot's only
+   * live one.
+   */
+  function seedOverlap(db: ReturnType<typeof createAppsUiD1>, githubAppId: number): string {
+    const target = db.raw
+      .prepare(
+        `SELECT t.id, t.bot_id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
+          WHERE b.github_app_id = ?`,
+      )
+      .get(githubAppId) as { id: string; bot_id: string };
+    db.raw.prepare(`UPDATE review_targets SET account_login = 'acme' WHERE id = ?`).run(target.id);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', 'mallory', datetime('now'))`,
+      )
+      .run();
+    const insert = db.raw.prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, installation_id, account_login, review_enabled,
+          review_trigger_mode, review_level, check_min_score, check_pass_verdicts,
+          allowlist_enabled, created_by, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, NULL, 'acme', 1, 'every_push', NULL, 70, '["ship it"]', 0,
+               'mallory', datetime('now'), datetime('now'), NULL)`,
+    );
+    // Same bot, second workspace: the bot has more than one live target.
+    insert.run("park-elsewhere", "ws-other", target.bot_id, "park-elsewhere");
+    // Another bot's target in THIS workspace: the claim it duplicates.
+    insert.run("park-rival", "default", "app-mstar-inspector-ada", "park-rival");
+    return target.id;
+  }
+
+  test("an overlap is parked: paused, claim cleared, one audit row, zero GitHub calls", async () => {
+    const db = await seededWorld();
+    const targetId = seedOverlap(db, MALLORY_APP_ID);
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      const res = await post(
+        `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
+        `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+        makeEnv(db),
+      );
+      expect(res.status).toBe(200);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    const row = db.raw
+      .query("SELECT review_enabled, account_login FROM review_targets WHERE id = ?")
+      .get(targetId) as { review_enabled: number; account_login: string | null };
+    expect(row).toEqual({ review_enabled: 0, account_login: null });
+    expect(
+      db.raw.query("SELECT action, target_id, actor_login FROM audit_events").all(),
+    ).toEqual([{ action: "target.park", target_id: targetId, actor_login: "mallory" }]);
+  });
+
+  test("a target with no overlapping claim is refused with 409 and zero writes", async () => {
+    const db = await seededWorld();
+    const auditBefore = db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number };
+    const res = await post(
+      `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe("only-live-target");
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n).toBe(auditBefore.n);
+    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
+  });
+
+  test("a plain member is refused by the manage gate before any write", async () => {
+    const db = await seededWorld();
+    seedOverlap(db, MALLORY_APP_ID);
+    const res = await post(
+      `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
+      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(403);
+    expect(
+      (db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n,
+    ).toBe(0);
+  });
+});
