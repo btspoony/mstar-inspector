@@ -4750,21 +4750,34 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // catalog is resolved on the READ side instead: the SPA pre-fill gates it
     // by endpoint, and the runner synthesis re-resolves it per declaration.
     //
-    // A form that carries NO models_meta field states nothing about the models:
-    // the store is handed undefined so it CARRIES the stored overlay across,
-    // pruned to the surviving ids (an id-only row stays id-only). A PRESENT
-    // field — the dialog always sends one, empty object included — is a full
-    // statement and replaces the overlay. Treating a missing field as "{}"
-    // would silently wipe every stored size, name and capability on a save
-    // that only edited the id list.
-    const metaStatement = typeof form.models_meta === "string" ? form.models_meta : undefined;
+    // What a models_meta field MEANS, in one place (the store's contract is
+    // "absent = state nothing"):
+    // - missing          → undefined: the store CARRIES the stored overlay
+    //                      across, pruned to the surviving ids (an id-only row
+    //                      stays id-only). A save that only edits the id list
+    //                      must never wipe sizes the operator never touched.
+    // - string, blank    → undefined: an empty form field is how a browser
+    //                      submits "this form has no size fields filled in", not
+    //                      an instruction to clear what is stored.
+    // - string, JSON obj → the statement, REPLACING the overlay whole ("{}"
+    //                      is the explicit "states nothing for these models").
+    // - anything else    → 400 malformed, zero writes: a repeated field arrives
+    //                      as string[] and a file part as File — a submission
+    //                      this route cannot read is refused, never silently
+    //                      downgraded to "states nothing".
     let statedMeta: CustomProviderModelsMeta | undefined;
-    if (metaStatement !== undefined) {
-      const stated = parseCustomProviderModelsMeta(metaStatement, modelIds);
-      if ("error" in stated) {
-        return settings400Response(c, gate.app.github_app_id, stated.error, stated.params);
+    const rawMeta = form.models_meta;
+    if (rawMeta !== undefined) {
+      if (typeof rawMeta !== "string") {
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelMetaMalformed);
       }
-      statedMeta = stated.meta;
+      if (rawMeta.trim() !== "") {
+        const stated = parseCustomProviderModelsMeta(rawMeta, modelIds);
+        if ("error" in stated) {
+          return settings400Response(c, gate.app.github_app_id, stated.error, stated.params);
+        }
+        statedMeta = stated.meta;
+      }
     }
     try {
       await store.updateCustomProviderModels(gate.app.id, providerId, modelIds, statedMeta);

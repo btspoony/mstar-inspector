@@ -401,6 +401,27 @@ async function postForm(
   );
 }
 
+/**
+ * The same POST with a body that may REPEAT a field — the shape a browser (or
+ * a hand-built client) sends when one key appears twice, which parseBody's
+ * all form aggregates into an array.
+ */
+async function postFormEntries(
+  path: string,
+  cookie: string,
+  env: Env,
+  entries: Array<[string, string]>,
+): Promise<Response> {
+  return await worker.fetch(
+    new Request(`https://worker.local${path}`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(entries).toString(),
+    }),
+    env,
+  );
+}
+
 // SPA ownership: settings HTML GET is SPA-owned (shared spa helper).
 
 /**
@@ -4634,6 +4655,81 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["fresh-a"]);
     expect(decl!.models_meta).toEqual({ "fresh-a": overlay["fresh-a"]! });
+  });
+
+  test("a blank models_meta field is not a clear instruction — the stored overlay survives", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const store = configStore(db);
+    const overlay = { "fresh-a": { contextWindow: 128000, maxTokens: 8192 }, "fresh-b": { maxTokens: 4096 } };
+    await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a, fresh-b",
+      models_meta: JSON.stringify(overlay),
+    });
+    // A native form submits its untouched size fields as an empty value: that
+    // is "no size typed", not "delete the sizes this declaration stores".
+    const blank = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a, fresh-b",
+      models_meta: "  ",
+    });
+    expect(blank.status).toBe(200);
+    const [decl] = await store.listCustomProviders(app.id);
+    expect(decl!.models_meta).toEqual(overlay);
+  });
+
+  test("an explicit {} models_meta replaces the overlay with no sizes", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const store = configStore(db);
+    await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a",
+      models_meta: JSON.stringify({ "fresh-a": { contextWindow: 128000, maxTokens: 8192 } }),
+    });
+    // "{}" is a statement about these models — the dialog sends it when nothing
+    // is typed and the catalogue supplies nothing — so it replaces the overlay.
+    const cleared = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a",
+      models_meta: "{}",
+    });
+    expect(cleared.status).toBe(200);
+    const [decl] = await store.listCustomProviders(app.id);
+    expect(decl!.models_meta).toBeUndefined();
+  });
+
+  test("a non-string models_meta is refused as malformed with zero writes", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const store = configStore(db);
+    const overlay = { "fresh-a": { contextWindow: 128000, maxTokens: 8192 } };
+    await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a",
+      models_meta: JSON.stringify(overlay),
+    });
+    const before = await store.listCustomProviders(app.id);
+    // A repeated field reaches the route as string[] (parseBody all); a file
+    // part as File. Either way the submission is unreadable, so it is refused
+    // instead of being treated as "states nothing".
+    const repeated = await postFormEntries(SETTINGS, await mallory(), makeEnv(db), [
+      ["op", "update-provider-models"],
+      ["provider", "my-custom"],
+      ["model_ids", "fresh-a, fresh-b"],
+      ["models_meta", JSON.stringify(overlay)],
+      ["models_meta", JSON.stringify({ "fresh-b": { maxTokens: 4096 } })],
+    ]);
+    expect(repeated.status).toBe(400);
+    expect(await repeated.json()).toMatchObject({ key: "settings.error.modelMetaMalformed" });
+    // Nothing moved: the ids AND the overlay are exactly what was stored.
+    expect(await store.listCustomProviders(app.id)).toEqual(before);
   });
 
   test.skipIf(coveredCatalogModel() === null)(
