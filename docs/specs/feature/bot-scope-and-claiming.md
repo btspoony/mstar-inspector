@@ -128,7 +128,7 @@ Every bot-scoped write route — settings operations, key deletion, provider-key
 Two surfaces carry the two halves of a bot's configuration, and only one of them is refused here:
 
 - The bot page `/dashboard/<workspaceRef>/apps/:appId/bot` (`BotSettingsPage.tsx`) is bot-owned configuration only — credentials health, provider keys, model chains, seats, sandbox image and installations.
-- The target's review policy — trigger mode, depth, Check gate, owner allowlist, pause and park — is **target** data, written on the target surface, the app detail's settings tab (`SettingsPage.tsx`). It is governed by the target's workspace role, not by `canWriteBotScope`.
+- The target's review policy — trigger mode, depth, Check gate, owner allowlist, pause and park — is **target** data, written on the target surface, `/dashboard/<workspaceRef>/targets/:appId` (`TargetDetailPage` in `src/spa/pages/TargetsPage.tsx`, which renders `SettingsView` from `src/spa/pages/SettingsPage.tsx`). The app detail's former settings tab is gone: `…/apps/:appId/settings` and its `?tab=settings` spelling both redirect there (`settingsTabRedirect`, `src/spa/routes.ts`). It is governed by the target's workspace role, not by `canWriteBotScope`.
 
 A consumer workspace may therefore still change its own target policy; only the bot-scoped writes above are refused for a `shared` bot.
 
