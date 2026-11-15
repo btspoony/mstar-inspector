@@ -590,8 +590,12 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
 
     expect(reads).toBe(3); // entry fence, first chunk, aborted second chunk
     expect(applied).toBe(false); // the stale invocation never marks complete
-    // Only the first chunk's writes landed; the second chunk never ran.
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
+    // Only the first chunk's writes landed; the second chunk never ran. The
+    // chunk budget is 25 statements and the artifact's two (the review INSERT
+    // and its public finding) lead it: 23 seen upserts, then the rest.
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(23);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n).toBe(1);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM review_threads").get() as { n: number }).n).toBe(0);
     expect(publicationRow(db, "pub-1").phase).toBe("confirmed"); // never marked applied
   });
@@ -610,7 +614,9 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
 
     expect(applied).toBe(false);
     expect(reads).toBe(3);
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
+    // First chunk = the artifact's two statements + 23 seen upserts.
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(23);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
     expect(publicationRow(db, "pub-1").phase).toBe("confirmed");
   });
 });
@@ -1651,8 +1657,8 @@ describe("target attribution is fixed at first record (rebind)", () => {
    * Round 2 at a new SHA. `hintTargetId` is the target frozen into its payload:
    * B for a publication composed after the rebind, A to model one composed
    * before it (the recovery lane can apply those late). The payload target is
-   * only a hint — a NEW finding must take the live binding; the review row
-   * `store.put` writes still carries the artifact's target, as before.
+   * only a hint — the NEW finding AND the NEW review row this apply inserts
+   * both take the live binding.
    */
   function roundTwo(
     seen: Array<{ rowId: string; findingId: string }>,
@@ -1767,6 +1773,55 @@ describe("target attribution is fixed at first record (rebind)", () => {
       reviews: 1,
       failures: 0,
       must_fix: 0,
+    });
+  });
+
+  test("a failed apply rolls the review row back with its findings, and the retry files both on the new target", async () => {
+    const db = fixedAttributionFixture({ withBPullRequest: true });
+    // An assessment gives the batch a statement AFTER the review insert and
+    // the finding upsert, so the failure lands mid-batch.
+    const pay1 = payload({
+      lifecycle: lifecycleRound({
+        selectedRowIds: ["row-1"],
+        seen: [seenEntry("row-1", "f-1")],
+        assessments: [
+          {
+            rowId: "row-1",
+            disposition: "unverifiable",
+            reason: "no-evidence",
+            evidence: null,
+            relatedCurrentFindingIndexes: [],
+          },
+        ],
+      }),
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay1, 1000);
+    db.raw.exec(
+      "CREATE TRIGGER boom BEFORE INSERT ON review_finding_rounds BEGIN SELECT RAISE(ABORT, 'boom'); END",
+    );
+    await expect(applyPublishedLifecycle(db, "pub-1", lease, 2000)).rejects.toThrow(/boom/);
+
+    // ONE transaction: the review row the batch had already inserted is gone
+    // with its findings — nothing is left for a retry to re-attribute.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 0 });
+
+    // The rebind lands before the recovery retry of the SAME confirmed
+    // publication; one batch now resolves the binding once and writes both
+    // halves on B.
+    db.raw.exec("DROP TRIGGER boom");
+    rebind(db);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
+
+    expect(db.raw.query("SELECT head_sha, target_id FROM reviews").all()).toEqual([
+      { head_sha: SHA, target_id: TARGET_B_ID },
+    ]);
+    expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
+      { finding_id: "f-1", target_id: TARGET_B_ID },
+    ]);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings WHERE target_id = ?").get(TARGET_ID)).toEqual({
+      n: 0,
     });
   });
 

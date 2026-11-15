@@ -231,6 +231,12 @@ export type TargetIdExpression = {
   binds: readonly unknown[];
 };
 
+/** One statement `put` would run, composed but not executed. */
+export type ComposedStatement = {
+  sql: string;
+  binds: unknown[];
+};
+
 /** `put` inputs that are not part of the artifact document itself. */
 export type ArtifactPutOptions = {
   /** Overrides `doc.targetId` with an expression evaluated at insert time. */
@@ -247,6 +253,14 @@ export type D1ArtifactStore = ArtifactStore & {
    * replaces the bound `doc.targetId` value in the review INSERT.
    */
   put(doc: ReviewArtifactDoc, options?: ArtifactPutOptions): Promise<void>;
+  /**
+   * The statements `put` would run — the review INSERT then one INSERT per
+   * finding — composed WITHOUT executing them, so a caller that owns a larger
+   * transaction can splice them in (the lifecycle apply does: the review row,
+   * its public findings and the lifecycle rows commit or roll back together).
+   * Same validation, same guards, same idempotent `ON CONFLICT DO NOTHING`.
+   */
+  statementsFor(doc: ReviewArtifactDoc, options?: ArtifactPutOptions): ComposedStatement[];
   /**
    * Consumer idempotency pre-check (dedup before clone/diff/run). Not part
    * of the engine `ArtifactStore` interface — it stays on the store face
@@ -274,124 +288,136 @@ export type D1ArtifactStore = ArtifactStore & {
  * statement error still throws (and rolls back).
  */
 export function createArtifactStore(db: D1Like): D1ArtifactStore {
-  return {
-    async put(doc: ReviewArtifactDoc, options?: ArtifactPutOptions): Promise<void> {
-      if (doc.kind !== "review") {
-        throw new Error(
-          `artifact-store: kind ${JSON.stringify(doc.kind)} is not persisted by the D1 store (only "review")`,
-        );
-      }
-      if (doc.schema !== REVIEW_SCHEMA) {
-        throw new Error(
-          `artifact-store: doc.schema must be ${JSON.stringify(REVIEW_SCHEMA)}, got ${JSON.stringify(doc.schema ?? null)}`,
-        );
-      }
-      const key = parseIdemKey(doc.key);
+  /**
+   * Compose the artifact write — the review INSERT plus one INSERT per
+   * finding — without executing anything. Both `put` (its own batch) and the
+   * lifecycle apply (the larger batch) run exactly these statements, so the
+   * two paths can never diverge in validation, guards or attribution.
+   */
+  function composeStatements(
+    doc: ReviewArtifactDoc,
+    options?: ArtifactPutOptions,
+  ): ComposedStatement[] {
+    if (doc.kind !== "review") {
+      throw new Error(
+        `artifact-store: kind ${JSON.stringify(doc.kind)} is not persisted by the D1 store (only "review")`,
+      );
+    }
+    if (doc.schema !== REVIEW_SCHEMA) {
+      throw new Error(
+        `artifact-store: doc.schema must be ${JSON.stringify(REVIEW_SCHEMA)}, got ${JSON.stringify(doc.schema ?? null)}`,
+      );
+    }
+    const key = parseIdemKey(doc.key);
 
-      // Put gate (spec 产品要求 2 /纵深防御): the container already validated
-      // this envelope; re-validate BEFORE any row is written so M1 vocab or
-      // a malformed envelope fails loud with zero rows written.
-      const gate = validateMstarReviewV1(doc.payload);
-      if (!gate.ok) {
-        const detail = gate.violations.map((v) => `${v.code}: ${v.message}`).join("; ");
-        throw new Error(
-          `artifact-store: payload failed validateMstarReviewV1 (${detail}) — zero rows written`,
-        );
-      }
-      const payload = doc.payload as MstarReviewV1;
-      assertTargetAgrees(key, payload);
+    // Put gate (spec 产品要求 2 /纵深防御): the container already validated
+    // this envelope; re-validate BEFORE any row is written so M1 vocab or
+    // a malformed envelope fails loud with zero rows written.
+    const gate = validateMstarReviewV1(doc.payload);
+    if (!gate.ok) {
+      const detail = gate.violations.map((v) => `${v.code}: ${v.message}`).join("; ");
+      throw new Error(
+        `artifact-store: payload failed validateMstarReviewV1 (${detail}) — zero rows written`,
+      );
+    }
+    const payload = doc.payload as MstarReviewV1;
+    assertTargetAgrees(key, payload);
 
-      const reviewId = crypto.randomUUID();
-      // bot_id: the REQUIRED caller-supplied per-bot attribution
-      // (every new row is attributed; NULL survives only on
-      // legacy historical rows). The FK to review_bots(id) rejects an
-      // unknown appId loud. `target_id` is the tenant half of the same
-      // attribution: the read faces bind it, so a row without it is
-      // invisible to every workspace.
-      const appId = doc.appId;
-      // `target_id`: a plain value by default; an expression when the caller's
-      // attribution can only be resolved by the INSERT itself (the lifecycle
-      // apply's live installation binding). Its binds take the value's place in
-      // text order, so the rest of the bind list is unchanged.
-      const targetIdSql = options?.targetIdExpression?.sql ?? "?";
-      const targetIdBinds: readonly unknown[] =
-        options?.targetIdExpression === undefined ? [doc.targetId] : options.targetIdExpression.binds;
-      const reviewStmt = db
-        .prepare(
-          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id, target_id, model, provider, context_incomplete, duration_ms, round)
+    const reviewId = crypto.randomUUID();
+    // bot_id: the REQUIRED caller-supplied per-bot attribution
+    // (every new row is attributed; NULL survives only on
+    // legacy historical rows). The FK to review_bots(id) rejects an
+    // unknown appId loud. `target_id` is the tenant half of the same
+    // attribution: the read faces bind it, so a row without it is
+    // invisible to every workspace.
+    const appId = doc.appId;
+    // `target_id`: a plain value by default; an expression when the caller's
+    // attribution can only be resolved by the INSERT itself (the lifecycle
+    // apply's live installation binding). Its binds take the value's place in
+    // text order, so the rest of the bind list is unchanged.
+    const targetIdSql = options?.targetIdExpression?.sql ?? "?";
+    const targetIdBinds: readonly unknown[] =
+      options?.targetIdExpression === undefined ? [doc.targetId] : options.targetIdExpression.binds;
+    const reviewStmt: ComposedStatement = {
+      sql: `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id, target_id, model, provider, context_incomplete, duration_ms, round)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${targetIdSql}, ?, ?, ?, ?, ?)
            ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`,
-        )
-        .bind(
-          reviewId,
-          key.installation_id,
-          key.owner,
-          key.repo,
-          key.pr_number,
-          key.head_sha,
-          payload.verdict,
-          // `?? null`: the envelope's summary is optional, and D1 rejects
-          // `undefined` in a bind list — the whole review row would be lost.
-          payload.summary_md ?? null,
-          REVIEW_SKILL_VERSION,
-          // The validated envelope object itself — full JSON, losslessly
-          // restorable via get() (no 64KB truncation on this column).
-          JSON.stringify(payload),
-          appId,
-          ...targetIdBinds,
-          // Version records: the caller-supplied chain head
-          // selector / provider — `?? null` because D1 .bind() rejects
-          // undefined; omitted put-input fields persist NULL (byte-compat).
-          doc.model ?? null,
-          doc.provider ?? null,
-          // 1/0 (SQLite has no boolean): a capture-failed round is stored but
-          // is never an incremental base.
-          doc.contextIncomplete === true ? 1 : 0,
-          // The measured round wall clock; NULL for rows that never carried one.
-          doc.durationMs ?? null,
-          // The publication round, so the findings and reviews faces share one
-          // ordinal space; NULL on rows written before migration 0050.
-          doc.round ?? null,
-        );
-      // raw_output stays NULL on the v1 path: the envelope is authoritative
-      // (its 64KB truncation is not losslessly restorable).
+      binds: [
+        reviewId,
+        key.installation_id,
+        key.owner,
+        key.repo,
+        key.pr_number,
+        key.head_sha,
+        payload.verdict,
+        // `?? null`: the envelope's summary is optional, and D1 rejects
+        // `undefined` in a bind list — the whole review row would be lost.
+        payload.summary_md ?? null,
+        REVIEW_SKILL_VERSION,
+        // The validated envelope object itself — full JSON, losslessly
+        // restorable via get() (no 64KB truncation on this column).
+        JSON.stringify(payload),
+        appId,
+        ...targetIdBinds,
+        // Version records: the caller-supplied chain head
+        // selector / provider — `?? null` because D1 .bind() rejects
+        // undefined; omitted put-input fields persist NULL (byte-compat).
+        doc.model ?? null,
+        doc.provider ?? null,
+        // 1/0 (SQLite has no boolean): a capture-failed round is stored but
+        // is never an incremental base.
+        doc.contextIncomplete === true ? 1 : 0,
+        // The measured round wall clock; NULL for rows that never carried one.
+        doc.durationMs ?? null,
+        // The publication round, so the findings and reviews faces share one
+        // ordinal space; NULL on rows written before migration 0050.
+        doc.round ?? null,
+      ],
+    };
+    // raw_output stays NULL on the v1 path: the envelope is authoritative
+    // (its 64KB truncation is not losslessly restorable).
 
-      // Findings are guarded by WHERE EXISTS on the review id: on a UNIQUE
-      // no-op the review insert writes 0 rows, the new UUID does not exist,
-      // and each findings statement writes 0 rows — the batch succeeds and
-      // the idempotent put resolves below.
-      const findingStmts = payload.findings.map((finding) =>
-        db
-          .prepare(
-            `INSERT INTO findings (id, review_id, severity, category, file_path, line_start, line_end, title, body, fingerprint)
+    // Findings are guarded by WHERE EXISTS on the review id: on a UNIQUE
+    // no-op the review insert writes 0 rows, the new UUID does not exist,
+    // and each findings statement writes 0 rows — the batch succeeds and
+    // the idempotent put resolves below.
+    const findingStmts: ComposedStatement[] = payload.findings.map((finding) => ({
+      sql: `INSERT INTO findings (id, review_id, severity, category, file_path, line_start, line_end, title, body, fingerprint)
              SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM reviews WHERE id = ?)`,
-          )
-          .bind(
-            crypto.randomUUID(),
-            reviewId,
-            // THE vocab-switch mapping point (architect-locked): v1 rows
-            // carry the harness merge class in the legacy `severity` column.
-            finding.mergeClass,
-            // D1 .bind() rejects undefined; optional finding fields
-            // (envelope contract: category/location may be omitted) are
-            // coalesced to NULL.
-            finding.category ?? null,
-            finding.file_path ?? null,
-            finding.line_start ?? null,
-            finding.line_end ?? null,
-            finding.title,
-            finding.body,
-            // AL-21-1: the persist path is the single fingerprint
-            // write point — a non-blank, non-marker hint is returned verbatim
-            // by the pure function; a blank or [REDACTED]-marker hint falls
-            // back to the normalized FNV-1a fingerprint (W-1).
-            computeFindingFingerprint(finding),
-            reviewId,
-          ),
-      );
+      binds: [
+          crypto.randomUUID(),
+          reviewId,
+          // THE vocab-switch mapping point (architect-locked): v1 rows
+          // carry the harness merge class in the legacy `severity` column.
+          finding.mergeClass,
+          // D1 .bind() rejects undefined; optional finding fields
+          // (envelope contract: category/location may be omitted) are
+          // coalesced to NULL.
+          finding.category ?? null,
+          finding.file_path ?? null,
+          finding.line_start ?? null,
+          finding.line_end ?? null,
+          finding.title,
+          finding.body,
+          // AL-21-1: the persist path is the single fingerprint
+          // write point — a non-blank, non-marker hint is returned verbatim
+          // by the pure function; a blank or [REDACTED]-marker hint falls
+          // back to the normalized FNV-1a fingerprint (W-1).
+          computeFindingFingerprint(finding),
+          reviewId,
+      ],
+    }));
 
-      const results = await db.batch([reviewStmt, ...findingStmts]);
+    return [reviewStmt, ...findingStmts];
+  }
+
+  return {
+    async put(doc: ReviewArtifactDoc, options?: ArtifactPutOptions): Promise<void> {
+      const statements = composeStatements(doc, options);
+      const results = await db.batch(
+        statements.map((statement) => db.prepare(statement.sql).bind(...statement.binds)),
+      );
 
       if (results[0]!.meta.changes === 0) {
         // UNIQUE conflict — another consumer already stored this sha.
@@ -399,6 +425,10 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
         // overwritten (module-header deviation from FsStore semantics).
         return;
       }
+    },
+
+    statementsFor(doc: ReviewArtifactDoc, options?: ArtifactPutOptions): ComposedStatement[] {
+      return composeStatements(doc, options);
     },
 
     async get<T = unknown>(ref: ArtifactRef): Promise<T | undefined> {

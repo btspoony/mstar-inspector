@@ -513,13 +513,15 @@ export async function findPublicationJournal(
 }
 
 /**
- * Proof-gated idempotent apply — the frozen §7.7 step 9 local sequence:
- * (1) the existing atomic `store.put` for the review artifact (idempotent
- * UNIQUE no-op — a replay after store.put but before the lifecycle apply
- * does not duplicate findings; skipped entirely when the review row already
- * exists), then (2) the lifecycle writes in batches of at most 25 row
- * transitions (§7.11.1), whose FINAL statement marks the publication applied
- * under the lease. Degraded proof creates no
+ * Proof-gated idempotent apply — the frozen §7.7 step 9 local sequence,
+ * composed into ONE transaction: (1) the review artifact's statements — the
+ * review INSERT and one INSERT per public finding, composed by
+ * `createArtifactStore().statementsFor()` and skipped entirely when the
+ * review row already exists (idempotent UNIQUE no-op) — followed by (2) the
+ * lifecycle writes in batches of at most 25 row transitions (§7.11.1), whose
+ * FINAL statement marks the publication applied under the lease. The review
+ * row and its findings therefore commit or roll back together, and both
+ * resolve the same live binding inside the batch. Degraded proof creates no
  * normal review/lifecycle rows — it only marks applied. Rows absent from
  * `seen` are never deleted and never rewritten: `review_findings.target_id`
  * and `reviews.target_id` are set when the row is FIRST recorded and are not
@@ -582,14 +584,16 @@ export async function applyPublishedLifecycle(
     return false;
   }
 
-  // Step 1 — the existing atomic store.put (review kind only), a separate
-  // idempotent step, never described as part of the lifecycle batch. Its
+  // Step 1 — the review artifact, COMPOSED rather than put. Its review row and
+  // public findings go into the SAME batch as step 2's lifecycle rows, so the
+  // review row and its findings commit or roll back together: a failed batch
+  // can never leave a committed review behind for a retry to re-attribute.
   // `reviews.target_id` is the same live binding the findings insert resolves
-  // (the artifact target is the unbound hint), so one apply cannot file a
-  // review under one tenant and its findings under another.
+  // (the artifact's target is only the unbound hint), and it is resolved by
+  // the batch itself, so one transaction resolves the binding once.
   // §7.11.1: skipped entirely when the review row already exists — the
   // UNIQUE(installation_id, owner, repo, pr_number, head_sha) row IS the
-  // review, so the put would be a pure no-op batch.
+  // review, so the composed INSERT would be a pure no-op.
   const stored = await db
     .prepare(
       `SELECT 1 AS present FROM reviews
@@ -597,22 +601,18 @@ export async function applyPublishedLifecycle(
     )
     .bind(payload.scope.installationId, payload.scope.owner, payload.scope.repo, payload.scope.prNumber, payload.headSha)
     .first<{ present: number }>();
-  if (stored === null) {
-    const store = createArtifactStore(db);
-    // The review row is a NEW record, so its tenant is resolved by the same
-    // in-batch binding the findings insert uses: the payload's target is only
-    // the unbound hint. Otherwise one apply could file a review under one
-    // tenant and its findings under another.
-    await store.put(
-      { ...payload.artifact, round: payload.round },
-      {
-        targetIdExpression: {
-          sql: `COALESCE(${LIVE_BINDING_TARGET_SQL}, ?)`,
-          binds: [payload.scope.appId, payload.scope.installationId, payload.artifact.targetId],
-        },
-      },
-    );
-  }
+  const artifactStatements =
+    stored === null
+      ? createArtifactStore(db).statementsFor(
+          { ...payload.artifact, round: payload.round },
+          {
+            targetIdExpression: {
+              sql: `COALESCE(${LIVE_BINDING_TARGET_SQL}, ?)`,
+              binds: [payload.scope.appId, payload.scope.installationId, payload.artifact.targetId],
+            },
+          },
+        )
+      : [];
 
   // Step 2 — the lifecycle writes in db.batches of at most
   // LIFECYCLE_APPLY_BATCH_STATEMENTS statements each (§7.11.1: "Local apply
@@ -624,18 +624,16 @@ export async function applyPublishedLifecycle(
   // FINAL batch, under the lease. Small payloads (the common case) still
   // run as ONE batch. The guard above narrowed `payload.lifecycle` to
   // non-null; it is passed explicitly so the helper's signature carries that
-  // invariant. Attribution: the live binding wins and is resolved INSIDE the
-  // batch (a scalar subquery in each statement); the artifact's own `targetId`
-  // is only the hint a new row falls back to when nothing is bound.
-  const statements = lifecycleApplyBatch(
-    db,
-    row,
-    payload,
-    payload.lifecycle,
-    payload.artifact.targetId,
-    nowMs,
-    lease,
-  );
+  // invariant. Attribution: the live binding is resolved INSIDE the batch by
+  // every INSERTING statement (a scalar subquery in this review row's INSERT
+  // and in the findings insert); the artifact's own `targetId` is only the
+  // hint a new row falls back to when nothing is bound.
+  const statements = [
+    // The review row goes FIRST: the lifecycle rows may reference it (the
+    // public findings guard on its id), and both halves are one transaction.
+    ...artifactStatements.map((statement) => db.prepare(statement.sql).bind(...statement.binds)),
+    ...lifecycleApplyBatch(db, row, payload, payload.lifecycle, payload.artifact.targetId, nowMs, lease),
+  ];
   const results: D1BatchResult[] = [];
   for (let start = 0; start < statements.length; start += LIFECYCLE_APPLY_BATCH_STATEMENTS) {
     // Per-chunk fence (§7.11.1): the apply may span a real time window, and
@@ -729,10 +727,9 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  *      that currently holds this fingerprint's `(bot, installation)` (read
  *      in-batch, so a concurrent unbind/claim cannot be frozen into an
  *      applied state), falling back to the payload's `artifact.targetId` as a
- *      hint when nothing is bound. The review row this apply inserts
- *      (`store.put`, before the batch) carries the same expression, so one
- *      apply never files a review under one tenant and its findings under
- *      another. No statement rewrites `target_id` on an existing row: a rebind
+ *      hint when nothing is bound. The review row this apply inserts is
+ *      composed into the same batch with the same expression, so one apply
+ *      never files a review under one tenant and its findings under another. No statement rewrites `target_id` on an existing row: a rebind
  *      moves FUTURE publications, never history — each target's ledger is the
  *      record of what that target reviewed.
  *   1. Seen upserts — new rows insert open at the current time; existing rows
