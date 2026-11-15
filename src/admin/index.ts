@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
 import { listBotScopes, setBotScope } from "../dashboard/apps-store";
+import { createInstallClaimsStore } from "../dashboard/install-claims-store";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
 import {
   CHECK_TERMINALIZE_MAX,
@@ -493,6 +494,34 @@ async function assignBotScope(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Clear one target's installation binding (the repair path). A wrong bind is a
+ * state change no workspace member can undo — the claim that made it is
+ * consumed, and the bind batch refuses every later installation while a
+ * binding exists — so the operator gets the one write that makes the target
+ * claimable again. `account_login` is cleared with the id because it was
+ * copied from that installation; a surviving login would describe a binding
+ * that no longer exists.
+ *
+ * Idempotent by design: a target that holds no binding answers 200 with
+ * `unbound: false`, so a retried repair converges instead of reporting an
+ * error. An unknown or soft-deleted target is `404 target not found`.
+ */
+async function unbindTargetBinding(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const targetId = c.req.param("targetId");
+  if (!targetId) return c.notFound();
+  const outcome = await createInstallClaimsStore(db).unbindTarget({
+    targetId,
+    now: new Date().toISOString(),
+  });
+  if (outcome.outcome === "target_not_found") return c.json({ error: "target not found" }, 404);
+  return c.json({ targetId, unbound: outcome.outcome === "unbound" });
+}
+
+/**
  * Every live bot with its scope (contract § 8.3), name-ordered. A console read
  * is unaudited: on this surface audit rows attach to writes.
  */
@@ -765,6 +794,7 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "patch", path: "/api/workspaces/:id/slug", handler: setSlug },
   { method: "patch", path: "/api/official-workspace", handler: assignOfficialWorkspace },
   { method: "patch", path: "/api/bots/:botId/scope", handler: assignBotScope },
+  { method: "post", path: "/api/targets/:targetId/unbind", handler: unbindTargetBinding },
   { method: "get", path: "/api/bots", handler: readBots },
   { method: "get", path: "/api/support-grants", handler: readSupportGrants },
   { method: "post", path: "/api/support-grants", handler: createGrant },

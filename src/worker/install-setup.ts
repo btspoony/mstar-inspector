@@ -120,9 +120,13 @@ function noLiveClaimPage(c: SetupContext): Response {
 }
 
 /**
- * N claims: every one gets its own form, and nothing is written. The page
- * lists the target, its workspace and when the claim was made, so the user can
- * tell the attempts apart.
+ * One or more live claims: every one gets its own form, and NOTHING is
+ * written. This page is the whole reason the callback is safe — GitHub appends
+ * an `installation_id` to a URL the browser reaches by a top-level GET, so the
+ * installation id is caller-supplied and unverified; the user has to see it and
+ * submit the form before anything binds. The installation id is shown for that
+ * reason, and each claim is listed with its target, workspace and claimed
+ * instant so the attempts are distinguishable.
  */
 function confirmPage(c: SetupContext, installationId: number, claims: InstallClaim[]): Response {
   const forms = claims
@@ -138,12 +142,17 @@ function confirmPage(c: SetupContext, installationId: number, claims: InstallCla
       </li>`,
     )
     .join("");
+  const choice =
+    claims.length === 1
+      ? "Confirm that this installation reviews the target below."
+      : "Your account holds more than one live claim. Choose the target this installation reviews.";
   return htmlPage(
     c,
     200,
     "confirm_required",
     `<h1>confirm_required</h1>
-     <p>Your account holds more than one live claim. Choose the target this installation reviews.</p>
+     <p>Installation <code>${installationId}</code> is asking to bind.</p>
+     <p>${choice}</p>
      <ul>${forms}</ul>`,
   );
 }
@@ -156,12 +165,6 @@ function boundPage(c: SetupContext, installationId: number, targetId: string): R
     `<h1>bound</h1>
      <p>Installation <code>${installationId}</code> now reviews target <code>${escapeHtml(targetId)}</code>.</p>`,
   );
-}
-
-/** One bind outcome → its answer; the 200 case is the `bound` page. */
-function bindResponse(c: SetupContext, outcome: InstallBindOutcome, installationId: number): Response {
-  if (outcome.outcome !== "bound") return refusalResponse(c, outcome);
-  return boundPage(c, installationId, outcome.targetId);
 }
 
 /**
@@ -182,7 +185,14 @@ function postRefusalResponse(
 /**
  * `GET /bot/setup?installation_id=<n>&setup_action=install|update`.
  * Validation order is frozen: malformed id, then the action, then the secret,
- * then the session. Binds only in the one-claim case.
+ * then the session.
+ *
+ * A `GET` NEVER binds. It is reached by a top-level browser navigation (and by
+ * prefetch or a mailed link), and `installation_id` is caller-supplied and
+ * unverified — nothing here can prove the installation belongs to the claim's
+ * bot. Binding is a state change, so it needs the user's explicit `POST`; this
+ * handler only renders the installation summary and one confirming form per
+ * live claim, and writes nothing at all.
  */
 export async function handleSetupGet(c: SetupContext): Promise<Response> {
   const installationId = parseInstallationId(c.req.query("installation_id"));
@@ -193,26 +203,19 @@ export async function handleSetupGet(c: SetupContext): Promise<Response> {
   const identity = await setupIdentity(c);
   if (!identity.ok) return identity.response;
 
-  const store = createInstallClaimsStore(identity.db);
   const now = new Date().toISOString();
-  const claims = await store.listLiveClaims(identity.userId, now);
+  const claims = await createInstallClaimsStore(identity.db).listLiveClaims(identity.userId, now);
   if (claims.length === 0) return noLiveClaimPage(c);
-  if (claims.length > 1) return confirmPage(c, installationId, claims);
-
-  const outcome = await store.consumeAndBind({
-    claimId: claims[0]!.id,
-    userId: identity.userId,
-    installationId,
-    now,
-  });
-  return bindResponse(c, outcome, installationId);
+  return confirmPage(c, installationId, claims);
 }
 
 /**
- * `POST /bot/setup` — the confirming action. Same validation and identity as
- * the GET; `setup_action` is not required here because the form does not carry
- * it. A cross-user or non-live claim is `404 claim not found`: another
- * session's claim is indistinguishable from a missing one.
+ * `POST /bot/setup` — the ONLY binder. Same validation and identity as the
+ * GET; `setup_action` is not required here because the form does not carry it.
+ * A cross-user or non-live claim is `404 claim not found`: another session's
+ * claim is indistinguishable from a missing one. A cross-site POST cannot
+ * reach this handler (the session cookie is `SameSite=Lax`), so the explicit
+ * confirm the GET page collects is also the CSRF boundary for the bind.
  */
 export async function handleSetupPost(c: SetupContext): Promise<Response> {
   const form = await c.req.parseBody();

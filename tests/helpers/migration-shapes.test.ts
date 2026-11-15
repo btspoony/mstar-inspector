@@ -142,8 +142,7 @@ describe("fixture migrations (fail-fast)", () => {
   });
 
   test("applyMigrations hands each statement over on its own — fail-fast", () => {
-    // A bare connection: the test is about what `applyMigrations` hands over,
-    // and 0001 is one of the two files `createTestD1` has already applied.
+    // A bare connection: the test is about what `applyMigrations` hands over.
     const db = new Database(":memory:");
     const handed: string[] = [];
     // `applyMigrations` touches nothing but the connection's `exec`, so
@@ -157,8 +156,45 @@ describe("fixture migrations (fail-fast)", () => {
       },
     } as unknown as TestD1;
     try {
-      applyMigrations(recording, ["0001_reviews.sql"]);
-      expect(handed).toEqual(splitSqlStatements(migrationSql("0001_reviews.sql")));
+      applyMigrations(recording, ["0059_install_claims.sql"]);
+      // The expectation is HAND-WRITTEN. Deriving it from `splitSqlStatements`
+      // would be satisfied by any splitter output, including a splitter that
+      // stopped splitting (one handed-over blob) or split inside a literal.
+      expect(handed).toHaveLength(3);
+      // The statement's head, with the leading `--` comment lines the splitter
+      // keeps attached skipped: three words identify each statement.
+      expect(
+        handed.map((statement) =>
+          (statement
+            .split("\n")
+            .map((line) => line.trim())
+            .find((line) => line !== "" && !line.startsWith("--")) ?? ""
+          )
+            .split(/\s+/)
+            .slice(0, 3)
+            .join(" "),
+        ),
+      ).toEqual([
+        "CREATE TABLE install_claims",
+        "CREATE INDEX install_claims_user_open",
+        "CREATE UNIQUE INDEX",
+      ]);
+      // ...and each one reached the connection whole: the schema is what the
+      // three statements describe, nothing more and nothing less.
+      expect(
+        db
+          .query(
+            `SELECT name FROM sqlite_master
+              WHERE tbl_name = 'install_claims' AND type IN ('table','index')
+                AND name NOT LIKE 'sqlite_%'
+              ORDER BY name`,
+          )
+          .all(),
+      ).toEqual([
+        { name: "install_claims" },
+        { name: "install_claims_live_target" },
+        { name: "install_claims_user_open" },
+      ]);
     } finally {
       db.close();
     }

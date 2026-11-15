@@ -361,10 +361,12 @@ test("listLiveClaims returns exactly the live-claim columns", async () => {
 });
 
 /**
- * The test double brackets a batch's transaction by hand (`BEGIN` … `COMMIT`
- * around awaited statements), so two batches in flight cannot nest. D1
- * serializes batches per database; this wrapper queues them, which is what lets
- * the concurrent calls below model two requests instead of a harness artifact.
+ * Two batches in flight cannot share one connection here: the double brackets
+ * each batch's transaction by hand, and nested `BEGIN`s are an error. This
+ * wrapper queues them FIFO — one connection, one batch at a time — which is how
+ * D1 serializes batches per database, so the concurrent calls below model two
+ * requests instead of a harness artifact. Rollback stays the underlying
+ * `db.batch` semantics; the wrapper adds no transaction control of its own.
  */
 function serializedBatches(db: TestD1): TestD1 {
   let tail: Promise<unknown> = Promise.resolve();

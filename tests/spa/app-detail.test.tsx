@@ -1132,6 +1132,9 @@ describe("install claim entry (static SSR)", () => {
     );
     expect(bound).toContain(t("en", "settings.installBoundAccount", { account: "acme" }));
     expect(bound).not.toContain(t("en", "settings.installRemoved"));
+    // A bound target cannot start a claim (the route answers 409), so the
+    // action is not rendered: the operator's unbind is the way to re-bind.
+    expect(bound).not.toContain(t("en", "settings.installClaim"));
   });
 
   test("the claim block separates an unknown account from a removed installation", () => {

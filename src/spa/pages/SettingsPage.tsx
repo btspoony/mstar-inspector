@@ -919,7 +919,7 @@ export function AppInstallSection({
           <p className="font-semibold">{name}</p>
           {href === null ? (
             <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
-          ) : app.scope === "shared" ? (
+          ) : app.scope === "shared" && installation === null ? (
             <>
               <p className="text-sm text-muted-foreground">{t(locale, "settings.installClaimCopy")}</p>
               <Button

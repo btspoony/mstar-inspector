@@ -17,8 +17,10 @@
  *     therefore always means N different targets.
  *   - `consumeAndBind` is ONE batch: consume, upsert the installation, bind the
  *     target. A bind that cannot complete rolls back, so a refusal never burns
- *     the claim. It is the only production writer of
- *     `review_targets.installation_id`; no webhook writes a binding.
+ *     the claim. It is the only writer that SETS
+ *     `review_targets.installation_id`, and no webhook writes a binding;
+ *     `unbindTarget` is the one writer that CLEARS it, for the operator's
+ *     repair path (a binding is otherwise unrepairable from the workspace).
  *
  * Expiry is a text comparison on ISO instants and there is no sweeper: the live
  * predicate (`consumed_at IS NULL AND expires_at > :now`) makes a lapsed row
@@ -59,6 +61,15 @@ export type InstallBindOutcome =
   | { outcome: "bot_not_shared" }
   | { outcome: "installation_already_bound" };
 
+/**
+ * The repair path's outcome. "not_bound" is idempotent success: clearing a
+ * target nobody bound is a no-op, not an error, so a retried repair converges.
+ */
+export type UnbindOutcome =
+  | { outcome: "unbound" }
+  | { outcome: "not_bound" }
+  | { outcome: "target_not_found" };
+
 export type InstallClaimsStore = {
   createOrRefreshClaim(input: {
     userId: string;
@@ -73,6 +84,7 @@ export type InstallClaimsStore = {
     installationId: number;
     now: string;
   }): Promise<InstallBindOutcome>;
+  unbindTarget(input: { targetId: string; now: string }): Promise<UnbindOutcome>;
 };
 
 /** Insert, or refresh the live row the partial unique index already holds. */
@@ -150,6 +162,21 @@ const BIND_TARGET_SQL = `
      AND (installation_id IS NULL OR installation_id = ?)
      AND EXISTS (SELECT 1 FROM install_claims
                   WHERE id = ? AND consumed_token = ? AND user_id = ?)`;
+
+/**
+ * The repair path: clear the binding and the login it copied. Guarded on the
+ * target still being live, and on there being something to clear, so a second
+ * repair reports `not_bound` instead of bumping `updated_at` again. The
+ * installation row itself is untouched — the bot still has that installation;
+ * it is only no target's binding.
+ */
+const UNBIND_TARGET_SQL = `
+  UPDATE review_targets SET installation_id = NULL, account_login = NULL, updated_at = ?
+   WHERE id = ? AND deleted_at IS NULL AND installation_id IS NOT NULL`;
+
+/** The target's liveness, for naming why an unbind changed nothing. */
+const TARGET_LIVE_SQL = `
+  SELECT id FROM review_targets WHERE id = ? AND deleted_at IS NULL`;
 
 type ClaimState = {
   user_id: string;
@@ -255,6 +282,15 @@ export function createInstallClaimsStore(db: DashboardD1): InstallClaimsStore {
         return { outcome: "target_not_bindable" };
       }
       return { outcome: "bound", targetId };
+    },
+
+    async unbindTarget({ targetId, now }) {
+      const res = await db.prepare(UNBIND_TARGET_SQL).bind(now, targetId).run();
+      if (res.meta.changes > 0) return { outcome: "unbound" };
+      // Nothing changed: say whether the target exists at all, so the operator
+      // can tell a retry from a typo.
+      const live = await db.prepare(TARGET_LIVE_SQL).bind(targetId).first<{ id: string }>();
+      return live === null ? { outcome: "target_not_found" } : { outcome: "not_bound" };
     },
   };
 }

@@ -31,7 +31,7 @@ const WS = "default";
 function seedApp(
   db: TestD1,
   id: string,
-  options: { githubAppId: number; deleted?: boolean },
+  options: { githubAppId: number; deleted?: boolean; name?: string },
 ): void {
   db.raw
     .prepare(
@@ -41,7 +41,7 @@ function seedApp(
        VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active',
                ${options.deleted ? "datetime('now')" : "NULL"}, datetime('now'), datetime('now'))`,
     )
-    .run(id, options.githubAppId, id);
+    .run(id, options.githubAppId, options.name ?? id);
 }
 
 describe("review target pivot (create)", () => {
@@ -185,10 +185,17 @@ let nextGithubAppId = 6100;
 function seedScopedBot(
   db: TestD1,
   id: string,
-  options: { workspaceId?: string; deleted?: boolean; scope?: string; sharedAt?: string | null } = {},
+  options: {
+    workspaceId?: string;
+    deleted?: boolean;
+    scope?: string;
+    sharedAt?: string | null;
+    /** Display name; defaults to the id. An ordering test must vary it. */
+    name?: string;
+  } = {},
 ): void {
   nextGithubAppId += 1;
-  seedApp(db, id, { githubAppId: nextGithubAppId, deleted: options.deleted });
+  seedApp(db, id, { githubAppId: nextGithubAppId, deleted: options.deleted, name: options.name });
   if (options.workspaceId !== undefined) {
     db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(id, options.workspaceId);
   }
@@ -581,18 +588,23 @@ describe("bot scope transitions (contract § 7.1)", () => {
 
   test("the console list carries every live bot with its scope, ordered by name then id", async () => {
     const db = createMigratedTestD1();
-    seedScopedBot(db, "bot-b", { workspaceId: WS, scope: "shared", sharedAt: NOW });
-    seedScopedBot(db, "bot-a", { workspaceId: WS });
-    seedScopedBot(db, "bot-dead", { workspaceId: WS, deleted: true });
+    // The names order OPPOSITE to the ids: an implementation that drops the
+    // `name` sort key (or sorts by id alone) answers ["bot-a", "bot-b"] and
+    // fails here. With `name === id` the two orders were indistinguishable.
+    seedScopedBot(db, "bot-b", { workspaceId: WS, scope: "shared", sharedAt: NOW, name: "Alpha" });
+    seedScopedBot(db, "bot-a", { workspaceId: WS, name: "Zulu" });
+    seedScopedBot(db, "bot-dead", { workspaceId: WS, deleted: true, name: "Alpha" });
 
     const rows = await listBotScopes(db);
-    expect(rows.map((row) => row.id)).toEqual(["bot-a", "bot-b"]);
-    expect(rows[1]).toMatchObject({
+    expect(rows.map((row) => row.id)).toEqual(["bot-b", "bot-a"]);
+    expect(rows[0]).toMatchObject({
       id: "bot-b",
+      name: "Alpha",
       workspace_id: WS,
       scope: "shared",
       shared_at: NOW,
       deleted_at: null,
     });
+    expect(rows[1]).toMatchObject({ id: "bot-a", name: "Zulu" });
   });
 });

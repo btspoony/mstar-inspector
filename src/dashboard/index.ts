@@ -5200,7 +5200,11 @@ async function requireAppManagerJson(
  * manage it is `403 forbidden`; no single live target is `404 no target`; a bot
  * that is not `shared` advertises nothing, so `404 bot is not shared` rather
  * than "forbidden"; a never-synced slug is `409 bot has no installation url`
- * because there is no page to send the user to.
+ * because there is no page to send the user to; a target that already holds a
+ * binding is `409 target already bound` — the bind batch refuses a different
+ * installation and a same-installation claim has nothing left to do, so the
+ * claim would only send the user to GitHub to fail. The operator's unbind is
+ * the repair path, and it is what makes this action available again.
  */
 const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
@@ -5216,6 +5220,7 @@ const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
   if (!target) return c.json({ error: "no target" }, 404);
   if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
   if (app.github_slug === null) return c.json({ error: "bot has no installation url" }, 409);
+  if (target.installation_id !== null) return c.json({ error: "target already bound" }, 409);
 
   const claim = await createInstallClaimsStore(member.db).createOrRefreshClaim({
     userId: member.user.id,

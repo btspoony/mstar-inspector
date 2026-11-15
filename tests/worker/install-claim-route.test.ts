@@ -149,6 +149,22 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/claim", () => {
     expect(claimCount(db)).toBe(0);
   });
 
+  test("a target that already holds a binding answers 409 target already bound and mints no claim", async () => {
+    const { db, targetId } = await seededWorld({});
+    db.raw
+      .prepare("UPDATE review_targets SET installation_id = 4242, account_login = 'acme' WHERE id = ?")
+      .run(targetId);
+
+    const res = await postClaim(db, "mallory");
+
+    // The bind batch refuses a different installation, so a claim here would
+    // only send the user to GitHub to fail. The operator's unbind is the
+    // repair path that makes this action available again.
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "target already bound" });
+    expect(claimCount(db)).toBe(0);
+  });
+
   test("an unknown or non-numeric App id is the same 404 as an unknown bot", async () => {
     const { db } = await seededWorld({});
     for (const appId of ["999999", "not-a-number"]) {

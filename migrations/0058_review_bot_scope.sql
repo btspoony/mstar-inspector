@@ -15,7 +15,10 @@
 -- which SQLite drops with the column.
 --
 -- Only a platform operator writes `scope`; no workspace route, API key or
--- dashboard path does. No review path reads it in this deploy.
+-- dashboard path does. Exactly one review path reads it:
+-- `createTargetsStore().resolve` excludes `scope = 'shared'` bots from the
+-- single-target fallback, so a shared installation reviews nothing until a
+-- claim binds it. A share therefore changes delivery routing today.
 --
 -- Forward-only.
 

@@ -234,7 +234,7 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
     expect(installationCount(db)).toBe(0);
   });
 
-  test("one live claim binds exactly that target and consumes it", async () => {
+  test("one live claim renders the confirm page and binds nothing", async () => {
     const { db, targetId, store, userId } = await seededWorld();
     const claim = await store.createOrRefreshClaim({
       userId,
@@ -246,11 +246,38 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
 
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain("bound");
+    // The GET never binds: it shows the installation it was told about, the
+    // target the claim names, and one form the user has to submit.
+    expect(body).toContain("confirm_required");
+    expect(body).toContain(String(INSTALLATION));
     expect(body).toContain(targetId);
-    expect(claimRow(db, claim.id)?.consumed_at).not.toBeNull();
-    expect(targetBinding(db, targetId).installation_id).toBe(INSTALLATION);
-    expect(installationCount(db)).toBe(1);
+    expect(body).toContain(`value="${claim.id}"`);
+    expect(claimRow(db, claim.id)?.consumed_at).toBeNull();
+    expect(targetBinding(db, targetId).installation_id).toBeNull();
+    expect(installationCount(db)).toBe(0);
+  });
+
+  test("a mailed GET naming another installation binds nothing", async () => {
+    // The reviewer's scenario: a signed-in manager holding ONE live claim opens
+    // a crafted link. The installation id is caller-supplied and unverified, so
+    // the page must not act on it — it only shows it back.
+    const { db, targetId, store, userId } = await seededWorld();
+    const claim = await store.createOrRefreshClaim({
+      userId,
+      workspaceId: WS,
+      targetId,
+      now: new Date().toISOString(),
+    });
+    const res = await setupGet(makeEnv(db), "installation_id=666&setup_action=install");
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("confirm_required");
+    expect(body).toContain("<code>666</code>");
+    // Nothing was consumed, recorded or bound.
+    expect(claimRow(db, claim.id)?.consumed_at).toBeNull();
+    expect(installationCount(db)).toBe(0);
+    expect(targetBinding(db, targetId).installation_id).toBeNull();
   });
 
   test("two live claims bind nothing and list both for confirmation", async () => {
@@ -263,6 +290,9 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("confirm_required");
+    // The installation the callback was told about rides the page, so the user
+    // can check it before anything binds.
+    expect(body).toContain(String(INSTALLATION));
     // Both claims are on the page, each with its own confirming form.
     expect(body).toContain(firstClaim.id);
     expect(body).toContain(secondClaim.id);
@@ -276,6 +306,29 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
 });
 
 describe("POST /bot/setup — the confirming action", () => {
+  test("confirming the single claim binds exactly that target and consumes it", async () => {
+    const { db, targetId, store, userId } = await seededWorld();
+    const claim = await store.createOrRefreshClaim({
+      userId,
+      workspaceId: WS,
+      targetId,
+      now: new Date().toISOString(),
+    });
+
+    const res = await setupPost(makeEnv(db), {
+      installation_id: String(INSTALLATION),
+      claim_id: claim.id,
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("bound");
+    expect(body).toContain(targetId);
+    expect(claimRow(db, claim.id)?.consumed_at).not.toBeNull();
+    expect(targetBinding(db, targetId).installation_id).toBe(INSTALLATION);
+    expect(installationCount(db)).toBe(1);
+  });
+
   test("naming one of two claims binds it and leaves the other live", async () => {
     const world = await seededWorld();
     const second = addTarget(world.db, world.botId);
@@ -329,7 +382,10 @@ describe("POST /bot/setup — the confirming action", () => {
     const second = addTarget(world.db, world.botId);
     const claim = await claimFor(world, second);
 
-    const res = await setupGet(makeEnv(world.db), `installation_id=${INSTALLATION}&setup_action=install`);
+    const res = await setupPost(makeEnv(world.db), {
+      installation_id: String(INSTALLATION),
+      claim_id: claim.id,
+    });
 
     expect(res.status).toBe(409);
     expect(await res.text()).toBe("installation already bound");
@@ -343,7 +399,10 @@ describe("POST /bot/setup — the confirming action", () => {
     const claim = await claimFor(world, world.targetId);
     world.db.raw.prepare("UPDATE review_bots SET scope = 'owned' WHERE id = ?").run(world.botId);
 
-    const res = await setupGet(makeEnv(world.db), `installation_id=${INSTALLATION}&setup_action=install`);
+    const res = await setupPost(makeEnv(world.db), {
+      installation_id: String(INSTALLATION),
+      claim_id: claim.id,
+    });
 
     expect(res.status).toBe(409);
     expect(await res.text()).toBe("bot is not shared");

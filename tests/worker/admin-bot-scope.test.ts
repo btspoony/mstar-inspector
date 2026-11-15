@@ -60,7 +60,7 @@ function seedWorkspace(db: TestD1, id: string, deleted = false): void {
 function seedBot(
   db: TestD1,
   id: string,
-  options: { githubAppId: number; workspaceId?: string; deleted?: boolean },
+  options: { githubAppId: number; workspaceId?: string; deleted?: boolean; name?: string },
 ): void {
   db.raw
     .prepare(
@@ -71,7 +71,7 @@ function seedBot(
                ${options.deleted ? "'2026-01-02T00:00:00.000Z'" : "NULL"},
                '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
     )
-    .run(id, options.githubAppId, id);
+    .run(id, options.githubAppId, options.name ?? id);
   if (options.workspaceId !== undefined) {
     db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(id, options.workspaceId);
   }
@@ -438,9 +438,11 @@ describe("GET /_internal_admin/api/bots", () => {
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);
     seedWorkspace(db, "other");
-    seedBot(db, "bot-b", { githubAppId: 7101, workspaceId: "other" });
-    seedBot(db, "bot-a", { githubAppId: 7102, workspaceId: "default" });
-    seedBot(db, "bot-dead", { githubAppId: 7103, workspaceId: "default", deleted: true });
+    // The names order OPPOSITE to the ids, so dropping the `name` sort key
+    // answers ["bot-a", "bot-b"] and fails the assertion below.
+    seedBot(db, "bot-b", { githubAppId: 7101, workspaceId: "other", name: "Alpha" });
+    seedBot(db, "bot-a", { githubAppId: 7102, workspaceId: "default", name: "Zulu" });
+    seedBot(db, "bot-dead", { githubAppId: 7103, workspaceId: "default", deleted: true, name: "Alpha" });
     db.raw
       .prepare("UPDATE review_bots SET scope = 'shared', shared_at = '2026-01-05T00:00:00.000Z' WHERE id = 'bot-b'")
       .run();
@@ -450,21 +452,21 @@ describe("GET /_internal_admin/api/bots", () => {
     expect(await res.json()).toEqual({
       bots: [
         {
-          botId: "bot-a",
-          name: "bot-a",
-          githubAppId: 7102,
-          workspaceId: "default",
-          scope: "owned",
-          sharedAt: null,
-          deletedAt: null,
-        },
-        {
           botId: "bot-b",
-          name: "bot-b",
+          name: "Alpha",
           githubAppId: 7101,
           workspaceId: "other",
           scope: "shared",
           sharedAt: "2026-01-05T00:00:00.000Z",
+          deletedAt: null,
+        },
+        {
+          botId: "bot-a",
+          name: "Zulu",
+          githubAppId: 7102,
+          workspaceId: "default",
+          scope: "owned",
+          sharedAt: null,
           deletedAt: null,
         },
       ],
