@@ -186,7 +186,7 @@ describe("the release version lives on the console only", () => {
     can_manage: false as const,
     workspace_id: "ws_0123456789abcdefghijkl",
     target_id: "rt-501",
-    blocked: false,
+    blocked: false as const,
     blocked_reason: null,
     app: {
       github_app_id: 1,

@@ -15,6 +15,8 @@ A review bot's visibility (`owned` / `shared`), the platform's official workspac
 | Authority | Platform operator only, through `/_internal_admin`. A workspace owner cannot mark its own bot shared. |
 | Constraint | `shared` is only accepted for a bot whose workspace is the **official workspace** at write time. The check runs inside the same batch as the write, so a designation changed concurrently cannot authorize a stale share. |
 
+A retained target grants its workspace no bot-scope write; the bot's lifecycle, configuration, keys, metadata, installations and deliveries belong to its owning workspace, and a Blocked target's payload carries only target-owned configuration.
+
 ### Official workspace
 
 `review_runtime_settings["platform.official_workspace_id"]` — the platform parameter store's second key domain. Absent row means "no official workspace": no new share is possible, existing shares stay and remain revocable.

@@ -526,6 +526,7 @@ export const zhCN: Dictionary = {
     /** App 详情页指标带中 provider 密钥数的标签。 */
     metricKeys: "密钥",
     noInstallations: "还没有安装。",
+    installationsNotVisible: "该机器人的安装属于其所属工作区，因此不在此处列出。",
     recentDeliveries: "最近投递",
     recentDeliveriesCopy: "最多 10 次 webhook 投递 — 带结论的（正常 / 已暂停 / 已拒绝）排在前，其余按时间从新到旧。",
     noDeliveries: "还没有投递。",

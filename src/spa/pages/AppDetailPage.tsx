@@ -344,8 +344,10 @@ export function AppDetailView({
   // provider keys, model chains, and refused webhooks in the last 24h. The
   // refusal count is the one figure here that reports a failure, so it — and
   // only it — wears the alert face, and only when non-zero, exactly as the
-  // Apps list face (`AppsPage`) already rules it.
-  const metrics: Metric[] = payload.can_manage
+  // Apps list face (`AppsPage`) already rules it. A Blocked face carries none
+  // of the four (they are the bot's), so the band renders nothing rather than
+  // four fabricated zeros.
+  const metrics: Metric[] = payload.can_manage && !payload.blocked
     ? [
         { key: t(locale, "settings.installations"), value: payload.installations.length },
         { key: t(locale, "settings.metricKeys"), value: payload.keys.length },
@@ -434,7 +436,9 @@ export function AppDetailView({
                 appId={appId}
                 app={payload.app}
                 installation={payload.installation}
-                pendingInstallations={payload.pending_installations}
+                pendingInstallations={
+                  payload.can_manage && !payload.blocked ? payload.pending_installations : []
+                }
                 blocked={payload.blocked}
                 onReload={onReload}
               />
@@ -443,7 +447,7 @@ export function AppDetailView({
                 appId={appId}
                 allowlist={payload.allowlist}
                 privateApp={payload.app.github_visibility === "private"}
-                installations={payload.installations}
+                installations={payload.can_manage && !payload.blocked ? payload.installations : null}
                 onReload={onReload}
               />
             </div>

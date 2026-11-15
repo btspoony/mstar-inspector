@@ -1372,6 +1372,116 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     ).toEqual({ github_metadata_synced_at: null });
   });
 
+  /**
+   * The payload face of the same rule: a Blocked target carries its OWN
+   * configuration and nothing the bot owns. The seeded rows below are exactly
+   * what used to ride the face — an installation's account, a delivery with
+   * another tenant's repository, the provider/model surfaces.
+   */
+  test("the settings and models faces carry only target-owned sections", async () => {
+    const db = await crossWorkspaceWorld();
+    const botId = (
+      db.raw.query("SELECT id FROM review_bots WHERE github_app_id = ?").get(FOREIGN_APP_ID) as { id: string }
+    ).id;
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+         VALUES ('install-leak', ?, 777, 'acme-org', '2026-01-01 00:00:00', NULL)`,
+      )
+      .run(botId);
+    db.raw
+      .prepare(
+        `INSERT INTO webhook_deliveries
+           (id, bot_id, event_name, outcome, status_code, repository_full_name, created_at)
+         VALUES ('delivery-leak', ?, 'pull_request', 'ok', 200, 'secret-org/private-repo', datetime('now'))`,
+      )
+      .run(botId);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const env = makeEnv(db);
+
+    // Reading the face must not reach GitHub: the lazy metadata refresh is a
+    // bot-scope write with the OWNER's credentials.
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
+      throw new Error("a Blocked read must never reach GitHub");
+    }) as unknown as typeof fetch);
+    let res: Response;
+    try {
+      res = await get(
+        `/dashboard/${CONSUMER_WS}/api/apps/${FOREIGN_APP_ID}/settings`,
+        cookie,
+        env,
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+
+    // The target's own configuration is what the face exists for.
+    expect(body.blocked).toBe(true);
+    expect(body.blocked_reason).toBe("bot_not_shared");
+    expect(typeof body.target_id).toBe("string");
+    expect(body.workspace_id).toBe(CONSUMER_WS);
+    expect(body.check_gate).toEqual({ min_score: 80, pass_verdicts: ["ship it"] });
+    expect(body.allowlist).toEqual({ enabled: false, owners: [] });
+    expect(typeof body.owner_overlap).toBe("boolean");
+    expect(body.app.review_trigger_mode).toBe("every_push");
+    expect(body.app.review_level).toBeNull();
+    expect(body.app.default_review_level).toBe("default");
+    expect(body.app.review_enabled).toBe(true);
+
+    // Not one bot-owned section rides the face.
+    for (const key of [
+      "installations",
+      "deliveries",
+      "delivery_summary",
+      "keys",
+      "model_chain",
+      "model_roles",
+      "model_chains",
+      "custom_providers",
+      "configured_providers",
+      "provider_catalog",
+      "sandbox_images",
+      "model_limits_snapshot",
+      "model_role_ids",
+      "custom_provider_api_ids",
+      "pending_installations",
+    ]) {
+      expect(key in body, key).toBe(false);
+    }
+    for (const key of ["sandbox_image_id", "last_webhook_at", "github_metadata_synced_at"]) {
+      expect(key in body.app, key).toBe(false);
+    }
+    // Nor through a copied value: the other tenant's installation account and
+    // repository are nowhere in the body.
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("acme-org");
+    expect(serialized).not.toContain("secret-org/private-repo");
+
+    // The models face is bot-owned end to end, so a Blocked target has none.
+    expect(
+      db.raw.query("SELECT github_metadata_synced_at FROM review_bots WHERE github_app_id = ?").get(FOREIGN_APP_ID),
+    ).toEqual({ github_metadata_synced_at: null });
+    const models = await get(`/dashboard/${CONSUMER_WS}/api/apps/${FOREIGN_APP_ID}/models`, cookie, env);
+    expect(models.status).toBe(403);
+    expect(((await models.json()) as { key: unknown }).key).toBe("settings.error.botReadOnly");
+
+    // Nothing changed for the owning workspace: same bot, full face.
+    const owner = await get(`/dashboard/default/api/apps/${FOREIGN_APP_ID}/settings`, cookie, env);
+    expect(owner.status).toBe(200);
+    const ownerBody = (await owner.json()) as Record<string, unknown>;
+    expect(ownerBody.blocked).toBe(false);
+    expect(ownerBody.blocked_reason).toBeNull();
+    expect(ownerBody.installations).toEqual([
+      { installation_id: 777, account_login: "acme-org", seen_at: "2026-01-01 00:00:00" },
+    ]);
+    expect(Array.isArray(ownerBody.deliveries)).toBe(true);
+    expect(Array.isArray(ownerBody.keys)).toBe(true);
+    expect(Array.isArray(ownerBody.provider_catalog)).toBe(true);
+  });
+
   test("the consuming workspace keeps its TARGET settings, and the owner keeps the bot", async () => {
     const db = await crossWorkspaceWorld();
     const env = makeEnv(db);

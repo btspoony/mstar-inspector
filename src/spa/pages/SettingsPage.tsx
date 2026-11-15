@@ -71,10 +71,13 @@ import {
   type ModelOptionGroup,
   type ReviewLevel,
   type ReviewTriggerMode,
+  type AppIdentityCardApp,
+  type AppInstallApp,
   type SettingsAppMeta,
   type SettingsIdentityAppMeta,
   type SettingsManagePayload,
   type SettingsPayload,
+  type TargetReviewSlice,
 } from "./data";
 import { useSaveSignal } from "../components/save-signal";
 import { LoadingNotice, LoadFailedNotice, NoticeRegion, PageNotice, SaveInFlight, type OpNotice } from "./PageNotice";
@@ -317,6 +320,14 @@ export function SettingsView({
     );
   }
 
+  // A Blocked target (its bot is `owned` by another workspace) keeps every
+  // TARGET-owned control and loses the bot's: the identity card drops the
+  // delivery URL and the refresh (both bot-scope writes this workspace cannot
+  // make), and the ops zone keeps the pause and the park. The bot's own
+  // sections never reached this tab — they live on the bot page, which answers
+  // 404 for a Blocked target.
+  const blocked = payload.blocked;
+
   return (
     <div className="flex flex-col gap-6">
       {/* Detail-page section flow (r3 baseline § 5): one content plane divided
@@ -331,8 +342,8 @@ export function SettingsView({
           locale={locale}
           app={app}
           workspaceId={payload.workspace_id}
-          canManage={payload.can_manage}
-          onReload={() => onReload({ background: true })}
+          canManage={!blocked}
+          onReload={blocked ? undefined : () => onReload({ background: true })}
         />
 
         <ReviewTriggerSection locale={locale} payload={payload} onTriggerMode={runTriggerMode} />
@@ -341,7 +352,13 @@ export function SettingsView({
 
         <ReviewGateSection locale={locale} payload={payload} onSettings={submitSettings} />
 
-        <OpsSection locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
+        <OpsSection
+          locale={locale}
+          payload={payload}
+          onPending={setPending}
+          notice={opsNotice}
+          botWritable={!blocked}
+        />
       </div>
 
       <Dialog
@@ -506,8 +523,8 @@ export function AppInfoSection({
   onReload,
 }: {
   locale: SpaBoot["locale"];
-  /** Both faces — the identity and manage app shapes structurally share every field the card reads. */
-  app: SettingsIdentityAppMeta | SettingsAppMeta;
+  /** Every face — the identity, manage and Blocked app shapes share every field the card reads. */
+  app: SettingsIdentityAppMeta | SettingsAppMeta | AppIdentityCardApp;
   /**
    * The App's stable workspace id from the payload — the delivery URL's first
    * segment. Deliberately NOT derived from the pathname: a route ref may be a
@@ -656,7 +673,8 @@ export function AppInstallSection({
 }: {
   locale: SpaBoot["locale"];
   appId: string;
-  app: SettingsManagePayload["app"];
+  /** Every face: the three app shapes share the fields the block names. */
+  app: AppInstallApp;
   installation: SettingsManagePayload["installation"];
   /** The bot's live installations no target references — the bind source. */
   pendingInstallations: SettingsManagePayload["pending_installations"];
@@ -833,8 +851,12 @@ export function AllowlistSection({
   allowlist: AllowlistSettings;
   /** The cached visibility is `private` — only the note below changes. */
   privateApp: boolean;
-  /** The bot's installations — the rows this allowlist admits or refuses. */
-  installations: SettingsManagePayload["installations"];
+  /**
+   * The bot's installations — the rows this allowlist admits or refuses.
+   * `null` = not readable here (a Blocked target): the table is replaced by a
+   * line saying so instead of a false "no installations".
+   */
+  installations: SettingsManagePayload["installations"] | null;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const [enabled, setEnabled] = useState(allowlist.enabled);
@@ -928,7 +950,9 @@ export function AllowlistSection({
             installation rows themselves live on the bot page. */}
         <div className="flex flex-col gap-1">
           <span className="text-sm font-medium">{t(locale, "settings.installationsAvailability")}</span>
-          {installations.length === 0 ? (
+          {installations === null ? (
+            <p className="text-sm text-muted-foreground">{t(locale, "settings.installationsNotVisible")}</p>
+          ) : installations.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t(locale, "settings.noInstallations")}</p>
           ) : (
             <ul className="flex flex-col gap-1">
@@ -983,7 +1007,7 @@ export function ReviewGateSection({
   onSettings,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsManagePayload;
+  payload: TargetReviewSlice;
   onSettings: (fields: Record<string, string> | URLSearchParams) => Promise<OpNotice>;
 }) {
   const gate = payload.check_gate;
@@ -1189,7 +1213,7 @@ export function ReviewTriggerSection({
   onTriggerMode,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsManagePayload;
+  payload: TargetReviewSlice;
   /** The review-trigger-mode save (the mode control's POST, resolved back to its own region). */
   onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
 }) {
@@ -1339,7 +1363,7 @@ export function ReviewDepthSection({
   onSettings,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsManagePayload;
+  payload: TargetReviewSlice;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   const stored: ReviewDepthChoice = payload.app.review_level ?? REVIEW_DEPTH_INHERIT;
@@ -1426,12 +1450,19 @@ function OpsSection({
   payload,
   onPending,
   notice,
+  botWritable,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsManagePayload;
+  payload: TargetReviewSlice;
   onPending: (action: PendingAction) => void;
   /** The confirmed ops outcome (pause/resume/disable/enable/delete — delete carries its own copy). */
   notice: OpNotice | null;
+  /**
+   * Whether the bot's own lifecycle is this workspace's to drive. A Blocked
+   * target keeps the pause and the park (target-owned); the bot's
+   * disable/enable/delete would be refused by the server, so they never render.
+   */
+  botWritable: boolean;
 }) {
   const { app } = payload;
   const paused = isPaused(app);
@@ -1457,17 +1488,19 @@ function OpsSection({
               )}
             </OpsRow>
           ) : null}
-          <OpsRow title={t(locale, "settings.opsDeliveryTitle")} copy={t(locale, "settings.opsDeliveryCopy")}>
-            {app.status === "active" ? (
-              <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
-                {t(locale, "apps.actions.disable")}
-              </Button>
-            ) : (
-              <Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>
-                {t(locale, "apps.actions.enable")}
-              </Button>
-            )}
-          </OpsRow>
+          {botWritable ? (
+            <OpsRow title={t(locale, "settings.opsDeliveryTitle")} copy={t(locale, "settings.opsDeliveryCopy")}>
+              {app.status === "active" ? (
+                <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
+                  {t(locale, "apps.actions.disable")}
+                </Button>
+              ) : (
+                <Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>
+                  {t(locale, "apps.actions.enable")}
+                </Button>
+              )}
+            </OpsRow>
+          ) : null}
           {payload.owner_overlap ? (
             // Park is the repair for an overlapping owner claim, and the route
             // refuses it when the claim no longer overlaps — so the control
@@ -1478,11 +1511,13 @@ function OpsSection({
               </Button>
             </OpsRow>
           ) : null}
-          <OpsRow title={t(locale, "settings.opsDeleteTitle")} copy={t(locale, "settings.opsDeleteCopy")}>
-            <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
-              {t(locale, "apps.actions.delete")}
-            </Button>
-          </OpsRow>
+          {botWritable ? (
+            <OpsRow title={t(locale, "settings.opsDeleteTitle")} copy={t(locale, "settings.opsDeleteCopy")}>
+              <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
+                {t(locale, "apps.actions.delete")}
+              </Button>
+            </OpsRow>
+          ) : null}
         </div>
         <NoticeRegion notice={notice} />
       </div>

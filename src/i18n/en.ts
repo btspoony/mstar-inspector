@@ -608,6 +608,10 @@ export const en = {
     /** Metric-band label for the provider-key count on the App detail face. */
     metricKeys: "Keys",
     noInstallations: "No installations yet.",
+    // A Blocked target: the bot's installation rows belong to its owning
+    // workspace, so the table states the absence instead of a false "none".
+    installationsNotVisible:
+      "This bot's installations belong to its owning workspace, so they are not listed here.",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy:
       "Up to 10 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",

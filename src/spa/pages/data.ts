@@ -500,7 +500,26 @@ export type SettingsIdentityAppMeta = {
   github_description: string | null;
   github_html_url: string | null;
   github_avatar_url: string | null;
-  github_metadata_synced_at: string | null;
+  /**
+   * The bot's own metadata sync stamp. A Blocked face omits it (the stamp is
+   * the owning workspace's), so presence is parser-enforced per face.
+   */
+  github_metadata_synced_at?: string | null;
+};
+
+/**
+ * The fields the identity card reads. Every face carries them; a Blocked face
+ * omits the bot's metadata stamp, so the field is optional at the type level
+ * and required-when-readable in `parseSettings`.
+ */
+export type AppIdentityCardApp = {
+  github_app_id: number;
+  id: string;
+  github_name: string | null;
+  github_description: string | null;
+  github_html_url: string | null;
+  github_avatar_url: string | null;
+  github_metadata_synced_at?: string | null;
 };
 
 /**
@@ -607,6 +626,65 @@ export type BlockedReason = (typeof BLOCKED_REASONS)[number];
 export function isBlockedReason(value: unknown): value is BlockedReason {
   return (BLOCKED_REASONS as readonly unknown[]).includes(value);
 }
+
+/**
+ * The review configuration a TARGET owns — the sections a Blocked face still
+ * carries. Shared by both manager faces, so the review controls accept either.
+ */
+type TargetOwnedSections = {
+  check_gate: CheckGateSettings | null;
+  allowlist: AllowlistSettings;
+  /** Whether the park action would land for this target (owner overlap). */
+  owner_overlap: boolean;
+};
+
+/**
+ * The identity a Blocked face carries: enough to name and link the App, plus
+ * the target-owned review switches. Deliberately absent: `sandbox_image_id`,
+ * `last_webhook_at` and `github_metadata_synced_at` — the bot's own data.
+ */
+export type AppInstallApp = {
+  github_app_id: number;
+  id: string;
+  github_name: string | null;
+  github_slug: string | null;
+  github_avatar_url: string | null;
+  scope: BotScope;
+};
+
+export type BlockedAppIdentity = {
+  github_app_id: number;
+  id: string;
+  status: string;
+  created_by: string;
+  review_enabled: boolean;
+  review_trigger_mode: ReviewTriggerMode;
+  review_level: ReviewLevel | null;
+  default_review_level: ReviewLevel;
+  scope: BotScope;
+  github_name: string | null;
+  github_slug: string | null;
+  github_description: string | null;
+  github_html_url: string | null;
+  github_avatar_url: string | null;
+  github_visibility: GithubVisibility | null;
+  /** Absent on the wire: the bot's metadata stamp is the owner's. */
+  github_metadata_synced_at?: string | null;
+};
+
+/**
+ * The target-owned slice every review-policy control reads. Both manager faces
+ * carry it, so one component serves the full face and the Blocked face.
+ */
+export type TargetReviewSlice = {
+  app: Pick<
+    BlockedAppIdentity,
+    "status" | "review_enabled" | "review_trigger_mode" | "review_level" | "default_review_level" | "github_slug"
+  >;
+  check_gate: CheckGateSettings | null;
+  allowlist: AllowlistSettings;
+  owner_overlap: boolean;
+};
 
 /**
  * The pending rows, all-or-nothing: a row without a usable installation id
@@ -817,10 +895,11 @@ export type SettingsManagePayload = {
   pending_installations: PendingInstallation[];
   /**
    * Why this target reviews nothing, if it does (derived per read, never
-   * stored). Both faces carry it.
+   * stored). This face is the readable one; the Blocked face is its own
+   * variant, so the discriminant is a literal here.
    */
-  blocked: boolean;
-  blocked_reason: BlockedReason | null;
+  blocked: false;
+  blocked_reason: null;
   /**
    * The review gate (migration 0045) — the Check's pass condition. `null` =
    * the stored verdict list is unreadable: the section renders a read-only
@@ -837,7 +916,25 @@ export type SettingsManagePayload = {
   owner_overlap: boolean;
 } & BotConfigSections;
 
-export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload;
+/**
+ * The Blocked manager face: this workspace's target on another workspace's
+ * bot. It carries the target's own review configuration and the identity the
+ * page needs, and NOTHING the bot owns — no installations, deliveries, keys,
+ * chains, custom providers, sandbox image or metadata. Those belong to the
+ * owning workspace, so their absence is the contract, not a degradation.
+ */
+export type SettingsBlockedPayload = {
+  can_manage: true;
+  blocked: true;
+  blocked_reason: BlockedReason;
+  workspace_id: string;
+  target_id: string;
+  app: BlockedAppIdentity;
+  /** The target's own binding (`null` = unbound) — target-owned state. */
+  installation: BoundInstallation | null;
+} & TargetOwnedSections;
+
+export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload | SettingsBlockedPayload;
 
 export type ModelOptionSource = "verified" | "probe" | "custom";
 
@@ -2118,6 +2215,16 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (typeof data.blocked !== "boolean") return null;
   if (data.blocked_reason !== null && !isBlockedReason(data.blocked_reason)) return null;
   if (data.blocked !== (data.blocked_reason !== null)) return null;
+  // A Blocked face omits the bot's own metadata stamp; the identity face
+  // still requires it (nullable — NULL = never synced), exactly as before.
+  if (data.blocked) {
+    if (
+      data.app.github_metadata_synced_at !== undefined &&
+      !isNullableString(data.app.github_metadata_synced_at)
+    ) {
+      return null;
+    }
+  }
   if (!data.can_manage) {
     // Identity-only non-manager face (App detail IA): the D4
     // identity set — created_at joins the required keys; everything from
@@ -2130,11 +2237,36 @@ export function parseSettings(data: unknown): SettingsPayload | null {
       !isNullableString(data.app.github_name) ||
       !isNullableString(data.app.github_description) ||
       !isNullableString(data.app.github_html_url) ||
-      !isNullableString(data.app.github_avatar_url) ||
-      !isNullableString(data.app.github_metadata_synced_at)
+      !isNullableString(data.app.github_avatar_url)
     ) {
       return null;
     }
+    // The bot's metadata stamp is required on a readable identity face and
+    // absent on a Blocked one (its presence rule is the shared check above).
+    if (!data.blocked && !isNullableString(data.app.github_metadata_synced_at)) return null;
+    return data as SettingsPayload;
+  }
+  if (data.blocked) {
+    // The Blocked manager face: the target's own review configuration and the
+    // identity the page needs. The bot-owned sections are ABSENT by contract,
+    // so nothing here requires — or tolerates a guess for — them.
+    if (
+      !isNullableString(data.app.github_name) ||
+      !isNullableString(data.app.github_description) ||
+      !isNullableString(data.app.github_html_url) ||
+      !isNullableString(data.app.github_avatar_url) ||
+      !isNullableGithubVisibility(data.app.github_visibility)
+    ) {
+      return null;
+    }
+    if (!isBotScope(data.app.scope)) return null;
+    if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
+    if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
+    if (!isReviewLevel(data.app.default_review_level)) return null;
+    if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
+    if (!isAllowlistSettings(data.allowlist)) return null;
+    if (typeof data.owner_overlap !== "boolean") return null;
+    if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
     return data as SettingsPayload;
   }
   // The selected runtime-image id rides the MANAGER face (registry id
