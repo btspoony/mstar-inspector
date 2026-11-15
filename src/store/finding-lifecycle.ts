@@ -526,8 +526,12 @@ export async function findPublicationJournal(
  * other than the rows' tenant, every `review_findings` row for
  * (bot, installation, owner, repo, PR) and every `review_failures` row for
  * (installation, owner, repo, PR) is re-attributed to that target in the
- * same batch. The frozen `payload.artifact.targetId` is only a hint used to
- * stamp a NEW row when nothing is bound. Returns false (and writes nothing)
+ * same batch, and every `reviews` row for (bot, installation, owner, repo,
+ * PR) moves with them, so a PR's review history never sits on the tenant it
+ * was moved away from. The binding is resolved in-batch (one scalar subquery
+ * per statement), not by a read taken before it. The frozen
+ * `payload.artifact.targetId` is only a hint used to stamp a NEW row when
+ * nothing is bound. Returns false (and writes nothing)
  * when the row is unknown, the lease is not live, proof is missing, or the
  * payload is not a complete review publication; the previously-applied row
  * short-circuits to true (idempotent replay).
@@ -594,20 +598,6 @@ export async function applyPublishedLifecycle(
     await store.put({ ...payload.artifact, round: payload.round });
   }
 
-  // Attribution follows the LIVE BINDING, never the frozen payload: resolve
-  // the target that currently holds this fingerprint's (bot, installation).
-  // The partial unique index on `review_targets(bot_id, installation_id)`
-  // makes it at most one; a soft-deleted target holds nothing. No binding is
-  // not evidence of a move, so it only affects how a NEW row is stamped.
-  const boundTarget = await db
-    .prepare(
-      `SELECT id FROM review_targets
-        WHERE bot_id = ? AND installation_id = ? AND deleted_at IS NULL`,
-    )
-    .bind(payload.scope.appId, payload.scope.installationId)
-    .first<{ id: string }>();
-  const boundTargetId = boundTarget?.id ?? null;
-
   // Step 2 — the lifecycle writes in db.batches of at most
   // LIFECYCLE_APPLY_BATCH_STATEMENTS statements each (§7.11.1: "Local apply
   // batches ≤25 row transitions each; a larger payload is resumed
@@ -618,15 +608,15 @@ export async function applyPublishedLifecycle(
   // FINAL batch, under the lease. Small payloads (the common case) still
   // run as ONE batch. The guard above narrowed `payload.lifecycle` to
   // non-null; it is passed explicitly so the helper's signature carries that
-  // invariant. Attribution: the live binding wins; the artifact's own
-  // `targetId` is only the hint a new row falls back to when nothing is bound.
+  // invariant. Attribution: the live binding wins and is resolved INSIDE the
+  // batch (a scalar subquery in each statement); the artifact's own `targetId`
+  // is only the hint a new row falls back to when nothing is bound.
   const statements = lifecycleApplyBatch(
     db,
     row,
     payload,
     payload.lifecycle,
-    boundTargetId ?? payload.artifact.targetId,
-    boundTargetId,
+    payload.artifact.targetId,
     nowMs,
     lease,
   );
@@ -659,6 +649,18 @@ export async function applyPublishedLifecycle(
 const APPLY_LEASE_GUARD_SQL = `EXISTS (SELECT 1 FROM review_publications AS apply_lease
        WHERE apply_lease.id = ? AND apply_lease.holder = ? AND apply_lease.lease_epoch = ?
          AND apply_lease.lease_until_ms IS NOT NULL AND apply_lease.lease_until_ms > ?)`;
+
+/**
+ * The live-binding scalar subquery — the ONLY attribution source. It is
+ * embedded in every statement that needs the fingerprint's tenant, so the
+ * binding is read when the statement runs, inside the same batch and
+ * transaction as the write it feeds: a read taken before the batch could be
+ * stranded by a concurrent unbind/claim. Binds, in order: `(botId,
+ * installationId)`, and it yields NULL when nothing is bound (a target that
+ * keeps `installation_id` but is soft-deleted holds nothing).
+ */
+const LIVE_BINDING_TARGET_SQL = `(SELECT id FROM review_targets
+       WHERE bot_id = ? AND installation_id = ? AND deleted_at IS NULL)`;
 
 /**
  * The live-lease fence probe (§7.11.1) — the read twin of the applied
@@ -705,10 +707,13 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
 /**
  * The §7.2 state machine as ONE batch (knowledge `d1-batch-atomicity`).
  * Order inside the batch matters and is replay-safe:
- *   0. Attribution — ONE read (not a statement): the target that CURRENTLY
- *      holds this fingerprint's `(bot, installation)` live binding. The
- *      payload's `artifact.targetId` is only a hint for a row no target can
- *      claim; it never decides where an existing row lives.
+ *   0. Attribution — resolved INSIDE the batch: every statement that needs
+ *      the tenant embeds `LIVE_BINDING_TARGET_SQL`, the scalar subquery for
+ *      the target that CURRENTLY holds this fingerprint's `(bot,
+ *      installation)`. No read is taken before the batch, so a concurrent
+ *      unbind/claim cannot be frozen into an applied state. The payload's
+ *      `artifact.targetId` is only a hint for a row no target can claim; it
+ *      never decides where an existing row lives.
  *   1. Seen upserts — new rows insert open at the current time, attributed to
  *      the live binding (or the hint when nothing is bound); existing rows
  *      update last-seen tracking. A row closed (addressed/dismissed) under an
@@ -717,9 +722,10 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  *      (replay) are skipped by the last_publication guard.
  *   1b. Whole-scope re-attribution — when the live binding differs from the
  *      rows' tenant, EVERY row of the scope moves in one statement each: all
- *      `review_findings` for (bot, installation, owner, repo, PR) and all
- *      `review_failures` for (installation, owner, repo, PR), not only the
- *      rows this round re-sees. A rebind is the product path that needs it:
+ *      `review_findings` and `reviews` for (bot, installation, owner, repo,
+ *      PR), and all `review_failures` for (installation, owner, repo, PR) —
+ *      not only the rows this round re-sees. A PR's finding list and its
+ *      review history therefore never sit on two tenants. A rebind is the product path that needs it:
  *      the operator unbinds an installation
  *      (`/_internal_admin/api/targets/:id/unbind`) and another workspace
  *      claims the SAME installation for its own target, so the fingerprint
@@ -746,13 +752,14 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  * guard binds are the LAST four parameters of each statement, in the order
  * `(publicationId, holder, leaseEpoch, operationNow)`.
  *
- * Attribution follows the LIVE BINDING, never the payload: `boundTargetId` is
- * the target that currently holds this fingerprint's `(bot, installation)`
- * (`null` when nothing is bound). The tenant faces bind
- * `review_findings.target_id`, so it is the only attribution that survives a
- * rebind. `insertTargetId` is what a NEW row is written with — the binding
- * when there is one, else the publication's own target as a hint; it is never
- * used to move an existing row.
+ * Attribution follows the LIVE BINDING, never the payload. The binding is
+ * resolved INSIDE the batch — a scalar subquery on
+ * `review_targets(bot_id, installation_id, deleted_at IS NULL)` sits in every
+ * statement that needs the tenant — so a concurrent unbind/claim cannot be
+ * frozen into an applied state by a read taken before the batch. The tenant
+ * faces bind `review_findings.target_id` / `reviews.target_id`, so the binding
+ * is the only attribution that survives a rebind. `hintTargetId` is what a NEW
+ * row is written with when nothing is bound; it never moves an existing row.
  */
 function lifecycleApplyBatch(
   db: D1Like,
@@ -760,8 +767,8 @@ function lifecycleApplyBatch(
   payload: PublicationPayload,
   /** The caller-narrowed non-null `payload.lifecycle` (review kind only). */
   lifecycle: LifecycleRound,
-  insertTargetId: string,
-  boundTargetId: string | null,
+  /** The payload's own target — the hint a NEW row takes when nothing is bound. */
+  hintTargetId: string,
   nowMs: number,
   lease: Lease,
 ): D1StatementLike[] {
@@ -781,10 +788,11 @@ function lifecycleApplyBatch(
              (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
               first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?,
+                  COALESCE(${LIVE_BINDING_TARGET_SQL}, ?)
            WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(bot_id, installation_id, owner, repo, pr_number, finding_id) DO UPDATE SET
-             target_id = COALESCE(?, review_findings.target_id),
+             target_id = COALESCE(${LIVE_BINDING_TARGET_SQL}, review_findings.target_id),
              last_publication_id = excluded.last_publication_id,
              last_seen_sha = excluded.last_seen_sha,
              last_seen_round = excluded.last_seen_round,
@@ -801,50 +809,73 @@ function lifecycleApplyBatch(
         .bind(
           seen.rowId, scope.appId, scope.installationId, scope.owner, scope.repo,
           scope.prNumber, seen.findingId, JSON.stringify(seen.original),
-          pubId, pubId, headSha, headSha, round, round, nowMs, nowMs, insertTargetId,
+          pubId, pubId, headSha, headSha, round, round, nowMs, nowMs,
+          // The INSERT's target: the binding read in this statement, else the
+          // payload hint.
+          scope.appId, scope.installationId, hintTargetId,
           ...guard,
-          // COALESCE's bind — it sits AFTER the WHERE guard in the SQL text, so
-          // it binds last: no live binding keeps the row's current tenant.
-          boundTargetId,
+          // The upsert's own binding read; no binding keeps the row's tenant.
+          scope.appId, scope.installationId,
         ),
     );
   }
 
   // 1b. Whole-scope re-attribution — the live binding moved the installation,
-  // so the fingerprint's ENTIRE history follows it, not only the re-seen rows.
-  // ONE statement per table, each fenced by the same live lease as every other
-  // write in the batch. `review_failures` carries no `bot_id` (migration 0060
-  // resolves it through the installation), so its scope is the four
-  // attribution columns it has. Rows with a NULL `target_id` cannot exist after
-  // 0060's backfill guard and are deliberately not adopted here.
-  if (boundTargetId !== null) {
-    statements.push(
-      db
-        .prepare(
-          `UPDATE review_findings SET target_id = ?
-           WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             AND target_id <> ?
-             AND ${APPLY_LEASE_GUARD_SQL}`,
-        )
-        .bind(
-          boundTargetId, scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
-          boundTargetId, ...guard,
-        ),
-    );
-    statements.push(
-      db
-        .prepare(
-          `UPDATE review_failures SET target_id = ?
-           WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             AND target_id <> ?
-             AND ${APPLY_LEASE_GUARD_SQL}`,
-        )
-        .bind(
-          boundTargetId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
-          boundTargetId, ...guard,
-        ),
-    );
-  }
+  // so the fingerprint's ENTIRE history follows it, not only the re-seen rows:
+  // findings, failures and reviews alike. ONE statement per table, each
+  // resolving the binding with its own scalar subquery (no pre-batch read) and
+  // fenced by the same live lease as every other write in the batch. The
+  // statements are unconditional on purpose: with nothing bound the subquery is
+  // NULL, `target_id <> NULL` matches no row, and NOTHING moves — no binding is
+  // not evidence of a move. Scope columns follow each table's schema:
+  // `review_findings` and `reviews` carry `bot_id`, `review_failures` does not
+  // (migration 0060 resolves it through the installation). Rows with a NULL
+  // `target_id` cannot exist after 0060's backfill guard and are not adopted.
+  statements.push(
+    db
+      .prepare(
+        `UPDATE review_findings SET target_id = ${LIVE_BINDING_TARGET_SQL}
+         WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+           AND target_id <> ${LIVE_BINDING_TARGET_SQL}
+           AND ${APPLY_LEASE_GUARD_SQL}`,
+      )
+      .bind(
+        scope.appId, scope.installationId,
+        scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+        scope.appId, scope.installationId,
+        ...guard,
+      ),
+  );
+  statements.push(
+    db
+      .prepare(
+        `UPDATE reviews SET target_id = ${LIVE_BINDING_TARGET_SQL}
+         WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+           AND target_id <> ${LIVE_BINDING_TARGET_SQL}
+           AND ${APPLY_LEASE_GUARD_SQL}`,
+      )
+      .bind(
+        scope.appId, scope.installationId,
+        scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
+        scope.appId, scope.installationId,
+        ...guard,
+      ),
+  );
+  statements.push(
+    db
+      .prepare(
+        `UPDATE review_failures SET target_id = ${LIVE_BINDING_TARGET_SQL}
+         WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+           AND target_id <> ${LIVE_BINDING_TARGET_SQL}
+           AND ${APPLY_LEASE_GUARD_SQL}`,
+      )
+      .bind(
+        scope.appId, scope.installationId,
+        scope.installationId, scope.owner, scope.repo, scope.prNumber,
+        scope.appId, scope.installationId,
+        ...guard,
+      ),
+  );
 
   // 2. Assessments — state transition + round history (replay marker).
   for (const assessment of lifecycle.assessments) {

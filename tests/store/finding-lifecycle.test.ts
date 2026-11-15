@@ -1703,7 +1703,10 @@ describe("target attribution on a re-seen finding (rebind)", () => {
     expect(
       db.raw.query("SELECT COUNT(*) AS n FROM pull_requests WHERE target_id = ?").get(TARGET_ID),
     ).toEqual({ n: 1 });
-    expect((await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).findings).toBe(0);
+    expect((await store.countPullRequestRecords(scopeB, "acme", "widgets", 42)).reviews).toBe(2);
+    const fromA = await store.countPullRequestRecords(scopeA, "acme", "widgets", 42);
+    expect(fromA.findings).toBe(0);
+    expect(fromA.reviews).toBe(0);
     expect((await store.listPullRequestFindings(scopeA, "acme", "widgets", 42, PAGE))!.items).toEqual([]);
   });
 });
@@ -1815,7 +1818,7 @@ describe("live-binding attribution on re-seen findings", () => {
     expect((await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).findings).toBe(0);
   });
 
-  test("one re-seen row moves the whole fingerprint scope, findings and failures", async () => {
+  test("one re-seen row moves the whole fingerprint scope — findings, failures and reviews", async () => {
     const db = liveBindingFixture();
     const lease1 = await stageClaimProve(
       db,
@@ -1852,6 +1855,14 @@ describe("live-binding attribution on re-seen findings", () => {
     expect(db.raw.query("SELECT target_id FROM review_failures WHERE id = 'failure-1'").get()).toEqual({
       target_id: TARGET_B_ID,
     });
+    // The review history follows too: round 1's row was written while A held
+    // the installation, round 2's after the rebind — both now read B.
+    expect(
+      db.raw.query("SELECT head_sha, target_id FROM reviews ORDER BY head_sha").all(),
+    ).toEqual([
+      { head_sha: SHA, target_id: TARGET_B_ID },
+      { head_sha: SHA2, target_id: TARGET_B_ID },
+    ]);
 
     // One tenant owns the PR: B reads the three findings, A reads none of them
     // even though its own ledger row for the PR is still on the books.
@@ -1867,5 +1878,52 @@ describe("live-binding attribution on re-seen findings", () => {
     ).toEqual({ n: 1 });
     expect((await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).findings).toBe(0);
     expect((await store.listPullRequestFindings(scopeA, "acme", "widgets", 42, PAGE))!.items).toEqual([]);
+  });
+
+  /**
+   * The binding is resolved INSIDE the batch, so it cannot be frozen by a read
+   * taken before it. A pre-batch read is not observable from the outside
+   * without racing, so the race is staged deterministically in SQLite: a
+   * trigger rebinds the installation the moment the batch inserts its first
+   * finding. A frozen pre-batch read would leave both rows on A; the in-batch
+   * subquery sees B and moves them. This is the assertion that the statements
+   * themselves are the binding read.
+   */
+  test("the binding is read inside the batch, not frozen before it", async () => {
+    const db = liveBindingFixture();
+    // The publication is composed while A holds the installation.
+    const lease = await stageClaimProve(db, "pub-1", roundOne([{ rowId: "row-1", findingId: "f-1" }]), 1000);
+    db.raw.exec(
+      `CREATE TRIGGER rebind_mid_apply AFTER INSERT ON review_findings BEGIN
+         UPDATE review_targets SET installation_id = NULL WHERE id = '${TARGET_ID}';
+         UPDATE review_targets SET installation_id = ${SCOPE.installationId} WHERE id = '${TARGET_B_ID}';
+       END`,
+    );
+
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+
+    // The rebind landed mid-batch: the statements' own binding read saw B.
+    expect(
+      (db.raw.prepare("SELECT target_id FROM review_findings WHERE id = 'row-1'").get() as { target_id: string })
+        .target_id,
+    ).toBe(TARGET_B_ID);
+    expect(
+      (db.raw.prepare("SELECT target_id FROM reviews WHERE head_sha = ?").get(SHA) as { target_id: string })
+        .target_id,
+    ).toBe(TARGET_B_ID);
+
+    const store = createReviewBotsStore(db);
+    expect(await store.countPullRequestRecords(scopeB, "acme", "widgets", 42)).toEqual({
+      findings: 1,
+      reviews: 1,
+      failures: 0,
+      must_fix: 0,
+    });
+    expect(await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).toEqual({
+      findings: 0,
+      reviews: 0,
+      failures: 0,
+      must_fix: 0,
+    });
   });
 });
