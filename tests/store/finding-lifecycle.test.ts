@@ -1725,6 +1725,51 @@ describe("target attribution is fixed at first record (rebind)", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 1 });
   });
 
+  test("the review row records the same binding as its findings", async () => {
+    const db = fixedAttributionFixture({ withBPullRequest: true });
+    await applyRoundOne(db, "f-1");
+    rebind(db);
+
+    // The publication's FROZEN target names A; the live binding names B. The
+    // review row it inserts must follow the binding, like its findings — one
+    // apply cannot split a PR's records across two tenants.
+    const lease = await stageClaimProve(
+      db,
+      "pub-2",
+      roundTwo([{ rowId: "row-2", findingId: "f-2" }], TARGET_ID),
+      10_000,
+    );
+    expect(await applyPublishedLifecycle(db, "pub-2", lease, 11_000)).toBe(true);
+
+    expect(
+      db.raw.query("SELECT head_sha, target_id FROM reviews ORDER BY head_sha").all(),
+    ).toEqual([
+      { head_sha: SHA, target_id: TARGET_ID },
+      { head_sha: SHA2, target_id: TARGET_B_ID },
+    ]);
+    expect(
+      db.raw.query("SELECT finding_id, target_id FROM review_findings ORDER BY finding_id").all(),
+    ).toEqual([
+      { finding_id: "f-1", target_id: TARGET_ID },
+      { finding_id: "f-2", target_id: TARGET_B_ID },
+    ]);
+
+    // The tenants see one consistent record each.
+    const store = createReviewBotsStore(db);
+    expect(await store.countPullRequestRecords(scopeB, "acme", "widgets", 42)).toEqual({
+      findings: 1,
+      reviews: 1,
+      failures: 0,
+      must_fix: 0,
+    });
+    expect(await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).toEqual({
+      findings: 1,
+      reviews: 1,
+      failures: 0,
+      must_fix: 0,
+    });
+  });
+
   test("a genuinely new fingerprint after the rebind lands on the new target", async () => {
     // A delivery for the new workspace created B's own ledger row.
     const db = fixedAttributionFixture({ withBPullRequest: true });

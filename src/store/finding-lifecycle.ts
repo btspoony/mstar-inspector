@@ -523,7 +523,10 @@ export async function findPublicationJournal(
  * normal review/lifecycle rows — it only marks applied. Rows absent from
  * `seen` are never deleted and never rewritten: `review_findings.target_id`
  * and `reviews.target_id` are set when the row is FIRST recorded and are not
- * migrated afterwards. A rebind therefore affects future publications only —
+ * migrated afterwards. Within one apply the two agree by construction — the
+ * new review row (step 1) and the new findings rows (step 2) both take the
+ * live installation binding, falling back to the artifact's target only when
+ * nothing is bound. A rebind therefore affects future publications only —
  * each target keeps the history it actually reviewed — which is also why the
  * ledger's `(target_id, owner, repo, pr_number)` key stays correct. The
  * binding is resolved in-batch (a scalar subquery in the inserting statement)
@@ -580,7 +583,10 @@ export async function applyPublishedLifecycle(
   }
 
   // Step 1 — the existing atomic store.put (review kind only), a separate
-  // idempotent step, never described as part of the lifecycle batch.
+  // idempotent step, never described as part of the lifecycle batch. Its
+  // `reviews.target_id` is the same live binding the findings insert resolves
+  // (the artifact target is the unbound hint), so one apply cannot file a
+  // review under one tenant and its findings under another.
   // §7.11.1: skipped entirely when the review row already exists — the
   // UNIQUE(installation_id, owner, repo, pr_number, head_sha) row IS the
   // review, so the put would be a pure no-op batch.
@@ -593,7 +599,19 @@ export async function applyPublishedLifecycle(
     .first<{ present: number }>();
   if (stored === null) {
     const store = createArtifactStore(db);
-    await store.put({ ...payload.artifact, round: payload.round });
+    // The review row is a NEW record, so its tenant is resolved by the same
+    // in-batch binding the findings insert uses: the payload's target is only
+    // the unbound hint. Otherwise one apply could file a review under one
+    // tenant and its findings under another.
+    await store.put(
+      { ...payload.artifact, round: payload.round },
+      {
+        targetIdExpression: {
+          sql: `COALESCE(${LIVE_BINDING_TARGET_SQL}, ?)`,
+          binds: [payload.scope.appId, payload.scope.installationId, payload.artifact.targetId],
+        },
+      },
+    );
   }
 
   // Step 2 — the lifecycle writes in db.batches of at most
@@ -711,9 +729,12 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  *      that currently holds this fingerprint's `(bot, installation)` (read
  *      in-batch, so a concurrent unbind/claim cannot be frozen into an
  *      applied state), falling back to the payload's `artifact.targetId` as a
- *      hint when nothing is bound. No statement rewrites `target_id` on an
- *      existing row: a rebind moves FUTURE publications, never history —
- *      each target's ledger is the record of what that target reviewed.
+ *      hint when nothing is bound. The review row this apply inserts
+ *      (`store.put`, before the batch) carries the same expression, so one
+ *      apply never files a review under one tenant and its findings under
+ *      another. No statement rewrites `target_id` on an existing row: a rebind
+ *      moves FUTURE publications, never history — each target's ledger is the
+ *      record of what that target reviewed.
  *   1. Seen upserts — new rows insert open at the current time; existing rows
  *      update last-seen tracking only. A row closed (addressed/dismissed)
  *      under an OLDER publication reopens with reopen_count+1 ("retain

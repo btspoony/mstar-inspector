@@ -216,15 +216,37 @@ export type ReviewArtifactDoc = ArtifactDoc & {
   round?: number | null;
 };
 
+/**
+ * A SQL expression a NEW row's `target_id` is written with, instead of a
+ * value. The caller owns the text and its binds; the store only splices it
+ * into the INSERT it already builds. The lifecycle apply uses it so a review
+ * row carries the live installation binding — evaluated by the inserting
+ * statement, exactly like the findings insert of the same apply — instead of a
+ * target resolved before the write (no pre-batch read, no later rewrite).
+ */
+export type TargetIdExpression = {
+  /** One scalar expression yielding a `review_targets.id`. */
+  sql: string;
+  /** Binds for `sql`, in text order. */
+  binds: readonly unknown[];
+};
+
+/** `put` inputs that are not part of the artifact document itself. */
+export type ArtifactPutOptions = {
+  /** Overrides `doc.targetId` with an expression evaluated at insert time. */
+  targetIdExpression?: TargetIdExpression;
+};
+
 /** The D1 store face: the engine `ArtifactStore` plus the consumer's pre-check. */
 export type D1ArtifactStore = ArtifactStore & {
   /**
    * Widened put input (see `ReviewArtifactDoc`): the REQUIRED `appId` rides
    * the doc into `reviews.bot_id`; the optional `model` / `provider`
    * version records ride into `reviews.model` /
-   * `reviews.provider` (absent/NULL = unset).
+   * `reviews.provider` (absent/NULL = unset). `options.targetIdExpression`
+   * replaces the bound `doc.targetId` value in the review INSERT.
    */
-  put(doc: ReviewArtifactDoc): Promise<void>;
+  put(doc: ReviewArtifactDoc, options?: ArtifactPutOptions): Promise<void>;
   /**
    * Consumer idempotency pre-check (dedup before clone/diff/run). Not part
    * of the engine `ArtifactStore` interface — it stays on the store face
@@ -253,7 +275,7 @@ export type D1ArtifactStore = ArtifactStore & {
  */
 export function createArtifactStore(db: D1Like): D1ArtifactStore {
   return {
-    async put(doc: ReviewArtifactDoc): Promise<void> {
+    async put(doc: ReviewArtifactDoc, options?: ArtifactPutOptions): Promise<void> {
       if (doc.kind !== "review") {
         throw new Error(
           `artifact-store: kind ${JSON.stringify(doc.kind)} is not persisted by the D1 store (only "review")`,
@@ -287,10 +309,17 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       // attribution: the read faces bind it, so a row without it is
       // invisible to every workspace.
       const appId = doc.appId;
+      // `target_id`: a plain value by default; an expression when the caller's
+      // attribution can only be resolved by the INSERT itself (the lifecycle
+      // apply's live installation binding). Its binds take the value's place in
+      // text order, so the rest of the bind list is unchanged.
+      const targetIdSql = options?.targetIdExpression?.sql ?? "?";
+      const targetIdBinds: readonly unknown[] =
+        options?.targetIdExpression === undefined ? [doc.targetId] : options.targetIdExpression.binds;
       const reviewStmt = db
         .prepare(
           `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id, target_id, model, provider, context_incomplete, duration_ms, round)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${targetIdSql}, ?, ?, ?, ?, ?)
            ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`,
         )
         .bind(
@@ -309,7 +338,7 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // restorable via get() (no 64KB truncation on this column).
           JSON.stringify(payload),
           appId,
-          doc.targetId,
+          ...targetIdBinds,
           // Version records: the caller-supplied chain head
           // selector / provider — `?? null` because D1 .bind() rejects
           // undefined; omitted put-input fields persist NULL (byte-compat).
