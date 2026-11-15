@@ -11,9 +11,15 @@
 -- NULL is NOT another spelling of "unlimited" here — the column is NOT NULL, so
 -- a plan either includes the shared bot or it does not.
 --
--- The default is 0, which is what makes a deploy that lands before this
--- migration safe (the read sees the closed answer) and what keeps every plan
--- added later closed until someone says otherwise.
+-- The default is 0, which keeps every plan added later closed until someone
+-- says otherwise.
+--
+-- Order matters: apply this migration BEFORE deploying the Worker that reads
+-- the column — the normal `wrangler d1 migrations apply` → deploy order. A
+-- Worker that lands first reads a column that does not exist yet and
+-- `resolveWorkspacePlans` throws on every call: fail-closed, but a 500 on the
+-- webhook and dashboard faces rather than the refusal this gate is for. There
+-- is no dual-read window to preserve; the migration is the first step.
 --
 -- The seed is the capability table, in one place: `pro` and `unlimited`
 -- include the shared bot; the seeded `free` row stays at the default. A

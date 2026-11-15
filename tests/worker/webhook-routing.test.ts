@@ -22,7 +22,7 @@
 
 import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
-import worker from "../../src/worker/index";
+import worker, { settleRefusedAfterAttach } from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import {
@@ -61,6 +61,12 @@ type SeedOptions = {
    */
   githubSlug?: string | null;
   /**
+   * The bot's scope (migration 0058). OMITTED → the DDL default `owned`; a
+   * `shared` bot resolves ONLY through a bound installation (`TargetSeed.installationId`),
+   * so the shared-bot cases seed one.
+   */
+  scope?: "owned" | "shared";
+  /**
    * The bot's targets. OMITTED → ONE target with the DDL defaults (enabled,
    * `every_push`, no installation binding) — the shape the create path writes.
    */
@@ -86,8 +92,8 @@ async function seedApp(
     .prepare(
       `INSERT INTO review_bots
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-          created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+          created_by, status, scope, deleted_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', ?, NULL, datetime('now'), datetime('now'))`,
     )
     .run(
       id,
@@ -96,6 +102,7 @@ async function seedApp(
       opts.slug,
       privateKeyEnc,
       webhookSecretEnc,
+      opts.scope ?? "owned",
     );
   // Production shape: createApp writes the App and its workspace mapping in
   // one batch, so every execution-facing read (which joins bot_workspaces)
@@ -287,7 +294,15 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
 
   test("saas: a plan without the shared bot skips the delivery — 200, outcome skipped, no send, one entitlement failure", async () => {
     const db = createMigratedTestD1();
-    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // A SHARED bot: that is the feature's subject. Resolution for a shared bot
+    // goes through the target's installation binding (no implicit
+    // attribution), so the delivery's installation id is bound here.
+    const appRow = await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      scope: "shared",
+      targets: [{ installationId: 123 }],
+    });
     const { queue, sent } = makeQueue();
     // The production `saas` shape: the capability is read from the resolved
     // plan, and this workspace holds no subscription row → the seeded `free`
@@ -323,6 +338,34 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
     expect(failures[0]!.target_id).toBe(appRow.targetId);
     expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(SHARED_BOT_ENTITLEMENT_SKIP_REASON));
+  });
+
+  test("saas: a Free workspace's OWN bot is not the shared bot — the delivery enqueues normally", async () => {
+    const db = createMigratedTestD1();
+    // The bot the workspace owns (DDL default scope, mapped to `default`): the
+    // capability gate is about the SHARED bot and must not touch this path.
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.targetId).toBe(appRow.targetId);
+    // Neither an entitlement failure nor a skipped delivery row: the workspace
+    // resolved the free plan, which is irrelevant for its own bot.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
+    const delivery = db.raw
+      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(appRow.id) as { outcome: string };
+    expect(delivery.outcome).toBe("ok");
   });
 
   test("the queued head_at is byte-identical to the ledger's head_at (offset normalized)", async () => {
@@ -2363,5 +2406,60 @@ describe("webhook install bookkeeping vs. the target binding", () => {
     // The binding is kept (a reinstall resumes it) and is not re-attributed.
     expect(binding(db, app.targetId)).toEqual({ installation_id: 4242, account_login: null });
     expect(installationRows(db)[0]!.removed_at).not.toBeNull();
+  });
+});
+
+/**
+ * The refusal's Check settlement is CHAINED onto the attach, not raced with it.
+ * The webhook stops waiting at the inline budget and the invocation keeps the
+ * attach running, so a settlement started inline would find no settleable row
+ * (the claim needs a known create state and a run id) and the recovery lane
+ * would then close the run red instead of settling it `neutral`. Deterministic
+ * here: the deferred promises play the slow attach, no wall clock involved.
+ */
+describe("settleRefusedAfterAttach — the settlement follows the attach", () => {
+  test("settles nothing while the attach is still in flight, then settles once", async () => {
+    let finishAttach!: () => void;
+    const attach = new Promise<void>((resolve) => {
+      finishAttach = resolve;
+    });
+    const settle = mock(async () => true);
+    const warn = mock((_detail: string) => {});
+
+    const settled = settleRefusedAfterAttach({ attach, settle, warn });
+
+    // The inline wait already expired: the attach is still running, so the
+    // settlement must not have started.
+    expect(settle).toHaveBeenCalledTimes(0);
+    expect(warn).toHaveBeenCalledTimes(0);
+
+    finishAttach();
+    await settled;
+
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(0);
+  });
+
+  test("an already-finished attach settles immediately, and a settlement fault is one warn", async () => {
+    const settle = mock(async () => {
+      throw new Error("store down");
+    });
+    const warn = mock((_detail: string) => {});
+
+    await settleRefusedAfterAttach({ attach: Promise.resolve(), settle, warn });
+
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("store down");
+  });
+
+  test("a rejected attach still counts as finished, so the settlement is attempted", async () => {
+    const settle = mock(async () => false);
+    const warn = mock((_detail: string) => {});
+
+    await settleRefusedAfterAttach({ attach: Promise.reject(new Error("attach died")), settle, warn });
+
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(0);
   });
 });

@@ -7,17 +7,15 @@
  *     (`usage_events` stays empty);
  *   - NO KV idempotency key and NO `comment_trigger_claims` row, so the cron
  *     sweep has no outbox record to re-send — the refusal cannot come back;
- *   - the Check is still attached through the pre-enqueue hook, and the row it
- *     attached is settled `neutral` with THIS delivery's attach identity and
- *     the one skip reason;
+ *   - the Check is still attached through the pre-enqueue hook; its `neutral`
+ *     settlement is the ROUTE's, chained onto that attach (pinned in
+ *     `tests/worker/webhook-routing.test.ts`), so this handler writes no
+ *     registry row;
  *   - ONE terminal `entitlement` failure row whose `error` is the identical
  *     sentence the Check carries;
- *   - a bot-mention delivery (no head SHA) settles nothing and records
- *     `head_sha: ""`.
+ *   - a bot-mention delivery still runs the hook and records `head_sha: ""`.
  *
- * The fixture is the fully-migrated D1 double; the Check settlement is a spy
- * here because the store-only lifecycle it calls is pinned by
- * `tests/pipeline/checks.test.ts`.
+ * The fixture is the fully-migrated D1 double.
  */
 import { describe, expect, mock, test } from "bun:test";
 import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
@@ -41,10 +39,19 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 /** The verdict the route computes and hands to the handler. */
 const REFUSAL: SharedBotRefusal = { kind: "shared-bot-not-included", planId: "free" };
 
-type SettleInput = Parameters<NonNullable<HandlerDeps["settleSkipped"]>>[0];
-
 /** The one failure read both cases make. */
 const FAILURE_SQL = "SELECT * FROM review_failures ORDER BY rowid";
+
+type FailureRow = {
+  target_id: string;
+  installation_id: number;
+  owner: string;
+  repo: string;
+  pr_number: number;
+  head_sha: string;
+  stage: string;
+  error: string;
+};
 
 function payload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
   return {
@@ -98,47 +105,29 @@ function countRows(db: TestD1, table: string): number {
   return (db.raw.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 }
 
-type FailureRow = {
-  target_id: string;
-  installation_id: number;
-  owner: string;
-  repo: string;
-  pr_number: number;
-  head_sha: string;
-  stage: string;
-  error: string;
-};
-
-/** The deps the route assembles: the attach hook plus the settlement seam. */
+/** The deps the route assembles for a refused delivery: the attach hook. */
 function handlerDeps(
   db: TestD1,
   kv: KVNamespace,
   queue: Queue<ReviewJobPayload>,
-  settleSkipped: HandlerDeps["settleSkipped"],
   attach: HandlerDeps["beforeEnqueue"],
 ): HandlerDeps {
   return {
     env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue, DB: db as unknown as D1Database },
     log: { info: () => {}, warn: () => {} },
     beforeEnqueue: attach,
-    settleSkipped,
   };
 }
 
 describe("handleReviewJob — a shared-bot refusal", () => {
-  test("skips terminally: no send, no claim, neutral Check, one entitlement failure", async () => {
+  test("skips terminally: no send, no claim, one entitlement failure, Check work left to the route", async () => {
     const db = createMigratedTestD1();
     seedReviewConfig(db);
     const { kv, get, put } = makeKv();
     const { queue, send } = makeQueue();
-    const settleSkipped = mock(async (_input: SettleInput) => true);
     const attach = mock(async (p: ReviewJobPayload) => ({ ...p, attachDeliveryId: "delivery-uuid" }));
 
-    const outcome = await handleReviewJob(
-      payload(),
-      handlerDeps(db, kv, queue, settleSkipped, attach),
-      REFUSAL,
-    );
+    const outcome = await handleReviewJob(payload(), handlerDeps(db, kv, queue, attach), REFUSAL);
 
     expect(outcome).toEqual({ kind: "skipped", reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON });
     // No runner can start and nothing is metered.
@@ -149,24 +138,12 @@ describe("handleReviewJob — a shared-bot refusal", () => {
     expect(put).toHaveBeenCalledTimes(0);
     expect(countRows(db, "comment_trigger_claims")).toBe(0);
 
-    // The Check is attached exactly as an admitted delivery's would be, and
-    // settled through the lifecycle seam with THIS delivery's identity.
+    // The Check is still attached exactly as an admitted delivery's would be;
+    // its neutral settlement belongs to the route, which chains it onto that
+    // attach (the attach may outlive this handler's call), so the handler
+    // itself touches no registry row.
     expect(attach).toHaveBeenCalledTimes(1);
-    expect(settleSkipped).toHaveBeenCalledTimes(1);
-    expect(settleSkipped.mock.calls[0]?.[0]).toEqual({
-      scope: {
-        appId: APP_ID,
-        installationId: INSTALLATION_ID,
-        owner: "acme",
-        repo: "widgets",
-        prNumber: 7,
-      },
-      headSha: SHA,
-      triggeredBy: "pull_request",
-      action: "opened",
-      attachDeliveryId: "delivery-uuid",
-      reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON,
-    });
+    expect(countRows(db, "review_checks")).toBe(0);
 
     // ONE terminal failure row, carrying the sentence the Check carries.
     const rows = db.raw.query(FAILURE_SQL).all() as FailureRow[];
@@ -187,23 +164,24 @@ describe("handleReviewJob — a shared-bot refusal", () => {
     db.raw.close();
   });
 
-  test("a bot-mention delivery attaches and settles nothing, and records no head", async () => {
+  test("a bot-mention delivery still runs the hook, and records no head", async () => {
     const db = createMigratedTestD1();
     seedReviewConfig(db);
     const { kv } = makeKv();
     const { queue, send } = makeQueue();
-    const settleSkipped = mock(async (_input: SettleInput) => true);
     const attach = mock(async (p: ReviewJobPayload) => ({ ...p, attachDeliveryId: "delivery-uuid" }));
 
     const outcome = await handleReviewJob(
       payload({ head_sha: null, comment_id: 987654321, action: "created", triggered_by: "issue_comment" }),
-      handlerDeps(db, kv, queue, settleSkipped, attach),
+      handlerDeps(db, kv, queue, attach),
       REFUSAL,
     );
 
     expect(outcome.kind).toBe("skipped");
     expect(send).toHaveBeenCalledTimes(0);
-    expect(settleSkipped).toHaveBeenCalledTimes(0);
+    // The hook is the route's, and a mention delivery attaches nothing — the
+    // route decides that on the absent SHA, not this handler.
+    expect(attach).toHaveBeenCalledTimes(1);
     // The claim BEFORE the send would be this delivery's outbox record; a
     // refusal writes none, so the sweep re-sends nothing.
     expect(countRows(db, "comment_trigger_claims")).toBe(0);
