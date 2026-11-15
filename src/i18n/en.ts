@@ -381,6 +381,26 @@ export const en = {
     tableHealth: "Health",
     tableCreator: "Creator",
     openAria: "Open {name} detail",
+    /**
+     * The creation chooser behind the Create control: official mode puts a
+     * target on a bot the platform already shares, self-hosted is the GitHub
+     * App manifest flow. `botTarget*` label one shared bot with this
+     * workspace's live target count.
+     */
+    createDialog: {
+      title: "Create a review target",
+      description: "Use an App this platform already shares, or connect your own GitHub App.",
+      modeOfficial: "Official App",
+      modeSelfHosted: "My own GitHub App",
+      botLabel: "App",
+      botPlaceholder: "Select an App",
+      botTargetOne: "{name} · {count} target",
+      botTargets: "{name} · {count} targets",
+      noSharedBots: "This platform shares no App yet — connect your own GitHub App instead.",
+      submit: "Create target",
+      selfHostedSubmit: "Continue to GitHub",
+      failed: "The target was not created — try again.",
+    },
   },
   members: {
     heading: "Members",

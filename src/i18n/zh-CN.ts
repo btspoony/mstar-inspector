@@ -331,6 +331,21 @@ export const zhCN: Dictionary = {
     tableHealth: "健康",
     tableCreator: "创建者",
     openAria: "打开 {name} 详情",
+    /** 创建选择器（见 en.ts 同名字段）。 */
+    createDialog: {
+      title: "创建审查目标",
+      description: "使用平台已共享的 App，或连接你自己的 GitHub App。",
+      modeOfficial: "官方 App",
+      modeSelfHosted: "我的 GitHub App",
+      botLabel: "App",
+      botPlaceholder: "选择 App",
+      botTargetOne: "{name} · {count} 个目标",
+      botTargets: "{name} · {count} 个目标",
+      noSharedBots: "平台尚未共享任何 App — 请改为连接你自己的 GitHub App。",
+      submit: "创建目标",
+      selfHostedSubmit: "前往 GitHub",
+      failed: "未能创建目标 — 请重试。",
+    },
   },
   members: {
     heading: "成员",

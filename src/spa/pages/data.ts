@@ -136,7 +136,46 @@ export type AppsPayload = {
       rejected24h: number;
     };
   }>;
+  /**
+   * The `shared` bots the creation chooser may offer (official mode). The
+   * server always sends the key; `parseApps` normalizes it so a stale or
+   * malformed payload reads as none instead of reaching the chooser raw.
+   */
+  shared_bots?: SharedBotRow[];
 };
+
+/** One `shared` bot the workspace may create a target on. */
+export type SharedBotRow = {
+  id: string;
+  github_slug: string | null;
+  name: string;
+  /** The workspace's live targets on this bot — the chooser shows it. */
+  target_count: number;
+};
+
+function isSharedBotRow(value: unknown): value is SharedBotRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    value.id !== "" &&
+    (value.github_slug === null || typeof value.github_slug === "string") &&
+    typeof value.name === "string" &&
+    typeof value.target_count === "number"
+  );
+}
+
+/**
+ * The chooser's shared-bot list, all-or-nothing: one row that does not carry
+ * a usable id would offer a bot the create route answers `404` for, so a
+ * partially readable list is no list. A missing or non-array block is the
+ * empty list — official mode is then unavailable and the manifest flow stays
+ * usable.
+ */
+export function parseSharedBots(value: unknown): SharedBotRow[] {
+  if (!Array.isArray(value)) return [];
+  const rows = value.filter(isSharedBotRow);
+  return rows.length === value.length ? rows : [];
+}
 
 /**
  * (spec § Provider configuration contract): whether a catalog entry
@@ -1704,7 +1743,7 @@ export function parseApps(data: unknown): AppsPayload | null {
   const login = data.viewer.login;
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
-  return data as AppsPayload;
+  return { ...(data as AppsPayload), shared_bots: parseSharedBots(data.shared_bots) };
 }
 
 /**
