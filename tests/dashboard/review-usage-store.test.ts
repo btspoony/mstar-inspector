@@ -140,6 +140,32 @@ describe("readReviewUsage", () => {
     expect(countsOf(await readReviewUsage(db, NOVEMBER, "ws-beta"))).toEqual([["ws-beta", 0, 0]]);
   });
 
+  test("a target with no review this month contributes nothing", async () => {
+    const db = fixture();
+    // Two targets, one of them parked, and not a single review in the window:
+    // the LEFT JOIN keeps these rows, so only `r.id IS NOT NULL` keeps them
+    // from reading as one review each in their bot's column.
+    seedWorkspace(db, "ws-idle", "Idle");
+    seedTarget(db, "bot-own", { workspaceId: "ws-idle" });
+    seedTarget(db, "bot-shared", { workspaceId: "ws-idle" });
+    db.raw
+      .prepare(
+        "UPDATE review_targets SET deleted_at = '2026-11-05 00:00:00' WHERE workspace_id = 'ws-idle' AND bot_id = 'bot-shared'",
+      )
+      .run();
+
+    expect(countsOf(await readReviewUsage(db, NOVEMBER, "ws-idle"))).toEqual([["ws-idle", 0, 0]]);
+    // The operator face agrees, and its other rows are untouched by the two
+    // target rows that carry no review.
+    expect(countsOf(await readReviewUsage(db, NOVEMBER, null))).toEqual([
+      ["ws-alpha", 2, 2],
+      ["ws-gamma", 0, 3],
+      ["ws-beta", 0, 0],
+      ["default", 0, 0],
+      ["ws-idle", 0, 0],
+    ]);
+  });
+
   test("the operator face answers every live workspace in the decided order", async () => {
     const db = fixture();
     // Shared descending, own descending, then name ascending: Alpha (2
