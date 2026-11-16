@@ -127,29 +127,68 @@ function paramsInterpolable(value: unknown): boolean {
   );
 }
 
-/**
- * The verify 400's face: the mapped key in the operator's locale when the
- * body carries one, else the reason's copy. (CARRY-2)
- */
-export function verifyRefusalMessage(locale: SpaBoot["locale"], body: string): string {
-  let reason = "unexpected";
-  let keyed: DictionaryKey | undefined;
-  let keyedParams: Record<string, string | number> | undefined;
+/** The refusal body's JSON object, or null when it is not one. */
+function refusalBody(body: string): Record<string, unknown> | null {
   try {
-    const parsed = JSON.parse(body) as { reason?: string; key?: unknown; params?: unknown };
-    if (typeof parsed.reason === "string") reason = parsed.reason;
-    if (
-      typeof parsed.key === "string" &&
-      isDictionaryKey(parsed.key) &&
-      paramsInterpolable(parsed.params)
-    ) {
-      keyed = parsed.key;
-      keyedParams = parsed.params as Record<string, string | number> | undefined;
-    }
+    const parsed: unknown = JSON.parse(body);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
-    /* body is not JSON */
+    return null;
   }
-  return keyed !== undefined ? t(locale, keyed, keyedParams) : verifyReasonMessage(locale, reason);
+}
+
+/**
+ * The add-key refusal's face: STATUS first, body second. The status picks the
+ * cause family, and inside that family a keyed JSON body wins, then a
+ * recognised reason, then the family's own generic copy — so no status reaches
+ * the operator as one undifferentiated "unexpected response" (I-000573).
+ * `settings.verify.unexpected` survives only as the shared fallback for a
+ * status no rule classifies, and never carries the body or the key material.
+ */
+export function verifyRefusalMessage(locale: SpaBoot["locale"], status: number, body: string): string {
+  const parsed = refusalBody(body);
+  const keyed =
+    parsed !== null &&
+    typeof parsed.key === "string" &&
+    isDictionaryKey(parsed.key) &&
+    paramsInterpolable(parsed.params)
+      ? { key: parsed.key as DictionaryKey, params: parsed.params as Record<string, string | number> | undefined }
+      : undefined;
+  if (keyed !== undefined) return t(locale, keyed.key, keyed.params);
+  switch (status) {
+    case 400: {
+      // The provider's own rejections keep their per-reason face; only a body
+      // that states no reason this page knows falls back to the family copy.
+      const reason = parsed?.reason;
+      return typeof reason === "string"
+        ? verifyReasonMessage(locale, reason)
+        : t(locale, "settings.providers.addKeyRefused");
+    }
+    // A shared bot (the keyed body above) and a non-manager (the forbidden
+    // HTML page) are different causes with different remedies.
+    case 403:
+      return t(locale, "settings.providers.addKeyForbidden");
+    case 404:
+      return t(locale, "settings.providers.addKeyUnknownApp");
+    case 409:
+      return t(locale, "settings.providers.addKeyConflict");
+    case 429:
+      return t(locale, "settings.providers.addKeyRateLimited");
+    // The Worker already splits these: a missing master key answers plain
+    // text, a rejected write answers JSON. Both reuse its own wording.
+    case 500:
+      return t(
+        locale,
+        parsed === null ? "settings.providers.addKeyNoMasterKey" : "settings.providers.addKeyStorageFailed",
+      );
+    default:
+      return t(
+        locale,
+        parsed === null ? "settings.providers.addKeyUnreadable" : "settings.verify.unexpected",
+      );
+  }
 }
 
 export function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {

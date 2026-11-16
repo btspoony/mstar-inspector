@@ -767,6 +767,22 @@ export const zhCN: Dictionary = {
       customIdRequired: "{provider} 已被占用 — 请为此声明填写新的 id。",
       submitFailed: "该请求未到达服务端即失败 — 未存储任何内容。",
       /**
+       * 密钥添加时响应体自身无法解释的拒绝，按状态各一条。解析顺序是
+       * 状态优先、响应体其次：状态决定归属，带 key 的 JSON 体优先，
+       * 其次是可识别的纯文本体；无法读取的响应体才回落到该状态自己的文案。
+       * 上面的 submitFailed 仍是「请求未到达服务端」的唯一文案。
+       */
+      addKeyRefused: "请求在存储任何内容之前就被拒绝 — 请检查提供方与密钥后重新提交。",
+      addKeyForbidden: "只有工作区所有者或管理员可以修改该机器人的密钥 — 未存储任何内容。",
+      addKeyUnknownApp: "该 App 已不在此工作区 — 请刷新页面并打开仍在使用的 App。未存储任何内容。",
+      addKeyConflict: "该机器人已保存的配置在此对话框打开期间发生了变化 — 请刷新页面后重新提交。未存储任何内容。",
+      addKeyRateLimited: "当前尝试过于频繁 — 请等一分钟再重新提交。未存储任何内容。",
+      addKeyNoMasterKey:
+        "该部署没有为已存储密钥配置有效的 DASHBOARD_ENCRYPTION_KEY — 请运维配置后再重新提交。",
+      addKeyStorageFailed: "面板数据库拒绝了本次变更 — 未存储任何内容，可以重新提交。",
+      addKeyUnreadable:
+        "服务端返回了本页面无法读取的响应 — 未存储任何内容。若持续发生，请向平台运维索取 Worker 日志。",
+      /**
        * 每密钥用量探测：密钥行的操作按钮、其在该行下方展开的面板，以及四种形态
        * — ok（窗口条 / 余额）、unauthorized、absent、error。线上的诊断
        * reason 从不原样渲染。

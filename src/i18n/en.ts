@@ -943,6 +943,28 @@ export const en = {
       customIdRequired: "{provider} is taken — enter a new id for this declaration.",
       submitFailed: "That request failed before it reached the server — nothing was stored.",
       /**
+       * Add-key refusals the response's own body cannot explain, one per
+       * status family. Resolution is STATUS first, body second: the status
+       * picks the family, a keyed JSON body inside it wins, then a recognised
+       * plain-text body; only an unreadable body falls back to the family.
+       * `submitFailed` above stays the one face for a fetch that never
+       * reached the server.
+       */
+      addKeyRefused:
+        "The request was refused before anything was stored — check the provider and the key, then resubmit.",
+      addKeyForbidden: "Only a workspace owner or admin can change this bot's keys — nothing was stored.",
+      addKeyUnknownApp:
+        "This App is no longer in this workspace — reload the page and open a live App. Nothing was stored.",
+      addKeyConflict:
+        "The bot's stored configuration changed while this dialog was open — reload the page and resubmit. Nothing was stored.",
+      addKeyRateLimited: "Too many attempts right now — wait a minute and resubmit. Nothing was stored.",
+      addKeyNoMasterKey:
+        "This deployment has no valid DASHBOARD_ENCRYPTION_KEY for its stored keys — ask the operator to configure it, then resubmit.",
+      addKeyStorageFailed:
+        "The dashboard database rejected the change — nothing was stored. You can resubmit.",
+      addKeyUnreadable:
+        "The server answered in a form this page could not read — nothing was stored. If it keeps happening, ask the platform operator for the Worker log.",
+      /**
        * The per-key usage probe: the key-row action, the inline panel it
        * reveals under the row, and the four faces — ok (window bar /
        * balance), unauthorized, absent, error. The wire's diagnostic

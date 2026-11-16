@@ -74,10 +74,10 @@ describe("SPA 400-body resolution contract", () => {
     expect(settingsPage).not.toContain("message: body.trim()");
   });
 
-  test("the verify path prefers the mapped key when present; reason-only 400s keep verifyReasonMessage", () => {
-    expect(settingsPage).toContain(
-      "keyed !== undefined ? t(locale, keyed, keyedParams) : verifyReasonMessage(locale, reason)",
-    );
+  test("the verify path resolves status first: a keyed body wins, then the status's family", () => {
+    expect(settingsPage).toContain("if (keyed !== undefined) return t(locale, keyed.key, keyed.params);");
+    expect(settingsPage).toContain("switch (status) {");
+    expect(settingsPage).toContain('return typeof reason === "string"');
   });
 
   test("zh noConfiguredProviders copy drift (audit rejected-list note): zh references the Add Provider button like en", () => {
@@ -109,6 +109,7 @@ describe("malformed refusal params (both readers)", () => {
     for (const params of malformed) {
       const face = verifyRefusalMessage(
         "en",
+        400,
         JSON.stringify({
           reason: "unsupported_provider",
           key: "settings.error.providerUnknown",
@@ -123,6 +124,122 @@ describe("malformed refusal params (both readers)", () => {
   test("a well-formed params map still interpolates at both sites", () => {
     const body = JSON.stringify({ key: "settings.error.providerUnknown", params: { provider: "acme" } });
     expect(settingsErrorMessage("en", body)).toBe(t("en", "settings.error.providerUnknown", { provider: "acme" }));
-    expect(verifyRefusalMessage("en", body)).toBe(t("en", "settings.error.providerUnknown", { provider: "acme" }));
+    expect(verifyRefusalMessage("en", 400, body)).toBe(t("en", "settings.error.providerUnknown", { provider: "acme" }));
+  });
+});
+
+describe("add-key refusal: status first, body second", () => {
+  const face = (status: number, body: string, locale: "en" | "zh_CN" = "en"): string =>
+    verifyRefusalMessage(locale, status, body);
+  const providers = (key: string): string => t("en", `settings.providers.${key}` as never);
+
+  test("400 keeps the provider's own per-reason face (the body still decides inside the family)", () => {
+    expect(face(400, JSON.stringify({ ok: false, reason: "invalid_key" }))).toBe(t("en", "settings.verify.invalid_key"));
+    expect(face(400, JSON.stringify({ ok: false, reason: "quota_exhausted" }))).toBe(
+      t("en", "settings.verify.quota_exhausted"),
+    );
+    // A body naming a key this page knows wins over the reason.
+    expect(face(400, JSON.stringify({ key: "settings.error.providerKeyLimit", params: { provider: "acme", limit: 8 } }))).toBe(
+      t("en", "settings.error.providerKeyLimit", { provider: "acme", limit: 8 }),
+    );
+  });
+
+  test("400 with an unreadable body states the refusal instead of the provider's unexpected face", () => {
+    for (const body of ["", "not json at all", "<html>nope</html>"]) {
+      expect(face(400, body)).toBe(t("en", "settings.providers.addKeyRefused"));
+    }
+    // A reason this page does not know still resolves through the reason face.
+    expect(face(400, JSON.stringify({ reason: "brand_new_reason" }))).toBe(t("en", "settings.verify.unexpected"));
+  });
+
+  test("403 splits the shared bot (keyed) from the forbidden page", () => {
+    expect(face(403, JSON.stringify({ key: "settings.error.botReadOnly" }))).toBe(
+      t("en", "settings.error.botReadOnly"),
+    );
+    // The non-manager refusal is an HTML page: different cause, own remedy.
+    const page = face(403, "<!doctype html><title>Forbidden</title>");
+    expect(page).toBe(t("en", "settings.providers.addKeyForbidden"));
+    expect(page).not.toBe(t("en", "settings.error.botReadOnly"));
+  });
+
+  test("404, 409 and 429 each name their own cause and that nothing was stored", () => {
+    const statuses: Array<[number, string]> = [
+      [404, "settings.providers.addKeyUnknownApp"],
+      [409, "settings.providers.addKeyConflict"],
+      [429, "settings.providers.addKeyRateLimited"],
+    ];
+    const seen = new Set<string>();
+    for (const [status, key] of statuses) {
+      const message = face(status, "");
+      expect(message).toBe(t("en", key as never));
+      expect(message).toContain("Nothing was stored");
+      seen.add(message);
+    }
+    expect(seen.size).toBe(statuses.length);
+  });
+
+  test("500 splits by body shape: plain text is the master key, JSON is the rejected write", () => {
+    const noMasterKey = face(500, "the app settings need a configured DASHBOARD_ENCRYPTION_KEY");
+    expect(noMasterKey).toBe(t("en", "settings.providers.addKeyNoMasterKey"));
+    expect(noMasterKey).toContain("DASHBOARD_ENCRYPTION_KEY");
+    const storage = face(500, JSON.stringify({ ok: false, reason: "unexpected" }));
+    expect(storage).toBe(t("en", "settings.providers.addKeyStorageFailed"));
+    expect(storage).not.toBe(noMasterKey);
+  });
+
+  test("a non-JSON body on an unclassified status is the unreadable face, never the generic sentence", () => {
+    const unreadable = face(418, "<html>teapot</html>");
+    expect(unreadable).toBe(t("en", "settings.providers.addKeyUnreadable"));
+    expect(unreadable).toContain("Worker log");
+    expect(unreadable).not.toBe(t("en", "settings.verify.unexpected"));
+    // A body that IS readable still resolves inside the unclassified family.
+    expect(face(418, JSON.stringify({ ok: false, reason: "unexpected" }))).toBe(
+      t("en", "settings.verify.unexpected"),
+    );
+  });
+
+  test("no face echoes the submitted key, the body or the status code", () => {
+    const secret = "sk-live-should-never-surface";
+    const bodies = [
+      "",
+      JSON.stringify({ ok: false, reason: "invalid_key", key: secret, message: secret }),
+      "<html>Forbidden</html>",
+      JSON.stringify({ ok: false, reason: "unexpected", detail: secret }),
+    ];
+    for (const status of [400, 403, 404, 409, 429, 500, 418]) {
+      for (const body of bodies) {
+        for (const locale of ["en", "zh_CN"] as const) {
+          const message = face(status, body, locale);
+          expect(message).not.toContain(secret);
+          expect(message).not.toContain("<html>");
+          expect(message).not.toContain(` ${status} `);
+        }
+      }
+    }
+  });
+
+  test("every new face exists in both locales and says what happened to the data", () => {
+    const keys = [
+      "addKeyRefused",
+      "addKeyForbidden",
+      "addKeyUnknownApp",
+      "addKeyConflict",
+      "addKeyRateLimited",
+      "addKeyNoMasterKey",
+      "addKeyStorageFailed",
+      "addKeyUnreadable",
+    ] as const;
+    for (const key of keys) {
+      expect(t("en", `settings.providers.${key}` as never).length).toBeGreaterThan(0);
+      expect(t("zh_CN", `settings.providers.${key}` as never)).not.toBe(`settings.providers.${key}`);
+      expect(providers(key)).not.toContain("unexpected response");
+    }
+    // The one family whose remedy is a config fix rather than a retry still
+    // states the outcome; the rest all end in what happened to the data.
+    for (const key of keys.filter((candidate) => candidate !== "addKeyNoMasterKey")) {
+      expect(t("en", `settings.providers.${key}` as never)).toMatch(
+        /before anything was stored|nothing was stored|Nothing was stored|Nothing was saved/,
+      );
+    }
   });
 });

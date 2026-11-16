@@ -1735,10 +1735,12 @@ describe("section-scoped op feedback", () => {
     // channels plus the identity card's refresh (whose fetch rejects with no
     // status to key a message from).
     expect(source).toContain('message: t(locale, "common.saveFailed")');
-    // Three transport catches per face: the target detail's depth save, gate
-    // save and identity refresh; the bot page's settings save, verify and key
-    // delete.
-    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(6);
+    // Three transport catches per face, minus the key-verify one: the target
+    // detail's depth save, gate save and identity refresh; the bot page's
+    // settings save and key delete. A failed verify names its own face
+    // (`settings.providers.submitFailed`), because that dialog is the surface
+    // that must tell the operator nothing was stored.
+    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(5);
     // Page-level reload failures keep the load-failed copy: load()'s two
     // background-failure paths and the draft create's reload-failure return.
     expect(source).toContain('message: t(locale, "common.loadFailed")');
