@@ -298,12 +298,54 @@ export function effectiveTargetSettings(
   };
 }
 
-/** The refusal's cause: the bot's own row, read only after the guard refused. */
-const CREATE_SHARED_TARGET_CAUSE_SQL = `
-  SELECT b.deleted_at, b.scope,
-         EXISTS (SELECT 1 FROM review_targets t
-                  WHERE t.bot_id = b.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL) AS has_target
-    FROM review_bots b WHERE b.id = ?1`;
+/**
+ * Flip the inheritance switch (D16). `1` sets the flag only: the row's own
+ * policy columns become inert, never read again. `0` snapshots the values the
+ * target is running with right now into the row — reading the defaults when it
+ * was inheriting, its own columns otherwise — so the toggle itself changes no
+ * live behaviour. A later toggle-off re-snapshots from the then-current
+ * defaults. An unknown or deleted target writes nothing.
+ */
+export async function setInheritance(
+  db: TargetsStoreD1,
+  targetId: string,
+  follow: 0 | 1,
+): Promise<void> {
+  if (follow === 1) {
+    await db
+      .prepare(
+        `UPDATE review_targets SET follow_workspace_defaults = 1, updated_at = datetime('now')
+         WHERE id = ? AND deleted_at IS NULL`,
+      )
+      .bind(targetId)
+      .run();
+    return;
+  }
+  const target = await db
+    .prepare(`SELECT * FROM review_targets WHERE id = ? AND deleted_at IS NULL`)
+    .bind(targetId)
+    .first<ReviewTargetRow>();
+  if (!target) return;
+  const effective = effectiveTargetSettings(
+    target,
+    await getWorkspaceReviewDefaults(db, target.workspace_id),
+  );
+  await db
+    .prepare(
+      `UPDATE review_targets
+          SET follow_workspace_defaults = 0, review_trigger_mode = ?, review_level = ?,
+              check_min_score = ?, check_pass_verdicts = ?, updated_at = datetime('now')
+        WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .bind(
+      effective.triggerMode,
+      effective.level,
+      effective.checkMinScore,
+      JSON.stringify(effective.checkPassVerdicts),
+      targetId,
+    )
+    .run();
+}
 
 /** Create the `review_targets` store over one D1 handle. */
 export function createTargetsStore(db: TargetsStoreD1) {
@@ -524,15 +566,6 @@ export function createTargetsStore(db: TargetsStoreD1) {
         .bind(...values, targetId)
         .run();
       return res.meta.changes > 0;
-    },
-
-    /**
-     */
-          .prepare(
-          )
-        .prepare(
-        )
-        )
     },
 
     /**
