@@ -3670,6 +3670,69 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     ]);
   });
 
+  test("ignores a removed installation row, so a stale binding cannot abort or mis-attribute", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    seedPullRequest(db, "pr-42", 42);
+    seedFailure(db, "failure-42", 42);
+    // 0055 keeps the installation row and sets removed_at; a second bot holds
+    // the live binding at the same installation id with its own target. An
+    // unfiltered join would see two targets and abort; the live binding must win.
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', 'acme', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('target-b', 'ws-other', 'bot-a', 'target-b', 'acme',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    // A second bot now holds the live binding for the same installation id,
+    // pointing at its own target; the old bot's row is marked removed.
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+            status, created_at, updated_at)
+         VALUES ('bot-b', 9102, 'bot-b', 'enc', 'enc', 'acme', 'active',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-b', 'ws-other')")
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+         VALUES ('install-live', 'bot-b', 123, 'acme', datetime('now'))`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `UPDATE bot_installations SET removed_at = '2026-01-01T00:00:00.000Z' WHERE bot_id = 'bot-a'`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests
+           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+         VALUES ('pr-b', 'bot-b', 'target-b', 'acme', 'widgets', 42, 'PR', 'open', 'sha',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+
+    applyLedgerTargetMigration(db);
+
+    // The removed binding is ignored, so the live one wins: exactly one target.
+    expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
+      { id: "failure-42", target_id: "target-b" },
+    ]);
+  });
+
   test("refuses a finding whose bot resolves to two different targets", () => {
     const db = preLedgerTargetDb();
     seedParents(db);

@@ -97,6 +97,17 @@ SET target_id = (
     AND p.pr_number = review_findings.pr_number
 );
 
+-- 0057 dropped `idx_pull_requests_bot_pr` when it made the ledger target-keyed,
+-- so the finding backfill's `(bot_id, owner, repo, pr_number)` lookup has no
+-- index and would scan the whole ledger once per finding row. Recreate it: the
+-- pair of keys is exactly what both ledgers join on, and the target-keyed one
+-- cannot serve a bot-keyed lookup.
+CREATE INDEX idx_pull_requests_bot_pr ON pull_requests(bot_id, owner, repo, pr_number);
+
+-- The failure attribution resolves installation → bot. `bot_installations` is
+-- keyed by `bot_id`, so an installation-keyed lookup needs its own index.
+CREATE INDEX idx_bot_installations_installation ON bot_installations(installation_id);
+
 -- The candidate set must resolve to EXACTLY one distinct target. Two bots
 -- holding the same installation id, with a pull-request row each at the same
 -- key but different targets, is the case SQLite would answer with one row of
@@ -110,7 +121,8 @@ WHERE (
   SELECT COUNT(DISTINCT p.target_id)
   FROM bot_installations i
   JOIN pull_requests p ON p.bot_id = i.bot_id
-  WHERE i.installation_id = f.installation_id
+  WHERE i.removed_at IS NULL
+    AND i.installation_id = f.installation_id
     AND p.owner = f.owner
     AND p.repo = f.repo
     AND p.pr_number = f.pr_number
@@ -124,7 +136,8 @@ SET target_id = (
   SELECT p.target_id
   FROM bot_installations i
   JOIN pull_requests p ON p.bot_id = i.bot_id
-  WHERE i.installation_id = review_failures.installation_id
+  WHERE i.removed_at IS NULL
+    AND i.installation_id = review_failures.installation_id
     AND p.owner = review_failures.owner
     AND p.repo = review_failures.repo
     AND p.pr_number = review_failures.pr_number
@@ -156,7 +169,8 @@ WHERE f.target_id IS NULL
     SELECT 1
     FROM bot_installations i
     JOIN pull_requests p ON p.bot_id = i.bot_id
-    WHERE i.installation_id = f.installation_id
+    WHERE i.removed_at IS NULL
+      AND i.installation_id = f.installation_id
       AND p.owner = f.owner
       AND p.repo = f.repo
       AND p.pr_number = f.pr_number
