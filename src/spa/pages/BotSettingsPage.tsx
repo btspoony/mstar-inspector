@@ -233,10 +233,12 @@ export function BotSettingsView({
         fields,
       ));
     } catch {
-      return { kind: "error", message: t(locale, "common.saveFailed") };
+      // A fetch that never reached the server: the dialog's own face for it,
+      // which also says nothing was stored.
+      return { kind: "error", message: t(locale, "settings.providers.submitFailed") };
     }
     if (status >= 400) {
-      const outcome: OpNotice = { kind: "error", message: verifyRefusalMessage(locale, body) };
+      const outcome: OpNotice = { kind: "error", message: verifyRefusalMessage(locale, status, body) };
       await onReload({ background: true });
       return outcome;
     }
