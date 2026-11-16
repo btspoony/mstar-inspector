@@ -2751,18 +2751,25 @@ async function resolveScopedApp(
 }
 
 /**
- * The bot's first live target in this workspace — the app-scoped routes' local
+ * The bot's ONE live target in this workspace — the app-scoped routes' local
  * replacement for the retired store read. Plan 371 replaces this surface with
  * the repository list; until then every app-scoped route keeps behaving as it
  * did for the one-target-per-bot shape.
+ *
+ * Ambiguity is REFUSED, never resolved newest-wins: a bot holding two live
+ * targets in one workspace names no single configuration, so the answer is
+ * null and each caller keeps its "no single target" branch (404 / absent
+ * facts) rather than acting on a guessed row.
  */
 async function firstTargetForBot(
   db: DashboardD1,
   workspaceId: string,
   botId: string,
 ): Promise<ReviewTargetRow | null> {
-  const targets = await createTargetsStore(db).listLive(workspaceId);
-  return targets.find((target) => target.bot_id === botId) ?? null;
+  const live = (await createTargetsStore(db).listLiveByBot(botId)).filter(
+    (target) => target.workspace_id === workspaceId,
+  );
+  return live.length === 1 ? live[0]! : null;
 }
 
 /**

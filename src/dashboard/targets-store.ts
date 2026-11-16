@@ -404,6 +404,23 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
+     * The bot's live targets in creation order (`idx_review_targets_bot_id`).
+     * The caller filters by workspace: the index answers `bot_id` alone, and a
+     * bot can hold one target per workspace.
+     */
+    async listLiveByBot(botId: string): Promise<ReviewTargetRow[]> {
+      const res = await db
+        .prepare(
+          `SELECT * FROM review_targets
+           WHERE bot_id = ? AND deleted_at IS NULL
+           ORDER BY created_at, id`,
+        )
+        .bind(botId)
+        .all<ReviewTargetRow>();
+      return res.results;
+    },
+
+    /**
      * The target a delivery acts on, by the contract's three steps:
      *
      *   1. `repo.id` known → the live row holding it for this bot; a changed

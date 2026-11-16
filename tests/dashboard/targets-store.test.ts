@@ -185,6 +185,22 @@ describe("tenant reads bind workspace_id", () => {
   });
 });
 
+describe("listLiveByBot", () => {
+  test("a bot holding two live targets in one workspace answers both in creation order", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-two");
+    const older = seedTarget(db, { id: "t-older", botId: "bot-two", repoId: 9600, repoOwner: "acme", repoName: "widgets" });
+    const newer = seedTarget(db, { id: "t-newer", botId: "bot-two", repoId: 9601, repoOwner: "acme", repoName: "gadgets" });
+    // The insert stamps both rows in the same second; the columns are updated
+    // so creation order is the row's own fact, not the fixture's timing.
+    db.raw.prepare("UPDATE review_targets SET created_at = '2026-01-01 00:00:00' WHERE id = ?").run(older);
+    db.raw.prepare("UPDATE review_targets SET created_at = '2026-01-02 00:00:00' WHERE id = ?").run(newer);
+    const store = createTargetsStore(db);
+
+    expect((await store.listLiveByBot("bot-two")).map((target) => target.id)).toEqual([older, newer]);
+  });
+});
+
 describe("create (one repository, one workspace)", () => {
   test("a created target binds the repository, inherits the workspace and carries the caches", async () => {
     const db = createMigratedTestD1();

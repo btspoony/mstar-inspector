@@ -2604,6 +2604,22 @@ describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => 
   });
 });
 
+describe("app-scoped target lookup refuses ambiguity", () => {
+  test("two live targets in one workspace answer no single target: 404, never newest-wins", async () => {
+    const { db, app } = await seededWorld();
+    // A bot with two repositories in the same workspace names no single
+    // configuration, so the app-scoped lookup must refuse rather than pick one.
+    seedTarget(db, app.id, { name: "second-repo", repoName: "gadgets", repoId: 7001 });
+    const res = await get(
+      `/dashboard/default/api/apps/${APP_ID}/settings`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe("unknown app");
+  });
+});
+
 describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
   const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
