@@ -66,9 +66,7 @@ export type QuotaVersionRow = {
 };
 
 export type QuotaVersionsPayload = {
-  /** `YYYY-MM` of the month the `current` marker is relative to. */
-  month: string;
-  /** The version judging this month. */
+  /** The version judging this month (the `current` marker is relative to it). */
   judgingVersion: number;
   /** The ordinal a create would mint — the form's read-only `fieldVersion`. */
   nextVersion: number;
@@ -107,7 +105,6 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
     monthlyRp: profile.monthlyRp,
   }));
   return {
-    month: month.month,
     judgingVersion: judging.version,
     nextVersion: profiles.reduce((max, profile) => Math.max(max, profile.version), 0) + 1,
     plans,

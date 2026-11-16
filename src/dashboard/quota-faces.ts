@@ -19,8 +19,6 @@ import type { DashboardD1 } from "./users";
 
 /** What the workspace card's credit block renders, all of it integer RP. */
 export type WorkspaceQuota = {
-  /** `YYYY-MM`: the card's one month label. */
-  month: string;
   usedRp: number;
   /** NULL = no monthly limit on this plan. */
   limitRp: number | null;
@@ -48,7 +46,6 @@ export async function readWorkspaceQuota(
   ]);
   const usage = rows[0];
   return {
-    month: month.month,
     usedRp: usage?.total ?? 0,
     limitRp: monthlyRp,
     sharedRp: usage?.sharedRp ?? 0,

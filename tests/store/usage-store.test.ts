@@ -259,3 +259,35 @@ describe("usage_events.source (migration 0065)", () => {
     ]);
   });
 });
+
+/** The aggregate the two faces share, as SQL the plan can be asked about. */
+function usageByWorkspaceSql(extraWhere = ""): string {
+  return `SELECT workspace_id AS workspaceId, COALESCE(SUM(rp), 0) AS total
+            FROM usage_events
+           WHERE ${extraWhere === "" ? "" : `${extraWhere} AND `}occurred_at >= '2026-10-01T00:00:00.000Z' AND occurred_at < '2026-11-01T00:00:00.000Z'
+           GROUP BY workspace_id`;
+}
+
+describe("migration 0066 (the preview's month index)", () => {
+  test("occurred_at leads and the aggregated columns are carried", () => {
+    const db = createMigratedTestD1();
+    expect(db.raw.prepare(`PRAGMA index_info('idx_usage_events_occurred_rp')`).all()).toEqual([
+      { seqno: 0, cid: expect.any(Number), name: "occurred_at" },
+      { seqno: 1, cid: expect.any(Number), name: "workspace_id" },
+      { seqno: 2, cid: expect.any(Number), name: "rp" },
+      { seqno: 3, cid: expect.any(Number), name: "source" },
+    ]);
+  });
+
+  test("both month reads are index-served: the preview by the window, the tenant by its workspace", () => {
+    const db = createMigratedTestD1();
+    const plan = (sql: string) =>
+      (db.raw.query(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>)
+        .map((row) => row.detail)
+        .join(" | ");
+    // The preview binds no workspace: it must not scan the table.
+    expect(plan(usageByWorkspaceSql())).toContain("idx_usage_events_occurred_rp");
+    // The tenant form keeps its seek on the pre-existing index.
+    expect(plan(usageByWorkspaceSql("workspace_id = 'default'"))).toContain("usage_events_workspace_occurred");
+  });
+});

@@ -110,7 +110,6 @@ import {
   SHARED_BOT_REFUSAL,
   WORKSPACE_CREATION_CLOSED_REFUSAL,
   checkEntitlement,
-  isFreeTierPlan,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
   sharedBotAvailability,
@@ -1263,15 +1262,15 @@ dashboardApp.post("/api/workspaces", async (c) => {
       return c.text(WORKSPACE_CREATION_CLOSED_REFUSAL, 409);
     }
     if (mode === "saas") {
-      const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
-      // The workspace id is the one about to be created: `free-workspace-slot`
-      // reads nothing off it, and this is the mode's own precondition anyway.
+      // The workspace does not exist yet, so the question names none: the
+      // per-login rule alone, with no plan read and the counter read only when
+      // the answer can turn on it.
       const verdict = await checkEntitlement({
         db,
         mode,
-        workspaceId: "",
+        workspaceId: null,
         kind: "free-workspace-slot",
-        freeMembershipCount: freeCount,
+        freeMembershipCount: () => countFreeMembershipsForLogin(db, user.github_login),
       });
       if (!verdict.ok) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
     }
@@ -2156,19 +2155,17 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
     invite.expires_at > now &&
     invite.github_login.toLowerCase() === user.github_login.toLowerCase();
   if (wouldAccept) {
-    // One call answers both halves of this precondition: the verdict carries the
-    // TARGET workspace's plan (only a `free` one is gated, and the free-slot copy
-    // asserts the slot belongs to the accepting login) and its slot answer.
+    // One call answers both halves of this precondition: the branch resolves the
+    // TARGET workspace's plan (only a `free` one is gated) and reads the counter
+    // only for such a workspace — so a paid acceptance counts nothing.
     const verdict = await checkEntitlement({
       db,
       mode,
       workspaceId: tenant.workspaceId,
       kind: "free-workspace-slot",
-      freeMembershipCount: await countFreeMembershipsForLogin(db, user.github_login),
+      freeMembershipCount: () => countFreeMembershipsForLogin(db, user.github_login),
     });
-    if (!verdict.ok && isFreeTierPlan(verdict.plan.id)) {
-      return inviteMutationResponse(c, INVITE_FREE_SLOT_REFUSAL, 409);
-    }
+    if (!verdict.ok) return inviteMutationResponse(c, INVITE_FREE_SLOT_REFUSAL, 409);
   }
 
   // The read above is fast-fail UX; `acceptInvite` re-checks the slot inside

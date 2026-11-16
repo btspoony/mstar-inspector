@@ -821,25 +821,49 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // the enqueue call at the end of this route; a store fault propagates as a
   // 500, exactly like the allowlist read (an unapplied gate never admits a
   // delivery).
+  //
+  // This whole block is BEST-EFFORT, for the reason the `review_global` read
+  // above it is: it sits before the PR ledger, the `last_webhook_at` touch and
+  // the enqueue, so a store fault here would turn an already-verified delivery
+  // into a 500 and cost it every one of those diagnostics. A fault is therefore
+  // a REFUSAL (recorded, skipped, 200), never a failed request: the review does
+  // not run, and the failure row says which read could not answer. Fail-closed
+  // — a verdict the platform could not compute never admits a delivery — and
+  // never silent: the row and one structured warn both name the cause.
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   let refusal: DeliveryRefusal | null = null;
   if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {
-    if (row.scope === "shared") {
-      // The same one entry the target-creation route calls; an OWN bot is never
-      // asked, so this path pays no plan read for it.
-      const verdict = await checkEntitlement({
-        db,
-        mode,
-        workspaceId: target.workspace_id,
-        kind: "shared-bot",
-        botScope: "shared",
-      });
-      if (!verdict.ok && verdict.refusal.kind === "shared-bot") {
-        refusal = { kind: "shared-bot-not-included", planId: verdict.refusal.planId };
+    try {
+      if (row.scope === "shared") {
+        // The same one entry the target-creation route calls; an OWN bot is never
+        // asked, so this path pays no plan read for it.
+        const verdict = await checkEntitlement({
+          db,
+          mode,
+          workspaceId: target.workspace_id,
+          kind: "shared-bot",
+          botScope: "shared",
+        });
+        if (!verdict.ok && verdict.refusal.kind === "shared-bot") {
+          refusal = { kind: "shared-bot-not-included", planId: verdict.refusal.planId };
+        }
       }
-    }
-    if (refusal === null && mode !== "self-hosted") {
-      refusal = await quotaRefusal(db, target, row.scope, mode);
+      if (refusal === null && mode !== "self-hosted") {
+        refusal = await quotaRefusal(db, target, row.scope, mode);
+      }
+    } catch (err) {
+      // Three faults land here: a D1 error among the gate's own reads; an empty
+      // `quota_profiles` table (migration 0063 not applied); and a plan with no
+      // ceiling row in the judging profile — a CONFIGURATION defect that throws
+      // by design and would otherwise 500 every webhook of that plan until a
+      // new profile is published. All three are reported as an `entitlement`
+      // refusal, whose stage is the one the failure face already pages.
+      refusal = { kind: "entitlement-unreadable" };
+      webhookWarn(
+        "entitlement_gate_failed",
+        redactSecrets(err instanceof Error ? err.message : String(err)),
+        "entitlement gate could not answer — refusing the delivery (fail-closed), webhook answers 200",
+      );
     }
   }
   try {

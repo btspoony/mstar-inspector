@@ -26,7 +26,7 @@
  */
 import type { DeploymentMode } from "../worker/env";
 import type { D1Like } from "../store/types";
-import { resolveMonthlyQuota } from "../store/quota-store";
+import { quotaSpent, resolveMonthlyQuota } from "../store/quota-store";
 import type { WorkspaceStoreD1 } from "./workspace-store";
 
 /**
@@ -217,6 +217,25 @@ export type EntitlementKind =
 type Base = { db: WorkspaceStoreD1; mode: DeploymentMode; workspaceId: string };
 
 /**
+ * The free-workspace-slot question. Two things make it the odd kind.
+ *
+ * `workspaceId: null` is the "no workspace yet" form — the creation route (the
+ * workspace does not exist) and the SPA boot's create affordance (no workspace
+ * in the question at all) ask it that way. Those callers pay NO plan read: the
+ * rule they ask about is per LOGIN. A named workspace makes the branch
+ * plan-aware, because the slot gates only an acceptance into a workspace that
+ * resolves to `free` — a paid target is never gated (`index.ts` acceptance).
+ *
+ * `freeMembershipCount` is a thunk ordered AFTER the plan: a paid target is
+ * allowed without ever counting, and only a free one pays the counter.
+ */
+type FreeSlotCtx = Omit<Base, "workspaceId"> & {
+  kind: "free-workspace-slot";
+  workspaceId: string | null;
+  freeMembershipCount: () => Promise<number>;
+};
+
+/**
  * One question and the counters it is judged against. Counters are caller
  * inputs because they are read inside the caller's own statements (a seats count
  * in the same batch as the guarded insert, a month sum the enqueue already
@@ -237,7 +256,7 @@ type Base = { db: WorkspaceStoreD1; mode: DeploymentMode; workspaceId: string };
  */
 export type EntitlementCtx =
   | (Base & { kind: "member-slot"; seats: number | null })
-  | (Base & { kind: "free-workspace-slot"; freeMembershipCount: number })
+  | FreeSlotCtx
   | (Base & { kind: "shared-bot"; botScope: "shared" | "own" })
   | (Base & { kind: "app-count"; liveAppCount: () => Promise<number> })
   | (Base & {
@@ -267,6 +286,22 @@ export type EntitlementVerdict =
   | { ok: false; plan: PlanLimits; refusal: EntitlementRefusal };
 
 /**
+ * The free-workspace-slot verdict. Its ALLOWED case carries no plan: the
+ * question is about the login, and two of its three callers name no workspace
+ * at all, so minting a plan there would be a read nobody uses (the SPA boot
+ * would pay it on every page load). The REFUSED case carries one — the named
+ * workspace's — so the acceptance route can log which plan its copy blamed.
+ */
+export type FreeSlotVerdict =
+  | { ok: true }
+  | {
+      ok: false;
+      /** The named workspace's plan, or `null` when the question named none. */
+      plan: PlanLimits | null;
+      refusal: { kind: "free-workspace-slot" };
+    };
+
+/**
  * THE plan decision: every "may this workspace do X under its plan" question is
  * answered here, one branch per {@link EntitlementKind}. A route, a store or the
  * SPA maps the verdict onto its own surface (400 copy, 409 class, enqueue skip)
@@ -278,51 +313,88 @@ export type EntitlementVerdict =
  * A NULL plan limit is no cap, so those branches never refuse (the caller's own
  * guarded SQL stays the atomic authority where one exists).
  */
-export async function checkEntitlement(ctx: EntitlementCtx): Promise<EntitlementVerdict> {
-  const plan = await resolveWorkspacePlan(ctx.db, ctx.workspaceId, ctx.mode);
+export function checkEntitlement(ctx: FreeSlotCtx): Promise<FreeSlotVerdict>;
+export function checkEntitlement(
+  ctx: Exclude<EntitlementCtx, { kind: "free-workspace-slot" }>,
+): Promise<EntitlementVerdict>;
+export async function checkEntitlement(
+  ctx: EntitlementCtx,
+): Promise<EntitlementVerdict | FreeSlotVerdict> {
+  // The plan is read ONCE per call and only by a branch that needs it: every
+  // `self-hosted` answer, and the free-slot question that names no workspace,
+  // cost no read at all. The free-slot branch resolves it late enough to sit
+  // AFTER its own "does this workspace even have a free tier" test.
+  let resolved: PlanLimits | undefined;
+  const plan = async (workspaceId: string): Promise<PlanLimits> =>
+    (resolved ??= await resolveWorkspacePlan(ctx.db, workspaceId, ctx.mode));
+
   switch (ctx.kind) {
     case "member-slot": {
+      const limits = await plan(ctx.workspaceId);
       // `seats: null` and a NULL limit both mean no verdict to mint: the guarded
       // insert counts, or the plan has no cap to exceed.
-      if (ctx.seats === null || plan.includedMembers === null || memberSlotAvailable(ctx.seats, plan.includedMembers)) {
-        return { ok: true, plan };
+      if (
+        ctx.seats === null ||
+        limits.includedMembers === null ||
+        memberSlotAvailable(ctx.seats, limits.includedMembers)
+      ) {
+        return { ok: true, plan: limits };
       }
-      return { ok: false, plan, refusal: { kind: "member-slot", limit: plan.includedMembers, seats: ctx.seats } };
+      return { ok: false, plan: limits, refusal: { kind: "member-slot", limit: limits.includedMembers, seats: ctx.seats } };
     }
-    case "free-workspace-slot":
-      // The counter is per LOGIN, not per plan: the verdict's plan is unused by
-      // this branch and the caller decides which of the two 409 bodies it is.
-      return freeSlotAvailable(ctx.freeMembershipCount)
-        ? { ok: true, plan }
-        : { ok: false, plan, refusal: { kind: "free-workspace-slot" } };
-    case "shared-bot":
-      return ctx.botScope === "own" || assertSharedBotAllowed(plan) === null
-        ? { ok: true, plan }
-        : { ok: false, plan, refusal: { kind: "shared-bot", planId: plan.id } };
+    case "free-workspace-slot": {
+      // No named workspace → the per-login rule alone, with no plan read: the
+      // creation route creates a workspace that resolves to `free` by
+      // construction, and the SPA boot asks only about the login.
+      if (ctx.workspaceId === null) {
+        return freeSlotAvailable(await ctx.freeMembershipCount())
+          ? { ok: true }
+          : { ok: false, plan: null, refusal: { kind: "free-workspace-slot" } };
+      }
+      // A named target is only gated when it resolves to the free tier, and a
+      // paid one never pays the counter.
+      const limits = await plan(ctx.workspaceId);
+      if (!isFreeTierPlan(limits.id)) return { ok: true };
+      return freeSlotAvailable(await ctx.freeMembershipCount())
+        ? { ok: true }
+        : { ok: false, plan: limits, refusal: { kind: "free-workspace-slot" } };
+    }
+    case "shared-bot": {
+      const limits = await plan(ctx.workspaceId);
+      return ctx.botScope === "own" || assertSharedBotAllowed(limits) === null
+        ? { ok: true, plan: limits }
+        : { ok: false, plan: limits, refusal: { kind: "shared-bot", planId: limits.id } };
+    }
     case "app-count": {
+      const limits = await plan(ctx.workspaceId);
       // The count is read only for a plan that HAS a cap, so an uncapped plan
       // (and `self-hosted`, which answers the unlimited constant) pays nothing
       // — the pre-consolidation behaviour, kept because the count touches the
       // Apps tables and a workspace with no plan row must not need them.
-      if (plan.appsPerWorkspace === null) return { ok: true, plan };
+      if (limits.appsPerWorkspace === null) return { ok: true, plan: limits };
       const count = await ctx.liveAppCount();
-      return count < plan.appsPerWorkspace
-        ? { ok: true, plan }
-        : { ok: false, plan, refusal: { kind: "app-count", limit: plan.appsPerWorkspace, count } };
+      return count < limits.appsPerWorkspace
+        ? { ok: true, plan: limits }
+        : { ok: false, plan: limits, refusal: { kind: "app-count", limit: limits.appsPerWorkspace, count } };
     }
     case "review-quota": {
+      const limits = await plan(ctx.workspaceId);
       // The ceiling and the plan id come from ONE plan read, which is why this
       // kind is the one whose shape forces the whole function to be async.
-      const { monthlyRp } = await resolveMonthlyQuota(ctx.db, ctx.monthStart, plan.id);
-      // `used + cost > limit` refuses, so a month exactly at its ceiling admits
-      // the review that lands on it and only the next RP is refused.
-      return monthlyRp === null || ctx.usedRp + ctx.costRp <= monthlyRp
-        ? { ok: true, plan }
-        : {
-            ok: false,
-            plan,
-            refusal: { kind: "review-quota", limit: monthlyRp, used: ctx.usedRp, cost: ctx.costRp },
-          };
+      const { monthlyRp } = await resolveMonthlyQuota(ctx.db, ctx.monthStart, limits.id);
+      // ONE predicate for the whole system (`quotaSpent`): `used + cost > limit`
+      // refuses. A review whose cost exactly fits the remaining headroom
+      // (`used + cost == limit`) is admitted; everything above it is refused,
+      // and a month already AT its ceiling refuses every review, since
+      // `rpFor` is >= 1.
+      if (monthlyRp !== null && quotaSpent(ctx.usedRp, monthlyRp, ctx.costRp)) {
+        return {
+          ok: false,
+          plan: limits,
+          refusal: { kind: "review-quota", limit: monthlyRp, used: ctx.usedRp, cost: ctx.costRp },
+        };
+      }
+      return { ok: true, plan: limits };
     }
   }
 }

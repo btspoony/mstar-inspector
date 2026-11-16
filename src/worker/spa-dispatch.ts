@@ -242,9 +242,9 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
       const verdict = await checkEntitlement({
         db,
         mode: deploymentMode,
-        workspaceId: "",
+        workspaceId: null,
         kind: "free-workspace-slot",
-        freeMembershipCount: await countFreeMembershipsForLogin(db, login),
+        freeMembershipCount: () => countFreeMembershipsForLogin(db, login),
       });
       if (!verdict.ok) createBlockedReason = "free_slot";
     }

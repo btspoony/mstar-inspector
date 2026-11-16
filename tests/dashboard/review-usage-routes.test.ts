@@ -159,7 +159,6 @@ describe("GET /dashboard/<ref>/api/settings/review-usage", () => {
       // month's spend in RP. Nothing was metered in this fixture, so 0 is a
       // real answer, not a missing field.
       quota: {
-        month: month.month,
         usedRp: 0,
         limitRp: 20000,
         sharedRp: 0,
@@ -198,7 +197,6 @@ describe("GET /dashboard/<ref>/api/settings/review-usage", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { quota: Record<string, unknown> };
     expect(body.quota).toMatchObject({
-      month: month.month,
       usedRp: 62,
       limitRp: 20000,
       sharedRp: 60,

@@ -617,7 +617,6 @@ export type QuotaVersionRow = {
 };
 
 export type QuotaVersionsData = {
-  month: string;
   judgingVersion: number;
   /** The ordinal a create would mint — the form's read-only version field. */
   nextVersion: number;
@@ -651,7 +650,6 @@ function quotaCeilings(value: unknown, what: string): Record<string, number | nu
 export async function readQuotaVersions(): Promise<QuotaVersionsData> {
   const body = map(await fetchJson(`${BASE}/quota-versions`), "quota versions response");
   return {
-    month: text(body, "month"),
     judgingVersion: num(body, "judgingVersion"),
     nextVersion: num(body, "nextVersion"),
     plans: list(body.plans, "plans").map((row) => ({ id: text(row, "id"), name: text(row, "name") })),

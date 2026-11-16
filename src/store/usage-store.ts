@@ -83,12 +83,20 @@ export type MonthlyRpUsage = {
  * {@link readMonthlyRpByWorkspace} — so `sharedRp + byokRp === total` (for rows
  * written since migration 0065) and no face can invent a second definition.
  *
- * Two statement texts, one aggregate: the tenant form's `workspace_id = ?`
- * prefix is the leading column of `usage_events_workspace_occurred` (migration
- * 0031), so the enqueue's read stays an index seek. Spelling it as
- * `(?1 IS NULL OR workspace_id = ?1)` would make SQLite scan the whole index —
- * SQLite cannot fold a parameter-only OR branch into the seek, and this is the
- * pre-enqueue path of every review.
+ * Two statement texts, one aggregate, and two DIFFERENT indexes — chosen by
+ * predicate, not by taste:
+ *
+ * - the tenant form leads `workspace_id = ?` and rides
+ *   `usage_events_workspace_occurred (workspace_id, occurred_at)` (migration
+ *   0031), so the enqueue's read — this is the pre-enqueue path of every
+ *   review — stays a seek;
+ * - the preview binds no workspace at all, so its predicate is the window, and
+ *   it rides `idx_usage_events_occurred_rp (occurred_at, workspace_id, rp,
+ *   source)` (migration 0066), which also covers the three aggregated columns.
+ *
+ * Spelling the tenant form as `(?1 IS NULL OR workspace_id = ?1)` to reach both
+ * shapes from one text would make SQLite scan the whole index — it cannot fold
+ * a parameter-only OR branch into the seek.
  *
  * `rp` is 0 on every row written before migration 0064 and `source` is NULL on
  * every row written before 0065, so a pre-metering row contributes to nothing.
@@ -144,9 +152,10 @@ export async function readMonthlyRpByWorkspace(
 }
 
 /**
- * This workspace's RP spent in the half-open window — the ceiling's own read,
- * and the one number the card and the preview both show. A workspace with no
- * row in the window spent nothing.
+ * The RP this workspace spent in the half-open window — the ceiling's own read
+ * and the number the tenant card shows. It answers from
+ * {@link readMonthlyRp} rather than a second `SUM`, so it cannot disagree with
+ * the split beside it. A workspace with no row in the window spent nothing.
  */
 export async function sumMonthlyRp(
   db: D1Like,

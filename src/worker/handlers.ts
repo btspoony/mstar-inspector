@@ -36,6 +36,7 @@
 import type { D1Database, KVNamespace } from "@cloudflare/workers-types";
 import { idemCommentKey, idemKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
 import {
+  ENTITLEMENT_UNREADABLE_SKIP_REASON,
   QUOTA_SKIP_REASON,
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_SKIP_REASON,
@@ -203,16 +204,37 @@ async function runBeforeEnqueue(
  */
 export type DeliveryRefusal =
   | SharedBotRefusal
-  | { kind: "quota-exhausted"; limit: number; used: number; cost: number };
+  | { kind: "quota-exhausted"; limit: number; used: number; cost: number }
+  /**
+   * The gate could not answer (a store fault, an empty profile table, a plan
+   * with no ceiling row). Fail-closed: the delivery is skipped rather than
+   * admitted, on the `entitlement` stage — the same stage and the same paging
+   * as a capability refusal, because the failure face's job is "this delivery
+   * ran no review and here is why".
+   */
+  | { kind: "entitlement-unreadable" };
 
 /** The `review_failures.stage` a refusal is attributed to. */
 export function deliveryRefusalStage(refusal: DeliveryRefusal): FailureStage {
   return refusal.kind === "quota-exhausted" ? QUOTA_STAGE : SHARED_BOT_ENTITLEMENT_STAGE;
 }
 
-/** The one sentence a refusal carries, on all three surfaces that repeat it. */
+/**
+ * The one sentence a refusal carries, on all three surfaces that repeat it.
+ *
+ * `entitlement-unreadable` gets its own sentence rather than reusing the
+ * capability's: the author is told nothing that is untrue about their plan, and
+ * the operator reading the same row learns the gate could not answer.
+ */
 export function deliveryRefusalReason(refusal: DeliveryRefusal): string {
-  return refusal.kind === "quota-exhausted" ? QUOTA_SKIP_REASON : SHARED_BOT_ENTITLEMENT_SKIP_REASON;
+  switch (refusal.kind) {
+    case "quota-exhausted":
+      return QUOTA_SKIP_REASON;
+    case "entitlement-unreadable":
+      return ENTITLEMENT_UNREADABLE_SKIP_REASON;
+    case "shared-bot-not-included":
+      return SHARED_BOT_ENTITLEMENT_SKIP_REASON;
+  }
 }
 
 /**

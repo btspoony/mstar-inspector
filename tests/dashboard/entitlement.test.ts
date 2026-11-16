@@ -123,24 +123,68 @@ describe("checkEntitlement — member-slot", () => {
 });
 
 describe("checkEntitlement — free-workspace-slot", () => {
+  const freeSlot = (
+    db: ReturnType<typeof migrated>,
+    workspaceId: string | null,
+    count: number,
+    mode: "saas" | "self-hosted" = "saas",
+  ) =>
+    checkEntitlement({
+      db,
+      mode,
+      workspaceId,
+      kind: "free-workspace-slot",
+      freeMembershipCount: async () => count,
+    });
+
   test("one free workspace per login: the first is allowed, the second is not", async () => {
     const db = migrated(null);
-    expect(
-      (await checkEntitlement({ db, mode: "saas", workspaceId: WS, kind: "free-workspace-slot", freeMembershipCount: 0 }))
-        .ok,
-    ).toBe(true);
-    for (const freeMembershipCount of [1, 2]) {
-      const verdict = await checkEntitlement({
-        db,
-        mode: "saas",
-        workspaceId: WS,
-        kind: "free-workspace-slot",
-        freeMembershipCount,
-      });
+    expect((await freeSlot(db, null, 0)).ok).toBe(true);
+    for (const count of [1, 2]) {
+      const verdict = await freeSlot(db, null, count);
       expect(verdict.ok).toBe(false);
       if (!verdict.ok) expect(verdict.refusal).toEqual({ kind: "free-workspace-slot" });
     }
     db.raw.close();
+  });
+
+  test("a question naming no workspace reads no plan: the rule is per LOGIN", async () => {
+    // The creation route and the SPA boot both ask this way, and both would pay
+    // a plan resolution on every call if the branch resolved one anyway.
+    const noPlanRead: WorkspaceStoreD1 = {
+      prepare() {
+        throw new Error("a question naming no workspace must not read the catalogue");
+      },
+    };
+    expect((await freeSlot(noPlanRead as never, null, 1)).ok).toBe(false);
+    // A paid target is never gated, and the counter is never read for it.
+    expect((await freeSlot(migrated(SHAPES[3]!), WS, 9)).ok).toBe(true);
+  });
+
+  test("a named workspace is gated only when it resolves to the free tier", async () => {
+    const free = migrated(SHAPES[0]!);
+    expect((await freeSlot(free, WS, 0)).ok).toBe(true);
+    const refused = await freeSlot(free, WS, 1);
+    expect(refused.ok).toBe(false);
+    // The refusal carries the named workspace's plan, so its copy can name it.
+    if (!refused.ok) expect(refused.plan?.id).toBe("free");
+
+    // A paid workspace with the same spent slot: allowed, and — proved by the
+    // throwing counter — without reading the count at all.
+    let counted = 0;
+    const paid = migrated(SHAPES[3]!);
+    const verdict = await checkEntitlement({
+      db: paid,
+      mode: "saas",
+      workspaceId: WS,
+      kind: "free-workspace-slot",
+      freeMembershipCount: async () => {
+        counted += 1;
+        return 9;
+      },
+    });
+    expect(verdict.ok).toBe(true);
+    expect(counted).toBe(0);
   });
 });
 
@@ -183,7 +227,7 @@ describe("checkEntitlement — app-count", () => {
 });
 
 describe("checkEntitlement — review-quota", () => {
-  test("a month exactly at its ceiling admits the review that lands on it", async () => {
+  test("a review that exactly fits the remaining headroom is admitted; one RP more is refused", async () => {
     const db = migrated(SHAPES[0]!);
     for (const [usedRp, costRp, allowed] of [
       [1999, 1, true],
@@ -260,15 +304,15 @@ describe("checkEntitlement — self-hosted answers before any read", () => {
   }
 
   test("free-workspace-slot is a per-login rule, so the mode does not change it", async () => {
-    // Every caller gates it on `saas` itself; the branch never consults the mode
-    // (nor the plan it carries), which is why a self-hosted call pays no read
-    // and still refuses the second free membership.
+    // Every caller gates it on `saas` itself; the branch consults neither the
+    // mode nor a plan when the question names no workspace, so a self-hosted
+    // call pays no read and still refuses the second free membership.
     const verdict = await checkEntitlement({
       db: neverRead,
       mode: "self-hosted",
-      workspaceId: WS,
+      workspaceId: null,
       kind: "free-workspace-slot",
-      freeMembershipCount: 5,
+      freeMembershipCount: async () => 5,
     });
     expect(verdict.ok).toBe(false);
   });

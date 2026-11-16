@@ -26,6 +26,7 @@ import worker, { settleRefusedAfterAttach } from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import {
+  ENTITLEMENT_UNREADABLE_SKIP_REASON,
   QUOTA_SKIP_REASON,
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_SKIP_REASON,
@@ -341,6 +342,70 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
     expect(failures[0]!.target_id).toBe(appRow.targetId);
     expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(SHARED_BOT_ENTITLEMENT_SKIP_REASON));
+  });
+
+  test("saas: an UNREADABLE gate is a recorded skip, not a 500 — the failure names the cause", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // A plan with no ceiling row in the judging profile: the configuration
+    // defect `resolveMonthlyQuota` throws on by design. Before the guard this
+    // was a permanent 500 for every webhook of that plan.
+    db.raw.prepare(`DELETE FROM quota_profile_plans WHERE plan_id = 'free'`).run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    // Fail-closed but not failing: GitHub must not retry, and no review starts.
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0);
+    const failures = db.raw
+      .query("SELECT stage, target_id, error FROM review_failures ORDER BY rowid")
+      .all() as Array<{ stage: string; target_id: string; error: string }>;
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
+    expect(failures[0]!.target_id).toBe(appRow.targetId);
+    // NOT the capability sentence: the author's plan was never judged.
+    expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(ENTITLEMENT_UNREADABLE_SKIP_REASON));
+    expect(failures[0]!.error).not.toContain("does not include the shared bot");
+    // The bookkeeping the guard exists to protect still ran.
+    const delivery = db.raw
+      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(appRow.id) as { outcome: string };
+    expect(delivery.outcome).toBe("skipped");
+  });
+
+  test("saas: an empty quota profile table is the same recorded skip, not a 500", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
+    db.raw.prepare("DELETE FROM quota_profiles").run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(0);
+    const failures = db.raw.query("SELECT stage FROM review_failures").all() as Array<{ stage: string }>;
+    expect(failures).toEqual([{ stage: SHARED_BOT_ENTITLEMENT_STAGE }]);
+    const delivery = db.raw
+      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(appRow.id) as { outcome: string };
+    expect(delivery.outcome).toBe("skipped");
   });
 
   test("saas: a Free workspace's OWN bot is not the shared bot — the delivery enqueues normally", async () => {
@@ -2506,7 +2571,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = ? WHERE profile_id = 'quota-v1' AND plan_id = 'pro'").run(monthlyRp);
   }
 
-  test("a month exactly AT the ceiling still admits the review; one RP over refuses it", async () => {
+  test("a review that exactly fills the month's remaining headroom is admitted; one RP over refuses it", async () => {
     // Deep + BYOK is the cheapest cell in the table (6 RP): a pro ceiling of 20
     // leaves room for exactly three, so 14 used + 6 = 20 (allowed) and 15 + 6 =
     // 21 (refused) pin the boundary without a huge fixture.

@@ -241,13 +241,24 @@ never disagree.
   (every profile factor is `> 0` by DDL CHECK), so no metered row can hold 0:
   rows written before this iteration default to 0 and contribute nothing to any
   ceiling, and the column stays non-nullable with no `COALESCE` at the read.
+- **Whose month it is.** The ledger row is charged to the TARGET's workspace
+  (`review_targets.workspace_id`) — the tenant that asked for the review — which
+  is also the workspace the enqueue's ceiling check reads. It is deliberately
+  NOT the bot's owning workspace: for an OWNED bot the two are equal, but a
+  shared bot belongs to the platform's workspace while `createOnSharedBot`
+  writes only the target into the tenant's, so charging the bot's owner would
+  bill one workspace for every tenant's spend and leave each tenant's own month
+  at zero. The bot's workspace stays the CONCURRENCY key, which is a bot-scoped
+  fact and unrelated to who pays.
 - **The refusal.** A workspace whose month has reached its ceiling is refused
   AT ENQUEUE, in the shared-bot gate's shape: the Check is still attached and
   settles `neutral`, one terminal failure row is recorded under the `quota`
   stage (`QUOTA_STAGE`, outside `PAGING_EXCLUDED_STAGES` — the review did not
   run, so the row stays paged exactly like `entitlement`), and nothing is sent,
-  claimed or started. `used + cost > limit` refuses, so a month exactly AT its
-  ceiling still admits the review that lands on it.
+  claimed or started. The comparison is `used + cost > limit` (`quotaSpent`),
+  so a review whose cost exactly fills the remaining headroom is admitted and
+  everything above it is refused — and a month already AT its ceiling refuses
+  every review, because the cheapest one costs 1 RP.
 - **Order: capability first, then quota.** One delivery carries at most one
   refusal, so the two gates cannot both fire. The capability is a property of
   the plan (only the plan or the bot changes it) while quota is consumption

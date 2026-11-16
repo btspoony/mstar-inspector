@@ -13,6 +13,7 @@ import { createMigratedTestD1, type TestD1 } from "./helpers";
 import {
   quotaMonth,
   resolveMonthlyQuota,
+  quotaSpent,
   resolveQuotaProfile,
   rpFor,
   type QuotaProfile,
@@ -297,5 +298,30 @@ describe("self-hosted resolves no quota without reading a table", () => {
     const plan = await resolveWorkspacePlan(neverRead, "default", "self-hosted");
     expect(plan.id).toBe("unlimited");
     expect(reads).toBe(0);
+  });
+});
+
+describe("quotaSpent", () => {
+  test("a month already at its ceiling is spent, because the cheapest review costs 1 RP", () => {
+    // The default cost is the smallest cell `rpFor` can produce, so the faces
+    // answer "would even the cheapest review be refused?" — and the enqueue
+    // refuses at `used + cost > limit`, which at `used == limit` is already true.
+    expect(quotaSpent(2000, 2000)).toBe(true);
+    expect(quotaSpent(1999, 2000)).toBe(false);
+  });
+
+  test("a known cost asks the enqueue's own question, so the two cannot disagree", () => {
+    // At 1999 of 2000 a Quick BYOK review (1 RP) fits and a Deep one (6 RP) does
+    // not — the card said "not spent" for both when it ignored the cost.
+    expect(quotaSpent(1999, 2000, 1)).toBe(false);
+    expect(quotaSpent(1999, 2000, 6)).toBe(true);
+    // Exactly filling the headroom is admitted, one RP over is refused.
+    expect(quotaSpent(1994, 2000, 6)).toBe(false);
+    expect(quotaSpent(1995, 2000, 6)).toBe(true);
+  });
+
+  test("a NULL ceiling is unlimited and can never be spent, at any cost", () => {
+    expect(quotaSpent(1_000_000, null)).toBe(false);
+    expect(quotaSpent(1_000_000, null, 1_000_000)).toBe(false);
   });
 });

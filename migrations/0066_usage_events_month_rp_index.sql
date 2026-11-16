@@ -1,0 +1,27 @@
+-- 0066_usage_events_month_rp_index.sql — the operator preview's month scan gets
+-- an index that also covers the columns it aggregates.
+--
+-- `readMonthlyRpByWorkspace` (`src/store/usage-store.ts`) binds NO workspace: it
+-- groups every workspace's month in one statement, so its predicate is
+-- `occurred_at >= ? AND occurred_at < ?`. The only index on `usage_events` is
+-- `usage_events_workspace_occurred (workspace_id, occurred_at)` — leading on a
+-- column that statement never filters — so SQLite falls back to a full scan of
+-- every event ever written, then to the table for `rp` and `source`. On 1M rows
+-- that measured 120-130 ms, on the console page an operator opens before
+-- publishing a profile.
+--
+-- This index leads on `occurred_at` and carries the three aggregated columns, so
+-- the month window is a range seek and the aggregate is answered from the index
+-- alone (`workspace_id` groups, `rp` sums, `source` splits) with no table probe.
+--
+-- The TENANT face is untouched: `readMonthlyRp` / `sumMonthlyRp` bind one
+-- workspace and stay on `usage_events_workspace_occurred`, whose leading column
+-- is that predicate — the enqueue's hot path keeps its seek either way.
+--
+-- Metadata-only: `CREATE INDEX` builds a secondary structure without rewriting
+-- the table, so this applies over a live database with existing rows.
+-- Append-only: nothing here rewrites or drops data.
+--
+-- Must apply AFTER 0065 (the `source` column this index carries).
+
+CREATE INDEX idx_usage_events_occurred_rp ON usage_events(occurred_at, workspace_id, rp, source);

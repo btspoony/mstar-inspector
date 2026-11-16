@@ -132,7 +132,9 @@ function seedJudgingProfile(db: TestD1, ceilings: Record<string, number | null>)
 
 async function adminFetch(
   db: TestD1,
-  method: "GET" | "POST",
+  // `PATCH`/`DELETE` are here for the "no edit path" pin: the surface must 404
+  // a method it never registered, not answer 405 through the router.
+  method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<Response> {
@@ -193,13 +195,14 @@ describe("GET /_internal_admin/api/quota-versions", () => {
     const res = await adminFetch(db, "GET", "/api/quota-versions");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      month: string;
       judgingVersion: number;
       nextVersion: number;
       plans: Array<{ id: string; name: string }>;
       versions: Array<Record<string, unknown>>;
     };
-    expect(body.month).toBe(month.month);
+    // The payload carries no month of its own: `judgingVersion` IS the
+    // month-relative answer, and the form renders no month label.
+    expect(body).not.toHaveProperty("month");
     // v1 covers this month's 1st; v2 starts after it and never judges the month
     // in progress.
     expect(body.judgingVersion).toBe(1);

@@ -3061,6 +3061,20 @@ type CommenterResolution =
        * already fetched, so no second bot read is spent on it.
        */
       scope: BotScope;
+      /**
+       * The workspace the LEDGER row is charged to: the TARGET's
+       * (`review_targets.workspace_id`), which is the tenant that asked for the
+       * review — and the same workspace the enqueue's ceiling check reads.
+       *
+       * Deliberately separate from `workspaceId` above: that one is the bot's
+       * owning workspace (`bot_workspaces`), which is also the concurrency /
+       * inflight key and must stay bot-scoped. For an owned bot the two are
+       * equal; for a SHARED bot they are not — `createOnSharedBot` writes only
+       * the target into the tenant's workspace — and charging `workspaceId`
+       * would bill the bot's owner for every tenant's spend and leave each
+       * tenant's own month at zero.
+       */
+      usageWorkspaceId: string;
     }
   | { kind: "paused" };
 
@@ -3162,6 +3176,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
       workspaceId: row.workspace_id,
       reviewLevel: target.review_level,
       scope: row.scope,
+      usageWorkspaceId: target.workspace_id,
     };
   }
   // Cache miss (first message for this App) or fingerprint mismatch
@@ -3182,6 +3197,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
     workspaceId: row.workspace_id,
     reviewLevel: target.review_level,
     scope: row.scope,
+    usageWorkspaceId: target.workspace_id,
   };
 }
 
@@ -4631,7 +4647,10 @@ async function processMessage(
       await settleSkippedRow(deps, payload, payload.head_sha, "review paused");
       return { kind: "paused" };
     }
-    const { commenter, githubAppId, workspaceId } = resolution;
+    // `workspaceId` is the bot's owner (concurrency/inflight); the ledger is
+    // charged to the target's workspace — the tenant that asked (see
+    // `CommenterResolution.usageWorkspaceId`).
+    const { commenter, githubAppId, workspaceId, usageWorkspaceId } = resolution;
     // Supersede skip (migration 0044): a queued delivery whose PR head has
     // already advanced must cost nothing that can fail it, hold the guard, or
     // start work — no admission row, no sandbox, no Check, no publication.
@@ -5139,7 +5158,7 @@ async function processMessage(
       // The durable identity of THIS attempt: a review may already hold earlier
       // rows, so the failure read-back below must ask by token, not by review.
       executionToken: crypto.randomUUID(),
-      workspaceId,
+      workspaceId: usageWorkspaceId,
       occurredAt: usageNow.toISOString(),
       rp: rpFor(level, usageSource, monthProfile),
       source: usageSource,
@@ -5165,7 +5184,7 @@ async function processMessage(
         usageEvent.executionToken,
       ).catch(() => "unknown" as const);
       deps.log.warn(
-        { ...fields, review_id: reviewId, workspace_id: workspaceId, usage_applied: applied },
+        { ...fields, review_id: reviewId, workspace_id: usageWorkspaceId, usage_applied: applied },
         `usage_events insert failed (review continues): ${detail}`,
       );
       // The failure row is best-effort too — its own guard keeps a recording
@@ -5179,9 +5198,11 @@ async function processMessage(
           pr_number: payload.pr_number,
           head_sha: headSha,
           stage: "usage",
+          // The identity a backfill would write: `usageEvent.workspaceId` IS the
+          // charged workspace (the target's), never the bot's.
           error: `usage_events insert failed: ${detail} ${JSON.stringify({
             reviewId,
-            workspaceId,
+            workspaceId: usageEvent.workspaceId,
             executionToken: usageEvent.executionToken,
             applied,
           })}`,

@@ -65,6 +65,16 @@ export const QUOTA_STAGE = "quota";
 export const QUOTA_SKIP_REASON = "the workspace has reached this month's review quota";
 
 /**
+ * The one sentence an UNREADABLE gate carries. It is not a plan fact: the gate
+ * could not be computed (a store fault, no quota profile, a plan with no
+ * ceiling row), so the delivery was refused fail-closed. Author-facing like its
+ * siblings — it names no plan, no workspace and no configuration detail, which
+ * belongs on the failure row's log line instead.
+ */
+export const ENTITLEMENT_UNREADABLE_SKIP_REASON =
+  "this delivery could not be checked against the workspace's plan";
+
+/**
  * Render a stage list as the literal body of a SQL `IN (…)` / `NOT IN (…)`
  * comparison (each stage single-quoted and comma-joined, e.g.
  * `'recheck', 'usage'`). Callers supply the operator and parentheses; this

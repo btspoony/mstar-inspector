@@ -50,9 +50,13 @@ type QuotaProfileRow = {
 
 /**
  * The stored row → the profile. `base_standard` is the `default` level's
- * weight: the level enum keeps its `default` member while the tenant-facing
- * name (and the form's label) says Standard, so the mapping is here and only
- * here.
+ * weight: the level enum keeps its `default` member while every tenant-facing
+ * name says Standard. The mapping is therefore spread over three sites and none
+ * of them is local to this file — `REVIEW_LEVELS` in
+ * `packages/shared/src/runtime.ts` (the enum keeps `default`), this function
+ * (the column name to the enum member), and the form's label
+ * (`settings.reviewDepthStandard` plus the profile's weight column). A fourth
+ * level, or a rename of the tenant-facing name, has to change all three.
  */
 function quotaProfile(row: QuotaProfileRow): QuotaProfile {
   return {
@@ -147,18 +151,21 @@ export function quotaMonth(now: Date): { month: string; startIso: string; endIso
 }
 
 /**
- * Whether a month's usage has spent the ceiling — the ONE spelling of "at or
- * over" shared by the workspace card's banner and the operator's impact
- * preview. A NULL ceiling is unlimited, so it can never be spent.
+ * Whether a month's usage plus one more review's cost crosses the ceiling — THE
+ * spelling of the enqueue's own comparison (`used + cost > limit`), so a face
+ * and the refusal it predicts cannot disagree. A NULL ceiling is unlimited, so
+ * it can never be spent.
  *
- * The enqueue's own comparison is `used + cost > monthlyRp` (a review is
- * admitted while it still fits). Because `rpFor` is >= 1, that refuses exactly
- * the months this returns true for — plus the ones one review would tip over.
- * At today's usage, `used >= monthlyRp` therefore means "no further review is
- * admitted", which is what both faces count.
+ * `nextCostRp` defaults to 1: the smallest charge `rpFor` can produce (the
+ * cheapest cell is BYOK + Quick = 1 RP), so the default answers "is even the
+ * cheapest possible review refused?". The workspace card and the operator's
+ * impact preview ask exactly that question — they state today's usage, not a
+ * chosen depth — and at `used == limit` the answer is already true, because any
+ * real review costs at least 1 RP. A caller that knows the review's cost (a
+ * level and a source) passes it to answer for THAT review.
  */
-export function quotaSpent(usedRp: number, monthlyRp: number | null): boolean {
-  return monthlyRp !== null && usedRp >= monthlyRp;
+export function quotaSpent(usedRp: number, monthlyRp: number | null, nextCostRp = 1): boolean {
+  return monthlyRp !== null && usedRp + nextCostRp > monthlyRp;
 }
 
 /**

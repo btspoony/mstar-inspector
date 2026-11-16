@@ -242,9 +242,14 @@ number of live `saas` workspaces whose current month's RP has already reached th
 candidate ceiling for their plan. It is a **tightness check, not an eviction
 forecast** — under D5 the candidate cannot judge the current month, and every
 month it does judge starts at 0 RP. The count comes from the same month sum the
-enqueue reads (`readMonthlyRp`, which `sumMonthlyRp` also answers from), so it
-cannot disagree with a refusal at equal usage; it can and will differ a month
-later, because usage moves. A publish echoes the preview it was shown and is
+enqueue reads (`readMonthlyRp`, which `sumMonthlyRp` also answers from) and the
+same predicate (`quotaSpent`), so at equal usage it cannot disagree with a
+refusal — with one deliberate difference: the preview passes no cost, so it
+answers "would even the cheapest review (1 RP) be refused?", while the enqueue
+passes the review's own cost and can refuse a workspace the preview does not
+count yet. That gap is exactly one review wide and it closes as usage grows; the
+preview is a tightness check, not a per-review oracle. It can and will also
+differ a month later, because usage moves. A publish echoes the preview it was shown and is
 refused without one, or when the numbers moved since — a stale count is worse
 than none.
 

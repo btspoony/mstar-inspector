@@ -50,6 +50,7 @@ import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
 import { quotaMonth } from "../../src/store/quota-store";
 import { sumMonthlyRp } from "../../src/store/usage-store";
+import { DEFAULT_CHECK_MIN_SCORE } from "../../src/contracts/review-gate";
 import { createTestD1, type TestD1 } from "../store/helpers";
 import {
   CONSUMER_POST_CHAINS_MIGRATIONS,
@@ -8802,6 +8803,76 @@ describe("usage ledger (migration 0031)", () => {
     await consumer(h.makeBatch(makePayload()));
     expect(usageRows(db)).toHaveLength(1);
     expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(charged);
+  });
+
+  test("a shared-bot attempt is charged to the TARGET's workspace, never the bot owner's", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // A tenant that is not the bot's owner, plus a shared bot owned by
+    // `default`: `createOnSharedBot` writes only the TARGET into the tenant's
+    // workspace, and the `bot_workspaces` mapping still names the owner.
+    db.raw
+      .prepare(`INSERT INTO workspaces (id, slug, name, created_at) VALUES ('tenant', 'tenant', 'Tenant', datetime('now'))`)
+      .run();
+    await seedReviewingApp(db, TEST_SECOND_APP_ID, 434344, "deep");
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_SECOND_APP_ID);
+    db.raw
+      .prepare(`INSERT INTO review_targets
+                  (id, workspace_id, bot_id, name, review_level, check_min_score, created_by, created_at, updated_at)
+                VALUES ('target-tenant', 'tenant', ?, 'tenant', 'deep', ?, 'tester', datetime('now'), datetime('now'))`)
+      .run(TEST_SECOND_APP_ID, DEFAULT_CHECK_MIN_SCORE);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await withFrozenClock(() =>
+      consumer(h.makeBatch(makePayload({ botRef: { appId: TEST_SECOND_APP_ID }, targetId: "target-tenant" }))),
+    );
+
+    // Deep + shared = 6 x 10 = 60 RP, recorded against the TENANT.
+    expect(usageRows(db).map((row) => ({ workspace_id: row.workspace_id, rp: row.rp, source: row.source }))).toEqual([
+      { workspace_id: "tenant", rp: 60, source: "shared" },
+    ]);
+
+    // The tenant's ceiling counts it; the bot owner's month does not grow.
+    const month = quotaMonth(new Date());
+    expect(await sumMonthlyRp(db, "tenant", month.startIso, month.endIso)).toBe(60);
+    expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(0);
+  });
+
+  test("an owned-bot attempt and a shared-bot attempt from ONE tenant both land in that tenant's month", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The tenant owns one bot (BYOK, source 1, Standard = 2 RP) …
+    db.raw
+      .prepare(`INSERT INTO workspaces (id, slug, name, created_at) VALUES ('tenant', 'tenant', 'Tenant', datetime('now'))`)
+      .run();
+    db.raw.prepare(`UPDATE bot_workspaces SET workspace_id = 'tenant' WHERE bot_id = ?`).run(TEST_APP_ID);
+    db.raw.prepare(`UPDATE review_targets SET workspace_id = 'tenant' WHERE bot_id = ?`).run(TEST_APP_ID);
+    // … and reviews through ANOTHER workspace's shared bot on a second target
+    // (Quick + shared = 1 x 10 = 10 RP).
+    await seedReviewingApp(db, TEST_SECOND_APP_ID, 434344, "quick");
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_SECOND_APP_ID);
+    db.raw
+      .prepare(`INSERT INTO review_targets
+                  (id, workspace_id, bot_id, name, review_level, check_min_score, created_by, created_at, updated_at)
+                VALUES ('target-tenant-shared', 'tenant', ?, 'tenant-shared', 'quick', ?, 'tester', datetime('now'), datetime('now'))`)
+      .run(TEST_SECOND_APP_ID, DEFAULT_CHECK_MIN_SCORE);
+
+    const owned = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+    await owned(h.makeBatch(makePayload()));
+    const shared = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+    // A second PR: the two attempts must be two REVIEWS, or the dedup would
+    // answer the second delivery from the first review's row.
+    await shared(
+      h.makeBatch(
+        makePayload({ pr_number: 43, botRef: { appId: TEST_SECOND_APP_ID }, targetId: "target-tenant-shared" }),
+      ),
+    );
+
+    const month = quotaMonth(new Date());
+    // Both attempts are in the TENANT's month, 2 + 10.
+    expect(await sumMonthlyRp(db, "tenant", month.startIso, month.endIso)).toBe(12);
+    // …and the shared bot's owner counts nothing for either.
+    expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(0);
   });
 
   test("a genuine retry mints the next seq with ITS OWN rp", async () => {
