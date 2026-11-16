@@ -16,7 +16,6 @@
  * and src/contracts/failure-stages.ts — the `review_failures` stage
  * partition), which bound the sandbox_image_id value domain and keep the
  * failure-count/history SQL off hand-written stage literals, plus
- * src/contracts/review-gate.ts for the create path's score floor, and
  * ./runtime-config-store for the official-workspace key — `setBotScope`'s guard
  * names that row rather than guessing it, and this module never parses it.
  * The `db` parameter is a locally-declared narrow D1 face (types
@@ -26,12 +25,11 @@
  * dashboard modules must not import store/pipeline/review code (architect
  * decision Q2). The narrow face carries the operations this store needs:
  * multi-row reads go through IN-list queries (deliverySummaries) and the
- * writes that must commit together — bot creation with its target and owner
- * mapping, the user-facing delete, the installation reconcile — go through
- * `batch()`.
+ * writes that must commit together — bot creation with its owner mapping, the
+ * user-facing delete, the installation reconcile — go through `batch()`.
  *
  * The workspace-owned review configuration — trigger mode, review depth, Check
- * gate, owner allowlist, the business pause — lives on `review_targets` and is
+ * gate, the business pause — lives on `review_targets` and is
  * served by `src/dashboard/targets-store.ts`. This store keeps only the
  * execution identity: credentials, model and sandbox configuration,
  * installations, and `review_enabled` as the OPERATIONAL pause.
@@ -92,9 +90,9 @@
  *     panel: this App's PRESENT installations (`removed_at IS NULL`), most
  *     recently seen first. markInstallationRemoved / reconcileInstallations
  *     stamp the rows GitHub no longer has — never delete them.
- *   - listPendingInstallations is the target page's bind source: the live
- *     installations of this bot that no live target references. Binding them
- *     still goes through `install-claims-store`'s consume-and-bind batch.
+ *   - listPendingInstallations is the 已安装 tab's read face: this bot's live
+ *     installations, narrowed to the bots the addressed workspace may use.
+ *     Installations are app-level, so no target binding filters them.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
  *     whether THIS call performed the delete. It stamps the bot AND every
  *     target the bot owns in ONE batch: the user-facing delete removes one
@@ -132,7 +130,6 @@ import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stage
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
-import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
 import { OFFICIAL_WORKSPACE_KEY } from "./runtime-config-store";
 
 /** A row of `review_bots` (D1 column names, snake_case; migrations 0004/0036). */
@@ -161,13 +158,10 @@ export type GithubAppRow = {
   review_enabled: number;
   /**
    * Cached GitHub App visibility (migration 0045): 'public' | 'private' |
-   * 'unknown', written by the anonymous `GET /apps/{slug}` probe. Two callers
-   * probe — the metadata refresh and the allowlist save's forced probe — and
-   * both treat a no-answer the same way: skip the write and keep the stored
-   * value. NULL = never probed; getGithubVisibility reads it as 'unknown'
-   * (cannot prove private). Admission never reads this column: the allowlist
-   * applies whatever the visibility, which only picks the wording of the
-   * allowlist control's private-App note.
+   * 'unknown', written by the anonymous `GET /apps/{slug}` probe. The
+   * metadata refresh is its only caller, and a no-answer skips the write and
+   * keeps the stored value. NULL = never probed; getGithubVisibility reads it
+   * as 'unknown' (cannot prove private).
    */
   github_visibility: GithubVisibility | null;
   /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
@@ -214,8 +208,8 @@ export type GithubAppRow = {
   /**
    * The bot's scope (migration 0058): `owned` serves its own workspace only,
    * `shared` is offered platform-wide. Only `setBotScope` writes it, and
-   * `targets-store.resolve` is its one review-path reader: a shared bot has no
-   * implicit target, so it resolves nothing until a claim binds an installation.
+   * `targets-store.resolveByRepo` is its one review-path reader: a shared bot
+   * reviews nothing until a workspace adds a repository target on it.
    */
   scope: BotScope;
   /** Owning workspace (migration 0026); present on every execution-facing read. */
@@ -270,13 +264,6 @@ export type CreateAppInput = {
    * silently mis-home an App and no caller can leave the owner unstated.
    */
   workspaceId: string;
-  /**
-   * The workspace's default review-gate floor for this App, resolved by the
-   * caller (`getWorkspaceCheckMinScore`). Omitted or untrusted → the platform
-   * default. Passed in rather than read here: the store is a leaf, and the
-   * workspace settings read owns the absent/untrusted rule.
-   */
-  defaultCheckMinScore?: number;
 };
 
 export type UpsertInstallationInput = {
@@ -651,15 +638,13 @@ export const APP_READ_SQL = {
 } as const;
 
 /**
- * The workspace-scoped App resolve the target pages use: the bot the addressed
- * workspace OWNS, or one it holds a live target on. The second arm is the
- * entitlement a target carries — it is how a target created on a `shared` bot
- * (and a target whose share was revoked) stays readable from the workspace
- * that created it. A bot with neither arm stays invisible, so another
- * workspace's `owned` bot is never widened and an owned bot's own workspace
- * keeps the owning mapping's `workspace_id`.
+ * The workspace-scoped App resolve the target pages use: only the bot the
+ * addressed workspace OWNS (`bot_workspaces`). Ownership is the single arm
+ * (D13): a bot is an execution identity, so a target page reaches it through
+ * the workspace that created it and nothing else. Another workspace's bot
+ * stays invisible.
  */
-const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.bot_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND w.workspace_id = ?2 ORDER BY w.workspace_id LIMIT 1`;
 
 /**
  * The two `upsertInstallation` statements. Which one runs is chosen BEFORE
@@ -856,23 +841,15 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (review pin — the caller's
      * secretbox AAD rowKey is this id), plus its `bot_workspaces` mapping to
-     * the REQUIRED `input.workspaceId` and its ONE review target. Ownership is
-     * never discovered: the named workspace must still be live, and a dead
-     * target refuses the write with zero rows. The three inserts are ONE batch
-     * transaction, so a bot never exists without an owner or an unconfigured
-     * review surface. sandbox_image_id is omitted: the migration 0018 DDL
-     * default materializes every new row onto the registry's default image
-     * ('omp') — the store face for changing it is setSandboxImage. A UNIQUE
-     * violation on github_app_id throws — the commit path turns it into
-     * `already_connected` (409).
-     *
-     * The target keeps the DDL defaults a migrated target carries —
-     * review_enabled 1, review_trigger_mode 'every_push', review_level NULL,
-     * `["ship it"]` verdicts, allowlist off — except for `check_min_score`,
-     * seeded explicitly from `input.defaultCheckMinScore` (the caller's
-     * workspace read; platform default `DEFAULT_CHECK_MIN_SCORE` when absent),
-     * so a new target inherits the tenant's default floor. `installation_id`
-     * stays NULL: the create path binds no installation.
+     * the REQUIRED `input.workspaceId`. Ownership is never discovered: the
+     * named workspace must still be live. The two inserts are ONE batch
+     * transaction, so a bot never exists without an owner. An App creates no
+     * review target (D13): creation does not know a repository yet, and a
+     * target is born when a repository is added. sandbox_image_id is omitted:
+     * the migration 0018 DDL default materializes every new row onto the
+     * registry's default image ('omp') — the store face for changing it is
+     * setSandboxImage. A UNIQUE violation on github_app_id throws — the
+     * commit path turns it into `already_connected` (409).
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
@@ -886,9 +863,6 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       if (!liveWorkspace) {
         throw new Error("apps-store: createApp target workspace is not live");
       }
-      const checkMinScore = isCheckMinScoreValue(input.defaultCheckMinScore)
-        ? input.defaultCheckMinScore
-        : DEFAULT_CHECK_MIN_SCORE;
       await db.batch([
         db
           .prepare(
@@ -909,13 +883,6 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         db
           .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)`)
           .bind(id, input.workspaceId),
-        db
-          .prepare(
-            `INSERT INTO review_targets
-               (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-          )
-          .bind(crypto.randomUUID(), input.workspaceId, id, input.name, checkMinScore, input.createdBy),
       ]);
       const row = await db.prepare(`SELECT * FROM review_bots WHERE id = ?`).bind(id).first<GithubAppRow>();
       if (!row) {
@@ -1089,8 +1056,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 
     /**
      * Cache the App's GitHub visibility (migration 0045) from the anonymous
-     * probe (the metadata refresh and the allowlist save both call this).
-     * Writes ONLY github_visibility — deliberately
+     * probe (its one caller is the metadata refresh). Writes ONLY
+     * github_visibility — deliberately
      * NOT updated_at, which stays the operator-mutation timestamp (the
      * saveGithubMetadata convention: this write is machine-triggered).
      * Refuses soft-deleted rows exactly like setAppStatus. Returns whether a
@@ -1265,12 +1232,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The target page's bind source: this bot's live installations that NO
-     * live target of the bot references, most recently seen first. A bound
-     * installation is invisible because some target already holds it; a
-     * removed one because GitHub no longer has it. Empty for a bot the
-     * addressed workspace may not use — its visible set is the workspace's
-     * own bots plus every `shared` bot.
+     * The target page's 已安装 tab: this bot's live installations, most
+     * recently seen first. An installation is app-level (D19), so nothing
+     * binds it to a target and a removed one is the only exclusion. Empty for
+     * a bot the addressed workspace may not use — its visible set is the
+     * workspace's own bots plus every `shared` bot.
      */
     async listPendingInstallations(appId: string, workspaceId: string): Promise<AppInstallationRow[]> {
       const res = await db
@@ -1281,10 +1247,6 @@ export function createReviewBotsStore(db: AppsStoreD1) {
               AND (b.scope = 'shared'
                    OR EXISTS (SELECT 1 FROM bot_workspaces w
                                WHERE w.bot_id = b.id AND w.workspace_id = ?2))
-              AND NOT EXISTS (SELECT 1 FROM review_targets t
-                               WHERE t.bot_id = i.bot_id
-                                 AND t.installation_id = i.installation_id
-                                 AND t.deleted_at IS NULL)
             ORDER BY i.seen_at DESC, i.installation_id`,
         )
         .bind(appId, workspaceId)

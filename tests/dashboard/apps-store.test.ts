@@ -1,18 +1,20 @@
 /**
  * Unit tests for the bot-side face in src/dashboard/apps-store.ts: creation,
- * the user-facing delete and the cached GitHub App visibility.
+ * the user-facing delete, the workspace-scoped resolve, the 已安装
+ * installation read and the cached GitHub App visibility.
  *
  * Pinned here:
- *   - the create path writes the bot, its `bot_workspaces` mapping and its ONE
- *     review target in one batch, with the target unbound and seeded from the
- *     caller's workspace floor (platform default 60 when the caller names
- *     none);
- *   - the user-facing delete stamps the bot AND its target, once, refusing to
- *     re-stamp either;
+ *   - the create path writes the bot and its `bot_workspaces` mapping in one
+ *     batch and NO review target: creation knows no repository (D13);
+ *   - the user-facing delete stamps the bot AND every target it owns, once,
+ *     refusing to re-stamp either;
+ *   - the workspace-scoped resolve answers only the bot this workspace owns;
+ *   - the 已安装 read lists the bot's live installations, narrowed to the bots
+ *     the workspace may use;
  *   - visibility round-trips and reads `unknown` for a never-probed row.
  *
  * The workspace-owned review configuration itself (trigger mode, depth, gate,
- * owner allowlist, business pause) lives on the target and is covered by
+ * business pause) lives on the target and is covered by
  * tests/dashboard/targets-store.test.ts.
  *
  * The fixture is the fully migrated schema (tests/store/helpers), so the
@@ -22,7 +24,7 @@ import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
 import { createReviewBotsStore, listBotScopes, setBotScope } from "../../src/dashboard/apps-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
-import { getWorkspaceCheckMinScore, setOfficialWorkspace } from "../../src/dashboard/runtime-config-store";
+import { setOfficialWorkspace } from "../../src/dashboard/runtime-config-store";
 import type { TestD1 } from "../store/helpers";
 
 const WS = "default";
@@ -44,8 +46,8 @@ function seedApp(
     .run(id, options.githubAppId, options.name ?? id);
 }
 
-describe("review target pivot (create)", () => {
-  test("creates one bot, its workspace mapping and one unbound target", async () => {
+describe("app creation (D13)", () => {
+  test("creates the bot and its workspace mapping, and no review target", async () => {
     const db = createMigratedTestD1();
     const store = createReviewBotsStore(db);
 
@@ -60,51 +62,33 @@ describe("review target pivot (create)", () => {
       workspaceId: WS,
     });
 
-    const targets = await createTargetsStore(db).list(WS);
-    expect(targets).toHaveLength(1);
-    const [target] = targets;
-    expect(target!.bot_id).toBe("app-created");
-    expect(target!.workspace_id).toBe(WS);
-    expect(target!.installation_id).toBeNull();
-    // The creation path seeds the floor; the column's own default (80) is
-    // 0045's historical value and never applies to a real bot.
-    expect(target!.check_min_score).toBe(60);
-    expect(target!.review_trigger_mode).toBe("every_push");
-    expect(target!.review_level).toBeNull();
-    expect(target!.allowlist_enabled).toBe(0);
+    const app = await store.getAppById("app-created");
+    expect(app?.workspace_id).toBe(WS);
+    expect(app?.status).toBe("active");
+    // Creation knows no repository, so it creates no target: a target is born
+    // when a repository is added.
+    expect(await createTargetsStore(db).listLive(WS)).toEqual([]);
   });
 
-  test("the target inherits the workspace floor the caller resolved", async () => {
+  test("refuses a workspace that is not live", async () => {
     const db = createMigratedTestD1();
-    db.raw.prepare("UPDATE workspaces SET check_min_score = 45 WHERE id = 'default'").run();
-    const store = createReviewBotsStore(db);
-    // The route's shape: read the workspace default, then seed the bot with it.
-    const floor = await getWorkspaceCheckMinScore(db, WS);
-    expect(floor).toEqual({ minScore: 45, degraded: false });
-
-    await store.createApp({
-      defaultCheckMinScore: floor.minScore,
-      id: "app-inherit",
-      githubAppId: 5011,
-      githubSlug: null,
-      name: "app-inherit",
-      privateKeyEnc: "enc",
-      webhookSecretEnc: "enc",
-      createdBy: "acme",
-      workspaceId: WS,
-    });
-
-    const [target] = await createTargetsStore(db).list(WS);
-    expect(target!.check_min_score).toBe(45);
-    expect(await createTargetsStore(db).getCheckGate(WS, target!.id)).toEqual({
-      minScore: 45,
-      passVerdicts: ["ship it"],
-    });
+    await expect(
+      createReviewBotsStore(db).createApp({
+        id: "app-dangling",
+        githubAppId: 5011,
+        githubSlug: null,
+        name: "app-dangling",
+        privateKeyEnc: "enc",
+        webhookSecretEnc: "enc",
+        createdBy: "acme",
+        workspaceId: "ws-missing",
+      }),
+    ).rejects.toThrow(/workspace is not live/);
   });
 });
 
-describe("review target pivot (delete)", () => {
-  test("stamps the bot and its target, and the first delete wins on both", async () => {
+describe("app delete", () => {
+  test("stamps the bot and every target it owns, and the first delete wins on both", async () => {
     const db = createMigratedTestD1();
     const store = createReviewBotsStore(db);
     await store.createApp({
@@ -118,17 +102,24 @@ describe("review target pivot (delete)", () => {
       workspaceId: WS,
     });
     const targets = createTargetsStore(db);
-    const [target] = await targets.list(WS);
+    const { target } = await targets.create({
+      workspaceId: WS,
+      botId: "app-delete",
+      repoId: 900020,
+      repoOwner: "acme",
+      repoName: "repo",
+      createdBy: "acme",
+    });
 
     expect(await store.softDeleteApp("app-delete")).toBe(true);
     expect((await store.getAppById("app-delete"))?.deleted_at).not.toBeNull();
-    expect(await targets.getById(WS, target!.id)).toBeNull();
+    expect(await targets.getInWorkspace(WS, target.id)).toBeNull();
 
     // Idempotent: the first stamps are kept and the second call reports false.
     expect(await store.softDeleteApp("app-delete")).toBe(false);
     const stamped = db.raw
       .query("SELECT deleted_at FROM review_targets WHERE id = ?")
-      .get(target!.id) as { deleted_at: string | null } | null;
+      .get(target.id) as { deleted_at: string | null } | null;
     expect(stamped?.deleted_at).not.toBeNull();
   });
 });
@@ -658,29 +649,6 @@ describe("shared bots a workspace may create a target on", () => {
 
 // --- the workspace-scoped App resolve -------------------------------------
 
-/**
- * One target row in `workspaceId`, optionally bound to `installationId` and/or
- * soft-deleted. The pending read's whole predicate is "no LIVE target of this
- * bot references it", so the fixture must be able to produce both halves.
- */
-function seedPendingTarget(
-  db: TestD1,
-  botId: string,
-  workspaceId: string,
-  opts: { installationId?: number; deleted?: boolean } = {},
-): string {
-  const id = crypto.randomUUID();
-  db.raw
-    .prepare(
-      `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, installation_id, created_by, created_at, updated_at, deleted_at)
-       VALUES (?, ?, ?, ?, ?, 'fixture', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
-               ${opts.deleted ? "'2026-01-02T00:00:00.000Z'" : "NULL"})`,
-    )
-    .run(id, workspaceId, botId, botId, opts.installationId ?? null);
-  return id;
-}
-
 function githubAppIdOf(db: TestD1, botId: string): number {
   const row = db.raw.query("SELECT github_app_id AS id FROM review_bots WHERE id = ?").get(botId) as {
     id: number;
@@ -690,41 +658,31 @@ function githubAppIdOf(db: TestD1, botId: string): number {
 }
 
 /**
- * The resolve the target pages use: the workspace's own bot, or one it holds a
- * live target on. The second arm is what a target created on a shared bot —
- * and a target whose share was revoked — is reached through; a bot the
- * workspace neither owns nor holds a target on stays invisible.
+ * The resolve the target pages use: the bot the addressed workspace OWNS.
+ * Ownership is `bot_workspaces` alone, so another workspace's bot — shared or
+ * not — stays invisible until that workspace owns it.
  */
 describe("the workspace-scoped App resolve", () => {
-  test("resolves the workspace's own bot and a bot it holds a live target on", async () => {
+  test("resolves the workspace's own bot and nothing it does not own", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-other");
     seedScopedBot(db, "bot-own", { workspaceId: WS });
     seedScopedBot(db, "bot-foreign", { workspaceId: "ws-other" });
     seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
+    seedScopedBot(db, "bot-dead", { workspaceId: WS, deleted: true });
 
     const store = createReviewBotsStore(db);
-    expect((await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-own"), WS))?.id).toBe("bot-own");
-    // A shared bot with no target here has no configuration to resolve: the
-    // list does not carry it either (the target is the entitlement).
+    const own = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-own"), WS);
+    expect(own?.id).toBe("bot-own");
+    expect(own?.workspace_id).toBe(WS);
+    // Not owned here: neither another workspace's bot nor a soft-deleted one.
+    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS)).toBeNull();
-    // Owned by another workspace and no target here: not widened.
-    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
-
-    // The workspace's own live target is the entitlement — it makes the bot
-    // (still owned by ws-other) readable, which is the revoked-share case.
-    seedPendingTarget(db, "bot-shared", WS);
-    expect((await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS))?.id).toBe("bot-shared");
-    seedPendingTarget(db, "bot-foreign", WS);
-    const revoked = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS);
-    expect(revoked?.id).toBe("bot-foreign");
-    expect(revoked?.workspace_id).toBe("ws-other");
-    // A soft-deleted target grants nothing.
-    db.raw.prepare("UPDATE review_targets SET deleted_at = datetime('now') WHERE bot_id = 'bot-foreign'").run();
-    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
+    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-dead"), WS)).toBeNull();
   });
 });
-// --- the target page's pending installations ------------------------------
+
+// --- the target page's 已安装 installations --------------------------------
 
 /** One `bot_installations` row; `removed` stamps the removal. */
 function seedInstallation(db: TestD1, botId: string, installationId: number, removed = false): void {
@@ -737,19 +695,14 @@ function seedInstallation(db: TestD1, botId: string, installationId: number, rem
 }
 
 describe("pending installations of a bot", () => {
-  test("lists the live installations no live target references, and nothing else", async () => {
+  test("lists the bot's live installations, newest seen first", async () => {
     const db = createMigratedTestD1();
     seedScopedBot(db, "bot-pending", { workspaceId: WS });
     seedInstallation(db, "bot-pending", 100);
     seedInstallation(db, "bot-pending", 200, true);
-    seedInstallation(db, "bot-pending", 300);
-    seedInstallation(db, "bot-pending", 400);
-    // 300 is held by a live target, 400 only by a soft-deleted one.
-    seedPendingTarget(db, "bot-pending", WS, { installationId: 300 });
-    seedPendingTarget(db, "bot-pending", WS, { installationId: 400, deleted: true });
 
     const rows = await createReviewBotsStore(db).listPendingInstallations("bot-pending", WS);
-    expect(rows.map((row) => row.installation_id).sort()).toEqual([100, 400]);
+    expect(rows.map((row) => row.installation_id)).toEqual([100]);
   });
 
   test("answers nothing for a bot the addressed workspace may not use", async () => {
@@ -758,7 +711,7 @@ describe("pending installations of a bot", () => {
     // Another workspace's owned bot: out of the caller's visible set.
     seedScopedBot(db, "bot-foreign", { workspaceId: "ws-other" });
     seedInstallation(db, "bot-foreign", 501);
-    // A shared bot: usable from every workspace, so its pending rows read.
+    // A shared bot: usable from every workspace, so its rows read.
     seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
     seedInstallation(db, "bot-shared", 502);
 
