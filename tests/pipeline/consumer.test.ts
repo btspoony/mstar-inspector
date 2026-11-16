@@ -8759,6 +8759,9 @@ describe("usage ledger (migration 0031)", () => {
         // source 1) and reviews at the operator default (base 2) under the v1
         // profile — `rpFor("default", "byok")` = 2.
         rp: 2,
+        // …and the source that price was computed from (migration 0065), so
+        // the card's split never has to guess it from the product.
+        source: "byok",
       },
     ]);
     expect(reviewCount(db)).toBe(1);

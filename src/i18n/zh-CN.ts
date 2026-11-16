@@ -462,6 +462,39 @@ export const zhCN: Dictionary = {
     usageNotDesignated: "暂不可用",
     usageNotDesignatedHint:
       "此平台尚未指定共享机器人。共享机器人由平台运营者指定；在此之前，由你自有的 GitHub App 审查你的拉取请求。",
+    /**
+     * 发布审查计数之上的额度区块。所有数值都是整数 RP；额度一行按当月判定
+     * profile 的 `rp_per_credit` 换算并保留两位小数。单位写在标签里，数值只有
+     * 一对数字——绝不写成「12 额度」。
+     */
+    quotaHeading: "额度用量",
+    /** {month} = UTC 月份，例如 2026-11。卡片唯一的月份标签。 */
+    quotaWindow: "本月 · {month}（UTC）",
+    quotaCreditsLabel: "额度",
+    /** {used} / {limit}，以额度计，两位小数。 */
+    quotaCredits: "{used} / {limit}",
+    /** `monthly_rp` 为 NULL：绝不显示 0，也不留空上限。 */
+    quotaNoLimit: "当前套餐无月度上限",
+    /** {rpPerCredit} = 当月判定 profile 自己的比率，绝不写成常量。 */
+    quotaRpLabel: "RP（1 额度 = {rpPerCredit} RP）",
+    /** {used} / {limit}，以 RP 计，纯整数。 */
+    quotaRp: "{used} / {limit}",
+    /** 无上限套餐的同一行：花费仍然真实存在。 */
+    quotaRpNoLimit: "已用 {used} RP",
+    quotaSplitLabel: "去向",
+    quotaSharedBot: "共享机器人",
+    quotaByok: "自有密钥（BYOK）",
+    /** {version} = 当月判定的版本（"v2"）；{date} = 其起始日，YYYY-MM-DD。 */
+    quotaVersion: "额度版本 {version}（自 {date} 起）",
+    /** 两个计数的说明：卡片上每个数字各自读的是哪个计数。 */
+    quotaBasis:
+      "额度计的是已开始的审查，与成员页统计的尝试次数同一口径；下文的审查次数是已发布的审查。",
+    /**
+     * 达到或超出上限时上方的 used/limit 仍然保留，这条横幅说明后果与重置时间。
+     * {month} = YYYY-MM；{reset} = 下个 UTC 月的第一个瞬间（YYYY-MM-DD）。
+     */
+    quotaOverCeiling:
+      "此工作区已用尽 {month} 的月度额度。新审查将被拒绝，直到 {reset}——若平台运营者更早把此工作区调到更大的套餐则会更早恢复；已经开始运行的审查仍会完成。",
     /** 所有者的名称卡片——顶部切换器显示的名称。 */
     nameHeading: "工作区名称",
     nameDescription: "顶部工作区切换器显示的名称。此工作区的网址是其 id，不会改变。",
@@ -1014,6 +1047,7 @@ export const zhCN: Dictionary = {
       runtime: "运行时参数",
       workspaces: "工作区",
       usage: "审查用量",
+      quotaVersions: "额度版本",
       users: "用户",
       supportGrants: "支持访问",
     },
@@ -1192,6 +1226,54 @@ export const zhCN: Dictionary = {
       workspaceColumn: "工作区",
       sharedColumn: "共享机器人",
       ownColumn: "自有机器人",
+    },
+    /**
+     * 额度版本页：只增不改的 profile 表格、新建表单，以及发布前必须完成的
+     * 影响预览。「版本」是运营者对 profile 的说法，保留在这部分文案里。
+     */
+    quotaVersions: {
+      description: "每个额度版本及其覆盖的区间。版本不可修改；发布一个版本即追加它。",
+      loadFailed: "无法加载额度版本。",
+      versionColumn: "版本",
+      intervalColumn: "区间",
+      statusColumn: "状态",
+      /** 判定本月的版本：其 `effective_from` 覆盖了本月 1 日。 */
+      statusCurrent: "当前",
+      /** 区间起点晚于本月 1 日的版本。 */
+      statusScheduled: "已排定",
+      statusHistorical: "历史",
+      formTitle: "新建额度版本",
+      formCopy: "新版本会复制当前数值。发布即追加——既有版本永不被修改。",
+      /** 只读：下一个序号（如 v3）。绝不是表单输入。 */
+      fieldVersion: "版本",
+      fieldEffectiveFrom: "生效时间",
+      effectiveFromHint:
+        "月中批准的版本从次月 1 日起判定额度——当月仍沿用覆盖其 1 日的版本，因此新数值不会在月中把工作区推出额度。",
+      /** {date} = 此版本第一个判定的 1 日，显示在字段下方。 */
+      effectiveFromJudges: "自 {date} 起判定额度。",
+      fieldNotes: "变更原因",
+      notesPlaceholder: "例如：为覆盖深度审查上调 pro 上限",
+      fieldBaseQuick: "快速权重（RP）",
+      fieldBaseStandard: "标准权重（RP）",
+      fieldBaseDeep: "深度权重（RP）",
+      fieldSourceByok: "BYOK 倍率",
+      fieldSourceShared: "共享机器人倍率",
+      fieldRpPerCredit: "每额度 RP",
+      /** {plan} = 套餐目录中的名称。 */
+      fieldMonthlyRp: "每月 RP · {plan}",
+      monthlyRpHint: "留空表示不设月度上限。",
+      publish: "创建版本",
+      /** {count} 个超出，{total} 个工作区参与比较。绝不出现带分母的 0。 */
+      previewCount: "按今日用量，{total} 个工作区中有 {count} 个会超出月度上限。",
+      previewNone: "按今日用量，没有工作区会超出月度上限。",
+      /** {date} = 此版本第一个判定的 1 日。 */
+      previewStartsOn: "此版本自 {date} 起判定额度；当月沿用覆盖其 1 日的版本。",
+      previewRequired: "发布前请先检查影响。",
+      previewLoadFailed: "无法计算影响——在加载完成前不可发布。",
+      previewAction: "检查影响",
+      /** {version} = 服务器刚写入的序号。 */
+      published: "已创建版本 {version}。",
+      publishFailed: "无法创建额度版本。",
     },
     /** 用户页。 */
     users: {

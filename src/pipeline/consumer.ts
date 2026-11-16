@@ -5131,6 +5131,9 @@ async function processMessage(
     // between enqueue and consume is then priced at what actually ran).
     const usageNow = new Date();
     const monthProfile = await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso);
+    // Named once so the price and its source cannot disagree: `rpFor` reads the
+    // same value in the same expression.
+    const usageSource = resolution.scope === "shared" ? ("shared" as const) : ("byok" as const);
     const usageEvent = {
       reviewId,
       // The durable identity of THIS attempt: a review may already hold earlier
@@ -5138,7 +5141,8 @@ async function processMessage(
       executionToken: crypto.randomUUID(),
       workspaceId,
       occurredAt: usageNow.toISOString(),
-      rp: rpFor(level, resolution.scope === "shared" ? "shared" : "byok", monthProfile),
+      rp: rpFor(level, usageSource, monthProfile),
+      source: usageSource,
     };
     try {
       // No retry: a replay of the SAME token is already idempotent (the unique
