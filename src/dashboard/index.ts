@@ -109,6 +109,7 @@ import {
   MemberCapError,
   SHARED_BOT_REFUSAL,
   WORKSPACE_CREATION_CLOSED_REFUSAL,
+  appSlotAvailable,
   freeSlotAvailable,
   isFreeTierPlan,
   memberSlotAvailable,
@@ -1474,6 +1475,15 @@ dashboardApp.get("/manifest/callback", async (c) => {
     return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.codeRejected"), false, requestLocale(c)), 502);
   }
   const locale = requestLocale(c);
+  // The App cap is judged under this deployment's shape (spec §4: `self-hosted`
+  // has no cap and reads no column). A deployment that cannot name its shape
+  // already fails every SPA route; naming it here keeps that one 500.
+  let mode: DeploymentMode;
+  try {
+    mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+  } catch (error) {
+    return c.text((error as Error).message, 500);
+  }
   // The payload feeds the shared commit path; the cookie string is parked on
   // retryable outcomes so /manifest/confirm can resume.
   const holdPayload = buildHoldPayload(conversion, session.login, state.appId, state.workspaceId);
@@ -1484,6 +1494,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
     hold: holdPayload,
     login: session.login,
     workspaceId: target.kind === "ok" ? target.workspaceId : null,
+    mode,
   });
   // Retryable outcomes (db_unbound / encrypt_failed / db_rejected) keep the
   // hold: park the cookie so the operator can resume via /manifest/confirm.
@@ -1522,6 +1533,13 @@ dashboardApp.get("/manifest/callback", async (c) => {
     case "already_connected":
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
+    case "app_cap_reached":
+      // Non-retryable: a resubmit cannot free a slot, so the hold is burned.
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
+      return c.html(
+        manifestErrorPage(t(locale, "manifest.error.appCapReached", { limit: outcome.limit }), false, locale),
+        409,
+      );
     case "workspace_gate_unreadable":
       parkHold();
       return c.html(workspaceFloorUnreadablePage(locale, outcome.reason, target), 500);
@@ -1574,6 +1592,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
     hold,
     login: session.login,
     workspaceId: target.kind === "ok" ? target.workspaceId : null,
+    mode: deploymentModeOf(c.env.DEPLOYMENT_MODE),
   });
   switch (outcome.kind) {
     case "success": {
@@ -1600,6 +1619,12 @@ dashboardApp.post("/manifest/commit", async (c) => {
     case "already_connected":
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
+    case "app_cap_reached":
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+      return c.html(
+        manifestErrorPage(t(locale, "manifest.error.appCapReached", { limit: outcome.limit }), false, locale),
+        409,
+      );
     // Nothing to park: the submitted hold cookie IS this route's hold, so it
     // stays for the repair-then-resubmit retry — same as `db_rejected` below.
     case "workspace_gate_unreadable":
@@ -1619,6 +1644,7 @@ type ManifestCommitOutcome =
   | { kind: "encrypt_failed" }
   | { kind: "already_connected" }
   | { kind: "workspace_gate_unreadable"; reason?: DegradedReason }
+  | { kind: "app_cap_reached"; limit: number }
   | { kind: "db_rejected" };
 
 /**
@@ -1629,10 +1655,10 @@ type ManifestCommitOutcome =
  * semantics: success = ONE review_bots row (secretbox AAD rowKey = the row
  * PK, which IS the start-minted app id — the same value the manifest's
  * webhook URL carries);
- * login_mismatch / already_connected = non-retryable (the caller burns the
- * hold); db_unbound / encrypt_failed / workspace_gate_unreadable /
- * db_rejected = retryable (the caller keeps the hold so /manifest/confirm can
- * resume).
+ * login_mismatch / already_connected / app_cap_reached = non-retryable (the
+ * caller burns the hold: a retry cannot free a slot); db_unbound /
+ * encrypt_failed / workspace_gate_unreadable / db_rejected = retryable (the
+ * caller keeps the hold so /manifest/confirm can resume).
  * Zero upstream calls: encryption + a local D1 write only.
  */
 async function commitManifestApp(args: {
@@ -1646,8 +1672,10 @@ async function commitManifestApp(args: {
    * `db_unbound` outcome returns before it is read.
    */
   workspaceId: string | null;
+  /** The deployment shape the App cap is judged under (spec §4). */
+  mode: DeploymentMode;
 }): Promise<ManifestCommitOutcome> {
-  const { db, encryptionKey, hold, login, workspaceId } = args;
+  const { db, encryptionKey, hold, login, workspaceId, mode } = args;
   if (hold.login !== login) {
     logManifestFailure("commit", "login_mismatch");
     return { kind: "login_mismatch" };
@@ -1696,6 +1724,20 @@ async function commitManifestApp(args: {
     // workspace setting is repaired. The cause decides which page they get.
     logManifestFailure("commit", "db_error", { error_type: "workspace_gate_unreadable" });
     return { kind: "workspace_gate_unreadable", reason: workspaceFloor.reason };
+  }
+  // The plan's App allowance (D8), read BEFORE any row is written. A NULL
+  // limit is no cap, and `self-hosted` never consults the column at all:
+  // `resolveWorkspacePlan` answers the unlimited constant before its first
+  // read, so the count below is skipped there too. Refusing here (rather than
+  // inside createApp) keeps the check beside the other pre-write verdicts and
+  // leaves the store's batch the only writer.
+  const plan = await resolveWorkspacePlan(db, workspaceId, mode);
+  if (plan.appsPerWorkspace !== null) {
+    const liveApps = await createReviewBotsStore(db).countLiveApps(workspaceId);
+    if (!appSlotAvailable(liveApps, plan.appsPerWorkspace)) {
+      logManifestFailure("commit", "app_cap_reached", { apps_per_workspace: plan.appsPerWorkspace });
+      return { kind: "app_cap_reached", limit: plan.appsPerWorkspace };
+    }
   }
   try {
     const row = await apps.createApp({

@@ -1,0 +1,23 @@
+-- 0064_usage_events_rp.sql — every started review records what it cost in RP.
+--
+-- `usage_events` was counts-only: one row per started execution, no price. The
+-- quota profile added in 0063 states what one review costs (`base` per level ×
+-- `source` per bot scope), so the ledger needs the resolved integer beside the
+-- execution it charged. The consumer writes it in the same statement that mints
+-- `seq` (src/store/usage-store.ts), so a row's attempt ordinal and its cost can
+-- never disagree.
+--
+-- `0` is the PRE-METERING sentinel, not NULL. `rpFor` is >= 1 by construction
+-- (every profile factor is > 0 by 0063's CHECKs, and the smallest cell is
+-- BYOK + Quick = 1 RP), so no metered row can hold 0: the default keeps the
+-- column non-nullable for `SUM` — no COALESCE at the ceiling's read face — while
+-- still marking the rows written before this iteration, which contribute 0 to
+-- every ceiling.
+--
+-- `NOT NULL DEFAULT 0` is metadata-only for existing rows (SQLite stores the
+-- default; no table rewrite), so this applies over a live production DB.
+--
+-- Must apply AFTER 0063 (the profile whose weights produce the value).
+-- Append-only: nothing here rewrites or drops data.
+
+ALTER TABLE usage_events ADD COLUMN rp INTEGER NOT NULL DEFAULT 0;

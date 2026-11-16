@@ -22,13 +22,13 @@
  */
 import { Hono } from "hono";
 import type { D1Database, ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
-import { deploymentModeOf, type Env, type ScheduledEnv } from "./env";
+import { deploymentModeOf, type DeploymentMode, type Env, type ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
 import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
 import { reconcileReviewChecks } from "./check-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
-import { SHARED_BOT_ENTITLEMENT_SKIP_REASON } from "../contracts/failure-stages";
+import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
 import {
   classifyWebhook,
@@ -41,14 +41,23 @@ import {
   webhookRepositoryOwnerLogin,
   type WebhookOutcome,
 } from "./webhooks";
-import { defaultLog, handleReviewJob } from "./handlers";
+import { defaultLog, deliveryRefusalReason, handleReviewJob, type DeliveryRefusal } from "./handlers";
 import {
   createReviewBotsStore,
+  type BotScope,
   type DeliveryOutcome,
   type GithubAppTenantRow,
 } from "../dashboard/apps-store";
-import { createTargetsStore, type OwnerAllowlist, type ReviewTargetRow } from "../dashboard/targets-store";
-import { assertSharedBotAllowed } from "../dashboard/entitlement";
+import {
+  createTargetsStore,
+  parseTargetReviewLevel,
+  type OwnerAllowlist,
+  type ReviewTargetRow,
+} from "../dashboard/targets-store";
+import { readDefaultReviewLevel } from "../dashboard/runtime-config-store";
+import { assertSharedBotAllowed, resolveWorkspacePlan } from "../dashboard/entitlement";
+import { quotaMonth, resolveMonthlyQuota, rpFor } from "../store/quota-store";
+import { sumMonthlyRp } from "../store/usage-store";
 import { attachCheckAtAcceptance, createCheckLifecycle } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
@@ -346,6 +355,48 @@ export async function settleRefusedAfterAttach(input: {
   } catch (err) {
     input.warn(err instanceof Error ? err.message : String(err));
   }
+}
+
+/**
+ * The monthly RP ceiling for one admitted delivery: `null` means "may run",
+ * a `quota-exhausted` verdict means the enqueue is refused.
+ *
+ * Step 2 of the admission order (see the route's gate). The cost comes from
+ * the SAME two inputs the metering write prices — the target's resolved depth
+ * (`review_level`, through `parseTargetReviewLevel`, falling back to the
+ * operator default only when the row states none) and the bot's scope
+ * (`shared` → source 10, anything else → source 1; D7 makes BYOK metered, not
+ * exempt) — so a verdict and the charge it authorizes cannot be denominated
+ * differently.
+ *
+ * The month is the UTC calendar month of `usage_events.occurred_at` (the field
+ * the ledger writes), and the ceiling is the one from the profile covering
+ * that month's first day (D5): a profile published mid-month never judges it.
+ * `used + cost > limit` refuses, so a month exactly AT its ceiling still
+ * admits the review that lands on it and only the next RP is refused.
+ *
+ * Cost: one plan read (the capability check already paid its own), the profile
+ * read and one indexed month sum — and only for a delivery that could actually
+ * have proceeded.
+ */
+async function quotaRefusal(
+  db: D1Database,
+  target: ReviewTargetRow,
+  scope: BotScope,
+  mode: DeploymentMode,
+): Promise<DeliveryRefusal | null> {
+  const plan = await resolveWorkspacePlan(db, target.workspace_id, mode);
+  const month = quotaMonth(new Date());
+  const { profile, monthlyRp } = await resolveMonthlyQuota(db, month.startIso, plan.id);
+  // A NULL ceiling is unlimited: no sum is worth reading for it.
+  if (monthlyRp === null) return null;
+
+  let level = parseTargetReviewLevel(target.review_level);
+  if (level === null) level = (await readDefaultReviewLevel(db)).value;
+  const cost = rpFor(level, scope === "shared" ? "shared" : "byok", profile);
+
+  const used = await sumMonthlyRp(db, target.workspace_id, month.startIso, month.endIso);
+  return used + cost > monthlyRp ? { kind: "quota-exhausted", limit: monthlyRp, used, cost } : null;
 }
 
 // `version` rides the healthz face — additive field, `ok:true`
@@ -732,20 +783,42 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
-  // The shared-bot capability is decided ONCE, here, and only for a job both
-  // switches admitted on a bot the platform SHARES — the only delivery that
-  // could have enqueued. A workspace's OWN bot is not the shared bot: the
-  // owned path is untouched, and a Free workspace reviews with its own App
-  // exactly as before. It reads the TARGET's workspace (the consumer), never
-  // the bot's, and it is the very function the target-creation route calls, so
-  // neither surface re-derives the rule. The refusal feeds the delivery row
-  // below and the enqueue call at the end of this route; a store fault
-  // propagates as a 500, exactly like the allowlist read (an unapplied gate
-  // never admits a delivery).
-  const refusal =
-    outcome.kind === "job" && target !== null && !paused && reviewGlobal && row.scope === "shared"
-      ? await assertSharedBotAllowed(db, target.workspace_id, deploymentModeOf(c.env.DEPLOYMENT_MODE))
-      : null;
+  // The admission verdict, decided ONCE here, in the order the product fixes
+  // (capability first, then quota): a delivery may carry at most one refusal,
+  // so the two gates can never both fire and the author is told the cause that
+  // actually binds — a quota message for a workspace that may not use this bot
+  // at all would send it looking for a top-up it cannot buy here (D9).
+  //
+  //   1. Shared-bot capability — only for a job both switches admitted on a
+  //      bot the platform SHARES. A workspace's OWN bot is not the shared bot:
+  //      the owned path is untouched, and a Free workspace reviews with its own
+  //      App exactly as before. It reads the TARGET's workspace (the
+  //      consumer), never the bot's, and it is the very function the
+  //      target-creation route calls, so neither surface re-derives the rule.
+  //   2. Monthly RP ceiling — only in the branch step 1 admitted. The cost is
+  //      `rpFor` over the SAME two inputs the metering write uses (the
+  //      target's level, the bot's scope), so the enqueue's verdict and the
+  //      charge cannot be denominated differently; the ceiling is read from the
+  //      profile judging this UTC month (D5) and `null` means unlimited.
+  //
+  // `self-hosted` never reaches either decision: the capability resolves
+  // `unlimited` before its first read and there is no ceiling to compare
+  // against, so the whole branch is skipped rather than paid for.
+  //
+  // The refusal feeds the delivery row below, the Check's skip settlement and
+  // the enqueue call at the end of this route; a store fault propagates as a
+  // 500, exactly like the allowlist read (an unapplied gate never admits a
+  // delivery).
+  const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+  let refusal: DeliveryRefusal | null = null;
+  if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {
+    if (row.scope === "shared") {
+      refusal = await assertSharedBotAllowed(db, target.workspace_id, mode);
+    }
+    if (refusal === null && mode !== "self-hosted") {
+      refusal = await quotaRefusal(db, target, row.scope, mode);
+    }
+  }
   try {
     await appsStore.recordDelivery({
       appId: row.id,
@@ -964,7 +1037,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
                   triggeredBy: payload.triggered_by,
                   action: payload.action,
                   attachDeliveryId,
-                  reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON,
+                  reason: deliveryRefusalReason(refusal),
                 }),
               warn: (detail) =>
                 webhookWarn(

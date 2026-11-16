@@ -210,10 +210,65 @@ the future lever is a separate alert-only exclusion list, never a change to
 `PAGING_EXCLUDED_STAGES`, which would also hide the rows from the dashboard's
 failure counts and PR history.
 
+## RP metering and the monthly ceiling
+
+Every started review records an integer RP cost on its `usage_events` row
+(`usage_events.rp`, migration `0064_usage_events_rp.sql`), written in the SAME
+statement that mints the row's `seq` so the attempt ordinal and its charge can
+never disagree.
+
+- **The price.** `rp = base(strength) × source(multiplier)`, read from the
+  resolved quota profile: `base` ∈ 1/2/6 RP for Quick/Standard/Deep and
+  `source` ∈ 1/10 for BYOK and the shared bot. BYOK is metered, never exempt
+  (D7) — there is no second "own bot" allowance. `1 Credit = 20 RP` is the
+  profile's `rp_per_credit`, so the display ratio is configuration, not code.
+- **Both inputs are already on the path.** The strength is the target's
+  `review_level` (`parseTargetReviewLevel`, falling back to the operator
+  default only when the row states none — the same read the pipeline makes);
+  the source is the bot's `scope` on the row the gate already holds. The value
+  is computed twice from the one pure function (once for the enqueue verdict,
+  once at the metering write) and never carried on the queue message, so the
+  charge always describes what actually ran.
+- **The month.** The ceiling compares against `SUM(rp)` over the UTC calendar
+  month of `usage_events.occurred_at`, in a half-open window from `quotaMonth`.
+  The ceiling itself comes from the profile covering that month's **first
+  day** (D5), so a profile published mid-month starts judging on the next 1st
+  and cannot evict a workspace mid-month. `null` is unlimited.
+- **`0` is the pre-metering sentinel.** `rpFor` is `>= 1` by construction
+  (every profile factor is `> 0` by DDL CHECK), so no metered row can hold 0:
+  rows written before this iteration default to 0 and contribute nothing to any
+  ceiling, and the column stays non-nullable with no `COALESCE` at the read.
+- **The refusal.** A workspace whose month has reached its ceiling is refused
+  AT ENQUEUE, in the shared-bot gate's shape: the Check is still attached and
+  settles `neutral`, one terminal failure row is recorded under the `quota`
+  stage (`QUOTA_STAGE`, outside `PAGING_EXCLUDED_STAGES` — the review did not
+  run, so the row stays paged exactly like `entitlement`), and nothing is sent,
+  claimed or started. `used + cost > limit` refuses, so a month exactly AT its
+  ceiling still admits the review that lands on it.
+- **Order: capability first, then quota.** One delivery carries at most one
+  refusal, so the two gates cannot both fire. The capability is a property of
+  the plan (only the plan or the bot changes it) while quota is consumption
+  against that plan; a workspace that may not use the shared bot is told that,
+  because a quota message would send it looking for a top-up it cannot buy in
+  this repository (D9). Quota is evaluated only in the branch the capability
+  admitted, which also keeps the cheap refusal cheap.
+- **`self-hosted` never meters and never refuses.** The mode resolves the
+  unlimited plan constant before its first read, there is no ceiling to compare
+  against, and the enqueue gate skips the branch entirely.
+
+`apps_per_workspace` (a plan capability, not consumption) is enforced at App
+creation only: `free` 1, `pro` 10, NULL = no cap. The guard runs before any row
+is written, counts live bots of the workspace (`bot_workspaces` joined live
+`review_bots`, so a soft-deleted App frees its slot), and refuses with named
+copy and zero writes. `self-hosted` never reads the limit — the mode resolves
+the unlimited constant before its first read.
+
 ## Invariants
 
 - Free slots count memberships, not ownership.
-- `usage_events` is counts-only metering, not enforcement.
+- `usage_events.rp` is the ceiling's input: the ledger is metering AND the
+  evidence the next enqueue is judged on. A row's `rp` is written by the same
+  statement as its `seq`, and 0 marks a row that predates the column.
 - Workspace soft deletion and `PLATFORM_OPERATORS` / `isPlatformOperator` parsing are unchanged.
 - Unlimited means `null`, never a numeric sentinel.
 - The shared-bot capability has exactly one decision function
@@ -225,12 +280,15 @@ failure counts and PR history.
 - `src/dashboard/entitlement.ts`: `resolveWorkspacePlan`, `resolveWorkspacePlans`, `memberSlotAvailable`, `assertSharedBotAllowed`, `sharedBotAvailability`.
 - `src/dashboard/review-usage-store.ts`: `readReviewUsage` (the counts the usage card and the console's usage page read).
 - `src/dashboard/targets-store.ts`: `createOnSharedBot` (the creation refusal).
-- `src/worker/index.ts` + `src/worker/handlers.ts`: the enqueue refusal (`deliveryOutcomeFromWebhook`, `handleReviewJob`).
+- `src/worker/index.ts` + `src/worker/handlers.ts`: the enqueue refusal (`deliveryOutcomeFromWebhook`, `handleReviewJob`, `DeliveryRefusal`).
 - `src/dashboard/invite-store.ts`: `createInvite`, `acceptInvite`, seat/free-slot SQL guards.
 - `src/dashboard/workspace-store.ts`: `createWorkspace` and subscription writes.
 - `src/dashboard/index.ts`: members/invite routes and plan rendering.
 - `src/worker/env.ts`: `deploymentModeOf`.
+- `src/store/usage-store.ts`: `recordUsageEvent` (the one statement that mints `seq` and writes `rp`), `sumMonthlyRp` (the ceiling's read).
+- `src/store/quota-store.ts`: `resolveQuotaProfile`, `resolveMonthlyQuota`, `rpFor`, `quotaMonth`.
 - `migrations/0031_plans_usage.sql`, `migrations/0032_unlimited_plan.sql`, `migrations/0061_plan_shared_bot_allowed.sql`: catalogue, nullable column, capability.
+- `migrations/0063_quota_profiles.sql`, `migrations/0064_usage_events_rp.sql`: the profile tables, the `apps_per_workspace` seed, and the metered ledger column.
 
 ## Change obligations
 

@@ -955,6 +955,8 @@ export const zhCN: Dictionary = {
       noEncryptionKey:
         "此部署没有有效的 DASHBOARD_ENCRYPTION_KEY 来存储 App 凭据 — 请让运维配置后再提交。",
       alreadyConnected: "此 GitHub App 已在此部署上连接 — 未做任何更改。",
+      appCapReached:
+        "无法连接该 App — 此工作区已有 {limit} 个 App，达到其套餐上限，因此没有存储任何内容。请先移除一个 App，或将工作区迁移到额度更高的套餐，然后重新开始。",
       dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",
       workspaceFloorUnreadable:

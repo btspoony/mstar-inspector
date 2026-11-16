@@ -84,6 +84,15 @@ enqueue refusal sends nothing — its Check is settled `neutral` and the deliver
 records one terminal `entitlement` failure. `self-hosted` always has the
 capability and never reads the column.
 
+A second enqueue refusal sits beside it: a workspace whose month has reached its
+plan's RP ceiling
+([entitlement](../architecture/entitlement-and-deployment-modes.md) § RP metering
+and the monthly ceiling). It has the SAME shape and sends nothing — the attached
+Check settles `neutral` and one terminal failure is recorded — but under its own
+`quota` stage, because the cause is consumption rather than capability. The two
+are ordered capability first and can never both fire on one delivery: one
+verdict per delivery, recorded once.
+
 ## Invariants
 
 - `shared` is platform-authorized and batch-verified against the current designation.

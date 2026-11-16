@@ -38,6 +38,12 @@ export type PlanLimits = {
   name: string;
   includedMembers: number | null;
   sharedBotAllowed: boolean;
+  /**
+   * How many Apps this workspace may own (migration 0031's column, seeded
+   * 1/10 by 0063). NULL is no cap, exactly like `includedMembers`: a consumer
+   * must branch on it, never fall back to 0.
+   */
+  appsPerWorkspace: number | null;
 };
 
 /** The read's row shape: SQLite carries the capability as a 0/1 INTEGER. */
@@ -56,6 +62,7 @@ function planLimits(row: PlanLimitsRow): PlanLimits {
     name: row.name,
     includedMembers: row.includedMembers,
     sharedBotAllowed: row.sharedBotAllowed !== 0,
+    appsPerWorkspace: row.appsPerWorkspace,
   };
 }
 
@@ -87,6 +94,9 @@ const UNLIMITED_LIMITS: PlanLimits = {
   // `self-hosted` answer before any read: the capability never consults a
   // column in that mode.
   sharedBotAllowed: true,
+  // No App cap in this mode: the constant answers before any read, which is
+  // what makes `self-hosted` never consult the column (spec §4).
+  appsPerWorkspace: null,
 };
 
 /**
@@ -153,7 +163,7 @@ export async function resolveWorkspacePlans(
     const subscribed = await db
       .prepare(
         `SELECT s.workspace_id AS workspaceId, p.id AS id, p.name AS name, p.included_members AS includedMembers,
-                p.shared_bot_allowed AS sharedBotAllowed
+                p.shared_bot_allowed AS sharedBotAllowed, p.apps_per_workspace AS appsPerWorkspace
            FROM workspace_subscriptions s
            JOIN plans p ON p.id = s.plan_id
           WHERE s.workspace_id IN (${placeholders}) AND s.status = 'active'`,
@@ -173,7 +183,7 @@ export async function resolveWorkspacePlans(
       const row = await db
         .prepare(
           `SELECT id AS id, name AS name, included_members AS includedMembers,
-                  shared_bot_allowed AS sharedBotAllowed
+                  shared_bot_allowed AS sharedBotAllowed, apps_per_workspace AS appsPerWorkspace
              FROM plans WHERE id = ?`,
         )
         .bind(FREE_PLAN_ID)
@@ -238,6 +248,14 @@ export function sharedBotAvailability(limits: PlanLimits, sharedBotExists: boole
 /** One free workspace per login, so the second free membership is the last. */
 export function freeSlotAvailable(freeMembershipCount: number): boolean {
   return freeMembershipCount < 1;
+}
+
+/**
+ * The plan's App cap; NULL is no cap, so the answer is always yes and no caller
+ * can read the absence as "zero Apps". Mirrors {@link memberSlotAvailable}.
+ */
+export function appSlotAvailable(liveAppCount: number, appsPerWorkspace: number | null): boolean {
+  return appsPerWorkspace === null || liveAppCount < appsPerWorkspace;
 }
 
 /**

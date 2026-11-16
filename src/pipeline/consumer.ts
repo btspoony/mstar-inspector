@@ -103,6 +103,10 @@ import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redact
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
 import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
+// The cost model the ledger charges: `rpFor` from the profile judging this
+// month (D5), so a started review is priced by the same configuration the
+// enqueue's ceiling check read.
+import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 // The hand-off's two fenced writes live in the Check registry (§7.9/§7.11.2):
 // linking the publication the probe found, and releasing the claim to recovery.
@@ -203,7 +207,7 @@ import {
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // review_bots row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
-import { createReviewBotsStore } from "../dashboard/apps-store";
+import { createReviewBotsStore, type BotScope } from "../dashboard/apps-store";
 import {
   createTargetsStore,
   parseTargetReviewLevel,
@@ -3051,6 +3055,12 @@ type CommenterResolution =
        * it here keeps the depth on the per-message configuration read.
        */
       reviewLevel: string | null;
+      /**
+       * The bot's `scope` (migration 0058) — the RP source multiplier's only
+       * input at the metering write. Read off the SAME row this resolution
+       * already fetched, so no second bot read is spent on it.
+       */
+      scope: BotScope;
     }
   | { kind: "paused" };
 
@@ -3151,6 +3161,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
       githubAppId: cached.githubAppId,
       workspaceId: row.workspace_id,
       reviewLevel: target.review_level,
+      scope: row.scope,
     };
   }
   // Cache miss (first message for this App) or fingerprint mismatch
@@ -3170,6 +3181,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
     githubAppId: row.github_app_id,
     workspaceId: row.workspace_id,
     reviewLevel: target.review_level,
+    scope: row.scope,
   };
 }
 
@@ -5109,13 +5121,24 @@ async function processMessage(
       ...key,
       head_sha: payload.head_sha || "no-sha",
     });
+    // The charge (D2, D5, D7): this execution's own resolved strength against
+    // the source its bot scope selects, priced by the profile judging THIS UTC
+    // month's first day — the same profile the enqueue's ceiling read, so the
+    // rows and the ceiling can never be denominated differently. Recomputed
+    // here instead of carried on the queue message: `level` is already resolved
+    // and `scope` rides the credential read, so the charge costs one profile
+    // read per started review and the message gains no field (a level change
+    // between enqueue and consume is then priced at what actually ran).
+    const usageNow = new Date();
+    const monthProfile = await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso);
     const usageEvent = {
       reviewId,
       // The durable identity of THIS attempt: a review may already hold earlier
       // rows, so the failure read-back below must ask by token, not by review.
       executionToken: crypto.randomUUID(),
       workspaceId,
-      occurredAt: new Date().toISOString(),
+      occurredAt: usageNow.toISOString(),
+      rp: rpFor(level, resolution.scope === "shared" ? "shared" : "byok", monthProfile),
     };
     try {
       // No retry: a replay of the SAME token is already idempotent (the unique

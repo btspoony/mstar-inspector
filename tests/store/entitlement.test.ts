@@ -58,6 +58,7 @@ describe("resolveWorkspacePlan", () => {
       name: "Free",
       includedMembers: 5,
       sharedBotAllowed: false,
+      appsPerWorkspace: 1,
     });
     db.raw.close();
   });
@@ -70,6 +71,7 @@ describe("resolveWorkspacePlan", () => {
       name: "Pro",
       includedMembers: 5,
       sharedBotAllowed: true,
+      appsPerWorkspace: 10,
     });
     db.raw.close();
   });
@@ -82,6 +84,7 @@ describe("resolveWorkspacePlan", () => {
       name: "Unlimited",
       includedMembers: null,
       sharedBotAllowed: true,
+      appsPerWorkspace: null,
     });
     db.raw.close();
   });
@@ -114,6 +117,7 @@ describe("resolveWorkspacePlan — the mode decides before any read", () => {
       name: "Unlimited",
       includedMembers: null,
       sharedBotAllowed: true,
+      appsPerWorkspace: null,
     });
     db.raw.close();
   });
