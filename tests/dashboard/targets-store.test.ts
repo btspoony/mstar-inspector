@@ -24,6 +24,7 @@ import {
   effectiveTargetSettings,
   getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
+  setInheritance,
 } from "../../src/dashboard/targets-store";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 
@@ -131,10 +132,6 @@ function targetRow(db: TestD1, targetId: string): TargetRowSnapshot {
 function targetCount(db: TestD1): number {
   return (db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get() as { n: number }).n;
 }
-
-    const db = createMigratedTestD1();
-  });
-});
 
 describe("tenant reads bind workspace_id", () => {
   test("another workspace's target reads absent", async () => {
