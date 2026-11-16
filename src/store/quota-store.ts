@@ -145,3 +145,79 @@ export function quotaMonth(now: Date): { month: string; startIso: string; endIso
   const startIso = start.toISOString();
   return { month: startIso.slice(0, 7), startIso, endIso: end.toISOString() };
 }
+
+/**
+ * Whether a month's usage has spent the ceiling — the ONE spelling of "at or
+ * over" shared by the workspace card's banner and the operator's impact
+ * preview. A NULL ceiling is unlimited, so it can never be spent.
+ *
+ * The enqueue's own comparison is `used + cost > monthlyRp` (a review is
+ * admitted while it still fits). Because `rpFor` is >= 1, that refuses exactly
+ * the months this returns true for — plus the ones one review would tip over.
+ * At today's usage, `used >= monthlyRp` therefore means "no further review is
+ * admitted", which is what both faces count.
+ */
+export function quotaSpent(usedRp: number, monthlyRp: number | null): boolean {
+  return monthlyRp !== null && usedRp >= monthlyRp;
+}
+
+/**
+ * The date a profile first judges quota (D5): the 1st of the month its
+ * `effective_from` covers, or the next month's 1st when it lands mid-month.
+ * This is the same rule `resolveQuotaProfile(monthStart)` applies at read time
+ * — a month is judged by the profile whose `effective_from <= monthStart`, so
+ * the first month start at or after the instant is the first one it judges.
+ * Returns `YYYY-MM-DD`, the shape the faces render.
+ */
+export function quotaStartsOn(effectiveFrom: string): string {
+  const at = new Date(effectiveFrom);
+  const monthStart = Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1);
+  if (at.getTime() === monthStart) return new Date(monthStart).toISOString().slice(0, 10);
+  return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
+}
+
+/** One stored profile with its operator-only notes and its per-plan ceilings. */
+export type QuotaProfileVersion = QuotaProfile & {
+  notes: string | null;
+  /** This version's ceiling per plan id; `null` means that plan is unlimited. */
+  monthlyRp: Record<string, number | null>;
+};
+
+/**
+ * Every stored profile, oldest first, with its ceilings — the operator list's
+ * read. The interval END is the next row's `effective_from` (no second stored
+ * endpoint), so callers derive it from this order.
+ */
+export async function listQuotaProfiles(db: D1Like): Promise<QuotaProfileVersion[]> {
+  const res = await db
+    .prepare(
+      `SELECT p.id            AS id,
+              p.version       AS version,
+              p.effective_from AS effective_from,
+              p.base_quick    AS base_quick,
+              p.base_standard AS base_standard,
+              p.base_deep     AS base_deep,
+              p.source_byok   AS source_byok,
+              p.source_shared AS source_shared,
+              p.rp_per_credit AS rp_per_credit,
+              p.notes         AS notes,
+              q.plan_id       AS plan_id,
+              q.monthly_rp    AS monthly_rp
+         FROM quota_profiles p
+         LEFT JOIN quota_profile_plans q ON q.profile_id = p.id
+        ORDER BY p.effective_from ASC, q.plan_id ASC`,
+    )
+    .all<QuotaProfileRow & { notes: string | null; plan_id: string | null; monthly_rp: number | null }>();
+  const versions: QuotaProfileVersion[] = [];
+  const byId = new Map<string, QuotaProfileVersion>();
+  for (const row of res.results) {
+    let version = byId.get(row.id);
+    if (version === undefined) {
+      version = { ...quotaProfile(row), notes: row.notes, monthlyRp: {} };
+      byId.set(row.id, version);
+      versions.push(version);
+    }
+    if (row.plan_id !== null) version.monthlyRp[row.plan_id] = row.monthly_rp;
+  }
+  return versions;
+}

@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { reviewUsageMonth } from "../../src/dashboard/review-usage-store";
+import { quotaMonth } from "../../src/store/quota-store";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
@@ -148,14 +149,98 @@ describe("GET /dashboard/<ref>/api/settings/review-usage", () => {
     const res = await getUsage(db, "ws-acme", "frank");
     expect(res.status).toBe(200);
     const body: unknown = await res.json();
+    const month = quotaMonth(new Date());
     expect(body).toEqual({
       month: reviewUsageMonth(new Date()).month,
       sharedReviews: 2,
       ownReviews: 1,
       sharedBot: "available",
+      // The credit block: the judging profile (v1), its `pro` ceiling and the
+      // month's spend in RP. Nothing was metered in this fixture, so 0 is a
+      // real answer, not a missing field.
+      quota: {
+        month: month.month,
+        usedRp: 0,
+        limitRp: 20000,
+        sharedRp: 0,
+        byokRp: 0,
+        rpPerCredit: 20,
+        profileVersion: 1,
+        profileFrom: "2026-10-24",
+        resetOn: month.endIso.slice(0, 10),
+      },
     });
     // ws-other's four reviews stay out of this payload entirely.
     expect(JSON.stringify(body)).not.toContain("ws-other");
+  });
+
+  test("the credit block reads the month's RP, its source split and the judging profile", async () => {
+    const db = fixture();
+    const month = quotaMonth(new Date());
+    // A shared Deep review (6 x 10) and a BYOK Standard one (2 x 1), both
+    // started inside the reported month.
+    for (const [reviewId, rp, source] of [
+      ["usage-shared", 60, "shared"],
+      ["usage-byok", 2, "byok"],
+    ] as const) {
+      seed(
+        db,
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source)
+         VALUES (?, 1, ?, 'ws-acme', ?, ?, ?)`,
+        reviewId,
+        `token-${reviewId}`,
+        new Date().toISOString(),
+        rp,
+        source,
+      );
+    }
+    const res = await getUsage(db, "ws-acme", "frank");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { quota: Record<string, unknown> };
+    expect(body.quota).toMatchObject({
+      month: month.month,
+      usedRp: 62,
+      limitRp: 20000,
+      sharedRp: 60,
+      byokRp: 2,
+      // Credits are presentation: the ratio rides the payload so the card never
+      // carries a constant of its own.
+      rpPerCredit: 20,
+    });
+  });
+
+  test("an unlimited plan reports a NULL ceiling, never 0", async () => {
+    const db = fixture();
+    seed(
+      db,
+      "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES ('ws-other', 'unlimited', 'active', ?, ?)",
+      "2026-10-01T00:00:00.000Z",
+      "2026-10-01T00:00:00.000Z",
+    );
+    const res = await getUsage(db, "ws-other", "olga");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { quota: Record<string, unknown> };
+    expect(body.quota).toMatchObject({ limitRp: null });
+  });
+
+  test("self-hosted reports no quota block at all — and reads no profile", async () => {
+    const db = fixture();
+    // Deleting every profile proves the mode short-circuits: a `saas` read of
+    // the same database would throw on the empty table, so a 200 here is the
+    // "no ceiling is resolved" contract rather than a silently-swallowed error.
+    seed(db, "DELETE FROM quota_profile_plans");
+    seed(db, "DELETE FROM quota_profiles");
+    const res = await worker.fetch(
+      new Request(`https://worker.local/dashboard/ws-acme/api/settings/review-usage`, {
+        headers: {
+          Accept: "application/json",
+          Cookie: `${SESSION_COOKIE}=${await createSessionValue("frank", null, SESSION_SECRET)}`,
+        },
+      }),
+      withSpaAssets(envFor(db, { DEPLOYMENT_MODE: "self-hosted" })),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ quota: null, sharedReviews: 2, ownReviews: 1 });
   });
 
   test("a caller who is not a member of the addressed workspace gets the tenant 404", async () => {

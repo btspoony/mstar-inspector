@@ -1,0 +1,30 @@
+-- 0065_usage_events_source.sql — the ledger names the source it charged.
+--
+-- 0064 recorded WHAT a started review cost (`rp`), but not which of the two
+-- sources paid it. The workspace card shows "Where it went" — the month's RP
+-- split into the shared bot's and the workspace's own Apps' — and `rp` alone
+-- cannot answer it: `rp = base(strength) x source(multiplier)`, and the
+-- multipliers are profile-editable, so one integer is compatible with several
+-- (strength, source) pairs. Recovering the source from `reviews` or
+-- `pull_requests` instead would read the bot's CURRENT scope rather than the
+-- scope at charge time, and an attempt can outlive the review row it never
+-- produced, so that join is lossy as well. The consumer already resolves the
+-- source to price the row (`resolution.scope === "shared" ? "shared" : "byok"`),
+-- so this column records the same fact in the same statement that records the
+-- price — one bind, not a second write.
+--
+-- NULL is the PRE-0065 value, not a third source, and it is deliberately left
+-- unbackfilled: a row written before this column was genuinely unknown. The
+-- split sums only the two named values, so pre-column rows count in the
+-- month's total (`SUM(rp)`) and in neither split. That is the honest reading —
+-- the card's split may total less than its overall figure, and it never
+-- silently attributes spend to a source nothing recorded.
+--
+-- Append-only: one added column, nothing rewritten or dropped. Metadata-only
+-- for existing rows (SQLite stores the absent value; no table rewrite), so it
+-- applies over a live database.
+--
+-- Must apply AFTER 0064 (the price this column decomposes) and 0031 (the
+-- table).
+
+ALTER TABLE usage_events ADD COLUMN source TEXT CHECK (source IS NULL OR source IN ('byok', 'shared'));

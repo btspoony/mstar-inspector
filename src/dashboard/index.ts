@@ -118,6 +118,7 @@ import {
   sharedBotAvailability,
 } from "./entitlement";
 import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
+import { readWorkspaceQuota } from "./quota-faces";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
   type AcceptInviteOutcome,
@@ -2589,20 +2590,27 @@ const reviewUsageReadRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
   const { db, scope } = member;
-  const window = reviewUsageMonth(new Date());
+  const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+  const now = new Date();
+  const window = reviewUsageMonth(now);
   const [rows, plan, sharedBots] = await Promise.all([
     readReviewUsage(db, window, scope.workspaceId),
-    resolveWorkspacePlan(db, scope.workspaceId, deploymentModeOf(c.env.DEPLOYMENT_MODE)),
+    resolveWorkspacePlan(db, scope.workspaceId, mode),
     createReviewBotsStore(db).listSharedBots(scope.workspaceId),
   ]);
   const row = rows[0];
   // Retired between the gate and the read: the same 404 an unknown ref gets.
   if (!row) return await tenantNotFound(c);
+  // The credit block is `saas` only: `self-hosted` has no ceiling to report and
+  // renders no quota card, so no profile or month RP is read in that mode.
+  const quota =
+    mode === "saas" ? await readWorkspaceQuota(db, scope.workspaceId, plan.id, now) : null;
   return c.json({
     month: window.month,
     sharedReviews: row.sharedReviews,
     ownReviews: row.ownReviews,
     sharedBot: sharedBotAvailability(plan, sharedBots.length > 0),
+    quota,
   });
 };
 
