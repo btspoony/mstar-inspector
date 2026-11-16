@@ -21,7 +21,7 @@
  */
 import { describe, expect, spyOn, test } from "bun:test";
 import worker from "../../src/worker/index";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -96,14 +96,13 @@ async function seededWorld(): Promise<TestD1> {
     workspaceId: "default",
   });
   // One ledger row: the detail face's 200 side needs a real tuple, and every
-  // deny path must still answer before the lookup. `createApp` wrote the bot's
-  // one target in the same batch, so its id is what the row is attributed to.
-  const target = db.raw.prepare("SELECT id FROM review_targets WHERE bot_id = ?").get(id) as {
-    id: string;
-  };
+  // deny path must still answer before the lookup. Creation writes no target
+  // (D13), so the fixture seeds the App's repository target and attributes the
+  // row to it.
+  const targetId = seedTarget(db, id, { name: "mallorys-app" });
   await createReviewBotsStore(db).upsertPullRequest({
     appId: id,
-    targetId: target.id,
+    targetId,
     owner: "acme",
     repo: "widgets",
     prNumber: 131,
@@ -300,13 +299,9 @@ const MATRIX_ROUTES: MatrixRoute[] = [
   // side additionally calls api.github.com (GET /app + the bot avatar leg), so
   // the sweep's stub answers those URLs too.
   { name: "refresh-metadata", path: `/dashboard/default/api/apps/${APP_ID}/refresh-metadata` },
-  // --- workspace-scoped target creation (the shared bot's chooser) ---
-  // Not App-addressed: the body names the bot, and the route's own gates
-  // decide. A manager's 200 side writes one target on a SHARED bot, which is
-  // why the seeded world carries one.
-  { name: "create target on a shared bot", path: "/dashboard/default/api/targets", fields: { botId: CREATE_BOT_ID } },
+  // --- workspace-scoped installation binding ---
   // The target page's bind entry: the world's shared bot carries one pending
-  // installation, and the create above gave this workspace its target.
+  // installation.
   {
     name: "bind-installation",
     path: `/dashboard/default/api/apps/${SHARED_BOT_APP_ID}/bind-installation`,

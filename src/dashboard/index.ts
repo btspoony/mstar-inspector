@@ -74,6 +74,7 @@ import {
   createTargetsStore,
   parseTargetReviewLevel,
   REVIEW_TRIGGER_MODES,
+  targetCheckGate,
   type ReviewTargetRow,
   type ReviewTriggerMode,
 } from "./targets-store";
@@ -1747,7 +1748,6 @@ async function commitManifestApp(args: {
   }
   try {
     const row = await apps.createApp({
-      defaultCheckMinScore: workspaceFloor.minScore,
       id: hold.appId,
       githubSlug: hold.slug,
       githubAppId: hold.id,

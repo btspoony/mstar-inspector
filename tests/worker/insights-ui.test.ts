@@ -12,7 +12,7 @@ import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { createSessionValue, SESSION_COOKIE } from "../../src/dashboard/session";
 import { SPA_BOOT_MARKER, withSpaAssets } from "../helpers/spa";
-import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createUser } from "../../src/dashboard/users";
@@ -117,6 +117,7 @@ async function insightsWorld(): Promise<{
     createdBy: "mallory",
     workspaceId: "default",
   });
+  seedTarget(db, appId, { name: "widgets-app", repoName: "widgets" });
   await createReviewBotsStore(db).createApp({
     id: otherAppId,
     githubSlug: "other-app",
@@ -127,6 +128,7 @@ async function insightsWorld(): Promise<{
     createdBy: "mallory",
     workspaceId: "default",
   });
+  seedTarget(db, otherAppId, { name: "other-app", repoName: "other" });
 
   const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().replace("T", " ").slice(0, 19);
   const insertReview = db.raw.query(

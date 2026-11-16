@@ -618,7 +618,7 @@ export async function applyPublishedLifecycle(
       {
         targetIdExpression: {
           sql: `COALESCE(${LIVE_BINDING_TARGET_SQL}, ?)`,
-          binds: [payload.scope.appId, payload.scope.installationId, payload.artifact.targetId],
+          binds: [payload.scope.appId, payload.scope.owner, payload.scope.repo, payload.artifact.targetId],
         },
         guard: { sql: APPLY_LEASE_GUARD_SQL, binds: [...leaseGuard] },
       },
@@ -685,13 +685,19 @@ const APPLY_LEASE_GUARD_SQL = `EXISTS (SELECT 1 FROM review_publications AS appl
  * recorded row. It is embedded in the inserting statement, so the binding is
  * read when that statement runs, inside the same batch and transaction as the
  * write it feeds: a read taken before the batch could be stranded by a
- * concurrent unbind/claim. It is never used to rewrite an existing row's
+ * concurrent delete/claim. It is never used to rewrite an existing row's
  * `target_id` — a row's tenant is fixed when it is first recorded. Binds, in
- * order: `(botId, installationId)`; it yields NULL when nothing is bound (a
- * target that keeps `installation_id` but is soft-deleted holds nothing).
+ * order: `(botId, repoOwner, repoName)`; it yields NULL when the bot holds no
+ * live target for that repository. A target IS a repository (migration 0067),
+ * so exactly one live row matches per (bot, repository) in a workspace; the
+ * `ORDER BY` only makes a duplicate row deterministic. Owner/name compare
+ * NOCASE: GitHub repository identities are case-insensitive and the stored
+ * spelling may differ from the payload's.
  */
 const LIVE_BINDING_TARGET_SQL = `(SELECT id FROM review_targets
-       WHERE bot_id = ? AND installation_id = ? AND deleted_at IS NULL)`;
+       WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
+         AND deleted_at IS NULL
+       ORDER BY created_at, id LIMIT 1)`;
 
 /**
  * The live-lease fence probe (§7.11.1) — the read twin of the applied
@@ -746,11 +752,10 @@ function chunkStatements<T>(items: readonly T[], size: number): T[][] {
  * The §7.2 state machine as ONE batch (knowledge `d1-batch-atomicity`).
  * Order inside the batch matters and is replay-safe:
  *   0. Attribution — fixed at FIRST record. A statement that INSERTS a row
- *      embeds `LIVE_BINDING_TARGET_SQL`, the scalar subquery for the target
- *      that currently holds this fingerprint's `(bot, installation)` (read
- *      in-batch, so a concurrent unbind/claim cannot be frozen into an
- *      applied state), falling back to the payload's `artifact.targetId` as a
- *      hint when nothing is bound. The review row this apply inserts is
+ *      embeds `LIVE_BINDING_TARGET_SQL`, the scalar subquery for the bot's
+ *      live target for this repository (read in-batch, so a concurrent
+ *      delete/claim cannot be frozen into an applied state), falling back to
+ *      the payload's `artifact.targetId` as a hint when no target is bound. The review row this apply inserts is
  *      composed into the same batch with the same expression, so one apply
  *      never files a review under one tenant and its findings under another. No statement rewrites `target_id` on an existing row: a rebind
  *      moves FUTURE publications, never history — each target's ledger is the
@@ -780,10 +785,10 @@ function chunkStatements<T>(items: readonly T[], size: number): T[][] {
  * `(publicationId, holder, leaseEpoch, operationNow)`.
  *
  * Attribution is fixed at FIRST record. A newly inserted row is stamped with
- * the live binding for the fingerprint's `(bot, installation)` — resolved by a
- * scalar subquery inside the inserting statement, so a concurrent unbind/claim
- * cannot be frozen — and `hintTargetId` is only the fallback a new row takes
- * when nothing is bound. No statement here rewrites `target_id` on an existing
+ * the live binding for the bot and repository — resolved by a scalar subquery
+ * inside the inserting statement, so a concurrent delete/claim cannot be
+ * frozen — and `hintTargetId` is only the fallback a new row takes when no
+ * target resolves. No statement here rewrites `target_id` on an existing
  * row.
  */
 function lifecycleApplyBatch(
@@ -836,7 +841,7 @@ function lifecycleApplyBatch(
           pubId, pubId, headSha, headSha, round, round, nowMs, nowMs,
           // The INSERT's target: the binding read in this statement, else the
           // payload hint.
-          scope.appId, scope.installationId, hintTargetId,
+          scope.appId, scope.owner, scope.repo, hintTargetId,
           ...guard,
         ),
     );

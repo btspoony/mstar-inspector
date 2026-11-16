@@ -27,7 +27,7 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1 } from "../store/helpers";
 import type { Env } from "../../src/worker/env";
 import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
@@ -151,6 +151,7 @@ async function seededWorld(privateKeyPem: string): Promise<{ db: TestD1; appId: 
     createdBy: "mallory",
     workspaceId: "default",
   });
+  seedTarget(db, id, { name: "mallorys-app" });
   return { db, appId: id };
 }
 

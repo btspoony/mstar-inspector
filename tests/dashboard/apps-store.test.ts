@@ -103,7 +103,7 @@ describe("app delete", () => {
       workspaceId: WS,
     });
     const targets = createTargetsStore(db);
-    const { target } = await targets.create({
+    const created = await targets.create({
       workspaceId: WS,
       botId: "app-delete",
       repoId: 900020,
@@ -111,6 +111,8 @@ describe("app delete", () => {
       repoName: "repo",
       createdBy: "acme",
     });
+    if (created.outcome !== "created") throw new Error("seed: target was refused as a duplicate");
+    const target = created.target;
 
     expect(await store.softDeleteApp("app-delete")).toBe(true);
     expect((await store.getAppById("app-delete"))?.deleted_at).not.toBeNull();

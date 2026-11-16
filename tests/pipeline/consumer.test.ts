@@ -97,7 +97,7 @@ import {
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { reconcileReviewChecks } from "../../src/worker/check-reconcile";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
-import { createTargetsStore, targetCheckGate } from "../../src/dashboard/targets-store";
+import { targetCheckGate, type ReviewTargetRow } from "../../src/dashboard/targets-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { GITHUB_PRIMARY_RATE_LIMIT_PREFIX, GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
@@ -6093,10 +6093,15 @@ function publicationRow(db: TestD1): { id: string; kind: string; phase: string; 
 
 /**
  * The Check gate of the bot's target — the read the production Check lane
- * makes (the scope names the bot, not the target).
+ * makes (the scope names the bot, not the target). These fixtures give a bot
+ * exactly one live target, so the bot's single row is the gate.
  */
 async function targetGate(db: TestD1, appId: string) {
-  const target = await createTargetsStore(db).resolve(appId, null);
+  const rows = await db
+    .prepare(`SELECT * FROM review_targets WHERE bot_id = ? AND deleted_at IS NULL LIMIT 2`)
+    .bind(appId)
+    .all<ReviewTargetRow>();
+  const target = rows.results.length === 1 ? rows.results[0]! : null;
   return target === null ? null : targetCheckGate(target);
 }
 
