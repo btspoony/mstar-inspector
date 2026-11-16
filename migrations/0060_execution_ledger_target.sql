@@ -26,11 +26,18 @@
 -- Requiring zero NULLs would therefore refuse the migration on any deployment
 -- past the retention window — production had 99 such failures across 11 PRs on
 -- first apply, and the findings ledger reaches the same state as it ages.
--- So a guard refuses a NULL that COULD have been resolved (a candidate set of
--- exactly one that the UPDATE somehow did not attribute — a real defect) and
--- allows a NULL with no candidate at all, which the read faces already treat as
--- legacy and filtered, exactly as they treat a NULL `bot_id`. The ambiguity
--- guard still runs first, so a multi-candidate row never reaches this point.
+-- So a guard refuses a NULL that COULD have been resolved — at least one
+-- candidate row whose own `target_id` is non-NULL, i.e. an attribution the
+-- UPDATE should have written — and allows a NULL with no such candidate, which
+-- the read faces already treat as legacy and filtered, exactly as they treat a
+-- NULL `bot_id`. A candidate row that is itself unattributed is not a candidate:
+-- `COUNT(DISTINCT p.target_id)` ignores NULLs and would have read that state as
+-- "nothing to attribute", hiding a real miss.
+--
+-- Both ledgers also carry an ambiguity guard, because the tuple they join on
+-- stops being unique once a bot holds a second target (0057 enforces exactly
+-- one only at its own apply time). A scalar subquery over several rows would
+-- pick one arbitrarily, which is the cross-workspace leak this file closes.
 --
 -- The ambiguity guard runs BEFORE the failure UPDATE: the same installation id
 -- can be recorded under two bots, each with its own pull-request row at the
@@ -60,8 +67,27 @@ ALTER TABLE review_findings ADD COLUMN target_id TEXT REFERENCES review_targets(
 ALTER TABLE review_failures ADD COLUMN target_id TEXT REFERENCES review_targets(id);
 ALTER TABLE audit_events ADD COLUMN target_id TEXT REFERENCES review_targets(id);
 
--- A finding belongs to the PR its bot reviewed: the finding's own
--- (bot, owner, repo, pr_number) is the PR ledger's unique key.
+-- A finding belongs to the PR its bot reviewed, keyed on the same tuple the
+-- PR ledger uses. That tuple is unique only while a bot holds one live target
+-- (0057's guard); once a bot gains a second target, two ledger rows can share
+-- it with different targets, and the scalar subquery below would silently pick
+-- one. Refuse that state before attributing anything, exactly as the failures
+-- path does.
+CREATE TABLE guard_findings_ambiguous_target (
+  n INTEGER NOT NULL CONSTRAINT guard_findings_ambiguous_target CHECK (n = 0)
+);
+INSERT INTO guard_findings_ambiguous_target (n)
+SELECT COUNT(*) FROM review_findings f
+WHERE (
+  SELECT COUNT(DISTINCT p.target_id)
+  FROM pull_requests p
+  WHERE p.bot_id = f.bot_id
+    AND p.owner = f.owner
+    AND p.repo = f.repo
+    AND p.pr_number = f.pr_number
+) > 1;
+DROP TABLE guard_findings_ambiguous_target;
+
 UPDATE review_findings
 SET target_id = (
   SELECT p.target_id FROM pull_requests p
@@ -116,6 +142,7 @@ WHERE f.target_id IS NULL
       AND p.owner = f.owner
       AND p.repo = f.repo
       AND p.pr_number = f.pr_number
+      AND p.target_id IS NOT NULL
   );
 DROP TABLE guard_findings_without_target;
 
@@ -125,15 +152,16 @@ CREATE TABLE guard_failures_without_target (
 INSERT INTO guard_failures_without_target (n)
 SELECT COUNT(*) FROM review_failures f
 WHERE f.target_id IS NULL
-  AND (
-    SELECT COUNT(DISTINCT p.target_id)
+  AND EXISTS (
+    SELECT 1
     FROM bot_installations i
     JOIN pull_requests p ON p.bot_id = i.bot_id
     WHERE i.installation_id = f.installation_id
       AND p.owner = f.owner
       AND p.repo = f.repo
       AND p.pr_number = f.pr_number
-  ) = 1;
+      AND p.target_id IS NOT NULL
+  );
 DROP TABLE guard_failures_without_target;
 
 -- The tenant predicate is `(target_id, owner, repo, pr_number)`: the counts and

@@ -3670,6 +3670,73 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     ]);
   });
 
+  test("refuses a finding whose bot resolves to two different targets", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    // The same shape as the failures case, on the findings path: one bot, two
+    // ledger rows at the same (owner, repo, pr_number) under different targets.
+    // Without the ambiguity guard the scalar subquery would pick one of them,
+    // and the row would be invisible to the other workspace's face.
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', 'acme', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('target-b', 'ws-other', 'bot-a', 'target-b', 'acme',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests
+           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+         VALUES ('pr-b', 'bot-a', 'target-b', 'acme', 'widgets', 42, 'PR', 'open', 'sha',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+    seedPullRequest(db, "pr-a", 42);
+    seedFinding(db, "finding-42", 42);
+
+    expect(() => applyLedgerTargetMigration(db)).toThrow(
+      "CHECK constraint failed: guard_findings_ambiguous_target",
+    );
+    expect(db.raw.query("SELECT id, target_id FROM review_findings").all()).toEqual([
+      { id: "finding-42", target_id: null },
+    ]);
+  });
+
+  test("an unattributed candidate row is not a candidate: both guards leave the NULL alone", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    // A pull_requests row exists at the key but carries no target of its own
+    // (the column is nullable since 0057). Nothing can be derived from it, so
+    // both ledgers must pass rather than abort — and must not read it as an
+    // attribution the UPDATE missed.
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests
+           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+         VALUES ('pr-null', 'bot-a', NULL, 'acme', 'widgets', 55, 'PR', 'open', 'sha',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+    seedFinding(db, "finding-55", 55);
+    seedFailure(db, "failure-55", 55);
+
+    applyLedgerTargetMigration(db);
+
+    expect(db.raw.query("SELECT id, target_id FROM review_findings").all()).toEqual([
+      { id: "finding-55", target_id: null },
+    ]);
+    expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
+      { id: "failure-55", target_id: null },
+    ]);
+  });
+
   test("refuses a failure whose installation resolves to two different targets", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
