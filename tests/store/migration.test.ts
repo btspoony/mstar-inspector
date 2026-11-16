@@ -3670,7 +3670,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     ]);
   });
 
-  test("ignores a removed installation row, so a stale binding cannot abort or mis-attribute", () => {
+  test("a removed installation row is history, not an ambiguity: the failure keeps its own target", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
     seedPullRequest(db, "pr-42", 42);
@@ -3725,11 +3725,13 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
       )
       .run();
 
+    // The removed binding is history, so it neither makes the set ambiguous nor
+    // disappears: the failure reaches the target it was written for. What the
+    // live filter buys is that the ambiguity guard does NOT fire here.
     applyLedgerTargetMigration(db);
 
-    // The removed binding is ignored, so the live one wins: exactly one target.
     expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
-      { id: "failure-42", target_id: "target-b" },
+      { id: "failure-42", target_id: "target-a" },
     ]);
   });
 
