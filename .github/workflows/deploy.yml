@@ -182,6 +182,15 @@ jobs:
       - name: Assert zero orphan Apps (pre-deploy gate)
         run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-db
 
+      # ABORT GATE: the runtime validates the key lazily, so a malformed
+      # DASHBOARD_ENCRYPTION_KEY deploys green and then answers 500 on every
+      # encrypted write. The check is the runtime's own encrypt/decrypt round
+      # trip — never a second base64/length rule — and it reads no database, so
+      # it holds on an empty one. Ordered before every version-publishing step,
+      # same as the attribution gate.
+      - name: Assert usable encryption key (pre-deploy gate)
+        run: bun scripts/assert-encryption-key.ts
+
       - name: Write required secrets
         run: |
           : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \

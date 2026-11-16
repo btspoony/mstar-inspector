@@ -366,6 +366,9 @@ describe("deploy-prod.yml guards", () => {
       "DASHBOARD_SESSION_SECRET",
       "DASHBOARD_ENCRYPTION_KEY",
     ]);
+    // the key gate reads the one secret it proves usable — nothing else, and no
+    // token: it touches no cloud API.
+    expectSecrets("Assert usable encryption key (pre-deploy gate)", ["DASHBOARD_ENCRYPTION_KEY"]);
     // the secret-bulk writes read the values they upload + the token that authenticates
     expectSecrets("Write required secrets", [
       TOKEN,
@@ -397,7 +400,7 @@ describe("deploy-prod.yml guards", () => {
     const actionSteps = steps.filter((s) => s.uses !== undefined);
     for (const s of actionSteps) expect([s.uses, secretsOf(s)]).toEqual([s.uses, []]);
 
-    // and no OTHER step smuggles one in: the eleven above are the full carrier set
+    // and no OTHER step smuggles one in: the twelve above are the full carrier set
     expect(
       steps
         .filter((s) => secretsOf(s).length > 0)
@@ -407,6 +410,7 @@ describe("deploy-prod.yml guards", () => {
       [
         "Apply prod D1 migrations (remote)",
         "Assert required secrets are set",
+        "Assert usable encryption key (pre-deploy gate)",
         "Assert zero orphan Apps (post-deploy)",
         "Assert zero orphan Apps (pre-deploy gate)",
         "Deploy serving version (prod)",

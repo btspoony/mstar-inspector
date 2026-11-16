@@ -174,6 +174,13 @@ row = default, an invalid value fails loud at the writer, write + audit in one
 batch). The table's name is the honest cost; renaming it later is a mechanical
 migration, not a behaviour change.
 
+The encryption master key is not platform state and no route here reads it:
+`DASHBOARD_ENCRYPTION_KEY` is a deploy-time Worker secret
+(`docs/deploy.md` § Multi-App go-live → *Set DASHBOARD_ENCRYPTION_KEY*). That
+section also states the pre-deploy gate that refuses a malformed key, so an
+operator console whose settings writes answer 500 is debugged against the
+deploy, not against this surface.
+
 ### 4. Platform audit
 
 Table `platform_audit_events (id TEXT PRIMARY KEY, actor_login TEXT NOT NULL COLLATE NOCASE, action TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL, detail_json TEXT, created_at TEXT NOT NULL)` with an index on `(created_at)`.

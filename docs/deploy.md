@@ -105,7 +105,8 @@ production path itself, both ahead of its first mutating command:
   deploy, both `wrangler secret bulk` steps, the post-secret version
   re-capture), `OAUTH_CLIENT_SECRET` / `DASHBOARD_SESSION_SECRET` /
   `DASHBOARD_ENCRYPTION_KEY` on the required-secret preflight and the
-  required-secrets write, and `ALERT_WEBHOOK_URL` on its single
+  required-secrets write, `DASHBOARD_ENCRYPTION_KEY` alone on the
+  encryption-key gate that proves it usable, and `ALERT_WEBHOOK_URL` on its single
   bind-or-null-delete step — never on the job. No step that runs third-party
   action code (`actions/checkout`, `oven-sh/setup-bun`,
   `actions/upload-artifact`) therefore has a secret in its environment, and
@@ -953,10 +954,16 @@ Each deploy run performs, in order:
    live bot owns a live `review_targets` row, and a non-zero answer exits the
    same way: the review configuration lives on that row, so a target-less bot
    answers no delivery.
-4. Every step that publishes a Worker version — `wrangler secret bulk` (it
+4. `bun scripts/assert-encryption-key.ts` — an encrypt/decrypt round-trip
+   through `createSecretbox` (the runtime's own key parser), with no database
+   read. **An unusable `DASHBOARD_ENCRYPTION_KEY` exits the run before every
+   deploy-capable step**, naming the required shape and the observed byte
+   length. Without it the deploy is green and every encrypted write answers
+   500 (§ 1 of § Multi-App go-live).
+5. Every step that publishes a Worker version — `wrangler secret bulk` (it
    creates and deploys a version on its own) and `wrangler deploy`. On staging
    the D1 work therefore sits **before** the secret writes, not after them.
-5. Healthz / cron / digest smokes, then the same attribution gate again, against
+6. Healthz / cron / digest smokes, then the same attribution gate again, against
    the artifact now serving.
 
 ## Prerequisites
@@ -1728,6 +1735,16 @@ first use). Encryption-dependent dashboard routes (manifest commit, App
 settings) fail **closed with 5xx** when it is missing or malformed — the
 hold is kept and nothing is stored, so fixing the env makes the retry
 succeed.
+
+The deploy **refuses a malformed key before it deploys anything**. Both deploy
+workflows run `bun scripts/assert-encryption-key.ts` as a pre-deploy gate, in
+the same position as the zero-orphan gate (§ Gate ordering). It binds the value
+through `createSecretbox` — the runtime's own parser, never a second
+base64/length rule — encrypts a fixed plaintext and decrypts it back, and exits
+`1` naming the required shape and the observed byte length (never the value).
+It reads no database, so the gate also holds on production's empty first D1.
+The result is the failure you want: a red deploy, instead of a green one whose
+every encrypted write answers 500.
 
 ```bash
 # Generate: base64 of exactly 32 random bytes
