@@ -542,6 +542,41 @@ export const en = {
     usageNotDesignated: "Not available yet",
     usageNotDesignatedHint:
       "No shared bot is designated on this platform. A platform operator designates it; until then your own GitHub Apps review your pull requests.",
+    /**
+     * The credit block that sits above the published-review counts. Every
+     * figure is integer RP; the credits row divides by the judging profile's
+     * `rp_per_credit` and shows two decimals. The LABEL carries the unit and
+     * the value is the bare pair — never "12 credits".
+     */
+    quotaHeading: "Credit usage",
+    /** {month} = the UTC calendar month, e.g. 2026-11. The card's only month label. */
+    quotaWindow: "This month · {month} (UTC)",
+    quotaCreditsLabel: "Credits",
+    /** {used} / {limit} in credits, two decimals. */
+    quotaCredits: "{used} / {limit}",
+    /** `monthly_rp` NULL: never 0, never an empty limit. */
+    quotaNoLimit: "No monthly limit on this plan",
+    /** {rpPerCredit} = the judging profile's own ratio, never a constant. */
+    quotaRpLabel: "RP (1 credit = {rpPerCredit} RP)",
+    /** {used} / {limit} in RP, plain integers. */
+    quotaRp: "{used} / {limit}",
+    /** The same row for a plan with no ceiling: the spend is still real. */
+    quotaRpNoLimit: "{used} RP used",
+    quotaSplitLabel: "Where it went",
+    quotaSharedBot: "Shared bot",
+    quotaByok: "BYOK",
+    /** {version} = the judging profile ("v2"); {date} = its start, YYYY-MM-DD. */
+    quotaVersion: "Quota version {version} (from {date})",
+    /** The two-counter statement: which counter each figure on the card reads. */
+    quotaBasis:
+      "Credits weigh the same started reviews the members page counts as attempts; the review counts below are published reviews.",
+    /**
+     * At or past the ceiling the used/limit pair above stays and this banner
+     * states the consequence and the reset. {month} = YYYY-MM; {reset} = the
+     * next UTC month's first instant (YYYY-MM-DD).
+     */
+    quotaOverCeiling:
+      "This workspace has used its monthly credit allowance for {month}. New reviews are refused until {reset} — or sooner if a platform operator moves this workspace to a larger plan; a review that already started still finishes.",
     /** The owner's name card — the label the top-bar switcher shows. */
     nameHeading: "Workspace name",
     nameDescription:
@@ -1246,6 +1281,7 @@ export const en = {
       runtime: "Runtime parameters",
       workspaces: "Workspaces",
       usage: "Review usage",
+      quotaVersions: "Quota versions",
       users: "Users",
       supportGrants: "Support access",
     },
@@ -1434,6 +1470,59 @@ export const en = {
       workspaceColumn: "Workspace",
       sharedColumn: "Shared bot",
       ownColumn: "Own bots",
+    },
+    /**
+     * Quota versions page: the append-only profile table, the create form and
+     * the impact preview that must precede a publish. "Version" is the
+     * operator's word for a profile and is kept in this copy.
+     */
+    quotaVersions: {
+      description:
+        "Every quota version with the interval it covers. A version is never edited; publishing one appends it.",
+      loadFailed: "Could not load the quota versions.",
+      versionColumn: "Version",
+      intervalColumn: "Interval",
+      statusColumn: "Status",
+      /** The version judging this month: its `effective_from` covers the 1st. */
+      statusCurrent: "Current",
+      /** A version whose interval starts after this month's 1st. */
+      statusScheduled: "Scheduled",
+      statusHistorical: "Historical",
+      formTitle: "Create a quota version",
+      formCopy:
+        "A new version copies the current numbers. Publishing appends it — an existing version is never edited.",
+      /** Read-only: the next ordinal (v3). Never a form input. */
+      fieldVersion: "Version",
+      fieldEffectiveFrom: "Effective from",
+      effectiveFromHint:
+        "A version approved mid-month judges quota from the next month's 1st — the current month keeps the version that covered its 1st, so new numbers never push a workspace over mid-month.",
+      /** {date} = the first 1st this version judges, shown under the field. */
+      effectiveFromJudges: "Judges quota from {date}.",
+      fieldNotes: "Why this version",
+      notesPlaceholder: "e.g. pro ceiling raised to cover Deep reviews",
+      fieldBaseQuick: "Quick weight (RP)",
+      fieldBaseStandard: "Standard weight (RP)",
+      fieldBaseDeep: "Deep weight (RP)",
+      fieldSourceByok: "BYOK multiplier",
+      fieldSourceShared: "Shared bot multiplier",
+      fieldRpPerCredit: "RP per credit",
+      /** {plan} = the plan's catalogue name. */
+      fieldMonthlyRp: "Monthly RP · {plan}",
+      monthlyRpHint: "Leave blank for no monthly limit.",
+      publish: "Create version",
+      /** {count} over, {total} workspaces considered. Never a zero with a denominator. */
+      previewCount:
+        "{count} of {total} workspaces would be over their monthly limit at today's usage under these numbers.",
+      previewNone: "No workspace would be over its monthly limit at today's usage under these numbers.",
+      /** {date} = the first 1st this version judges. */
+      previewStartsOn:
+        "This version judges quota from {date}; the current month keeps the version that covered its 1st.",
+      previewRequired: "Check the impact before publishing.",
+      previewLoadFailed: "The impact could not be computed — publishing stays unavailable until it loads.",
+      previewAction: "Check impact",
+      /** {version} = the ordinal the server just stored. */
+      published: "Version {version} created.",
+      publishFailed: "Could not create the quota version.",
     },
     /** Users page. */
     users: {

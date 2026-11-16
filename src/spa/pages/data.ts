@@ -2500,24 +2500,70 @@ export function parseStoredCheckMinScore(body: string): number | null {
 }
 
 /**
- * The settings usage card's payload: the UTC month, the two counts and the
- * shared-bot row's state. A drifted field fails the parse into the card's
- * error face instead of rendering an undefined number.
+ * The card's credit block, all integer RP: the month's spend, the ceiling the
+ * judging profile sets for this workspace's plan, the source split and the
+ * profile label. `null` on the payload means `self-hosted` (no ceiling to
+ * report, no card).
+ */
+export type ReviewUsageQuota = {
+  month: string;
+  usedRp: number;
+  /** NULL = no monthly limit on this plan. */
+  limitRp: number | null;
+  sharedRp: number;
+  byokRp: number;
+  rpPerCredit: number;
+  profileVersion: number;
+  /** The judging profile's own start, `YYYY-MM-DD`. */
+  profileFrom: string;
+  /** The next UTC month's first instant, `YYYY-MM-DD`. */
+  resetOn: string;
+};
+
+/**
+ * The settings usage card's payload: the UTC month, the two published-review
+ * counts, the shared-bot row's state and the credit block. A drifted field
+ * fails the parse into the card's error face instead of rendering an undefined
+ * number.
  */
 export type ReviewUsage = {
   month: string;
   sharedReviews: number;
   ownReviews: number;
   sharedBot: "available" | "not-in-plan" | "not-designated";
+  quota: ReviewUsageQuota | null;
 };
+
+function parseReviewUsageQuota(value: unknown): ReviewUsageQuota | null {
+  if (!isRecord(value)) return null;
+  const { month, usedRp, limitRp, sharedRp, byokRp, rpPerCredit, profileVersion, profileFrom, resetOn } = value;
+  if (
+    typeof month !== "string" ||
+    typeof usedRp !== "number" ||
+    typeof sharedRp !== "number" ||
+    typeof byokRp !== "number" ||
+    typeof rpPerCredit !== "number" ||
+    typeof profileVersion !== "number" ||
+    typeof profileFrom !== "string" ||
+    typeof resetOn !== "string"
+  ) {
+    return null;
+  }
+  if (limitRp !== null && typeof limitRp !== "number") return null;
+  return { month, usedRp, limitRp, sharedRp, byokRp, rpPerCredit, profileVersion, profileFrom, resetOn };
+}
 
 export function parseReviewUsage(data: unknown): ReviewUsage | null {
   if (!isRecord(data)) return null;
-  const { month, sharedReviews, ownReviews, sharedBot } = data;
+  const { month, sharedReviews, ownReviews, sharedBot, quota } = data;
   if (typeof month !== "string") return null;
   if (typeof sharedReviews !== "number" || typeof ownReviews !== "number") return null;
   if (sharedBot !== "available" && sharedBot !== "not-in-plan" && sharedBot !== "not-designated") return null;
-  return { month, sharedReviews, ownReviews, sharedBot };
+  // Absent or `null` is the server saying "no quota block" (self-hosted, or a
+  // Worker that predates the field); a present object must parse whole.
+  const parsedQuota = quota === undefined || quota === null ? null : parseReviewUsageQuota(quota);
+  if (quota !== undefined && quota !== null && parsedQuota === null) return null;
+  return { month, sharedReviews, ownReviews, sharedBot, quota: parsedQuota };
 }
 
 export function splitModelChain(raw: string | null | undefined): string[] {

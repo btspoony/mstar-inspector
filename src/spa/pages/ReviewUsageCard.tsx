@@ -1,25 +1,30 @@
 /**
- * The workspace settings usage card: shared-bot vs own-bot reviews for the
- * current UTC month (spec bot-scope-and-claiming § Review usage).
+ * The workspace settings usage card: the month's credit spend against the
+ * ceiling, then the shared-bot vs own-bot published-review counts for the same
+ * UTC month (spec bot-scope-and-claiming § Review usage).
  *
- * Read-only — the counts are what happened and the status row is why nothing
- * more can happen. The two unavailable states must not share copy: the plan
- * state is the reader's to change, while the designation state waits for a
- * platform operator and offers nothing to buy. `self-hosted` renders no status
- * row at all, because the console that designates a shared bot is not
- * registered in that mode — the own-bot count is the whole card there.
+ * One card, two counters, and the copy says which is which: the credit block
+ * reads `usage_events` (attempts — the same rows the members page counts) and
+ * the rows below read `reviews` (published reviews). `workspace.quotaBasis`
+ * states that relationship on the surface, so a workspace at its ceiling can
+ * tell which number will refuse it.
  *
- * This card counts PUBLISHED reviews (`reviews`). The members page's meter
- * counts review ATTEMPTS (`usage_events`), a different measure; the labels
- * here say `reviews` so the two numbers are never read as the same one.
+ * Credits are presentation over integer RP: every figure the server sends is
+ * RP, and this file divides by the judging profile's `rp_per_credit` to two
+ * decimals. Nothing is stored or compared in credits.
+ *
+ * `self-hosted` renders no quota block at all — there is no ceiling to report —
+ * so the card falls back to the published-review rows alone, exactly as the
+ * previous iteration shipped it.
  */
 import { useEffect, useState } from "react";
 import { FlowSection } from "@design-system";
+import { quotaSpent } from "../../store/quota-store";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 import { fetchJson } from "../api";
 import { apiBase } from "../workspace-base";
 import { parseReviewUsage, type ReviewUsage } from "./data";
-import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
+import { LoadFailedNotice, LoadingNotice, PageNotice } from "./PageNotice";
 
 /** The shared-bot row's value and hint per state (the two states differ). */
 const SHARED_BOT_COPY: Record<ReviewUsage["sharedBot"], { value: DictionaryKey; hint?: DictionaryKey }> = {
@@ -27,6 +32,11 @@ const SHARED_BOT_COPY: Record<ReviewUsage["sharedBot"], { value: DictionaryKey; 
   "not-in-plan": { value: "workspace.usageNotInPlan", hint: "workspace.usageNotInPlanHint" },
   "not-designated": { value: "workspace.usageNotDesignated", hint: "workspace.usageNotDesignatedHint" },
 };
+
+/** RP as credits, two decimals — the only place the division happens. */
+function credits(rp: number, rpPerCredit: number): string {
+  return (rp / rpPerCredit).toFixed(2);
+}
 
 export function ReviewUsageCard({
   locale,
@@ -60,18 +70,82 @@ export function ReviewUsageCard({
   }, []);
 
   const status = usage === null ? null : SHARED_BOT_COPY[usage.sharedBot];
+  const quota = usage?.quota ?? null;
 
   return (
     <FlowSection
-      title={t(locale, "workspace.usageHeading")}
-      subtitle={usage === null ? undefined : t(locale, "workspace.usageWindow", { month: usage.month })}
+      title={t(locale, quota === null ? "workspace.usageHeading" : "workspace.quotaHeading")}
+      subtitle={
+        usage === null
+          ? undefined
+          : t(locale, quota === null ? "workspace.usageWindow" : "workspace.quotaWindow", {
+              month: usage.month,
+            })
+      }
     >
       {failed ? (
         <LoadFailedNotice locale={locale} />
       ) : usage === null || status === null ? (
         <LoadingNotice locale={locale} />
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-3">
+          {quota === null ? null : (
+            <>
+              {/* The consequence, not just the figure: the pair below is kept so
+                  the reader sees by how much, and this states what happens next. */}
+              {quotaSpent(quota.usedRp, quota.limitRp) ? (
+                <PageNotice
+                  kind="warn"
+                  message={t(locale, "workspace.quotaOverCeiling", {
+                    month: usage.month,
+                    reset: quota.resetOn,
+                  })}
+                />
+              ) : null}
+              <dl className="flex flex-col gap-3 text-sm">
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="text-muted-foreground">{t(locale, "workspace.quotaCreditsLabel")}</dt>
+                  <dd className="font-medium tabular-nums">
+                    {quota.limitRp === null
+                      ? t(locale, "workspace.quotaNoLimit")
+                      : t(locale, "workspace.quotaCredits", {
+                          used: credits(quota.usedRp, quota.rpPerCredit),
+                          limit: credits(quota.limitRp, quota.rpPerCredit),
+                        })}
+                  </dd>
+                </div>
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="text-muted-foreground">
+                    {t(locale, "workspace.quotaRpLabel", { rpPerCredit: quota.rpPerCredit })}
+                  </dt>
+                  <dd className="font-medium tabular-nums">
+                    {quota.limitRp === null
+                      ? t(locale, "workspace.quotaRpNoLimit", { used: quota.usedRp })
+                      : t(locale, "workspace.quotaRp", { used: quota.usedRp, limit: quota.limitRp })}
+                  </dd>
+                </div>
+              </dl>
+              <div className="flex flex-col gap-1">
+                <p className="text-xs text-muted-foreground">{t(locale, "workspace.quotaSplitLabel")}</p>
+                <dl className="flex flex-col gap-1 text-xs">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <dt className="text-muted-foreground">{t(locale, "workspace.quotaSharedBot")}</dt>
+                    <dd className="tabular-nums">{quota.sharedRp} RP</dd>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-3">
+                    <dt className="text-muted-foreground">{t(locale, "workspace.quotaByok")}</dt>
+                    <dd className="tabular-nums">{quota.byokRp} RP</dd>
+                  </div>
+                </dl>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {t(locale, "workspace.quotaVersion", {
+                  version: `v${quota.profileVersion}`,
+                  date: quota.profileFrom,
+                })}
+              </p>
+            </>
+          )}
           <dl className="flex flex-col gap-3 text-sm">
             <div className="flex items-baseline justify-between gap-3">
               <dt className="text-muted-foreground">{t(locale, "workspace.usageSharedReviews")}</dt>
@@ -88,6 +162,11 @@ export function ReviewUsageCard({
               </div>
             )}
           </dl>
+          {/* The surface statement: which counter each figure reads, so the
+              credits and the review counts are never read as the same number. */}
+          {quota === null ? null : (
+            <p className="text-xs text-muted-foreground">{t(locale, "workspace.quotaBasis")}</p>
+          )}
           {/* The hint explains the status row directly above it and is absent
               for `available`. */}
           {deploymentMode === "self-hosted" || status.hint === undefined ? null : (
