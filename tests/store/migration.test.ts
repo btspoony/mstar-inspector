@@ -3641,26 +3641,176 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     ]);
   });
 
-  test("aborts the migration when a finding cannot be attributed, naming the guard", () => {
+  test("leaves a finding whose PR row was swept NULL, and does not abort", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
-    // No pull_requests row for this finding's PR: the bot-keyed join that the
-    // tenant faces are about to lose was the only path to its target.
+    // The ledger row is gone (the 90-day sweep removes terminal PRs), so no
+    // target can ever be derived for this finding — the same history shape the
+    // failures guard was narrowed for.
     seedFinding(db, "finding-orphan", 77);
 
-    expect(() => applyLedgerTargetMigration(db)).toThrow(
-      "CHECK constraint failed: guard_findings_without_target",
-    );
+    applyLedgerTargetMigration(db);
+
+    expect(db.raw.query("SELECT id, target_id FROM review_findings").all()).toEqual([
+      { id: "finding-orphan", target_id: null },
+    ]);
   });
 
-  test("aborts the migration when a failure cannot be attributed, naming the guard", () => {
+  test("leaves a failure whose PR row was swept NULL, and does not abort", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
+    // The PR ledger row is gone: no target can ever be derived for this
+    // failure, which is the shape production history has (a pruned ledger).
     seedFailure(db, "failure-orphan", 77);
 
+    applyLedgerTargetMigration(db);
+
+    expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
+      { id: "failure-orphan", target_id: null },
+    ]);
+  });
+
+  test("a moved installation resolves to the live binding, whichever order the rows were seeded", () => {
+    // One installation, two binding rows: bot-a's is removed, bot-b's is live,
+    // each with its own ledger row at the same PR key. The guard counts one live
+    // candidate; the UPDATE must agree rather than take SQLite's scan order, so
+    // both seeded orders must answer target-b.
+    for (const liveFirst of [false, true]) {
+      const db = preLedgerTargetDb();
+      seedParents(db);
+      seedPullRequest(db, "pr-42", 42);
+      seedFailure(db, "failure-42", 42);
+      db.raw
+        .prepare(
+          `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+           VALUES ('ws-other', 'ws-other', 'ws-other', 'acme', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      db.raw
+        .prepare(
+          `INSERT INTO review_bots
+             (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
+              status, created_at, updated_at)
+           VALUES ('bot-b', 9102, 'bot-b', 'enc', 'enc', 'acme', 'active',
+                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      db.raw
+        .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-b', 'ws-other')")
+        .run();
+      db.raw
+        .prepare(
+          `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+           VALUES ('target-b', 'ws-other', 'bot-b', 'target-b', 'acme',
+                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+        )
+        .run();
+      // `seedParents` already gave bot-a an installation row; mark it removed
+      // rather than inserting a second one (the pair is unique), then add the
+      // live binding, in the order this iteration asks for.
+      const removeA = (): void => {
+        db.raw
+          .prepare("UPDATE bot_installations SET removed_at = '2026-01-01T00:00:00.000Z' WHERE bot_id = 'bot-a'")
+          .run();
+      };
+      const addLive = (): void => {
+        db.raw
+          .prepare(
+            `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+             VALUES ('install-live', 'bot-b', 123, 'acme', datetime('now'))`,
+          )
+          .run();
+      };
+      if (liveFirst) {
+        addLive();
+        removeA();
+      } else {
+        removeA();
+        addLive();
+      }
+      db.raw
+        .prepare(
+          `INSERT INTO pull_requests
+             (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+           VALUES ('pr-b', 'bot-b', 'target-b', 'acme', 'widgets', 42, 'PR', 'open', 'sha',
+                   datetime('now'), datetime('now'))`,
+        )
+        .run();
+
+      applyLedgerTargetMigration(db);
+
+      expect(
+        db.raw.query("SELECT id, target_id FROM review_failures").all(),
+        `liveFirst=${liveFirst}`,
+      ).toEqual([{ id: "failure-42", target_id: "target-b" }]);
+    }
+  });
+
+  test("refuses a finding whose bot resolves to two different targets", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    // The same shape as the failures case, on the findings path: one bot, two
+    // ledger rows at the same (owner, repo, pr_number) under different targets.
+    // Without the ambiguity guard the scalar subquery would pick one of them,
+    // and the row would be invisible to the other workspace's face.
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', 'acme', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('target-b', 'ws-other', 'bot-a', 'target-b', 'acme',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests
+           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+         VALUES ('pr-b', 'bot-a', 'target-b', 'acme', 'widgets', 42, 'PR', 'open', 'sha',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+    seedPullRequest(db, "pr-a", 42);
+    seedFinding(db, "finding-42", 42);
+
     expect(() => applyLedgerTargetMigration(db)).toThrow(
-      "CHECK constraint failed: guard_failures_without_target",
+      "CHECK constraint failed: guard_findings_ambiguous_target",
     );
+    expect(db.raw.query("SELECT id, target_id FROM review_findings").all()).toEqual([
+      { id: "finding-42", target_id: null },
+    ]);
+  });
+
+  test("an unattributed candidate row is not a candidate: both guards leave the NULL alone", () => {
+    const db = preLedgerTargetDb();
+    seedParents(db);
+    // A pull_requests row exists at the key but carries no target of its own
+    // (the column is nullable since 0057). Nothing can be derived from it, so
+    // both ledgers must pass rather than abort — and must not read it as an
+    // attribution the UPDATE missed.
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests
+           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+         VALUES ('pr-null', 'bot-a', NULL, 'acme', 'widgets', 55, 'PR', 'open', 'sha',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+    seedFinding(db, "finding-55", 55);
+    seedFailure(db, "failure-55", 55);
+
+    applyLedgerTargetMigration(db);
+
+    expect(db.raw.query("SELECT id, target_id FROM review_findings").all()).toEqual([
+      { id: "finding-55", target_id: null },
+    ]);
+    expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
+      { id: "failure-55", target_id: null },
+    ]);
   });
 
   test("refuses a failure whose installation resolves to two different targets", () => {
