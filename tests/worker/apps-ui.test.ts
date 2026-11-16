@@ -546,7 +546,7 @@ describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App revie
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     db.raw
       .prepare(
-        `UPDATE review_targets SET updated_at = '2026-01-01 00:00:00'
+        `UPDATE review_targets SET updated_at = '2026-01-01 00:00:00', follow_workspace_defaults = 0
           WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)`,
       )
       .run(MALLORY_APP_ID);
