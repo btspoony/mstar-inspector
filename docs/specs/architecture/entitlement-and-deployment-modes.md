@@ -45,7 +45,7 @@ edit `plans` rows.
 
 `PlanLimits.includedMembers` is `number | null`:
 
-- `null` → no seat cap. `memberSlotAvailable` returns true unconditionally.
+- `null` → no seat cap. The `member-slot` verdict is always `ok`.
 - `number` → existing rule: members + live pending invites `< limit`.
 
 `PlanLimits.sharedBotAllowed` is the resolved shared-bot capability (a boolean;
@@ -144,10 +144,12 @@ Mode-switch behavior:
 ### 5. Shared-bot capability
 
 A workspace may attach a review target to a bot the platform shares only when
-its resolved plan includes that bot. `assertSharedBotAllowed(db, workspaceId,
-mode)` in `src/dashboard/entitlement.ts` is THE decision: `null` = allowed, a
-typed refusal carrying the resolved plan id = refused. Exactly two call sites
-consult it, and neither re-derives the rule:
+its resolved plan includes that bot. `checkEntitlement({kind: "shared-bot", …})`
+in `src/dashboard/entitlement.ts` answers it, as the `shared-bot` branch of the
+one function every plan verdict comes from: `ok: true` = allowed, `ok: false`
+with a refusal carrying the resolved plan id = refused. `assertSharedBotAllowed`
+survives only as that branch's internal body, so it has no caller outside the
+module. Exactly two surfaces ask the question, and neither re-derives the rule:
 
 - creating a target on a shared bot (`targetsStore.createOnSharedBot`), which
   decides before writing anything, so a refusal leaves no target and no audit
@@ -161,7 +163,8 @@ consult it, and neither re-derives the rule:
 
 The gate reads the bot's scope first: only a bot the platform SHARES consults
 the plan. A workspace's own bot never does — a Free workspace keeps reviewing
-with its own App exactly as before, with no plan read on that path.
+with its own App exactly as before, and the `own` branch mints `ok` without
+looking at the capability column.
 
 `self-hosted` answers before any read: `resolveWorkspacePlans` returns the
 unlimited constant, so that mode never touches the column. Every other mode
@@ -194,7 +197,7 @@ the capability is granted but no operator has shared a bot yet, so the reader
 waits for a platform operator and has nothing to buy. The two unavailable
 states never share copy because they differ in who can fix them. A plan change
 or a designation therefore moves the card on the next read with no cache,
-exactly as both move `assertSharedBotAllowed`; `self-hosted` renders no
+exactly as both move `checkEntitlement`'s `shared-bot` branch; `self-hosted` renders no
 shared-bot row at all, because the console that designates one is not
 registered in that mode — the absence is a property of the deployment, not a
 fourth state of the workspace.
@@ -271,13 +274,17 @@ the unlimited constant before its first read.
   statement as its `seq`, and 0 marks a row that predates the column.
 - Workspace soft deletion and `PLATFORM_OPERATORS` / `isPlatformOperator` parsing are unchanged.
 - Unlimited means `null`, never a numeric sentinel.
-- The shared-bot capability has exactly one decision function
-  (`assertSharedBotAllowed`); a second spelling in a route, a store or the SPA
-  is a defect.
+- Every plan verdict is minted by `checkEntitlement` in
+  `src/dashboard/entitlement.ts`; `memberSlotAvailable`, `freeSlotAvailable` and
+  `assertSharedBotAllowed` are its internals and have no caller outside that
+  module. A second decision spelling in a route, a store or the SPA is a defect.
+  `resolveWorkspacePlan` keeps its display and audit readers (switcher label,
+  members plan card, usage card, operator audit detail) — the invariant is one
+  decision site, not one caller.
 
 ## Where it lives
 
-- `src/dashboard/entitlement.ts`: `resolveWorkspacePlan`, `resolveWorkspacePlans`, `memberSlotAvailable`, `assertSharedBotAllowed`, `sharedBotAvailability`.
+- `src/dashboard/entitlement.ts`: `checkEntitlement` (the one decision: `member-slot`, `free-workspace-slot`, `shared-bot`, `app-count`, `review-quota`), `resolveWorkspacePlan`, `resolveWorkspacePlans`, `sharedBotAvailability`.
 - `src/dashboard/review-usage-store.ts`: `readReviewUsage` (the counts the usage card and the console's usage page read).
 - `src/dashboard/targets-store.ts`: `createOnSharedBot` (the creation refusal).
 - `src/worker/index.ts` + `src/worker/handlers.ts`: the enqueue refusal (`deliveryOutcomeFromWebhook`, `handleReviewJob`, `DeliveryRefusal`).

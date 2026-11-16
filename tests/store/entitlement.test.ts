@@ -1,6 +1,8 @@
 /**
- * Entitlement: plan resolution, the two slot predicates and the free-membership
- * count. The subject is resolved limits and admission boundaries, so the fixture
+ * Entitlement: plan resolution, the free-membership count and the in-write
+ * guards. The slot predicates themselves are private — their behaviour is
+ * pinned through `checkEntitlement` in tests/dashboard/entitlement.test.ts. The
+ * subject is resolved limits and admission boundaries, so the fixture
  * is the fully-migrated D1 double (plans seeded by 0031) plus raw rows for the
  * cases the schema permits: no subscription row, an active plan, a non-active
  * one, and a soft-deleted tenant.
@@ -11,8 +13,6 @@ import {
   MEMBER_CAP_REFUSAL,
   MemberCapError,
   UNLIMITED_PLAN_ID,
-  freeSlotAvailable,
-  memberSlotAvailable,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
 } from "../../src/dashboard/entitlement";
@@ -135,25 +135,6 @@ describe("resolveWorkspacePlan — the mode decides before any read", () => {
     db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
     expect((await resolveWorkspacePlan(db, "default", "self-hosted")).includedMembers).toBeNull();
     db.raw.close();
-  });
-});
-
-describe("slot predicates", () => {
-  test("freeSlotAvailable admits an empty history only", () => {
-    expect(freeSlotAvailable(0)).toBe(true);
-    expect(freeSlotAvailable(1)).toBe(false);
-    expect(freeSlotAvailable(2)).toBe(false);
-  });
-
-  test("memberSlotAvailable fills up to, not including, the included members", () => {
-    expect(memberSlotAvailable(4, 5)).toBe(true);
-    expect(memberSlotAvailable(5, 5)).toBe(false);
-    expect(memberSlotAvailable(6, 5)).toBe(false);
-  });
-
-  test("a null limit is no cap, so any count fits", () => {
-    expect(memberSlotAvailable(0, null)).toBe(true);
-    expect(memberSlotAvailable(6, null)).toBe(true);
   });
 });
 

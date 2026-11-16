@@ -109,10 +109,8 @@ import {
   MemberCapError,
   SHARED_BOT_REFUSAL,
   WORKSPACE_CREATION_CLOSED_REFUSAL,
-  appSlotAvailable,
-  freeSlotAvailable,
+  checkEntitlement,
   isFreeTierPlan,
-  memberSlotAvailable,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
   sharedBotAvailability,
@@ -1265,7 +1263,16 @@ dashboardApp.post("/api/workspaces", async (c) => {
     }
     if (mode === "saas") {
       const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
-      if (!freeSlotAvailable(freeCount)) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
+      // The workspace id is the one about to be created: `free-workspace-slot`
+      // reads nothing off it, and this is the mode's own precondition anyway.
+      const verdict = await checkEntitlement({
+        db,
+        mode,
+        workspaceId: "",
+        kind: "free-workspace-slot",
+        freeMembershipCount: freeCount,
+      });
+      if (!verdict.ok) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
     }
     const createdAt = new Date().toISOString();
     for (let attempt = 0; attempt < WORKSPACE_ID_ATTEMPTS; attempt++) {
@@ -1725,19 +1732,21 @@ async function commitManifestApp(args: {
     logManifestFailure("commit", "db_error", { error_type: "workspace_gate_unreadable" });
     return { kind: "workspace_gate_unreadable", reason: workspaceFloor.reason };
   }
-  // The plan's App allowance (D8), read BEFORE any row is written. A NULL
-  // limit is no cap, and `self-hosted` never consults the column at all:
-  // `resolveWorkspacePlan` answers the unlimited constant before its first
-  // read, so the count below is skipped there too. Refusing here (rather than
-  // inside createApp) keeps the check beside the other pre-write verdicts and
-  // leaves the store's batch the only writer.
-  const plan = await resolveWorkspacePlan(db, workspaceId, mode);
-  if (plan.appsPerWorkspace !== null) {
-    const liveApps = await createReviewBotsStore(db).countLiveApps(workspaceId);
-    if (!appSlotAvailable(liveApps, plan.appsPerWorkspace)) {
-      logManifestFailure("commit", "app_cap_reached", { apps_per_workspace: plan.appsPerWorkspace });
-      return { kind: "app_cap_reached", limit: plan.appsPerWorkspace };
-    }
+  // The plan's App allowance (D8), decided BEFORE any row is written. A NULL
+  // limit is no cap and `self-hosted` answers the unlimited constant, so the
+  // count (a thunk) is only read for a plan that actually has one. Refusing here
+  // (rather than inside createApp) keeps the check beside the other pre-write
+  // verdicts and leaves the store's batch the only writer.
+  const verdict = await checkEntitlement({
+    db,
+    mode,
+    workspaceId,
+    kind: "app-count",
+    liveAppCount: () => apps.countLiveApps(workspaceId),
+  });
+  if (!verdict.ok && verdict.refusal.kind === "app-count") {
+    logManifestFailure("commit", "app_cap_reached", { apps_per_workspace: verdict.refusal.limit });
+    return { kind: "app_cap_reached", limit: verdict.refusal.limit };
   }
   try {
     const row = await apps.createApp({
@@ -2041,15 +2050,20 @@ const inviteCreateRoute = async (c: DashboardContext) => {
     // no seats to exhaust, so this gate cannot fire for it — and self-hosted
     // resolves `unlimited` before it reads anything.
     const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
-    const plan = await resolveWorkspacePlan(gate.db, gate.scope.workspaceId, mode);
-    const limit = plan.includedMembers;
     const seats = await countMembersAndPendingInvites(
       gate.db,
       gate.scope.workspaceId,
       now.toISOString(),
     );
-    if (limit !== null && !memberSlotAvailable(seats, limit)) {
-      throw new MemberCapError(MEMBER_CAP_REFUSAL(limit));
+    const verdict = await checkEntitlement({
+      db: gate.db,
+      mode,
+      workspaceId: gate.scope.workspaceId,
+      kind: "member-slot",
+      seats,
+    });
+    if (!verdict.ok && verdict.refusal.kind === "member-slot") {
+      throw new MemberCapError(MEMBER_CAP_REFUSAL(verdict.refusal.limit));
     }
     await createInvite(
       gate.db,
@@ -2140,12 +2154,18 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
     invite.status === "pending" &&
     invite.expires_at > now &&
     invite.github_login.toLowerCase() === user.github_login.toLowerCase();
-  if (
-    wouldAccept &&
-    isFreeTierPlan((await resolveWorkspacePlan(db, tenant.workspaceId, mode)).id)
-  ) {
-    const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
-    if (!freeSlotAvailable(freeCount)) {
+  if (wouldAccept) {
+    // One call answers both halves of this precondition: the verdict carries the
+    // TARGET workspace's plan (only a `free` one is gated, and the free-slot copy
+    // asserts the slot belongs to the accepting login) and its slot answer.
+    const verdict = await checkEntitlement({
+      db,
+      mode,
+      workspaceId: tenant.workspaceId,
+      kind: "free-workspace-slot",
+      freeMembershipCount: await countFreeMembershipsForLogin(db, user.github_login),
+    });
+    if (!verdict.ok && isFreeTierPlan(verdict.plan.id)) {
       return inviteMutationResponse(c, INVITE_FREE_SLOT_REFUSAL, 409);
     }
   }
