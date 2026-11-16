@@ -3641,19 +3641,22 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     ]);
   });
 
-  test("aborts the migration when a finding cannot be attributed, naming the guard", () => {
+  test("leaves a finding whose PR row was swept NULL, and does not abort", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
-    // No pull_requests row for this finding's PR: the bot-keyed join that the
-    // tenant faces are about to lose was the only path to its target.
+    // The ledger row is gone (the 90-day sweep removes terminal PRs), so no
+    // target can ever be derived for this finding — the same history shape the
+    // failures guard was narrowed for.
     seedFinding(db, "finding-orphan", 77);
 
-    expect(() => applyLedgerTargetMigration(db)).toThrow(
-      "CHECK constraint failed: guard_findings_without_target",
-    );
+    applyLedgerTargetMigration(db);
+
+    expect(db.raw.query("SELECT id, target_id FROM review_findings").all()).toEqual([
+      { id: "finding-orphan", target_id: null },
+    ]);
   });
 
-  test("leaves an unattributable failure NULL instead of aborting, and still aborts a resolvable one", () => {
+  test("leaves a failure whose PR row was swept NULL, and does not abort", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
     // The PR ledger row is gone: no target can ever be derived for this
@@ -3665,49 +3668,6 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
       { id: "failure-orphan", target_id: null },
     ]);
-  });
-
-  test("the guard still catches a resolvable failure left NULL, so the relaxation is not a blanket pass", () => {
-    const db = preLedgerTargetDb();
-    seedParents(db);
-    seedPullRequest(db, "pr-42", 42);
-    seedFailure(db, "failure-resolvable", 42);
-    applyLedgerTargetMigration(db);
-    // The UPDATE attributed it, as it must.
-    expect(db.raw.query("SELECT target_id FROM review_failures").all()).toEqual([
-      { target_id: "target-a" },
-    ]);
-
-    // Now the state the guard exists for: a NULL that a single candidate could
-    // have filled. Simulated directly, because the migration's own UPDATE
-    // always fills it — the point is that the guard's predicate, not the
-    // UPDATE, is what refuses.
-    db.raw.prepare("UPDATE review_failures SET target_id = NULL").run();
-    expect(() =>
-      db.raw
-        .prepare(
-          `CREATE TABLE guard_probe (
-             n INTEGER NOT NULL CONSTRAINT guard_probe CHECK (n = 0)
-           )`,
-        )
-        .run(),
-    ).not.toThrow();
-    const count = db.raw
-      .query(
-        `SELECT COUNT(*) AS n FROM review_failures f
-         WHERE f.target_id IS NULL
-           AND (
-             SELECT COUNT(DISTINCT p.target_id)
-             FROM bot_installations i
-             JOIN pull_requests p ON p.bot_id = i.bot_id
-             WHERE i.installation_id = f.installation_id
-               AND p.owner = f.owner
-               AND p.repo = f.repo
-               AND p.pr_number = f.pr_number
-           ) = 1`,
-      )
-      .get() as { n: number };
-    expect(count.n).toBe(1);
   });
 
   test("refuses a failure whose installation resolves to two different targets", () => {

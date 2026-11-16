@@ -19,13 +19,15 @@
 --   ambiguous failure candidates → `CHECK constraint failed: guard_failures_ambiguous_target`
 --
 -- The failures guard is narrower than the findings one, and deliberately so.
--- A finding's PR row always exists: nothing deletes a `pull_requests` row while
--- findings reference it. A failure can outlive its PR — the ledger is pruned
--- independently of this table — and then no target can ever be derived for it.
--- Requiring zero NULLs would refuse the migration on any deployment carrying
--- such history (production had 99 such rows across 11 PRs on first apply).
--- So the guard refuses a NULL that COULD have been resolved (a candidate set of
--- exactly one that the UPDATE somehow did not attribute — a real defect), and
+-- Both ledgers can outlive their PR row: `sweepTerminalPullRequests` deletes
+-- `pull_requests` rows for terminal PRs older than 90 days with no predicate
+-- over either ledger (`src/dashboard/apps-store.ts`), and neither table has a
+-- FK to it. Once a row's PR is swept, no target can ever be derived for it.
+-- Requiring zero NULLs would therefore refuse the migration on any deployment
+-- past the retention window — production had 99 such failures across 11 PRs on
+-- first apply, and the findings ledger reaches the same state as it ages.
+-- So a guard refuses a NULL that COULD have been resolved (a candidate set of
+-- exactly one that the UPDATE somehow did not attribute — a real defect) and
 -- allows a NULL with no candidate at all, which the read faces already treat as
 -- legacy and filtered, exactly as they treat a NULL `bot_id`. The ambiguity
 -- guard still runs first, so a multi-candidate row never reaches this point.
@@ -106,7 +108,15 @@ CREATE TABLE guard_findings_without_target (
   n INTEGER NOT NULL CONSTRAINT guard_findings_without_target CHECK (n = 0)
 );
 INSERT INTO guard_findings_without_target (n)
-SELECT COUNT(*) FROM review_findings WHERE target_id IS NULL;
+SELECT COUNT(*) FROM review_findings f
+WHERE f.target_id IS NULL
+  AND EXISTS (
+    SELECT 1 FROM pull_requests p
+    WHERE p.bot_id = f.bot_id
+      AND p.owner = f.owner
+      AND p.repo = f.repo
+      AND p.pr_number = f.pr_number
+  );
 DROP TABLE guard_findings_without_target;
 
 CREATE TABLE guard_failures_without_target (
