@@ -344,10 +344,10 @@ export function spaDispatch(): MiddlewareHandler<{ Bindings: Env }> {
     if (method !== "GET" && method !== "HEAD") return next();
     const url = new URL(c.req.url);
     const pathname = url.pathname;
-    // The app-detail settings tab moved to the review-target surface, so both
-    // spellings of its address answer ONE 302 before anything else reads them
-    // (the address is dead, not a page). The redirect needs no session: the
-    // destination enforces its own access.
+    // The settings tab lives on the app detail, so the retired path spelling
+    // of its address answers ONE 302 to the tab's query address before
+    // anything else reads it (the path is dead, not a page). The redirect needs
+    // no session: the destination enforces its own access.
     const settingsTarget = settingsTabRedirect(pathname, url.search);
     if (settingsTarget !== null) return c.redirect(settingsTarget, 302);
     const assets = c.env.ASSETS;

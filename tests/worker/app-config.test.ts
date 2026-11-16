@@ -2588,11 +2588,11 @@ describe("duplication locks", () => {
 // --- routes ---
 
 describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => {
-  test("HTML navigation GET answers one 302 to the review-target page (no shell read)", async () => {
+  test("HTML navigation GET answers one 302 to the app's settings tab (no shell read)", async () => {
     const { db } = await seededWorld();
     const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}?tab=settings`);
     expect(await res.text()).not.toContain("window.__BOOT__");
   });
 
@@ -2600,7 +2600,7 @@ describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => 
     const { db } = await seededWorld();
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}?tab=settings`);
   });
 });
 

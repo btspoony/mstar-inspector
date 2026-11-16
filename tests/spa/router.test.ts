@@ -1,8 +1,9 @@
 /**
  * Enumerated client router (pathname + params). The four workspace surfaces
  * (apps, targets, members, settings) plus the App detail and the bot page.
- * The app detail's retired settings-tab spellings are not routes: they answer
- * one redirect to the review-target detail.
+ * A repositories detail is a target id (`all` for the workspace default); the
+ * app detail's retired `…/settings` path spelling answers one redirect to the
+ * app's own settings tab.
  */
 import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
@@ -119,7 +120,14 @@ describe("matchSpaRoute — workspace-scoped surfaces", () => {
       page: "targets",
       pathname: "/dashboard/acme/targets/12345",
       workspaceRef: "acme",
-      appId: "12345",
+      targetId: "12345",
+    });
+    // `all` is the reserved default detail, not a workspace word.
+    expect(matchSpaRoute("/dashboard/acme/targets/all")).toEqual({
+      page: "targets",
+      pathname: "/dashboard/acme/targets/all",
+      workspaceRef: "acme",
+      targetId: "all",
     });
     expect(matchSpaRoute("/dashboard/acme/members")?.page).toBe("members");
     expect(matchSpaRoute("/dashboard/acme/settings")?.page).toBe("settings");
@@ -127,20 +135,20 @@ describe("matchSpaRoute — workspace-scoped surfaces", () => {
     expect(matchSpaRoute("/dashboard/targets")).toBeNull();
   });
 
-  test("the workspace App detail keeps its path; the retired settings-tab spellings redirect", () => {
+  test("the app detail keeps its path; its retired settings path spelling redirects to the tab", () => {
     expect(matchSpaRoute("/dashboard/acme/apps/12345")).toEqual({
       page: "app-detail",
       pathname: "/dashboard/acme/apps/12345",
       appId: "12345",
       workspaceRef: "acme",
     });
+    // The path spelling is dead: it answers one redirect to the canonical tab
+    // address, which is a page (the app detail) rather than a redirect.
     expect(matchSpaRoute("/dashboard/acme/apps/12345/settings")).toBeNull();
     expect(settingsTabRedirect("/dashboard/acme/apps/12345/settings", "")).toBe(
-      "/dashboard/acme/targets/12345",
+      "/dashboard/acme/apps/12345?tab=settings",
     );
-    expect(settingsTabRedirect("/dashboard/acme/apps/12345", "?tab=settings")).toBe(
-      "/dashboard/acme/targets/12345",
-    );
+    expect(settingsTabRedirect("/dashboard/acme/apps/12345", "?tab=settings")).toBeNull();
   });
 
   test("settingsTabRedirect leaves every other address alone", () => {
