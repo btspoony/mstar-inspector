@@ -1887,6 +1887,119 @@ export function parseApps(data: unknown): AppsPayload | null {
   return { ...(data as AppsPayload), shared_bots: parseSharedBots(data.shared_bots) };
 }
 
+/** One repository target row of `GET /:ref/api/targets` (product spec J1). */
+export type TargetListRow = {
+  target_id: string;
+  /** NULL = 待安装: a target migrated before its first delivery names no repository. */
+  repo_id: number | null;
+  repo_owner: string | null;
+  repo_name: string | null;
+  bot_id: string;
+  app_name: string;
+  review_enabled: number;
+  follow_workspace_defaults: number;
+  last_reviewed_at: string | null;
+};
+
+/** The add-repository dialog's application option (one row of `GET /api/apps`). */
+export type RepositoryAppOption = {
+  /** The App's GitHub id — the address the repositories face takes. */
+  app_id: number;
+  /** The local bot UID the create POST names as `bot_id`. */
+  bot_id: string;
+  name: string;
+};
+
+/** One repository an installation grants — the dialog's multi-select option. */
+export type InstallationRepositoryOption = { repo_id: number; owner: string; name: string };
+
+function parseTargetListRow(value: unknown): TargetListRow | null {
+  if (!isRecord(value)) return null;
+  const { target_id, bot_id, app_name } = value;
+  if (typeof target_id !== "string" || typeof bot_id !== "string" || typeof app_name !== "string") return null;
+  const repoId = value.repo_id;
+  const repoOwner = value.repo_owner;
+  const repoName = value.repo_name;
+  if (repoId !== null && typeof repoId !== "number") return null;
+  if (repoOwner !== null && typeof repoOwner !== "string") return null;
+  if (repoName !== null && typeof repoName !== "string") return null;
+  const reviewed = value.last_reviewed_at;
+  if (reviewed !== null && typeof reviewed !== "string") return null;
+  if (typeof value.review_enabled !== "number") return null;
+  if (typeof value.follow_workspace_defaults !== "number") return null;
+  return {
+    target_id,
+    repo_id: repoId,
+    repo_owner: repoOwner,
+    repo_name: repoName,
+    bot_id,
+    app_name,
+    review_enabled: value.review_enabled,
+    follow_workspace_defaults: value.follow_workspace_defaults,
+    last_reviewed_at: reviewed,
+  };
+}
+
+/**
+ * The repository list, all-or-nothing: a row the page cannot read would render
+ * a repository with no identity or no status, so one bad row is no list (the
+ * `parseSharedBots` rule). A payload without a `targets` array is not this face.
+ */
+export function parseTargets(data: unknown): TargetListRow[] | null {
+  if (!isRecord(data) || !Array.isArray(data.targets)) return null;
+  const rows: TargetListRow[] = [];
+  for (const value of data.targets) {
+    const row = parseTargetListRow(value);
+    if (row === null) return null;
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * The installation-repositories face. `degraded` says some installation failed
+ * while the rest answered, so the dialog can offer what it has and say so.
+ */
+export function parseInstallationRepositories(
+  data: unknown,
+): { repositories: InstallationRepositoryOption[]; degraded: boolean } | null {
+  if (!isRecord(data) || !Array.isArray(data.repositories)) return null;
+  const repositories: InstallationRepositoryOption[] = [];
+  for (const value of data.repositories) {
+    if (!isRecord(value)) return null;
+    const { repo_id, owner, name } = value;
+    if (typeof repo_id !== "number" || typeof owner !== "string" || typeof name !== "string") return null;
+    repositories.push({ repo_id, owner, name });
+  }
+  return { repositories, degraded: data.degraded === true };
+}
+
+/**
+ * `POST /api/targets` 201 body. `duplicates` is the partial outcome the dialog
+ * reports: the rows in `created` are written, the listed repositories are not.
+ */
+export function parseTargetCreate(
+  body: string,
+): { created: number; duplicates: InstallationRepositoryOption[] } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.created)) return null;
+  const duplicates: InstallationRepositoryOption[] = [];
+  if (Array.isArray(parsed.duplicates)) {
+    for (const value of parsed.duplicates) {
+      if (!isRecord(value)) continue;
+      const { repo_id, owner, name } = value;
+      if (typeof repo_id !== "number" || typeof owner !== "string" || typeof name !== "string") continue;
+      duplicates.push({ repo_id, owner, name });
+    }
+  }
+  return { created: parsed.created.length, duplicates };
+}
+
 /**
  * `POST /api/workspaces` 201 body — the new workspace's ref plus the Apps page
  * the creator lands on. The landing is server-chosen: only the Worker knows the

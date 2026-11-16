@@ -158,12 +158,47 @@ export const en = {
    * the `settings.*` labels of the tab it was moved from.
    */
   targets: {
-    heading: "Review targets",
-    backToList: "Back to review targets",
+    heading: "Repositories",
+    backToList: "Back to repositories",
     /** Composed empty state (EmptyState title + description). */
-    emptyTitle: "No review targets yet",
-    emptyDescription:
-      "Review targets come from GitHub Apps — create one, or attach the shared bot if your plan includes it.",
+    emptyTitle: "No repositories yet",
+    emptyDescription: "Add one of the repositories your App is installed on.",
+    /** The fixed first row (J1): the workspace default configuration. */
+    allRepositories: "All repositories",
+    allRepositoriesMeta: "Workspace defaults · workspace-wide insights and pull requests",
+    /** Count pill on the fixed row; the count is the workspace's live targets. */
+    repositoryCount: "0 repositories",
+    repositoryCountOne: "1 repository",
+    repositoryCountMany: "{count} repositories",
+    /** Status pills of a repository row (J1). */
+    status: {
+      reviewing: "Reviewing",
+      uninstalled: "Awaiting install",
+      paused: "Paused",
+    },
+    meta: "{app} · reviewed {time}",
+    metaNever: "{app} · never reviewed",
+    /** The 待安装 meta line: a target with no repository identity yet. */
+    metaUninstalled: "No installation bound · waiting for a delivery",
+    add: "Add repository",
+    addDialog: {
+      title: "Add repository",
+      description: "Pick the App and the repositories it should review.",
+      appLabel: "Application",
+      noApps: "This workspace has no application yet.",
+      goToApps: "Go to the applications page",
+      binding: "Will bind to {app}",
+      repoLabel: "Repositories",
+      noInstallationRepos: "This App is not installed on any repository.",
+      goToInstalled: "Open the App's installed tab",
+      loadingRepos: "Loading repositories…",
+      loadReposFailed: "Could not load this App's repositories.",
+      alreadyAdded: "Added",
+      degraded: "Some installations could not be read — this list may be incomplete.",
+      noSelection: "Select at least one repository.",
+      duplicates: "Already added: {names}",
+      confirm: "Add",
+    },
   },
   /**
    * The bot settings page: the bot-owned configuration (credentials health,

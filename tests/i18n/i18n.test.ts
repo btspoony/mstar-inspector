@@ -236,16 +236,18 @@ describe("App detail IA copy", () => {
     expect(isDictionaryKey("appDetail.tabSettings")).toBe(false);
   });
 
-  test("the review-target surface copy exists atomically in both locales", () => {
-    expect(t("en", "nav.targets")).toBe("Review targets");
-    expect(t("zh_CN", "nav.targets")).toBe("审查目标");
-    expect(t("en", "targets.emptyTitle")).toBe("No review targets yet");
-    expect(t("en", "targets.emptyDescription")).toBe(
-      "Review targets come from GitHub Apps — create one, or attach the shared bot if your plan includes it.",
+  test("the repository surface copy exists atomically in both locales", () => {
+    // The nav LABEL is plan 371.5's; this pins the surface copy the repository
+    // list renders (plan 371.2).
+    expect(t("en", "targets.heading")).toBe("Repositories");
+    expect(t("zh_CN", "targets.heading")).toBe("仓库");
+    expect(t("en", "targets.emptyTitle")).toBe("No repositories yet");
+    expect(t("en", "targets.allRepositories")).toBe("All repositories");
+    expect(t("zh_CN", "targets.allRepositories")).toBe("所有仓库");
+    expect(t("en", "targets.addDialog.noInstallationRepos")).toBe(
+      "This App is not installed on any repository.",
     );
-    expect(t("zh_CN", "targets.heading")).toBe("审查目标");
-    expect(t("zh_CN", "targets.emptyTitle").length).toBeGreaterThan(0);
-    expect(t("zh_CN", "targets.emptyDescription").length).toBeGreaterThan(0);
+    expect(t("zh_CN", "targets.addDialog.duplicates").length).toBeGreaterThan(0);
   });
 
   test("the back-to-apps wayfinding key lives under appDetail atomically; the old settings key is removed, not aliased", () => {

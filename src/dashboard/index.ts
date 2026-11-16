@@ -131,7 +131,10 @@ import {
   fetchAppInstallations,
   fetchAppMetadata,
   fetchAppVisibility,
+  fetchInstallationRepositories,
   isGithubMetadataStale,
+  mintInstallationJwt,
+  type InstallationRepository,
 } from "./github-app-metadata";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
@@ -5931,6 +5934,172 @@ const appPullRequestRecordsRoute = async (
   return c.json({ items: page.items, total: page.total, limit });
 };
 
+// --- Repository targets: list, add, and the installation's repositories ----
+//
+// The repository surface (product spec J1/J2) reads and writes TARGETS, never
+// Apps: a bot is where a target may live, a repository is what it names. The
+// list is member-visible; the add flow is manager-gated per the family rule.
+
+/** One row of `GET /api/targets` — the list face. */
+type TargetListRow = {
+  target_id: string;
+  repo_id: number | null;
+  repo_owner: string | null;
+  repo_name: string | null;
+  bot_id: string;
+  app_name: string;
+  review_enabled: number;
+  follow_workspace_defaults: number;
+  last_reviewed_at: string | null;
+};
+
+/**
+ * `GET /api/targets` — this workspace's live targets. `repo_id: null` is the
+ * 待安装 discriminator (J1): a target migrated before its first delivery names
+ * no repository yet. The store's ONE query carries the bot name and the newest
+ * review stamp, so the list costs one read whatever its length.
+ */
+const targetListRoute = async (c: DashboardContext): Promise<Response> => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  const targets = await createTargetsStore(gate.db).listLiveWithApp(gate.scope.workspaceId);
+  const rows: TargetListRow[] = targets.map((target) => ({
+    target_id: target.id,
+    repo_id: target.repo_id,
+    repo_owner: target.repo_owner,
+    repo_name: target.repo_name,
+    bot_id: target.bot_id,
+    app_name: target.app_name,
+    review_enabled: target.review_enabled,
+    follow_workspace_defaults: target.follow_workspace_defaults,
+    last_reviewed_at: target.last_reviewed_at,
+  }));
+  return c.json({ targets: rows });
+};
+
+/**
+ * `GET /api/apps/:appId/installation-repositories` — the repositories the App's
+ * live installations grant, deduped by `repo_id` across installations. One App
+ * JWT serves every installation; a failed installation leaves `degraded: true`
+ * on an otherwise usable list, and every installation failing is `502` (the
+ * dialog cannot offer anything to add).
+ */
+const appInstallationRepositoriesRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const app = await resolveScopedApp(
+    createReviewBotsStore(member.db),
+    c.req.param("appId") ?? "",
+    member.scope,
+  );
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  const encryptionKey = c.env.DASHBOARD_ENCRYPTION_KEY;
+  if (!encryptionKey) return c.json({ error: "installation_repositories_unavailable" }, 502);
+  const installations = await createReviewBotsStore(member.db).listInstallations(app.id);
+  let jwt: string;
+  try {
+    const pem = await createSecretbox(encryptionKey).decryptSecret(
+      app.private_key_enc,
+      `github_apps.private_key_enc:${app.id}`,
+    );
+    jwt = await mintInstallationJwt(app.github_app_id, pem);
+  } catch (err) {
+    logSettingsFailure("installation_repositories_key", app.id, err);
+    return c.json({ error: "installation_repositories_unavailable" }, 502);
+  }
+  const byRepoId = new Map<number, InstallationRepository>();
+  let failures = 0;
+  for (const installation of installations) {
+    const repositories = await fetchInstallationRepositories(installation.installation_id, jwt);
+    if (repositories === null) {
+      failures += 1;
+      continue;
+    }
+    for (const repository of repositories) {
+      if (!byRepoId.has(repository.repo_id)) byRepoId.set(repository.repo_id, repository);
+    }
+  }
+  if (installations.length > 0 && failures === installations.length) {
+    return c.json({ error: "installation_repositories_unavailable" }, 502);
+  }
+  return c.json({ repositories: [...byRepoId.values()], degraded: failures > 0 });
+};
+
+/** An add-repository body row; anything not shaped like this is a 400. */
+function parseRepositoryBodyRow(value: unknown): { repo_id: number; owner: string; name: string } | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as { repo_id?: unknown; owner?: unknown; name?: unknown };
+  if (typeof row.repo_id !== "number" || !Number.isInteger(row.repo_id) || row.repo_id <= 0) return null;
+  if (typeof row.owner !== "string" || row.owner.trim() === "") return null;
+  if (typeof row.name !== "string" || row.name.trim() === "") return null;
+  return { repo_id: row.repo_id, owner: row.owner.trim(), name: row.name.trim() };
+}
+
+/**
+ * `POST /api/targets` — one target per selected repository, each inheriting the
+ * workspace defaults (`follow_workspace_defaults = 1`, J4). The store's duplicate
+ * rule is a VALUE, so a repository the workspace already holds lands in
+ * `duplicates` while every other row of the same batch stays written: a partial
+ * add is reported, never rolled back and never a 409 for the whole batch.
+ */
+const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  let botId = "";
+  let rawRepositories: unknown = null;
+  try {
+    const body = (await c.req.json()) as { bot_id?: unknown; repositories?: unknown };
+    botId = typeof body.bot_id === "string" ? body.bot_id.trim() : "";
+    rawRepositories = body.repositories;
+  } catch {
+    // malformed body → the empty-selection 400 below
+  }
+  const repositories: Array<{ repo_id: number; owner: string; name: string }> = [];
+  if (Array.isArray(rawRepositories)) {
+    for (const entry of rawRepositories) {
+      const parsed = parseRepositoryBodyRow(entry);
+      if (parsed === null) return c.json({ error: "invalid repository" }, 400);
+      repositories.push(parsed);
+    }
+  }
+  if (botId === "" || repositories.length === 0) {
+    return c.json({ error: "no repositories selected" }, 400);
+  }
+  // Visibility first, then the manager verdict: a bot this workspace neither
+  // owns nor shares (and holds no target on) is the family's 404, never a write.
+  const app = await createReviewBotsStore(member.db).getAppById(botId);
+  if (!app || app.deleted_at !== null) return c.json({ error: "unknown app" }, 404);
+  if (app.workspace_id !== member.scope.workspaceId && app.scope !== "shared") {
+    return c.json({ error: "unknown app" }, 404);
+  }
+  const store = createTargetsStore(member.db);
+  const created: Array<{ target_id: string; repo_id: number; repo_owner: string; repo_name: string }> = [];
+  const duplicates: Array<{ repo_id: number; owner: string; name: string }> = [];
+  for (const repository of repositories) {
+    const outcome = await store.create({
+      workspaceId: member.scope.workspaceId,
+      botId: app.id,
+      repoId: repository.repo_id,
+      repoOwner: repository.owner,
+      repoName: repository.name,
+      createdBy: member.user.github_login,
+    });
+    if (outcome.outcome === "created") {
+      created.push({
+        target_id: outcome.target.id,
+        repo_id: repository.repo_id,
+        repo_owner: repository.owner,
+        repo_name: repository.name,
+      });
+    } else {
+      duplicates.push(repository);
+    }
+  }
+  return c.json({ created, duplicates }, 201);
+};
+
 // --- App + member route table ----------------------------------------------
 //
 // ONE table, ONE registration loop: every route lives under a workspace ref
@@ -5965,6 +6134,14 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
   // Workspace-scoped target creation on a shared bot — not App-addressed: the
   // body names the bot, and the route re-checks its scope inside the write.
+  { method: "get", path: "/api/targets", handler: targetListRoute, access: "read" },
+  { method: "post", path: "/api/targets", handler: targetCreateRoute, access: "write" },
+  {
+    method: "get",
+    path: "/api/apps/:appId/installation-repositories",
+    handler: appInstallationRepositoriesRoute,
+    access: "write",
+  },
   { method: "post", path: "/apps/:appId/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },

@@ -128,12 +128,47 @@ export const zhCN: Dictionary = {
   },
   /** 审查目标页（`/dashboard/<ref>/targets`）：工作区对某个机器人的认领，独立成页。详情页沿用被移出的“应用设置”标签的 `settings.*` 文案。 */
   targets: {
-    heading: "审查目标",
-    backToList: "返回审查目标",
+    heading: "仓库",
+    backToList: "返回仓库",
     /** 组合空状态（EmptyState 的标题 + 描述）。 */
-    emptyTitle: "还没有审查目标",
-    emptyDescription:
-      "审查目标来自 GitHub App——创建一个，或在你的方案包含时接入共享机器人。",
+    emptyTitle: "还没有仓库",
+    emptyDescription: "添加一个你的应用已安装的仓库。",
+    /** 固定首行（J1）：工作区默认配置。 */
+    allRepositories: "所有仓库",
+    allRepositoriesMeta: "工作区默认评审配置 · 全工作区洞察与拉取请求",
+    /** 固定行的计数 pill；数字是工作区的活跃 target 数。 */
+    repositoryCount: "0 个仓库",
+    repositoryCountOne: "1 个仓库",
+    repositoryCountMany: "{count} 个仓库",
+    /** 仓库行的状态 pill（J1）。 */
+    status: {
+      reviewing: "审查中",
+      uninstalled: "待安装",
+      paused: "已暂停",
+    },
+    meta: "{app} · 最近审查 {time}",
+    metaNever: "{app} · 尚未审查",
+    /** 待安装行的 meta。 */
+    metaUninstalled: "未绑定安装 · 等待接收投递",
+    add: "添加仓库",
+    addDialog: {
+      title: "添加仓库",
+      description: "选择应用，以及它要审查的仓库。",
+      appLabel: "应用",
+      noApps: "本工作区还没有应用",
+      goToApps: "跳转到应用页面",
+      binding: "将绑定到 {app}",
+      repoLabel: "仓库",
+      noInstallationRepos: "该应用尚未安装到任何仓库",
+      goToInstalled: "打开该应用的已安装标签页",
+      loadingRepos: "正在加载仓库…",
+      loadReposFailed: "无法加载该应用的仓库。",
+      alreadyAdded: "已添加",
+      degraded: "部分安装无法读取 — 此列表可能不完整。",
+      noSelection: "至少选择一个仓库。",
+      duplicates: "以下仓库已存在：{names}",
+      confirm: "添加",
+    },
   },
   /** 机器人设置页：机器人自身拥有的配置（凭据健康、提供方、模型链、沙箱镜像、安装）。使用该机器人的工作区可读，但不能配置。 */
   botSettings: {

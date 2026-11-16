@@ -313,18 +313,17 @@ export type FetchAppInstallationsResult =
 type NextInstallationsPage = { kind: "none" } | { kind: "next"; url: string } | { kind: "unusable" };
 
 /**
- * Parse the `Link: <…>; rel="next"` target. Only an
- * `https://api.github.com/app/installations` URL is followed: the header comes
- * from GitHub over TLS, but a reconcile must never be steered at another host,
- * and a rejected target makes the collected list untrustworthy rather than
- * complete (it may be missing every later page).
+ * Parse the `Link: <…>; rel="next"` target. Only a URL under `allowedPrefix`
+ * is followed: the header comes from GitHub over TLS, but a listing must never
+ * be steered at another host, and a rejected target makes the collected list
+ * untrustworthy rather than complete (it may be missing every later page).
  */
-function nextInstallationsPage(linkHeader: string | null): NextInstallationsPage {
+function nextListPage(linkHeader: string | null, allowedPrefix: string): NextInstallationsPage {
   if (!linkHeader) return { kind: "none" };
   for (const segment of linkHeader.split(",")) {
     const match = /<([^>]+)>\s*;\s*rel="next"/.exec(segment.trim());
     if (match) {
-      return match[1]!.startsWith(`${GITHUB_APP_INSTALLATIONS_URL}?`)
+      return match[1]!.startsWith(allowedPrefix)
         ? { kind: "next", url: match[1]! }
         : { kind: "unusable" };
     }
@@ -390,7 +389,7 @@ export async function fetchAppInstallations(
         if (typeof id !== "number") return { ok: false };
         installationIds.push(id);
       }
-      const next = nextInstallationsPage(res.headers.get("link"));
+      const next = nextListPage(res.headers.get("link"), `${GITHUB_APP_INSTALLATIONS_URL}?`);
       if (next.kind === "unusable") return { ok: false };
       url = next.kind === "next" ? next.url : null;
     }
@@ -400,6 +399,94 @@ export async function fetchAppInstallations(
     // network failure, abort timeout — one shape, caller writes nothing.
     return { ok: false };
   }
+}
+
+/** One repository an installation grants — the add-repository dialog's option. */
+export type InstallationRepository = { repo_id: number; owner: string; name: string };
+
+/**
+ * One installation's repositories, or `null` when that installation's answer
+ * was unusable. The caller decides whether a partial answer is degraded.
+ */
+export type FetchInstallationRepositoriesResult = InstallationRepository[] | null;
+
+const GITHUB_INSTALLATION_REPOSITORIES_SUFFIX = "/repositories";
+/**
+ * Page bound for ONE installation's repository list (100 per page): 5 pages /
+ * 500 repositories, the contract's cap. Reaching it with a next page still
+ * pending stops the walk — a dialog offering 500 of 900 repositories is
+ * degraded, never silently truncated.
+ */
+const MAX_REPOSITORY_PAGES = 5;
+
+/**
+ * Fetch one installation's repositories — `GET
+ * /app/installations/{id}/repositories?per_page=100` with an App JWT, walking
+ * `Link rel="next"` within this module's budgets.
+ *
+ * `[]` is a real answer (the installation grants no repository); `null` is
+ * "no usable answer" — bad key, network failure, non-200, a payload that is
+ * not an array, a foreign next link, or the page cap. Callers count nulls to
+ * report `degraded`, so this function never invents an empty list on failure.
+ * Same failure discipline as the other fetches here: zero retries, a total
+ * catch-all, nothing thrown.
+ */
+export async function fetchInstallationRepositories(
+  installationId: number,
+  jwt: string,
+): Promise<FetchInstallationRepositoriesResult> {
+  const base = `${GITHUB_APP_INSTALLATIONS_URL}/${installationId}${GITHUB_INSTALLATION_REPOSITORIES_SUFFIX}`;
+  try {
+    const headers = {
+      Authorization: `Bearer ${jwt}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "mstar-inspector",
+    };
+    const repositories: InstallationRepository[] = [];
+    let url: string | null = `${base}?per_page=100`;
+    const deadline = Date.now() + LISTING_BUDGET_MS;
+    for (let page = 0; url !== null; page++) {
+      // Stopping WITH a next page pending is an incomplete answer, not a short
+      // one: returning what was read would offer a partial repository list as
+      // if it were the installation's. `null` makes the caller say degraded.
+      if (page >= MAX_REPOSITORY_PAGES) return null;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return null;
+      const res = await fetch(url, {
+        method: "GET",
+        signal: AbortSignal.timeout(Math.min(FETCH_TIMEOUT_MS, remainingMs)),
+        headers,
+      });
+      if (!res.ok) {
+        await res.body?.cancel();
+        return null;
+      }
+      const data = (await res.json().catch(() => null)) as unknown;
+      if (!Array.isArray(data)) return null;
+      for (const entry of data) {
+        const row = entry as { id?: unknown; name?: unknown; owner?: { login?: unknown } } | null;
+        const repoId = row?.id;
+        const name = row?.name;
+        const owner = row?.owner?.login;
+        // A row without the three facts the dialog posts cannot become a
+        // target, so it is a partial answer rather than an option.
+        if (typeof repoId !== "number" || typeof name !== "string" || typeof owner !== "string") return null;
+        repositories.push({ repo_id: repoId, owner, name });
+      }
+      const next = nextListPage(res.headers.get("link"), `${base}?`);
+      if (next.kind === "unusable") return null;
+      url = next.kind === "next" ? next.url : null;
+    }
+    return repositories;
+  } catch {
+    return null;
+  }
+}
+
+/** Mint the App JWT these installation reads share (throws on an unusable key). */
+export async function mintInstallationJwt(githubAppId: number, decryptedPem: string): Promise<string> {
+  return mintAppJwt(githubAppId, decryptedPem);
 }
 
 /**

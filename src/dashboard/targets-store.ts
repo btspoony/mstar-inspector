@@ -118,6 +118,16 @@ export type ReviewTargetRow = {
 };
 
 /**
+ * A row of the repository list (product spec J1): the target's own columns plus
+ * the bot's display name and the newest review stamp. `last_reviewed_at` is
+ * `null` for a repository no review has finished on yet.
+ */
+export type LiveTargetListRow = ReviewTargetRow & {
+  app_name: string;
+  last_reviewed_at: string | null;
+};
+
+/**
  * The workspace-level answers a following target inherits (`workspaces`
  * columns): the floor is the existing `check_min_score` (0049), the other three
  * are the `default_*` columns of 0067.
@@ -441,6 +451,29 @@ export function createTargetsStore(db: TargetsStoreD1) {
         )
         .bind(workspaceId)
         .all<ReviewTargetRow>();
+      return res.results;
+    },
+
+    /**
+     * The repository list's ONE read (product spec J1): each live target with
+     * the bot's display name and its newest review stamp. A join beats a
+     * per-row App read, and the stamp subquery rides
+     * `idx_reviews_target_reviewed_at` — never a scan of every workspace's
+     * reviews.
+     */
+    async listLiveWithApp(workspaceId: string): Promise<LiveTargetListRow[]> {
+      const res = await db
+        .prepare(
+          `SELECT t.*,
+                  COALESCE(b.github_name, b.github_slug, CAST(b.github_app_id AS TEXT)) AS app_name,
+                  (SELECT MAX(r.reviewed_at) FROM reviews r WHERE r.target_id = t.id) AS last_reviewed_at
+             FROM review_targets t
+             LEFT JOIN review_bots b ON b.id = t.bot_id
+            WHERE t.workspace_id = ? AND t.deleted_at IS NULL
+            ORDER BY t.created_at DESC, t.id`,
+        )
+        .bind(workspaceId)
+        .all<LiveTargetListRow>();
       return res.results;
     },
 
