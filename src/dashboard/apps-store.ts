@@ -638,13 +638,14 @@ export const APP_READ_SQL = {
 } as const;
 
 /**
- * The workspace-scoped App resolve the target pages use: only the bot the
- * addressed workspace OWNS (`bot_workspaces`). Ownership is the single arm
- * (D13): a bot is an execution identity, so a target page reaches it through
- * the workspace that created it and nothing else. Another workspace's bot
- * stays invisible.
+ * The workspace-scoped App resolve the target pages use: the bot the addressed
+ * workspace OWNS, or a `shared` bot it holds a live target on. The second arm
+ * is the entitlement a target carries — a `shared` bot has no `bot_workspaces`
+ * row in the workspaces that use it, so without it those workspaces would get
+ * nothing on a bot they hold a live target for. An `owned` bot is never
+ * widened: its target arm requires `scope = 'shared'`.
  */
-const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND w.workspace_id = ?2 ORDER BY w.workspace_id LIMIT 1`;
+const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR (g.scope = 'shared' AND EXISTS (SELECT 1 FROM review_targets t WHERE t.bot_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL))) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
 
 /**
  * The two `upsertInstallation` statements. Which one runs is chosen BEFORE
@@ -954,10 +955,10 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The target pages' resolve: the workspace's own bot, or one it holds a
-     * live target on (a shared bot it created a target on, or a bot whose
-     * share was revoked). `null` for a soft-deleted bot, another workspace's
-     * `owned` bot it has no target on, or a non-existent id.
+     * The target pages' resolve: the workspace's own bot, or a `shared` bot it
+     * holds a live target on. `null` for a soft-deleted bot, an owned bot
+     * outside the caller's workspace, a `shared` bot with no live target here,
+     * or a non-existent id.
      */
     async getScopedAppByGithubId(
       githubAppId: number,

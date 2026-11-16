@@ -8,7 +8,8 @@
  *     batch and NO review target: creation knows no repository (D13);
  *   - the user-facing delete stamps the bot AND every target it owns, once,
  *     refusing to re-stamp either;
- *   - the workspace-scoped resolve answers only the bot this workspace owns;
+ *   - the workspace-scoped resolve answers the bot this workspace owns, plus a
+ *     `shared` bot it holds a live target on;
  *   - the 已安装 read lists the bot's live installations, narrowed to the bots
  *     the workspace may use;
  *   - visibility round-trips and reads `unknown` for a never-probed row.
@@ -602,19 +603,19 @@ describe("bot scope transitions (contract § 7.1)", () => {
 
 // --- the creation chooser's shared-bot list --------------------------------
 
-describe("shared bots a workspace may create a target on", () => {
-  /** One target on `botId` in `workspaceId`, stamped when `deleted`. */
-  function seedTargetIn(db: TestD1, botId: string, workspaceId: string, deleted = false): void {
-    db.raw
-      .prepare(
-        `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, created_by, created_at, updated_at, deleted_at)
-         VALUES (?, ?, ?, ?, 'fixture', datetime('now'), datetime('now'),
-                 ${deleted ? "datetime('now')" : "NULL"})`,
-      )
-      .run(crypto.randomUUID(), workspaceId, botId, botId);
-  }
+/** One target on `botId` in `workspaceId`, stamped when `deleted`. */
+function seedTargetIn(db: TestD1, botId: string, workspaceId: string, deleted = false): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, created_by, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, 'fixture', datetime('now'), datetime('now'),
+               ${deleted ? "datetime('now')" : "NULL"})`,
+    )
+    .run(crypto.randomUUID(), workspaceId, botId, botId);
+}
 
+describe("shared bots a workspace may create a target on", () => {
   test("each live shared bot carries the ADDRESSED workspace's live target count", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-other");
@@ -658,12 +659,14 @@ function githubAppIdOf(db: TestD1, botId: string): number {
 }
 
 /**
- * The resolve the target pages use: the bot the addressed workspace OWNS.
- * Ownership is `bot_workspaces` alone, so another workspace's bot — shared or
- * not — stays invisible until that workspace owns it.
+ * The resolve the target pages use: the bot the addressed workspace OWNS, or a
+ * `shared` bot it holds a live target on. The second arm is the entitlement a
+ * target carries — a `shared` bot carries no `bot_workspaces` row in the
+ * workspaces that use it, so only the target makes it reachable there. An
+ * `owned` bot is never widened.
  */
 describe("the workspace-scoped App resolve", () => {
-  test("resolves the workspace's own bot and nothing it does not own", async () => {
+  test("resolves the workspace's own bot and a shared bot it holds a live target on", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-other");
     seedScopedBot(db, "bot-own", { workspaceId: WS });
@@ -675,10 +678,28 @@ describe("the workspace-scoped App resolve", () => {
     const own = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-own"), WS);
     expect(own?.id).toBe("bot-own");
     expect(own?.workspace_id).toBe(WS);
-    // Not owned here: neither another workspace's bot nor a soft-deleted one.
-    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
+    // A shared bot with no live target here has nothing to resolve.
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS)).toBeNull();
+    // An owned bot of another workspace is never widened by a target.
+    seedTargetIn(db, "bot-foreign", WS);
+    expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-dead"), WS)).toBeNull();
+
+    // A live target IS the entitlement on a shared bot.
+    seedTargetIn(db, "bot-shared", WS);
+    const shared = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS);
+    expect(shared?.id).toBe("bot-shared");
+    // The returned workspace is the bot's owner, not the caller's.
+    expect(shared?.workspace_id).toBe("ws-other");
+  });
+
+  test("a shared bot whose only target here is deleted stays invisible", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-other");
+    seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
+    seedTargetIn(db, "bot-shared", WS, true);
+
+    expect(await createReviewBotsStore(db).getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS)).toBeNull();
   });
 });
 
