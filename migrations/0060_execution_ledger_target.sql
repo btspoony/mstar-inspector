@@ -18,6 +18,18 @@
 --   failures → `CHECK constraint failed: guard_failures_without_target`
 --   ambiguous failure candidates → `CHECK constraint failed: guard_failures_ambiguous_target`
 --
+-- The failures guard is narrower than the findings one, and deliberately so.
+-- A finding's PR row always exists: nothing deletes a `pull_requests` row while
+-- findings reference it. A failure can outlive its PR — the ledger is pruned
+-- independently of this table — and then no target can ever be derived for it.
+-- Requiring zero NULLs would refuse the migration on any deployment carrying
+-- such history (production had 99 such rows across 11 PRs on first apply).
+-- So the guard refuses a NULL that COULD have been resolved (a candidate set of
+-- exactly one that the UPDATE somehow did not attribute — a real defect), and
+-- allows a NULL with no candidate at all, which the read faces already treat as
+-- legacy and filtered, exactly as they treat a NULL `bot_id`. The ambiguity
+-- guard still runs first, so a multi-candidate row never reaches this point.
+--
 -- The ambiguity guard runs BEFORE the failure UPDATE: the same installation id
 -- can be recorded under two bots, each with its own pull-request row at the
 -- same (owner, repo, pr_number) but pointing at different targets in different
@@ -101,7 +113,17 @@ CREATE TABLE guard_failures_without_target (
   n INTEGER NOT NULL CONSTRAINT guard_failures_without_target CHECK (n = 0)
 );
 INSERT INTO guard_failures_without_target (n)
-SELECT COUNT(*) FROM review_failures WHERE target_id IS NULL;
+SELECT COUNT(*) FROM review_failures f
+WHERE f.target_id IS NULL
+  AND (
+    SELECT COUNT(DISTINCT p.target_id)
+    FROM bot_installations i
+    JOIN pull_requests p ON p.bot_id = i.bot_id
+    WHERE i.installation_id = f.installation_id
+      AND p.owner = f.owner
+      AND p.repo = f.repo
+      AND p.pr_number = f.pr_number
+  ) = 1;
 DROP TABLE guard_failures_without_target;
 
 -- The tenant predicate is `(target_id, owner, repo, pr_number)`: the counts and
