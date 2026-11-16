@@ -450,6 +450,18 @@ describe("the console gate", () => {
     );
     expect(res.status).toBe(404);
   });
+
+  test("a stored version has no edit path at all", async () => {
+    const db = fixture();
+    const before = db.raw.query("SELECT * FROM quota_profiles WHERE id = 'quota-v1'").get();
+    for (const path of ["/api/quota-versions/quota-v1", "/api/quota-versions"]) {
+      const res = await adminFetch(db, "PATCH", path, { notes: "rewritten" });
+      // Append-only is a surface with no write route, not a guarded one: the
+      // only writes are a create and nothing else.
+      expect(res.status).toBe(404);
+    }
+    expect(db.raw.query("SELECT * FROM quota_profiles WHERE id = 'quota-v1'").get()).toEqual(before);
+  });
 });
 
 /**
