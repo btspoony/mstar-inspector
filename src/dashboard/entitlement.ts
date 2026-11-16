@@ -61,7 +61,7 @@ type PlanLimitsRow = Omit<PlanLimits, "sharedBotAllowed"> & {
 
 /**
  * One row → the limits the decisions read, converting the column's 0/1 into
- * the boolean at the boundary (the `allowlist_enabled !== 0` precedent).
+ * the boolean at the boundary.
  */
 function planLimits(row: PlanLimitsRow): PlanLimits {
   return {
