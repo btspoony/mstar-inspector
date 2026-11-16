@@ -174,6 +174,39 @@ row = default, an invalid value fails loud at the writer, write + audit in one
 batch). The table's name is the honest cost; renaming it later is a mechanical
 migration, not a behaviour change.
 
+The encryption master key is not platform state and no route here reads it:
+`DASHBOARD_ENCRYPTION_KEY` is a deploy-time Worker secret
+(`docs/deploy.md` § Multi-App go-live → *Set DASHBOARD_ENCRYPTION_KEY*). That
+section also states the pre-deploy gate that refuses a malformed key, so an
+operator console whose settings writes answer 500 is debugged against the
+deploy, not against this surface.
+
+### 3.6 Provider sizes and the add-key refusal
+
+Two operator-facing rules on the bot settings page, both presentation-only —
+neither changes a route, a payload or a stored column.
+
+**An unstated provider size is a normal answer.** The per-model size set
+(`contextWindow`, `maxTokens`) is stored only as far as the operator states it.
+`parseCustomProviderModelsMeta` (`src/dashboard/index.ts`) skips an absent field
+before any shape check, so a partial set saves as-is and a model that states no
+size stores no override at all — the runtime's own default applies. A stated
+value must still be a positive whole number, and the refusal names the model and
+the field. The dialog therefore pre-fills only a catalog-supplied number, posts
+no value the operator left untouched, and never disables the save for a blank
+size. A provider with **no** catalog row has unknown sizes, not zero sizes: it
+states that case instead of naming a snapshot it cannot have.
+
+**One refusal per status.** `verifyRefusalMessage` resolves STATUS first, body
+second. 400 keeps the route's per-reason faces; 403 separates a `shared` bot
+(the keyed `settings.error.botReadOnly` body) from the non-manager forbidden
+page; 404, 409 and 429 name their own cause; 500 splits by body shape, because
+the Worker already answers a missing `DASHBOARD_ENCRYPTION_KEY` in plain text
+and a rejected write as JSON. A body this page cannot read falls back to that
+family's copy, and the one shared "unexpected response" sentence survives only
+for a 400 naming a reason the page does not know. No face echoes the submitted
+key, the response body or the status code.
+
 ### 4. Platform audit
 
 Table `platform_audit_events (id TEXT PRIMARY KEY, actor_login TEXT NOT NULL COLLATE NOCASE, action TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL, detail_json TEXT, created_at TEXT NOT NULL)` with an index on `(created_at)`.
@@ -247,6 +280,10 @@ string — the mode is a separate conjunct.
 - No admin route joins tenant `APP_ROUTES`; self-hosted registers none.
 - Every admin write has exactly one audit home; list reads are unaudited.
 - Both audit ledgers are append-only and retained indefinitely.
+- A provider size is never a save precondition: only a stated value is stored and
+  shape-checked, and an absent one means the runtime default.
+- No add-key status reaches the operator as one undifferentiated sentence, and
+  no refusal face echoes the key, the body or the status code.
 
 ## Where it lives
 
@@ -261,6 +298,10 @@ string — the mode is a separate conjunct.
 - `src/dashboard/runtime-config-store.ts`: the platform parameter store —
   `platform.official_workspace_id` and the key-domain registry.
 - `src/dashboard/apps-store.ts`: the bot-scope transition and its audit row.
+- `src/spa/pages/provider-models-dialog.tsx`: the per-model size fields, the
+  catalog pre-fill and the unknown-size sentence (§3.6).
+- `src/spa/pages/SettingsPage.tsx` (`verifyRefusalMessage`): the add-key
+  refusal's status-first resolution, rendered by the bot page's verify submit.
 
 ## Change obligations
 

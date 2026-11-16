@@ -653,6 +653,8 @@ describe("create on a shared bot", () => {
     seedSharedBot(db, "bot-shared", 6408);
     // A catalogue read would throw here (`free` is missing); the mode resolves
     // the unlimited constant before any read, so the create still succeeds.
+    // The profile's plan set references `plans`, so the ceilings go first.
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
     db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
     expect(
       (await createTargetsStore(db).createOnSharedBot({

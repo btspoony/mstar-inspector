@@ -4611,6 +4611,34 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(afterInvalid!.models_meta).toEqual({ "fresh-a": { contextWindow: 64000, maxTokens: 2048 } });
   });
 
+  test("a save that states only one size stores only that size — the other stays absent", async () => {
+    const { db, app } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const store = configStore(db);
+    // The dialog posts what the operator typed and nothing else: an absent
+    // max token count is not a zero and not a default, and the parser keeps
+    // only the stated field. Nothing here is a save precondition.
+    const partial = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "update-provider-models",
+      provider: "my-custom",
+      model_ids: "fresh-a,fresh-b",
+      models_meta: JSON.stringify({ "fresh-a": { contextWindow: 200000 } }),
+    });
+    expect(partial.status).toBe(200);
+    const [decl] = await store.listCustomProviders(app.id);
+    expect(decl!.model_ids).toEqual(["fresh-a", "fresh-b"]);
+    expect(decl!.models_meta).toEqual({ "fresh-a": { contextWindow: 200000 } });
+    // The round-trip: the face the dialog re-seeds from returns exactly that,
+    // with no second field invented for the same model.
+    const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const body = (await payload.json()) as {
+      custom_providers: Array<{ provider_id: string; models_meta?: Record<string, unknown> }>;
+    };
+    expect(body.custom_providers.find((p) => p.provider_id === "my-custom")!.models_meta).toEqual({
+      "fresh-a": { contextWindow: 200000 },
+    });
+  });
+
   test("an all-blank overlay saves the ids and stores no size at all", async () => {
     const { db, app } = await seededWorld();
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);

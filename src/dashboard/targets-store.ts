@@ -31,7 +31,7 @@ import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
 import type { DeploymentMode } from "../worker/env";
-import { assertSharedBotAllowed } from "./entitlement";
+import { checkEntitlement } from "./entitlement";
 
 /**
  * The per-target auto-trigger vocabulary (exact enum spelling is wire-visible:
@@ -180,7 +180,7 @@ type TargetsStoreStatement = {
   all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
   // Generic like `WorkspaceStoreD1`'s statement, so this face stays
   // structurally assignable to it (the shared-bot capability reads the plan
-  // through `assertSharedBotAllowed`).
+  // through `checkEntitlement`).
   run<T = Record<string, unknown>>(): Promise<{ results: T[]; meta: { changes: number; last_row_id: number } }>;
 };
 
@@ -319,8 +319,16 @@ export function createTargetsStore(db: TargetsStoreD1) {
       /** The workspace's floor, read by the route; omitted → the product default. */
       checkMinScore?: number;
     }): Promise<CreateSharedTargetOutcome> {
-      const refusal = await assertSharedBotAllowed(db, input.workspaceId, input.mode);
-      if (refusal !== null) return { outcome: "plan_refused", planId: refusal.planId };
+      const verdict = await checkEntitlement({
+        db,
+        mode: input.mode,
+        workspaceId: input.workspaceId,
+        kind: "shared-bot",
+        botScope: "shared",
+      });
+      if (!verdict.ok && verdict.refusal.kind === "shared-bot") {
+        return { outcome: "plan_refused", planId: verdict.refusal.planId };
+      }
       const id = crypto.randomUUID();
       const minScore = isCheckMinScoreValue(input.checkMinScore)
         ? input.checkMinScore

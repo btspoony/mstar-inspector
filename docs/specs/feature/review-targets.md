@@ -48,7 +48,7 @@ Manifest commit writes one bot, its workspace mapping and one unbound target (`i
 ## Invariants
 
 - One target per bot is a product constraint, not a schema rule; a second target requires `target_id` on the execution ledgers first.
-- A target's `bot_id` is written once, by an INSERT; a re-bind is a new target. Three INSERTs write it — the manifest commit's inline batch (the caller's own new bot), `CREATE_SHARED_TARGET_SQL` (gated on a `shared`, live bot) and `createTargetsStore().create()` (no production caller today) — plus migration `0057_review_targets.sql`'s backfill; no statement ASSIGNS it after creation. A future writer of that column must consult `assertSharedBotAllowed` in that writer, never add a second guard ([entitlement](../architecture/entitlement-and-deployment-modes.md) §5).
+- A target's `bot_id` is written once, by an INSERT; a re-bind is a new target. Three INSERTs write it — the manifest commit's inline batch (the caller's own new bot), `CREATE_SHARED_TARGET_SQL` (gated on a `shared`, live bot) and `createTargetsStore().create()` (no production caller today) — plus migration `0057_review_targets.sql`'s backfill; no statement ASSIGNS it after creation. A future writer of that column must call `checkEntitlement({kind: "shared-bot", …})` in that writer, never add a second guard ([entitlement](../architecture/entitlement-and-deployment-modes.md) §5).
 - Tenant reads bind both ids in SQL; execution reads bind neither workspace predicate nor target.
 - The review job payload names both ids; no code reads `appRef`.
 - The five moved columns never return to `review_bots`.

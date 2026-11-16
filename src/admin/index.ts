@@ -62,6 +62,16 @@ import { createSupportGrant, revokeSupportGrant } from "./support-grants";
 import { listUsers } from "./users";
 import { readReviewUsage, reviewUsageMonth } from "../dashboard/review-usage-store";
 import { WORKSPACE_SLUG_PATTERN, listWorkspaces, setWorkspacePlan, setWorkspaceSlug } from "./workspaces";
+import {
+  createQuotaVersion,
+  listPlans,
+  listQuotaVersions,
+  parseQuotaCandidate,
+  parseQuotaImpact,
+  parseQuotaNumbers,
+  previewQuotaImpact,
+} from "./quota-versions";
+import { quotaMonth } from "../store/quota-store";
 
 /** One declaration row of this namespace's own route table. */
 type AdminRoute = {
@@ -684,6 +694,113 @@ async function setSlug(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Every stored quota version with its derived interval, the marker on the one
+ * judging this month and the ceilings it sets per plan — one read per table,
+ * composed by `./quota-versions`. The console only needs this list to render
+ * history, the current version and anything scheduled.
+ */
+async function readQuotaVersions(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  return c.json(await listQuotaVersions(db, new Date()));
+}
+
+/**
+ * The impact preview for candidate numbers the operator typed but has not
+ * published. It writes nothing; the count comes from the same month sum the
+ * enqueue's ceiling read answers from, so it cannot disagree with a refusal at
+ * equal usage.
+ */
+async function previewQuotaVersion(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  let parsed: unknown = {};
+  try {
+    parsed = await c.req.json();
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  const plans = await listPlans(db);
+  const candidate = parseQuotaCandidate(
+    parsed,
+    plans.map((plan) => plan.id),
+  );
+  if (!candidate.ok) return c.json({ error: candidate.error }, 400);
+  return c.json(await previewQuotaImpact(db, candidate.value, new Date()));
+}
+
+/**
+ * Publish one quota version. Two refusals guard the form's promises:
+ *
+ * - `effectiveFrom` must be after this month's 1st, or the new numbers would
+ *   judge the month in progress and could push a workspace over mid-month (D5);
+ * - the body must echo the impact the operator was shown, and that echo must
+ *   still match a fresh computation. A publish without a preview is refused
+ *   (`previewRequired`), and so is one whose numbers moved since.
+ *
+ * The write itself is one batch (profile, per-plan ceilings, audit row):
+ * publishing appends, and no existing profile is touched.
+ */
+async function publishQuotaVersion(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  let parsed: unknown = {};
+  try {
+    parsed = await c.req.json();
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  const plans = await listPlans(db);
+  const candidate = parseQuotaCandidate(
+    parsed,
+    plans.map((plan) => plan.id),
+  );
+  if (!candidate.ok) return c.json({ error: candidate.error }, 400);
+  const numbers = parseQuotaNumbers(parsed);
+  if (!numbers.ok) return c.json({ error: numbers.error }, 400);
+  const now = new Date();
+  const month = quotaMonth(now);
+  if (candidate.value.effectiveFrom <= month.startIso) {
+    return c.json(
+      {
+        error: `effectiveFrom must be after ${month.startIso.slice(0, 10)}: the month in progress keeps the version that covered its 1st`,
+      },
+      400,
+    );
+  }
+  const impact = parseQuotaImpact(parsed);
+  if (impact === null) {
+    return c.json(
+      {
+        error:
+          "body must carry the impact you previewed: POST /api/quota-versions/preview first, then publish with its { count, total, startsOn }",
+      },
+      400,
+    );
+  }
+  const fresh = await previewQuotaImpact(db, candidate.value, now);
+  if (fresh.count !== impact.count || fresh.total !== impact.total || fresh.startsOn !== impact.startsOn) {
+    return c.json(
+      {
+        error: `the impact moved since it was previewed (it is ${fresh.count} of ${fresh.total} now); preview these numbers again before publishing`,
+      },
+      409,
+    );
+  }
+  const outcome = await createQuotaVersion(db, { ...candidate.value, ...numbers.value }, now.toISOString(), login);
+  if (outcome.kind === "effective_from_taken") {
+    return c.json({ error: `another quota version already starts at ${candidate.value.effectiveFrom}` }, 409);
+  }
+  return c.json({ version: outcome.version, startsOn: fresh.startsOn }, 201);
+}
+
+/**
  * Every open support window across workspaces — one statement, newest append
  * per (workspace, operator), expired rows excluded. The console's list reads
  * are deliberately unaudited (spec §4): audit rows attach to writes.
@@ -813,6 +930,9 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
   { method: "get", path: "/api/users", handler: readUsers },
   { method: "get", path: "/api/usage", handler: readUsage },
+  { method: "get", path: "/api/quota-versions", handler: readQuotaVersions },
+  { method: "post", path: "/api/quota-versions/preview", handler: previewQuotaVersion },
+  { method: "post", path: "/api/quota-versions", handler: publishQuotaVersion },
   { method: "patch", path: "/api/workspaces/:id/plan", handler: assignPlan },
   { method: "patch", path: "/api/workspaces/:id/slug", handler: setSlug },
   { method: "patch", path: "/api/official-workspace", handler: assignOfficialWorkspace },

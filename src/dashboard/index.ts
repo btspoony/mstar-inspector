@@ -109,14 +109,13 @@ import {
   MemberCapError,
   SHARED_BOT_REFUSAL,
   WORKSPACE_CREATION_CLOSED_REFUSAL,
-  freeSlotAvailable,
-  isFreeTierPlan,
-  memberSlotAvailable,
+  checkEntitlement,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
   sharedBotAvailability,
 } from "./entitlement";
 import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
+import { readWorkspaceQuota } from "./quota-faces";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
   type AcceptInviteOutcome,
@@ -1263,8 +1262,17 @@ dashboardApp.post("/api/workspaces", async (c) => {
       return c.text(WORKSPACE_CREATION_CLOSED_REFUSAL, 409);
     }
     if (mode === "saas") {
-      const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
-      if (!freeSlotAvailable(freeCount)) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
+      // The workspace does not exist yet, so the question names none: the
+      // per-login rule alone, with no plan read and the counter read only when
+      // the answer can turn on it.
+      const verdict = await checkEntitlement({
+        db,
+        mode,
+        workspaceId: null,
+        kind: "free-workspace-slot",
+        freeMembershipCount: () => countFreeMembershipsForLogin(db, user.github_login),
+      });
+      if (!verdict.ok) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
     }
     const createdAt = new Date().toISOString();
     for (let attempt = 0; attempt < WORKSPACE_ID_ATTEMPTS; attempt++) {
@@ -1474,6 +1482,15 @@ dashboardApp.get("/manifest/callback", async (c) => {
     return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.codeRejected"), false, requestLocale(c)), 502);
   }
   const locale = requestLocale(c);
+  // The App cap is judged under this deployment's shape (spec §4: `self-hosted`
+  // has no cap and reads no column). A deployment that cannot name its shape
+  // already fails every SPA route; naming it here keeps that one 500.
+  let mode: DeploymentMode;
+  try {
+    mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+  } catch (error) {
+    return c.text((error as Error).message, 500);
+  }
   // The payload feeds the shared commit path; the cookie string is parked on
   // retryable outcomes so /manifest/confirm can resume.
   const holdPayload = buildHoldPayload(conversion, session.login, state.appId, state.workspaceId);
@@ -1484,6 +1501,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
     hold: holdPayload,
     login: session.login,
     workspaceId: target.kind === "ok" ? target.workspaceId : null,
+    mode,
   });
   // Retryable outcomes (db_unbound / encrypt_failed / db_rejected) keep the
   // hold: park the cookie so the operator can resume via /manifest/confirm.
@@ -1522,6 +1540,13 @@ dashboardApp.get("/manifest/callback", async (c) => {
     case "already_connected":
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
+    case "app_cap_reached":
+      // Non-retryable: a resubmit cannot free a slot, so the hold is burned.
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
+      return c.html(
+        manifestErrorPage(t(locale, "manifest.error.appCapReached", { limit: outcome.limit }), false, locale),
+        409,
+      );
     case "workspace_gate_unreadable":
       parkHold();
       return c.html(workspaceFloorUnreadablePage(locale, outcome.reason, target), 500);
@@ -1574,6 +1599,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
     hold,
     login: session.login,
     workspaceId: target.kind === "ok" ? target.workspaceId : null,
+    mode: deploymentModeOf(c.env.DEPLOYMENT_MODE),
   });
   switch (outcome.kind) {
     case "success": {
@@ -1600,6 +1626,12 @@ dashboardApp.post("/manifest/commit", async (c) => {
     case "already_connected":
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
+    case "app_cap_reached":
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+      return c.html(
+        manifestErrorPage(t(locale, "manifest.error.appCapReached", { limit: outcome.limit }), false, locale),
+        409,
+      );
     // Nothing to park: the submitted hold cookie IS this route's hold, so it
     // stays for the repair-then-resubmit retry — same as `db_rejected` below.
     case "workspace_gate_unreadable":
@@ -1619,6 +1651,7 @@ type ManifestCommitOutcome =
   | { kind: "encrypt_failed" }
   | { kind: "already_connected" }
   | { kind: "workspace_gate_unreadable"; reason?: DegradedReason }
+  | { kind: "app_cap_reached"; limit: number }
   | { kind: "db_rejected" };
 
 /**
@@ -1629,10 +1662,10 @@ type ManifestCommitOutcome =
  * semantics: success = ONE review_bots row (secretbox AAD rowKey = the row
  * PK, which IS the start-minted app id — the same value the manifest's
  * webhook URL carries);
- * login_mismatch / already_connected = non-retryable (the caller burns the
- * hold); db_unbound / encrypt_failed / workspace_gate_unreadable /
- * db_rejected = retryable (the caller keeps the hold so /manifest/confirm can
- * resume).
+ * login_mismatch / already_connected / app_cap_reached = non-retryable (the
+ * caller burns the hold: a retry cannot free a slot); db_unbound /
+ * encrypt_failed / workspace_gate_unreadable / db_rejected = retryable (the
+ * caller keeps the hold so /manifest/confirm can resume).
  * Zero upstream calls: encryption + a local D1 write only.
  */
 async function commitManifestApp(args: {
@@ -1646,8 +1679,10 @@ async function commitManifestApp(args: {
    * `db_unbound` outcome returns before it is read.
    */
   workspaceId: string | null;
+  /** The deployment shape the App cap is judged under (spec §4). */
+  mode: DeploymentMode;
 }): Promise<ManifestCommitOutcome> {
-  const { db, encryptionKey, hold, login, workspaceId } = args;
+  const { db, encryptionKey, hold, login, workspaceId, mode } = args;
   if (hold.login !== login) {
     logManifestFailure("commit", "login_mismatch");
     return { kind: "login_mismatch" };
@@ -1696,6 +1731,22 @@ async function commitManifestApp(args: {
     // workspace setting is repaired. The cause decides which page they get.
     logManifestFailure("commit", "db_error", { error_type: "workspace_gate_unreadable" });
     return { kind: "workspace_gate_unreadable", reason: workspaceFloor.reason };
+  }
+  // The plan's App allowance (D8), decided BEFORE any row is written. A NULL
+  // limit is no cap and `self-hosted` answers the unlimited constant, so the
+  // count (a thunk) is only read for a plan that actually has one. Refusing here
+  // (rather than inside createApp) keeps the check beside the other pre-write
+  // verdicts and leaves the store's batch the only writer.
+  const verdict = await checkEntitlement({
+    db,
+    mode,
+    workspaceId,
+    kind: "app-count",
+    liveAppCount: () => apps.countLiveApps(workspaceId),
+  });
+  if (!verdict.ok && verdict.refusal.kind === "app-count") {
+    logManifestFailure("commit", "app_cap_reached", { apps_per_workspace: verdict.refusal.limit });
+    return { kind: "app_cap_reached", limit: verdict.refusal.limit };
   }
   try {
     const row = await apps.createApp({
@@ -1999,15 +2050,20 @@ const inviteCreateRoute = async (c: DashboardContext) => {
     // no seats to exhaust, so this gate cannot fire for it — and self-hosted
     // resolves `unlimited` before it reads anything.
     const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
-    const plan = await resolveWorkspacePlan(gate.db, gate.scope.workspaceId, mode);
-    const limit = plan.includedMembers;
     const seats = await countMembersAndPendingInvites(
       gate.db,
       gate.scope.workspaceId,
       now.toISOString(),
     );
-    if (limit !== null && !memberSlotAvailable(seats, limit)) {
-      throw new MemberCapError(MEMBER_CAP_REFUSAL(limit));
+    const verdict = await checkEntitlement({
+      db: gate.db,
+      mode,
+      workspaceId: gate.scope.workspaceId,
+      kind: "member-slot",
+      seats,
+    });
+    if (!verdict.ok && verdict.refusal.kind === "member-slot") {
+      throw new MemberCapError(MEMBER_CAP_REFUSAL(verdict.refusal.limit));
     }
     await createInvite(
       gate.db,
@@ -2098,14 +2154,18 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
     invite.status === "pending" &&
     invite.expires_at > now &&
     invite.github_login.toLowerCase() === user.github_login.toLowerCase();
-  if (
-    wouldAccept &&
-    isFreeTierPlan((await resolveWorkspacePlan(db, tenant.workspaceId, mode)).id)
-  ) {
-    const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
-    if (!freeSlotAvailable(freeCount)) {
-      return inviteMutationResponse(c, INVITE_FREE_SLOT_REFUSAL, 409);
-    }
+  if (wouldAccept) {
+    // One call answers both halves of this precondition: the branch resolves the
+    // TARGET workspace's plan (only a `free` one is gated) and reads the counter
+    // only for such a workspace — so a paid acceptance counts nothing.
+    const verdict = await checkEntitlement({
+      db,
+      mode,
+      workspaceId: tenant.workspaceId,
+      kind: "free-workspace-slot",
+      freeMembershipCount: () => countFreeMembershipsForLogin(db, user.github_login),
+    });
+    if (!verdict.ok) return inviteMutationResponse(c, INVITE_FREE_SLOT_REFUSAL, 409);
   }
 
   // The read above is fast-fail UX; `acceptInvite` re-checks the slot inside
@@ -2547,20 +2607,27 @@ const reviewUsageReadRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
   const { db, scope } = member;
-  const window = reviewUsageMonth(new Date());
+  const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+  const now = new Date();
+  const window = reviewUsageMonth(now);
   const [rows, plan, sharedBots] = await Promise.all([
     readReviewUsage(db, window, scope.workspaceId),
-    resolveWorkspacePlan(db, scope.workspaceId, deploymentModeOf(c.env.DEPLOYMENT_MODE)),
+    resolveWorkspacePlan(db, scope.workspaceId, mode),
     createReviewBotsStore(db).listSharedBots(scope.workspaceId),
   ]);
   const row = rows[0];
   // Retired between the gate and the read: the same 404 an unknown ref gets.
   if (!row) return await tenantNotFound(c);
+  // The credit block is `saas` only: `self-hosted` has no ceiling to report and
+  // renders no quota card, so no profile or month RP is read in that mode.
+  const quota =
+    mode === "saas" ? await readWorkspaceQuota(db, scope.workspaceId, plan.id, now) : null;
   return c.json({
     month: window.month,
     sharedReviews: row.sharedReviews,
     ownReviews: row.ownReviews,
     sharedBot: sharedBotAvailability(plan, sharedBots.length > 0),
+    quota,
   });
 };
 

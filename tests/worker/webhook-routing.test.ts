@@ -26,9 +26,13 @@ import worker, { settleRefusedAfterAttach } from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import {
+  ENTITLEMENT_UNREADABLE_SKIP_REASON,
+  QUOTA_SKIP_REASON,
+  QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_SKIP_REASON,
   SHARED_BOT_ENTITLEMENT_STAGE,
 } from "../../src/contracts/failure-stages";
+import { quotaMonth } from "../../src/store/quota-store";
 import { CHECK_SUMMARIES } from "../../src/pipeline/checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
@@ -338,6 +342,70 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
     expect(failures[0]!.target_id).toBe(appRow.targetId);
     expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(SHARED_BOT_ENTITLEMENT_SKIP_REASON));
+  });
+
+  test("saas: an UNREADABLE gate is a recorded skip, not a 500 — the failure names the cause", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // A plan with no ceiling row in the judging profile: the configuration
+    // defect `resolveMonthlyQuota` throws on by design. Before the guard this
+    // was a permanent 500 for every webhook of that plan.
+    db.raw.prepare(`DELETE FROM quota_profile_plans WHERE plan_id = 'free'`).run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    // Fail-closed but not failing: GitHub must not retry, and no review starts.
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0);
+    const failures = db.raw
+      .query("SELECT stage, target_id, error FROM review_failures ORDER BY rowid")
+      .all() as Array<{ stage: string; target_id: string; error: string }>;
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
+    expect(failures[0]!.target_id).toBe(appRow.targetId);
+    // NOT the capability sentence: the author's plan was never judged.
+    expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(ENTITLEMENT_UNREADABLE_SKIP_REASON));
+    expect(failures[0]!.error).not.toContain("does not include the shared bot");
+    // The bookkeeping the guard exists to protect still ran.
+    const delivery = db.raw
+      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(appRow.id) as { outcome: string };
+    expect(delivery.outcome).toBe("skipped");
+  });
+
+  test("saas: an empty quota profile table is the same recorded skip, not a 500", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
+    db.raw.prepare("DELETE FROM quota_profiles").run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(0);
+    const failures = db.raw.query("SELECT stage FROM review_failures").all() as Array<{ stage: string }>;
+    expect(failures).toEqual([{ stage: SHARED_BOT_ENTITLEMENT_STAGE }]);
+    const delivery = db.raw
+      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(appRow.id) as { outcome: string };
+    expect(delivery.outcome).toBe("skipped");
   });
 
   test("saas: a Free workspace's OWN bot is not the shared bot — the delivery enqueues normally", async () => {
@@ -2461,5 +2529,225 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
 
     expect(settle).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(0);
+  });
+});
+
+/**
+ * The monthly RP ceiling, on the enqueue face. The verdict is computed from the
+ * SAME inputs the consumer meters with (the target's depth, the bot's scope),
+ * read against `usage_events` for the UTC calendar month, and the ceiling comes
+ * from the profile covering that month's first day (D5).
+ *
+ * Every case runs `saas`: `self-hosted` has no ceiling at all (the plan
+ * resolves `unlimited` before its first read), so the mode is part of what
+ * these tests pin.
+ */
+describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
+  /** The current UTC month's bounds, from the same helper the route uses. */
+  const month = quotaMonth(new Date());
+
+  /** A seeded `pro` subscription: 20000 RP/month, and the shared bot allowed. */
+  function seedPro(db: TestD1): void {
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES ('default', 'pro', 'active', datetime('now'), datetime('now'))`,
+      )
+      .run();
+  }
+
+  /** Meter `rp` into the current month, at a review id of its own. */
+  function seedUsage(db: TestD1, reviewId: string, rp: number, occurredAt = new Date().toISOString()): void {
+    db.raw
+      .prepare(
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp)
+         VALUES (?, 1, ?, 'default', ?, ?)`,
+      )
+      .run(reviewId, `token-${reviewId}`, occurredAt, rp);
+  }
+
+  /** Lower the profile ceiling so a case need not spend 20000 RP to reach it. */
+  function setCeiling(db: TestD1, monthlyRp: number | null): void {
+    db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = ? WHERE profile_id = 'quota-v1' AND plan_id = 'pro'").run(monthlyRp);
+  }
+
+  test("a review that exactly fills the month's remaining headroom is admitted; one RP over refuses it", async () => {
+    // Deep + BYOK is the cheapest cell in the table (6 RP): a pro ceiling of 20
+    // leaves room for exactly three, so 14 used + 6 = 20 (allowed) and 15 + 6 =
+    // 21 (refused) pin the boundary without a huge fixture.
+    for (const [usedRp, expected] of [
+      [14, "enqueued"],
+      [15, "refused"],
+    ] as const) {
+      const db = createMigratedTestD1();
+      seedPro(db);
+      setCeiling(db, 20);
+      const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+      // The App's own depth is deep, so the cost is `rpFor("deep", "byok")` = 6.
+      db.raw.prepare("UPDATE review_targets SET review_level = 'deep' WHERE id = ?").run(appRow.targetId);
+      seedUsage(db, "prior", usedRp);
+      const { queue, sent } = makeQueue();
+      const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+      const body = JSON.stringify(PR_PAYLOAD);
+
+      const res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      if (expected === "enqueued") {
+        expect(sent).toHaveLength(1);
+        expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
+      } else {
+        // The refusal spends nothing: no send, no claim, and one `quota` row.
+        expect(sent).toHaveLength(0);
+        expect(db.raw.query("SELECT COUNT(*) AS n FROM comment_trigger_claims").get()).toEqual({ n: 0 });
+        expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events WHERE review_id <> 'prior'").get()).toEqual({ n: 0 });
+        const failures = db.raw
+          .query("SELECT stage, error, target_id FROM review_failures ORDER BY rowid")
+          .all() as Array<{ stage: string; error: string; target_id: string }>;
+        expect(failures).toHaveLength(1);
+        expect(failures[0]!.stage).toBe(QUOTA_STAGE);
+        expect(failures[0]!.target_id).toBe(appRow.targetId);
+        expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_SKIP_REASON));
+        // The delivery row distinguishes the refusal from a pause or an ignore.
+        const delivery = db.raw
+          .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+          .get(appRow.id) as { outcome: string };
+        expect(delivery.outcome).toBe("skipped");
+      }
+    }
+  });
+
+  test("a NULL ceiling is unlimited: no sum is read and nothing refuses", async () => {
+    const db = createMigratedTestD1();
+    seedPro(db);
+    setCeiling(db, null);
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // A month already far past every finite ceiling.
+    seedUsage(db, "prior", 1_000_000);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
+  });
+
+  test("a pre-metering row (rp 0) contributes nothing to the ceiling", async () => {
+    const db = createMigratedTestD1();
+    seedPro(db);
+    setCeiling(db, 6);
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    db.raw.prepare("UPDATE review_targets SET review_level = 'deep' WHERE id = ?").run(appRow.targetId);
+    // Written the way a row that predates migration 0064 reads.
+    db.raw
+      .prepare(
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
+         VALUES ('pre-metering', 1, 'token-pre', 'default', ?)`,
+      )
+      .run(new Date().toISOString());
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    // 0 used + 6 cost = 6, exactly the ceiling: admitted.
+    expect(sent).toHaveLength(1);
+  });
+
+  test("a previous month's spend never counts against this one", async () => {
+    const db = createMigratedTestD1();
+    seedPro(db);
+    setCeiling(db, 6);
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    db.raw.prepare("UPDATE review_targets SET review_level = 'deep' WHERE id = ?").run(appRow.targetId);
+    // The instant just before this month's first day.
+    const before = new Date(Date.parse(month.startIso) - 1).toISOString();
+    seedUsage(db, "last-month", 1000, before);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+  });
+
+  test("a delivery that would fail both gates records exactly one failure, of the entitlement stage", async () => {
+    const db = createMigratedTestD1();
+    // The workspace holds NO subscription → the seeded `free` plan, which lacks
+    // the shared bot AND whose 2000 RP ceiling is already spent.
+    setCeiling(db, null); // the free plan keeps its seeded ceiling
+    db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = 1 WHERE profile_id = 'quota-v1' AND plan_id = 'free'").run();
+    seedUsage(db, "prior", 1000);
+    await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared", targets: [{ installationId: 123 }] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(0);
+    const failures = db.raw
+      .query("SELECT stage FROM review_failures ORDER BY rowid")
+      .all() as Array<{ stage: string }>;
+    expect(failures).toHaveLength(1);
+    // Capability first: the author is told the cause that binds, not the one a
+    // top-up could not fix (D9).
+    expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
+  });
+
+  test("self-hosted never meters and never refuses, even with a spent month", async () => {
+    const db = createMigratedTestD1();
+    setCeiling(db, 1);
+    seedUsage(db, "prior", 1_000_000);
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    // `makeEnv` already defaults to self-hosted; the ceiling fixture is what
+    // would refuse if the mode were ignored.
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
   });
 });

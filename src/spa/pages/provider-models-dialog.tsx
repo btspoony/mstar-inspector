@@ -157,6 +157,9 @@ export function ProviderModelsDialog({
   const detailId = detailsFor !== null && selected.has(detailsFor) ? detailsFor : (selectedIds[0] ?? "");
   const detailState = stateOf(detailId);
   const detailSource = sourceOf(detailId);
+  // A provider with no catalog row at all has UNKNOWN sizes, not zero: the
+  // dialog says so instead of crediting a snapshot with numbers it lacks.
+  const catalogKnowsSizes = Object.keys(catalogLimits).length > 0;
 
   function toggle(id: string): void {
     setSelected((current) => {
@@ -369,16 +372,31 @@ export function ProviderModelsDialog({
                 id="provider-models-details"
                 className="flex flex-col gap-3 rounded-(--radius-control) border border-(--border-default) bg-(--surface-inset) px-3 py-2"
               >
-                <p className="text-sm text-muted-foreground">
-                  {t(locale, "settings.providers.models.requirements")}
-                </p>
-                {/* The warning is for a model NOTHING supplies; a catalog
-                    value is labelled with its snapshot instead. */}
-                {detailSource === "absent" ? (
+                {/* A provider with NO catalog sizes at all has unknown sizes,
+                    not zero — so one sentence replaces the provenance line
+                    (whose "a catalog size is pre-filled" would credit a
+                    snapshot with numbers this provider does not have) and the
+                    "unstated" note, which is for a catalog that exists but
+                    says nothing about this model. Neither size field is a
+                    precondition in either case. */}
+                {catalogKnowsSizes ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      {t(locale, "settings.providers.models.requirements")}
+                    </p>
+                    {/* The warning is for a model NOTHING supplies; a catalog
+                        value is labelled with its snapshot instead. */}
+                    {detailSource === "absent" ? (
+                      <p className="text-sm text-muted-foreground">
+                        {t(locale, "settings.providers.models.sizesUnstated")}
+                      </p>
+                    ) : null}
+                  </>
+                ) : (
                   <p className="text-sm text-muted-foreground">
-                    {t(locale, "settings.providers.models.sizesUnstated")}
+                    {t(locale, "settings.providers.models.sizesUnknownProvider")}
                   </p>
-                ) : null}
+                )}
                 <label className="flex flex-col gap-1.5 text-sm font-medium">
                   {t(locale, "settings.providers.models.detailsSelectLabel")}
                   <select

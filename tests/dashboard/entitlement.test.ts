@@ -1,27 +1,30 @@
 /**
- * The shared-bot capability decision — `assertSharedBotAllowed`, the ONE
- * function both surfaces consult (creating a target on a shared bot, and
- * enqueueing a review for one).
+ * `checkEntitlement` — the ONE plan decision, pinned as a table over
+ * kind × plan × mode. Every row asserts the verdict a caller maps onto its own
+ * surface, so a rule change has to change a row here first.
  *
- * Pinned here:
- *   - the decision table over both modes and the four resolvable plan shapes
- *     (no subscription → `free`, plus the three seeded catalogue rows);
- *   - `self-hosted` answers WITHOUT reading the catalogue — the mode decides
- *     first, so that deployment never touches the column;
- *   - a plan change reaches the next attempt with no restart and no cache;
- *   - the creation refusal's verbatim Product copy.
+ * The fixture is the fully-migrated D1 double, so the plan columns and the
+ * quota profile's ceilings come from the real migrations (`0031`, `0061`,
+ * `0063`) rather than a hand-built table.
  *
- * The fixture is the fully-migrated D1 double, so the column comes from
- * migration `0061_plan_shared_bot_allowed.sql` rather than a hand-built table.
+ * Also pinned:
+ *   - `self-hosted` answers WITHOUT reading the catalogue, for every kind that
+ *     can refuse;
+ *   - every verdict carries `plan`, allowed or refused, and the `seats: null`
+ *     branch never refuses while still carrying the limit;
+ *   - a plan change reaches the next call with no restart and no cache;
+ *   - the shared-bot creation refusal's verbatim Product copy.
  */
 import { describe, expect, test } from "bun:test";
-import { assertSharedBotAllowed, SHARED_BOT_REFUSAL } from "../../src/dashboard/entitlement";
+import { checkEntitlement, SHARED_BOT_REFUSAL } from "../../src/dashboard/entitlement";
 import type { DeploymentMode } from "../../src/worker/env";
 import type { WorkspaceStoreD1 } from "../../src/dashboard/workspace-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const WS = "default";
 const TS = "2026-10-24T00:00:00.000Z";
+/** The month `quota-v1` judges: any instant on or after its `effective_from`. */
+const MONTH_START = "2026-11-01T00:00:00.000Z";
 
 /** The workspace's active subscription; no row resolves the seeded `free`. */
 function seedSubscription(db: TestD1, planId: string): void {
@@ -35,64 +38,301 @@ function seedSubscription(db: TestD1, planId: string): void {
 
 /** The four shapes a workspace resolves to: absent row → `free`, else the catalogue. */
 const SHAPES = [
-  { plan: null, planId: "free", allowed: false },
-  { plan: "free", planId: "free", allowed: false },
-  { plan: "pro", planId: "pro", allowed: true },
-  { plan: "unlimited", planId: "unlimited", allowed: true },
+  { plan: null, planId: "free", includedMembers: 5, sharedBotAllowed: false, appsPerWorkspace: 1 },
+  { plan: "free", planId: "free", includedMembers: 5, sharedBotAllowed: false, appsPerWorkspace: 1 },
+  { plan: "pro", planId: "pro", includedMembers: 5, sharedBotAllowed: true, appsPerWorkspace: 10 },
+  {
+    plan: "unlimited",
+    planId: "unlimited",
+    includedMembers: null,
+    sharedBotAllowed: true,
+    appsPerWorkspace: null,
+  },
 ] as const;
 
-describe("assertSharedBotAllowed — the decision table", () => {
+/** Migration 0063's ceiling per plan, in RP. */
+const CEILING = { free: 2000, pro: 20000, unlimited: null } as const;
+
+function migrated(shape: (typeof SHAPES)[number] | null): TestD1 {
+  const db = createMigratedTestD1();
+  if (shape?.plan != null) seedSubscription(db, shape.plan);
+  return db;
+}
+
+/** `self-hosted` resolves the unlimited constant whatever the stored row says. */
+const SELF_HOSTED = { planId: "unlimited", includedMembers: null, sharedBotAllowed: true, appsPerWorkspace: null };
+
+describe("checkEntitlement — shared-bot, the decision table", () => {
   for (const mode of ["saas", "self-hosted"] as const) {
     for (const shape of SHAPES) {
-      // `self-hosted` resolves `unlimited` whatever the stored row says.
-      const allowed = mode === "self-hosted" ? true : shape.allowed;
-      const planId = mode === "self-hosted" ? "unlimited" : shape.planId;
-      const verdict = allowed ? "allowed" : `refused (${planId})`;
-      test(`${mode} + ${shape.plan ?? "no subscription"} → ${verdict}`, async () => {
-        const db = createMigratedTestD1();
-        if (shape.plan !== null) seedSubscription(db, shape.plan);
-
-        const refusal = await assertSharedBotAllowed(db, WS, mode);
-
-        expect(refusal).toEqual(allowed ? null : { kind: "shared-bot-not-included", planId });
+      const expected = mode === "self-hosted" ? SELF_HOSTED : shape;
+      const allowed = expected.sharedBotAllowed;
+      test(`${mode} + ${shape.plan ?? "no subscription"} → ${allowed ? "allowed" : `refused (${expected.planId})`}`, async () => {
+        const db = migrated(shape);
+        const verdict = await checkEntitlement({ db, mode, workspaceId: WS, kind: "shared-bot", botScope: "shared" });
+        expect(verdict.plan.id).toBe(expected.planId);
+        expect(verdict.ok).toBe(allowed);
+        if (!verdict.ok) expect(verdict.refusal).toEqual({ kind: "shared-bot", planId: expected.planId });
         db.raw.close();
       });
     }
   }
+
+  test("an own bot is never a plan question, though the verdict still carries the plan", async () => {
+    const db = migrated(SHAPES[0]!);
+    const verdict = await checkEntitlement({ db, mode: "saas", workspaceId: WS, kind: "shared-bot", botScope: "own" });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.plan.id).toBe("free");
+    db.raw.close();
+  });
 });
 
-describe("assertSharedBotAllowed — the mode and the plan are read per call", () => {
-  test("self-hosted never reads the catalogue, so a missing free row cannot fail it", async () => {
-    // A double that throws on ANY read: `self-hosted` must answer before it.
-    let reads = 0;
-    const neverRead: WorkspaceStoreD1 = {
-      prepare() {
-        reads += 1;
-        throw new Error("self-hosted must not read the catalogue");
-      },
-    };
-
-    expect(await assertSharedBotAllowed(neverRead, WS, "self-hosted")).toBeNull();
-    expect(reads).toBe(0);
+describe("checkEntitlement — member-slot", () => {
+  test("fills up to, not including, the plan's included members", async () => {
+    const db = migrated(SHAPES[0]!);
+    for (const seats of [0, 4]) {
+      const verdict = await checkEntitlement({ db, mode: "saas", workspaceId: WS, kind: "member-slot", seats });
+      expect(verdict.ok).toBe(true);
+      expect(verdict.plan.includedMembers).toBe(5);
+    }
+    for (const seats of [5, 6]) {
+      const verdict = await checkEntitlement({ db, mode: "saas", workspaceId: WS, kind: "member-slot", seats });
+      expect(verdict.ok).toBe(false);
+      if (!verdict.ok) expect(verdict.refusal).toEqual({ kind: "member-slot", limit: 5, seats });
+    }
+    db.raw.close();
   });
 
-  test("a plan change takes effect on the next attempt — no restart, no cache", async () => {
-    const db = createMigratedTestD1();
-    expect(await assertSharedBotAllowed(db, WS, "saas")).toEqual({
-      kind: "shared-bot-not-included",
-      planId: "free",
+  test("a null limit is no cap, and an unlimited plan carries no refusal to mint", async () => {
+    const db = migrated({ ...SHAPES[3]! });
+    const verdict = await checkEntitlement({ db, mode: "saas", workspaceId: WS, kind: "member-slot", seats: 600 });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.plan.includedMembers).toBeNull();
+    db.raw.close();
+  });
+
+  test("`seats: null` never refuses: the caller's guarded SQL is the authority", async () => {
+    const db = migrated(SHAPES[0]!);
+    // The count that WOULD refuse the route's fast-fail, deliberately absent.
+    const verdict = await checkEntitlement({ db, mode: "saas", workspaceId: WS, kind: "member-slot", seats: null });
+    expect(verdict.ok).toBe(true);
+    // ...and the limit the guarded insert binds comes off the same verdict.
+    expect(verdict.plan.includedMembers).toBe(5);
+    db.raw.close();
+  });
+});
+
+describe("checkEntitlement — free-workspace-slot", () => {
+  const freeSlot = (
+    db: ReturnType<typeof migrated>,
+    workspaceId: string | null,
+    count: number,
+    mode: "saas" | "self-hosted" = "saas",
+  ) =>
+    checkEntitlement({
+      db,
+      mode,
+      workspaceId,
+      kind: "free-workspace-slot",
+      freeMembershipCount: async () => count,
     });
+
+  test("one free workspace per login: the first is allowed, the second is not", async () => {
+    const db = migrated(null);
+    expect((await freeSlot(db, null, 0)).ok).toBe(true);
+    for (const count of [1, 2]) {
+      const verdict = await freeSlot(db, null, count);
+      expect(verdict.ok).toBe(false);
+      if (!verdict.ok) expect(verdict.refusal).toEqual({ kind: "free-workspace-slot" });
+    }
+    db.raw.close();
+  });
+
+  test("a question naming no workspace reads no plan: the rule is per LOGIN", async () => {
+    // The creation route and the SPA boot both ask this way, and both would pay
+    // a plan resolution on every call if the branch resolved one anyway.
+    const noPlanRead: WorkspaceStoreD1 = {
+      prepare() {
+        throw new Error("a question naming no workspace must not read the catalogue");
+      },
+    };
+    expect((await freeSlot(noPlanRead as never, null, 1)).ok).toBe(false);
+    // A paid target is never gated, and the counter is never read for it.
+    expect((await freeSlot(migrated(SHAPES[3]!), WS, 9)).ok).toBe(true);
+  });
+
+  test("a named workspace is gated only when it resolves to the free tier", async () => {
+    const free = migrated(SHAPES[0]!);
+    expect((await freeSlot(free, WS, 0)).ok).toBe(true);
+    const refused = await freeSlot(free, WS, 1);
+    expect(refused.ok).toBe(false);
+    // The refusal carries the named workspace's plan, so its copy can name it.
+    if (!refused.ok) expect(refused.plan?.id).toBe("free");
+
+    // A paid workspace with the same spent slot: allowed, and — proved by the
+    // throwing counter — without reading the count at all.
+    let counted = 0;
+    const paid = migrated(SHAPES[3]!);
+    const verdict = await checkEntitlement({
+      db: paid,
+      mode: "saas",
+      workspaceId: WS,
+      kind: "free-workspace-slot",
+      freeMembershipCount: async () => {
+        counted += 1;
+        return 9;
+      },
+    });
+    expect(verdict.ok).toBe(true);
+    expect(counted).toBe(0);
+  });
+});
+
+describe("checkEntitlement — app-count", () => {
+  test("the plan's App cap admits below it and refuses at it", async () => {
+    const db = migrated(SHAPES[0]!);
+    const count = (n: number) => async () => n;
+    expect((await checkEntitlement({ db, mode: "saas", workspaceId: WS, kind: "app-count", liveAppCount: count(0) })).ok).toBe(
+      true,
+    );
+    const verdict = await checkEntitlement({
+      db,
+      mode: "saas",
+      workspaceId: WS,
+      kind: "app-count",
+      liveAppCount: count(1),
+    });
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) expect(verdict.refusal).toEqual({ kind: "app-count", limit: 1, count: 1 });
+    db.raw.close();
+  });
+
+  test("a null cap admits any count without reading it — absence is never 'zero Apps'", async () => {
+    const db = migrated({ ...SHAPES[3]! });
+    let reads = 0;
+    const verdict = await checkEntitlement({
+      db,
+      mode: "saas",
+      workspaceId: WS,
+      kind: "app-count",
+      liveAppCount: async () => {
+        reads += 1;
+        return 500;
+      },
+    });
+    expect(verdict.ok).toBe(true);
+    expect(reads).toBe(0);
+    db.raw.close();
+  });
+});
+
+describe("checkEntitlement — review-quota", () => {
+  test("a review that exactly fits the remaining headroom is admitted; one RP more is refused", async () => {
+    const db = migrated(SHAPES[0]!);
+    for (const [usedRp, costRp, allowed] of [
+      [1999, 1, true],
+      [1999, 2, false],
+      [2000, 1, false],
+    ] as const) {
+      const verdict = await checkEntitlement({
+        db,
+        mode: "saas",
+        workspaceId: WS,
+        kind: "review-quota",
+        monthStart: MONTH_START,
+        usedRp,
+        costRp,
+      });
+      expect(verdict.ok).toBe(allowed);
+      if (!verdict.ok) {
+        expect(verdict.refusal).toEqual({ kind: "review-quota", limit: CEILING.free, used: usedRp, cost: costRp });
+      }
+    }
+    db.raw.close();
+  });
+
+  test("the ceiling follows the plan the same verdict resolved", async () => {
+    const db = migrated(SHAPES[2]!);
+    const verdict = await checkEntitlement({
+      db,
+      mode: "saas",
+      workspaceId: WS,
+      kind: "review-quota",
+      monthStart: MONTH_START,
+      usedRp: 5000,
+      costRp: 100,
+    });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.plan.id).toBe("pro");
+    db.raw.close();
+  });
+
+  test("a null ceiling is unlimited", async () => {
+    const db = migrated({ ...SHAPES[3]! });
+    const verdict = await checkEntitlement({
+      db,
+      mode: "saas",
+      workspaceId: WS,
+      kind: "review-quota",
+      monthStart: MONTH_START,
+      usedRp: 10_000_000,
+      costRp: 1000,
+    });
+    expect(verdict.ok).toBe(true);
+    db.raw.close();
+  });
+});
+
+describe("checkEntitlement — self-hosted answers before any read", () => {
+  // A double that throws on ANY read: the mode must answer without touching it.
+  const neverRead: WorkspaceStoreD1 = {
+    prepare() {
+      throw new Error("self-hosted must not read the catalogue");
+    },
+  };
+
+  for (const ctx of [
+    { kind: "shared-bot", botScope: "shared" },
+    { kind: "member-slot", seats: 1000 },
+    { kind: "app-count", liveAppCount: async () => 1000 },
+  ] as const) {
+    test(`${ctx.kind} is allowed with zero reads`, async () => {
+      const verdict = await checkEntitlement({ db: neverRead, mode: "self-hosted", workspaceId: WS, ...ctx });
+      expect(verdict.ok).toBe(true);
+      expect(verdict.plan.id).toBe("unlimited");
+    });
+  }
+
+  test("free-workspace-slot is a per-login rule, so the mode does not change it", async () => {
+    // Every caller gates it on `saas` itself; the branch consults neither the
+    // mode nor a plan when the question names no workspace, so a self-hosted
+    // call pays no read and still refuses the second free membership.
+    const verdict = await checkEntitlement({
+      db: neverRead,
+      mode: "self-hosted",
+      workspaceId: null,
+      kind: "free-workspace-slot",
+      freeMembershipCount: async () => 5,
+    });
+    expect(verdict.ok).toBe(false);
+  });
+});
+
+describe("checkEntitlement — the plan is read per call", () => {
+  test("a plan change takes effect on the next attempt — no restart, no cache", async () => {
+    const db = migrated(null);
+    const sharedBot = async () =>
+      checkEntitlement({ db, mode: "saas", workspaceId: WS, kind: "shared-bot", botScope: "shared" });
+
+    expect((await sharedBot()).ok).toBe(false);
 
     // The operator's move, through the same row Operator Admin writes.
     seedSubscription(db, "pro");
-    expect(await assertSharedBotAllowed(db, WS, "saas")).toBeNull();
+    expect((await sharedBot()).ok).toBe(true);
 
     // ...and back: the refusal returns without anything being restarted.
     db.raw.prepare("UPDATE workspace_subscriptions SET status = 'canceled' WHERE workspace_id = ?").run(WS);
-    expect(await assertSharedBotAllowed(db, WS, "saas")).toEqual({
-      kind: "shared-bot-not-included",
-      planId: "free",
-    });
+    expect((await sharedBot()).ok).toBe(false);
     db.raw.close();
   });
 });

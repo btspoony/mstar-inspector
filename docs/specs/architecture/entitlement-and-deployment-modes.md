@@ -45,7 +45,7 @@ edit `plans` rows.
 
 `PlanLimits.includedMembers` is `number | null`:
 
-- `null` → no seat cap. `memberSlotAvailable` returns true unconditionally.
+- `null` → no seat cap. The `member-slot` verdict is always `ok`.
 - `number` → existing rule: members + live pending invites `< limit`.
 
 `PlanLimits.sharedBotAllowed` is the resolved shared-bot capability (a boolean;
@@ -144,10 +144,12 @@ Mode-switch behavior:
 ### 5. Shared-bot capability
 
 A workspace may attach a review target to a bot the platform shares only when
-its resolved plan includes that bot. `assertSharedBotAllowed(db, workspaceId,
-mode)` in `src/dashboard/entitlement.ts` is THE decision: `null` = allowed, a
-typed refusal carrying the resolved plan id = refused. Exactly two call sites
-consult it, and neither re-derives the rule:
+its resolved plan includes that bot. `checkEntitlement({kind: "shared-bot", …})`
+in `src/dashboard/entitlement.ts` answers it, as the `shared-bot` branch of the
+one function every plan verdict comes from: `ok: true` = allowed, `ok: false`
+with a refusal carrying the resolved plan id = refused. `assertSharedBotAllowed`
+survives only as that branch's internal body, so it has no caller outside the
+module. Exactly two surfaces ask the question, and neither re-derives the rule:
 
 - creating a target on a shared bot (`targetsStore.createOnSharedBot`), which
   decides before writing anything, so a refusal leaves no target and no audit
@@ -161,7 +163,8 @@ consult it, and neither re-derives the rule:
 
 The gate reads the bot's scope first: only a bot the platform SHARES consults
 the plan. A workspace's own bot never does — a Free workspace keeps reviewing
-with its own App exactly as before, with no plan read on that path.
+with its own App exactly as before, and the `own` branch mints `ok` without
+looking at the capability column.
 
 `self-hosted` answers before any read: `resolveWorkspacePlans` returns the
 unlimited constant, so that mode never touches the column. Every other mode
@@ -194,7 +197,7 @@ the capability is granted but no operator has shared a bot yet, so the reader
 waits for a platform operator and has nothing to buy. The two unavailable
 states never share copy because they differ in who can fix them. A plan change
 or a designation therefore moves the card on the next read with no cache,
-exactly as both move `assertSharedBotAllowed`; `self-hosted` renders no
+exactly as both move `checkEntitlement`'s `shared-bot` branch; `self-hosted` renders no
 shared-bot row at all, because the console that designates one is not
 registered in that mode — the absence is a property of the deployment, not a
 fourth state of the workspace.
@@ -210,27 +213,122 @@ the future lever is a separate alert-only exclusion list, never a change to
 `PAGING_EXCLUDED_STAGES`, which would also hide the rows from the dashboard's
 failure counts and PR history.
 
+## RP metering and the monthly ceiling
+
+Every started review records an integer RP cost on its `usage_events` row
+(`usage_events.rp`, migration `0064_usage_events_rp.sql`), written in the SAME
+statement that mints the row's `seq` so the attempt ordinal and its charge can
+never disagree.
+
+- **The price.** `rp = base(strength) × source(multiplier)`, read from the
+  resolved quota profile: `base` ∈ 1/2/6 RP for Quick/Standard/Deep and
+  `source` ∈ 1/10 for BYOK and the shared bot. BYOK is metered, never exempt
+  (D7) — there is no second "own bot" allowance. `1 Credit = 20 RP` is the
+  profile's `rp_per_credit`, so the display ratio is configuration, not code.
+- **Both inputs are already on the path.** The strength is the target's
+  `review_level` (`parseTargetReviewLevel`, falling back to the operator
+  default only when the row states none — the same read the pipeline makes);
+  the source is the bot's `scope` on the row the gate already holds. The value
+  is computed twice from the one pure function (once for the enqueue verdict,
+  once at the metering write) and never carried on the queue message, so the
+  charge always describes what actually ran.
+- **The month.** The ceiling compares against `SUM(rp)` over the UTC calendar
+  month of `usage_events.occurred_at`, in a half-open window from `quotaMonth`.
+  The ceiling itself comes from the profile covering that month's **first
+  day** (D5), so a profile published mid-month starts judging on the next 1st
+  and cannot evict a workspace mid-month. `null` is unlimited.
+- **`0` is the pre-metering sentinel.** `rpFor` is `>= 1` by construction
+  (every profile factor is `> 0` by DDL CHECK), so no metered row can hold 0:
+  rows written before this iteration default to 0 and contribute nothing to any
+  ceiling, and the column stays non-nullable with no `COALESCE` at the read.
+- **Whose month it is.** The ledger row is charged to the TARGET's workspace
+  (`review_targets.workspace_id`) — the tenant that asked for the review — which
+  is also the workspace the enqueue's ceiling check reads. It is deliberately
+  NOT the bot's owning workspace: for an OWNED bot the two are equal, but a
+  shared bot belongs to the platform's workspace while `createOnSharedBot`
+  writes only the target into the tenant's, so charging the bot's owner would
+  bill one workspace for every tenant's spend and leave each tenant's own month
+  at zero. The bot's workspace stays the CONCURRENCY key, which is a bot-scoped
+  fact and unrelated to who pays.
+- **The refusal.** A workspace whose month has reached its ceiling is refused
+  AT ENQUEUE, in the shared-bot gate's shape: the Check is still attached and
+  settles `neutral`, one terminal failure row is recorded under the `quota`
+  stage (`QUOTA_STAGE`, outside `PAGING_EXCLUDED_STAGES` — the review did not
+  run, so the row stays paged exactly like `entitlement`), and nothing is sent,
+  claimed or started. The comparison is `used + cost > limit` (`quotaSpent`),
+  so a review whose cost exactly fills the remaining headroom is admitted and
+  everything above it is refused — and a month already AT its ceiling refuses
+  every review, because the cheapest one costs 1 RP.
+- **Order: capability first, then quota.** One delivery carries at most one
+  refusal, so the two gates cannot both fire. The capability is a property of
+  the plan (only the plan or the bot changes it) while quota is consumption
+  against that plan; a workspace that may not use the shared bot is told that,
+  because a quota message would send it looking for a top-up it cannot buy in
+  this repository (D9). Quota is evaluated only in the branch the capability
+  admitted, which also keeps the cheap refusal cheap.
+- **A gate that cannot answer refuses, and says so.** Any fault in the enqueue
+  decision — a store error, an empty `quota_profiles`, or a plan with no ceiling
+  row in the judging profile — is a REFUSAL, not a failed request: the delivery
+  is skipped on the `entitlement` stage with the
+  `ENTITLEMENT_UNREADABLE_SKIP_REASON` sentence, the route still answers 200,
+  and one structured warn carries the cause. The third case is the only one an
+  operator can cause and cannot see on the affected surface, so
+  `GET /_internal_admin/api/quota-versions` reports `uncoveredPlanIds` — the
+  plan ids the JUDGING version states no ceiling for — and the console's quota
+  versions page renders it as a notice naming the plans. **Publishing a version
+  that covers the plan is the only repair**: no setting, no per-workspace
+  override and no mode check adds the missing `quota_profile_plans` row, and
+  until one is published every delivery of a workspace on that plan is refused
+  with that recorded stage. A gap in a version that does not judge this month
+  refuses nothing and is therefore not reported.
+- **Metering never refuses.** The consume-time charge is inside the same error
+  boundary as its insert: when the profile cannot be read there, the review
+  still runs to completion (no retry, no DLQ) and one `usage` failure row
+  records the attempt's token, the charged workspace and the source, so the lost
+  charge is reconcilable. This is the module's own rule — count, never refuse —
+  and it matters most on `self-hosted`, where no enqueue gate exists to have
+  caught the fault first.
+- **`self-hosted` never meters and never refuses.** The mode resolves the
+  unlimited plan constant before its first read, there is no ceiling to compare
+  against, and the enqueue gate skips the branch entirely.
+
+`apps_per_workspace` (a plan capability, not consumption) is enforced at App
+creation only: `free` 1, `pro` 10, NULL = no cap. The guard runs before any row
+is written, counts live bots of the workspace (`bot_workspaces` joined live
+`review_bots`, so a soft-deleted App frees its slot), and refuses with named
+copy and zero writes. `self-hosted` never reads the limit — the mode resolves
+the unlimited constant before its first read.
+
 ## Invariants
 
 - Free slots count memberships, not ownership.
-- `usage_events` is counts-only metering, not enforcement.
+- `usage_events.rp` is the ceiling's input: the ledger is metering AND the
+  evidence the next enqueue is judged on. A row's `rp` is written by the same
+  statement as its `seq`, and 0 marks a row that predates the column.
 - Workspace soft deletion and `PLATFORM_OPERATORS` / `isPlatformOperator` parsing are unchanged.
 - Unlimited means `null`, never a numeric sentinel.
-- The shared-bot capability has exactly one decision function
-  (`assertSharedBotAllowed`); a second spelling in a route, a store or the SPA
-  is a defect.
+- Every plan verdict is minted by `checkEntitlement` in
+  `src/dashboard/entitlement.ts`; `memberSlotAvailable`, `freeSlotAvailable` and
+  `assertSharedBotAllowed` are its internals and have no caller outside that
+  module. A second decision spelling in a route, a store or the SPA is a defect.
+  `resolveWorkspacePlan` keeps its display and audit readers (switcher label,
+  members plan card, usage card, operator audit detail) — the invariant is one
+  decision site, not one caller.
 
 ## Where it lives
 
-- `src/dashboard/entitlement.ts`: `resolveWorkspacePlan`, `resolveWorkspacePlans`, `memberSlotAvailable`, `assertSharedBotAllowed`, `sharedBotAvailability`.
+- `src/dashboard/entitlement.ts`: `checkEntitlement` (the one decision: `member-slot`, `free-workspace-slot`, `shared-bot`, `app-count`, `review-quota`), `resolveWorkspacePlan`, `resolveWorkspacePlans`, `sharedBotAvailability`.
 - `src/dashboard/review-usage-store.ts`: `readReviewUsage` (the counts the usage card and the console's usage page read).
 - `src/dashboard/targets-store.ts`: `createOnSharedBot` (the creation refusal).
-- `src/worker/index.ts` + `src/worker/handlers.ts`: the enqueue refusal (`deliveryOutcomeFromWebhook`, `handleReviewJob`).
+- `src/worker/index.ts` + `src/worker/handlers.ts`: the enqueue refusal (`deliveryOutcomeFromWebhook`, `handleReviewJob`, `DeliveryRefusal`).
 - `src/dashboard/invite-store.ts`: `createInvite`, `acceptInvite`, seat/free-slot SQL guards.
 - `src/dashboard/workspace-store.ts`: `createWorkspace` and subscription writes.
 - `src/dashboard/index.ts`: members/invite routes and plan rendering.
 - `src/worker/env.ts`: `deploymentModeOf`.
+- `src/store/usage-store.ts`: `recordUsageEvent` (the one statement that mints `seq` and writes `rp`), `sumMonthlyRp` (the ceiling's read).
+- `src/store/quota-store.ts`: `resolveQuotaProfile`, `resolveMonthlyQuota`, `rpFor`, `quotaMonth`.
 - `migrations/0031_plans_usage.sql`, `migrations/0032_unlimited_plan.sql`, `migrations/0061_plan_shared_bot_allowed.sql`: catalogue, nullable column, capability.
+- `migrations/0063_quota_profiles.sql`, `migrations/0064_usage_events_rp.sql`: the profile tables, the `apps_per_workspace` seed, and the metered ledger column.
 
 ## Change obligations
 

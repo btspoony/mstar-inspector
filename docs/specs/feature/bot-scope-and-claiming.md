@@ -76,13 +76,25 @@ The webhook **never** writes a binding. An installation no target references is 
 
 Dependency: `shared` stops reviewing until an installation is claimed. Operators must share, then claim.
 
-`shared` is also a plan capability, not only a bot scope: `assertSharedBotAllowed`
+`shared` is also a plan capability, not only a bot scope:
+`checkEntitlement({kind: "shared-bot", …})`
 ([entitlement](../architecture/entitlement-and-deployment-modes.md) §5) refuses
 a target creation on a shared bot and refuses the enqueue for a target whose
-workspace plan no longer includes it. A creation refusal writes nothing and the
-enqueue refusal sends nothing — its Check is settled `neutral` and the delivery
-records one terminal `entitlement` failure. `self-hosted` always has the
-capability and never reads the column.
+workspace plan no longer includes it. It is the one entry every plan verdict
+comes from, and `assertSharedBotAllowed` survives only as that branch's internal
+body. A creation refusal writes nothing and the enqueue refusal sends nothing —
+its Check is settled `neutral` and the delivery records one terminal
+`entitlement` failure. `self-hosted` always has the capability and never reads
+the column.
+
+A second enqueue refusal sits beside it: a workspace whose month has reached its
+plan's RP ceiling
+([entitlement](../architecture/entitlement-and-deployment-modes.md) § RP metering
+and the monthly ceiling). It has the SAME shape and sends nothing — the attached
+Check settles `neutral` and one terminal failure is recorded — but under its own
+`quota` stage, because the cause is consumption rather than capability. The two
+are ordered capability first and can never both fire on one delivery: one
+verdict per delivery, recorded once.
 
 ## Invariants
 
@@ -141,11 +153,13 @@ A row's `target_id` is set when it is first recorded and never rewritten; rebind
 
 ### Review usage
 
-Two read-only faces count published reviews per workspace: the settings card on
-`/dashboard/<ref>/settings` and the operator console's usage page
-(`/_internal_admin/usage`). Both read one statement
-(`src/dashboard/review-usage-store.ts#readReviewUsage`) parameterized by
-workspace.
+The workspace settings card (`/dashboard/<ref>/settings`) carries two counters
+for one UTC month — the credit block above, the published-review counts below —
+and the operator console has a face per counter: `/_internal_admin/usage` for
+the review counts and `/_internal_admin/quota-versions` for the quota profiles
+that price the credits. The published-review counts on both faces read one
+statement (`src/dashboard/review-usage-store.ts#readReviewUsage`) parameterized
+by workspace.
 
 | Rule | Contract |
 |---|---|
@@ -168,9 +182,76 @@ Heading placement: a page's title names the surface, and the window sits in
 the description line under it — the month is only known once the read has
 answered, so a title carrying it would render blank and then reflow.
 
-The card's labels say `reviews` and never `attempts`: the members page's
-"this workspace" meter counts review attempts (`usage_events`), a different
-measure, and no copy on either surface may imply the two numbers agree.
+#### Which counter each label reads
+
+Three counters exist and the surfaces never present them as one number:
+
+| Counter | Read by | What it counts |
+|---|---|---|
+| `usage_events.rp` | the card's credit block; the enqueue's ceiling | Integer RP charged per **started** review, priced by the profile judging the month. |
+| `usage_events` rows | the members page's "this workspace" meter | Started review **attempts**. One review can contribute several rows (a retry after a runner failure mints the next `seq`). |
+| `reviews` | the card's published-review rows; `/_internal_admin/usage` | **Published** reviews — a row exists only once a review finished and was stored. |
+
+They differ by construction, and the differences are the rule rather than noise:
+an attempt that fails after being charged spends RP and writes no review row; a
+retry charges again; a review that never publishes is never counted as one. So
+the credits and the review counts are never equal and no copy may imply they
+are. The card states this on the surface (`workspace.quotaBasis`) and the labels
+keep the words apart: the review rows say `reviews`, the members meter says
+attempts, and the credit block says credits with the RP detail beside it.
+
+Counters are not unified, and no report may substitute one for another: a
+workspace at its ceiling is refused by the credits (the RP ceiling), not by the
+published-review count.
+
+#### The credit block
+
+Credits are **presentation over integer RP**. Every stored and compared value is
+RP (`usage_events.rp`, `quota_profile_plans.monthly_rp`); the card divides by
+`rp_per_credit` from the profile that judges the month and shows two decimals.
+No float reaches storage, and the ratio is a column rather than a constant so a
+later profile can re-denominate credits without a code change.
+
+The profile that judges a month is the one covering that month's **1st** (D5):
+`resolveQuotaProfile(db, quotaMonth(now).startIso)`. A profile published
+mid-month therefore never judges the month it was published in — it shows as
+scheduled and starts judging at the next 1st, which is what keeps a price change
+from pushing a workspace over mid-month. The card names the judging profile,
+never "the profile current at render time".
+
+At or past the ceiling (`usedRp >= monthlyRp`) the used/limit pair stays — the
+measurement is never hidden — and one banner states the consequence and the
+reset: the next review is refused, a review that already started still finishes,
+and an operator moving the workspace to a larger plan restores it sooner. The
+enqueue's own comparison is `used + cost > monthlyRp`; because a charged review
+costs at least 1 RP it refuses exactly the months the card banners, plus the ones
+one review would tip over. `self-hosted` resolves no ceiling and renders no
+credit block at all.
+
+The block's "where it went" rows split the month's RP into the shared bot's and
+the workspace's own Apps'. `usage_events.source` records which one paid, written
+in the same statement that records the price (migration
+`0065_usage_events_source.sql`) — the price alone is not invertible, because
+`rp = base × source` and a profile chooses its own multipliers. Rows written
+before that column exist have a NULL source: they count in the month's total and
+in **neither** split, so the split may total less than the overall figure. That
+is the honest reading and nothing is attributed by default.
+
+The operator's create form must show an impact preview before publishing: the
+number of live `saas` workspaces whose current month's RP has already reached the
+candidate ceiling for their plan. It is a **tightness check, not an eviction
+forecast** — under D5 the candidate cannot judge the current month, and every
+month it does judge starts at 0 RP. The count comes from the same month sum the
+enqueue reads (`readMonthlyRp`, which `sumMonthlyRp` also answers from) and the
+same predicate (`quotaSpent`), so at equal usage it cannot disagree with a
+refusal — with one deliberate difference: the preview passes no cost, so it
+answers "would even the cheapest review (1 RP) be refused?", while the enqueue
+passes the review's own cost and can refuse a workspace the preview does not
+count yet. That gap is exactly one review wide and it closes as usage grows; the
+preview is a tightness check, not a per-review oracle. It can and will also
+differ a month later, because usage moves. A publish echoes the preview it was shown and is
+refused without one, or when the numbers moved since — a stale count is worse
+than none.
 
 ### Parking an overlapping target
 

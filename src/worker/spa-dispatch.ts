@@ -30,7 +30,7 @@ import {
   workspaceMembershipsForLogin,
   type WorkspaceBoot,
 } from "../dashboard/index";
-import { freeSlotAvailable } from "../dashboard/entitlement";
+import { checkEntitlement } from "../dashboard/entitlement";
 import { countFreeMembershipsForLogin } from "../dashboard/workspace-store";
 import { isFlagEnabled } from "../admin/flags";
 import {
@@ -234,11 +234,19 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   if (login !== null && db !== undefined) {
     if (!(await isFlagEnabled(db, "workspace_creation_open"))) {
       createBlockedReason = "flag";
-    } else if (
-      deploymentMode === "saas" &&
-      !freeSlotAvailable(await countFreeMembershipsForLogin(db, login))
-    ) {
-      createBlockedReason = "free_slot";
+    } else if (deploymentMode === "saas") {
+      // The same one entry the creation route asks, so the menu cannot disagree
+      // with it. `free-workspace-slot` is per LOGIN, not per plan: the empty
+      // workspace id is a sentinel for a question that names no workspace, and
+      // the plan the verdict carries is unused by this branch.
+      const verdict = await checkEntitlement({
+        db,
+        mode: deploymentMode,
+        workspaceId: null,
+        kind: "free-workspace-slot",
+        freeMembershipCount: () => countFreeMembershipsForLogin(db, login),
+      });
+      if (!verdict.ok) createBlockedReason = "free_slot";
     }
   }
   // The shell's Apps/brand links need the active workspace, and the shell

@@ -1,6 +1,8 @@
 /**
- * Entitlement: plan resolution, the two slot predicates and the free-membership
- * count. The subject is resolved limits and admission boundaries, so the fixture
+ * Entitlement: plan resolution, the free-membership count and the in-write
+ * guards. The slot predicates themselves are private — their behaviour is
+ * pinned through `checkEntitlement` in tests/dashboard/entitlement.test.ts. The
+ * subject is resolved limits and admission boundaries, so the fixture
  * is the fully-migrated D1 double (plans seeded by 0031) plus raw rows for the
  * cases the schema permits: no subscription row, an active plan, a non-active
  * one, and a soft-deleted tenant.
@@ -11,8 +13,6 @@ import {
   MEMBER_CAP_REFUSAL,
   MemberCapError,
   UNLIMITED_PLAN_ID,
-  freeSlotAvailable,
-  memberSlotAvailable,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
 } from "../../src/dashboard/entitlement";
@@ -58,6 +58,7 @@ describe("resolveWorkspacePlan", () => {
       name: "Free",
       includedMembers: 5,
       sharedBotAllowed: false,
+      appsPerWorkspace: 1,
     });
     db.raw.close();
   });
@@ -70,6 +71,7 @@ describe("resolveWorkspacePlan", () => {
       name: "Pro",
       includedMembers: 5,
       sharedBotAllowed: true,
+      appsPerWorkspace: 10,
     });
     db.raw.close();
   });
@@ -82,6 +84,7 @@ describe("resolveWorkspacePlan", () => {
       name: "Unlimited",
       includedMembers: null,
       sharedBotAllowed: true,
+      appsPerWorkspace: null,
     });
     db.raw.close();
   });
@@ -95,6 +98,8 @@ describe("resolveWorkspacePlan", () => {
 
   test("a missing seeded free row is an error, not invented limits", async () => {
     const db = createMigratedTestD1();
+    // The profile's plan set references `plans`, so the ceilings go first.
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
     db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
     await expect(resolveWorkspacePlan(db, "default", "saas")).rejects.toThrow(/seeded 'free' row/);
     db.raw.close();
@@ -112,6 +117,7 @@ describe("resolveWorkspacePlan — the mode decides before any read", () => {
       name: "Unlimited",
       includedMembers: null,
       sharedBotAllowed: true,
+      appsPerWorkspace: null,
     });
     db.raw.close();
   });
@@ -124,28 +130,11 @@ describe("resolveWorkspacePlan — the mode decides before any read", () => {
 
   test("self-hosted reads no catalogue row, so a missing free row cannot fail it", async () => {
     const db = createMigratedTestD1();
+    // The profile's plan set references `plans`, so the ceilings go first.
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
     db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
     expect((await resolveWorkspacePlan(db, "default", "self-hosted")).includedMembers).toBeNull();
     db.raw.close();
-  });
-});
-
-describe("slot predicates", () => {
-  test("freeSlotAvailable admits an empty history only", () => {
-    expect(freeSlotAvailable(0)).toBe(true);
-    expect(freeSlotAvailable(1)).toBe(false);
-    expect(freeSlotAvailable(2)).toBe(false);
-  });
-
-  test("memberSlotAvailable fills up to, not including, the included members", () => {
-    expect(memberSlotAvailable(4, 5)).toBe(true);
-    expect(memberSlotAvailable(5, 5)).toBe(false);
-    expect(memberSlotAvailable(6, 5)).toBe(false);
-  });
-
-  test("a null limit is no cap, so any count fits", () => {
-    expect(memberSlotAvailable(0, null)).toBe(true);
-    expect(memberSlotAvailable(6, null)).toBe(true);
   });
 });
 
@@ -387,18 +376,16 @@ describe("migration 0032 (unlimited plan)", () => {
       monthly_price_cents: null,
       included_members: 5,
       extra_member_price_cents: null,
-      platform_key_limit: null,
-      reviews_included: null,
-      apps_per_workspace: null,
       created_at: "2026-10-24T00:00:00.000Z",
     };
 
     // Both seeded rows survive the rebuild byte-identically. `shared_bot_allowed`
-    // is migration 0061's later seed, not 0032's rebuild — it is what
-    // distinguishes the two tiers, so neither row is the other's copy.
+    // is migration 0061's later seed and `apps_per_workspace` 0063's — neither
+    // is 0032's rebuild; they are what distinguishes the two tiers, so neither
+    // row is the other's copy.
     expect(db.raw.prepare("SELECT * FROM plans WHERE id <> 'unlimited' ORDER BY id").all()).toEqual([
-      { ...seeded, id: "free", name: "Free", monthly_price_cents: 0, shared_bot_allowed: 0 },
-      { ...seeded, id: "pro", name: "Pro", shared_bot_allowed: 1 },
+      { ...seeded, id: "free", name: "Free", monthly_price_cents: 0, apps_per_workspace: 1, shared_bot_allowed: 0 },
+      { ...seeded, id: "pro", name: "Pro", apps_per_workspace: 10, shared_bot_allowed: 1 },
     ]);
 
     // The column is relaxed — the reason the table was rebuilt at all ...

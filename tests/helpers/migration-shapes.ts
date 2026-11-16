@@ -48,6 +48,10 @@ export const TAIL_PREREQUISITES = [
   // 0061 alters `plans` and updates its seeded rows; 0031 creates the table
   // and seeds `free`/`pro`. The DML is why the guard cannot see this one.
   "0031_plans_usage.sql",
+  // 0063's per-plan ceilings reference EVERY seeded plan, `unlimited`
+  // included: 0032 is the migration that seeds that third row, and the derived
+  // tail applies 0063 in every shape.
+  "0032_unlimited_plan.sql",
 ] as const;
 
 /** The directory-derived tail after the shared anchor. */
@@ -179,8 +183,7 @@ export const SPA_PAGE_APIS_MIGRATIONS = shape("spa-page-apis", [
   "0028_workspace_invites.sql",
   // The shell boot reads the support-grant table, the plan catalogue +
   // subscriptions and `server_flags`, so the dispatch face runs on the
-  // production shape. 0029 and 0031 already ride `TAIL_PREREQUISITES`.
-  "0032_unlimited_plan.sql",
+  // production shape. 0029, 0031 and 0032 already ride `TAIL_PREREQUISITES`.
   "0033_platform_admin.sql",
   // 0036: github_apps.slug → webhook_path plus the cached github_slug.
   "0036_app_identity.sql",
@@ -326,7 +329,6 @@ export const APP_CONFIG_PRE_POOL_MIGRATIONS: readonly string[] = [
 export const APP_CONFIG_MIGRATIONS: readonly string[] = [
   "0024_provider_multi_key.sql",
   "0025_provider_model_evidence.sql",
-  "0032_unlimited_plan.sql",
   "0033_platform_admin.sql",
   // 0034/0035 index the support-grant and lapsed-invite predicates: index-only,
   // and they must follow 0029/0028.
@@ -404,6 +406,8 @@ export const APP_CREDENTIAL_RESOLUTION_MIGRATIONS = shape("app-credential-resolu
   // to the shape guard, so the creating migration is named here.
   "0029_operator_support.sql",
   "0031_plans_usage.sql",
+  // 0032: the seeded `unlimited` row 0063's per-plan ceilings reference.
+  "0032_unlimited_plan.sql",
   "0036_app_identity.sql",
   // Every later migration, derived from the directory (0040–… included):
   // the consumer's per-message admission reads the runtime caps and writes
@@ -453,8 +457,12 @@ export const CONSUMER_POST_CHAINS_MIGRATIONS: readonly string[] = [
   "0027_workspace_backfill.sql",
   // 0029: `audit_events`, which the derived tail's 0060 alters.
   "0029_operator_support.sql",
-  // 0031 meters every started execution into usage_events.
+  // 0031 meters every started execution into usage_events (0032, the
+  // `unlimited` plan row 0063's ceilings reference, rides
+  // TAIL_PREREQUISITES above).
   "0031_plans_usage.sql",
+  // 0032: the seeded `unlimited` row 0063's per-plan ceilings reference.
+  "0032_unlimited_plan.sql",
   "0036_app_identity.sql",
   ...migrationsAfter(36),
 ];

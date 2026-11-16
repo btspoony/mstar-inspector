@@ -48,6 +48,9 @@ import { acquireInflight } from "../../src/store/inflight-store";
 import { claimPublication, recordPublicationProof } from "../../src/store/finding-lifecycle";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
+import { quotaMonth } from "../../src/store/quota-store";
+import { sumMonthlyRp } from "../../src/store/usage-store";
+import { DEFAULT_CHECK_MIN_SCORE } from "../../src/contracts/review-gate";
 import { createTestD1, type TestD1 } from "../store/helpers";
 import {
   CONSUMER_POST_CHAINS_MIGRATIONS,
@@ -8753,6 +8756,13 @@ describe("usage ledger (migration 0031)", () => {
         execution_token: expect.any(String),
         workspace_id: "default",
         occurred_at: expect.any(String),
+        // The charge, in the SAME row: the seeded App owns its bot (BYOK,
+        // source 1) and reviews at the operator default (base 2) under the v1
+        // profile — `rpFor("default", "byok")` = 2.
+        rp: 2,
+        // …and the source that price was computed from (migration 0065), so
+        // the card's split never has to guess it from the product.
+        source: "byok",
       },
     ]);
     expect(reviewCount(db)).toBe(1);
@@ -8774,6 +8784,171 @@ describe("usage ledger (migration 0031)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(usageRows(db)).toHaveLength(0);
+  });
+
+  test("a duplicate delivery does not double-charge: the dedup leaves the month's RP where it was", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    // The first delivery reviews the sha and meters it.
+    await consumer(h.makeBatch(makePayload()));
+    const month = quotaMonth(new Date());
+    const charged = await sumMonthlyRp(db, "default", month.startIso, month.endIso);
+    expect(charged).toBe(2);
+
+    // GitHub redelivers the same commit: the KV done-claim plus the stored
+    // review both answer "already reviewed", so no second row and no second
+    // charge.
+    await consumer(h.makeBatch(makePayload()));
+    expect(usageRows(db)).toHaveLength(1);
+    expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(charged);
+  });
+
+  test("an unreadable quota profile does not abort the review: it posts, and one usage row records the lost charge", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // `resolveQuotaProfile` throws this way when `quota_profiles` is empty — and
+    // on `self-hosted` the enqueue gate never runs to absorb it, so this read is
+    // the ONLY place the fault can be caught. Outside the ledger's error
+    // boundary it was a retry→DLQ with no review and no `usage` row.
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
+    db.raw.prepare("DELETE FROM quota_profiles").run();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // The review ran to completion: returning without `retry()` is the ack, so
+    // no retry call and a stored review is the proof — the queue never sees the
+    // fault and never redelivers into the DLQ.
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    // No ledger row (the charge could not be computed) …
+    expect(usageRows(db)).toHaveLength(0);
+    // … and exactly ONE recorded `usage` row carrying the identity a repair or
+    // backfill needs, so the lost charge is reconcilable rather than invisible.
+    expect(failureRows(db)).toHaveLength(1);
+    const row = failureRows(db)[0]!;
+    expect(row).toMatchObject({ stage: "usage" });
+    expect(row.error).toContain("quota_profiles is empty");
+    expect(row.error).toContain('"applied":false');
+    expect(row.error).toContain('"workspaceId":"default"');
+    expect(row.error).toContain('"source":"byok"');
+    expect(row.error).toContain(
+      idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+    );
+  });
+
+  test("a shared-bot attempt is charged to the TARGET's workspace, never the bot owner's", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // A tenant that is not the bot's owner, plus a shared bot owned by
+    // `default`: `createOnSharedBot` writes only the TARGET into the tenant's
+    // workspace, and the `bot_workspaces` mapping still names the owner.
+    db.raw
+      .prepare(`INSERT INTO workspaces (id, slug, name, created_at) VALUES ('tenant', 'tenant', 'Tenant', datetime('now'))`)
+      .run();
+    await seedReviewingApp(db, TEST_SECOND_APP_ID, 434344, "deep");
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_SECOND_APP_ID);
+    db.raw
+      .prepare(`INSERT INTO review_targets
+                  (id, workspace_id, bot_id, name, review_level, check_min_score, created_by, created_at, updated_at)
+                VALUES ('target-tenant', 'tenant', ?, 'tenant', 'deep', ?, 'tester', datetime('now'), datetime('now'))`)
+      .run(TEST_SECOND_APP_ID, DEFAULT_CHECK_MIN_SCORE);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await withFrozenClock(() =>
+      consumer(h.makeBatch(makePayload({ botRef: { appId: TEST_SECOND_APP_ID }, targetId: "target-tenant" }))),
+    );
+
+    // Deep + shared = 6 x 10 = 60 RP, recorded against the TENANT.
+    expect(usageRows(db).map((row) => ({ workspace_id: row.workspace_id, rp: row.rp, source: row.source }))).toEqual([
+      { workspace_id: "tenant", rp: 60, source: "shared" },
+    ]);
+
+    // The tenant's ceiling counts it; the bot owner's month does not grow.
+    const month = quotaMonth(new Date());
+    expect(await sumMonthlyRp(db, "tenant", month.startIso, month.endIso)).toBe(60);
+    expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(0);
+  });
+
+  test("an owned-bot attempt and a shared-bot attempt from ONE tenant both land in that tenant's month", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The tenant owns one bot (BYOK, source 1, Standard = 2 RP) …
+    db.raw
+      .prepare(`INSERT INTO workspaces (id, slug, name, created_at) VALUES ('tenant', 'tenant', 'Tenant', datetime('now'))`)
+      .run();
+    db.raw.prepare(`UPDATE bot_workspaces SET workspace_id = 'tenant' WHERE bot_id = ?`).run(TEST_APP_ID);
+    db.raw.prepare(`UPDATE review_targets SET workspace_id = 'tenant' WHERE bot_id = ?`).run(TEST_APP_ID);
+    // … and reviews through ANOTHER workspace's shared bot on a second target
+    // (Quick + shared = 1 x 10 = 10 RP).
+    await seedReviewingApp(db, TEST_SECOND_APP_ID, 434344, "quick");
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_SECOND_APP_ID);
+    db.raw
+      .prepare(`INSERT INTO review_targets
+                  (id, workspace_id, bot_id, name, review_level, check_min_score, created_by, created_at, updated_at)
+                VALUES ('target-tenant-shared', 'tenant', ?, 'tenant-shared', 'quick', ?, 'tester', datetime('now'), datetime('now'))`)
+      .run(TEST_SECOND_APP_ID, DEFAULT_CHECK_MIN_SCORE);
+
+    const owned = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+    await owned(h.makeBatch(makePayload()));
+    const shared = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+    // A second PR: the two attempts must be two REVIEWS, or the dedup would
+    // answer the second delivery from the first review's row.
+    await shared(
+      h.makeBatch(
+        makePayload({ pr_number: 43, botRef: { appId: TEST_SECOND_APP_ID }, targetId: "target-tenant-shared" }),
+      ),
+    );
+
+    const month = quotaMonth(new Date());
+    // Both attempts are in the TENANT's month, 2 + 10.
+    expect(await sumMonthlyRp(db, "tenant", month.startIso, month.endIso)).toBe(12);
+    // …and the shared bot's owner counts nothing for either.
+    expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(0);
+  });
+
+  test("a genuine retry mints the next seq with ITS OWN rp", async () => {
+    const db = await createSeededTestD1();
+    // Attempt 1: the runner fails AFTER the ledger write (step 4b precedes the
+    // runner), so this execution is metered and the review still has to run.
+    h.sandbox.runnerExitCode = 1;
+    h.sandbox.runnerStderr = "review: session failed: boom\n";
+    const first = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
+    await first(h.makeBatch(makePayload())).catch(() => undefined);
+    expect(usageRows(db)).toHaveLength(1);
+
+    // The operator switches the App to quick, and the queue redelivers: nothing
+    // was published, so this is the same review's next attempt — a new `seq`
+    // priced at the depth that actually ran this time (quick + BYOK = 1 RP).
+    setAppReviewLevel(db, TEST_APP_ID, "quick");
+    h.sandbox.runnerExitCode = 0;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const second = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+    await second(h.makeBatch(makePayload()));
+
+    expect(usageRows(db).map((row) => ({ seq: row.seq, rp: row.rp }))).toEqual([
+      { seq: 1, rp: 2 },
+      { seq: 2, rp: 1 },
+    ]);
+    const month = quotaMonth(new Date());
+    expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(3);
+  });
+
+  test("a shared bot meters the source multiplier: deep × shared records 60 RP", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The shared bot is offered platform-wide (migration 0058); the source
+    // multiplier is 10 for it and 1 for a workspace's own App (D7).
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_APP_ID);
+    setAppReviewLevel(db, TEST_APP_ID, "deep");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
+
+    expect(usageRows(db).map((row) => row.rp)).toEqual([60]);
   });
 
   test("a soft-deleted workspace is unresolvable — fail closed before any sandbox or usage row", async () => {

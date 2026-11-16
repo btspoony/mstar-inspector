@@ -8,6 +8,7 @@ import { otherLocale } from "../shell";
 import { readBoot } from "../boot";
 import { FlagsPage } from "./FlagsPage";
 import { RuntimePage } from "./RuntimePage";
+import { QuotaVersionsPage } from "./QuotaVersionsPage";
 import { SupportGrantsPage } from "./SupportGrantsPage";
 import { UsagePage } from "./UsagePage";
 import { UsersPage } from "./UsersPage";
@@ -46,6 +47,7 @@ const SCREENS: Record<AdminPageId, ComponentType<{ locale: Locale }>> = {
   runtime: RuntimePage,
   workspaces: WorkspacesPage,
   usage: UsagePage,
+  "quota-versions": QuotaVersionsPage,
   users: UsersPage,
   "support-grants": SupportGrantsPage,
 };

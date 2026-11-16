@@ -596,6 +596,121 @@ export async function revokeGrant(id: string): Promise<void> {
   await write("DELETE", `/support-grants/${encodeURIComponent(id)}`);
 }
 
+/** A plan of the catalogue, as the quota form labels one ceiling field per plan. */
+export type QuotaPlan = { id: string; name: string };
+
+/** One `GET /api/quota-versions` row — the profile plus its derived interval. */
+export type QuotaVersionRow = {
+  id: string;
+  version: number;
+  /** ISO-8601 instant; renders as `YYYY-MM-DD`. */
+  effectiveFrom: string;
+  /** The next profile's start; `null` for the open (last) interval. */
+  effectiveTo: string | null;
+  /** The version judging this month, one scheduled after it, the rest past. */
+  state: "current" | "scheduled" | "past";
+  base: { quick: number; default: number; deep: number };
+  source: { byok: number; shared: number };
+  rpPerCredit: number;
+  notes: string | null;
+  monthlyRp: Record<string, number | null>;
+};
+
+export type QuotaVersionsData = {
+  judgingVersion: number;
+  /** The ordinal a create would mint — the form's read-only version field. */
+  nextVersion: number;
+  plans: QuotaPlan[];
+  versions: QuotaVersionRow[];
+  /** Plans the judging version sets no ceiling for: refused until republished. */
+  uncoveredPlanIds: string[];
+};
+
+/** The candidate numbers a preview and a publish share. */
+export type QuotaCandidate = {
+  effectiveFrom: string;
+  base: { quick: number; default: number; deep: number };
+  source: { byok: number; shared: number };
+  rpPerCredit: number;
+  monthlyRp: Record<string, number | null>;
+};
+
+export type QuotaImpact = { count: number; total: number; startsOn: string };
+
+/** A list of plan ids (the coverage report's shape), never a list of rows. */
+function planIds(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((id): id is string => typeof id === "string")) {
+    throw new Error("admin API: uncoveredPlanIds must be a list of plan ids");
+  }
+  return value;
+}
+
+/** A ceiling map where a plan's `null` is a real value (no limit), not missing. */
+function quotaCeilings(value: unknown, what: string): Record<string, number | null> {
+  const ceilings: Record<string, number | null> = {};
+  for (const [planId, entry] of Object.entries(map(value, what))) {
+    if (entry !== null && typeof entry !== "number") {
+      throw new Error(`admin API: ${what}.${planId} is neither a number nor null`);
+    }
+    ceilings[planId] = entry;
+  }
+  return ceilings;
+}
+
+export async function readQuotaVersions(): Promise<QuotaVersionsData> {
+  const body = map(await fetchJson(`${BASE}/quota-versions`), "quota versions response");
+  return {
+    judgingVersion: num(body, "judgingVersion"),
+    nextVersion: num(body, "nextVersion"),
+    plans: list(body.plans, "plans").map((row) => ({ id: text(row, "id"), name: text(row, "name") })),
+    // Plan IDS, not rows: `list()` maps objects, so a string array is read raw.
+    uncoveredPlanIds: planIds(body.uncoveredPlanIds),
+    versions: list(body.versions, "versions").map((row) => {
+      const state = text(row, "state");
+      if (state !== "current" && state !== "scheduled" && state !== "past") {
+        throw new Error(`admin API: quota version state is not current|scheduled|past`);
+      }
+      const base = map(row.base, "base");
+      const source = map(row.source, "source");
+      return {
+        id: text(row, "id"),
+        version: num(row, "version"),
+        effectiveFrom: text(row, "effectiveFrom"),
+        effectiveTo: maybeText(row, "effectiveTo"),
+        state,
+        base: { quick: num(base, "quick"), default: num(base, "default"), deep: num(base, "deep") },
+        source: { byok: num(source, "byok"), shared: num(source, "shared") },
+        rpPerCredit: num(row, "rpPerCredit"),
+        notes: maybeText(row, "notes"),
+        monthlyRp: quotaCeilings(row.monthlyRp, "monthlyRp"),
+      };
+    }),
+  };
+}
+
+/** The candidate numbers' impact at today's usage. Writes nothing. */
+export async function previewQuotaVersion(candidate: QuotaCandidate): Promise<QuotaImpact> {
+  const body = map(
+    await write("POST", "/quota-versions/preview", candidate),
+    "quota impact response",
+  );
+  return { count: num(body, "count"), total: num(body, "total"), startsOn: text(body, "startsOn") };
+}
+
+/**
+ * Publish one version, answering the ordinal the server minted. The preview is
+ * part of the body: a publish without one is refused, and so is one whose
+ * numbers moved since it was shown.
+ */
+export async function createQuotaVersion(
+  candidate: QuotaCandidate,
+  notes: string | null,
+  impact: QuotaImpact,
+): Promise<number> {
+  const answer = await write("POST", "/quota-versions", { ...candidate, notes, impact });
+  return num(map(answer, "quota version response"), "version");
+}
+
 /**
  * One read per screen, plus its retry/refresh and an in-place update.
  *

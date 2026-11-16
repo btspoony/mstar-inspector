@@ -20,13 +20,15 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
 import {
+  QUOTA_SKIP_REASON,
+  QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_SKIP_REASON,
   SHARED_BOT_ENTITLEMENT_STAGE,
 } from "../../src/contracts/failure-stages";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { SharedBotRefusal } from "../../src/dashboard/entitlement";
 import { CHECK_SUMMARIES } from "../../src/pipeline/checks";
-import { handleReviewJob, type HandlerDeps } from "../../src/worker/handlers";
+import { handleReviewJob, type DeliveryRefusal, type HandlerDeps } from "../../src/worker/handlers";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const WS = "default";
@@ -38,6 +40,9 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 
 /** The verdict the route computes and hands to the handler. */
 const REFUSAL: SharedBotRefusal = { kind: "shared-bot-not-included", planId: "free" };
+
+/** The quota verdict the route computes in the branch the capability admitted. */
+const QUOTA_REFUSAL: DeliveryRefusal = { kind: "quota-exhausted", limit: 2000, used: 1999, cost: 60 };
 
 /** The one failure read both cases make. */
 const FAILURE_SQL = "SELECT * FROM review_failures ORDER BY rowid";
@@ -189,6 +194,37 @@ describe("handleReviewJob — a shared-bot refusal", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.head_sha).toBe("");
     expect(rows[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
+    db.raw.close();
+  });
+});
+
+describe("handleReviewJob — a quota refusal", () => {
+  test("skips terminally on the `quota` stage: no send, no claim, one failure row", async () => {
+    const db = createMigratedTestD1();
+    seedReviewConfig(db);
+    const { kv, get, put } = makeKv();
+    const { queue, send } = makeQueue();
+    const attach = mock(async (p: ReviewJobPayload) => ({ ...p, attachDeliveryId: "delivery-uuid" }));
+
+    const outcome = await handleReviewJob(payload(), handlerDeps(db, kv, queue, attach), QUOTA_REFUSAL);
+
+    expect(outcome).toEqual({ kind: "skipped", reason: QUOTA_SKIP_REASON });
+    // The refusal spends nothing: no runner, no ledger row, no claim, no KV key.
+    expect(send).toHaveBeenCalledTimes(0);
+    expect(countRows(db, "usage_events")).toBe(0);
+    expect(countRows(db, "comment_trigger_claims")).toBe(0);
+    expect(get).toHaveBeenCalledTimes(0);
+    expect(put).toHaveBeenCalledTimes(0);
+    // The Check is still attached; its neutral settlement is the route's.
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(countRows(db, "review_checks")).toBe(0);
+
+    const rows = db.raw.query(FAILURE_SQL).all() as FailureRow[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stage: QUOTA_STAGE, target_id: TARGET_ID, head_sha: SHA });
+    expect(rows[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_SKIP_REASON));
+    // The author-facing sentence names no plan, no ceiling and no workspace.
+    expect(rows[0]!.error).not.toContain("2000");
     db.raw.close();
   });
 });

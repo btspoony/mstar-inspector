@@ -925,6 +925,25 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
+     * How many Apps a workspace currently OWNS: `bot_workspaces` joined to the
+     * LIVE `review_bots` rows. A soft-deleted App keeps its mapping row, so the
+     * join condition is what frees its slot — the plan's
+     * `apps_per_workspace` cap counts this number at creation.
+     */
+    async countLiveApps(workspaceId: string): Promise<number> {
+      const row = await db
+        .prepare(
+          `SELECT COUNT(*) AS n
+             FROM bot_workspaces w
+             JOIN review_bots b ON b.id = w.bot_id
+            WHERE w.workspace_id = ? AND b.deleted_at IS NULL`,
+        )
+        .bind(workspaceId)
+        .first<{ n: number }>();
+      return row?.n ?? 0;
+    },
+
+    /**
      * By the webhook URL's two segments — the App row `id` must belong to the
      * named workspace. Resolves soft-deleted and disabled App rows too
      * (callers filter), but NOT an App whose workspace is soft-deleted, and

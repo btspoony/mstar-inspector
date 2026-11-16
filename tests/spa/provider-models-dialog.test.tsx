@@ -205,7 +205,14 @@ describe("ProviderModelsDialog", () => {
   });
 
   test("a legacy id-only declaration shows the unstated note and blank size fields", async () => {
-    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"] });
+    // The catalogue DOES cover this provider (m-2 carries sizes); it simply
+    // says nothing about m-1, which is the "unstated" case — not the
+    // no-catalogue-row case, which has its own sentence.
+    const view = await mount({
+      catalogModelIds: CATALOG,
+      storedModelIds: ["m-1"],
+      catalogLimits: { "m-2": { contextWindow: 1, maxTokens: 1 } },
+    });
     try {
       await view.click(view.detailsToggle());
       // The sentence is a DATA statement about the declaration, never a
@@ -360,7 +367,11 @@ describe("ProviderModelsDialog", () => {
   });
 
   test("the detail editor is folded away by default — no detail field is in the markup", async () => {
-    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1", "m-2"] });
+    const view = await mount({
+      catalogModelIds: CATALOG,
+      storedModelIds: ["m-1", "m-2"],
+      catalogLimits: { "m-3": { contextWindow: 1, maxTokens: 1 } },
+    });
     try {
       const toggle = view.detailsToggle();
       expect(toggle).not.toBeNull();
@@ -641,6 +652,130 @@ describe("ProviderModelsDialog", () => {
       await view.click(view.win.document.querySelector("[data-testid=reopen]") as unknown as Element);
       expect(view.checkboxes()[1]?.checked).toBe(false);
       expect(view.checkboxes()[0]?.checked).toBe(true);
+    } finally {
+      await view.cleanup();
+    }
+  });
+});
+
+/**
+ * A provider with no catalog row (the 18 the vendor snapshot omits, I-000574)
+ * has UNKNOWN sizes, not zero. The dialog says so, and blank stays the
+ * ordinary, savable answer — the server accepts a partial or absent set
+ * (`parseCustomProviderModelsMeta` skips an absent size before any shape
+ * check), so the form must not add a precondition it does not have.
+ */
+describe("ProviderModelsDialog — sizes no catalogue states", () => {
+  test("renders the unknown-provider sentence and no catalogue-provenance line", async () => {
+    // No catalog limits at all, for a model the catalogue lists as an id.
+    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"], catalogLimits: {} });
+    try {
+      await view.click(view.detailsToggle());
+      const text = view.dialog()?.textContent ?? "";
+      expect(text).toContain(t(locale, "settings.providers.models.sizesUnknownProvider"));
+      // The provenance line would credit a snapshot with numbers this provider
+      // does not have, so it is absent — as is the "unstated" note, which is
+      // for a catalogue that exists but says nothing about this model.
+      expect(text).not.toContain(t(locale, "settings.providers.models.requirements"));
+      expect(text).not.toContain(t(locale, "settings.providers.models.sizesUnstated"));
+      expect(text).not.toContain("2026-11-13");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("both size fields start blank and neither is a save precondition", async () => {
+    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"], catalogLimits: {} });
+    try {
+      await view.click(view.detailsToggle());
+      expect(view.field("m-1", "contextWindow")?.value).toBe("");
+      expect(view.field("m-1", "maxTokens")?.value).toBe("");
+      expect(view.field("m-1", "contextWindow")?.required).toBe(false);
+      expect(view.field("m-1", "maxTokens")?.required).toBe(false);
+      // The save is available with nothing stated: blank is a valid answer.
+      expect(view.saveButton()?.disabled).toBe(false);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a blank pair saves a declaration with no size entry at all", async () => {
+    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"], catalogLimits: {} });
+    try {
+      await view.click(view.detailsToggle());
+      await view.click(view.saveButton());
+      expect(view.calls).toEqual([
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1",
+          models_meta: JSON.stringify({}),
+        },
+      ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("typing ONE size stores that one alone and leaves the other absent", async () => {
+    const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"], catalogLimits: {} });
+    try {
+      await view.click(view.detailsToggle());
+      await view.type(view.field("m-1", "contextWindow"), "200000");
+      await view.click(view.saveButton());
+      // The untouched max token count is NOT invented, defaulted or sent as 0.
+      expect(view.calls).toEqual([
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1",
+          models_meta: JSON.stringify({ "m-1": { contextWindow: 200000 } }),
+        },
+      ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("the round-trip: a partial set posts as-is and re-seeds as stored", async () => {
+    // What the server accepted for THAT save is what comes back — the form
+    // shows it without demanding the missing side.
+    const view = await mount({
+      catalogModelIds: CATALOG,
+      storedModelIds: ["m-1"],
+      storedModelsMeta: { "m-1": { contextWindow: 200000 } },
+      catalogLimits: {},
+    });
+    try {
+      await view.click(view.detailsToggle());
+      expect(view.field("m-1", "contextWindow")?.value).toBe("200000");
+      expect(view.field("m-1", "maxTokens")?.value).toBe("");
+      await view.click(view.saveButton());
+      expect(view.calls).toEqual([
+        {
+          op: "update-provider-models",
+          provider: "my-gateway",
+          model_ids: "m-1",
+          models_meta: JSON.stringify({ "m-1": { contextWindow: 200000 } }),
+        },
+      ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a catalogue that exists says 'unstated', not 'no catalog sizes'", async () => {
+    const view = await mount({
+      catalogModelIds: CATALOG,
+      storedModelIds: ["m-1"],
+      // The catalogue covers the provider, but says nothing about m-1.
+      catalogLimits: { "m-2": { contextWindow: 111, maxTokens: 22 } },
+    });
+    try {
+      await view.click(view.detailsToggle());
+      const text = view.dialog()?.textContent ?? "";
+      expect(text).toContain(t(locale, "settings.providers.models.sizesUnstated"));
+      expect(text).not.toContain(t(locale, "settings.providers.models.sizesUnknownProvider"));
     } finally {
       await view.cleanup();
     }

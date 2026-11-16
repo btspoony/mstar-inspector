@@ -22,13 +22,13 @@
  */
 import { Hono } from "hono";
 import type { D1Database, ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
-import { deploymentModeOf, type Env, type ScheduledEnv } from "./env";
+import { deploymentModeOf, type DeploymentMode, type Env, type ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
 import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
 import { reconcileReviewChecks } from "./check-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
-import { SHARED_BOT_ENTITLEMENT_SKIP_REASON } from "../contracts/failure-stages";
+import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
 import {
   classifyWebhook,
@@ -41,14 +41,23 @@ import {
   webhookRepositoryOwnerLogin,
   type WebhookOutcome,
 } from "./webhooks";
-import { defaultLog, handleReviewJob } from "./handlers";
+import { defaultLog, deliveryRefusalReason, handleReviewJob, type DeliveryRefusal } from "./handlers";
 import {
   createReviewBotsStore,
+  type BotScope,
   type DeliveryOutcome,
   type GithubAppTenantRow,
 } from "../dashboard/apps-store";
-import { createTargetsStore, type OwnerAllowlist, type ReviewTargetRow } from "../dashboard/targets-store";
-import { assertSharedBotAllowed } from "../dashboard/entitlement";
+import {
+  createTargetsStore,
+  parseTargetReviewLevel,
+  type OwnerAllowlist,
+  type ReviewTargetRow,
+} from "../dashboard/targets-store";
+import { readDefaultReviewLevel } from "../dashboard/runtime-config-store";
+import { checkEntitlement } from "../dashboard/entitlement";
+import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
+import { sumMonthlyRp } from "../store/usage-store";
 import { attachCheckAtAcceptance, createCheckLifecycle } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
@@ -346,6 +355,59 @@ export async function settleRefusedAfterAttach(input: {
   } catch (err) {
     input.warn(err instanceof Error ? err.message : String(err));
   }
+}
+
+/**
+ * The monthly RP ceiling for one admitted delivery: `null` means "may run",
+ * a `quota-exhausted` verdict means the enqueue is refused.
+ *
+ * Step 2 of the admission order (see the route's gate). The cost comes from
+ * the SAME two inputs the metering write prices — the target's resolved depth
+ * (`review_level`, through `parseTargetReviewLevel`, falling back to the
+ * operator default only when the row states none) and the bot's scope
+ * (`shared` → source 10, anything else → source 1; D7 makes BYOK metered, not
+ * exempt) — so a verdict and the charge it authorizes cannot be denominated
+ * differently.
+ *
+ * The two counters are this caller's inputs (the plan's `review-quota` kind
+ * takes them), and the ceiling itself is resolved INSIDE `checkEntitlement`
+ * from the plan id it already read — so the ceiling can never be judged against
+ * a different plan than the verdict carries. The month is the UTC calendar
+ * month of `usage_events.occurred_at` (the field the ledger writes), and the
+ * profile covering that month's first day (D5) prices it, so a profile
+ * published mid-month never judges it. `used + cost > limit` refuses, so a
+ * month exactly AT its ceiling still admits the review that lands on it and
+ * only the next RP is refused.
+ */
+async function quotaRefusal(
+  db: D1Database,
+  target: ReviewTargetRow,
+  scope: BotScope,
+  mode: DeploymentMode,
+): Promise<DeliveryRefusal | null> {
+  const month = quotaMonth(new Date());
+  // Pricing this attempt and resolving its ceiling each need the profile
+  // covering `month.startIso`; the ctx shape carries a resolved `costRp`, so
+  // this path reads that one row twice (same month, same deterministic answer)
+  // rather than widening the shared verdict. It is one PK read on the gate path.
+  const profile = await resolveQuotaProfile(db, month.startIso);
+  let level = parseTargetReviewLevel(target.review_level);
+  if (level === null) level = (await readDefaultReviewLevel(db)).value;
+  const cost = rpFor(level, scope === "shared" ? "shared" : "byok", profile);
+  const used = await sumMonthlyRp(db, target.workspace_id, month.startIso, month.endIso);
+
+  const verdict = await checkEntitlement({
+    db,
+    mode,
+    workspaceId: target.workspace_id,
+    kind: "review-quota",
+    monthStart: month.startIso,
+    usedRp: used,
+    costRp: cost,
+  });
+  return !verdict.ok && verdict.refusal.kind === "review-quota"
+    ? { kind: "quota-exhausted", limit: verdict.refusal.limit, used: verdict.refusal.used, cost: verdict.refusal.cost }
+    : null;
 }
 
 // `version` rides the healthz face — additive field, `ok:true`
@@ -732,20 +794,78 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
-  // The shared-bot capability is decided ONCE, here, and only for a job both
-  // switches admitted on a bot the platform SHARES — the only delivery that
-  // could have enqueued. A workspace's OWN bot is not the shared bot: the
-  // owned path is untouched, and a Free workspace reviews with its own App
-  // exactly as before. It reads the TARGET's workspace (the consumer), never
-  // the bot's, and it is the very function the target-creation route calls, so
-  // neither surface re-derives the rule. The refusal feeds the delivery row
-  // below and the enqueue call at the end of this route; a store fault
-  // propagates as a 500, exactly like the allowlist read (an unapplied gate
-  // never admits a delivery).
-  const refusal =
-    outcome.kind === "job" && target !== null && !paused && reviewGlobal && row.scope === "shared"
-      ? await assertSharedBotAllowed(db, target.workspace_id, deploymentModeOf(c.env.DEPLOYMENT_MODE))
-      : null;
+  // The admission verdict, decided ONCE here, in the order the product fixes
+  // (capability first, then quota): a delivery may carry at most one refusal,
+  // so the two gates can never both fire and the author is told the cause that
+  // actually binds — a quota message for a workspace that may not use this bot
+  // at all would send it looking for a top-up it cannot buy here (D9).
+  //
+  //   1. Shared-bot capability — only for a job both switches admitted on a
+  //      bot the platform SHARES. A workspace's OWN bot is not the shared bot:
+  //      the owned path is untouched, and a Free workspace reviews with its own
+  //      App exactly as before. It reads the TARGET's workspace (the
+  //      consumer), never the bot's, and it is the very `checkEntitlement` entry
+  //      the target-creation route calls (`shared-bot` branch), so neither
+  //      surface re-derives the rule.
+  //   2. Monthly RP ceiling — only in the branch step 1 admitted. The cost is
+  //      `rpFor` over the SAME two inputs the metering write uses (the
+  //      target's level, the bot's scope), so the enqueue's verdict and the
+  //      charge cannot be denominated differently; the ceiling is read from the
+  //      profile judging this UTC month (D5) and `null` means unlimited.
+  //
+  // `self-hosted` never reaches either decision: the capability resolves
+  // `unlimited` before its first read and there is no ceiling to compare
+  // against, so the whole branch is skipped rather than paid for.
+  //
+  // The refusal feeds the delivery row below, the Check's skip settlement and
+  // the enqueue call at the end of this route; a store fault propagates as a
+  // 500, exactly like the allowlist read (an unapplied gate never admits a
+  // delivery).
+  //
+  // This whole block is BEST-EFFORT, for the reason the `review_global` read
+  // above it is: it sits before the PR ledger, the `last_webhook_at` touch and
+  // the enqueue, so a store fault here would turn an already-verified delivery
+  // into a 500 and cost it every one of those diagnostics. A fault is therefore
+  // a REFUSAL (recorded, skipped, 200), never a failed request: the review does
+  // not run, and the failure row says which read could not answer. Fail-closed
+  // — a verdict the platform could not compute never admits a delivery — and
+  // never silent: the row and one structured warn both name the cause.
+  const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+  let refusal: DeliveryRefusal | null = null;
+  if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {
+    try {
+      if (row.scope === "shared") {
+        // The same one entry the target-creation route calls; an OWN bot is never
+        // asked, so this path pays no plan read for it.
+        const verdict = await checkEntitlement({
+          db,
+          mode,
+          workspaceId: target.workspace_id,
+          kind: "shared-bot",
+          botScope: "shared",
+        });
+        if (!verdict.ok && verdict.refusal.kind === "shared-bot") {
+          refusal = { kind: "shared-bot-not-included", planId: verdict.refusal.planId };
+        }
+      }
+      if (refusal === null && mode !== "self-hosted") {
+        refusal = await quotaRefusal(db, target, row.scope, mode);
+      }
+    } catch (err) {
+      // Three faults land here: a D1 error among the gate's own reads; an empty
+      // `quota_profiles` table (migration 0063 not applied); and a plan with no
+      // ceiling row in the judging profile — a CONFIGURATION defect that throws
+      // by design and would otherwise 500 every webhook of that plan until a
+      // new profile is published. All three are reported as an `entitlement`
+      // refusal, whose stage is the one the failure face already pages.
+      refusal = { kind: "entitlement-unreadable" };
+      webhookWarn(
+        "entitlement_gate_failed",
+        redactSecrets(err instanceof Error ? err.message : String(err)),
+        "entitlement gate could not answer — refusing the delivery (fail-closed), webhook answers 200",
+      );
+    }
+  }
   try {
     await appsStore.recordDelivery({
       appId: row.id,
@@ -964,7 +1084,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
                   triggeredBy: payload.triggered_by,
                   action: payload.action,
                   attachDeliveryId,
-                  reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON,
+                  reason: deliveryRefusalReason(refusal),
                 }),
               warn: (detail) =>
                 webhookWarn(
