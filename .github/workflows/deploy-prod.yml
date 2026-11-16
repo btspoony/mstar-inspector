@@ -303,6 +303,17 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-prod-db --env production
 
+      # ABORT GATE: the `:?required` preflight above proves only that the secret
+      # is non-empty, and the runtime validates the key lazily — so a malformed
+      # DASHBOARD_ENCRYPTION_KEY would deploy green and then answer 500 on every
+      # encrypted write. The check is the runtime's own encrypt/decrypt round
+      # trip (no second base64/length rule) and reads no database, so it holds
+      # on production's empty first D1. Before every version-publishing step.
+      - name: Assert usable encryption key (pre-deploy gate)
+        env:
+          DASHBOARD_ENCRYPTION_KEY: ${{ secrets.DASHBOARD_ENCRYPTION_KEY }}
+        run: bun scripts/assert-encryption-key.ts
+
       - name: Deploy Worker (prod)
         id: deploy
         shell: bash

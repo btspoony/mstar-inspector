@@ -156,6 +156,7 @@ const DEPLOYMENT_VAR = '--var "DEPLOYMENT_MODE:saas"';
 /** The retired tenant-mode var, assembled so this file does not match its own scan. */
 const RETIRED_VAR = ["WORKSPACE", "TENANT", "MODE"].join("_");
 const GATE = "Assert zero orphan Apps (pre-deploy gate)";
+const KEY_GATE = "Assert usable encryption key (pre-deploy gate)";
 const BACKFILL = "Re-run App attribution repair (workspace-backfill.sql, idempotent)";
 
 /**
@@ -239,6 +240,36 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       for (const i of deployCapable) {
         expect(i, `${file}: "${steps[i]!.name}" runs before the zero-orphan gate`).toBeGreaterThan(gate);
       }
+    });
+
+    test("the encryption-key gate sits beside the zero-orphan gate, before every deploy-capable step", () => {
+      // A malformed DASHBOARD_ENCRYPTION_KEY deploys green and then 500s every
+      // encrypted write, so this gate has to precede `wrangler secret bulk` too
+      // (it publishes a version) — not merely the final `wrangler deploy`.
+      const keyGate = steps.findIndex((s) => s.name === KEY_GATE);
+      expect(keyGate, `${file}: encryption-key gate step is missing`).toBeGreaterThan(-1);
+      expect(steps[keyGate]!.run, `${file}: the gate must run the script`).toBe(
+        "bun scripts/assert-encryption-key.ts",
+      );
+      expect(keyGate, `${file}: the key gate must follow the attribution gate`).toBeGreaterThan(
+        steps.findIndex((s) => s.name === GATE),
+      );
+      for (const i of deployCapable) {
+        expect(i, `${file}: "${steps[i]!.name}" runs before the encryption-key gate`).toBeGreaterThan(keyGate);
+      }
+    });
+
+    test("the encryption-key gate feeds the secret it checks", () => {
+      // The gate reads `process.env.DASHBOARD_ENCRYPTION_KEY`; a step that binds
+      // neither its own env nor (staging) the job-level one would answer "not
+      // set" on every deploy — a false red that trains operators to bypass it.
+      const step = steps.find((s) => s.name === KEY_GATE)!;
+      const jobValue = (parseWorkflow(file).jobs.deploy.env ?? {}).DASHBOARD_ENCRYPTION_KEY as
+        | string
+        | undefined;
+      expect(step.env?.DASHBOARD_ENCRYPTION_KEY ?? jobValue).toBe(
+        "${{ secrets.DASHBOARD_ENCRYPTION_KEY }}",
+      );
     });
 
     test("the replayed file the deploy hands wrangler writes no workspace membership", () => {
