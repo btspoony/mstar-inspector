@@ -622,6 +622,8 @@ export type QuotaVersionsData = {
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
+  /** Plans the judging version sets no ceiling for: refused until republished. */
+  uncoveredPlanIds: string[];
 };
 
 /** The candidate numbers a preview and a publish share. */
@@ -634,6 +636,14 @@ export type QuotaCandidate = {
 };
 
 export type QuotaImpact = { count: number; total: number; startsOn: string };
+
+/** A list of plan ids (the coverage report's shape), never a list of rows. */
+function planIds(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((id): id is string => typeof id === "string")) {
+    throw new Error("admin API: uncoveredPlanIds must be a list of plan ids");
+  }
+  return value;
+}
 
 /** A ceiling map where a plan's `null` is a real value (no limit), not missing. */
 function quotaCeilings(value: unknown, what: string): Record<string, number | null> {
@@ -653,6 +663,8 @@ export async function readQuotaVersions(): Promise<QuotaVersionsData> {
     judgingVersion: num(body, "judgingVersion"),
     nextVersion: num(body, "nextVersion"),
     plans: list(body.plans, "plans").map((row) => ({ id: text(row, "id"), name: text(row, "name") })),
+    // Plan IDS, not rows: `list()` maps objects, so a string array is read raw.
+    uncoveredPlanIds: planIds(body.uncoveredPlanIds),
     versions: list(body.versions, "versions").map((row) => {
       const state = text(row, "state");
       if (state !== "current" && state !== "scheduled" && state !== "past") {

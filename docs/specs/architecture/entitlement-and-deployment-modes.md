@@ -266,6 +266,28 @@ never disagree.
   because a quota message would send it looking for a top-up it cannot buy in
   this repository (D9). Quota is evaluated only in the branch the capability
   admitted, which also keeps the cheap refusal cheap.
+- **A gate that cannot answer refuses, and says so.** Any fault in the enqueue
+  decision — a store error, an empty `quota_profiles`, or a plan with no ceiling
+  row in the judging profile — is a REFUSAL, not a failed request: the delivery
+  is skipped on the `entitlement` stage with the
+  `ENTITLEMENT_UNREADABLE_SKIP_REASON` sentence, the route still answers 200,
+  and one structured warn carries the cause. The third case is the only one an
+  operator can cause and cannot see on the affected surface, so
+  `GET /_internal_admin/api/quota-versions` reports `uncoveredPlanIds` — the
+  plan ids the JUDGING version states no ceiling for — and the console's quota
+  versions page renders it as a notice naming the plans. **Publishing a version
+  that covers the plan is the only repair**: no setting, no per-workspace
+  override and no mode check adds the missing `quota_profile_plans` row, and
+  until one is published every delivery of a workspace on that plan is refused
+  with that recorded stage. A gap in a version that does not judge this month
+  refuses nothing and is therefore not reported.
+- **Metering never refuses.** The consume-time charge is inside the same error
+  boundary as its insert: when the profile cannot be read there, the review
+  still runs to completion (no retry, no DLQ) and one `usage` failure row
+  records the attempt's token, the charged workspace and the source, so the lost
+  charge is reconcilable. This is the module's own rule — count, never refuse —
+  and it matters most on `self-hosted`, where no enqueue gate exists to have
+  caught the fault first.
 - **`self-hosted` never meters and never refuses.** The mode resolves the
   unlimited plan constant before its first read, there is no ceiling to compare
   against, and the enqueue gate skips the branch entirely.

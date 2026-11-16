@@ -1268,6 +1268,8 @@ export const zhCN: Dictionary = {
       previewNone: "按今日用量，没有工作区会超出月度上限。",
       /** {date} = 此版本第一个判定的 1 日。 */
       previewStartsOn: "此版本自 {date} 起判定额度；当月沿用覆盖其 1 日的版本。",
+      uncoveredPlans:
+        "版本 {version} 没有为 {plans} 设置月度上限，因此这些套餐上的审查会在开始前被拒绝。创建一个覆盖所有套餐的版本即可恢复。",
       previewRequired: "发布前请先检查影响。",
       previewLoadFailed: "无法计算影响——在加载完成前不可发布。",
       previewAction: "检查影响",

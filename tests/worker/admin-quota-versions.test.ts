@@ -199,6 +199,7 @@ describe("GET /_internal_admin/api/quota-versions", () => {
       nextVersion: number;
       plans: Array<{ id: string; name: string }>;
       versions: Array<Record<string, unknown>>;
+      uncoveredPlanIds: string[];
     };
     // The payload carries no month of its own: `judgingVersion` IS the
     // month-relative answer, and the form renders no month label.
@@ -208,6 +209,9 @@ describe("GET /_internal_admin/api/quota-versions", () => {
     expect(body.judgingVersion).toBe(1);
     expect(body.nextVersion).toBe(3);
     expect(body.plans.map((plan) => plan.id)).toEqual(["free", "pro", "unlimited"]);
+    // Both stored versions cover every plan, so the page has nothing to warn
+    // about.
+    expect(body.uncoveredPlanIds).toEqual([]);
     expect(body.versions).toEqual([
       {
         id: "quota-v1",
@@ -593,3 +597,58 @@ async function postWebhook(path: string, body: string, secret: string, env: Env)
     env,
   );
 }
+
+describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
+  /** A profile whose plan set is missing exactly `missing`, judging this month. */
+  function fixtureMissing(missing: string[]): TestD1 {
+    const db = fixture();
+    const month = quotaMonth(new Date());
+    seed(
+      db,
+      `INSERT INTO quota_profiles (
+         id, version, effective_from, base_quick, base_standard, base_deep,
+         source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
+       VALUES ('quota-gap', 2, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
+      month.startIso,
+      month.startIso,
+    );
+    for (const planId of ["free", "pro", "unlimited"].filter((id) => !missing.includes(id))) {
+      seed(
+        db,
+        "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-gap', ?, 1000)",
+        planId,
+      );
+    }
+    return db;
+  }
+
+  test("the JUDGING version's gap is reported, ordered, and nothing else is", async () => {
+    const db = fixtureMissing(["pro"]);
+    const res = await adminFetch(db, "GET", "/api/quota-versions");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { judgingVersion: number; uncoveredPlanIds: string[] };
+    expect(body.judgingVersion).toBe(2);
+    expect(body.uncoveredPlanIds).toEqual(["pro"]);
+  });
+
+  test("a gap in a version that does NOT judge this month refuses nothing and is not reported", async () => {
+    const db = fixture();
+    // The v1 row keeps all three plans; the incomplete one is scheduled for the
+    // next month, so today's verdicts never consult it.
+    const month = quotaMonth(new Date());
+    seed(
+      db,
+      `INSERT INTO quota_profiles (
+         id, version, effective_from, base_quick, base_standard, base_deep,
+         source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
+       VALUES ('quota-later', 2, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
+      month.endIso,
+      month.endIso,
+    );
+    seed(db, "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-later', 'free', 1000)");
+    const res = await adminFetch(db, "GET", "/api/quota-versions");
+    const body = (await res.json()) as { judgingVersion: number; uncoveredPlanIds: string[] };
+    expect(body.judgingVersion).toBe(1);
+    expect(body.uncoveredPlanIds).toEqual([]);
+  });
+});

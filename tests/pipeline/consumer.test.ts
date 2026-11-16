@@ -8805,6 +8805,41 @@ describe("usage ledger (migration 0031)", () => {
     expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(charged);
   });
 
+  test("an unreadable quota profile does not abort the review: it posts, and one usage row records the lost charge", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // `resolveQuotaProfile` throws this way when `quota_profiles` is empty — and
+    // on `self-hosted` the enqueue gate never runs to absorb it, so this read is
+    // the ONLY place the fault can be caught. Outside the ledger's error
+    // boundary it was a retry→DLQ with no review and no `usage` row.
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
+    db.raw.prepare("DELETE FROM quota_profiles").run();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // The review ran to completion: returning without `retry()` is the ack, so
+    // no retry call and a stored review is the proof — the queue never sees the
+    // fault and never redelivers into the DLQ.
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    // No ledger row (the charge could not be computed) …
+    expect(usageRows(db)).toHaveLength(0);
+    // … and exactly ONE recorded `usage` row carrying the identity a repair or
+    // backfill needs, so the lost charge is reconcilable rather than invisible.
+    expect(failureRows(db)).toHaveLength(1);
+    const row = failureRows(db)[0]!;
+    expect(row).toMatchObject({ stage: "usage" });
+    expect(row.error).toContain("quota_profiles is empty");
+    expect(row.error).toContain('"applied":false');
+    expect(row.error).toContain('"workspaceId":"default"');
+    expect(row.error).toContain('"source":"byok"');
+    expect(row.error).toContain(
+      idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+    );
+  });
+
   test("a shared-bot attempt is charged to the TARGET's workspace, never the bot owner's", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();

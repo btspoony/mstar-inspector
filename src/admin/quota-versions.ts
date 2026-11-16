@@ -72,6 +72,20 @@ export type QuotaVersionsPayload = {
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
+  /**
+   * Plan ids the JUDGING version states no ceiling for, ordered by id. Empty is
+   * the healthy state.
+   *
+   * `quota_profile_plans` must carry a row for every plan (a missing row would
+   * be indistinguishable from "no ceiling", so `resolveMonthlyQuota` throws by
+   * design), and the enqueue turns that throw into a REFUSAL: every webhook of
+   * a workspace on one of these plans is skipped, with a recorded `entitlement`
+   * failure, until a version that covers the plan is published. Publishing is
+   * the only repair — no setting anywhere can add the row. The page states this
+   * because otherwise the state is invisible: the deliveries are refused and
+   * nothing on any other surface says why.
+   */
+  uncoveredPlanIds: string[];
 };
 
 /** The plans catalogue, ordered by id (free, pro, unlimited). */
@@ -104,11 +118,17 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
     notes: profile.notes,
     monthlyRp: profile.monthlyRp,
   }));
+  // The JUDGING version is the one that decides today's verdicts, so its plan
+  // coverage is what the page must report: a gap in a past or scheduled version
+  // cannot refuse anything this month.
+  const covered = profiles.find((profile) => profile.id === judging.id)?.monthlyRp ?? {};
+  const uncoveredPlanIds = plans.filter((plan) => !Object.hasOwn(covered, plan.id)).map((plan) => plan.id);
   return {
     judgingVersion: judging.version,
     nextVersion: profiles.reduce((max, profile) => Math.max(max, profile.version), 0) + 1,
     plans,
     versions,
+    uncoveredPlanIds,
   };
 }
 

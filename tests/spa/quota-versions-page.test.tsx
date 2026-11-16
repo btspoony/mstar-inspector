@@ -85,9 +85,10 @@ async function mount(respond: Respond): Promise<Surface> {
 }
 
 const DATA = {
-  month: "2026-11",
   judgingVersion: 1,
   nextVersion: 2,
+  // Every plan covered: the page has nothing to warn about.
+  uncoveredPlanIds: [],
   plans: [
     { id: "free", name: "Free" },
     { id: "pro", name: "Pro" },
@@ -132,6 +133,25 @@ describe("console quota versions page", () => {
     expect(surface.text()).toContain("v2");
     expect(surface.text()).toContain(t("en", "admin.quotaVersions.previewRequired"));
     expect(publishButton(surface)?.hasAttribute("disabled")).toBe(true);
+    await surface.close();
+  });
+
+  test("a judging version that skips a plan is reported, naming the plan", async () => {
+    const surface = await mount(() => json({ ...DATA, uncoveredPlanIds: ["pro"] }));
+    // The notice names the version and the PLAN NAME the page already lists.
+    expect(surface.text()).toContain(
+      t("en", "admin.quotaVersions.uncoveredPlans", { version: 1, plans: "Pro" }),
+    );
+    await surface.close();
+  });
+
+  test("a fully covered judging version renders no coverage notice", async () => {
+    const surface = await mount(() => json(DATA));
+    expect(surface.text()).not.toContain(
+      t("en", "admin.quotaVersions.uncoveredPlans", { version: 1, plans: "Pro" }),
+    );
+    // Non-vacuity: the page did render its table.
+    expect(surface.text()).toContain("v1");
     await surface.close();
   });
 

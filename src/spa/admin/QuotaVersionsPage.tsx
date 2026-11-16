@@ -160,6 +160,22 @@ export function QuotaVersionsPage({ locale }: { locale: Locale }) {
       >
         {(data) => (
           <div className="flex flex-col gap-6">
+            {/* A plan with no ceiling row in the JUDGING version refuses every
+                delivery of its workspaces (the enqueue cannot tell "no row"
+                from "no limit", so it fails closed). Nothing on this page can
+                repair that — publishing a version that covers the plan is the
+                only fix — so this states the cause and points at the form. */}
+            {data.uncoveredPlanIds.length === 0 ? null : (
+              <PageNotice
+                kind="error"
+                message={t(locale, "admin.quotaVersions.uncoveredPlans", {
+                  version: data.judgingVersion,
+                  plans: data.uncoveredPlanIds
+                    .map((id) => data.plans.find((plan) => plan.id === id)?.name ?? id)
+                    .join(", "),
+                })}
+              />
+            )}
             <DataTable columns={columns} rows={data.versions} rowKey={(row) => row.id} />
             {/* Keyed by the judging version: publishing a new one re-reads the
                 list, and the form must re-seed from the numbers now in force

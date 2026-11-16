@@ -102,7 +102,11 @@ import { encodeCredentialPayload, type CredentialPools } from "../../packages/sh
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
-import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
+import {
+  hasUsageEventForExecutionToken,
+  recordUsageEvent,
+  type UsageSource,
+} from "../store/usage-store";
 // The cost model the ledger charges: `rpFor` from the profile judging this
 // month (D5), so a started review is priced by the same configuration the
 // enqueue's ceiling check read.
@@ -5148,27 +5152,37 @@ async function processMessage(
     // and `scope` rides the credential read, so the charge costs one profile
     // read per started review and the message gains no field (a level change
     // between enqueue and consume is then priced at what actually ran).
+    //
+    // EVERYTHING that computes or writes this row is inside ONE boundary, the
+    // profile read above all: `resolveQuotaProfile` THROWS when the profile
+    // table is empty, and `self-hosted` never runs the enqueue gate that would
+    // have absorbed it, so a charge priced outside this `try` would abort the
+    // review — queue retry ×3, DLQ, no review posted and no ledger row. The
+    // product rule here is "count, never refuse", and the recorded `usage`
+    // failure row below is how a charge that could not be computed is
+    // reconciled instead.
     const usageNow = new Date();
-    const monthProfile = await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso);
     // Named once so the price and its source cannot disagree: `rpFor` reads the
     // same value in the same expression.
-    const usageSource = resolution.scope === "shared" ? ("shared" as const) : ("byok" as const);
-    const usageEvent = {
-      reviewId,
-      // The durable identity of THIS attempt: a review may already hold earlier
-      // rows, so the failure read-back below must ask by token, not by review.
-      executionToken: crypto.randomUUID(),
-      workspaceId: usageWorkspaceId,
-      occurredAt: usageNow.toISOString(),
-      rp: rpFor(level, usageSource, monthProfile),
-      source: usageSource,
-    };
+    const usageSource: UsageSource = resolution.scope === "shared" ? "shared" : "byok";
+    // Minted BEFORE the profile read: the failure row and the read-back must
+    // name THIS attempt even when the charge never got computed. The row input
+    // itself is built INSIDE the `try`, so no path can write a placeholder price.
+    const executionToken = crypto.randomUUID();
+    const usageOccurredAt = usageNow.toISOString();
     try {
       // No retry: a replay of the SAME token is already idempotent (the unique
       // index rejects it), and a retry that minted a NEW token would be a
       // different execution by definition — a second count for one attempt. A
       // dropped row stays reconcilable through the `usage` failure row below.
-      await recordUsageEvent(deps.env.DB, usageEvent);
+      await recordUsageEvent(deps.env.DB, {
+        reviewId,
+        executionToken,
+        workspaceId: usageWorkspaceId,
+        occurredAt: usageOccurredAt,
+        rp: rpFor(level, usageSource, await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso)),
+        source: usageSource,
+      });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       // A pre-commit failure and an ambiguous one (the write landed, the driver
@@ -5179,13 +5193,17 @@ async function processMessage(
       // failed, so nothing is known. A backfill must re-check the token before
       // inserting: the unique index only rejects a replay that REUSES the
       // recorded token, and a fresh token would mint another `seq`.
+      //
+      // A CHARGE that could not be computed (an empty profile table) reaches
+      // this same catch: no row was attempted, so the read-back answers `false`
+      // and the reconciliation below applies unchanged.
       const applied: true | false | "unknown" = await hasUsageEventForExecutionToken(
         deps.env.DB,
-        usageEvent.executionToken,
+        executionToken,
       ).catch(() => "unknown" as const);
       deps.log.warn(
         { ...fields, review_id: reviewId, workspace_id: usageWorkspaceId, usage_applied: applied },
-        `usage_events insert failed (review continues): ${detail}`,
+        `usage_events row not written (review continues): ${detail}`,
       );
       // The failure row is best-effort too — its own guard keeps a recording
       // failure from reaching the pipeline.
@@ -5198,12 +5216,14 @@ async function processMessage(
           pr_number: payload.pr_number,
           head_sha: headSha,
           stage: "usage",
-          // The identity a backfill would write: `usageEvent.workspaceId` IS the
-          // charged workspace (the target's), never the bot's.
-          error: `usage_events insert failed: ${detail} ${JSON.stringify({
+          // The identity a backfill would write, and the source its price
+          // comes from: `usageWorkspaceId` IS the charged workspace (the
+          // target's), never the bot's.
+          error: `usage_events row not written: ${detail} ${JSON.stringify({
             reviewId,
-            workspaceId: usageEvent.workspaceId,
-            executionToken: usageEvent.executionToken,
+            workspaceId: usageWorkspaceId,
+            executionToken,
+            source: usageSource,
             applied,
           })}`,
         });

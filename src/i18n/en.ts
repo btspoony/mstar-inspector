@@ -1517,6 +1517,14 @@ export const en = {
       /** {date} = the first 1st this version judges. */
       previewStartsOn:
         "This version judges quota from {date}; the current month keeps the version that covered its 1st.",
+      /**
+       * The judging version states no ceiling for at least one plan. Nothing on
+       * this page can repair it: only a new version that covers the plan can,
+       * so this is a diagnosis, not a control.
+       * {plans} = the plan names, comma-joined.
+       */
+      uncoveredPlans:
+        "Version {version} sets no monthly limit for {plans}, so reviews on those plans are refused before they start. Create a version that covers every plan to restore them.",
       previewRequired: "Check the impact before publishing.",
       previewLoadFailed: "The impact could not be computed — publishing stays unavailable until it loads.",
       previewAction: "Check impact",
