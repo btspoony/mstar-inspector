@@ -29,12 +29,12 @@
 
 import type { DeploymentMode } from "../worker/env";
 import {
+  checkEntitlement,
   FREE_PLAN_ID,
   FreeWorkspaceSlotError,
   INVITE_FREE_SLOT_REFUSAL,
   MemberCapError,
   MEMBER_CAP_REFUSAL,
-  resolveWorkspacePlan,
 } from "./entitlement";
 
 /** Invite role inside one workspace (migration 0028 CHECK domain; no `owner`). */
@@ -332,7 +332,16 @@ export async function createInvite(
     expires_at: input.expiresAt,
     accepted_at: null,
   };
-  const limit = (await resolveWorkspacePlan(db, input.workspaceId, mode)).includedMembers;
+  // `seats: null` says the guarded insert below IS the authority: the verdict
+  // never refuses, and it carries the plan so the limit is bound from one read.
+  const verdict = await checkEntitlement({
+    db,
+    mode,
+    workspaceId: input.workspaceId,
+    kind: "member-slot",
+    seats: null,
+  });
+  const limit = verdict.plan.includedMembers;
   const values: Record<string, unknown> = {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -578,7 +587,18 @@ export async function acceptInvite(
   // This literal's order IS the refusal precedence (free slot, then seat), used
   // by both the insert's AND chain and the classifier's CASE below — so
   // precedence is stated once here instead of falling out of a push sequence.
-  const limit = (await resolveWorkspacePlan(db, invite.workspace_id, mode)).includedMembers;
+  //
+  // `seats: null` says the insert's own guards below are the authority: the
+  // verdict never refuses here and supplies the limit from the same plan read.
+  const limit = (
+    await checkEntitlement({
+      db,
+      mode,
+      workspaceId: invite.workspace_id,
+      kind: "member-slot",
+      seats: null,
+    })
+  ).plan.includedMembers;
   const conditions = [
     mode === "saas"
       ? { allow: ACCEPT_FREE_SLOT_GUARD_SQL, refusal: "free_slot" as const, binds: { freePlanId: FREE_PLAN_ID } }

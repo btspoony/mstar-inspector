@@ -55,8 +55,8 @@ import {
   type ReviewTargetRow,
 } from "../dashboard/targets-store";
 import { readDefaultReviewLevel } from "../dashboard/runtime-config-store";
-import { assertSharedBotAllowed, resolveWorkspacePlan } from "../dashboard/entitlement";
-import { quotaMonth, resolveMonthlyQuota, rpFor } from "../store/quota-store";
+import { checkEntitlement } from "../dashboard/entitlement";
+import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
 import { sumMonthlyRp } from "../store/usage-store";
 import { attachCheckAtAcceptance, createCheckLifecycle } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
@@ -369,15 +369,15 @@ export async function settleRefusedAfterAttach(input: {
  * exempt) — so a verdict and the charge it authorizes cannot be denominated
  * differently.
  *
- * The month is the UTC calendar month of `usage_events.occurred_at` (the field
- * the ledger writes), and the ceiling is the one from the profile covering
- * that month's first day (D5): a profile published mid-month never judges it.
- * `used + cost > limit` refuses, so a month exactly AT its ceiling still
- * admits the review that lands on it and only the next RP is refused.
- *
- * Cost: one plan read (the capability check already paid its own), the profile
- * read and one indexed month sum — and only for a delivery that could actually
- * have proceeded.
+ * The two counters are this caller's inputs (the plan's `review-quota` kind
+ * takes them), and the ceiling itself is resolved INSIDE `checkEntitlement`
+ * from the plan id it already read — so the ceiling can never be judged against
+ * a different plan than the verdict carries. The month is the UTC calendar
+ * month of `usage_events.occurred_at` (the field the ledger writes), and the
+ * profile covering that month's first day (D5) prices it, so a profile
+ * published mid-month never judges it. `used + cost > limit` refuses, so a
+ * month exactly AT its ceiling still admits the review that lands on it and
+ * only the next RP is refused.
  */
 async function quotaRefusal(
   db: D1Database,
@@ -385,18 +385,29 @@ async function quotaRefusal(
   scope: BotScope,
   mode: DeploymentMode,
 ): Promise<DeliveryRefusal | null> {
-  const plan = await resolveWorkspacePlan(db, target.workspace_id, mode);
   const month = quotaMonth(new Date());
-  const { profile, monthlyRp } = await resolveMonthlyQuota(db, month.startIso, plan.id);
-  // A NULL ceiling is unlimited: no sum is worth reading for it.
-  if (monthlyRp === null) return null;
-
+  // Pricing this attempt and resolving its ceiling each need the profile
+  // covering `month.startIso`; the ctx shape carries a resolved `costRp`, so
+  // this path reads that one row twice (same month, same deterministic answer)
+  // rather than widening the shared verdict. It is one PK read on the gate path.
+  const profile = await resolveQuotaProfile(db, month.startIso);
   let level = parseTargetReviewLevel(target.review_level);
   if (level === null) level = (await readDefaultReviewLevel(db)).value;
   const cost = rpFor(level, scope === "shared" ? "shared" : "byok", profile);
-
   const used = await sumMonthlyRp(db, target.workspace_id, month.startIso, month.endIso);
-  return used + cost > monthlyRp ? { kind: "quota-exhausted", limit: monthlyRp, used, cost } : null;
+
+  const verdict = await checkEntitlement({
+    db,
+    mode,
+    workspaceId: target.workspace_id,
+    kind: "review-quota",
+    monthStart: month.startIso,
+    usedRp: used,
+    costRp: cost,
+  });
+  return !verdict.ok && verdict.refusal.kind === "review-quota"
+    ? { kind: "quota-exhausted", limit: verdict.refusal.limit, used: verdict.refusal.used, cost: verdict.refusal.cost }
+    : null;
 }
 
 // `version` rides the healthz face — additive field, `ok:true`
@@ -793,8 +804,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   //      bot the platform SHARES. A workspace's OWN bot is not the shared bot:
   //      the owned path is untouched, and a Free workspace reviews with its own
   //      App exactly as before. It reads the TARGET's workspace (the
-  //      consumer), never the bot's, and it is the very function the
-  //      target-creation route calls, so neither surface re-derives the rule.
+  //      consumer), never the bot's, and it is the very `checkEntitlement` entry
+  //      the target-creation route calls (`shared-bot` branch), so neither
+  //      surface re-derives the rule.
   //   2. Monthly RP ceiling — only in the branch step 1 admitted. The cost is
   //      `rpFor` over the SAME two inputs the metering write uses (the
   //      target's level, the bot's scope), so the enqueue's verdict and the
@@ -813,7 +825,18 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   let refusal: DeliveryRefusal | null = null;
   if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {
     if (row.scope === "shared") {
-      refusal = await assertSharedBotAllowed(db, target.workspace_id, mode);
+      // The same one entry the target-creation route calls; an OWN bot is never
+      // asked, so this path pays no plan read for it.
+      const verdict = await checkEntitlement({
+        db,
+        mode,
+        workspaceId: target.workspace_id,
+        kind: "shared-bot",
+        botScope: "shared",
+      });
+      if (!verdict.ok && verdict.refusal.kind === "shared-bot") {
+        refusal = { kind: "shared-bot-not-included", planId: verdict.refusal.planId };
+      }
     }
     if (refusal === null && mode !== "self-hosted") {
       refusal = await quotaRefusal(db, target, row.scope, mode);

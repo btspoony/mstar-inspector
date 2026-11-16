@@ -76,13 +76,16 @@ The webhook **never** writes a binding. An installation no target references is 
 
 Dependency: `shared` stops reviewing until an installation is claimed. Operators must share, then claim.
 
-`shared` is also a plan capability, not only a bot scope: `assertSharedBotAllowed`
+`shared` is also a plan capability, not only a bot scope:
+`checkEntitlement({kind: "shared-bot", …})`
 ([entitlement](../architecture/entitlement-and-deployment-modes.md) §5) refuses
 a target creation on a shared bot and refuses the enqueue for a target whose
-workspace plan no longer includes it. A creation refusal writes nothing and the
-enqueue refusal sends nothing — its Check is settled `neutral` and the delivery
-records one terminal `entitlement` failure. `self-hosted` always has the
-capability and never reads the column.
+workspace plan no longer includes it. It is the one entry every plan verdict
+comes from, and `assertSharedBotAllowed` survives only as that branch's internal
+body. A creation refusal writes nothing and the enqueue refusal sends nothing —
+its Check is settled `neutral` and the delivery records one terminal
+`entitlement` failure. `self-hosted` always has the capability and never reads
+the column.
 
 A second enqueue refusal sits beside it: a workspace whose month has reached its
 plan's RP ceiling
