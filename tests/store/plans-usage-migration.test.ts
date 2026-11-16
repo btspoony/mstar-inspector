@@ -21,7 +21,8 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
   // `unlimited` tier, so the applied DB carries three rows: 0031's free/pro
   // seed plus 0032's every-quota-NULL tier (timestamps stay the fixed seeds).
   // 0061 then sets the shared-bot capability: `free` keeps the column default,
-  // the two paid tiers include it.
+  // the two paid tiers include it. 0063 seeds the app cap (free 1, pro 10,
+  // `unlimited` no cap) and drops the two superseded quota columns.
   test("plans has the three catalogue rows — free, pro and the unlimited tier — with the fixed timestamps", () => {
     const db = createMigratedTestD1();
     expect(db.raw.query("SELECT * FROM plans ORDER BY id").all()).toEqual([
@@ -31,9 +32,7 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
         monthly_price_cents: 0,
         included_members: 5,
         extra_member_price_cents: null,
-        platform_key_limit: null,
-        reviews_included: null,
-        apps_per_workspace: null,
+        apps_per_workspace: 1,
         shared_bot_allowed: 0,
         created_at: "2026-10-24T00:00:00.000Z",
       },
@@ -43,9 +42,7 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
         monthly_price_cents: null,
         included_members: 5,
         extra_member_price_cents: null,
-        platform_key_limit: null,
-        reviews_included: null,
-        apps_per_workspace: null,
+        apps_per_workspace: 10,
         shared_bot_allowed: 1,
         created_at: "2026-10-24T00:00:00.000Z",
       },
@@ -55,8 +52,6 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
         monthly_price_cents: null,
         included_members: null,
         extra_member_price_cents: null,
-        platform_key_limit: null,
-        reviews_included: null,
         apps_per_workspace: null,
         shared_bot_allowed: 1,
         created_at: "2026-10-25T00:00:00.000Z",

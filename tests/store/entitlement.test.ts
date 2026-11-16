@@ -95,6 +95,8 @@ describe("resolveWorkspacePlan", () => {
 
   test("a missing seeded free row is an error, not invented limits", async () => {
     const db = createMigratedTestD1();
+    // The profile's plan set references `plans`, so the ceilings go first.
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
     db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
     await expect(resolveWorkspacePlan(db, "default", "saas")).rejects.toThrow(/seeded 'free' row/);
     db.raw.close();
@@ -124,6 +126,8 @@ describe("resolveWorkspacePlan — the mode decides before any read", () => {
 
   test("self-hosted reads no catalogue row, so a missing free row cannot fail it", async () => {
     const db = createMigratedTestD1();
+    // The profile's plan set references `plans`, so the ceilings go first.
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
     db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
     expect((await resolveWorkspacePlan(db, "default", "self-hosted")).includedMembers).toBeNull();
     db.raw.close();
@@ -387,18 +391,16 @@ describe("migration 0032 (unlimited plan)", () => {
       monthly_price_cents: null,
       included_members: 5,
       extra_member_price_cents: null,
-      platform_key_limit: null,
-      reviews_included: null,
-      apps_per_workspace: null,
       created_at: "2026-10-24T00:00:00.000Z",
     };
 
     // Both seeded rows survive the rebuild byte-identically. `shared_bot_allowed`
-    // is migration 0061's later seed, not 0032's rebuild — it is what
-    // distinguishes the two tiers, so neither row is the other's copy.
+    // is migration 0061's later seed and `apps_per_workspace` 0063's — neither
+    // is 0032's rebuild; they are what distinguishes the two tiers, so neither
+    // row is the other's copy.
     expect(db.raw.prepare("SELECT * FROM plans WHERE id <> 'unlimited' ORDER BY id").all()).toEqual([
-      { ...seeded, id: "free", name: "Free", monthly_price_cents: 0, shared_bot_allowed: 0 },
-      { ...seeded, id: "pro", name: "Pro", shared_bot_allowed: 1 },
+      { ...seeded, id: "free", name: "Free", monthly_price_cents: 0, apps_per_workspace: 1, shared_bot_allowed: 0 },
+      { ...seeded, id: "pro", name: "Pro", apps_per_workspace: 10, shared_bot_allowed: 1 },
     ]);
 
     // The column is relaxed — the reason the table was rebuilt at all ...
