@@ -728,6 +728,8 @@ export const zhCN: Dictionary = {
         detailsSelectLabel: "要编辑的模型",
         requirements: "上下文窗口和最大 token 数决定上下文何时被压缩、单次回复最长能跑多久 — 目录有值会自动预填，留空则按未声明保存。",
         sizesUnstated: "未填写尺寸 — 该模型按未声明保存，运行时使用自身默认值。",
+        sizesUnknownProvider:
+          "该提供方没有目录尺寸，因此两个字段都从空白开始。留空即按未声明保存 — 运行时使用自身默认值。",
         sizesFromCatalog: "这些数值来自模型目录快照 {snapshot} — 修改数值即可覆盖。",
         sizesFromDeclaration: "这些数值来自你已保存的声明。",
         sizesFromMixed: "你填的数值以你为准；另一项来自模型目录快照 {snapshot}。",

@@ -890,6 +890,14 @@ export const en = {
          */
         sizesUnstated:
           "No size stated — this model saves as unstated and the runtime's own defaults apply.",
+        /**
+         * A provider with no catalog row at all: the sizes are UNKNOWN, not
+         * zero. This replaces the requirements line (which would credit a
+         * snapshot with numbers this provider does not have) — blank stays the
+         * ordinary, savable answer and neither field is a precondition.
+         */
+        sizesUnknownProvider:
+          "This provider has no catalog sizes, so both fields start blank. Leave a field blank and it saves as unstated — the runtime's own defaults apply.",
         /** The provenance label under the two size fields (catalog names its snapshot). */
         sizesFromCatalog:
           "These sizes come from the model catalog snapshot {snapshot} — edit a value to override it.",
