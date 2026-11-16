@@ -1187,6 +1187,8 @@ export const en = {
       noEncryptionKey:
         "This deployment has no valid DASHBOARD_ENCRYPTION_KEY to store App credentials with — ask the operator to configure it, then resubmit.",
       alreadyConnected: "This GitHub App is already connected on this deployment — no changes were made.",
+      appCapReached:
+        "This App was not connected — this workspace already owns {limit} Apps, which is its plan's limit, so nothing was stored. Remove an App, or move the workspace to a plan with a higher allowance, then start again.",
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
       /**

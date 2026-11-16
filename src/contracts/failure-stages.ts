@@ -49,6 +49,22 @@ export const SHARED_BOT_ENTITLEMENT_SKIP_REASON =
   "the review target's plan does not include the shared bot";
 
 /**
+ * The `review_failures.stage` a quota refusal is recorded under. It is a
+ * SEPARATE stage from `entitlement` because the two name different causes: the
+ * plan lacks the capability versus this month's consumption reached the plan's
+ * RP ceiling. Like `entitlement` it is NOT in `PAGING_EXCLUDED_STAGES` — the
+ * delivery ran no review at all, so it stays paged.
+ */
+export const QUOTA_STAGE = "quota";
+
+/**
+ * The one sentence a quota refusal carries. Author-facing for the same reason
+ * as its `entitlement` sibling — no plan id, no workspace name, no ceiling
+ * figure: the PR author can act on none of them, and the Check is public.
+ */
+export const QUOTA_SKIP_REASON = "the workspace has reached this month's review quota";
+
+/**
  * Render a stage list as the literal body of a SQL `IN (…)` / `NOT IN (…)`
  * comparison (each stage single-quoted and comma-joined, e.g.
  * `'recheck', 'usage'`). Callers supply the operator and parentheses; this

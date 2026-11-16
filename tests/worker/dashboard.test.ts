@@ -2184,6 +2184,100 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(appRowCount(env)).toBe(1);
   });
 
+  /**
+   * Seed `count` extra live Apps into the default workspace through the real
+   * store (the cap guard sits ABOVE createApp, so the store itself never
+   * refuses — that is what makes these fixtures possible and the guard's
+   * position observable).
+   */
+  async function seedApps(env: Env, count: number): Promise<void> {
+    for (let at = 0; at < count; at += 1) {
+      await envDb(env).createApp({
+        id: crypto.randomUUID(),
+        githubSlug: `seeded-${at}`,
+        githubAppId: 900_000 + at,
+        name: `seeded-${at}`,
+        privateKeyEnc: "v1.primary.aXZpdi5h.cHJldGV4dA==",
+        webhookSecretEnc: "v1.primary.aXZpdi5i.cHJldGV4dA==",
+        createdBy: "octocat",
+        workspaceId: "default",
+      });
+    }
+  }
+
+  // HTML-escaped at the view boundary, like every sibling banner (escapeHtml
+  // owns the apostrophe entity).
+  const appCapCopy = (limit: number) => t("en", "manifest.error.appCapReached", { limit }).replaceAll("'", "&#39;");
+
+  test("saas: a free workspace's second App is refused before any row is written", async () => {
+    const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
+    // The seeded `free` plan caps a workspace at ONE App (0063), and this
+    // workspace already owns one.
+    await seedApps(env, 1);
+    expect(appRowCount(env)).toBe(1);
+
+    const refused = await doCommit({ env, holdValue: await freshHold() });
+
+    expect(refused.status).toBe(409);
+    // Zero writes: the guard runs before `createApp`, so neither the bot row,
+    // its mapping nor its target can exist.
+    expect(appRowCount(env)).toBe(1);
+    expect((dbOf(env).raw.query("SELECT COUNT(*) AS n FROM review_targets").get() as { n: number }).n).toBe(1);
+    expect(await refused.text()).toContain(appCapCopy(1));
+    // Non-retryable: a resubmit cannot free a slot, so the hold is burned.
+    expectHoldExpired(refused);
+  });
+
+  test("saas: a pro workspace's tenth App succeeds and the eleventh is refused", async () => {
+    const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
+    dbOf(env)
+      .raw.prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES ('default', 'pro', 'active', datetime('now'), datetime('now'))`,
+      )
+      .run();
+    await seedApps(env, 9);
+
+    // The tenth fits: nine existing + this one = the plan's ten.
+    const accepted = await doCommit({ env, holdValue: await freshHold() });
+    expect(accepted.status).toBe(302);
+    expect(appRowCount(env)).toBe(10);
+
+    // The eleventh does not, and lands no row of any kind.
+    const refused = await doCommit({ env, holdValue: await freshHold() });
+    expect(refused.status).toBe(409);
+    expect(appRowCount(env)).toBe(10);
+    expect(await refused.text()).toContain(appCapCopy(10));
+  });
+
+  test("self-hosted reads no App cap: an eleventh App still connects", async () => {
+    // The default env is `self-hosted`, where the plan resolves to the
+    // unlimited constant and `apps_per_workspace` is never consulted.
+    const env = commitEnv();
+    await seedApps(env, 11);
+
+    const accepted = await doCommit({ env, holdValue: await freshHold() });
+
+    expect(accepted.status).toBe(302);
+    expect(appRowCount(env)).toBe(12);
+  });
+
+  test("a soft-deleted App frees its slot", async () => {
+    const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
+    await seedApps(env, 1);
+    const seeded = dbOf(env)
+      .raw.query("SELECT id FROM review_bots ORDER BY created_at, rowid LIMIT 1")
+      .get() as { id: string };
+    // The mapping row survives a soft delete; the guard's join on the LIVE bot
+    // is what frees the slot.
+    dbOf(env).raw.prepare("UPDATE review_bots SET deleted_at = datetime('now') WHERE id = ?").run(seeded.id);
+
+    const accepted = await doCommit({ env, holdValue: await freshHold() });
+
+    expect(accepted.status).toBe(302);
+    expect(appRowCount(env)).toBe(2);
+  });
+
   test("an unreadable workspace default fails the commit closed, then retries at the stored floor", async () => {
     const env = commitEnv();
     const db = dbOf(env);
@@ -2753,6 +2847,9 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0028_workspace_invites.sql",
   // 0031: workspace creation writes its `free` subscription row.
   "0031_plans_usage.sql",
+  // 0032: the `unlimited` plan row (and the nullable seat limit) — 0063's
+  // profile ceilings reference every seeded plan, `unlimited` included.
+  "0032_unlimited_plan.sql",
   // 0033: the OAuth callback and workspace creation read their server flag.
   "0033_platform_admin.sql",
   // 0036: github_apps.slug → github_slug cache.
@@ -2802,6 +2899,12 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   // 0058: the App list's shared-bot block reads `review_bots.scope`, so this
   // fixture must carry the column or every list read 500s.
   "0058_review_bot_scope.sql",
+  // 0061: the manifest commit resolves the workspace's plan, whose row shape
+  // includes the shared-bot capability.
+  "0061_plan_shared_bot_allowed.sql",
+  // 0063: the commit path reads `plans.apps_per_workspace`, which this
+  // migration seeds (free 1, pro 10, unlimited NULL).
+  "0063_quota_profiles.sql",
 ] as const;
 
 function createDashboardTestD1(

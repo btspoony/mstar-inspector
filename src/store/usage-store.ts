@@ -27,6 +27,12 @@ export type UsageEventInput = {
   executionToken: string;
   workspaceId: string;
   occurredAt: string;
+  /**
+   * The RP this started execution costs, from `rpFor(level, source, profile)`.
+   * `0` is reserved for rows written before migration 0064 metered the ledger:
+   * `rpFor` is >= 1 by construction, so a metered row can never read as 0.
+   */
+  rp: number;
 };
 
 /**
@@ -46,14 +52,37 @@ export async function countUsageEventsSince(
   return row?.n ?? 0;
 }
 
+/**
+ * This workspace's RP spent in the half-open window
+ * `[startIso, endIso)` — the ceiling's own read. `rp` is 0 on every row
+ * written before migration 0064, so a pre-metering row contributes nothing
+ * and needs no COALESCE. `usage_events_workspace_occurred` (migration 0031)
+ * serves the predicate.
+ */
+export async function sumMonthlyRp(
+  db: D1Like,
+  workspaceId: string,
+  startIso: string,
+  endIso: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COALESCE(SUM(rp), 0) AS rp FROM usage_events
+        WHERE workspace_id = ? AND occurred_at >= ? AND occurred_at < ?`,
+    )
+    .bind(workspaceId, startIso, endIso)
+    .first<{ rp: number }>();
+  return row?.rp ?? 0;
+}
+
 /** Append one started-execution row, minting the attempt `seq`. */
 export async function recordUsageEvent(db: D1Like, input: UsageEventInput): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
-       SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4 FROM usage_events WHERE review_id = ?1`,
+      `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp)
+       SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4, ?5 FROM usage_events WHERE review_id = ?1`,
     )
-    .bind(input.reviewId, input.executionToken, input.workspaceId, input.occurredAt)
+    .bind(input.reviewId, input.executionToken, input.workspaceId, input.occurredAt, input.rp)
     .run();
 }
 
