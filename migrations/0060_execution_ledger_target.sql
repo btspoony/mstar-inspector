@@ -139,6 +139,15 @@ DROP TABLE guard_failures_ambiguous_target;
 
 -- A failure names the installation it ran under, not the bot: resolve
 -- installation → bot, then the same PR key.
+--
+-- The join MUST apply the same candidate rule the ambiguity guard does, or the
+-- guard proves nothing: with one removed and one live binding the guard sees a
+-- single candidate and passes, while an unfiltered UPDATE would match both
+-- bots' rows at this key and let SQLite pick one by scan order. So the UPDATE
+-- prefers the live binding, and falls back to history (a removed binding) only
+-- when no live one holds this installation — which is exactly the population the
+-- guard leaves alone. `LIMIT 1` is safe because the guard already refused any
+-- state with two live candidates.
 UPDATE review_failures
 SET target_id = (
   SELECT p.target_id
@@ -148,6 +157,8 @@ SET target_id = (
     AND p.owner = review_failures.owner
     AND p.repo = review_failures.repo
     AND p.pr_number = review_failures.pr_number
+  ORDER BY (i.removed_at IS NULL) DESC
+  LIMIT 1
 );
 
 CREATE TABLE guard_findings_without_target (
