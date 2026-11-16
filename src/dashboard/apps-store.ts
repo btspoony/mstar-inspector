@@ -639,13 +639,16 @@ export const APP_READ_SQL = {
 
 /**
  * The workspace-scoped App resolve the target pages use: the bot the addressed
- * workspace OWNS, or a `shared` bot it holds a live target on. The second arm
- * is the entitlement a target carries — a `shared` bot has no `bot_workspaces`
- * row in the workspaces that use it, so without it those workspaces would get
- * nothing on a bot they hold a live target for. An `owned` bot is never
- * widened: its target arm requires `scope = 'shared'`.
+ * workspace OWNS (its `bot_workspaces` mapping), or a bot it holds a live
+ * target on. Both arms are the pre-0067 visibility rule, unchanged by the
+ * repository keying — the second is the entitlement a target carries, and it
+ * is what keeps a `shared` bot reachable from the workspace that created a
+ * target on it AND a target readable after its share was revoked (`scope` back
+ * to `owned`). That revoked-share read is exactly the state the settings face
+ * must report as Blocked, so a scope guard on this arm would hide the bot
+ * instead of answering it.
  */
-const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR (g.scope = 'shared' AND EXISTS (SELECT 1 FROM review_targets t WHERE t.bot_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL))) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
+const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.bot_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
 
 /**
  * The two `upsertInstallation` statements. Which one runs is chosen BEFORE
@@ -955,10 +958,10 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The target pages' resolve: the workspace's own bot, or a `shared` bot it
-     * holds a live target on. `null` for a soft-deleted bot, an owned bot
-     * outside the caller's workspace, a `shared` bot with no live target here,
-     * or a non-existent id.
+     * The target pages' resolve: the workspace's own bot, or any bot it holds
+     * a live target on (the same visibility rule `resolveScopedApp` documents).
+     * `null` for a soft-deleted bot, a bot with neither this workspace's
+     * mapping nor a live target here, or a non-existent id.
      */
     async getScopedAppByGithubId(
       githubAppId: number,

@@ -170,9 +170,8 @@ describe("consumeAndBind (the one batch)", () => {
     expect(claimRow(db, claim.id)?.consumed_at).toBe(NOW);
     expect(installationRow(db, botId, 4242)).toEqual({ account_login: null, seen_at: NOW, removed_at: null });
     // An installation belongs to the App: adding a repository later is a
-    // separate, explicit action.
-    expect(count(db, "review_targets")).toBe(1); // only createApp's legacy row
-    expect(db.raw.query("SELECT repo_id FROM review_targets").all()).toEqual([{ repo_id: null }]);
+    // separate, explicit action, so the claim writes no target at all.
+    expect(count(db, "review_targets")).toBe(0);
   });
 
   test("a stored account_login survives the upsert and a removed stamp clears", async () => {

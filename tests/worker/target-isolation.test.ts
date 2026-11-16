@@ -183,8 +183,23 @@ function isolationFixture() {
 
   // Target A is the workspace's live configuration; target B is PAUSED, so a
   // settings read that served B's row would answer review_enabled: false.
-  const targetA = seedTarget(db, BOT_ID, { id: "target-a", workspaceId: WORKSPACE_A });
-  const targetB = seedTarget(db, BOT_ID, { id: "target-b", workspaceId: WORKSPACE_B });
+  // Each carries the repository its own PR belongs to (0067): `repo_id` is the
+  // identity, distinct per repository, and the owner/name pair is the display
+  // cache the review and Check lanes resolve by.
+  const targetA = seedTarget(db, BOT_ID, {
+    id: "target-a",
+    workspaceId: WORKSPACE_A,
+    repoId: 700001,
+    repoOwner: "acme",
+    repoName: "widgets",
+  });
+  const targetB = seedTarget(db, BOT_ID, {
+    id: "target-b",
+    workspaceId: WORKSPACE_B,
+    repoId: 700002,
+    repoOwner: "other",
+    repoName: "lib",
+  });
   seed(db, "UPDATE review_targets SET review_enabled = 0 WHERE id = ?", targetB);
   seed(db, "UPDATE review_targets SET review_trigger_mode = 'manual' WHERE id = ?", targetA);
 

@@ -661,14 +661,15 @@ function githubAppIdOf(db: TestD1, botId: string): number {
 }
 
 /**
- * The resolve the target pages use: the bot the addressed workspace OWNS, or a
- * `shared` bot it holds a live target on. The second arm is the entitlement a
- * target carries — a `shared` bot carries no `bot_workspaces` row in the
- * workspaces that use it, so only the target makes it reachable there. An
- * `owned` bot is never widened.
+ * The resolve the target pages use: the bot the addressed workspace OWNS (its
+ * `bot_workspaces` mapping), or a bot it holds a live target on — main's
+ * pre-0067 visibility rule. The second arm is the entitlement a target
+ * carries, so it reaches a `shared` bot the workspace created a target on AND
+ * a target whose share was revoked (`scope` back to `owned`, which is the
+ * state the settings face reports as Blocked).
  */
 describe("the workspace-scoped App resolve", () => {
-  test("resolves the workspace's own bot and a shared bot it holds a live target on", async () => {
+  test("resolves the workspace's own bot and any bot it holds a live target on", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-other");
     seedScopedBot(db, "bot-own", { workspaceId: WS });
@@ -680,18 +681,23 @@ describe("the workspace-scoped App resolve", () => {
     const own = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-own"), WS);
     expect(own?.id).toBe("bot-own");
     expect(own?.workspace_id).toBe(WS);
-    // A shared bot with no live target here has nothing to resolve.
+    // A bot with no live target here and no mapping here has nothing to resolve.
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS)).toBeNull();
-    // An owned bot of another workspace is never widened by a target.
-    seedTargetIn(db, "bot-foreign", WS);
+    // Nor is another workspace's bot widened without one.
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-dead"), WS)).toBeNull();
 
-    // A live target IS the entitlement on a shared bot.
+    // A live target IS the entitlement, whatever the bot's scope: the
+    // revoked-share read must answer the bot (then report it Blocked), not 404.
+    seedTargetIn(db, "bot-foreign", WS);
+    const revoked = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS);
+    expect(revoked?.id).toBe("bot-foreign");
+    // The returned workspace is the bot's owner, not the caller's.
+    expect(revoked?.workspace_id).toBe("ws-other");
+
     seedTargetIn(db, "bot-shared", WS);
     const shared = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS);
     expect(shared?.id).toBe("bot-shared");
-    // The returned workspace is the bot's owner, not the caller's.
     expect(shared?.workspace_id).toBe("ws-other");
   });
 

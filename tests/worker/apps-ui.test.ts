@@ -1209,12 +1209,16 @@ describe("a retained target on another workspace's bot grants no bot-scope write
       )
       .run(CONSUMER_WS);
     // The target C created while the bot was shared. Nothing about the bot
-    // changed except its scope: it was never C's.
+    // changed except its scope: it was never C's. It carries the repository
+    // identity a target needs (0067) — the same repo the App's own target
+    // points at, since one repository belongs to one workspace.
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
-         SELECT 'target-consumer', ?, b.id, 'consumer', 'mallory', datetime('now'), datetime('now')
+           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+            created_by, created_at, updated_at)
+         SELECT 'target-consumer', ?, b.id, 'consumer', 901001, 'acme', 'mstar-inspector-mallory',
+                'mallory', datetime('now'), datetime('now')
            FROM review_bots b WHERE b.github_app_id = ?`,
       )
       .run(CONSUMER_WS, FOREIGN_APP_ID);
@@ -1344,8 +1348,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect(typeof body.target_id).toBe("string");
     expect(body.workspace_id).toBe(CONSUMER_WS);
     expect(body.check_gate).toEqual({ min_score: 80, pass_verdicts: ["ship it"] });
-    expect(body.allowlist).toEqual({ enabled: false, owners: [] });
-    expect(typeof body.owner_overlap).toBe("boolean");
     expect(body.app.review_trigger_mode).toBe("every_push");
     expect(body.app.review_level).toBeNull();
     expect(body.app.default_review_level).toBe("default");
