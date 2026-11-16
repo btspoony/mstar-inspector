@@ -213,9 +213,10 @@ import {
 // pipeline/worker isolation is one-directional and unaffected.
 import { createReviewBotsStore, type BotScope } from "../dashboard/apps-store";
 import {
+  checkGateOf,
   createTargetsStore,
-  parseTargetReviewLevel,
-  targetCheckGate,
+  readEffectiveTargetSettings,
+  type ReviewTargetRow,
 } from "../dashboard/targets-store";
 import { createSecretbox } from "../dashboard/secretbox";
 // The operator default review depth (migration 0047 pairing): read ONLY when
@@ -3054,11 +3055,12 @@ type CommenterResolution =
       githubAppId: number;
       workspaceId: string;
       /**
-       * The target row's RAW `review_level` (migration 0047) — `null` = follow
-       * the operator default. Read through `parseTargetReviewLevel`; carrying
-       * it here keeps the depth on the per-message configuration read.
+       * The target's EFFECTIVE review depth (migrations 0047 + 0067) — `null`
+       * = follow the operator default. An inheriting target answers the
+       * workspace default, an own-columns row its stored (vocabulary-checked)
+       * level, so the depth rides the same read as the Check gate.
        */
-      reviewLevel: string | null;
+      reviewLevel: ReviewLevel | null;
       /**
        * The bot's `scope` (migration 0058) — the RP source multiplier's only
        * input at the metering write. Read off the SAME row this resolution
@@ -3171,6 +3173,9 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   // AES-GCM envelope → one harmless rebuild; a real rotation rebuilds with
   // the new credential on the very next message.
   const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
+  // The workspace defaults are read only for a target that actually inherits
+  // (migration 0067), so an own-columns target pays no second D1 round trip.
+  const effective = await readEffectiveTargetSettings(deps.env.DB, target);
   const cached = deps.appCommenters.get(botId);
   if (cached !== undefined && cached.fingerprint === fingerprint) {
     return {
@@ -3178,7 +3183,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
       commenter: cached.commenter,
       githubAppId: cached.githubAppId,
       workspaceId: row.workspace_id,
-      reviewLevel: target.review_level,
+      reviewLevel: effective.level,
       scope: row.scope,
       usageWorkspaceId: target.workspace_id,
     };
@@ -3199,7 +3204,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
     commenter,
     githubAppId: row.github_app_id,
     workspaceId: row.workspace_id,
-    reviewLevel: target.review_level,
+    reviewLevel: effective.level,
     scope: row.scope,
     usageWorkspaceId: target.workspace_id,
   };
@@ -4006,14 +4011,18 @@ export function createReviewConsumer(
       // An unreadable row is `null` (fail-closed).
       getCheckGate: async (scope) => {
         const row = await env.DB.prepare(
-          `SELECT check_min_score, check_pass_verdicts FROM review_targets
+          `SELECT * FROM review_targets
             WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
               AND deleted_at IS NULL
             ORDER BY created_at, id LIMIT 1`,
         )
           .bind(scope.appId, scope.owner, scope.repo)
-          .first<{ check_min_score: number; check_pass_verdicts: string }>();
-        return row === null ? null : targetCheckGate(row);
+          .first<ReviewTargetRow>();
+        if (row === null) return null;
+        // The gate is the EFFECTIVE one (migration 0067): an inheriting target
+        // runs on the workspace floor, not on the inert placeholder its row
+        // carries. An unreadable verdict array is still `null` (fail-closed).
+        return checkGateOf(await readEffectiveTargetSettings(env.DB, row));
       },
     });
   return async (batch) => {
@@ -4744,17 +4753,18 @@ async function processMessage(
         return { kind: "superseded" };
       }
     }
-    // The App's review depth (migration 0047), resolved from the SAME row read
-    // that resolved its credentials — the admission TTL, the runner budget and
-    // the guard backoff all use it. A NULL (or off-vocabulary) column follows
-    // the operator default: one bounded settings read, issued only then. A
-    // degraded read answers the documented default and owes the operator one
-    // structured warn (the concurrency reader's contract) — never a silent
-    // fallback.
+    // The App's review depth (migrations 0047 + 0067), resolved on the SAME
+    // per-message configuration read that resolved its credentials — the
+    // admission TTL, the runner budget and the guard backoff all use it. The
+    // value is already parsed (an unknown stored level reads as `null`), and
+    // NULL follows the operator default: one bounded settings read, issued
+    // only then. A degraded read answers the documented default and owes the
+    // operator one structured warn (the concurrency reader's contract) — never
+    // a silent fallback.
     //
     // AFTER the supersede skip on purpose: a superseded delivery is not the
     // live review, so it must not pay — or degrade on — this read.
-    const appLevel = parseTargetReviewLevel(resolution.reviewLevel);
+    const appLevel = resolution.reviewLevel;
     if (appLevel !== null) {
       level = appLevel;
     } else {

@@ -126,7 +126,14 @@ export type WorkspaceReviewDefaults = {
   triggerMode: ReviewTriggerMode;
   level: ReviewLevel | null;
   checkMinScore: number;
-  checkPassVerdicts: string[];
+  /** Empty when the stored array is unreadable — see `checkPassVerdictsReadable`. */
+  checkPassVerdicts: readonly PrVerdict[];
+  /**
+   * False = the stored array is unreadable CONFIGURATION, not the legal empty
+   * gate: the settings surface renders its read-only recovery notice instead
+   * of an editable gate nobody stored.
+   */
+  checkPassVerdictsReadable: boolean;
 };
 
 /** What a target runs with, whichever side of the inheritance switch answers. */
@@ -134,21 +141,20 @@ export type EffectiveTargetSettings = {
   triggerMode: ReviewTriggerMode;
   level: ReviewLevel | null;
   checkMinScore: number;
-  checkPassVerdicts: string[];
+  checkPassVerdicts: readonly PrVerdict[];
+  checkPassVerdictsReadable: boolean;
 };
 
 /**
- * The gate a stored row carries, or `null` when its verdict array is
- * unreadable. The execution lanes read the gate straight off a resolved row,
- * so this is the ONE parser both the tenant read and they use.
+ * The Check gate these settings authorise, or `null` when the verdict array
+ * that answered them is unreadable. The execution lanes and the settings face
+ * read the gate through this ONE derivation, so neither can invent a gate the
+ * stored configuration does not state.
  */
-export function targetCheckGate(row: {
-  check_min_score: number;
-  check_pass_verdicts: string;
-}): CheckGate | null {
-  const passVerdicts = storedPassVerdicts(row.check_pass_verdicts);
-  if (passVerdicts === null) return null;
-  return { minScore: row.check_min_score, passVerdicts };
+export function checkGateOf(settings: EffectiveTargetSettings): CheckGate | null {
+  return settings.checkPassVerdictsReadable
+    ? { minScore: settings.checkMinScore, passVerdicts: settings.checkPassVerdicts }
+    : null;
 }
 
 /** Narrow D1 face, declared locally so this leaf module imports nothing. */
@@ -192,6 +198,12 @@ export type TargetReviewConfig = {
   level?: ReviewLevel | null;
   checkMinScore?: number;
   checkPassVerdicts?: readonly PrVerdict[];
+  /**
+   * `0` = this row answers with these columns, not the workspace defaults. An
+   * explicit save must say so in the SAME statement: a settings control that
+   * wrote a column while `follow_workspace_defaults = 1` would be inert.
+   */
+  follow?: 0 | 1;
 };
 
 /**
@@ -255,8 +267,12 @@ export async function getWorkspaceReviewDefaults(
       level: null,
       checkMinScore: DEFAULT_CHECK_MIN_SCORE,
       checkPassVerdicts: ["ship it"],
+      checkPassVerdictsReadable: true,
     };
   }
+  // Unreadable stored verdicts admit nothing: an empty set fails closed,
+  // where a permissive fallback would let a review through nobody configured.
+  const verdicts = storedPassVerdicts(row.default_check_pass_verdicts);
   return {
     triggerMode: (REVIEW_TRIGGER_MODES as readonly string[]).includes(row.default_review_trigger_mode)
       ? (row.default_review_trigger_mode as ReviewTriggerMode)
@@ -265,38 +281,63 @@ export async function getWorkspaceReviewDefaults(
     checkMinScore: isCheckMinScoreValue(row.check_min_score)
       ? row.check_min_score
       : DEFAULT_CHECK_MIN_SCORE,
-    // Unreadable stored verdicts admit nothing: an empty set fails closed,
-    // where a permissive fallback would let a review through nobody configured.
-    checkPassVerdicts: [...(storedPassVerdicts(row.default_check_pass_verdicts) ?? [])],
+    checkPassVerdicts: [...(verdicts ?? [])],
+    checkPassVerdictsReadable: verdicts !== null,
   };
 }
 
 /**
- * What the target runs with (D16). `follow_workspace_defaults = 1` answers the
- * workspace defaults — computed here, every read, never copied into the row
- * while inheriting. `= 0` answers the row's own four columns; an unreadable
- * stored verdict array fails closed (empty), like the workspace side.
+ * The four policy columns a non-inheriting row answers with. Split out because
+ * `readEffectiveTargetSettings` decides the inheritance branch BEFORE the
+ * defaults read, and must not need a defaults object to say so.
  */
-export function effectiveTargetSettings(
-  target: ReviewTargetRow,
-  defaults: WorkspaceReviewDefaults,
-): EffectiveTargetSettings {
-  if (target.follow_workspace_defaults === 1) {
-    return {
-      triggerMode: defaults.triggerMode,
-      level: defaults.level,
-      checkMinScore: defaults.checkMinScore,
-      checkPassVerdicts: [...defaults.checkPassVerdicts],
-    };
-  }
+function ownTargetSettings(target: ReviewTargetRow): EffectiveTargetSettings {
+  const verdicts = storedPassVerdicts(target.check_pass_verdicts);
   return {
     triggerMode: target.review_trigger_mode,
     level: parseTargetReviewLevel(target.review_level),
     checkMinScore: isCheckMinScoreValue(target.check_min_score)
       ? target.check_min_score
       : DEFAULT_CHECK_MIN_SCORE,
-    checkPassVerdicts: [...(storedPassVerdicts(target.check_pass_verdicts) ?? [])],
+    // An unreadable stored verdict array fails closed (empty), like the
+    // workspace side; `checkPassVerdictsReadable` keeps the two apart.
+    checkPassVerdicts: [...(verdicts ?? [])],
+    checkPassVerdictsReadable: verdicts !== null,
   };
+}
+
+/**
+ * What the target runs with (D16). `follow_workspace_defaults = 1` answers the
+ * workspace defaults — computed here, every read, never copied into the row
+ * while inheriting. `= 0` answers the row's own four columns.
+ */
+export function effectiveTargetSettings(
+  target: ReviewTargetRow,
+  defaults: WorkspaceReviewDefaults,
+): EffectiveTargetSettings {
+  if (target.follow_workspace_defaults !== 1) return ownTargetSettings(target);
+  return {
+    triggerMode: defaults.triggerMode,
+    level: defaults.level,
+    checkMinScore: defaults.checkMinScore,
+    checkPassVerdicts: [...defaults.checkPassVerdicts],
+    checkPassVerdictsReadable: defaults.checkPassVerdictsReadable,
+  };
+}
+
+/**
+ * THE effective-settings read every lane uses (webhook trigger, review
+ * execution, Check gate, settings face): the workspace defaults are read only
+ * for a target that actually inherits, so an own-columns target pays no second
+ * D1 round trip for a value its row already answers.
+ */
+export async function readEffectiveTargetSettings(
+  db: TargetsStoreD1,
+  target: ReviewTargetRow,
+): Promise<EffectiveTargetSettings> {
+  return target.follow_workspace_defaults === 1
+    ? effectiveTargetSettings(target, await getWorkspaceReviewDefaults(db, target.workspace_id))
+    : ownTargetSettings(target);
 }
 
 /**
@@ -623,6 +664,12 @@ export function createTargetsStore(db: TargetsStoreD1) {
         }
         assignments.push("check_pass_verdicts = ?");
         values.push(JSON.stringify(config.checkPassVerdicts));
+      }
+      // First, so the row's own columns are the ones the caller just wrote —
+      // one statement, no second write and no window where the save is inert.
+      if (config.follow !== undefined) {
+        assignments.unshift("follow_workspace_defaults = ?");
+        values.unshift(config.follow);
       }
       if (assignments.length === 0) return false;
       const res = await db

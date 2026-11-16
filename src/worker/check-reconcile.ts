@@ -90,7 +90,12 @@ import {
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createReviewBotsStore } from "../dashboard/apps-store";
-import { createTargetsStore, targetCheckGate } from "../dashboard/targets-store";
+import {
+  checkGateOf,
+  createTargetsStore,
+  readEffectiveTargetSettings,
+  type ReviewTargetRow,
+} from "../dashboard/targets-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { getCheckBudgets } from "../dashboard/runtime-config-store";
 import { sha256Hex } from "../pipeline/review-threads";
@@ -1421,14 +1426,18 @@ async function readRecoveryGate(db: D1Like, scope: Scope): Promise<ReviewGate | 
   try {
     const row = await db
       .prepare(
-        `SELECT check_min_score, check_pass_verdicts FROM review_targets
+        `SELECT * FROM review_targets
           WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
             AND deleted_at IS NULL
           ORDER BY created_at, id LIMIT 1`,
       )
       .bind(scope.appId, scope.owner, scope.repo)
-      .first<{ check_min_score: number; check_pass_verdicts: string }>();
-    return row === null ? null : targetCheckGate(row);
+      .first<ReviewTargetRow>();
+    if (row === null) return null;
+    // The EFFECTIVE gate (migration 0067): an inheriting target is judged by
+    // the workspace floor it actually runs on, not by the inert placeholder
+    // columns its row still carries.
+    return checkGateOf(await readEffectiveTargetSettings(db, row));
   } catch {
     return null;
   }

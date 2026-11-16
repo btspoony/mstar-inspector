@@ -20,10 +20,12 @@ import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
 import type { TestD1 } from "../store/helpers";
 import {
+  checkGateOf,
   createTargetsStore,
   effectiveTargetSettings,
   getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
+  readEffectiveTargetSettings,
   setInheritance,
 } from "../../src/dashboard/targets-store";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
@@ -520,6 +522,7 @@ describe("effective settings and inheritance", () => {
       level: "quick",
       checkMinScore: 45,
       checkPassVerdicts: ["ship it", "blocked"],
+      checkPassVerdictsReadable: true,
     });
 
     const following = (await store.getInWorkspace(WS, "t-follow"))!;
@@ -528,6 +531,7 @@ describe("effective settings and inheritance", () => {
       level: "quick",
       checkMinScore: 45,
       checkPassVerdicts: ["ship it", "blocked"],
+      checkPassVerdictsReadable: true,
     });
     const own = (await store.getInWorkspace(WS, "t-own"))!;
     expect(effectiveTargetSettings(own, defaults)).toEqual({
@@ -535,6 +539,7 @@ describe("effective settings and inheritance", () => {
       level: "deep",
       checkMinScore: 90,
       checkPassVerdicts: ["ship it"],
+      checkPassVerdictsReadable: true,
     });
   });
 
@@ -669,6 +674,40 @@ describe("setReviewConfig", () => {
       review_trigger_mode: "every_push",
       review_level: null,
       check_min_score: 70,
+    });
+  });
+
+  test("an explicit save flips the row off inheritance in the same statement", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .prepare(
+        `UPDATE workspaces SET check_min_score = 45 WHERE id = ?`,
+      )
+      .run(WS);
+    seedBot(db, "bot-explicit");
+    const targetId = seedTarget(db, {
+      id: "t-explicit",
+      botId: "bot-explicit",
+      repoId: 10700,
+      repoOwner: "acme",
+      repoName: "widgets",
+      follow: 1,
+      minScore: 90,
+    });
+    const store = createTargetsStore(db);
+
+    // Baseline: the placeholder floor is inert while inheriting.
+    expect(checkGateOf(await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, targetId))!))).toEqual({
+      minScore: 45,
+      passVerdicts: ["ship it"],
+    });
+
+    expect(await store.setReviewConfig(WS, targetId, { checkMinScore: 90, follow: 0 })).toBe(true);
+    expect(targetRow(db, targetId)).toMatchObject({ follow_workspace_defaults: 0, check_min_score: 90 });
+    // …and the saved floor is now the one the target runs with.
+    expect(checkGateOf(await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, targetId))!))).toEqual({
+      minScore: 90,
+      passVerdicts: ["ship it"],
     });
   });
 

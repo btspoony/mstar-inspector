@@ -71,10 +71,11 @@ import {
   type PullRequestReviewing,
 } from "./apps-store";
 import {
+  checkGateOf,
   createTargetsStore,
   parseTargetReviewLevel,
+  readEffectiveTargetSettings,
   REVIEW_TRIGGER_MODES,
-  targetCheckGate,
   type ReviewTargetRow,
   type ReviewTriggerMode,
 } from "./targets-store";
@@ -3028,8 +3029,15 @@ async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response
   const targets = createTargetsStore(gate.db);
   const target = await firstTargetForBot(gate.db, gate.scope.workspaceId, app.id);
   if (!target) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  if (target.review_trigger_mode !== mode) {
-    await targets.setReviewConfig(gate.scope.workspaceId, target.id, { triggerMode: mode });
+  // Compared against the EFFECTIVE mode, not the row's placeholder: saving the
+  // mode an inheriting target already runs leaves a real change to make (the
+  // row must stop inheriting), so only an own-columns row can no-op here.
+  const current = await readEffectiveTargetSettings(gate.db, target);
+  if (current.triggerMode !== mode || target.follow_workspace_defaults === 1) {
+    // `follow: 0` in the SAME statement: a mode saved on an inheriting target
+    // would otherwise be inert — the effective answer would stay the
+    // workspace's, and the manager's choice would never take effect.
+    await targets.setReviewConfig(gate.scope.workspaceId, target.id, { triggerMode: mode, follow: 0 });
   }
   return settingsPostResponse(c, app.github_app_id, "ok");
 }
@@ -3919,7 +3927,12 @@ const appSettingsRoute = async (c: DashboardContext) => {
     // unreadable verdict list is not — the face serves `check_gate: null`,
     // every other field stays readable, and the SPA renders a read-only
     // notice instead of controls that could not round-trip.
-    const checkGate = targetCheckGate(gate.target);
+    // Everything this face reports as the target's review policy is the
+    // EFFECTIVE one (migration 0067): an inheriting target runs on the
+    // workspace answers, so the payload must not play back the inert
+    // placeholder columns its row happens to carry. One read answers all four.
+    const effective = await readEffectiveTargetSettings(gate.db, gate.target);
+    const checkGate = checkGateOf(effective);
     const githubVisibility = await apps.getGithubVisibility(app.id);
     // Task 5 / plan 371 own the settings surface: a target no longer holds an
     // installation binding (migration 0067), so the installation block stays
@@ -3947,8 +3960,8 @@ const appSettingsRoute = async (c: DashboardContext) => {
           status: app.status,
           created_by: app.created_by,
           review_enabled: gate.target.review_enabled !== 0,
-          review_trigger_mode: gate.target.review_trigger_mode,
-          review_level: parseTargetReviewLevel(gate.target.review_level),
+          review_trigger_mode: effective.triggerMode,
+          review_level: effective.level,
           default_review_level: defaultReviewLevel,
           scope: app.scope,
           github_name: app.github_name ?? null,
@@ -3987,13 +4000,12 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // read face the SPA's mode control consumes) — vocabulary-checked
         // by the column's CHECK enum, so the wire value is always one of
         // open | every_push | manual.
-        review_trigger_mode: gate.target.review_trigger_mode,
-        // The review depth (migration 0047): the stored level, or null
-        // for "follow the operator default". Read through
-        // parseTargetReviewLevel so an off-vocabulary stored value renders as
-        // the inherit face (the review path treats it the same way) instead of
-        // a dead selection.
-        review_level: parseTargetReviewLevel(gate.target.review_level),
+        review_trigger_mode: effective.triggerMode,
+        // The review depth (migration 0047): the effective level, or null
+        // for "follow the operator default" — an inheriting target answers the
+        // workspace default, an own-columns target its (vocabulary-checked)
+        // stored value.
+        review_level: effective.level,
         // The operator level the inherit face names. MANAGER face only: the
         // member face is identity-set only and renders no depth control.
         default_review_level: defaultReviewLevel,
@@ -5234,7 +5246,12 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     try {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
-      if (!(await createTargetsStore(gate.db).setReviewConfig(gate.scope.workspaceId, gate.target.id, { level }))) {
+      if (
+        !(await createTargetsStore(gate.db).setReviewConfig(gate.scope.workspaceId, gate.target.id, {
+          level,
+          follow: 0,
+        }))
+      ) {
         throw new Error(`app ${gate.app.id} vanished before its review level save`);
       }
     } catch (err) {
@@ -5284,6 +5301,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         !(await createTargetsStore(gate.db).setReviewConfig(gate.scope.workspaceId, gate.target.id, {
           checkMinScore: minScore,
           checkPassVerdicts: passVerdicts,
+          follow: 0,
         }))
       ) {
         throw new Error(`app ${gate.app.id} vanished before its review gate save`);
