@@ -412,6 +412,50 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     expect(res.status).toBe(404);
   });
 
+  /**
+   * The contract's visibility rule is the sibling reads' resolve: a shared bot
+   * is reachable only through a live target this workspace already holds on it.
+   * The first repository on a shared bot stays out of scope (compass Non-Goal),
+   * so the POST refuses exactly as the GET does — no write, no partial add.
+   */
+  test("a shared bot with no live target here is a 404, and becomes reachable once one exists", async () => {
+    const { db } = await seededWorld({ target: false });
+    const sharedId = "bot-shared-platform";
+    db.raw
+      .prepare(
+        `INSERT INTO review_bots
+           (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+            created_by, status, scope, shared_at, created_at, updated_at)
+         VALUES (?, 'platform-bot', 9403, 'platform-bot', 'enc', 'enc', 'mallory',
+                 'active', 'shared', datetime('now'), datetime('now'), datetime('now'))`,
+      )
+      .run(sharedId);
+    db.raw
+      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+      .run(sharedId, OTHER_WS);
+
+    const body = {
+      bot_id: sharedId,
+      repositories: [{ repo_id: 1301, owner: "acme", name: "api" }],
+    };
+    const refused = await post(db, "/dashboard/default/api/targets", "mallory", body);
+    expect(refused.status).toBe(404);
+    expect(await refused.json()).toEqual({ error: "unknown app" });
+    const written = db.raw
+      .query("SELECT COUNT(*) AS n FROM review_targets WHERE bot_id = ?")
+      .get(sharedId) as { n: number };
+    expect(written.n).toBe(0);
+
+    // The workspace now holds a live target on it: the bot is visible, so the
+    // next repository is an ordinary create.
+    seedTarget(db, sharedId, { workspaceId: "default", repoId: 1302, repoOwner: "acme", repoName: "web" });
+    const accepted = await post(db, "/dashboard/default/api/targets", "mallory", body);
+    expect(accepted.status).toBe(201);
+    const acceptedBody = (await accepted.json()) as { created: Array<{ repo_id: number }>; duplicates: unknown[] };
+    expect(acceptedBody.created.map((row) => row.repo_id)).toEqual([1301]);
+    expect(acceptedBody.duplicates).toEqual([]);
+  });
+
   test("a plain member is refused before any write", async () => {
     const { db, botId } = await seededWorld({ target: false });
 

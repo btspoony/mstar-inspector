@@ -1974,13 +1974,16 @@ export function parseInstallationRepositories(
   return { repositories, degraded: data.degraded === true };
 }
 
+/** One row `POST /api/targets` reports under `created` — a written target. */
+export type CreatedTarget = { target_id: string; repo_id: number; repo_owner: string; repo_name: string };
+
 /**
  * `POST /api/targets` 201 body. `duplicates` is the partial outcome the dialog
  * reports: the rows in `created` are written, the listed repositories are not.
  */
 export function parseTargetCreate(
   body: string,
-): { created: number; duplicates: InstallationRepositoryOption[] } | null {
+): { created: CreatedTarget[]; duplicates: InstallationRepositoryOption[] } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -1988,6 +1991,20 @@ export function parseTargetCreate(
     return null;
   }
   if (!isRecord(parsed) || !Array.isArray(parsed.created)) return null;
+  const created: CreatedTarget[] = [];
+  for (const value of parsed.created) {
+    if (!isRecord(value)) continue;
+    const { target_id, repo_id, repo_owner, repo_name } = value;
+    if (
+      typeof target_id !== "string" ||
+      typeof repo_id !== "number" ||
+      typeof repo_owner !== "string" ||
+      typeof repo_name !== "string"
+    ) {
+      continue;
+    }
+    created.push({ target_id, repo_id, repo_owner, repo_name });
+  }
   const duplicates: InstallationRepositoryOption[] = [];
   if (Array.isArray(parsed.duplicates)) {
     for (const value of parsed.duplicates) {
@@ -1997,7 +2014,7 @@ export function parseTargetCreate(
       duplicates.push({ repo_id, owner, name });
     }
   }
-  return { created: parsed.created.length, duplicates };
+  return { created, duplicates };
 }
 
 /**

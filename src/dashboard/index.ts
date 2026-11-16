@@ -2865,6 +2865,8 @@ const appListRoute = async (c: DashboardContext) => {
         // App id + the cached GitHub facts (D6): the list links and labels by
         // the immutable id, and renders whatever GitHub currently calls the App.
         github_app_id: app.github_app_id,
+        // The local bot UID: the add-repository POST names it as `bot_id`.
+        bot_id: app.id,
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
         github_avatar_url: app.github_avatar_url ?? null,
@@ -6067,13 +6069,16 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   if (botId === "" || repositories.length === 0) {
     return c.json({ error: "no repositories selected" }, 400);
   }
-  // Visibility first, then the manager verdict: a bot this workspace neither
-  // owns nor shares (and holds no target on) is the family's 404, never a write.
-  const app = await createReviewBotsStore(member.db).getAppById(botId);
-  if (!app || app.deleted_at !== null) return c.json({ error: "unknown app" }, 404);
-  if (app.workspace_id !== member.scope.workspaceId && app.scope !== "shared") {
-    return c.json({ error: "unknown app" }, 404);
-  }
+  // Visibility first, then the manager verdict: the body names a local bot id,
+  // so resolve the row to its GitHub App id and put it through the SAME
+  // workspace-scoped resolve the sibling reads use — owned bots plus shared
+  // bots already holding a live target here (frozen contract, compass
+  // Non-Goal). A bot invisible to that rule is the family's 404, never a write.
+  const apps = createReviewBotsStore(member.db);
+  const named = await apps.getAppById(botId);
+  if (!named || named.deleted_at !== null) return c.json({ error: "unknown app" }, 404);
+  const app = await resolveScopedApp(apps, String(named.github_app_id), member.scope);
+  if (!app) return c.json({ error: "unknown app" }, 404);
   const store = createTargetsStore(member.db);
   const created: Array<{ target_id: string; repo_id: number; repo_owner: string; repo_name: string }> = [];
   const duplicates: Array<{ repo_id: number; owner: string; name: string }> = [];

@@ -14,18 +14,25 @@
  * with every state as a prop, which is what a DOM-less runner can render.
  */
 import { describe, expect, test } from "bun:test";
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { type Element as DomElement, type Window as DomWindow } from "happy-dom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
+import type { SpaBoot } from "../../src/spa/boot";
 import {
   AddRepositoryDialogBody,
+  AddRepositoryDialog,
   repositoryCountLabel,
+  TargetsPage,
   TargetsView,
   targetStatusPill,
 } from "../../src/spa/pages/TargetsPage";
 import type { RepositoryOptionsState } from "../../src/spa/pages/TargetsPage";
+import { parseTargetCreate } from "../../src/spa/pages/data";
 import type { InstallationRepositoryOption, RepositoryAppOption, TargetListRow } from "../../src/spa/pages/data";
 import { withLocation } from "./browser-stub";
+import { installDom } from "./dom";
 
 const row = (overrides: Partial<TargetListRow> = {}): TargetListRow => ({
   target_id: "t-1",
@@ -277,5 +284,239 @@ describe("add-repository dialog (static SSR)", () => {
       repos: { state: "ok", repositories: [{ repo_id: 501, owner: "acme", name: "api" }], degraded: true },
     });
     expect(markup).toContain(t("en", "targets.addDialog.degraded"));
+  });
+});
+
+// --- mounted (stateful dialog + page) --------------------------------------
+
+type Wire = { url: string; method: string; body: string | null };
+
+const wireJson = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+/** One installation listing, as the dialog's read consumes it. */
+const listing = (rows: Array<{ repo_id: number; owner: string; name: string }>) =>
+  wireJson({ repositories: rows, degraded: false });
+
+const BOOT: SpaBoot = {
+  locale: "en",
+  login: "mallory",
+  name: null,
+  workspaceRef: "acme",
+  memberships: [{ id: "acme", slug: "acme", name: "Acme", role: "owner", plan: "Free" }],
+};
+
+/**
+ * Mount `element` on the targets URL with a recorded fetch stub. Teardown
+ * unmounts, restores `fetch` and removes the window, including on a throw.
+ */
+async function mountTargets(
+  element: ReturnType<typeof createElement>,
+  respond: (wire: Wire) => Response | Promise<Response>,
+) {
+  const { win, cleanup } = installDom("http://localhost/dashboard/acme/targets");
+  const realFetch = globalThis.fetch;
+  const sent: Wire[] = [];
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const wire: Wire = {
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? init.body : null,
+    };
+    sent.push(wire);
+    return await respond(wire);
+  }) as unknown as typeof fetch;
+  const container = win.document.createElement("div");
+  win.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  const settle = async () => {
+    for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+  };
+  await act(async () => root.render(element));
+  await settle();
+  return {
+    win,
+    sent,
+    dialog: (): DomElement | null => win.document.querySelector('[role="dialog"]') as unknown as DomElement | null,
+    text: () => container.textContent ?? "",
+    click: async (node: DomElement | null | undefined) => {
+      await act(async () => {
+        node?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      await settle();
+    },
+    /** Open a Radix Select (pointerdown is what it listens for), then pick by label. */
+    pickApp: async (label: string) => {
+      const trigger = win.document.querySelector('[role="combobox"]');
+      await act(async () => {
+        trigger?.dispatchEvent(
+          new win.PointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerType: "mouse",
+          }),
+        );
+        trigger?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      const option = [...win.document.querySelectorAll('[role="option"]')].find(
+        (node) => node.textContent === label,
+      );
+      await act(async () => {
+        option?.dispatchEvent(
+          new win.PointerEvent("pointerup", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerType: "mouse",
+          }),
+        );
+        option?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      await settle();
+    },
+    unmount: async () => {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    },
+  };
+}
+
+const confirmButton = (win: DomWindow): DomElement | null => {
+  const dialog = win.document.querySelector('[role="dialog"]');
+  const buttons = [...(dialog?.querySelectorAll("button") ?? [])];
+  return buttons.find((button) => button.textContent === t("en", "targets.addDialog.confirm")) ?? null;
+};
+
+describe("add-repository dialog (mounted)", () => {
+  test("a stale repository read cannot overwrite the App now selected", async () => {
+    let releaseFirst: () => void = () => {};
+    const firstAnswer = new Promise<Response>((resolve) => {
+      releaseFirst = () => resolve(listing([{ repo_id: 501, owner: "acme", name: "api" }]));
+    });
+    const view = await mountTargets(
+      createElement(AddRepositoryDialog, {
+        locale: "en",
+        open: true,
+        apps: [app(), app({ app_id: 9402, bot_id: "bot-2", name: "Second App" })],
+        existingRepoIds: new Set<number>(),
+        onAdded: () => {},
+        onClose: () => {},
+      }),
+      (wire) => {
+        if (wire.url.endsWith("/api/apps/9401/installation-repositories")) return firstAnswer;
+        if (wire.url.endsWith("/api/apps/9402/installation-repositories")) {
+          return listing([{ repo_id: 502, owner: "acme", name: "web" }]);
+        }
+        return wireJson({});
+      },
+    );
+    try {
+      // Switch to the second App while the first App's walk is still in flight.
+      await view.pickApp("Second App");
+      expect(view.dialog()?.textContent ?? "").toContain("acme/web");
+
+      // The slow answer for the App the user left lands last and must be dropped.
+      releaseFirst();
+      for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+      const text = view.dialog()?.textContent ?? "";
+      expect(text).toContain("acme/web");
+      expect(text).not.toContain("acme/api");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a duplicate refusal keeps the dialog open with its notice across the refresh", async () => {
+    // The refresh the add triggers is held open: a reload that put the page back
+    // on its skeleton would unmount the dialog (and its notice) right here.
+    let releaseRefresh: () => void = () => {};
+    const heldRefresh = new Promise<Response>((resolve) => {
+      releaseRefresh = () => resolve(wireJson({ targets: [row()] }));
+    });
+    let afterPost = false;
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/targets") && wire.method === "POST") {
+        afterPost = true;
+        return wireJson({ created: [], duplicates: [{ repo_id: 501, owner: "acme", name: "api" }] }, 201);
+      }
+      if (wire.url.endsWith("/api/targets")) {
+        return afterPost ? heldRefresh : wireJson({ targets: [] });
+      }
+      if (wire.url.endsWith("/api/apps")) {
+        return wireJson({
+          viewer: { login: "mallory", role: "admin" },
+          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector" }],
+          shared_bots: [],
+        });
+      }
+      if (wire.url.endsWith("/installation-repositories")) {
+        return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
+      }
+      return wireJson({});
+    });
+    try {
+      const addButton = [...view.win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      await view.click(addButton);
+      await view.click(view.win.document.querySelector('input[type="checkbox"]') as unknown as DomElement | null);
+      await view.click(confirmButton(view.win));
+
+      // While the list refresh is still in flight the dialog is still mounted
+      // and still carries the refusal notice.
+      const pending = view.dialog();
+      expect(pending).not.toBeNull();
+      expect(pending?.textContent ?? "").toContain(
+        t("en", "targets.addDialog.duplicates").replace("{names}", "acme/api"),
+      );
+      expect(view.win.document.querySelector('[data-slot="page-skeleton"]')).toBeNull();
+
+      // ...and it survives the refresh landing.
+      releaseRefresh();
+      for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+      const landed = view.dialog();
+      expect(landed).not.toBeNull();
+      expect(landed?.textContent ?? "").toContain(
+        t("en", "targets.addDialog.duplicates").replace("{names}", "acme/api"),
+      );
+      expect(view.win.document.querySelector('[data-slot="page-skeleton"]')).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+});
+
+describe("target create parser", () => {
+  test("keeps the created rows, not just their count", () => {
+    const parsed = parseTargetCreate(
+      JSON.stringify({
+        created: [{ target_id: "t-9", repo_id: 901, repo_owner: "acme", repo_name: "new" }],
+        duplicates: [{ repo_id: 501, owner: "acme", name: "api" }],
+      }),
+    );
+    expect(parsed?.created).toEqual([
+      { target_id: "t-9", repo_id: 901, repo_owner: "acme", repo_name: "new" },
+    ]);
+    expect(parsed?.duplicates).toEqual([{ repo_id: 501, owner: "acme", name: "api" }]);
+  });
+});
+
+describe("the list failure face", () => {
+  test("a failed list read offers no add dialog (an empty App list is not 'no apps')", async () => {
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), () =>
+      wireJson({ error: "boom" }, 500),
+    );
+    try {
+      expect(view.text()).toContain(t("en", "common.loadFailed"));
+      expect(
+        [...view.win.document.querySelectorAll("button")].some(
+          (button) => button.textContent === t("en", "targets.add"),
+        ),
+      ).toBe(false);
+    } finally {
+      await view.unmount();
+    }
   });
 });

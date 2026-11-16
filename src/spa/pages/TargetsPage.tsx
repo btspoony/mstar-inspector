@@ -398,10 +398,15 @@ export function AddRepositoryDialog({
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const cancelledRef = useRef(false);
+  // Every read is stamped. A response lands only while its stamp is still the
+  // newest one, so a slow walk for the App the user switched AWAY from can
+  // never overwrite the list of the App now selected (a boolean reset by the
+  // next effect body would always pass that check).
+  const requestRef = useRef(0);
 
   const loadRepositories = useCallback(
     async (targetAppId: string): Promise<void> => {
+      const request = ++requestRef.current;
       if (targetAppId === "") {
         setRepositories({ state: "loading" });
         return;
@@ -411,27 +416,25 @@ export function AddRepositoryDialog({
         const parsed = parseInstallationRepositories(
           await fetchJson(`${base}/api/apps/${targetAppId}/installation-repositories`),
         );
-        if (cancelledRef.current) return;
+        if (requestRef.current !== request) return;
         setRepositories(
           parsed === null
             ? { state: "error" }
             : { state: "ok", repositories: parsed.repositories, degraded: parsed.degraded },
         );
       } catch {
-        if (!cancelledRef.current) setRepositories({ state: "error" });
+        if (requestRef.current === request) setRepositories({ state: "error" });
       }
     },
     [base],
   );
 
   useEffect(() => {
-    cancelledRef.current = false;
-    if (!open) return () => {
-      cancelledRef.current = true;
-    };
+    if (!open) return;
     void loadRepositories(appId);
+    // Closing (or another App) retires whatever is still in flight.
     return () => {
-      cancelledRef.current = true;
+      requestRef.current += 1;
     };
   }, [open, appId, loadRepositories]);
 
@@ -464,16 +467,20 @@ export function AddRepositoryDialog({
       // The rows that landed are no longer offerable; the refused ones stay
       // selected so the user can see what already existed.
       setSelected(new Set(parsed.duplicates.map((repository) => repository.repo_id)));
-      onAdded();
       if (parsed.duplicates.length > 0) {
+        // The notice must be on screen BEFORE the list refetch, and that
+        // refetch must not tear the dialog (or its notice) down: `onAdded`
+        // refreshes in the background, so this subtree stays mounted.
         setNotice({
           kind: "warn",
           message: t(locale, "targets.addDialog.duplicates", {
             names: parsed.duplicates.map((repository) => `${repository.owner}/${repository.name}`).join(", "),
           }),
         });
+        onAdded();
         return;
       }
+      onAdded();
       onClose();
     } catch {
       setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
@@ -537,19 +544,23 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [dialogOpen, setDialogOpen] = useState(false);
 
-  const load = useCallback(async (): Promise<void> => {
-    setState("loading");
+  // The first load owns the skeleton; a reload (after an add) refreshes in the
+  // background so the list and the add dialog stay mounted — a skeleton flash
+  // would unmount the dialog's notice. A failed background read keeps the rows
+  // the page last read successfully rather than blanking them.
+  const load = useCallback(async ({ background = false }: { background?: boolean } = {}): Promise<void> => {
+    if (!background) setState("loading");
     try {
       const loaded = await loadTargets(base);
       if (loaded === null) {
-        setState("error");
+        if (!background) setState("error");
         return;
       }
       setTargets(loaded);
       setApps((await loadRepositoryApps(base)) ?? []);
       setState("ok");
     } catch {
-      setState("error");
+      if (!background) setState("error");
     }
   }, [base]);
 
@@ -572,7 +583,11 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
       targets={targets}
       onRetry={() => void load()}
       addControl={
-        canManageHere(boot) ? (
+        // The dialog is only reachable once the list and the App list have been
+        // read: on the error face `apps` is empty, so mounting it would invite
+        // the user to "add" against "no application yet" for what is actually a
+        // transient read failure.
+        state === "ok" && canManageHere(boot) ? (
           <div className="flex flex-col items-end gap-2">
             <Button type="button" onClick={() => setDialogOpen(true)}>
               {t(locale, "targets.add")}
@@ -583,7 +598,7 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
               onClose={() => setDialogOpen(false)}
               apps={apps}
               existingRepoIds={existingRepoIds}
-              onAdded={() => void load()}
+              onAdded={() => void load({ background: true })}
             />
           </div>
         ) : undefined
