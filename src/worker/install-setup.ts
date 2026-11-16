@@ -2,7 +2,7 @@
  * `/bot/setup` — the Setup URL GitHub redirects to after an App installation
  * (contract § 8.6/§ 8.7). GitHub contributes exactly two query parameters
  * (`installation_id`, `setup_action`) and NO `state`, so this route treats the
- * signed-in session as the identity: the target page already recorded a
+ * signed-in session as the identity: the app's page already recorded a
  * short-lived `install_claims` row, and the claim is the only carrier of
  * intent.
  *
@@ -12,7 +12,7 @@
  *     or an unknown `setup_action` is `400 bad setup request` before any read.
  *   - `GET` binds ONLY when the session holds exactly one live claim. Zero
  *     claims explain themselves; more than one is listed for an explicit
- *     `POST`, because guessing among targets is exactly what the absence of
+ *     `POST`, because guessing among Apps is exactly what the absence of
  *     `state` forbids and a prefetch must never choose.
  *   - The route holds no SQL: `install-claims-store` owns the claim lifecycle
  *     and the one bind batch, so this file only validates, identifies and maps
@@ -86,7 +86,7 @@ async function setupIdentity(c: SetupContext): Promise<SetupIdentity> {
         401,
         "unauthenticated",
         `<h1>unauthenticated</h1>
-         <p>Sign in to the dashboard, then start the installation from the target's page again.</p>
+         <p>Sign in to the dashboard, then start the installation from the app's page again.</p>
          <p><a href="/dashboard/login">Sign in</a></p>`,
       ),
     };
@@ -99,12 +99,8 @@ function refusalResponse(c: SetupContext, outcome: Exclude<InstallBindOutcome, {
   switch (outcome.outcome) {
     case "claim_not_found":
       return c.text("claim not found", 404);
-    case "target_not_bindable":
-      return c.text("target not bindable", 409);
     case "bot_not_shared":
       return c.text("bot is not shared", 409);
-    case "installation_already_bound":
-      return c.text("installation already bound", 409);
   }
 }
 
@@ -114,7 +110,7 @@ function noLiveClaimPage(c: SetupContext): Response {
     200,
     "no_live_claim",
     `<h1>no_live_claim</h1>
-     <p>No live installation claim for your account. Open the review target's page and press install again.</p>
+     <p>No live installation claim for your account. Open the app's page and press install again.</p>
      <p><a href="/dashboard">Back to the dashboard</a></p>`,
   );
 }
@@ -125,27 +121,29 @@ function noLiveClaimPage(c: SetupContext): Response {
  * an `installation_id` to a URL the browser reaches by a top-level GET, so the
  * installation id is caller-supplied and unverified; the user has to see it and
  * submit the form before anything binds. The installation id is shown for that
- * reason, and each claim is listed with its target, workspace and claimed
- * instant so the attempts are distinguishable.
+ * reason, and each claim is listed with its App, workspace and claimed instant
+ * so the attempts are distinguishable. A claim names a BOT (D19), never a
+ * target: an installation is the App's, and the repositories it reviews are
+ * targets a manager adds afterwards.
  */
 function confirmPage(c: SetupContext, installationId: number, claims: InstallClaim[]): Response {
   const forms = claims
     .map(
       (claim) => `<li>
-        <p>target <code>${escapeHtml(claim.target_id)}</code> in workspace
+        <p>app <code>${escapeHtml(claim.bot_name)}</code> in workspace
            <code>${escapeHtml(claim.workspace_id)}</code>, claimed ${escapeHtml(claim.created_at)}</p>
         <form method="post" action="/bot/setup">
           <input type="hidden" name="claim_id" value="${escapeHtml(claim.id)}">
           <input type="hidden" name="installation_id" value="${installationId}">
-          <button type="submit">Bind this target</button>
+          <button type="submit">Bind this installation</button>
         </form>
       </li>`,
     )
     .join("");
   const choice =
     claims.length === 1
-      ? "Confirm that this installation reviews the target below."
-      : "Your account holds more than one live claim. Choose the target this installation reviews.";
+      ? "Confirm that this installation belongs to the app below."
+      : "Your account holds more than one live claim. Choose the app this installation belongs to.";
   return htmlPage(
     c,
     200,
@@ -157,13 +155,14 @@ function confirmPage(c: SetupContext, installationId: number, claims: InstallCla
   );
 }
 
-function boundPage(c: SetupContext, installationId: number, targetId: string): Response {
+function boundPage(c: SetupContext, installationId: number, botId: string): Response {
   return htmlPage(
     c,
     200,
     "bound",
     `<h1>bound</h1>
-     <p>Installation <code>${installationId}</code> now reviews target <code>${escapeHtml(targetId)}</code>.</p>`,
+     <p>Installation <code>${installationId}</code> is now recorded for app <code>${escapeHtml(botId)}</code>.</p>
+     <p><a href="/dashboard">Add the repositories this installation should review</a></p>`,
   );
 }
 
@@ -235,5 +234,5 @@ export async function handleSetupPost(c: SetupContext): Promise<Response> {
     now: new Date().toISOString(),
   });
   if (outcome.outcome !== "bound") return postRefusalResponse(c, outcome);
-  return boundPage(c, installationId, outcome.targetId);
+  return boundPage(c, installationId, outcome.botId);
 }

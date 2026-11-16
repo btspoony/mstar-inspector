@@ -137,14 +137,24 @@ export async function createSeededTestD1(): Promise<TestD1> {
     .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
     .run(TEST_APP_ID);
   // …and one review target: the consumer reads the depth, the gate and the
-  // business pause from it, so a targetless App is a DLQ, not a review.
+  // business pause from it, so a targetless App is a DLQ, not a review. It is
+  // the repository the fixture PR belongs to (0067): the Check lane resolves
+  // the gate by the bot + owner/name pair the delivery carries.
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
-       VALUES (?, 'default', ?, 'consumer-test-app', ?, 'tester', datetime('now'), datetime('now'))`,
+         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+          check_min_score, created_by, created_at, updated_at)
+       VALUES (?, 'default', ?, 'consumer-test-app', ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
     )
-    .run(`target-${TEST_APP_ID}`, TEST_APP_ID, DEFAULT_CHECK_MIN_SCORE);
+    .run(
+      `target-${TEST_APP_ID}`,
+      TEST_APP_ID,
+      TEST_REPO_ID,
+      TEST_OWNER,
+      TEST_REPO,
+      DEFAULT_CHECK_MIN_SCORE,
+    );
   // The default App's per-App AI config (AL-24-5 health baseline). AWAITED
   // so the seed completes before any caller re-seeds the same bot_id with a
   // different chain (Rev24T6 Important-2: the fire-and-forget seed raced
@@ -268,6 +278,8 @@ export const VALID_DIFF = [
 export const TEST_INSTALLATION_ID = 123;
 export const TEST_OWNER = "acme";
 export const TEST_REPO = "widgets";
+/** GitHub's numeric id for `acme/widgets` — the target's identity (0067). */
+export const TEST_REPO_ID = 4242;
 export const TEST_PR_NUMBER = 42;
 
 /**

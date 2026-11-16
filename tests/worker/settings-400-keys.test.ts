@@ -7,7 +7,7 @@
  * no new reason value. Static-key bodies carry no `params` field.
  */
 import { describe, expect, spyOn, test } from "bun:test";
-import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -41,6 +41,7 @@ async function seededWorld(malloryRole: "owner" | "member" = "owner") {
     createdBy: "mallory",
     workspaceId: "default",
   });
+  seedTarget(db, id, { name: "mallorys-app" });
   return { db, app };
 }
 

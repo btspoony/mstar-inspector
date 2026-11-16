@@ -38,7 +38,6 @@ import {
   pullRequestRecord,
   WEBHOOK_BODY_LIMIT,
   webhookRepositoryFullName,
-  webhookRepositoryOwnerLogin,
   type WebhookOutcome,
 } from "./webhooks";
 import { defaultLog, deliveryRefusalReason, handleReviewJob, type DeliveryRefusal } from "./handlers";
@@ -50,8 +49,8 @@ import {
 } from "../dashboard/apps-store";
 import {
   createTargetsStore,
+  getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
-  type OwnerAllowlist,
   type ReviewTargetRow,
 } from "../dashboard/targets-store";
 import { readDefaultReviewLevel } from "../dashboard/runtime-config-store";
@@ -575,10 +574,13 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
 
   // The review configuration a delivery reads lives on the bot's target, not
-  // on the bot row: trigger mode, the owner allowlist and the business pause.
-  // The installation that selects a bound target exists only in the body, so
-  // resolution runs inside the classifier's seam — after signature
-  // verification, before classification (whose trigger mode it supplies).
+  // on the bot row: trigger mode and the business pause. A target IS a
+  // repository now (migration 0067), so resolution needs the delivery's own
+  // repository — which exists only in the body, so resolution runs inside the
+  // classifier's seam: after signature verification, before classification
+  // (whose trigger mode it supplies). The trigger mode comes from the
+  // EFFECTIVE settings, so one `workspaces` defaults read answers it per
+  // delivery.
   const targetsStore = createTargetsStore(db);
   const delivery: { target: ReviewTargetRow | null; installationId: number | null } = {
     target: null,
@@ -627,11 +629,22 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     eventName,
     defaultLog,
     row.id,
-    async (installationId) => {
+    async ({ installationId, repository }) => {
       delivery.installationId = installationId;
-      delivery.target = await targetsStore.resolve(row.id, installationId);
+      // The classifier consults a resolver only for a body that names a
+      // repository, so this is non-null by contract.
+      const repo = repository!;
+      delivery.target = await targetsStore.resolveByRepo(row.id, repo);
       const target = delivery.target;
-      return target === null ? null : { mode: target.review_trigger_mode, appSlug };
+      if (target === null) return null;
+      // Only a following target reads the workspace defaults: an own-columns
+      // target answers its stored mode directly (the column is CHECK-bound to
+      // the vocabulary), so the common path saves one D1 read per delivery.
+      const mode =
+        target.follow_workspace_defaults === 1
+          ? (await getWorkspaceReviewDefaults(db, target.workspace_id)).triggerMode
+          : target.review_trigger_mode;
+      return { mode, appSlug };
     },
     (parsed) => {
       classified = parsed;
@@ -680,69 +693,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // record and at the pause gate. A delivery with no target cannot be a job,
   // so it carries no pause state.
   const paused = target !== null && (row.review_enabled === 0 || target.review_enabled === 0);
-  // Owner allowlist admission (migration 0045, AC5–AC7): after classification,
-  // BEFORE any ledger write, and ONLY for the two review-triggering events
-  // (`pull_request`, `issue_comment`) — the events this route can enqueue a
-  // review for. Every other event, `installation` bookkeeping included, is
-  // never gated: it has no review to admit or refuse. A `reject` is never
-  // gated either: the classifier already refused the delivery (malformed
-  // payload, bad signature) and its status is the answer GitHub must see, so
-  // the gate must not mask a 400/401 with the allowlist's 200 or 500.
-  // An App whose switch is on reviews only the repository owners it lists;
-  // the login comes off the classifier's own single parse, so the up-to-1 MB
-  // body is never re-parsed.
-  // That parse is pure and a review-triggering payload without a repository
-  // owner cannot be judged, so such a delivery proceeds. The cached
-  // `github_visibility` is NOT part of this decision: `private` only hides the
-  // Settings control, and a stale cached `private` must never leave the gate
-  // inert. The switch and the owner set come from ONE `getAllowlist` snapshot
-  // of the RESOLVED TARGET — no bot column is consulted for this decision, and
-  // a delivery with no target never reaches here (nothing to admit). A
-  // refusal is a 200 (GitHub must not retry) with no `webhook_deliveries` row,
-  // no `pull_requests` row, no `last_webhook_at` touch and no enqueue. An
-  // allowlist that cannot be read — a thrown read, or a null on a row that was
-  // read moments earlier — is fail-CLOSED: 500 with those same zero writes, so
-  // an unapplied gate never admits a delivery.
-  const reviewTriggering =
-    outcome.kind !== "reject" && (eventName === "pull_request" || eventName === "issue_comment");
-  const ownerLogin = reviewTriggering ? webhookRepositoryOwnerLogin(classified) : null;
-  if (ownerLogin !== null && target !== null) {
-    let allowlist: OwnerAllowlist | null;
-    try {
-      allowlist = await targetsStore.getAllowlist(target.workspace_id, target.id);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      webhookWarn(
-        "owner_allowlist_read_failed",
-        detail,
-        "owner allowlist read failed — delivery refused with 500 so GitHub retries (fail-closed); zero writes, zero enqueue",
-      );
-      return c.text("owner allowlist unreadable", 500);
-    }
-    if (allowlist === null) {
-      // `getAppForWebhook` resolved this row moments ago, so a null here means
-      // it vanished underneath us: the gate's state is unknown, not absent.
-      webhookWarn(
-        "owner_allowlist_row_vanished",
-        `${webhookRef} row_id=${row.id}`,
-        "owner allowlist row vanished after the App lookup — delivery refused with 500 so GitHub retries (fail-closed); zero writes, zero enqueue",
-      );
-      return c.text("owner allowlist unreadable", 500);
-    }
-    // GitHub logins are case-insensitive; the stored list keeps the
-    // operator's case, so fold both sides (the users.ts login-list rule).
-    if (
-      allowlist.enabled &&
-      !allowlist.owners.some((owner) => owner.toLowerCase() === ownerLogin.toLowerCase())
-    ) {
-      webhookWarn(
-        "owner_not_allowlisted",
-        `${webhookRef} row_id=${row.id} owner=${ownerLogin}`,
-        "per-App webhook skipped a delivery from a repository owner outside the allowlist — zero writes, 200 so GitHub stops retrying",
-      );
-      return c.text("ignored", 200);
-    }
-  }
+  // Owner allowlist admission is GONE with migration 0067 (D18): an App
+  // reviews every repository its targets name, and a repository owner outside
+  // any list is admitted exactly like one inside it. Nothing here can refuse a
+  // verified delivery before the delivery record.
 
   // AL-20-1: best-effort delivery recording — the R2 diagnostics
   // face ("断线看得见"). ONE row per ADMITTED verified delivery, written

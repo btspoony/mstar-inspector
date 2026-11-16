@@ -224,7 +224,7 @@ function appSnapshot(db: TestD1, appId = "app-acme") {
     // moved them must show here.
     target: db.raw
       .query(
-        `SELECT review_enabled, review_trigger_mode, review_level, check_min_score, allowlist_enabled
+        `SELECT review_enabled, review_trigger_mode, review_level, check_min_score
            FROM review_targets WHERE bot_id = ?`,
       )
       .get(appId),

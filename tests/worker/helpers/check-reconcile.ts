@@ -60,9 +60,22 @@ export function seedApp(
   db: TestD1,
   id: string,
   githubAppId: number,
-  options: { install?: boolean; installationId?: number; status?: string } = {},
+  options: {
+    install?: boolean;
+    installationId?: number;
+    status?: string;
+    /** The target's repository cache — the Check lane's gate lookup key. */
+    repoOwner?: string;
+    repoName?: string;
+  } = {},
 ): void {
-  const { install = true, installationId = 123, status = "active" } = options;
+  const {
+    install = true,
+    installationId = 123,
+    status = "active",
+    repoOwner = SCOPE.owner,
+    repoName = SCOPE.repo,
+  } = options;
   db.raw
     .prepare(
       `INSERT INTO review_bots
@@ -71,14 +84,16 @@ export function seedApp(
        VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
     )
     .run(id, `checks-${id}`, githubAppId, `checks-${id}`, status);
-  // One review target per bot: the gate the reconcile lane re-reads lives there.
+  // One review target per bot, keyed by the repository it reviews (migration
+  // 0067): the gate the reconcile lane re-reads lives there.
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
-       VALUES (?, 'default', ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
+         (id, workspace_id, bot_id, name, repo_owner, repo_name, check_min_score,
+          created_by, created_at, updated_at)
+       VALUES (?, 'default', ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
     )
-    .run(`target-${id}`, id, `checks-${id}`, DEFAULT_CHECK_MIN_SCORE);
+    .run(`target-${id}`, id, `checks-${id}`, repoOwner, repoName, DEFAULT_CHECK_MIN_SCORE);
   if (install) {
     db.raw
       .prepare(
@@ -92,7 +107,11 @@ export function seedApp(
 export function seededDb(): TestD1 {
   const db = createMigratedTestD1();
   seedApp(db, APP, NUMERIC_APP);
-  seedApp(db, APP_B, NUMERIC_APP_B, { installationId: SCOPE_B.installationId });
+  seedApp(db, APP_B, NUMERIC_APP_B, {
+    installationId: SCOPE_B.installationId,
+    repoOwner: SCOPE_B.owner,
+    repoName: SCOPE_B.repo,
+  });
   return db;
 }
 

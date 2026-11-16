@@ -74,7 +74,7 @@ async function seedApp(
   // route assertions below can name the App without re-reading the row.
   const id = `app-${opts.slug}`;
   const enc = await encryptedColumns(id);
-  return createReviewBotsStore(db).createApp({
+  const row = await createReviewBotsStore(db).createApp({
     id,
     githubSlug: opts.slug,
     githubAppId: opts.githubAppId,
@@ -84,6 +84,20 @@ async function seedApp(
     createdBy: opts.createdBy,
     workspaceId: "default",
   });
+  // A target IS a repository (migration 0067) and creation no longer writes
+  // one, so the fixture gives each App its single reviewing target: the App
+  // pages' target-owned configuration (pause, trigger mode, gate, depth) reads
+  // that row.
+  const created = await createTargetsStore(db).create({
+    workspaceId: "default",
+    botId: id,
+    repoId: 900000 + opts.githubAppId,
+    repoOwner: "acme",
+    repoName: opts.slug,
+    createdBy: opts.createdBy,
+  });
+  if (created.outcome !== "created") throw new Error(`seed: target for ${id} was refused`);
+  return row;
 }
 
 /**
@@ -359,8 +373,8 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
     const apps = createReviewBotsStore(db);
     const bot = (await apps.listApps()).find((a) => a.github_app_id === MALLORY_APP_ID)!;
     const targets = createTargetsStore(db);
-    const target = (await targets.resolve(bot.id, null))!;
-    await targets.setReviewEnabled(target.workspace_id, target.id, false);
+    const target = (await targets.listLive("default")).find((t) => t.bot_id === bot.id)!;
+    await targets.setReviewEnabled("default", target.id, false);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/resume`, cookie, makeEnv(db));
     expect(res.status).toBe(200);
@@ -532,7 +546,7 @@ describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App revie
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     db.raw
       .prepare(
-        `UPDATE review_targets SET updated_at = '2026-01-01 00:00:00'
+        `UPDATE review_targets SET updated_at = '2026-01-01 00:00:00', follow_workspace_defaults = 0
           WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)`,
       )
       .run(MALLORY_APP_ID);
@@ -869,92 +883,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
 });
 
 /**
- * `POST /dashboard/:ref/apps/:appId/park` — the manager's repair for an owner
- * overlap. The route is a thin shell over the store's batch; the store's own
- * guards are pinned in tests/dashboard/targets-store.test.ts.
- */
-describe("POST /dashboard/:ref/apps/:appId/park", () => {
-  /**
-   * The overlap the park repairs: this App's target claims `acme` in `default`
-   * and ANOTHER bot's target claims it too — the shape the audit reports. Both
-   * bots keep their single target; the duplicate claim is what park settles.
-   */
-  function seedOverlap(db: ReturnType<typeof createAppsUiD1>, githubAppId: number): string {
-    const target = db.raw
-      .prepare(
-        `SELECT t.id, t.bot_id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
-          WHERE b.github_app_id = ?`,
-      )
-      .get(githubAppId) as { id: string; bot_id: string };
-    db.raw.prepare(`UPDATE review_targets SET account_login = 'acme' WHERE id = ?`).run(target.id);
-    const insert = db.raw.prepare(
-      `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, installation_id, account_login, review_enabled,
-          review_trigger_mode, review_level, check_min_score, check_pass_verdicts,
-          allowlist_enabled, created_by, created_at, updated_at, deleted_at)
-       VALUES (?, ?, ?, ?, NULL, 'acme', 1, 'every_push', NULL, 70, '["ship it"]', 0,
-               'mallory', datetime('now'), datetime('now'), NULL)`,
-    );
-    // Another bot's target in THIS workspace: the claim it duplicates.
-    insert.run("park-rival", "default", "app-mstar-inspector-ada", "park-rival");
-    return target.id;
-  }
-
-  test("an overlap is parked: paused, claim cleared, one audit row, zero GitHub calls", async () => {
-    const db = await seededWorld();
-    const targetId = seedOverlap(db, MALLORY_APP_ID);
-    const fetchSpy = spyOn(globalThis, "fetch");
-    try {
-      const res = await post(
-        `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
-        `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-        makeEnv(db),
-      );
-      expect(res.status).toBe(200);
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      fetchSpy.mockRestore();
-    }
-    const row = db.raw
-      .query("SELECT review_enabled, account_login FROM review_targets WHERE id = ?")
-      .get(targetId) as { review_enabled: number; account_login: string | null };
-    expect(row).toEqual({ review_enabled: 0, account_login: null });
-    expect(
-      db.raw.query("SELECT action, target_id, actor_login FROM audit_events").all(),
-    ).toEqual([{ action: "target.park", target_id: targetId, actor_login: "mallory" }]);
-  });
-
-  test("a target with no overlapping claim is refused with 409 and zero writes", async () => {
-    const db = await seededWorld();
-    const auditBefore = db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number };
-    const res = await post(
-      `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
-      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-      makeEnv(db),
-    );
-    expect(res.status).toBe(409);
-    // No account claim at all on this target: nothing to settle.
-    expect(await res.text()).toBe("no-overlap");
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n).toBe(auditBefore.n);
-    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
-  });
-
-  test("a plain member is refused by the manage gate before any write", async () => {
-    const db = await seededWorld();
-    seedOverlap(db, MALLORY_APP_ID);
-    const res = await post(
-      `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
-      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
-      makeEnv(db),
-    );
-    expect(res.status).toBe(403);
-    expect(
-      (db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n,
-    ).toBe(0);
-  });
-});
-
-/**
  * The list's shared-bot block — the creation chooser's official mode. It is
  * additive: every existing key keeps its value, and the new key is always
  * present, `[]` when the platform shares nothing.
@@ -1203,26 +1131,19 @@ describe("the settings payload's pending installations", () => {
     return (await res.json()) as Record<string, unknown>;
   }
 
-  test("lists the bot's unbound live installations and keeps every existing key", async () => {
+  test("lists the bot's live installations and keeps every existing key", async () => {
     const db = await seededWorld();
     seedWorldWithBot(db);
     seedInstallation(db, "app-platform", 500);
     seedInstallation(db, "app-platform", 600, true);
-    // Bound by another workspace's target: not this target's to bind, and
-    // never listed cross-workspace.
+    // Installations are app-level (migration 0067): another workspace's target
+    // binds nothing, so this one is listed like any other live installation.
     seedInstallation(db, "app-platform", 700);
-    db.raw
-      .prepare(
-        `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, installation_id, created_by, created_at, updated_at)
-         VALUES ('target-other', 'ws-other', 'app-platform', 'Other', 700, 'hubot',
-                 datetime('now'), datetime('now'))`,
-      )
-      .run();
 
     const body = await settingsOf(db);
     expect(body.pending_installations).toEqual([
       { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+      { installation_id: 700, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
     ]);
     // Additive: the keys the payload already carried are unchanged.
     expect(body.installation).toBeNull();
@@ -1288,12 +1209,16 @@ describe("a retained target on another workspace's bot grants no bot-scope write
       )
       .run(CONSUMER_WS);
     // The target C created while the bot was shared. Nothing about the bot
-    // changed except its scope: it was never C's.
+    // changed except its scope: it was never C's. It carries the repository
+    // identity a target needs (0067) — the same repo the App's own target
+    // points at, since one repository belongs to one workspace.
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
-         SELECT 'target-consumer', ?, b.id, 'consumer', 'mallory', datetime('now'), datetime('now')
+           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+            created_by, created_at, updated_at)
+         SELECT 'target-consumer', ?, b.id, 'consumer', 901001, 'acme', 'mstar-inspector-mallory',
+                'mallory', datetime('now'), datetime('now')
            FROM review_bots b WHERE b.github_app_id = ?`,
       )
       .run(CONSUMER_WS, FOREIGN_APP_ID);
@@ -1423,8 +1348,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect(typeof body.target_id).toBe("string");
     expect(body.workspace_id).toBe(CONSUMER_WS);
     expect(body.check_gate).toEqual({ min_score: 80, pass_verdicts: ["ship it"] });
-    expect(body.allowlist).toEqual({ enabled: false, owners: [] });
-    expect(typeof body.owner_overlap).toBe("boolean");
     expect(body.app.review_trigger_mode).toBe("every_push");
     expect(body.app.review_level).toBeNull();
     expect(body.app.default_review_level).toBe("default");

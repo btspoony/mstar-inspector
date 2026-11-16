@@ -90,7 +90,12 @@ import {
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createReviewBotsStore } from "../dashboard/apps-store";
-import { createTargetsStore, targetCheckGate } from "../dashboard/targets-store";
+import {
+  checkGateOf,
+  createTargetsStore,
+  readEffectiveTargetSettings,
+  type ReviewTargetRow,
+} from "../dashboard/targets-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { getCheckBudgets } from "../dashboard/runtime-config-store";
 import { sha256Hex } from "../pipeline/review-threads";
@@ -1410,13 +1415,29 @@ async function readProof(
  * target, corrupt stored verdicts, or a failed read) — the same "unreadable"
  * meaning the consumer lane gets, so a review proof concludes `failure`. A read
  * failure is never a reason to abandon the row: the conclusion below still
- * gets persisted. The row's own scope names the bot and the installation it was
- * attached for, so the target bound to that installation answers first.
+ * gets persisted.
+ *
+ * A target IS a repository (migration 0067), and a Check's stored scope names
+ * the bot with the delivery's owner/name — the exact pair the target caches, so
+ * the lookup is one index seek on `idx_review_targets_bot_owner_name` and no
+ * second resolution (the delivery already refreshed those caches).
  */
 async function readRecoveryGate(db: D1Like, scope: Scope): Promise<ReviewGate | null> {
   try {
-    const target = await createTargetsStore(db).resolve(scope.appId, scope.installationId);
-    return target === null ? null : targetCheckGate(target);
+    const row = await db
+      .prepare(
+        `SELECT * FROM review_targets
+          WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
+            AND deleted_at IS NULL
+          ORDER BY created_at, id LIMIT 1`,
+      )
+      .bind(scope.appId, scope.owner, scope.repo)
+      .first<ReviewTargetRow>();
+    if (row === null) return null;
+    // The EFFECTIVE gate (migration 0067): an inheriting target is judged by
+    // the workspace floor it actually runs on, not by the inert placeholder
+    // columns its row still carries.
+    return checkGateOf(await readEffectiveTargetSettings(db, row));
   } catch {
     return null;
   }
