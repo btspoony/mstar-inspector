@@ -174,9 +174,8 @@ describe("tenant reads bind workspace_id", () => {
 
     expect(await store.setReviewEnabled(WS, targetId, false)).toBe(false);
     expect(await store.delete(WS, targetId)).toBe(false);
-    // `setReviewConfig` is the execution-side writer (target id only, like
-    // `getForExecution`); the route binds the workspace through
-    // `getInWorkspace` before it writes.
+    expect(await store.setReviewConfig(WS, targetId, { triggerMode: "manual" })).toBe(false);
+    await setInheritance(db, WS, targetId, 1);
     expect(await store.getInWorkspace(WS, targetId)).toBeNull();
 
     const row = targetRow(db, targetId);
@@ -373,6 +372,66 @@ describe("resolveByRepo (webhook resolution)", () => {
     expect(targetRow(db, targetId).repo_id).toBeNull();
   });
 
+  test("the bot's ONE all-NULL row is claimed on its first delivery (the migrated shape)", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-first");
+    // Exactly what 0067 leaves behind: no id, no owner, no name.
+    const targetId = seedTarget(db, { id: "t-first", botId: "bot-first" });
+    const store = createTargetsStore(db);
+
+    const resolved = await store.resolveByRepo("bot-first", { id: 9810, owner: "acme", name: "widgets" });
+    expect(resolved?.id).toBe(targetId);
+    expect(targetRow(db, targetId)).toMatchObject({
+      repo_id: 9810,
+      repo_owner: "acme",
+      repo_name: "widgets",
+    });
+    // The claim is written once: the next delivery resolves by id.
+    expect((await store.resolveByRepo("bot-first", { id: 9810, owner: "acme", name: "widgets" }))?.id).toBe(targetId);
+  });
+
+  test("two all-NULL rows name no repository, so neither is claimed", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-two-null");
+    seedTarget(db, { id: "t-null-a", botId: "bot-two-null" });
+    seedTarget(db, { id: "t-null-b", botId: "bot-two-null" });
+    const store = createTargetsStore(db);
+
+    expect(await store.resolveByRepo("bot-two-null", { id: 9820, owner: "acme", name: "widgets" })).toBeNull();
+    expect(targetRow(db, "t-null-a").repo_id).toBeNull();
+    expect(targetRow(db, "t-null-b").repo_id).toBeNull();
+  });
+
+  test("owner/name compare case-insensitively, like the index", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-case");
+    const targetId = seedTarget(db, { id: "t-case", botId: "bot-case", repoOwner: "Acme", repoName: "Widgets" });
+    const store = createTargetsStore(db);
+
+    // The delivery spells the same repository differently: the claim must not
+    // orphan the row.
+    const resolved = await store.resolveByRepo("bot-case", { id: 9830, owner: "acme", name: "widgets" });
+    expect(resolved?.id).toBe(targetId);
+    expect(targetRow(db, targetId)).toMatchObject({ repo_id: 9830, repo_owner: "acme", repo_name: "widgets" });
+
+    // An unclaimed row spelled `Acme/Widgets` IS the repository `ACME/WIDGETS`
+    // names, so `create` refuses it instead of adding a second target.
+    seedBot(db, "bot-case-2");
+    seedTarget(db, { id: "t-case-unclaimed", botId: "bot-case-2", repoOwner: "Acme", repoName: "Widgets" });
+    expect(
+      (
+        await store.create({
+          workspaceId: WS,
+          botId: "bot-case-2",
+          repoId: 9831,
+          repoOwner: "ACME",
+          repoName: "WIDGETS",
+          createdBy: "octocat",
+        })
+      ).outcome,
+    ).toBe("duplicate");
+  });
+
   test("an id already held by a live row wins over a legacy name match", async () => {
     const db = createMigratedTestD1();
     seedBot(db, "bot-clash");
@@ -492,7 +551,7 @@ describe("effective settings and inheritance", () => {
     expect(targetRow(db, targetId).review_trigger_mode).toBe("every_push"); // inert placeholder, never copied
 
     // Toggle off: the four effective values land in the row.
-    await setInheritance(db, targetId, 0);
+    await setInheritance(db, WS, targetId, 0);
     expect(targetRow(db, targetId)).toMatchObject({
       follow_workspace_defaults: 0,
       review_trigger_mode: "manual",
@@ -502,7 +561,7 @@ describe("effective settings and inheritance", () => {
     });
 
     // Toggle on: the flag only — stored overrides become inert.
-    await setInheritance(db, targetId, 1);
+    await setInheritance(db, WS, targetId, 1);
     expect(targetRow(db, targetId)).toMatchObject({
       follow_workspace_defaults: 1,
       review_trigger_mode: "manual",
@@ -526,7 +585,7 @@ describe("effective settings and inheritance", () => {
     const target = (await store.getInWorkspace(WS, "t-gate"))!;
     expect(effectiveTargetSettings(target, await getWorkspaceReviewDefaults(db, WS)).checkPassVerdicts).toEqual([]);
     // A save repairs it.
-    expect(await store.setReviewConfig("t-gate", { checkPassVerdicts: ["ship it"] })).toBe(true);
+    expect(await store.setReviewConfig(WS, "t-gate", { checkPassVerdicts: ["ship it"] })).toBe(true);
     expect(targetRow(db, "t-gate").check_pass_verdicts).toBe('["ship it"]');
   });
 
@@ -554,7 +613,7 @@ describe("setReviewConfig", () => {
     });
     const store = createTargetsStore(db);
 
-    expect(await store.setReviewConfig(targetId, { triggerMode: "manual" })).toBe(true);
+    expect(await store.setReviewConfig(WS, targetId, { triggerMode: "manual" })).toBe(true);
     expect(targetRow(db, targetId)).toMatchObject({
       review_trigger_mode: "manual",
       review_level: "deep",
@@ -562,7 +621,7 @@ describe("setReviewConfig", () => {
     });
 
     expect(
-      await store.setReviewConfig(targetId, { checkMinScore: 55, checkPassVerdicts: ["ship it", "blocked"] }),
+      await store.setReviewConfig(WS, targetId, { checkMinScore: 55, checkPassVerdicts: ["ship it", "blocked"] }),
     ).toBe(true);
     expect(targetRow(db, targetId)).toMatchObject({
       review_trigger_mode: "manual",
@@ -571,7 +630,7 @@ describe("setReviewConfig", () => {
     });
 
     // `null` is the "follow the operator default" choice, a real write.
-    expect(await store.setReviewConfig(targetId, { level: null })).toBe(true);
+    expect(await store.setReviewConfig(WS, targetId, { level: null })).toBe(true);
     expect(targetRow(db, targetId).review_level).toBeNull();
   });
 
@@ -582,12 +641,12 @@ describe("setReviewConfig", () => {
     const store = createTargetsStore(db);
 
     await expect(
-      store.setReviewConfig(targetId, { triggerMode: "sometimes" as never }),
+      store.setReviewConfig(WS, targetId, { triggerMode: "sometimes" as never }),
     ).rejects.toThrow(/trigger mode/);
-    await expect(store.setReviewConfig(targetId, { level: "turbo" as never })).rejects.toThrow(/review level/);
-    await expect(store.setReviewConfig(targetId, { checkMinScore: 101 })).rejects.toThrow(/outside 0..100/);
+    await expect(store.setReviewConfig(WS, targetId, { level: "turbo" as never })).rejects.toThrow(/review level/);
+    await expect(store.setReviewConfig(WS, targetId, { checkMinScore: 101 })).rejects.toThrow(/outside 0..100/);
     await expect(
-      store.setReviewConfig(targetId, { checkPassVerdicts: ["lgtm" as never] }),
+      store.setReviewConfig(WS, targetId, { checkPassVerdicts: ["lgtm" as never] }),
     ).rejects.toThrow(/PR_VERDICTS/);
 
     expect(targetRow(db, targetId)).toMatchObject({

@@ -74,12 +74,18 @@ export type InstallClaimsStore = {
   }): Promise<InstallBindOutcome>;
 };
 
-/** Insert, or refresh the live row the partial unique index already holds. */
+/**
+ * Insert, or refresh the live row the partial unique index already holds. The
+ * refresh carries `workspace_id`: the claim is what the signed-in user pressed
+ * install FOR, so a re-claim from another workspace moves the live row there
+ * instead of leaving a stale tenant behind the same user/bot pair.
+ */
 const CREATE_CLAIM_SQL = `
   INSERT INTO install_claims
     (id, user_id, workspace_id, bot_id, created_at, expires_at, consumed_at, consumed_token)
   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
   ON CONFLICT (user_id, bot_id) WHERE consumed_at IS NULL DO UPDATE SET
+    workspace_id = excluded.workspace_id,
     created_at = excluded.created_at,
     expires_at = excluded.expires_at
   RETURNING id`;

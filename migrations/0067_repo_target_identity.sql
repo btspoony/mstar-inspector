@@ -66,12 +66,24 @@ CREATE UNIQUE INDEX review_targets_workspace_repo
 
 -- One named consumer each: id resolution (`(bot_id, repo_id)`), the
 -- name-fallback resolution for a delivery without an id (`(bot_id, repo_owner,
--- repo_name)`), and the workspace read scope / dashboard list. 0062's
--- `idx_review_targets_workspace_id` is the identical single-column index under
--- a second name, so it goes rather than doubling the write cost.
+-- repo_name)`), the app-visibility probe and the shared-target count
+-- (`(bot_id, workspace_id)`), and the workspace-only read scope (`listLive`,
+-- the dashboard list). Both workspace indexes are kept: a `(bot_id,
+-- workspace_id)` index cannot serve a workspace-only predicate, and neither
+-- can the other answer the bot-scoped ones. 0062's single-column index under
+-- its second name (`idx_review_targets_workspace_id`) is the exact duplicate
+-- of `idx_review_targets_workspace`, so that one goes.
+--
+-- The name index is built `COLLATE NOCASE`: GitHub repository identities are
+-- case-insensitive, and this is the ONE collation every owner/name comparison
+-- uses (the store's resolution and duplicate rule, the attribution subquery,
+-- both Check-gate reads). An index declared with the collation is what makes
+-- those `NOCASE` predicates a seek instead of a scan.
 DROP INDEX idx_review_targets_workspace_id;
 CREATE INDEX idx_review_targets_bot_repo ON review_targets(bot_id, repo_id);
-CREATE INDEX idx_review_targets_bot_owner_name ON review_targets(bot_id, repo_owner, repo_name);
+CREATE INDEX idx_review_targets_bot_owner_name
+  ON review_targets(bot_id, repo_owner COLLATE NOCASE, repo_name COLLATE NOCASE);
+CREATE INDEX idx_review_targets_bot_workspace ON review_targets(bot_id, workspace_id);
 CREATE INDEX idx_review_targets_workspace ON review_targets(workspace_id);
 
 -- Workspace-level defaults a target may inherit from (D5) — the gate floor is

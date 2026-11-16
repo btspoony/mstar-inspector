@@ -49,7 +49,6 @@ import {
 } from "../dashboard/apps-store";
 import {
   createTargetsStore,
-  effectiveTargetSettings,
   getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
   type ReviewTargetRow,
@@ -638,8 +637,14 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       delivery.target = await targetsStore.resolveByRepo(row.id, repo);
       const target = delivery.target;
       if (target === null) return null;
-      const defaults = await getWorkspaceReviewDefaults(db, target.workspace_id);
-      return { mode: effectiveTargetSettings(target, defaults).triggerMode, appSlug };
+      // Only a following target reads the workspace defaults: an own-columns
+      // target answers its stored mode directly (the column is CHECK-bound to
+      // the vocabulary), so the common path saves one D1 read per delivery.
+      const mode =
+        target.follow_workspace_defaults === 1
+          ? (await getWorkspaceReviewDefaults(db, target.workspace_id)).triggerMode
+          : target.review_trigger_mode;
+      return { mode, appSlug };
     },
     (parsed) => {
       classified = parsed;

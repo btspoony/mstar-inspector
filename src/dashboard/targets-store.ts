@@ -209,7 +209,8 @@ const LIVE_TARGET = "id = ? AND workspace_id = ? AND deleted_at IS NULL";
  */
 const DUPLICATE_REPO = `t.workspace_id = ?2 AND t.deleted_at IS NULL
    AND (t.repo_id = ?4
-        OR (t.repo_id IS NULL AND t.repo_owner = ?5 AND t.repo_name = ?6))`;
+        OR (t.repo_id IS NULL AND t.repo_owner = ?5 COLLATE NOCASE
+            AND t.repo_name = ?6 COLLATE NOCASE))`;
 
 /**
  * The guarded insert behind `create`: ONE statement decides and writes, so a
@@ -308,6 +309,7 @@ export function effectiveTargetSettings(
  */
 export async function setInheritance(
   db: TargetsStoreD1,
+  workspaceId: string,
   targetId: string,
   follow: 0 | 1,
 ): Promise<void> {
@@ -315,27 +317,24 @@ export async function setInheritance(
     await db
       .prepare(
         `UPDATE review_targets SET follow_workspace_defaults = 1, updated_at = datetime('now')
-         WHERE id = ? AND deleted_at IS NULL`,
+         WHERE ${LIVE_TARGET}`,
       )
-      .bind(targetId)
+      .bind(targetId, workspaceId)
       .run();
     return;
   }
   const target = await db
-    .prepare(`SELECT * FROM review_targets WHERE id = ? AND deleted_at IS NULL`)
-    .bind(targetId)
+    .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
+    .bind(targetId, workspaceId)
     .first<ReviewTargetRow>();
   if (!target) return;
-  const effective = effectiveTargetSettings(
-    target,
-    await getWorkspaceReviewDefaults(db, target.workspace_id),
-  );
+  const effective = effectiveTargetSettings(target, await getWorkspaceReviewDefaults(db, workspaceId));
   await db
     .prepare(
       `UPDATE review_targets
           SET follow_workspace_defaults = 0, review_trigger_mode = ?, review_level = ?,
               check_min_score = ?, check_pass_verdicts = ?, updated_at = datetime('now')
-        WHERE id = ? AND deleted_at IS NULL`,
+        WHERE ${LIVE_TARGET}`,
     )
     .bind(
       effective.triggerMode,
@@ -343,6 +342,7 @@ export async function setInheritance(
       effective.checkMinScore,
       JSON.stringify(effective.checkPassVerdicts),
       targetId,
+      workspaceId,
     )
     .run();
 }
@@ -404,7 +404,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * The target a delivery acts on, by the contract's two steps:
+     * The target a delivery acts on, by the contract's three steps:
      *
      *   1. `repo.id` known → the live row holding it for this bot; a changed
      *      owner/name refreshes the caches (a rename must not orphan a row).
@@ -412,8 +412,17 @@ export function createTargetsStore(db: TargetsStoreD1) {
      *      owner/name that is still unclaimed; a hit CLAIMS `repo_id` and the
      *      names inside this request. A migrated row therefore starts
      *      reviewing on its first delivery (D15).
+     *   3. Otherwise, when the bot has EXACTLY ONE live target whose three
+     *      repository columns are all NULL — the shape a 0067 migration leaves
+     *      behind, since it backfills nothing — that row is the delivery's:
+     *      claim it. Two or more such rows name no repository, so no guess is
+     *      made and the delivery is ignored.
      *
-     * No hit → null and the delivery is ignored with 200. The claim refuses to
+     * Owner/name compare `COLLATE NOCASE`: a GitHub repository is
+     * case-insensitive and the payload's spelling may differ from the stored
+     * one, matching `idx_review_targets_bot_owner_name`.
+     *
+     * No hit → null and the delivery is ignored with 200. A claim refuses to
      * take an id another live row of the same workspace already holds: one
      * repository belongs to one workspace, and silently reviewing twice would
      * be worse than ignoring the delivery.
@@ -427,11 +436,14 @@ export function createTargetsStore(db: TargetsStoreD1) {
         const hit = await db
           .prepare(
             `SELECT * FROM review_targets
-             WHERE bot_id = ? AND repo_id = ? AND deleted_at IS NULL`,
+             WHERE bot_id = ? AND repo_id = ? AND deleted_at IS NULL
+             ORDER BY created_at, id LIMIT 1`,
           )
           .bind(botId, repo.id)
           .first<ReviewTargetRow>();
         if (hit) {
+          // The stored spelling is only a cache: a delivery that spells the
+          // repository differently (a rename, or other case) refreshes it.
           if (hit.repo_owner === repo.owner && hit.repo_name === repo.name) return hit;
           await db
             .prepare(
@@ -443,35 +455,69 @@ export function createTargetsStore(db: TargetsStoreD1) {
           return { ...hit, repo_owner: repo.owner, repo_name: repo.name };
         }
       }
+      // LIMIT 2, not 1: an owner/name pair two unclaimed rows both answer is
+      // ambiguous, and the delivery is refused instead of attributed by
+      // created_at. The ORDER BY still makes a single hit deterministic.
       const unclaimed = await db
         .prepare(
           `SELECT * FROM review_targets
-            WHERE bot_id = ? AND repo_owner = ? AND repo_name = ?
+            WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
               AND repo_id IS NULL AND deleted_at IS NULL
+            ORDER BY created_at, id
             LIMIT 2`,
         )
         .bind(botId, repo.owner, repo.name)
         .all<ReviewTargetRow>();
       if (unclaimed.results.length > 1) return null;
       const legacy = unclaimed.results[0];
-      if (!legacy) return null;
-      // A payload without an id has nothing to claim; the row still reviews.
-      if (repo.id === null) return legacy;
-      const claimed = await db
+      if (legacy) {
+        // A payload without an id has nothing to claim; the row still reviews.
+        if (repo.id === null) return legacy;
+        const claimed = await db
+          .prepare(
+            `UPDATE review_targets
+                SET repo_id = ?, repo_owner = ?, repo_name = ?, updated_at = datetime('now')
+              WHERE id = ? AND repo_id IS NULL AND deleted_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM review_targets x
+                                 WHERE x.workspace_id = review_targets.workspace_id
+                                   AND x.repo_id = ? AND x.deleted_at IS NULL)`,
+          )
+          .bind(repo.id, repo.owner, repo.name, legacy.id, repo.id)
+          .run();
+        if (claimed.meta.changes === 0) return null;
+        return db
+          .prepare(`SELECT * FROM review_targets WHERE id = ? AND deleted_at IS NULL`)
+          .bind(legacy.id)
+          .first<ReviewTargetRow>();
+      }
+      if (repo.id === null) return null;
+      // Step 3: ONE guarded UPDATE claims the bot's lone all-NULL row. The
+      // count guard is what keeps two placeholders from being guessed between.
+      const firstDelivery = await db
         .prepare(
           `UPDATE review_targets
               SET repo_id = ?, repo_owner = ?, repo_name = ?, updated_at = datetime('now')
-            WHERE id = ? AND repo_id IS NULL AND deleted_at IS NULL
-              AND NOT EXISTS (SELECT 1 FROM review_targets x
-                               WHERE x.workspace_id = review_targets.workspace_id
-                                 AND x.repo_id = ? AND x.deleted_at IS NULL)`,
+            WHERE bot_id = ?
+              AND repo_id IS NULL AND repo_owner IS NULL AND repo_name IS NULL
+              AND deleted_at IS NULL
+              AND (SELECT COUNT(*) FROM review_targets x
+                    WHERE x.bot_id = ? AND x.repo_id IS NULL
+                      AND x.repo_owner IS NULL AND x.repo_name IS NULL
+                      AND x.deleted_at IS NULL) = 1
+              AND NOT EXISTS (SELECT 1 FROM review_targets y
+                               WHERE y.workspace_id = review_targets.workspace_id
+                                 AND y.repo_id = ? AND y.deleted_at IS NULL)`,
         )
-        .bind(repo.id, repo.owner, repo.name, legacy.id, repo.id)
+        .bind(repo.id, repo.owner, repo.name, botId, botId, repo.id)
         .run();
-      if (claimed.meta.changes === 0) return null;
+      if (firstDelivery.meta.changes === 0) return null;
       return db
-        .prepare(`SELECT * FROM review_targets WHERE id = ? AND deleted_at IS NULL`)
-        .bind(legacy.id)
+        .prepare(
+          `SELECT * FROM review_targets
+            WHERE bot_id = ? AND repo_id = ? AND deleted_at IS NULL
+            ORDER BY created_at, id LIMIT 1`,
+        )
+        .bind(botId, repo.id)
         .first<ReviewTargetRow>();
     },
 
@@ -513,10 +559,14 @@ export function createTargetsStore(db: TargetsStoreD1) {
      * validated BEFORE any write — an off-vocabulary mode/level or an
      * out-of-domain score/verdict throws and leaves the row untouched (the
      * settings route answers 400 first; the DDL CHECK is the last line).
-     * Returns whether a row changed (false also covers an unknown or deleted
-     * target, and an input naming no column).
+     * Returns whether a row changed (false also covers an unknown, deleted or
+     * another workspace's target, and an input naming no column).
      */
-    async setReviewConfig(targetId: string, config: TargetReviewConfig): Promise<boolean> {
+    async setReviewConfig(
+      workspaceId: string,
+      targetId: string,
+      config: TargetReviewConfig,
+    ): Promise<boolean> {
       const assignments: string[] = [];
       const values: unknown[] = [];
       if (config.triggerMode !== undefined) {
@@ -561,9 +611,9 @@ export function createTargetsStore(db: TargetsStoreD1) {
       const res = await db
         .prepare(
           `UPDATE review_targets SET ${assignments.join(", ")}, updated_at = datetime('now')
-           WHERE id = ? AND deleted_at IS NULL`,
+           WHERE ${LIVE_TARGET}`,
         )
-        .bind(...values, targetId)
+        .bind(...values, targetId, workspaceId)
         .run();
       return res.meta.changes > 0;
     },

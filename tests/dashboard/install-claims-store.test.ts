@@ -138,6 +138,26 @@ describe("claim lifecycle and TTL", () => {
     expect(claimRow(db, first.id)?.expires_at).toBe(at(60_000 + INSTALL_CLAIM_TTL_MS));
   });
 
+  test("a re-claim from another workspace moves the live row's tenant", async () => {
+    const { db, botId, userId, store } = await seedWorld();
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('ws-other', 'ws-other', 'ws-other', 'acme', datetime('now'))`,
+      )
+      .run();
+    const first = await store.createOrRefreshClaim({ userId, workspaceId: WS, botId, now: NOW });
+
+    const second = await store.createOrRefreshClaim({ userId, workspaceId: "ws-other", botId, now: at(1_000) });
+
+    // The same live row, now naming the workspace the user pressed install for.
+    expect(second.id).toBe(first.id);
+    expect(count(db, "install_claims")).toBe(1);
+    expect(db.raw.query("SELECT workspace_id FROM install_claims WHERE id = ?").get(first.id)).toEqual({
+      workspace_id: "ws-other",
+    });
+  });
+
   test("listLiveClaims answers only this user's live rows, naming the app", async () => {
     const { botId, userId, otherUserId, store } = await seedWorld();
     const first = await store.createOrRefreshClaim({ userId, workspaceId: WS, botId, now: NOW });

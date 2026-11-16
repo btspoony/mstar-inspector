@@ -3022,7 +3022,7 @@ async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response
   const target = await firstTargetForBot(gate.db, gate.scope.workspaceId, app.id);
   if (!target) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (target.review_trigger_mode !== mode) {
-    await targets.setReviewConfig(target.id, { triggerMode: mode });
+    await targets.setReviewConfig(gate.scope.workspaceId, target.id, { triggerMode: mode });
   }
   return settingsPostResponse(c, app.github_app_id, "ok");
 }
@@ -5227,7 +5227,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     try {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
-      if (!(await createTargetsStore(gate.db).setReviewConfig(gate.target.id, { level }))) {
+      if (!(await createTargetsStore(gate.db).setReviewConfig(gate.scope.workspaceId, gate.target.id, { level }))) {
         throw new Error(`app ${gate.app.id} vanished before its review level save`);
       }
     } catch (err) {
@@ -5274,7 +5274,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
       if (
-        !(await createTargetsStore(gate.db).setReviewConfig(gate.target.id, {
+        !(await createTargetsStore(gate.db).setReviewConfig(gate.scope.workspaceId, gate.target.id, {
           checkMinScore: minScore,
           checkPassVerdicts: passVerdicts,
         }))

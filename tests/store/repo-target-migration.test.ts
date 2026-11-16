@@ -111,11 +111,23 @@ describe("migration 0067: repository-keyed review targets", () => {
       "review_targets_workspace_repo",
       "idx_review_targets_bot_repo",
       "idx_review_targets_bot_owner_name",
+      "idx_review_targets_bot_workspace",
       "idx_review_targets_workspace",
       "idx_review_targets_bot_id",
     ]) {
       expect(indexes.has(name), name).toBe(true);
     }
+
+    // ONE collation: the name index is built NOCASE, so every owner/name
+    // comparison (resolution, attribution, both gate reads) is a seek.
+    const nameIndex = db.raw
+      .query("PRAGMA index_xinfo(idx_review_targets_bot_owner_name)")
+      .all() as Array<{ name: string | null; coll: string | null }>;
+    expect(nameIndex.filter((column) => column.name !== null).map((column) => [column.name, column.coll])).toEqual([
+      ["bot_id", "BINARY"],
+      ["repo_owner", "NOCASE"],
+      ["repo_name", "NOCASE"],
+    ]);
   });
 
   test("one repository belongs to one workspace; unclaimed and deleted rows stay outside the claim", () => {

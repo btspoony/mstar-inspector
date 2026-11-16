@@ -1422,7 +1422,8 @@ async function readRecoveryGate(db: D1Like, scope: Scope): Promise<ReviewGate | 
     const row = await db
       .prepare(
         `SELECT check_min_score, check_pass_verdicts FROM review_targets
-          WHERE bot_id = ? AND repo_owner = ? AND repo_name = ? AND deleted_at IS NULL
+          WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
+            AND deleted_at IS NULL
           ORDER BY created_at, id LIMIT 1`,
       )
       .bind(scope.appId, scope.owner, scope.repo)
