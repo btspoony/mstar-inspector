@@ -3036,8 +3036,17 @@ async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response
   if (current.triggerMode !== mode || target.follow_workspace_defaults === 1) {
     // `follow: 0` in the SAME statement: a mode saved on an inheriting target
     // would otherwise be inert — the effective answer would stay the
-    // workspace's, and the manager's choice would never take effect.
-    await targets.setReviewConfig(gate.scope.workspaceId, target.id, { triggerMode: mode, follow: 0 });
+    // workspace's, and the manager's choice would never take effect. The other
+    // three columns carry the values the manager was just looking at, so the
+    // flip to explicit changes the mode alone instead of exposing the row's
+    // inert DDL placeholders.
+    await targets.setReviewConfig(gate.scope.workspaceId, target.id, {
+      triggerMode: mode,
+      level: current.level,
+      checkMinScore: current.checkMinScore,
+      checkPassVerdicts: current.checkPassVerdicts,
+      follow: 0,
+    });
   }
   return settingsPostResponse(c, app.github_app_id, "ok");
 }
@@ -5244,11 +5253,18 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       });
     }
     try {
+      // The other three columns take the values the target is running with
+      // right now (workspace defaults while inheriting), so this save changes
+      // the depth alone rather than exposing the row's inert placeholders.
+      const current = await readEffectiveTargetSettings(gate.db, gate.target);
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
       if (
         !(await createTargetsStore(gate.db).setReviewConfig(gate.scope.workspaceId, gate.target.id, {
           level,
+          triggerMode: current.triggerMode,
+          checkMinScore: current.checkMinScore,
+          checkPassVerdicts: current.checkPassVerdicts,
           follow: 0,
         }))
       ) {
@@ -5295,12 +5311,18 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const minScore = Number(rawScore);
     const passVerdicts = submitted as PrVerdict[];
     try {
+      // The two columns this op does not submit take the values the target is
+      // running with right now (workspace defaults while inheriting), so a
+      // gate save on an inheriting row changes the gate alone.
+      const current = await readEffectiveTargetSettings(gate.db, gate.target);
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
       if (
         !(await createTargetsStore(gate.db).setReviewConfig(gate.scope.workspaceId, gate.target.id, {
           checkMinScore: minScore,
           checkPassVerdicts: passVerdicts,
+          triggerMode: current.triggerMode,
+          level: current.level,
           follow: 0,
         }))
       ) {

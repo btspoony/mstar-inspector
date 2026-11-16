@@ -2724,6 +2724,61 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
   });
 });
 
+describe("saving one settings control on an inheriting target snapshots the other three (F-007)", () => {
+  const TRIGGER = `/dashboard/default/apps/${APP_ID}/review-trigger-mode`;
+
+  /** The row's four policy columns plus the inheritance flag, as one snapshot. */
+  const policyRow = (db: TestD1, appId: string) =>
+    db.raw
+      .query(
+        `SELECT t.follow_workspace_defaults, t.review_trigger_mode, t.review_level,
+                t.check_min_score, t.check_pass_verdicts
+           FROM review_targets t WHERE t.bot_id = ?`,
+      )
+      .get(appId) as {
+      follow_workspace_defaults: number;
+      review_trigger_mode: string;
+      review_level: string | null;
+      check_min_score: number;
+      check_pass_verdicts: string;
+    };
+
+  test("saving only the trigger mode keeps the effective floor, depth and verdicts instead of the DDL placeholders", async () => {
+    const { db, app } = await seededWorld();
+    // The workspace the target inherits: floor 60, depth deep, two passing
+    // verdicts. The row itself still carries the DDL placeholders (NULL level,
+    // floor 80, one verdict) that the manager never saw.
+    rawRun(
+      db,
+      `UPDATE workspaces
+          SET check_min_score = 60, default_review_level = 'deep',
+              default_check_pass_verdicts = '["ship it","blocked"]'
+        WHERE id = 'default'`,
+    );
+    rawRun(
+      db,
+      `UPDATE review_targets
+          SET follow_workspace_defaults = 1, review_trigger_mode = 'every_push',
+              review_level = NULL, check_min_score = 80,
+              check_pass_verdicts = '["ship it"]'
+        WHERE bot_id = ?`,
+      app.id,
+    );
+
+    const res = await postForm(TRIGGER, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      mode: "manual",
+    });
+    expect(res.status).toBe(200);
+    expect(policyRow(db, app.id)).toEqual({
+      follow_workspace_defaults: 0,
+      review_trigger_mode: "manual",
+      review_level: "deep",
+      check_min_score: 60,
+      check_pass_verdicts: '["ship it","blocked"]',
+    });
+  });
+});
+
 describe("review gate (payload and ops)", () => {
   const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
