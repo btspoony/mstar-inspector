@@ -60,11 +60,19 @@ export type ReviewTriggerContext = { mode: ReviewTriggerMode; appSlug: string };
 const DEFAULT_TRIGGER: ReviewTriggerContext = { mode: "every_push", appSlug: "" };
 
 /**
- * The delivery's install identity, read from the already-parsed body. This is
- * GitHub's installation number, not our row id: the route resolves the target
- * from it, and the classifier itself never learns the bot or target id.
+ * The delivery's install identity and source repository, read from the
+ * already-parsed body — the two facts a target resolves from (migration 0067:
+ * a target is a repository, not an installation). This is GitHub's
+ * installation number, not our row id, and `repository.id` is GitHub's numeric
+ * repository identity (`null` when the payload omits it, which resolves by
+ * owner/name).
  */
-export type ReviewTriggerResolver = (installationId: number | null) => Promise<ReviewTriggerContext | null>;
+export type DeliveryIdentity = {
+  installationId: number | null;
+  repository: { id: number | null; owner: string; name: string } | null;
+};
+
+export type ReviewTriggerResolver = (delivery: DeliveryIdentity) => Promise<ReviewTriggerContext | null>;
 
 /**
  * The classification of a delivery with no resolved review target. It is an
@@ -401,6 +409,10 @@ const repositorySchema = z
     // payload, but the classifiers only ever needed the pair — requiring it
     // would turn an old-shaped delivery into a parse failure.
     full_name: z.string().min(1).optional(),
+    // GitHub's numeric `repository.id` — the STABLE target identity (migration
+    // 0067). Optional like the pair: a payload without it resolves by
+    // owner/name, the historical path.
+    id: z.number().int().optional(),
   })
   .nullable()
   .optional();
@@ -572,19 +584,43 @@ export async function classifyWebhook(
   // only for the two events that can enqueue a review: an install delivery is
   // bot-scoped bookkeeping with no review configuration to resolve.
   if (typeof trigger === "function" && (eventName === "pull_request" || eventName === "issue_comment")) {
-    const resolved = await trigger(installationIdOf(parsed));
-    if (resolved === null) return { kind: "ignore", reason: NO_TARGET_REASON };
-    return classifyParsed(eventName, parsed, log, resolved);
+    const identity = deliveryIdentityOf(parsed);
+    // A payload that cannot name its installation or repository is MALFORMED,
+    // not unconfigured: it takes the classifier's own 400 below instead of
+    // being resolved. Only a well-formed delivery asks the route for a target.
+    if (identity.installationId !== null && identity.repository !== null) {
+      const resolved = await trigger(identity);
+      if (resolved === null) return { kind: "ignore", reason: NO_TARGET_REASON };
+      return classifyParsed(eventName, parsed, log, resolved);
+    }
   }
   return classifyParsed(eventName, parsed, log, typeof trigger === "function" ? DEFAULT_TRIGGER : trigger);
 }
 
-/** The body's `installation.id`, or null when the document names none. */
-function installationIdOf(parsed: unknown): number | null {
-  const installation =
-    typeof parsed === "object" && parsed !== null && "installation" in parsed ? parsed.installation : null;
-  if (typeof installation !== "object" || installation === null || !("id" in installation)) return null;
-  return typeof installation.id === "number" ? installation.id : null;
+/**
+ * The body's `installation.id` and source repository, or an absent part when
+ * the document cannot state one. One read of the already-parsed body, so the
+ * resolver never re-parses up to 1 MB.
+ */
+function deliveryIdentityOf(parsed: unknown): DeliveryIdentity {
+  if (typeof parsed !== "object" || parsed === null) return { installationId: null, repository: null };
+  const installation = "installation" in parsed ? parsed.installation : null;
+  const installationId =
+    typeof installation === "object" &&
+    installation !== null &&
+    "id" in installation &&
+    typeof installation.id === "number"
+      ? installation.id
+      : null;
+  const result = repositorySchema.safeParse("repository" in parsed ? parsed.repository : null);
+  const repository = result.success ? result.data : null;
+  return {
+    installationId,
+    repository:
+      repository === null || repository === undefined
+        ? null
+        : { id: repository.id ?? null, owner: repository.owner.login, name: repository.name },
+  };
 }
 
 /**
@@ -860,36 +896,6 @@ export function pullRequestRecord(parsed: unknown): {
     // EXPLICITLY.
     updatedAt: normalizeRfc3339(pull_request?.updated_at) ?? null,
   };
-}
-
-/**
- * The delivery's SENDING repository owner login — the allowlist's admission
- * key (migration 0045). `repository.owner.login` is the only source: unlike
- * `webhookRepositoryFullName` there is no `full_name` fallback, because this
- * value is COMPARED against the App's stored owner list, never displayed.
- * `null` when the document carries no readable login (an install / bypass
- * event, or a malformed owner block) — the caller then cannot apply the gate
- * and proceeds.
- *
- * Takes the ALREADY PARSED body (the one `classifyEvent` read), like
- * `webhookRepositoryFullName`: the admission check must not re-parse up to
- * 1 MB. `min(1)` on the login: "" is not a login, so it reads as unreadable
- * rather than as a value no allowlist could ever list.
- */
-export function webhookRepositoryOwnerLogin(parsed: unknown): string | null {
-  if (parsed === null) return null;
-  const result = z
-    .object({
-      repository: z
-        .object({
-          owner: z.object({ login: z.string().min(1) }).nullish().catch(null),
-        })
-        .nullish()
-        .catch(null),
-    })
-    .safeParse(parsed);
-  if (!result.success) return null;
-  return result.data.repository?.owner?.login ?? null;
 }
 
 /**

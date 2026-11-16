@@ -1410,13 +1410,24 @@ async function readProof(
  * target, corrupt stored verdicts, or a failed read) — the same "unreadable"
  * meaning the consumer lane gets, so a review proof concludes `failure`. A read
  * failure is never a reason to abandon the row: the conclusion below still
- * gets persisted. The row's own scope names the bot and the installation it was
- * attached for, so the target bound to that installation answers first.
+ * gets persisted.
+ *
+ * A target IS a repository (migration 0067), and a Check's stored scope names
+ * the bot with the delivery's owner/name — the exact pair the target caches, so
+ * the lookup is one index seek on `idx_review_targets_bot_owner_name` and no
+ * second resolution (the delivery already refreshed those caches).
  */
 async function readRecoveryGate(db: D1Like, scope: Scope): Promise<ReviewGate | null> {
   try {
-    const target = await createTargetsStore(db).resolve(scope.appId, scope.installationId);
-    return target === null ? null : targetCheckGate(target);
+    const row = await db
+      .prepare(
+        `SELECT check_min_score, check_pass_verdicts FROM review_targets
+          WHERE bot_id = ? AND repo_owner = ? AND repo_name = ? AND deleted_at IS NULL
+          ORDER BY created_at, id LIMIT 1`,
+      )
+      .bind(scope.appId, scope.owner, scope.repo)
+      .first<{ check_min_score: number; check_pass_verdicts: string }>();
+    return row === null ? null : targetCheckGate(row);
   } catch {
     return null;
   }

@@ -3999,13 +3999,20 @@ export function createReviewConsumer(
       db: env.DB,
       nowMs: () => Date.now(),
       getAdapter: (scope) => appCommenters.get(scope.appId)?.commenter.checks ?? null,
-      // The Check gate is the target's configuration. The Check row's scope
-      // names the bot AND the installation it was attached for, so resolution
-      // reads the target BOUND to that installation before falling back to the
-      // bot's single one — the same rule the webhook applied to the message.
+      // The Check gate is the target's configuration. A target IS a repository
+      // (migration 0067) and a Check's stored scope carries the bot with the
+      // delivery's owner/name, so this is one index seek on the target's own
+      // cache columns — the delivery refreshed them, so no second resolution.
+      // An unreadable row is `null` (fail-closed).
       getCheckGate: async (scope) => {
-        const target = await targetsStore.resolve(scope.appId, scope.installationId);
-        return target === null ? null : targetCheckGate(target);
+        const row = await env.DB.prepare(
+          `SELECT check_min_score, check_pass_verdicts FROM review_targets
+            WHERE bot_id = ? AND repo_owner = ? AND repo_name = ? AND deleted_at IS NULL
+            ORDER BY created_at, id LIMIT 1`,
+        )
+          .bind(scope.appId, scope.owner, scope.repo)
+          .first<{ check_min_score: number; check_pass_verdicts: string }>();
+        return row === null ? null : targetCheckGate(row);
       },
     });
   return async (batch) => {

@@ -71,9 +71,7 @@ import {
   type PullRequestReviewing,
 } from "./apps-store";
 import {
-  ALLOWLIST_MAX_OWNERS,
   createTargetsStore,
-  dedupeOwnerLogins,
   parseTargetReviewLevel,
   REVIEW_TRIGGER_MODES,
   type ReviewTargetRow,
@@ -107,7 +105,6 @@ import {
   INVITE_FREE_SLOT_REFUSAL,
   MEMBER_CAP_REFUSAL,
   MemberCapError,
-  SHARED_BOT_REFUSAL,
   WORKSPACE_CREATION_CLOSED_REFUSAL,
   checkEntitlement,
   resolveWorkspacePlan,
@@ -2754,6 +2751,21 @@ async function resolveScopedApp(
 }
 
 /**
+ * The bot's first live target in this workspace — the app-scoped routes' local
+ * replacement for the retired store read. Plan 371 replaces this surface with
+ * the repository list; until then every app-scoped route keeps behaving as it
+ * did for the one-target-per-bot shape.
+ */
+async function firstTargetForBot(
+  db: DashboardD1,
+  workspaceId: string,
+  botId: string,
+): Promise<ReviewTargetRow | null> {
+  const targets = await createTargetsStore(db).listLive(workspaceId);
+  return targets.find((target) => target.bot_id === botId) ?? null;
+}
+
+/**
  * The App's operator-facing label (D6): GitHub's current name, then its slug,
  * then the immutable numeric ids. Every settings notice and dialog name the
  * App this way, so a rename shows up wherever the App is mentioned.
@@ -2823,7 +2835,7 @@ const appListRoute = async (c: DashboardContext) => {
   // workspace's pause state per bot, and a shared bot's row is in the list
   // exactly because one of these targets exists.
   const targetByBot = new Map(
-    (await createTargetsStore(gate.db).list(gate.scope.workspaceId)).map((target) => [
+    (await createTargetsStore(gate.db).listLive(gate.scope.workspaceId)).map((target) => [
       target.bot_id,
       target,
     ]),
@@ -2953,7 +2965,7 @@ async function appReviewAction(
   // The switch users flip is the TARGET's business pause; `review_bots`'
   // review_enabled is the operational pause and has no dashboard writer.
   const targets = createTargetsStore(gate.db);
-  const target = await targets.resolveInWorkspace(gate.scope.workspaceId, app.id);
+  const target = await firstTargetForBot(gate.db, gate.scope.workspaceId, app.id);
   if (!target) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   const paused = target.review_enabled === 0;
   if (action === "pause" ? paused : !paused) return pinnedPostMutationResponse(c, htmlRedirect, "ok"); // idempotent no-op — never touch the row
@@ -3007,10 +3019,10 @@ async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response
     return settings400Response(c, app.github_app_id, SETTINGS_400_KEYS.triggerModeUnknown, { mode });
   }
   const targets = createTargetsStore(gate.db);
-  const target = await targets.resolveInWorkspace(gate.scope.workspaceId, app.id);
+  const target = await firstTargetForBot(gate.db, gate.scope.workspaceId, app.id);
   if (!target) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (target.review_trigger_mode !== mode) {
-    await targets.setReviewTriggerMode(gate.scope.workspaceId, target.id, mode);
+    await targets.setReviewConfig(target.id, { triggerMode: mode });
   }
   return settingsPostResponse(c, app.github_app_id, "ok");
 }
@@ -3069,10 +3081,7 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
     member.scope,
   );
   if (!app) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  const target = await createTargetsStore(member.db).resolveInWorkspace(
-    member.scope.workspaceId,
-    app.id,
-  );
+  const target = await firstTargetForBot(member.db, member.scope.workspaceId, app.id);
   if (!target) {
     // The bot resolved but its configuration did not: every bot has exactly
     // one target, so this is a row that no longer exists, and 404 is the honest
@@ -3903,40 +3912,16 @@ const appSettingsRoute = async (c: DashboardContext) => {
     // unreadable verdict list is not — the face serves `check_gate: null`,
     // every other field stays readable, and the SPA renders a read-only
     // notice instead of controls that could not round-trip.
-    const targets = createTargetsStore(gate.db);
-    const checkGate = await targets.getCheckGate(gate.scope.workspaceId, gate.target.id);
-    const allowlist = await targets.getAllowlist(gate.scope.workspaceId, gate.target.id);
+    const checkGate = targetCheckGate(gate.target);
     const githubVisibility = await apps.getGithubVisibility(app.id);
-    // The target's bound installation, with `removed` read off
-    // `bot_installations.removed_at`: the binding survives an uninstall, so the
-    // block can say the account it reviews as AND that reviews stopped. A NULL
-    // `installation_id` is the unbound state. A binding whose installation row
-    // is gone entirely (impossible through the bind batch, possible for a
-    // hand-seeded row) still reports the id it holds.
-    const boundInstallation =
-      gate.target.installation_id === null
-        ? null
-        : await apps.getInstallation(app.id, gate.target.installation_id);
-    if (allowlist === null) {
-      throw new Error(`app settings row ${app.id} vanished while reading its review gate configuration`);
-    }
+    // Task 5 / plan 371 own the settings surface: a target no longer holds an
+    // installation binding (migration 0067), so the installation block stays
+    // empty until the repository surface replaces this payload.
+    const installationPayload = null;
     // The level a NULL target column resolves to (migration 0047) — the depth
     // control's inherit face names it, so a manager never needs the operator
     // console to know what "follow the operator default" currently runs.
     const defaultReviewLevel = (await readDefaultReviewLevel(gate.db)).value;
-    const installationPayload =
-      boundInstallation === null
-        ? null
-        : {
-            id: boundInstallation.installation_id,
-            account_login: boundInstallation.account_login,
-            removed: boundInstallation.removed_at !== null,
-          };
-    // Whether the park action would land for this target (target-owned).
-    const ownerOverlap = await createTargetsStore(gate.db).hasOwnerOverlap(
-      gate.scope.workspaceId,
-      gate.target.id,
-    );
     if (blockedReason !== null) {
       // The Blocked manager face: this workspace's target on another
       // workspace's bot. It carries the target's OWN review configuration and
@@ -3971,8 +3956,6 @@ const appSettingsRoute = async (c: DashboardContext) => {
           checkGate === null
             ? null
             : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
-        allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
-        owner_overlap: ownerOverlap,
       });
     }
     const base = {
@@ -4057,10 +4040,6 @@ const appSettingsRoute = async (c: DashboardContext) => {
         checkGate === null
           ? null
           : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
-      allowlist: { enabled: allowlist.enabled, owners: [...allowlist.owners] },
-      // Whether the park action would be accepted for this target: its account
-      // claim is duplicated by another live target of a multi-target bot.
-      owner_overlap: ownerOverlap,
     });
   } catch (err) {
     logSettingsFailure("api_render", gate.app.id, err);
@@ -5248,7 +5227,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     try {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
-      if (!(await createTargetsStore(gate.db).setReviewLevel(gate.scope.workspaceId, gate.target.id, level))) {
+      if (!(await createTargetsStore(gate.db).setReviewConfig(gate.target.id, { level }))) {
         throw new Error(`app ${gate.app.id} vanished before its review level save`);
       }
     } catch (err) {
@@ -5295,9 +5274,9 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       // `false` = the App row vanished (or was soft-deleted) before this
       // write: nothing was saved, so the success notice would lie.
       if (
-        !(await createTargetsStore(gate.db).saveCheckGate(gate.scope.workspaceId, gate.target.id, {
-          minScore,
-          passVerdicts,
+        !(await createTargetsStore(gate.db).setReviewConfig(gate.target.id, {
+          checkMinScore: minScore,
+          checkPassVerdicts: passVerdicts,
         }))
       ) {
         throw new Error(`app ${gate.app.id} vanished before its review gate save`);
@@ -5310,106 +5289,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       c,
       gate.app.github_app_id,
       `Saved the review gate for ${appDisplayName(gate.app)} — passes at ${minScore}+ points on: ${passVerdicts.join(", ") || "no verdicts"}.`,
-    );
-  }
-  if (op === "save-allowlist") {
-    // The owner allowlist (migration 0045): the switch plus the accepted
-    // owner logins, REPLACED as a set on every save (saveAllowlist
-    // delete-then-inserts in one batch), so removing an owner is the same
-    // submission as adding one. Enabled with an empty list refuses every
-    // owner — fail closed, and the SPA warns before save.
-    if (Array.isArray(form.owners)) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.fieldDuplicated, { field: "owners" });
-    }
-    const enabled = typeof form.enabled === "string" ? form.enabled : "";
-    if (enabled !== "1" && enabled !== "0") {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.allowlistToggleInvalid);
-    }
-    const ownerText = typeof form.owners === "string" ? form.owners : "";
-    // One login per line: blank lines are noise, duplicates collapse, the
-    // operator's order is kept. GitHub logins are case-insensitive, so case
-    // variants are the SAME owner and collapse to the first spelling.
-    const owners = dedupeOwnerLogins(
-      ownerText.split("\n").map((line) => line.trim()).filter((line) => line !== ""),
-    );
-    // Same GitHub login grammar as the invite route: a login that can never
-    // match a real owner would sit in the table as a dead row that admits
-    // nobody, so the offending entry is named back to the operator.
-    const invalidOwner = owners.find((owner) => !GITHUB_LOGIN_PATTERN.test(owner));
-    if (invalidOwner !== undefined) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.allowlistInvalidOwner, {
-        owner: invalidOwner,
-      });
-    }
-    // The replace is ONE D1 batch, so the accepted size is bounded here (the
-    // trust boundary): an oversized submission is a keyed 400, zero writes.
-    if (owners.length > ALLOWLIST_MAX_OWNERS) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.allowlistTooManyOwners, {
-        limit: ALLOWLIST_MAX_OWNERS,
-      });
-    }
-    const apps = createReviewBotsStore(gate.db);
-    try {
-      // `false` = the target vanished (or was soft-deleted, or belongs to
-      // another workspace) before this write: nothing was saved, so the
-      // success notice would lie.
-      if (
-        !(await createTargetsStore(gate.db).saveAllowlist(
-          gate.scope.workspaceId,
-          gate.target.id,
-          { enabled: enabled === "1", owners },
-        ))
-      ) {
-        throw new Error(`app ${gate.app.id} vanished before its owner allowlist save`);
-      }
-    } catch (err) {
-      logSettingsFailure("save_allowlist", gate.app.id, err);
-      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
-    }
-    // Admission applies whenever this switch is on, whatever the cached
-    // visibility; `private` only changes the SPA's private-App note under an
-    // allowlist control it renders regardless. So the copy below reports the
-    // state the save just produced, and it needs the resolved visibility so a
-    // `private` App is told the stored list still applies. A save probes
-    // through the metadata refresh's anonymous probe and caches a public or
-    // private answer. A no-answer (`null`: the probe ran but could not tell)
-    // keeps the stored value, exactly like the refresh path — admission never
-    // reads the column, so a no-answer invalidates nothing. An App with no
-    // slug has nothing to probe either, so it skips both the probe and the
-    // cache write, leaving the cached value standing.
-    // Bookkeeping only: a probe or cache-write failure is logged and never
-    // blocks the save the operator asked for.
-    let visibility = gate.app.github_visibility ?? "unknown";
-    if (enabled === "1" && gate.app.github_slug !== null) {
-      try {
-        const probed = await fetchAppVisibility(gate.app.github_slug);
-        if (probed !== null) {
-          visibility = probed;
-          await apps.saveGithubVisibility(gate.app.id, probed);
-        }
-      } catch (err) {
-        logSettingsFailure("github_visibility", gate.app.id, err);
-      }
-    }
-    if (enabled !== "1") {
-      return settingsPostResponse(
-        c,
-        gate.app.github_app_id,
-        `Saved the owner allowlist for ${appDisplayName(gate.app)} — switched off; every owner is reviewed as before.`,
-      );
-    }
-    // One owner / many owners reads correctly, and a `private` App is told
-    // that its stored list still applies — the Settings control stays visible
-    // for it, so the notice must not claim the control went anywhere.
-    const accepted = `${owners.length} ${owners.length === 1 ? "owner" : "owners"} accepted; every other owner is refused.`;
-    const privateControl =
-      visibility === "private"
-        ? " This App is private, but the stored list still applies to its deliveries — the control stays visible so you can manage it."
-        : "";
-    return settingsPostResponse(
-      c,
-      gate.app.github_app_id,
-      `Saved the owner allowlist for ${appDisplayName(gate.app)} — ${accepted}${privateControl}`,
     );
   }
   // Review fold-in: an unknown op is a validation failure like any
@@ -5626,28 +5505,26 @@ async function requireAppManagerJson(
   const app = await resolveScopedApp(store, c.req.param("appId") ?? "", member.scope);
   if (!app) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
   if (!canManageApp(member.scope)) return { ok: false, response: c.json({ error: "forbidden" }, 403) };
-  const target = await createTargetsStore(member.db).resolveInWorkspace(member.scope.workspaceId, app.id);
+  const target = await firstTargetForBot(member.db, member.scope.workspaceId, app.id);
   if (!target) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
   return { ok: true, app, target, scope: member.scope, db: member.db, store };
 }
 
 /**
  * `POST /api/apps/:appId/claim` — record (or refresh) this session's intent to
- * bind an installation to the App's target, and hand the SPA the GitHub page to
- * send the user to. `access: "write"` like every other manager mutation:
- * `requireMember` + `canManageApp`, so a granted support operator reaches the
- * existing write-route refusal and no impersonated principal creates a claim.
+ * install the App, and hand the SPA the GitHub page to send the user to.
+ * `access: "write"` like every other manager mutation: `requireMember` +
+ * `canManageApp`, so a granted support operator reaches the existing write-route
+ * refusal and no impersonated principal creates a claim.
  *
- * The refusals are the contract's, in order: an unknown, foreign, soft-deleted
- * or non-numeric App is `404 unknown app` (never 403); a caller who cannot
- * manage it is `403 forbidden`; no single live target is `404 no target`; a bot
- * that is not `shared` advertises nothing, so `404 bot is not shared` rather
- * than "forbidden"; a never-synced slug is `409 bot has no installation url`
- * because there is no page to send the user to; a target that already holds a
- * binding is `409 target already bound` — the bind batch refuses a different
- * installation and a same-installation claim has nothing left to do, so the
- * claim would only send the user to GitHub to fail. The operator's unbind is
- * the repair path, and it is what makes this action available again.
+ * A claim names the APP (migration 0067 / D19), never a target: an installation
+ * belongs to the App, and the repositories it reviews are targets a manager
+ * adds afterwards. The refusals are the contract's, in order: an unknown,
+ * foreign, soft-deleted or non-numeric App is `404 unknown app` (never 403); a
+ * caller who cannot manage it is `403 forbidden`; a bot that is not `shared`
+ * advertises nothing, so `404 bot is not shared` rather than "forbidden"; a
+ * never-synced slug is `409 bot has no installation url` because there is no
+ * page to send the user to.
  */
 const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
@@ -5656,19 +5533,13 @@ const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
   if (!app) return c.json({ error: "unknown app" }, 404);
   if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
-  const target = await createTargetsStore(member.db).resolveInWorkspace(
-    member.scope.workspaceId,
-    app.id,
-  );
-  if (!target) return c.json({ error: "no target" }, 404);
   if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
   if (app.github_slug === null) return c.json({ error: "bot has no installation url" }, 409);
-  if (target.installation_id !== null) return c.json({ error: "target already bound" }, 409);
 
   const claim = await createInstallClaimsStore(member.db).createOrRefreshClaim({
     userId: member.user.id,
     workspaceId: member.scope.workspaceId,
-    targetId: target.id,
+    botId: app.id,
     now: new Date().toISOString(),
   });
   // No `state`: GitHub preserves none, so the claim row is the only carrier of
@@ -5685,20 +5556,19 @@ const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
  * a workspace manager picks one pending installation of the bot and binds it to
  * the workspace's target without leaving the dashboard.
  *
- * The write is the setup callback's OWN batch — `claimAndBind` records the
- * caller's claim and consumes it in this request — so the unique index, the
- * one-installation-per-target rule and the shared-bot guard all still decide.
+ * The write is the setup callback's OWN batch — the caller's claim is
+ * recorded and consumed in this request — so the unique index and the
+ * shared-bot guard still decide, and it writes `bot_installations` only
+ * (migration 0067: an installation belongs to the App, never to a target).
  * This route adds one guard of its own: the installation must answer the
  * pending read, because the batch's upsert is conflict-tolerant and would
  * accept an id the bot never reported.
  *
  * Refusals keep the family's vocabulary: an unknown, foreign or soft-deleted
  * App is `404 unknown app`; a caller who cannot manage it is `403 forbidden`;
- * a bot that is not `shared` advertises nothing (`404 bot is not shared`); no
- * single live target is `404 no target`; an unreadable id is `400`; an id the
- * pending read does not answer is `404 unknown installation`; a target that
- * already holds a binding is `409 target already bound`, and a losing race for
- * the same installation is the batch's `409 installation already bound`.
+ * a bot that is not `shared` advertises nothing (`404 bot is not shared`); an
+ * unreadable id is `400`; an id the pending read does not answer is
+ * `404 unknown installation`.
  */
 const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
@@ -5708,151 +5578,41 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
   if (!app) return c.json({ error: "unknown app" }, 404);
   if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
   if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
-  const target = await createTargetsStore(member.db).resolveInWorkspace(
-    member.scope.workspaceId,
-    app.id,
-  );
-  if (!target) return c.json({ error: "no target" }, 404);
-  if (target.installation_id !== null) return c.json({ error: "target already bound" }, 409);
   const form = await c.req.parseBody();
   const raw = form["installationId"];
   const installationId = typeof raw === "string" ? Number(raw) : Number.NaN;
   if (!Number.isSafeInteger(installationId) || installationId <= 0) {
     return c.json({ error: "installationId required" }, 400);
   }
-  const pending = await apps.listPendingInstallations(app.id, member.scope.workspaceId);
+  // The App's live installations are the whole candidate set now (migration
+  // 0067): nothing can already hold one, because no target binds an
+  // installation.
+  const pending = await apps.listInstallations(app.id);
   if (!pending.some((row) => row.installation_id === installationId)) {
     return c.json({ error: "unknown installation" }, 404);
   }
-  const bound = await createInstallClaimsStore(member.db).claimAndBind({
+  const claims = createInstallClaimsStore(member.db);
+  const now = new Date().toISOString();
+  const claim = await claims.createOrRefreshClaim({
     userId: member.user.id,
     workspaceId: member.scope.workspaceId,
-    targetId: target.id,
+    botId: app.id,
+    now,
+  });
+  const bound = await claims.consumeAndBind({
+    claimId: claim.id,
+    userId: member.user.id,
     installationId,
-    now: new Date().toISOString(),
+    now,
   });
   switch (bound.outcome) {
     case "bound":
-      return c.json({ targetId: bound.targetId });
-    case "installation_already_bound":
-      return c.json({ error: "installation already bound" }, 409);
-    case "target_not_bindable":
-      return c.json({ error: "target already bound" }, 409);
+      return c.json({ botId: bound.botId, installationId });
     case "bot_not_shared":
       return c.json({ error: "bot is not shared" }, 404);
     case "claim_not_found":
       return c.json({ error: "claim not found" }, 404);
   }
-};
-
-/**
- * `POST /apps/:appId/park` — the workspace manager's repair for an overlapping
- * owner claim: pause the target and retire its `account_login`, with one
- * `target.park` audit row, all in one batch.
- *
- * The refusals keep the pinned-post vocabulary: an unknown, foreign,
- * soft-deleted or non-numeric App is `404 unknown app`; a caller who cannot
- * manage it is the family's 403; a target the store refused (not live here, the
- * bot's only live target, or a claim nobody duplicates) answers that reason as
- * `409`, and wrote nothing.
- */
-const appParkRoute = async (c: DashboardContext): Promise<Response> => {
-  const member = await requireMember(c);
-  if (!member.ok) return member.response;
-  const app = await resolveScopedApp(
-    createReviewBotsStore(member.db),
-    c.req.param("appId") ?? "",
-    member.scope,
-  );
-  if (!app) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  }
-  if (!canManageApp(member.scope)) {
-    return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
-  }
-  const target = await createTargetsStore(member.db).resolveInWorkspace(
-    member.scope.workspaceId,
-    app.id,
-  );
-  if (!target) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  }
-  const parked = await createTargetsStore(member.db).park(
-    member.scope.workspaceId,
-    target.id,
-    member.user.github_login,
-    new Date().toISOString(),
-  );
-  if (parked.outcome === "refused") {
-    return pinnedPostMutationResponse(
-      c,
-      scopedAppPath(c, `/dashboard/targets/${app.github_app_id}`),
-      parked.reason,
-      409,
-    );
-  }
-  return pinnedPostMutationResponse(
-    c,
-    scopedAppPath(c, `/dashboard/targets/${app.github_app_id}`),
-    "ok",
-  );
-};
-
-/**
- * `POST /api/targets` — the workspace manager's target on a `shared` bot, the
- * chooser's official mode. `{ botId }` is the whole body: the workspace is the
- * request's own, and the bot is one the platform already shares.
- *
- * Refusals reuse the pinned-post vocabulary: a body without a `botId` is a
- * `400`; a workspace whose plan does not include the shared bot is the same
- * `400` carrying the plan-named refusal, with nothing written — the capability
- * is decided BEFORE the bot row is read (the right order: no read for a
- * workspace that may not use the feature), so the `404 unknown app` below is
- * reachable only when the plan grants the capability; a bot the store would
- * not write (unknown, soft-deleted or not shared) is the same `404 unknown
- * app` an unknown App answers; a workspace that already holds a
- * live target on the bot is the family's `409`. A caller who is not
- * owner/admin is refused by the manage gate before any read, and the store's
- * own guard re-checks the bot inside the write, so a bot unshared between page
- * load and submit writes nothing.
- */
-const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
-  const member = await requireMember(c);
-  if (!member.ok) return member.response;
-  if (!canManageRole(member.scope.role)) {
-    return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
-  }
-  const form = await c.req.parseBody();
-  const botId = typeof form.botId === "string" ? form.botId.trim() : "";
-  if (botId === "") {
-    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "bot id required", 400);
-  }
-  // The floor a new target starts at is the workspace's own; a degraded read
-  // would silently widen a floor the tenant may have set higher, so it fails
-  // closed before anything is written (the manifest commit's rule).
-  const floor = await getWorkspaceCheckMinScore(member.db, member.scope.workspaceId);
-  if (floor.degraded) {
-    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "workspace floor unreadable", 500);
-  }
-  const created = await createTargetsStore(member.db).createOnSharedBot({
-    workspaceId: member.scope.workspaceId,
-    botId,
-    createdBy: member.user.github_login,
-    mode: deploymentModeOf(c.env.DEPLOYMENT_MODE),
-    checkMinScore: floor.minScore,
-  });
-  if (created.outcome === "plan_refused") {
-    // The shared-bot capability is the plan's, so the refusal names the plan
-    // this reader can change (own App, or an operator moves it).
-    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, SHARED_BOT_REFUSAL(created.planId), 400);
-  }
-  if (created.outcome === "bot_not_shared") {
-    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "unknown app", 404);
-  }
-  if (created.outcome === "target_exists") {
-    return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "target exists", 409);
-  }
-  return pinnedPostMutationResponse(c, APPS_LIST_REDIRECT, "ok");
 };
 
 /** The ledger scope the PR faces bind: the resolved target, its workspace, its bot. */
@@ -6156,10 +5916,8 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/delete", handler: (c) => appStatusAction(c, "delete"), access: "write" },
   { method: "post", path: "/apps/:appId/pause", handler: (c) => appReviewAction(c, "pause"), access: "write" },
   { method: "post", path: "/apps/:appId/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
-  { method: "post", path: "/apps/:appId/park", handler: appParkRoute, access: "write" },
   // Workspace-scoped target creation on a shared bot — not App-addressed: the
   // body names the bot, and the route re-checks its scope inside the write.
-  { method: "post", path: "/api/targets", handler: targetCreateRoute, access: "write" },
   { method: "post", path: "/apps/:appId/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },

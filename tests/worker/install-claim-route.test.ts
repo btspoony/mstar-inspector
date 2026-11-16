@@ -4,7 +4,8 @@
  *
  * Pinned here:
  *   - a shared bot with a synced slug answers the claim id, its expiry and the
- *     installation URL, and writes ONE live claim for the addressed target;
+ *     installation URL, and writes ONE live claim for the addressed APP
+ *     (migration 0067 / D19: a claim names a bot, never a target);
  *   - a second press refreshes that claim instead of stacking;
  *   - an owned bot is "nothing here" rather than "forbidden" (404
  *     `bot is not shared`), and a never-synced slug is 409
@@ -55,7 +56,7 @@ function claimAnswerOf(body: unknown): ClaimAnswer {
   return { claimId, expiresAt, installationUrl };
 }
 
-type World = { db: TestD1; botId: string; targetId: string };
+type World = { db: TestD1; botId: string };
 
 /** One bot in the `default` workspace with its target, scope and slug as asked. */
 async function seededWorld(opts: {
@@ -79,11 +80,7 @@ async function seededWorld(opts: {
     workspaceId: "default",
   });
   db.raw.prepare("UPDATE review_bots SET scope = ? WHERE id = ?").run(opts.scope ?? "shared", botId);
-  const targetRow = db.raw.query("SELECT id FROM review_targets WHERE bot_id = ?").get(botId);
-  if (targetRow === null || typeof targetRow !== "object" || !("id" in targetRow) || typeof targetRow.id !== "string") {
-    throw new Error(`createApp wrote no target for ${botId}`);
-  }
-  return { db, botId, targetId: targetRow.id };
+  return { db, botId };
 }
 
 async function postClaim(db: TestD1, login: string, appId = String(APP_ID)): Promise<Response> {
@@ -106,7 +103,7 @@ function claimCount(db: TestD1): number {
 
 describe("POST /dashboard/:workspaceRef/api/apps/:appId/claim", () => {
   test("a shared bot answers the claim id, its expiry and the installation URL", async () => {
-    const { db, targetId } = await seededWorld({});
+    const { db, botId } = await seededWorld({});
     const res = await postClaim(db, "mallory");
 
     expect(res.status).toBe(200);
@@ -117,9 +114,9 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/claim", () => {
     expect(body.installationUrl).not.toContain("state");
     expect(Date.parse(body.expiresAt)).toBeGreaterThan(Date.now());
     const claim = db.raw
-      .query("SELECT target_id, workspace_id, consumed_at FROM install_claims WHERE id = ?")
+      .query("SELECT bot_id, workspace_id, consumed_at FROM install_claims WHERE id = ?")
       .get(body.claimId);
-    expect(claim).toEqual({ target_id: targetId, workspace_id: "default", consumed_at: null });
+    expect(claim).toEqual({ bot_id: botId, workspace_id: "default", consumed_at: null });
   });
 
   test("a second press refreshes the same live claim instead of stacking", async () => {
@@ -149,22 +146,6 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/claim", () => {
     expect(claimCount(db)).toBe(0);
   });
 
-  test("a target that already holds a binding answers 409 target already bound and mints no claim", async () => {
-    const { db, targetId } = await seededWorld({});
-    db.raw
-      .prepare("UPDATE review_targets SET installation_id = 4242, account_login = 'acme' WHERE id = ?")
-      .run(targetId);
-
-    const res = await postClaim(db, "mallory");
-
-    // The bind batch refuses a different installation, so a claim here would
-    // only send the user to GitHub to fail. The operator's unbind is the
-    // repair path that makes this action available again.
-    expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: "target already bound" });
-    expect(claimCount(db)).toBe(0);
-  });
-
   test("an unknown or non-numeric App id is the same 404 as an unknown bot", async () => {
     const { db } = await seededWorld({});
     for (const appId of ["999999", "not-a-number"]) {
@@ -187,16 +168,13 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/claim", () => {
 
 /**
  * `POST /dashboard/:workspaceRef/api/apps/:appId/bind-installation` — the
- * target page's second bind entry point. It composes the claim store's
- * create-then-consume call, so the ONLY writer of
- * `review_targets.installation_id` stays the setup callback's batch: the
- * unique index, the one-target-per-installation rule and the shared-bot guard
- * all still speak here.
+ * app page's second install entry point. It composes the claim store's
+ * create-then-consume call, so the app's installation row and the shared-bot
+ * guard still decide — and no target is written (migration 0067 / D19).
  *
  * Pinned: one pending installation of the bot binds (and the claim it created
  * is consumed); an id the pending read does not answer is 404 with nothing
- * written; a bound target keeps its existing 409 vocabulary; a non-manager and
- * an unshared bot are refused before any write.
+ * written; a non-manager and an unshared bot are refused before any write.
  */
 describe("POST /dashboard/:workspaceRef/api/apps/:appId/bind-installation", () => {
   /** One live installation of the world's bot, optionally already removed. */
@@ -228,22 +206,14 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/bind-installation", () =
     );
   }
 
-  function targetBinding(db: TestD1, targetId: string): number | null {
-    const row = db.raw
-      .query("SELECT installation_id FROM review_targets WHERE id = ?")
-      .get(targetId) as { installation_id: number | null } | null;
-    return row?.installation_id ?? null;
-  }
-
-  test("binds one pending installation to the workspace's target in one action", async () => {
-    const { db, botId, targetId } = await seededWorld({});
+  test("records one pending installation on the app in one action", async () => {
+    const { db, botId } = await seededWorld({});
     seedInstallation(db, botId, 4321);
 
     const res = await postBind(db, "mallory", { installationId: "4321" });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ targetId });
-    expect(targetBinding(db, targetId)).toBe(4321);
+    expect(await res.json()).toEqual({ botId, installationId: 4321 });
     // The composed claim was consumed by the same call; the installation row
     // the batch upserted is the bot's live one.
     expect(claimCount(db)).toBe(1);
@@ -254,32 +224,21 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/bind-installation", () =
   });
 
   test("an installation the pending read does not answer is 404 and writes nothing", async () => {
-    const { db, botId, targetId } = await seededWorld({});
+    const { db, botId } = await seededWorld({});
     seedInstallation(db, botId, 1111);
     // Removed, and never seen at all: neither is the route's to bind.
     seedInstallation(db, botId, 2222, true);
-    // 1111 is held by ANOTHER workspace's target: cross-workspace
-    // installations are never listed, so it is not this target's to bind.
-    db.raw
-      .prepare(
-        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
-         VALUES ('ws-other', 'ws-other', 'ws-other', NULL, datetime('now'))`,
-      )
-      .run();
-    db.raw
-      .prepare(
-        `INSERT INTO review_targets (id, workspace_id, bot_id, name, installation_id, created_by, created_at, updated_at)
-         VALUES ('target-elsewhere', 'ws-other', ?, 'elsewhere', 1111, 'fixture', datetime('now'), datetime('now'))`,
-      )
-      .run(botId);
-
-    for (const installationId of ["1111", "2222", "3333"]) {
+    for (const installationId of ["2222", "3333"]) {
       const res = await postBind(db, "mallory", { installationId });
       expect(res.status, installationId).toBe(404);
       expect(await res.json()).toEqual({ error: "unknown installation" });
     }
     expect(claimCount(db)).toBe(0);
-    expect(targetBinding(db, targetId)).toBeNull();
+    expect(
+      db.raw
+        .query("SELECT COUNT(*) AS n FROM bot_installations WHERE bot_id = ? AND installation_id = 1111")
+        .get(botId),
+    ).toEqual({ n: 1 });
   });
 
   test("a malformed installation id is a 400 and writes nothing", async () => {
@@ -297,19 +256,6 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/bind-installation", () =
     expect(claimCount(db)).toBe(0);
   });
 
-  test("a target that already holds a binding keeps 409 target already bound", async () => {
-    const { db, botId, targetId } = await seededWorld({});
-    seedInstallation(db, botId, 4321);
-    db.raw.prepare("UPDATE review_targets SET installation_id = 9999 WHERE id = ?").run(targetId);
-
-    const res = await postBind(db, "mallory", { installationId: "4321" });
-
-    expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: "target already bound" });
-    expect(claimCount(db)).toBe(0);
-    expect(targetBinding(db, targetId)).toBe(9999);
-  });
-
   test("an owned bot answers 404 bot is not shared and writes nothing", async () => {
     const { db, botId } = await seededWorld({ scope: "owned" });
     seedInstallation(db, botId, 4321);
@@ -322,7 +268,7 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/bind-installation", () =
   });
 
   test("a plain member is refused before any claim exists", async () => {
-    const { db, botId, targetId } = await seededWorld({});
+    const { db, botId } = await seededWorld({});
     seedInstallation(db, botId, 4321);
 
     const res = await postBind(db, "trudy", { installationId: "4321" });
@@ -330,7 +276,6 @@ describe("POST /dashboard/:workspaceRef/api/apps/:appId/bind-installation", () =
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "forbidden" });
     expect(claimCount(db)).toBe(0);
-    expect(targetBinding(db, targetId)).toBeNull();
   });
 
   test("an unknown or non-numeric App id stays the same 404", async () => {
