@@ -3670,75 +3670,12 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     ]);
   });
 
-  test("a removed installation row is history, not an ambiguity: the failure keeps its own target", () => {
-    const db = preLedgerTargetDb();
-    seedParents(db);
-    seedPullRequest(db, "pr-42", 42);
-    seedFailure(db, "failure-42", 42);
-    // 0055 keeps the installation row and sets removed_at; a second bot holds
-    // the live binding at the same installation id with its own target. An
-    // unfiltered join would see two targets and abort; the live binding must win.
-    db.raw
-      .prepare(
-        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
-         VALUES ('ws-other', 'ws-other', 'ws-other', 'acme', '2026-01-01T00:00:00.000Z')`,
-      )
-      .run();
-    db.raw
-      .prepare(
-        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
-         VALUES ('target-b', 'ws-other', 'bot-a', 'target-b', 'acme',
-                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
-      )
-      .run();
-    // A second bot now holds the live binding for the same installation id,
-    // pointing at its own target; the old bot's row is marked removed.
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
-           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
-            status, created_at, updated_at)
-         VALUES ('bot-b', 9102, 'bot-b', 'enc', 'enc', 'acme', 'active',
-                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
-      )
-      .run();
-    db.raw
-      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-b', 'ws-other')")
-      .run();
-    db.raw
-      .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
-         VALUES ('install-live', 'bot-b', 123, 'acme', datetime('now'))`,
-      )
-      .run();
-    db.raw
-      .prepare(
-        `UPDATE bot_installations SET removed_at = '2026-01-01T00:00:00.000Z' WHERE bot_id = 'bot-a'`,
-      )
-      .run();
-    db.raw
-      .prepare(
-        `INSERT INTO pull_requests
-           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
-         VALUES ('pr-b', 'bot-b', 'target-b', 'acme', 'widgets', 42, 'PR', 'open', 'sha',
-                 datetime('now'), datetime('now'))`,
-      )
-      .run();
-
-    // The guard sees one live candidate and passes; the UPDATE must reach the
-    // same conclusion, not SQLite's row order. The live binding wins.
-    applyLedgerTargetMigration(db);
-
-    expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
-      { id: "failure-42", target_id: "target-b" },
-    ]);
-  });
-
-  test("a moved installation resolves the same whichever binding was seeded first", () => {
-    // The scalar subquery has no natural order; the migration must impose one.
-    // Seed the LIVE binding first, the reverse of the previous test, and the
-    // answer must not change.
-    const build = (): TestD1 => {
+  test("a moved installation resolves to the live binding, whichever order the rows were seeded", () => {
+    // One installation, two binding rows: bot-a's is removed, bot-b's is live,
+    // each with its own ledger row at the same PR key. The guard counts one live
+    // candidate; the UPDATE must agree rather than take SQLite's scan order, so
+    // both seeded orders must answer target-b.
+    for (const liveFirst of [false, true]) {
       const db = preLedgerTargetDb();
       seedParents(db);
       seedPullRequest(db, "pr-42", 42);
@@ -3768,18 +3705,29 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
                    '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
         )
         .run();
-      // LIVE first.
-      db.raw
-        .prepare(
-          `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
-           VALUES ('install-live', 'bot-b', 123, 'acme', datetime('now'))`,
-        )
-        .run();
-      db.raw
-        .prepare(
-          `UPDATE bot_installations SET removed_at = '2026-01-01T00:00:00.000Z' WHERE bot_id = 'bot-a'`,
-        )
-        .run();
+      // `seedParents` already gave bot-a an installation row; mark it removed
+      // rather than inserting a second one (the pair is unique), then add the
+      // live binding, in the order this iteration asks for.
+      const removeA = (): void => {
+        db.raw
+          .prepare("UPDATE bot_installations SET removed_at = '2026-01-01T00:00:00.000Z' WHERE bot_id = 'bot-a'")
+          .run();
+      };
+      const addLive = (): void => {
+        db.raw
+          .prepare(
+            `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+             VALUES ('install-live', 'bot-b', 123, 'acme', datetime('now'))`,
+          )
+          .run();
+      };
+      if (liveFirst) {
+        addLive();
+        removeA();
+      } else {
+        removeA();
+        addLive();
+      }
       db.raw
         .prepare(
           `INSERT INTO pull_requests
@@ -3788,14 +3736,13 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
                    datetime('now'), datetime('now'))`,
         )
         .run();
-      return db;
-    };
 
-    for (const db of [build()]) {
       applyLedgerTargetMigration(db);
-      expect(db.raw.query("SELECT id, target_id FROM review_failures").all()).toEqual([
-        { id: "failure-42", target_id: "target-b" },
-      ]);
+
+      expect(
+        db.raw.query("SELECT id, target_id FROM review_failures").all(),
+        `liveFirst=${liveFirst}`,
+      ).toEqual([{ id: "failure-42", target_id: "target-b" }]);
     }
   });
 
