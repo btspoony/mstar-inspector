@@ -482,11 +482,16 @@ export async function releaseUpgradeClaim(
 }
 
 /**
- * The batch's outcome: cursor, counter, log entry AND the lease release commit
- * together, after the data move. The log is append-only JSON so the operator
- * keeps the counts of every batch a later reset would otherwise erase; clearing
- * `started_at` is what lets the next step claim again, and `claim_token` goes
- * with it so no stale claim identity outlives its claim.
+ * The batch's outcome: cursor, counter, log entry AND the lease release. The
+ * log is append-only JSON so the operator keeps the counts of every batch a
+ * later reset would otherwise erase; clearing `started_at` is what lets the next
+ * step claim again, and `claim_token` goes with it so no stale claim identity
+ * outlives its claim.
+ *
+ * The guard is OUR token: the batch runs after an await, so a successor can
+ * claim the row before this write lands. `changes === 0` then means the claim
+ * was taken over — writing anyway would record this batch's page onto the
+ * successor's run and clear the claim it now holds.
  */
 const STEP_PROGRESS_SQL = `
   UPDATE operator_data_upgrades
@@ -497,7 +502,7 @@ const STEP_PROGRESS_SQL = `
          log_json = CASE WHEN ?4 IS NULL THEN log_json
                          WHEN log_json IS NULL THEN json_array(json(?4))
                          ELSE json_insert(log_json, '$[#]', json(?4)) END
-   WHERE id = ?1`;
+   WHERE id = ?1 AND status = 'running' AND claim_token = ?5`;
 
 /** The phases the operator console can run, as the ledger names them. */
 type UpgradePhase = "step" | "verify" | "reset";
@@ -582,17 +587,22 @@ export async function stepDataUpgrade(
     await releaseClaim(db, item.id, now, token);
     throw err;
   });
-  await db.batch([
-    db
-      .prepare(STEP_PROGRESS_SQL)
-      .bind(
-        item.id,
-        JSON.stringify(batch.cursor),
-        batch.processed,
-        batch.log === undefined ? null : JSON.stringify(batch.log),
-      ),
-    upgradeAudit(db, "step", actor, item.id, "running", now),
-  ]);
+  // Our token must still hold the row: the batch awaited, so a successor may
+  // have claimed it. A refusal writes neither the page nor an audit row, and
+  // leaves the successor's claim untouched.
+  const progressed = await guardedWrite(
+    db,
+    STEP_PROGRESS_SQL,
+    item.id,
+    JSON.stringify(batch.cursor),
+    batch.processed,
+    batch.log === undefined ? null : JSON.stringify(batch.log),
+    token,
+  );
+  if (progressed === "refused") {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
+  }
+  await upgradeAudit(db, "step", actor, item.id, "running", now).run();
   return { kind: "ok", state: await readDataUpgradeState(db, item.id), batch };
 }
 

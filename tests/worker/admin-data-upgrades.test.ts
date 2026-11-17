@@ -307,6 +307,43 @@ describe("the data-upgrade runner", () => {
     expect(movedCount(db)).toBe(3);
   });
 
+  test("a claim taken over during the batch is refused the progress write", async () => {
+    const db = fixture(3);
+    const successorStamp = "2026-11-17T04:00:00.000Z";
+    const inner = fixtureItem();
+    // The takeover lands AFTER `runBatch` returned and BEFORE the progress
+    // write: a successor now holds the row under its own token.
+    register({
+      ...inner,
+      async runBatch(dbApi, cursor) {
+        const batch = await inner.runBatch(dbApi, cursor);
+        db.raw
+          .prepare("UPDATE operator_data_upgrades SET started_at = ?, claim_token = ? WHERE id = ?")
+          .run(successorStamp, "claim-successor", ITEM_ID);
+        return batch;
+      },
+    });
+
+    const step = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    expect(step.status).toBe(409);
+    const refusal = (await step.json()) as { error: string };
+    expect(refusal.error).toBe("upgrade_running");
+    // The successor's claim stands and the stale step wrote no progress: no
+    // cursor, no counter, no log entry.
+    expect(db.raw.prepare("SELECT * FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID)).toMatchObject({
+      status: "running",
+      started_at: successorStamp,
+      claim_token: "claim-successor",
+      processed: 0,
+      cursor_json: null,
+      log_json: null,
+    });
+    // A refusal writes no ledger row either.
+    expect(
+      db.raw.prepare("SELECT COUNT(*) AS n FROM platform_audit_events WHERE action = 'upgrade.step'").get(),
+    ).toEqual({ n: 0 });
+  });
+
   test("a batch that throws releases the claim, so the operator can retry", async () => {
     const db = fixture(2);
     const inner = fixtureItem();
