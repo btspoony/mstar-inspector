@@ -1,7 +1,5 @@
 # Feature: operator data upgrade
 
-Promoted from: iteration v1.18 (package specs repository-surface / repository-target-model / operator-data-upgrade).
-
 ## Scope
 
 The operator-owned machinery for data migrations too large to run as a schema change: the maintenance window, the upgrade registry and its state machine, and the repository backfill item that gives historical targets their repository identity. It also fixes how this machinery couples to the ordinary schema migrations that ship beside it.
