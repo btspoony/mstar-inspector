@@ -587,7 +587,7 @@ describe("Bot settings read-face permission matrix", () => {
   });
 });
 
-// --- PR-ledger read faces: the list and one-PR detail (plan 372 / 0039) ---
+// --- PR-ledger read faces: the list and one-PR detail (migration 0039) ---
 // Same canManageApp rule as every other target read: the workspace role decides,
 // and target authorship grants nothing. The address is the target plus the
 // ledger's own key (owner/repo/number).

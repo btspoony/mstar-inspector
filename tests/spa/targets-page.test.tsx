@@ -1,5 +1,5 @@
 /**
- * The repository surface's rendered faces (product spec J1/J2, plan 371.2).
+ * The repository surface's rendered faces (product spec J1/J2).
  *
  * Static SSR pins what the page shows, not how it wires:
  *   - the fixed 所有仓库 row first, with the live count and the per-repository
@@ -557,7 +557,7 @@ describe("the list failure face", () => {
 });
 
 /**
- * The 评审配置 tab (plan 371.3, D16 / product spec J4): what the target RUNS
+ * The 评审配置 tab (D16 / product spec J4): what the target RUNS
  * with while inheriting, and the same controls editable once it opts out. The
  * only DOM facts asserted are the ones a reader would check — read-only
  * controls, the follow line, the two switches.
@@ -668,7 +668,7 @@ describe("target settings tab (static SSR)", () => {
 });
 
 /**
- * The detail page's wiring (plan 371.3, second slice): the three tabs, the
+ * The detail page's wiring: the three tabs, the
  * not-found face a 404 renders, and the settings tab reading the payload the
  * page loaded. Asserted on the page, not the tab component — the tab's own
  * faces are pinned above.

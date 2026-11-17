@@ -3916,7 +3916,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
     // workspace answers, so the payload must not play back the inert
     // placeholder columns its row happens to carry. One read answers all four.
     const githubVisibility = await apps.getGithubVisibility(app.id);
-    // Task 5 / plan 371 own the settings surface: a target no longer holds an
+    // The settings surface owns this: a target no longer holds an
     // installation binding (migration 0067), so the installation block stays
     // empty until the repository surface replaces this payload.
     const installationPayload = null;
@@ -6129,7 +6129,7 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
 
 // --- Repository settings: one target, and the workspace defaults -----------
 //
-// The detail page's 评审配置 tab (plan 371.3, product spec J4). Both faces read
+// The detail page's 评审配置 tab (product spec J4). Both faces read
 // the SAME effective settings every runtime lane reads (`readEffectiveTargetSettings`),
 // so the page can never show a policy the review path does not run with.
 
@@ -6501,7 +6501,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   // body names the bot, and the route re-checks its scope inside the write.
   { method: "get", path: "/api/targets", handler: targetListRoute, access: "read" },
   { method: "post", path: "/api/targets", handler: targetCreateRoute, access: "write" },
-  // The detail page's settings tab (plan 371.3). `/api/targets/all` is the
+  // The detail page's settings tab. `/api/targets/all` is the
   // fixed 所有仓库 entry and MUST stay registered before the `:targetId` read:
   // Hono matches in registration order, so the literal would otherwise be
   // swallowed as a target UUID.
@@ -6525,7 +6525,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/api/apps/:appId/keys/usage", handler: appKeyUsageRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
-  // Target-addressed reads (plan 372): one repository target's insights and
+  // Target-addressed reads: one repository target's insights and
   // PR ledger. The workspace-scope siblings below aggregate every live target;
   // the payload keys are identical, only the scope differs. The detail address
   // is the ledger's own key — owner/repo/number — and a miss is a 404.
@@ -6535,7 +6535,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/findings", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "findings"), access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/reviews", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "reviews"), access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/failures", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "failures"), access: "write" },
-  // Workspace-scope reads (plan 372): the same payloads over every live target
+  // Workspace-scope reads: the same payloads over every live target
   // of the workspace. Target-owned data reads are `write` in this table (AC3)
   // — only the workspace-scoped member list is `read`. The detail and its
   // three record families reuse the target handlers' bodies via the gate

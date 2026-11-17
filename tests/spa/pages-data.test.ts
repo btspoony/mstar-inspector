@@ -71,7 +71,7 @@ describe("insights search wiring", () => {
   });
 
   test("the App-addressed read builders are retired with their routes", async () => {
-    // Plan 372 moved both read faces to target and workspace scopes; only the
+    // Both read faces moved to target and workspace scopes; only the
     // scoped builders remain, so no module can emit a removed path.
     const data = await import("../../src/spa/pages/data");
     for (const retired of [

@@ -171,8 +171,8 @@ function fixture() {
   seedMembership(db, "ws-acme", owner, "owner");
   seedMembership(db, "ws-other", other, "owner");
   seedApp(db, "app-acme", "acme-app", "ws-acme");
-  // The App's repository target: the ledger/insights routes are target-addressed
-  // (plan 372), so the ceiling sweep needs a real id to present.
+  // The App's repository target: the ledger/insights routes are target-addressed,
+  // so the ceiling sweep needs a real id to present.
   seedTarget(db, "app-acme", { id: TARGET_ID, workspaceId: "ws-acme" });
   return { db, owner };
 }
@@ -328,7 +328,7 @@ describe("operator with a valid grant", () => {
       { path: "/dashboard/acme/api/apps" },
       { path: `/dashboard/acme/api/apps/${APP_ID}/settings` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/models` },
-      // Target-addressed data faces (plan 372): a support grant never widens to
+      // Target-addressed data faces: a support grant never widens to
       // tenant data, so insights and both ledger faces stay 403.
       { path: `/dashboard/acme/api/targets/${TARGET_ID}/insights/summary` },
       { path: `/dashboard/acme/api/targets/${TARGET_ID}/pull-requests` },

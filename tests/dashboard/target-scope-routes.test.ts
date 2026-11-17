@@ -1,5 +1,5 @@
 /**
- * The target-addressed read family (plan 372 task 2 round B), driven through
+ * The target-addressed read family, driven through
  * the real worker mount:
  *
  *   GET /dashboard/<ref>/api/targets/<targetId>/insights/summary

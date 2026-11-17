@@ -101,7 +101,7 @@ export type DataUpgradeState = {
 
 /**
  * Every registered upgrade, in run order — the registry's single source.
- * `repo-backfill` is the historical-identity item (plan 373 task 3); the
+ * `repo-backfill` is the historical-identity item; the
  * runner, the table and the routes are item-agnostic, so registering an item
  * is the only change a new upgrade needs.
  */

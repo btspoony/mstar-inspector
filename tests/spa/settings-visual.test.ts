@@ -190,7 +190,7 @@ describe("settings section flow (r3 baseline § 5)", () => {
   });
 
   test("the App settings body keeps the identity card only; the target policy lives on the repository surface", () => {
-    // Plan 371's owner split: the App page's settings body has no target-owned
+    // The owner split: the App page's settings body has no target-owned
     // section at all, and the review-policy sections that used to be declared
     // here are gone with the manager branch nothing could reach.
     const view = settingsTabSource.slice(
