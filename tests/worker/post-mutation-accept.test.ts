@@ -30,6 +30,9 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0023_removed_logins.sql",
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
+    // 0040: every /dashboard request reads the maintenance window through the
+    // gate, so the settings table must exist (an unreadable window fails closed).
+    "0040_runtime_config.sql",
     // 0028: the SPA boot reads pending invites.
     "0028_workspace_invites.sql",
     // 0036: github_apps.slug → webhook_path plus the cached github_slug.

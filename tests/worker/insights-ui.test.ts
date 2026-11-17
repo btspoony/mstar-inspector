@@ -24,17 +24,23 @@ const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].j
 /** Users-store D1 double: any session login resolves to a member row. */
 function memberDbStub(): Env["DB"] {
   return {
-    prepare: () => ({
-      bind: () => ({
-        first: async () => ({
-          id: "u-test",
-          github_login: "octocat",
-          role: "admin",
-          created_at: new Date().toISOString(),
-          invited_by: null,
-        }),
-      }),
-    }),
+    prepare: (sql: string) =>
+      // The maintenance window is answered OPEN: this double exists to fake a
+      // user row, and an unreadable window would close the dashboard gate
+      // before the retired route is reached.
+      sql.includes("review_runtime_settings WHERE key IN")
+        ? { bind: () => ({ all: async () => ({ results: [] }) }) }
+        : {
+            bind: () => ({
+              first: async () => ({
+                id: "u-test",
+                github_login: "octocat",
+                role: "admin",
+                created_at: new Date().toISOString(),
+                invited_by: null,
+              }),
+            }),
+          },
   } as unknown as Env["DB"];
 }
 

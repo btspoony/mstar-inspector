@@ -1448,6 +1448,7 @@ export const en = {
         "While on, the dashboard answers 503, the webhook returns 503 so GitHub retries, and queued reviews are dropped. Health checks and this console stay reachable.",
       maintenanceStateOn: "On — the platform is closed",
       maintenanceStateOff: "Off — the platform is serving",
+      maintenanceStateUnreadable: "Unreadable — the gates answer as closed",
       maintenanceReasonLabel: "Reason (shown to users)",
       maintenanceOn: "Close the platform",
       maintenanceOff: "Reopen the platform",

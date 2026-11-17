@@ -157,9 +157,11 @@ export function DataUpgradeView({
                 <dd className="font-medium" data-maintenance="state">
                   {t(
                     locale,
-                    maintenance.enabled
-                      ? "admin.runtime.maintenanceStateOn"
-                      : "admin.runtime.maintenanceStateOff",
+                    maintenance.unreadable
+                      ? "admin.runtime.maintenanceStateUnreadable"
+                      : maintenance.enabled
+                        ? "admin.runtime.maintenanceStateOn"
+                        : "admin.runtime.maintenanceStateOff",
                   )}
                 </dd>
               </div>

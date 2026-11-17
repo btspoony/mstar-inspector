@@ -176,7 +176,7 @@ describe("repo-backfill item", () => {
       unidentified_targets: 1,
       ledger_pairs: 2,
       conflicting_groups: 0,
-      empty_targets: 0,
+      leftover_without_ledger: 0,
     });
     // Read-only: not one row moved.
     expect(liveTargets(db)).toEqual(before);
@@ -294,9 +294,12 @@ describe("repo-backfill item", () => {
     seedPr(db, "pr-1", "target-old", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
     // 待安装: an unclaimed row with no history at all.
     seedLeftoverTarget(db, "target-empty", { minScore: 55 });
+    // A row that already names its repository and merely has no ledger rows yet
+    // is not backfill work — the batch's own write skips it, so the count must.
+    seedLeftoverTarget(db, "target-claimed", { owner: "acme", repo: "gamma" });
 
     const counts = await repoBackfill.preflight(db);
-    expect(counts).toMatchObject({ unidentified_targets: 2, empty_targets: 1 });
+    expect(counts).toMatchObject({ unidentified_targets: 2, leftover_without_ledger: 1 });
 
     await repoBackfill.runBatch(db, null);
     const empty = db.raw

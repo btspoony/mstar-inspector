@@ -105,7 +105,7 @@ describe("migration 0067: repository-keyed review targets", () => {
     expect(tableNames(db).has("target_owner_allowlist")).toBe(false);
     const indexes = indexNames(db);
     expect(indexes.has("review_targets_bot_installation")).toBe(false);
-    // 0062's identically-shaped index is replaced, not duplicated.
+    // 0062's index is renamed (drop + create), never duplicated.
     expect(indexes.has("idx_review_targets_workspace_id")).toBe(false);
     for (const name of [
       "review_targets_workspace_repo",

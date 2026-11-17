@@ -3711,8 +3711,12 @@ describe("createReviewConsumer", () => {
   test("a degraded caps read warns once and admits at the conservative cap (never unlimited)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // The fault names the CAPS statement, not the table: the maintenance read
+    // shares `review_runtime_settings`, and an unreadable window now defers the
+    // batch (fail closed) before admission is ever asked — so a table-wide fault
+    // would pin the deferral instead of the degraded cap.
     const consumer = createReviewConsumer(
-      await h.makeEnv({ DB: dbFailingOn(db, "review_runtime_settings") as never }),
+      await h.makeEnv({ DB: dbFailingOn(db, "AS system_value") as never }),
       h.testLog,
       h.overrides,
     );

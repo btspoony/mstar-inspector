@@ -53,7 +53,11 @@ import {
   parseTargetReviewLevel,
   type ReviewTargetRow,
 } from "../dashboard/targets-store";
-import { getMaintenanceMode, readDefaultReviewLevel } from "../dashboard/runtime-config-store";
+import {
+  getMaintenanceMode,
+  maintenanceClosed,
+  readDefaultReviewLevel,
+} from "../dashboard/runtime-config-store";
 import { checkEntitlement } from "../dashboard/entitlement";
 import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
 import { sumMonthlyRp } from "../store/usage-store";
@@ -588,7 +592,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // running backfill may be repointing. 503 (not 200) is what makes GitHub
   // retry the delivery once the window closes. Read ONCE per delivery.
   const maintenance = await getMaintenanceMode(db);
-  if (maintenance.enabled) {
+  if (maintenanceClosed(maintenance)) {
     webhookWarn(
       "maintenance_skip",
       `${webhookRef} row_id=${row.id}`,
@@ -1171,7 +1175,7 @@ export default {
     // the window is read again on the next tick, so nothing is remembered.
     if (env.DB) {
       const maintenance = await getMaintenanceMode(env.DB);
-      if (maintenance.enabled) {
+      if (maintenanceClosed(maintenance)) {
         defaultSweepLog.warn(
           { event: "maintenance_skip", detail: `cron=${controller.cron}` },
           "cron invocation skipped — the platform is in its maintenance window",

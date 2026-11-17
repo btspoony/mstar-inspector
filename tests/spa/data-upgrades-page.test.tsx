@@ -74,7 +74,12 @@ const RUNTIME = {
   min: 1,
   max: 64,
   degraded: false,
-  maintenance: { enabled: true, reason: "data upgrade: Repository identity backfill", since: "2026-11-16T07:59:00.000Z" },
+  maintenance: {
+    enabled: true,
+    reason: "data upgrade: Repository identity backfill",
+    since: "2026-11-16T07:59:00.000Z",
+    unreadable: false,
+  },
 };
 
 const view = (over: Partial<Parameters<typeof DataUpgradeView>[0]> = {}) =>

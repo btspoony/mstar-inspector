@@ -473,11 +473,14 @@ export const repoBackfill: DataUpgradeItem = {
             GROUP BY t.bot_id, p.owner COLLATE NOCASE, p.repo COLLATE NOCASE
            HAVING COUNT(DISTINCT t.id) > 1)`,
       ),
-      // Awaiting-first-delivery rows: untouched except the follow flag.
-      empty_targets: await countRows(
+      // Leftover rows awaiting their first delivery: the batch leaves them in
+      // place and only settles the follow flag. Filtered by the same leftover
+      // predicate as the other counters, so a claimed target that simply has no
+      // ledger rows yet is not reported as backfill work.
+      leftover_without_ledger: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM review_targets t
-          WHERE t.deleted_at IS NULL
+          WHERE ${LEFTOVER_TARGET}
             AND NOT EXISTS (SELECT 1 FROM pull_requests p WHERE p.target_id = t.id)`,
       ),
     };

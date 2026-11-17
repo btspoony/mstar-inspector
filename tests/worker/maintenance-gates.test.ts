@@ -147,6 +147,53 @@ describe("the webhook maintenance gate", () => {
   });
 });
 
+describe("an unreadable window", () => {
+  /** Every `platform.maintenance.*` read throws: the state is unknowable. */
+  function brokenWindow(db: TestD1): TestD1 {
+    return {
+      ...db,
+      prepare(query: string) {
+        if (query.includes("review_runtime_settings WHERE key IN")) throw new Error("settings unavailable");
+        return db.prepare(query);
+      },
+    } as TestD1;
+  }
+
+  test("the webhook answers 503 instead of admitting the delivery", async () => {
+    const db = createMigratedTestD1();
+    const appId = await seedApp(db);
+    const response = await deliver(appId, makeEnv(brokenWindow(db)));
+    expect(response.status).toBe(503);
+    expect(await response.text()).toBe("maintenance in progress");
+    expect(db.raw.prepare("SELECT * FROM webhook_deliveries").all()).toHaveLength(0);
+  });
+
+  test("the cron returns before any lane runs", async () => {
+    const db = createMigratedTestD1();
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    const warns: Array<Record<string, unknown>> = [];
+    const originalWarn = defaultSweepLog.warn;
+    defaultSweepLog.warn = (fields) => void warns.push(fields as Record<string, unknown>);
+    try {
+      await worker.scheduled(
+        { cron: "*/15 * * * *" } as ScheduledController,
+        makeEnv(brokenWindow(db)),
+        {} as ExecutionContext,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      defaultSweepLog.warn = originalWarn;
+    }
+    expect(fetchCalls).toBe(0);
+    expect(warns.map((call) => call.event)).toContain("maintenance_skip");
+  });
+});
+
 describe("the cron maintenance gate", () => {
   const NOOP_CONTROLLER = { cron: "*/15 * * * *" } as ScheduledController;
   const NOOP_CTX = {} as ExecutionContext;

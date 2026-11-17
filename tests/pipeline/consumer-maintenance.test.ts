@@ -127,6 +127,32 @@ describe("the queue maintenance gate", () => {
     expect(String(rows[0]!.error)).toContain(`attempt ${QUEUE_MAX_ATTEMPTS}`);
   });
 
+  test("an unreadable window defers too — an unknowable fence is not open", async () => {
+    const h = createConsumerHarness();
+    const lines: ConsumerLogFields[] = [];
+    const db = await closedWindowDB();
+    // Every maintenance read throws: the reader answers `unreadable`, and the
+    // queue takes the same deferral as a stated window rather than running a
+    // pipeline write on a ledger the backfill may be repointing.
+    const broken = {
+      ...db,
+      prepare(query: string) {
+        if (query.includes("review_runtime_settings WHERE key IN")) throw new Error("settings unavailable");
+        return db.prepare(query);
+      },
+    };
+    const { createReviewConsumer } = await loadConsumer();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: broken as never }), deferLog(lines), h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(h.messageAckCalls).toHaveLength(0);
+    expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 300 }]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ event: "maintenance_defer", queue: "review-queue", batch_size: 1 });
+  });
+
   test("the absent-row default leaves the round to run", async () => {
     const h = createConsumerHarness();
     const lines: ConsumerLogFields[] = [];

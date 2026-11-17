@@ -1206,6 +1206,7 @@ export const zhCN: Dictionary = {
         "开启后，控制台返回 503，Webhook 返回 503 以便 GitHub 重试，队列中的审查会被丢弃。健康检查与本控制台保持可用。",
       maintenanceStateOn: "已开启 — 平台已关闭",
       maintenanceStateOff: "已关闭 — 平台正常服务",
+      maintenanceStateUnreadable: "不可读 — 各闸门按关闭处理",
       maintenanceReasonLabel: "原因（展示给用户）",
       maintenanceOn: "关闭平台",
       maintenanceOff: "恢复平台",

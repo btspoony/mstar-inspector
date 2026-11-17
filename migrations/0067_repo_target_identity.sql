@@ -70,9 +70,10 @@ CREATE UNIQUE INDEX review_targets_workspace_repo
 -- (`(bot_id, workspace_id)`), and the workspace-only read scope (`listLive`,
 -- the dashboard list). Both workspace indexes are kept: a `(bot_id,
 -- workspace_id)` index cannot serve a workspace-only predicate, and neither
--- can the other answer the bot-scoped ones. 0062's single-column index under
--- its second name (`idx_review_targets_workspace_id`) is the exact duplicate
--- of `idx_review_targets_workspace`, so that one goes.
+-- can the other answer the bot-scoped ones. 0062's single-column index is
+-- renamed for naming consistency — `idx_review_targets_workspace_id` becomes
+-- `idx_review_targets_workspace` beside its sibling names — and SQLite has no
+-- ALTER INDEX RENAME, so the drop and the create below are that rename.
 --
 -- The name index is built `COLLATE NOCASE`: GitHub repository identities are
 -- case-insensitive, and this is the ONE collation every owner/name comparison

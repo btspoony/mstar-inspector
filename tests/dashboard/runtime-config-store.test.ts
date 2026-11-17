@@ -216,7 +216,41 @@ describe("maintenance mode (delivery-compass D20)", () => {
 
   test("an absent trio means the platform is open", async () => {
     const db = createMigratedTestD1();
-    expect(await getMaintenanceMode(db)).toEqual({ enabled: false, reason: null, since: null });
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: false,
+      reason: null,
+      since: null,
+      unreadable: false,
+    });
+  });
+
+  test("an unreadable window is flagged, never answered as open", async () => {
+    const db = createMigratedTestD1();
+    // A settings read that throws cannot tell "no window" from "unknown": the
+    // reader states the third value and one structured line names the fault,
+    // so a gate can fail closed instead of unlocking traffic.
+    const broken = {
+      prepare() {
+        throw new Error("settings unavailable");
+      },
+    } as unknown as TestD1;
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (line: string) => void warns.push(line);
+    try {
+      expect(await getMaintenanceMode(broken)).toEqual({
+        enabled: false,
+        reason: null,
+        since: null,
+        unreadable: true,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warns).toHaveLength(1);
+    expect(JSON.parse(warns[0]!)).toMatchObject({ event: "maintenance_read_failed" });
+    // The fixture's own row is untouched: nothing was written to recover.
+    expect(storedMaintenance(db)).toEqual({});
   });
 
   test("enabling writes the flag, the reason, the start time and one audit row", async () => {
@@ -232,6 +266,7 @@ describe("maintenance mode (delivery-compass D20)", () => {
       enabled: true,
       reason: "repository backfill",
       since: NOW,
+      unreadable: false,
     });
     expect(audits(db)).toEqual([
       {
@@ -254,6 +289,7 @@ describe("maintenance mode (delivery-compass D20)", () => {
         enabled: true,
         reason: null,
         since: NOW,
+        unreadable: false,
       });
     }
   });
@@ -265,7 +301,12 @@ describe("maintenance mode (delivery-compass D20)", () => {
 
     // The disable leaves the documented off-shape: no stale window survives.
     expect(storedMaintenance(db)).toEqual({ [MAINTENANCE_ENABLED_KEY]: "0" });
-    expect(await getMaintenanceMode(db)).toEqual({ enabled: false, reason: null, since: null });
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: false,
+      reason: null,
+      since: null,
+      unreadable: false,
+    });
     expect(audits(db).at(-1)).toEqual({
       action: "platform.maintenance.set",
       target_type: "runtime",
@@ -283,7 +324,12 @@ describe("maintenance mode (delivery-compass D20)", () => {
     await setMaintenanceMode(db, { enabled: false, actor: "operator" }, NOW);
     await setMaintenanceMode(db, { enabled: true, actor: "operator" }, LATER);
 
-    expect(await getMaintenanceMode(db)).toEqual({ enabled: true, reason: null, since: LATER });
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: true,
+      reason: null,
+      since: LATER,
+      unreadable: false,
+    });
     expect(audits(db)).toHaveLength(3);
   });
 });

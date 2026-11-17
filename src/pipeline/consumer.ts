@@ -223,7 +223,12 @@ import { createSecretbox } from "../dashboard/secretbox";
 // The operator default review depth (migration 0047 pairing): read ONLY when
 // the target row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
-import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel, getMaintenanceMode } from "../dashboard/runtime-config-store";
+import {
+  getMaintenanceMode,
+  getRecheckAssignmentMaxBytes,
+  maintenanceClosed,
+  readDefaultReviewLevel,
+} from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads bot_provider_keys / bot_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
@@ -4058,7 +4063,7 @@ export function createReviewConsumer(
     // longer spends every delivery, and each spent one is now alerted through
     // `review_failures` — upgrade to a re-enqueue-on-close drain then.
     const maintenance = await getMaintenanceMode(env.DB);
-    if (maintenance.enabled) {
+    if (maintenanceClosed(maintenance)) {
       // An empty batch has nothing to defer (and no identity to name it with).
       if (batch.messages[0] === undefined) return;
       const deferral = {

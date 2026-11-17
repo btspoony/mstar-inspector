@@ -168,6 +168,8 @@ export type MaintenanceConfig = {
   enabled: boolean;
   reason: string | null;
   since: string | null;
+  /** The stored window could not be read: the gates treat it as closed. */
+  unreadable: boolean;
 };
 
 /** Admission drops in the trailing 24h, one count per refusal reason. */
@@ -292,6 +294,9 @@ function parseMaintenance(row: Json): MaintenanceConfig | null {
     enabled: bool(window, "enabled"),
     reason: maybeText(window, "reason"),
     since: maybeText(window, "since"),
+    // Additive field: an older Worker omits it, and its absence is "readable"
+    // (that Worker had no unreadable state to report).
+    unreadable: window.unreadable === true,
   };
 }
 
@@ -487,12 +492,15 @@ export async function setMaintenance(
   if (typeof answer === "object" && answer !== null && "maintenance" in answer) {
     const saved = answer.maintenance;
     if (typeof saved === "object" && saved !== null && "enabled" in saved) {
-      const { enabled, reason, since } = saved as Json;
+      const { enabled, reason, since, unreadable } = saved as Json;
       if (typeof enabled === "boolean") {
+        // The write's own answer: a save that returned a readable state is
+        // readable, so `unreadable` defaults false when the field is absent.
         return {
           enabled,
           reason: typeof reason === "string" ? reason : null,
           since: typeof since === "string" ? since : null,
+          unreadable: unreadable === true,
         };
       }
     }
