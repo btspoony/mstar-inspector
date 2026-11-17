@@ -30,6 +30,7 @@ import {
 } from "../../src/spa/pages/TargetsPage";
 import type { RepositoryOptionsState } from "../../src/spa/pages/TargetsPage";
 import { parseTargetCreate } from "../../src/spa/pages/data";
+import { TargetSettingsTab } from "../../src/spa/pages/TargetSettingsTab";
 import type { InstallationRepositoryOption, RepositoryAppOption, TargetListRow } from "../../src/spa/pages/data";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
@@ -518,5 +519,86 @@ describe("the list failure face", () => {
     } finally {
       await view.unmount();
     }
+  });
+});
+
+/**
+ * The 评审配置 tab (plan 371.3, D16 / product spec J4): what the target RUNS
+ * with while inheriting, and the same controls editable once it opts out. The
+ * only DOM facts asserted are the ones a reader would check — read-only
+ * controls, the follow line, the two switches.
+ */
+function targetPayload(follow: 0 | 1, overrides: { review_enabled?: 0 | 1 } = {}) {
+  return {
+    target: {
+      target_id: "t-1",
+      repo_owner: "acme",
+      repo_name: "api",
+      app_name: "Acme Inspector",
+      review_enabled: overrides.review_enabled ?? 1,
+      follow_workspace_defaults: follow,
+    },
+    effective: {
+      trigger_mode: "every_push" as const,
+      review_level: "deep" as const,
+      check_min_score: 45,
+      check_pass_verdicts: ["ship it"],
+    },
+    defaults: {
+      trigger_mode: "open" as const,
+      review_level: "default" as const,
+      check_min_score: 60,
+      check_pass_verdicts: ["ship it", "blocked"],
+    },
+  };
+}
+
+function renderSettingsTab(follow: 0 | 1, reviewEnabled: 0 | 1 = 1): string {
+  return withLocation("/dashboard/acme/targets/t-1", () =>
+    renderToStaticMarkup(
+      createElement(TargetSettingsTab, {
+        locale: "en",
+        payload: targetPayload(follow, { review_enabled: reviewEnabled }),
+        onReload: async () => true,
+        onNotice: () => {},
+      }),
+    ),
+  );
+}
+
+/** The disabled inputs of a rendered face (SSR writes the bare attribute). */
+function disabledInputs(markup: string): number {
+  return [...markup.matchAll(/<input[^>]*>/g)].filter((match) => /\sdisabled=""/.test(match[0])).length;
+}
+
+describe("target settings tab (static SSR)", () => {
+  test("an inheriting target shows the effective values read-only plus the follow line", () => {
+    const markup = renderSettingsTab(1);
+    // The effective policy, not the workspace default beside it.
+    expect(markup).toContain("Every push");
+    expect(markup).toContain("Deep");
+    expect(markup).toContain('value="45"');
+    // The policy cluster's controls are all disabled — the score field and the
+    // four verdict boxes — while the two switches (inheritance, pause) stay
+    // operable: 7 inputs, 5 of them disabled.
+    const inputs = [...markup.matchAll(/<input[^>]*>/g)];
+    expect(inputs.length).toBe(7);
+    expect(disabledInputs(markup)).toBe(5);
+    expect(markup).toContain("Following the workspace defaults");
+    expect(markup).toContain(t("en", "settings.reviewGateSave"));
+  });
+
+  test("an explicit target renders the same controls enabled and no follow line", () => {
+    const markup = renderSettingsTab(0);
+    expect(disabledInputs(markup)).toBe(0);
+    expect(markup).not.toContain("Following the workspace defaults");
+    expect(markup).toContain("Every push");
+  });
+
+  test("the pause switch reflects review_enabled", () => {
+    const paused = renderSettingsTab(0, 0);
+    expect(paused).toContain(t("en", "settings.resumeReviews"));
+    const running = renderSettingsTab(0, 1);
+    expect(running).toContain(t("en", "settings.pauseReviews"));
   });
 });
