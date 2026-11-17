@@ -1,7 +1,5 @@
 # Feature: repository surface
 
-Promoted from: iteration v1.18 (package specs repository-surface / repository-target-model / operator-data-upgrade).
-
 ## Scope
 
 The workspace repository surface: the sidebar entry and its route family, the repository list and its fixed 所有仓库 row, the add-repository dialog and the API behind it, the three-tab repository detail, review settings as two tiers with inheritance, the application detail's two-tab split, and the boundary states and refusal vocabulary those surfaces answer with.
