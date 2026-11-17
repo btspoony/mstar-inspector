@@ -5,7 +5,7 @@
  * add-key / save-chain / save-roles / add-custom-provider /
  * add-template-provider / remove-custom-provider / key/delete / keys/verify /
  * keys/usage, plus the chain ops add-chain / remove-chain) and ops
- * (pause / resume / disable / enable / delete) — funnels through the SAME
+ * (disable / enable / delete) — funnels through the SAME
  * server-side workspace owner/admin gate (`canManageApp` in
  * src/dashboard/index.ts,
  * `canManageRole` = workspace owner/admin). This file locks that matrix as
