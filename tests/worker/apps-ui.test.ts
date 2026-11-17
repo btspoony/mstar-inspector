@@ -445,7 +445,7 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
     }
   });
 
-  test("a target in another workspace is invisible: the detail face 404s and the action refuses with zero writes", async () => {
+  test("a target in another workspace is invisible: no target facts and no pause write, but the App still opens", async () => {
     const db = await seededWorld();
     db.raw
       .prepare(
@@ -462,8 +462,16 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
       .run(MALLORY_APP_ID);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
+    // Visibility is the APP's (plan 371): this workspace owns the bot, so the
+    // App opens even though it holds no repository here. The foreign target is
+    // invisible as target-owned FACT — no id, no pause, no policy.
     const detail = await get(`/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`, cookie, makeEnv(db));
-    expect(detail.status).toBe(404);
+    expect(detail.status).toBe(200);
+    const body = (await detail.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+    for (const key of ["target_id", "check_gate"]) expect(body).not.toHaveProperty(key);
+    expect(body.app).not.toHaveProperty("review_enabled");
+    expect(body.app).not.toHaveProperty("review_trigger_mode");
+
     const pause = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/pause`, cookie, makeEnv(db));
     expect(pause.status).toBe(404);
     // The refusal wrote nothing: the foreign target still reads reviewing.
@@ -491,6 +499,71 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
     expect(sibling.review_enabled).toBe(1);
   });
 
+});
+
+describe("an App with no repository yet", () => {
+  const SETTINGS_API = `/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`;
+
+  test("a manager opens it: 200 with the App's own facts and no target-owned ones", async () => {
+    const db = await seededWorld();
+    // The repository surface owns target creation now, so an App the
+    // workspace owns routinely has none. Visibility is the APP's.
+    db.raw
+      .prepare("DELETE FROM review_targets WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)")
+      .run(MALLORY_APP_ID);
+
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+    expect(body.can_manage).toBe(true);
+    expect(body.blocked).toBe(false);
+    // Target-owned facts are ABSENT, not defaulted: there is no row to name.
+    for (const key of ["target_id", "check_gate"]) expect(body).not.toHaveProperty(key);
+    for (const key of ["review_enabled", "review_trigger_mode", "review_level", "default_review_level"]) {
+      expect(body.app).not.toHaveProperty(key);
+    }
+    // The bot's own sections still render: they never needed a target.
+    expect(body.app.sandbox_image_id).toBe("omp");
+    expect(body).toHaveProperty("keys");
+    expect(body).toHaveProperty("installations");
+  });
+
+  test("a member reads the same App: 200, identity set only", async () => {
+    const db = await seededWorld();
+    db.raw
+      .prepare("DELETE FROM review_targets WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)")
+      .run(MALLORY_APP_ID);
+
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+    expect(body.can_manage).toBe(false);
+    expect(body).not.toHaveProperty("target_id");
+    expect(body.app).not.toHaveProperty("review_enabled");
+    expect(body.app.created_at).toBeDefined();
+  });
+
+  test("a target-owned write with no target answers 404 unknown app and writes nothing", async () => {
+    const db = await seededWorld();
+    db.raw
+      .prepare("DELETE FROM review_targets WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)")
+      .run(MALLORY_APP_ID);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+    const pause = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/pause`, cookie, makeEnv(db));
+    expect(pause.status).toBe(404);
+    const targetOwnedWrites: Record<string, string>[] = [
+      { op: "save-review-level", level: "deep" },
+      { op: "save-check-gate", min_score: "60" },
+    ];
+    for (const fields of targetOwnedWrites) {
+      const res = await postForm(`/dashboard/default/apps/${MALLORY_APP_ID}/settings`, cookie, makeEnv(db), fields);
+      expect(res.status, fields.op).toBe(404);
+    }
+    expect(
+      db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get() as { n: number },
+    ).toEqual({ n: 1 }); // ada's row is untouched
+  });
 });
 
 describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App review trigger mode)", () => {

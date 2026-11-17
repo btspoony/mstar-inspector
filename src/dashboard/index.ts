@@ -2755,6 +2755,21 @@ async function resolveScopedApp(
 }
 
 /**
+ * The bot's LIVE targets in this workspace, newest-first ordering left to the
+ * store. Callers that need "is there exactly one?" ask {@link firstTargetForBot};
+ * the ones that must tell "none" from "several" read this.
+ */
+async function liveTargetsForBot(
+  db: DashboardD1,
+  workspaceId: string,
+  botId: string,
+): Promise<ReviewTargetRow[]> {
+  return (await createTargetsStore(db).listLiveByBot(botId)).filter(
+    (target) => target.workspace_id === workspaceId,
+  );
+}
+
+/**
  * The bot's ONE live target in this workspace — the app-scoped routes' local
  * replacement for the retired store read. Plan 371 replaces this surface with
  * the repository list; until then every app-scoped route keeps behaving as it
@@ -2770,9 +2785,7 @@ async function firstTargetForBot(
   workspaceId: string,
   botId: string,
 ): Promise<ReviewTargetRow | null> {
-  const live = (await createTargetsStore(db).listLiveByBot(botId)).filter(
-    (target) => target.workspace_id === workspaceId,
-  );
+  const live = await liveTargetsForBot(db, workspaceId, botId);
   return live.length === 1 ? live[0]! : null;
 }
 
@@ -3085,11 +3098,15 @@ type AppSettingsGate =
       db: DashboardDb;
       app: GithubAppRow;
       /**
-       * The bot's ONE review target — where the workspace-owned review
-       * configuration lives. Required: a bot without a target has no settings
-       * surface (every bot has exactly one).
+       * The bot's ONE review target in this workspace — where the
+       * workspace-owned review configuration lives. `null` = the workspace
+       * holds no repository under this App yet (a real state since the
+       * repository surface owns creation): the App is still a valid settings
+       * subject, and its target-owned facts are simply absent. Ambiguity (two
+       * or more live targets) is NOT represented here — it is refused as
+       * `404 unknown app` before the gate resolves.
        */
-      target: ReviewTargetRow;
+      target: ReviewTargetRow | null;
       user: DashboardUserRow;
       scope: WorkspaceScope;
     }
@@ -3110,14 +3127,27 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
     member.scope,
   );
   if (!app) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  const target = await firstTargetForBot(member.db, member.scope.workspaceId, app.id);
-  if (!target) {
-    // The bot resolved but its configuration did not: every bot has exactly
-    // one target, so this is a row that no longer exists, and 404 is the honest
-    // answer rather than a page of defaults it does not have.
+  // Visibility is the APP's: the repository surface creates targets now, so a
+  // workspace may open an App it has added no repository to yet. `target` is
+  // then null and the payload renders the target-owned facts as absent.
+  //
+  // Ambiguity is still refused: a bot holding several live targets in one
+  // workspace names no single configuration, and serving either one would
+  // show a policy the manager is not editing. That stays the 404 it has always
+  // been — "no single target" is a different fact from "no target".
+  const live = await liveTargetsForBot(member.db, member.scope.workspaceId, app.id);
+  if (live.length > 1) {
     return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
   }
-  return { ok: true, session: member.session, db: member.db, app, target, user: member.user, scope: member.scope };
+  return {
+    ok: true,
+    session: member.session,
+    db: member.db,
+    app,
+    target: live[0] ?? null,
+    user: member.user,
+    scope: member.scope,
+  };
 }
 
 /**
@@ -3879,8 +3909,13 @@ const appSettingsRoute = async (c: DashboardContext) => {
   // Derived per read, never stored: a target whose bot is `owned` by ANOTHER
   // workspace reviews nothing (the resolver's guard), and the page has to say
   // so. The two facts are already in hand — the bot row's scope + owning
-  // workspace and the target's workspace — so this costs no extra query.
-  const blockedReason = blockedReasonFor(app, gate.target.workspace_id);
+  // workspace and the requesting workspace — so this costs no extra query.
+  // The REQUESTING workspace stands in for the target's: an App with no
+  // repository yet has no target to ask, and the answer is the same one the
+  // target would have given (a workspace only reaches a foreign `owned` bot
+  // through a live target, so target-less implies not Blocked).
+  const blockedReason = blockedReasonFor(app, gate.scope.workspaceId);
+  const target = gate.target;
   try {
     c.header("Cache-Control", "private, no-store");
     if (!canManageApp(gate.scope)) {
@@ -3897,10 +3932,12 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // it composes the webhook delivery URL. Server-resolved, never the
         // request's path segment (a ref may be a slug).
         workspace_id: gate.scope.workspaceId,
-        // The review configuration this App resolved to IN this workspace.
-        // The SPA parses it as required: the settings a manager edits belong to
-        // a target, and a payload that cannot name it is not a settings read.
-        target_id: gate.target.id,
+        // The review configuration this App resolved to IN this workspace, and
+        // the pause state that belongs to it. BOTH are absent when the
+        // workspace has added no repository yet: there is no target to name
+        // and no pause to report, and inventing either would state
+        // configuration the database does not hold.
+        ...(target === null ? {} : { target_id: target.id }),
         // Why this target reviews nothing, if it does. Both faces carry it:
         // a member must know why the App is silent, not only the manager.
         blocked: blockedReason !== null,
@@ -3908,7 +3945,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
         app: {
           github_app_id: app.github_app_id,
           status: app.status,
-          review_enabled: gate.target.review_enabled !== 0,
+          ...(target === null ? {} : { review_enabled: target.review_enabled !== 0 }),
           created_by: app.created_by,
           created_at: app.created_at,
           github_name: app.github_name ?? null,
@@ -3945,35 +3982,35 @@ const appSettingsRoute = async (c: DashboardContext) => {
     // EFFECTIVE one (migration 0067): an inheriting target runs on the
     // workspace answers, so the payload must not play back the inert
     // placeholder columns its row happens to carry. One read answers all four.
-    const effective = await readEffectiveTargetSettings(gate.db, gate.target);
-    const checkGate = checkGateOf(effective);
     const githubVisibility = await apps.getGithubVisibility(app.id);
     // Task 5 / plan 371 own the settings surface: a target no longer holds an
     // installation binding (migration 0067), so the installation block stays
     // empty until the repository surface replaces this payload.
     const installationPayload = null;
-    // The level a NULL target column resolves to (migration 0047) — the depth
-    // control's inherit face names it, so a manager never needs the operator
-    // console to know what "follow the operator default" currently runs.
-    const defaultReviewLevel = (await readDefaultReviewLevel(gate.db)).value;
-    if (blockedReason !== null) {
+    if (blockedReason !== null && target !== null) {
       // The Blocked manager face: this workspace's target on another
       // workspace's bot. It carries the target's OWN review configuration and
       // the identity needed to name the page — never the bot's sections
       // (installations, deliveries, provider keys, chains, sandbox image,
       // metadata), which belong to the owning workspace.
+      const effective = await readEffectiveTargetSettings(gate.db, target);
+      const checkGate = checkGateOf(effective);
+      // The level a NULL target column resolves to (migration 0047) — the depth
+      // control's inherit face names it, so a manager never needs the operator
+      // console to know what "follow the operator default" currently runs.
+      const defaultReviewLevel = (await readDefaultReviewLevel(gate.db)).value;
       return c.json({
         can_manage: true,
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: gate.scope.workspaceId,
-        target_id: gate.target.id,
+        target_id: target.id,
         app: {
           github_app_id: app.github_app_id,
           id: app.id,
           status: app.status,
           created_by: app.created_by,
-          review_enabled: gate.target.review_enabled !== 0,
+          review_enabled: target.review_enabled !== 0,
           review_trigger_mode: effective.triggerMode,
           review_level: effective.level,
           default_review_level: defaultReviewLevel,
@@ -3992,41 +4029,47 @@ const appSettingsRoute = async (c: DashboardContext) => {
             : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
       });
     }
+    // The target-owned facts, or nothing at all: a workspace that has added no
+    // repository under this App owns no review configuration yet, so the
+    // payload carries no target id, no pause state and no policy. The whole
+    // slice is all-or-nothing — a partial answer would render a control whose
+    // save the POST family refuses with `404 unknown app`.
+    const effective = target === null ? null : await readEffectiveTargetSettings(gate.db, target);
+    const checkGate = effective === null ? null : checkGateOf(effective);
+    const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(gate.db)).value;
+    const targetOwned =
+      target === null
+        ? { app: {}, top: {} }
+        : {
+            app: {
+              review_enabled: target.review_enabled !== 0,
+              review_trigger_mode: effective!.triggerMode,
+              review_level: effective!.level,
+              default_review_level: defaultReviewLevel,
+              github_visibility: githubVisibility,
+            },
+            top: {
+              target_id: target.id,
+              check_gate:
+                checkGate === null
+                  ? null
+                  : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+            },
+          };
     const base = {
       // The stable workspace id the App belongs to (server-resolved scope,
       // never the request's path segment): with `app.id` it composes the
       // webhook delivery URL.
       workspace_id: gate.scope.workspaceId,
-      // The target every review-policy key below is read from — the App's
-      // single live target in this workspace.
-      target_id: gate.target.id,
       app: {
         github_app_id: app.github_app_id,
         status: app.status,
-        review_enabled: gate.target.review_enabled !== 0,
         created_by: app.created_by,
         last_webhook_at: app.last_webhook_at ?? null,
         // (spec § Technical interfaces): the App's selected runtime
         // harness — read-only on BOTH faces (registry id only, never
         // image-local configuration or secrets).
         sandbox_image_id: app.sandbox_image_id,
-        // The review trigger mode (spec review-trigger-policy §2,
-        // read face the SPA's mode control consumes) — vocabulary-checked
-        // by the column's CHECK enum, so the wire value is always one of
-        // open | every_push | manual.
-        review_trigger_mode: effective.triggerMode,
-        // The review depth (migration 0047): the effective level, or null
-        // for "follow the operator default" — an inheriting target answers the
-        // workspace default, an own-columns target its (vocabulary-checked)
-        // stored value.
-        review_level: effective.level,
-        // The operator level the inherit face names. MANAGER face only: the
-        // member face is identity-set only and renders no depth control.
-        default_review_level: defaultReviewLevel,
-        // Cached GitHub App visibility (migration 0045): null only when the
-        // row could not be read; 'unknown' = never probed / probe could not
-        // answer, which the SPA treats as "cannot prove private".
-        github_visibility: githubVisibility,
         // The cached public GitHub profile (migration 0019) —
         // every field nullable (NULL = never synced / absent upstream, the
         // old-row degradation) and present on BOTH faces (AC3: the
@@ -4064,15 +4107,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
     return c.json({
       can_manage: true,
       ...base,
+      ...targetOwned.top,
+      app: { ...base.app, ...targetOwned.app },
       ...botSections,
-      // Migration 0045: the review gate (the Check's pass condition) and the
-      // owner allowlist (switch + accepted logins) — manager face only.
-      // `check_gate: null` = the stored verdict list is unreadable; the SPA
-      // then renders a read-only notice rather than a gate it cannot save.
-      check_gate:
-        checkGate === null
-          ? null
-          : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
     });
   } catch (err) {
     logSettingsFailure("api_render", gate.app.id, err);
@@ -5257,6 +5294,13 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         level: rawLevel,
       });
     }
+    // The depth is the TARGET's column: with no repository under this App there
+    // is no row to write, and `404 unknown app` is the family's answer (the
+    // same one the pause/resume routes give). The settings face renders no
+    // depth control in that state, so this is the direct-caller backstop.
+    if (gate.target === null) {
+      return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+    }
     try {
       // The other three columns take the values the target is running with
       // right now (workspace defaults while inheriting), so this save changes
@@ -5315,6 +5359,10 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     }
     const minScore = Number(rawScore);
     const passVerdicts = submitted as PrVerdict[];
+    // Same target-owned rule as the depth save above: no repository, no row.
+    if (gate.target === null) {
+      return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+    }
     try {
       // The two columns this op does not submit take the values the target is
       // running with right now (workspace defaults while inheriting), so a
