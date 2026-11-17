@@ -1,6 +1,6 @@
 /**
- * Pull requests tab (App detail IA): the per-App PR ledger, its list face and
- * the routing/deep-link contract.
+ * Pull requests tab: the scoped PR ledger (one repository target, or the whole
+ * workspace), its list face and the routing/deep-link contract.
  *
  * Static-SSR pins over the pure faces (the InsightsRecordsView idiom): the
  * manage-gated tab trigger, the list table (title / state / verdict / last
@@ -9,7 +9,7 @@
  * the ledger, the failures-column cell content, and the S2 switching contract
  * — a retained detail from PR A must never render while PR B loads, a failed
  * fetch for the new PR renders the error face with a retry, and a switch to
- * another App never paints the previous App's rows. The detail face
+ * another target never paints the previous target's rows. The detail face
  * itself lives in `pull-request-detail-static.test.tsx` and
  * `pull-request-detail-interaction.test.tsx`; payloads every suite reads live
  * in `pull-request-fixtures.ts`.
@@ -20,9 +20,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
-  appPullRequestsUrl,
   parsePullRequestList,
   pullRequestRefOf,
+  scopedPullRequestsUrl,
   type AppDetailSearch,
   type PullRequestDetail,
   type PullRequestReviewing,
@@ -198,7 +198,7 @@ describe("pull requests list face (static SSR)", () => {
     expect(markup).toContain(t("en", "pullRequests.columnFailures"));
   });
 
-  test("the empty state renders when the App has seen no PR yet", () => {
+  test("the empty state renders when the scope has seen no PR yet", () => {
     const markup = renderToStaticMarkup(
       createElement(PullRequestsListView, { locale: "en", rows: [], onOpen: noSearch }),
     );
@@ -270,33 +270,61 @@ describe("reviewing-now badge on the list row (D11)", () => {
 });
 
 describe("pull requests data plane (pure helpers)", () => {
-  test("the list URL is base-prefixed and encodes the appId", () => {
-    expect(appPullRequestsUrl("/dashboard", "1")).toBe("/dashboard/api/apps/1/pull-requests");
-    expect(appPullRequestsUrl("/dashboard/acme", "12345")).toBe(
-      "/dashboard/acme/api/apps/12345/pull-requests",
+  test("the list URL is base-prefixed and addresses the scope, not an App", () => {
+    // One repository: the target-addressed family, its id encoded.
+    expect(scopedPullRequestsUrl("/dashboard", { kind: "target", targetId: "1" })).toBe(
+      "/dashboard/api/targets/1/pull-requests",
     );
+    expect(scopedPullRequestsUrl("/dashboard/acme", { kind: "target", targetId: "12345" })).toBe(
+      "/dashboard/acme/api/targets/12345/pull-requests",
+    );
+    // Every repository: the workspace's own ledger, no target segment.
+    expect(scopedPullRequestsUrl("/dashboard", { kind: "workspace" })).toBe(
+      "/dashboard/api/pull-requests",
+    );
+    // The removed App-addressed family is never emitted.
+    for (const url of [
+      scopedPullRequestsUrl("/dashboard", { kind: "target", targetId: "1" }),
+      scopedPullRequestsUrl("/dashboard", { kind: "workspace" }),
+    ]) {
+      expect(url).not.toContain("/api/apps/");
+    }
   });
 
   test("a selected repository becomes a request parameter, encoded", () => {
-    expect(appPullRequestsUrl("/dashboard", "1", "acme/web")).toBe(
-      "/dashboard/api/apps/1/pull-requests?repo=acme%2Fweb",
+    expect(scopedPullRequestsUrl("/dashboard", { kind: "target", targetId: "1" }, "acme/web")).toBe(
+      "/dashboard/api/targets/1/pull-requests?repo=acme%2Fweb",
     );
-    // No selection is exactly today's unfiltered URL.
-    expect(appPullRequestsUrl("/dashboard", "1")).toBe("/dashboard/api/apps/1/pull-requests");
+    // No selection is exactly the unfiltered URL.
+    expect(scopedPullRequestsUrl("/dashboard", { kind: "target", targetId: "1" })).toBe(
+      "/dashboard/api/targets/1/pull-requests",
+    );
   });
 
-  test("a ledger read stamped for another App derives to a clean loading face", () => {
-    // App 1's answered read: rows, option list, ok state, App 1's stamp.
-    const appOne: ListRead = { app: "1", rows: [ROW_OPEN], repos: ["acme/web"], kind: "ok" };
-    // Under App 2 the rows, the option list and the ok state are gone —
+  test("a ledger read stamped for another scope derives to a clean loading face", () => {
+    // Target 1's answered read: rows, option list, ok state, target 1's stamp.
+    const targetOne: ListRead = {
+      scope: "target:1",
+      rows: [ROW_OPEN],
+      repos: ["acme/web"],
+      kind: "ok",
+    };
+    // Under target 2 the rows, the option list and the ok state are gone —
     // nothing survives the switch, so the operator's first frame cannot be
-    // another App's ledger.
-    expect(currentListRead(appOne, "2")).toEqual({ app: "2", rows: null, repos: null, kind: "loading" });
-    // The same stamp under its own App passes through untouched.
-    expect(currentListRead(appOne, "1")).toBe(appOne);
-    // An error is App-scoped too: App 1's failure must not announce on App 2.
-    expect(currentListRead({ app: "1", rows: null, repos: null, kind: "error" }, "2")).toEqual({
-      app: "2",
+    // another scope's ledger.
+    expect(currentListRead(targetOne, "target:2")).toEqual({
+      scope: "target:2",
+      rows: null,
+      repos: null,
+      kind: "loading",
+    });
+    // The same stamp under its own scope passes through untouched.
+    expect(currentListRead(targetOne, "target:1")).toBe(targetOne);
+    // The workspace scope is a different read from any target's.
+    expect(currentListRead(targetOne, "workspace").rows).toBeNull();
+    // An error is scope-scoped too: target 1's failure must not announce on 2.
+    expect(currentListRead({ scope: "target:1", rows: null, repos: null, kind: "error" }, "target:2")).toEqual({
+      scope: "target:2",
       rows: null,
       repos: null,
       kind: "loading",
@@ -360,6 +388,59 @@ describe("pull requests data plane (pure helpers)", () => {
 });
 
 describe("pull requests tab (mounted)", () => {
+  test("the workspace scope reads every repository and an empty workspace is the empty state, not an error", async () => {
+    // Zero live targets → the server answers `{ pull_requests: [], repos: [] }`.
+    // That is the product's 暂无拉取请求 empty state (J4), never an error face or
+    // a request naming a target that does not exist.
+    const calls: string[] = [];
+    const { container, unmount } = await mountView(
+      createElement(AppPullRequestsTab, {
+        locale: "en",
+        scope: { kind: "workspace" },
+        search: { tab: "pull-requests", window: "30", repo: "", pr: "" },
+        onSearch: () => {},
+      }),
+      {
+        fetch: (async (input: unknown) => {
+          calls.push(String(input));
+          return jsonResponse({ pull_requests: [], repos: [] });
+        }) as unknown as typeof fetch,
+      },
+    );
+    try {
+      expect(calls).toEqual(["/dashboard/api/pull-requests"]);
+      expect(container.textContent ?? "").toContain(t("en", "pullRequests.emptyTitle"));
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("the App detail's tabs read the payload's own target, never the removed App family", async () => {
+    // The manage face names its target (`target_id`), so the insights summary
+    // and the ledger are read under that target — and the App-addressed family
+    // the server no longer serves is never requested.
+    const calls: string[] = [];
+    const { win, unmount } = await mountView(createElement(DetailHarness), {
+      fetch: (async (input: unknown) => {
+        calls.push(String(input));
+        return jsonResponse({ pull_requests: [], repos: [] });
+      }) as unknown as typeof fetch,
+    });
+    try {
+      const trigger = [...win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "appDetail.tabPullRequests"),
+      );
+      await press(win, trigger as unknown as Element);
+      await press(win, trigger as unknown as Element);
+    } finally {
+      await unmount();
+    }
+    expect(calls.some((url) => url.includes("/api/targets/rt-501/insights/summary"))).toBe(true);
+    expect(calls.some((url) => url.includes("/api/targets/rt-501/pull-requests"))).toBe(true);
+    expect(calls.every((url) => !url.includes("/api/apps/"))).toBe(true);
+  });
+
   test("clicking the Pull requests tab on the manage face opens the ledger", async () => {
     // Every read answers the same empty ledger.
     const { container, win, unmount } = await mountView(createElement(DetailHarness), {
@@ -539,29 +620,33 @@ describe("pull requests tab (mounted)", () => {
     }
   });
 
-  test("switching Apps never paints the previous App's ledger while the new read is pending", async () => {
-    // The tab instance survives an App switch (the shell keeps it mounted for
-    // `/dashboard/apps/:appId`), so the ledger is stamped with its App: App 1's
-    // row must be gone the instant the tab belongs to App 2.
-    const { container, fetches, text, switchApp, resolve, unmount } = await mountTabWithGatedFetch("");
+  test("switching targets never paints the previous target's ledger while the new read is pending", async () => {
+    // The tab instance survives a target switch (the repository page keeps it
+    // mounted across a sibling navigation), so the ledger is stamped with its
+    // scope: target 1's row must be gone the instant the tab belongs to 2.
+    const { container, fetches, text, switchTarget, resolve, unmount } = await mountTabWithGatedFetch("");
     try {
-      await act(async () => resolve("/apps/1/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
+      await act(async () =>
+        resolve("/targets/1/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })),
+      );
       await act(async () => {});
       expect(text()).toContain("Add the export button");
 
-      // App 2's read is issued but not answered: the loading face stands in,
-      // with neither App 1's row nor App 1's empty/error state.
-      await switchApp("2");
+      // Target 2's read is issued but not answered: the loading face stands
+      // in, with neither target 1's row nor its empty/error state.
+      await switchTarget("2");
       const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
       expect(listReads()).toHaveLength(2);
-      expect(listReads()[1]).toContain("/apps/2/");
+      expect(listReads()[1]).toContain("/targets/2/");
       expect(text()).not.toContain("Add the export button");
       expect(text()).toContain(t("en", "common.loading"));
       expect(container.querySelector('[role="alert"]')).toBeNull();
       expect(container.querySelector("table")).toBeNull();
 
-      // App 2's own ledger replaces the loading face.
-      await act(async () => resolve("/apps/2/pull-requests", jsonResponse({ pull_requests: [ROW_CLOSED] })));
+      // Target 2's own ledger replaces the loading face.
+      await act(async () =>
+        resolve("/targets/2/pull-requests", jsonResponse({ pull_requests: [ROW_CLOSED] })),
+      );
       await act(async () => {});
       expect(text()).toContain("Revert the cache change");
       expect(text()).not.toContain("Add the export button");
@@ -679,8 +764,8 @@ describe("pull requests tab (mounted)", () => {
     }
   });
 
-  test("the repo filter resets to all when the tab switches Apps (I-001)", async () => {
-    const { container, fetches, win, switchApp, resolve, unmount } = await mountTabWithGatedFetch("");
+  test("the repo filter resets to all when the tab switches targets (I-001)", async () => {
+    const { container, fetches, win, switchTarget, resolve, unmount } = await mountTabWithGatedFetch("");
     const payload = { pull_requests: [ROW_OPEN, ROW_CLOSED], repos: ["acme/api", "acme/web"] };
     try {
       await act(async () => resolve("/pull-requests", jsonResponse(payload)));
@@ -699,14 +784,14 @@ describe("pull requests tab (mounted)", () => {
       expect(container.textContent ?? "").toContain("Revert the cache change");
       expect(container.textContent ?? "").not.toContain("Add the export button");
 
-      // The tab instance survives the App switch, but the filter does not:
-      // the new App's ledger is read unfiltered and the select is back on
+      // The tab instance survives the target switch, but the filter does not:
+      // the new target's ledger is read unfiltered and the select is back on
       // the all option.
-      await switchApp("2");
-      const appTwoReads = fetches.filter((url) => url.includes("/apps/2/"));
-      expect(appTwoReads).toHaveLength(1);
-      expect(appTwoReads[0]).not.toContain("repo=");
-      await act(async () => resolve("/apps/2/pull-requests", jsonResponse(payload)));
+      await switchTarget("2");
+      const targetTwoReads = fetches.filter((url) => url.includes("/targets/2/"));
+      expect(targetTwoReads).toHaveLength(1);
+      expect(targetTwoReads[0]).not.toContain("repo=");
+      await act(async () => resolve("/targets/2/pull-requests", jsonResponse(payload)));
       await act(async () => {});
       expect(container.textContent ?? "").toContain("Add the export button");
       expect(container.querySelector('[role="combobox"]')?.textContent ?? "").toContain(

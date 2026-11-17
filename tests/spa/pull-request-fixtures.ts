@@ -310,11 +310,12 @@ export async function mountView(
 }
 
 /**
- * A fetch stub for the detail host: the head read answers that App's `detail`,
- * and each record read pages that App's family — `offset`/`limit` slice its
+ * A fetch stub for the detail host: the head read answers that TARGET's
+ * `detail`, and each record read pages that target's family — `offset`/`limit` slice its
  * rows and `severity` filters findings, so a mounted test sees a real page
- * swap. `sceneFor` receives the App the URL names, so one stub can serve
- * different Apps. Every request is recorded for the "one read per switch"
+ * swap. `sceneFor` receives the target id the URL names (or "" for the
+ * workspace scope), so one stub can serve different targets. Every request is
+ * recorded for the "one read per switch"
  * assertions. A read outside those families (the head and the three record
  * sections) is refused, naming the URL: no head payload stands in for a read
  * the API never answered.
@@ -329,13 +330,14 @@ export async function mountView(
  * bucket), refused when combined with `severity` exactly as the route refuses
  * it.
  */
-export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
+export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
   const fetches: string[] = [];
   const impl = (async (input: unknown) => {
     const url = new URL(String(input), "http://localhost");
     fetches.push(url.pathname + url.search);
-    // `/api/apps/<appId>/pull-requests/...`: the App the read answers for.
-    const sceneValue = sceneFor(/\/apps\/([^/]+)\//.exec(url.pathname)?.[1] ?? "");
+    // `/api/targets/<targetId>/pull-requests/...` names the target the read
+    // answers for; the workspace scope (`/api/pull-requests/...`) names none.
+    const sceneValue = sceneFor(/\/targets\/([^/]+)\//.exec(url.pathname)?.[1] ?? "");
     const severity = url.searchParams.get("severity") ?? "";
     const unclassified = url.searchParams.get("unclassified") === "1";
     for (const section of ["findings", "reviews", "failures"] as const) {
@@ -383,7 +385,8 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
     // The head read is the only other read this stub describes; anything else
     // is a test asking for a read the stub cannot answer, and answering it with
     // a head payload would let that test pass on a response the API never gave.
-    if (/\/api\/apps\/[^/]+\/pull-requests\/[^/]+\/[^/]+\/\d+$/.test(url.pathname)) {
+    // The detail head: one target, or the workspace with no target segment.
+    if (/\/api\/(?:targets\/[^/]+\/)?pull-requests\/[^/]+\/[^/]+\/\d+$/.test(url.pathname)) {
       return jsonResponse(sceneValue.detail);
     }
     throw new Error(`detailFetch: unhandled URL ${url.pathname}${url.search}`);
@@ -413,7 +416,7 @@ export async function mountDetailView(
   const pr = sceneValue.detail.pull_request;
   const view = createElement(PullRequestDetail, {
     locale: "en",
-    appId: "1",
+    scope: { kind: "target", targetId: "1" },
     prKey: `${pr.owner}/${pr.repo}/${pr.number}`,
     prRef: { owner: pr.owner, repo: pr.repo, number: pr.number },
     onBack: () => {},
@@ -426,8 +429,9 @@ export async function mountDetailView(
  * Mount the tab with every fetch gated until the test resolves it by URL
  * suffix, so a transition frame is observable instead of raced. The mount of
  * `initialPr` is the helper's own first act; teardown restores `fetch` and the
- * DOM in one call. `switchApp` moves the SAME tab instance to another App, the
- * way the shell does when the route's appId changes in place.
+ * DOM in one call. `switchTarget` moves the SAME tab instance to another
+ * target, the way the repository page does when the route's target changes in
+ * place.
  *
  * A detail's record sections are NOT gated: they are an implementation of the
  * face under test, and a pending section read would hold the transition frame
@@ -461,7 +465,7 @@ export async function mountTabWithGatedFetch(initialPr: string) {
   // The helper owns the shell's search state, so a close (`onSearch`) commits
   // exactly as the real page's does — the deep-link test needs no harness.
   let setSearch: (next: (previous: AppDetailSearch) => AppDetailSearch) => void = () => {};
-  let setApp: (next: string) => void = () => {};
+  let setTarget: (next: string) => void = () => {};
   function Harness() {
     const [search, set] = useState<AppDetailSearch>({
       tab: "pull-requests",
@@ -469,10 +473,17 @@ export async function mountTabWithGatedFetch(initialPr: string) {
       repo: "",
       pr: initialPr,
     });
-    const [appId, setAppId] = useState("1");
+    const [targetId, setTargetId] = useState("1");
     setSearch = set;
-    setApp = setAppId;
-    return createElement(AppPullRequestsTab, { locale: "en", appId, search, onSearch: set });
+    setTarget = setTargetId;
+    // A fresh scope object every render: the tab keys its reads on the scope's
+    // KEY, not on the object's identity.
+    return createElement(AppPullRequestsTab, {
+      locale: "en",
+      scope: { kind: "target", targetId },
+      search,
+      onSearch: set,
+    });
   }
   const mounted = await mountView(createElement(Harness), { fetch: gatedFetch });
   return {
@@ -487,9 +498,9 @@ export async function mountTabWithGatedFetch(initialPr: string) {
       await act(async () => setSearch((previous) => ({ ...previous, pr })));
       await act(async () => {});
     },
-    /** Move the tab to another App, keeping the same `search` (and PR). */
-    switchApp: async (appId: string) => {
-      await act(async () => setApp(appId));
+    /** Move the tab to another target, keeping the same `search` (and PR). */
+    switchTarget: async (targetId: string) => {
+      await act(async () => setTarget(targetId));
       await act(async () => {});
     },
     resolve,
@@ -497,15 +508,18 @@ export async function mountTabWithGatedFetch(initialPr: string) {
 }
 
 /**
- * Mount the TAB over per-App detail scenes, then move it to another App in
- * place — the shell's own appId change with the PR retained. The tab is the
- * detail host's call site, so what an App switch does to the open PR's head
- * and section pages is what this mount observes; `sceneFor` is asked for the
- * App the request names, and every request is recorded.
+ * Mount the TAB over per-target detail scenes, then move it to another target
+ * in place — the repository page's own target change with the PR retained. The
+ * tab is the detail host's call site, so what a target switch does to the open
+ * PR's head and section pages is what this mount observes; `sceneFor` is asked
+ * for the target the request names, and every request is recorded.
  */
-export async function mountTabAcrossApps(initialPr: string, sceneFor: (appId: string) => DetailScene) {
+export async function mountTabAcrossTargets(
+  initialPr: string,
+  sceneFor: (targetId: string) => DetailScene,
+) {
   const stub = detailFetch(sceneFor);
-  let setApp: (next: string) => void = () => {};
+  let setTarget: (next: string) => void = () => {};
   function Harness() {
     const [search, setSearch] = useState<AppDetailSearch>({
       tab: "pull-requests",
@@ -513,18 +527,23 @@ export async function mountTabAcrossApps(initialPr: string, sceneFor: (appId: st
       repo: "",
       pr: initialPr,
     });
-    const [appId, set] = useState("1");
-    setApp = set;
-    return createElement(AppPullRequestsTab, { locale: "en", appId, search, onSearch: setSearch });
+    const [targetId, setTargetId] = useState("1");
+    setTarget = setTargetId;
+    return createElement(AppPullRequestsTab, {
+      locale: "en",
+      scope: { kind: "target", targetId },
+      search,
+      onSearch: setSearch,
+    });
   }
   const mounted = await mountView(createElement(Harness), { fetch: stub.fetch });
   return {
     ...mounted,
     fetches: stub.fetches,
     text: () => mounted.container.textContent ?? "",
-    /** Move the tab to another App, keeping the same search (and PR). */
-    switchApp: async (appId: string) => {
-      await act(async () => setApp(appId));
+    /** Move the tab to another target, keeping the same search (and PR). */
+    switchTarget: async (targetId: string) => {
+      await act(async () => setTarget(targetId));
       await act(async () => {});
     },
   };

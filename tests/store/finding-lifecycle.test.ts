@@ -1602,8 +1602,8 @@ describe("target attribution follows the repository", () => {
   const TARGET_B_ID = "11111111-2222-3333-4444-aaaaaaaaaaaa";
   const WORKSPACE_B = "ws-b-fixed";
   const PAGE = { offset: 0, limit: 10 };
-  const scopeA = { targetId: TARGET_ID, workspaceId: "default", botId: APP_ID };
-  const scopeB = { targetId: TARGET_B_ID, workspaceId: WORKSPACE_B, botId: APP_ID };
+  const scopeA = { kind: "target", targetId: TARGET_ID, workspaceId: "default" } as const;
+  const scopeB = { kind: "target", targetId: TARGET_B_ID, workspaceId: WORKSPACE_B } as const;
 
   /**
    * Bot APP_ID with one target per repository — A reviews `acme/widgets`, B
