@@ -380,7 +380,7 @@ describe("pull requests tab (mounted)", () => {
       createElement(AppPullRequestsTab, {
         locale: "en",
         scope: { kind: "workspace" },
-        search: { tab: "pull-requests", window: "30", repo: "", pr: "" },
+        search: { tab: "settings", window: "30", repo: "", pr: "" },
         onSearch: () => {},
       }),
       {
