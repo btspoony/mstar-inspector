@@ -44,7 +44,13 @@
  * batch intact and the cursor resumes on work the worklist still names.
  */
 import type { DashboardD1, DashboardD1Statement } from "../../dashboard/users";
-import type { DataUpgradeItem, UpgradeBatch, UpgradeCounts, UpgradeCursor } from "../data-upgrades";
+import type {
+  DataUpgradeItem,
+  UpgradeBatch,
+  UpgradeCounts,
+  UpgradeCursor,
+  UpgradeVerifyContext,
+} from "../data-upgrades";
 
 /** Repository groups per step (spec § Repository backfill item). */
 const GROUPS_PER_BATCH = 20;
@@ -58,6 +64,46 @@ const IN_CHUNK = 40;
 /** A live target of the 0067 leftover shape: no identity, no repository name. */
 const LEFTOVER_TARGET = `t.deleted_at IS NULL
   AND t.repo_id IS NULL AND t.repo_owner IS NULL AND t.repo_name IS NULL`;
+
+/**
+ * Ledger rows sitting on a soft-deleted target this item's worklist could not
+ * visit again (a live target of the same bot and workspace already covers the
+ * repository). The split is a TIME comparison, not a flag: retirement stamps
+ * `deleted_at`, and this run's own start stamp is what separates its work from
+ * deletions that predate it. `%s` is the time predicate on that stamp.
+ */
+const RETIRED_LEDGER_ROWS = `FROM (
+   SELECT target_id, owner, repo FROM pull_requests
+   UNION ALL SELECT target_id, owner, repo FROM reviews
+   UNION ALL SELECT target_id, owner, repo FROM review_findings
+   UNION ALL SELECT target_id, owner, repo FROM review_failures) x
+  JOIN review_targets d ON d.id = x.target_id AND d.deleted_at IS NOT NULL
+ WHERE EXISTS (
+   SELECT 1 FROM review_targets l
+     JOIN pull_requests lp ON lp.target_id = l.id
+    WHERE l.deleted_at IS NULL AND l.bot_id = d.bot_id
+      AND l.workspace_id = d.workspace_id
+      AND l.repo_owner = x.owner COLLATE NOCASE
+      AND l.repo_name = x.repo COLLATE NOCASE)
+   AND %s`;
+
+/**
+ * One retired-target count: `blocking` rows (retired at or after the run's
+ * start, so this run could have stranded them) or `historical` ones (retired
+ * before it). With no recorded run start nothing was retired by this item, so
+ * every deleted target is history — and no row can block.
+ *
+ * `datetime()` on both sides: `deleted_at` is written as SQLite's
+ * `datetime('now')` while the run start is an ISO-8601 stamp, and a lexical
+ * comparison of those two shapes would be wrong.
+ */
+function retiredRowsSql(kind: "blocking" | "historical", runStart: string | null): string {
+  if (runStart === null) {
+    return RETIRED_LEDGER_ROWS.replace("%s", kind === "blocking" ? "0 = 1" : "1 = 1");
+  }
+  const op = kind === "blocking" ? ">=" : "<";
+  return RETIRED_LEDGER_ROWS.replace("%s", `datetime(d.deleted_at) ${op} datetime(?1)`);
+}
 
 /** One worklist row: an old target, its bot and its workspace. */
 type WorklistRow = { id: string; workspace_id: string; bot_id: string };
@@ -436,16 +482,25 @@ export const repoBackfill: DataUpgradeItem = {
   },
 
   /**
-   * Read-only checks, every one of which must read 0.
+   * Read-only checks. Every blocking entry must read 0; `historical_rows` is
+   * advisory — reported, never a failure.
    *
-   * The second is the crash residual, not a data-quality opinion: a ledger row
-   * still naming a retired target WHILE a live target of the same bot and
-   * workspace already covers that repository is exactly a batch that created
-   * the replacement and died before repointing every row. A target the user
-   * deleted through the dashboard has no such live coverage and is not
-   * counted — that history is not this item's to judge.
+   * The unrepointed check is the crash residual, not a data-quality opinion: a
+   * ledger row still naming a retired target WHILE a live target of the same bot
+   * and workspace already covers that repository is a batch that created the
+   * replacement and died before repointing every row. Only targets retired AT OR
+   * AFTER this run started can be that residual; one retired earlier is history
+   * the worklist can never visit again, so it is counted as `historical_rows`
+   * and never fails the item. With no run start recorded, nothing was retired by
+   * this run: every such row is history.
    */
-  async verify(db: DashboardD1): Promise<UpgradeCounts> {
+  advisoryChecks: ["historical_rows"],
+
+  async verify(db: DashboardD1, context: UpgradeVerifyContext): Promise<UpgradeCounts> {
+    const runStart = context.runStartedAt;
+    const blockingSql = retiredRowsSql("blocking", runStart);
+    const historicalSql = retiredRowsSql("historical", runStart);
+    const blockingBinds = runStart === null ? [] : [runStart];
     return {
       // Identity is owner/name, not `repo_id`: a backfilled row names its
       // repository and legitimately awaits the first delivery's id claim (D15).
@@ -455,22 +510,8 @@ export const repoBackfill: DataUpgradeItem = {
           WHERE t.deleted_at IS NULL AND (t.repo_owner IS NULL OR t.repo_name IS NULL)
             AND EXISTS (SELECT 1 FROM pull_requests p WHERE p.target_id = t.id)`,
       ),
-      unrepointed_ledger_rows: await countRows(
-        db,
-        `SELECT COUNT(*) AS n FROM (
-           SELECT target_id, owner, repo FROM pull_requests
-           UNION ALL SELECT target_id, owner, repo FROM reviews
-           UNION ALL SELECT target_id, owner, repo FROM review_findings
-           UNION ALL SELECT target_id, owner, repo FROM review_failures) x
-          JOIN review_targets d ON d.id = x.target_id AND d.deleted_at IS NOT NULL
-         WHERE EXISTS (
-           SELECT 1 FROM review_targets l
-             JOIN pull_requests lp ON lp.target_id = l.id
-            WHERE l.deleted_at IS NULL AND l.bot_id = d.bot_id
-              AND l.workspace_id = d.workspace_id
-              AND l.repo_owner = x.owner COLLATE NOCASE
-              AND l.repo_name = x.repo COLLATE NOCASE)`,
-      ),
+      unrepointed_ledger_rows: await countRows(db, `SELECT COUNT(*) AS n ${blockingSql}`, ...blockingBinds),
+      historical_rows: await countRows(db, `SELECT COUNT(*) AS n ${historicalSql}`, ...blockingBinds),
       duplicate_repository_groups: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (

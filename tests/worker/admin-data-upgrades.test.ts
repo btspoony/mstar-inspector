@@ -345,7 +345,7 @@ describe("the data-upgrade runner", () => {
       async verify(dbApi) {
         entered.resolve();
         await release.promise;
-        return inner.verify(dbApi);
+        return inner.verify(dbApi, { runStartedAt: null });
       },
     });
 
@@ -525,5 +525,76 @@ describe("the data-upgrade routes", () => {
     const res = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/verify`);
     expect(res.status).toBe(409);
     expect((await state(db)).status).toBe("pending");
+  });
+});
+
+describe("the runner's run-start stamp", () => {
+  function runStart(db: TestD1): string | null {
+    const row = db.raw
+      .prepare("SELECT run_started_at FROM operator_data_upgrades WHERE id = ?")
+      .get(ITEM_ID) as { run_started_at: string | null } | null;
+    return row?.run_started_at ?? null;
+  }
+
+  test("the first step stamps the run once and later steps keep it", async () => {
+    const db = fixture(3);
+    register(fixtureItem());
+
+    expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(200);
+    const stamped = runStart(db);
+    expect(stamped).not.toBeNull();
+
+    // A later step of the SAME run must not move the boundary: rows retired by
+    // the first batch are this run's, however late the verify reads them.
+    expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(200);
+    expect(runStart(db)).toBe(stamped);
+  });
+
+  test("verify reads the run start and passes it to the item", async () => {
+    const db = fixture(1);
+    let seen: string | null | undefined;
+    const inner = fixtureItem();
+    register({
+      ...inner,
+      async verify(dbApi, context) {
+        seen = context.runStartedAt;
+        return inner.verify(dbApi, { runStartedAt: null });
+      },
+    });
+
+    expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(200);
+    expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/verify`)).status).toBe(200);
+    expect(seen).toBe(runStart(db));
+    expect(seen).not.toBeNull();
+  });
+
+  test("an advisory check never fails the item and stays in the reported checks", async () => {
+    const db = fixture(1);
+    register(
+      fixtureItem({
+        advisoryChecks: ["historical_rows"],
+        verify: async () => ({ unmigrated: 0, historical_rows: 7 }),
+      }),
+    );
+
+    await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    const res = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/verify`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { state: { status: string; lastError: string | null }; checks: Record<string, number> };
+    expect(body.state.status).toBe("completed");
+    expect(body.state.lastError).toBeNull();
+    // The number is still reported: it is evidence, not a failure.
+    expect(body.checks.historical_rows).toBe(7);
+  });
+
+  test("reset clears the run start, so the next run's boundary is its own", async () => {
+    const db = fixture(3);
+    register(fixtureItem());
+    await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    expect(runStart(db)).not.toBeNull();
+
+    expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/reset`)).status).toBe(200);
+    expect(runStart(db)).toBeNull();
+    expect(await state(db)).toEqual({ status: "pending", processed: 0, cursor_json: null });
   });
 });

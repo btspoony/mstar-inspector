@@ -59,9 +59,22 @@ export type DataUpgradeItem = {
   preflight(db: DashboardD1): Promise<UpgradeCounts>;
   /** Move one batch of rows. ONE transaction; a replay over migrated rows moves nothing. */
   runBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise<UpgradeBatch>;
-  /** Read-only checks; every entry must read `0` for the item to complete. */
-  verify(db: DashboardD1): Promise<UpgradeCounts>;
+  /**
+   * Read-only checks; every entry must read `0` for the item to complete,
+   * except the ones named here — those are REPORTED (in `checks`, and so on the
+   * console) and never fail the item.
+   */
+  advisoryChecks?: readonly string[];
+  /**
+   * Read-only checks; every entry must read `0` for the item to complete.
+   * `runStartedAt` is when the current run began (`run_started_at`), so an item
+   * can tell the rows it could have stranded from deletions that predate it.
+   */
+  verify(db: DashboardD1, context: UpgradeVerifyContext): Promise<UpgradeCounts>;
 };
+
+/** The run the item's `verify` is judging: one run, stamped by its first step. */
+export type UpgradeVerifyContext = { runStartedAt: string | null };
 
 /** The state machine's states; the table's CHECK is the runtime authority. */
 export type DataUpgradeStatus = "pending" | "running" | "verifying" | "completed" | "failed";
@@ -74,7 +87,10 @@ export type DataUpgradeState = {
   processed: number;
   /** The runner opened the maintenance window, so only it may close it. */
   maintenanceOwned: boolean;
+  /** The per-phase in-flight claim; NULL between phases. */
   startedAt: string | null;
+  /** When the current run began retiring rows; NULL before its first step and after a reset. */
+  runStartedAt: string | null;
   finishedAt: string | null;
   lastError: string | null;
   /** One entry per batch: what it moved and what it discarded. */
@@ -102,13 +118,14 @@ type DataUpgradeRow = {
   processed: number;
   maintenance_owned: number;
   started_at: string | null;
+  run_started_at: string | null;
   finished_at: string | null;
   last_error: string | null;
   log_json: string | null;
 };
 
 const STATE_COLUMNS =
-  "id, status, cursor_json, processed, maintenance_owned, started_at, finished_at, last_error, log_json";
+  "id, status, cursor_json, processed, maintenance_owned, started_at, run_started_at, finished_at, last_error, log_json";
 
 /** An absent row is the documented `pending` state — nothing was ever started. */
 function pendingState(id: string): DataUpgradeState {
@@ -119,6 +136,7 @@ function pendingState(id: string): DataUpgradeState {
     processed: 0,
     maintenanceOwned: false,
     startedAt: null,
+    runStartedAt: null,
     finishedAt: null,
     lastError: null,
     log: [],
@@ -160,6 +178,7 @@ function stateFromRow(row: DataUpgradeRow): DataUpgradeState {
     processed: row.processed,
     maintenanceOwned: row.maintenance_owned === 1,
     startedAt: row.started_at,
+    runStartedAt: row.run_started_at,
     finishedAt: row.finished_at,
     lastError: row.last_error,
     log: parseLog(row.log_json),
@@ -240,15 +259,22 @@ const CLAIM_LEASE_MS = 5 * 60_000;
  * lost a read-then-claim race against a DIFFERENT phase also refuses instead of
  * resurrecting a state that phase already wrote.
  */
-function claimSql(allowed: readonly DataUpgradeStatus[]): string {
+function claimSql(allowed: readonly DataUpgradeStatus[], stampsRunStart: boolean): string {
   const list = allowed.map((status) => `'${status}'`).join(", ");
+  // Only `step` retires rows, so only its claim stamps the run: the first step
+  // of a run sets it and every later one keeps it (`?4` is the claim stamp).
+  const runColumn = stampsRunStart ? ", run_started_at" : "";
+  const runValue = stampsRunStart ? ", ?4" : "";
+  const runSet = stampsRunStart
+    ? ",\n    run_started_at = COALESCE(operator_data_upgrades.run_started_at, ?4)"
+    : "";
   return `
-  INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at)
-  VALUES (?1, ?2, ?3, ?4)
+  INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at${runColumn})
+  VALUES (?1, ?2, ?3, ?4${runValue})
   ON CONFLICT (id) DO UPDATE SET
     status = ?2,
     maintenance_owned = ?3,
-    started_at = ?4
+    started_at = ?4${runSet}
   WHERE operator_data_upgrades.status IN (${list})
     AND (operator_data_upgrades.started_at IS NULL
          OR operator_data_upgrades.started_at < ?5)`;
@@ -257,9 +283,9 @@ function claimSql(allowed: readonly DataUpgradeStatus[]): string {
 /** `verifying` is included so a verify interrupted mid-flight can be retried. */
 const VERIFIABLE_STATUSES: readonly DataUpgradeStatus[] = ["running", "verifying", "failed"];
 
-const STEP_CLAIM_SQL = claimSql(["pending", "running"]);
-const VERIFY_CLAIM_SQL = claimSql(VERIFIABLE_STATUSES);
-const RESET_CLAIM_SQL = claimSql(["pending", "running", "verifying", "completed", "failed"]);
+const STEP_CLAIM_SQL = claimSql(["pending", "running"], true);
+const VERIFY_CLAIM_SQL = claimSql(VERIFIABLE_STATUSES, false);
+const RESET_CLAIM_SQL = claimSql(["pending", "running", "verifying", "completed", "failed"], false);
 
 /** Take the phase's claim; `false` means another phase holds the item. */
 async function claimUpgrade(
@@ -484,10 +510,13 @@ export type UpgradeVerifyOutcome =
 /**
  * Read-only verification: `running|failed|verifying → completed | failed`.
  *
- * Any non-zero check fails the item with `last_error` naming the checks that
- * were not zero; all zero completes it. A window the runner opened is closed
- * only now AND only when it owns one — an operator-enabled window stays open
- * until the operator clears it (spec § Invariants).
+ * Any non-zero BLOCKING check fails the item with `last_error` naming the
+ * checks that were not zero; all blocking zero completes it. The item's
+ * `advisoryChecks` are reported in `checks` but never fail it — they describe
+ * history the item cannot repair.
+ * A window the runner opened is closed only now AND only when it owns one — an
+ * operator-enabled window stays open until the operator clears it (spec §
+ * Invariants).
  *
  * The claim makes verify refuse while another phase is in flight: a verify that
  * interleaved with a step would read data the step is still moving.
@@ -515,8 +544,13 @@ export async function verifyDataUpgrade(
   }
   // A throw is NOT caught: the claim stays and its 5-minute lease expiry is the
   // recovery, so a half-run phase never looks claimable to a later one.
-  const checks = await item.verify(db);
-  const failing = Object.entries(checks).filter(([, count]) => count !== 0);
+  // The run start is read AFTER the claim: a step that finished between the read
+  // above and this claim may have stamped the run, and the boundary the item
+  // judges must be the one it holds now.
+  const claimedState = await readDataUpgradeState(db, item.id);
+  const checks = await item.verify(db, { runStartedAt: claimedState.runStartedAt });
+  const advisory = new Set(item.advisoryChecks ?? []);
+  const failing = Object.entries(checks).filter(([name, count]) => count !== 0 && !advisory.has(name));
   const status = failing.length > 0 ? "failed" : "completed";
   const lastError =
     failing.length > 0 ? `verify failed: ${failing.map(([name, count]) => `${name}=${count}`).join(", ")}` : null;
@@ -536,15 +570,18 @@ export async function verifyDataUpgrade(
 }
 
 /**
- * The reset's state write: `pending` with no cursor, counter or finish — but
- * `started_at` stays, because the window close and ownership clear below run
- * under the same stamp, and only the last step re-opens the row.
+ * The reset's state write: `pending` with no cursor, counter, finish or run
+ * start — but `started_at` stays, because the window close and ownership clear
+ * below run under the same stamp, and only the last step re-opens the row.
+ * Clearing `run_started_at` is what makes the next run's retirements its own:
+ * with no run start, every deleted target is history.
  */
 const RESET_SQL = `
   UPDATE operator_data_upgrades
      SET status = 'pending',
          cursor_json = NULL,
          processed = 0,
+         run_started_at = NULL,
          finished_at = NULL,
          last_error = NULL
    WHERE id = ?1 AND started_at = ?2 AND maintenance_owned = ?3`;

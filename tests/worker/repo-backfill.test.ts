@@ -30,17 +30,36 @@ const BOT = "bot-1";
 function seedLeftoverTarget(
   db: TestD1,
   id: string,
-  opts: { minScore?: number; workspaceId?: string; botId?: string } = {},
+  opts: {
+    minScore?: number;
+    workspaceId?: string;
+    botId?: string;
+    /** A target that already names a repository (the live replacement). */
+    owner?: string;
+    repo?: string;
+    /** `deleted_at` in SQLite's `datetime('now')` shape, as production writes it. */
+    deletedAt?: string;
+  } = {},
 ): void {
   db.raw
     .prepare(
       `INSERT INTO review_targets
          (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
-          follow_workspace_defaults, check_min_score, review_level, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, 'deep', 'fixture',
-               '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+          follow_workspace_defaults, check_min_score, review_level, created_by, created_at, updated_at,
+          deleted_at)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, 0, ?, 'deep', 'fixture',
+               '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ?)`,
     )
-    .run(id, opts.workspaceId ?? "default", opts.botId ?? BOT, id, opts.minScore ?? 80);
+    .run(
+      id,
+      opts.workspaceId ?? "default",
+      opts.botId ?? BOT,
+      id,
+      opts.owner ?? null,
+      opts.repo ?? null,
+      opts.minScore ?? 80,
+      opts.deletedAt ?? null,
+    );
 }
 
 function seedPr(
@@ -214,13 +233,14 @@ describe("repo-backfill item", () => {
 
   test("verify reports the split as outstanding before the run and clean after it", async () => {
     const db = fixture();
-    const outstanding = await repoBackfill.verify(db);
+    const outstanding = await repoBackfill.verify(db, { runStartedAt: null });
     expect(Object.values(outstanding).some((value) => value !== 0)).toBe(true);
 
     await repoBackfill.runBatch(db, null);
-    expect(await repoBackfill.verify(db)).toEqual({
+    expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
       unidentified_targets_with_ledger: 0,
       unrepointed_ledger_rows: 0,
+      historical_rows: 0,
       duplicate_repository_groups: 0,
     });
   });
@@ -248,7 +268,7 @@ describe("repo-backfill item", () => {
       .all() as Array<{ id: string; target_id: string }>;
     expect(prs.map((row) => row.target_id)).toEqual([live[0]!.id, live[0]!.id]);
     expect(batch.processed).toBe(2);
-    expect((await repoBackfill.verify(db)).duplicate_repository_groups).toBe(0);
+    expect((await repoBackfill.verify(db, { runStartedAt: null })).duplicate_repository_groups).toBe(0);
   });
 
   test("a PR held by two old rows of one repository keeps the later last_seen_at", async () => {
@@ -262,7 +282,7 @@ describe("repo-backfill item", () => {
     await repoBackfill.runBatch(db, null);
     const rows = db.raw.query("SELECT id FROM pull_requests").all() as Array<{ id: string }>;
     expect(rows.map((row) => row.id)).toEqual(["pr-fresh"]);
-    expect((await repoBackfill.verify(db)).unrepointed_ledger_rows).toBe(0);
+    expect((await repoBackfill.verify(db, { runStartedAt: null })).unrepointed_ledger_rows).toBe(0);
   });
 
   test("a leftover row with no ledger rows keeps its configuration", async () => {
@@ -323,9 +343,10 @@ describe("repo-backfill item", () => {
     const batches = await drain(db);
     expect(batches.at(-1)!.done).toBe(true);
     expect(liveTargets(db)).toHaveLength(21);
-    expect(await repoBackfill.verify(db)).toEqual({
+    expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
       unidentified_targets_with_ledger: 0,
       unrepointed_ledger_rows: 0,
+      historical_rows: 0,
       duplicate_repository_groups: 0,
     });
   });
@@ -359,7 +380,7 @@ describe("repo-backfill item", () => {
       };
       expect(pr.target_id, id).toBe(live.find((row) => row.bot_id === botId)!.id);
     }
-    expect((await repoBackfill.verify(db)).duplicate_repository_groups).toBe(0);
+    expect((await repoBackfill.verify(db, { runStartedAt: null })).duplicate_repository_groups).toBe(0);
   });
 
   test("a case-variant owner name joins the same group instead of creating a second target", async () => {
@@ -379,7 +400,7 @@ describe("repo-backfill item", () => {
       target_id: string;
     }>;
     expect(prs.map((row) => row.target_id)).toEqual([live[0]!.id, live[0]!.id]);
-    expect((await repoBackfill.verify(db)).duplicate_repository_groups).toBe(0);
+    expect((await repoBackfill.verify(db, { runStartedAt: null })).duplicate_repository_groups).toBe(0);
   });
 
   test("a target naming many repositories migrates without overrunning the bind list", async () => {
@@ -395,10 +416,60 @@ describe("repo-backfill item", () => {
     const batches = await drain(db);
     expect(batches.every((batch) => batch.created <= 20)).toBe(true);
     expect(liveTargets(db)).toHaveLength(60);
-    expect(await repoBackfill.verify(db)).toEqual({
+    expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
       unidentified_targets_with_ledger: 0,
       unrepointed_ledger_rows: 0,
+      historical_rows: 0,
       duplicate_repository_groups: 0,
     });
+  });
+});
+
+/**
+ * A live target already covering `acme/alpha` (its PR proves the coverage) plus
+ * a soft-deleted target of the same bot and workspace still holding a ledger row
+ * for that repository — the shape verify has to date.
+ */
+function withRetiredTarget(deletedAt: string): TestD1 {
+  const db = createMigratedTestD1();
+  seedBot(db, BOT, 7001);
+  seedLeftoverTarget(db, "target-live", { owner: "acme", repo: "alpha" });
+  seedPr(db, "pr-live", "target-live", "acme", "alpha", 1, "2026-02-01T00:00:00.000Z");
+  seedLeftoverTarget(db, "target-retired", { deletedAt });
+  seedPr(db, "pr-retired", "target-retired", "acme", "alpha", 9, "2026-01-01T00:00:00.000Z");
+  return db;
+}
+
+describe("repo-backfill verify: this run's retirements vs history", () => {
+  test("a row on a target deleted BEFORE the run is history and does not fail the item", async () => {
+    // `deleted_at` in SQLite's `datetime('now')` shape, a month before the run.
+    const db = withRetiredTarget("2026-05-01 00:00:00");
+
+    const checks = await repoBackfill.verify(db, { runStartedAt: "2026-06-01T00:00:00.000Z" });
+    expect(checks).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      historical_rows: 1,
+      duplicate_repository_groups: 0,
+    });
+    // Advisory only: the run completes.
+    expect(repoBackfill.advisoryChecks).toContain("historical_rows");
+  });
+
+  test("a row on a target deleted DURING the run blocks the item", async () => {
+    // Retired a day into the run: the worklist could have stranded this row.
+    const db = withRetiredTarget("2026-06-02 00:00:00");
+
+    const checks = await repoBackfill.verify(db, { runStartedAt: "2026-06-01T00:00:00.000Z" });
+    expect(checks).toMatchObject({ unrepointed_ledger_rows: 1, historical_rows: 0 });
+  });
+
+  test("with no recorded run start every deleted target is history", async () => {
+    // A freshly deleted target with no run start is still not this run's doing:
+    // the item never stepped, so it cannot have stranded anything.
+    const db = withRetiredTarget("2026-06-02 00:00:00");
+
+    const checks = await repoBackfill.verify(db, { runStartedAt: null });
+    expect(checks).toMatchObject({ unrepointed_ledger_rows: 0, historical_rows: 1 });
   });
 });

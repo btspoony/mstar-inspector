@@ -19,6 +19,11 @@ CREATE TABLE operator_data_upgrades (
   maintenance_owned INTEGER NOT NULL DEFAULT 0
                     CHECK (maintenance_owned IN (0, 1)),
   started_at        TEXT,
+  -- When the CURRENT run began retiring rows, stamped once by its first claim
+  -- and cleared by a reset. `started_at` cannot serve: it is the per-phase
+  -- in-flight claim, cleared between phases. Verify reads this to tell rows the
+  -- run itself could have stranded from deletions that predate it.
+  run_started_at    TEXT,
   finished_at       TEXT,
   last_error        TEXT,
   log_json          TEXT
