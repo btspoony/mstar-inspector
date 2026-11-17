@@ -2,7 +2,7 @@
 
 ## Scope
 
-Dashboard App detail routing, member identity-only reads, manager-only operational data, and per-App insights. Global insights have no page or data endpoint.
+Dashboard App detail routing, the application detail's own two tabs, member identity-only reads and manager-only operational data.
 
 ## Current state
 
@@ -10,10 +10,10 @@ Dashboard App detail routing, member identity-only reads, manager-only operation
 
 | ID | Contract |
 |----|----------|
-| D2 | The global insights face is **removed entirely** (page, SPA route/nav, `GET /api/insights/summary`). No admin-only global variant exists: insights have no global concept. |
-| D3 | `/dashboard/apps/:appId` (the numeric `github_app_id`) is the **应用详情 (App detail)** page with the App's own tabs: **洞察** (per-App insights view, the default), **已安装** and **Pull requests**. The target-owned review policy moved to the review-target surface, `/dashboard/{workspaceRef}/targets/:appId`. |
-| D4 | A member without the workspace owner/admin role sees **GitHub App identity info only** on the detail face. The identity set: `github_app_id`, `status`, `review_enabled`, `created_by`, `created_at` — the App identity fields, plus creation time — **and** the App's cached public GitHub profile (`github_name`, `github_slug`, `github_description`, `github_html_url`, `github_avatar_url`, `github_metadata_synced_at`), plus local App `id` and top-level server-resolved `workspace_id` (the pair composing the manager-visible webhook URL). Operational fields — `installations`, `deliveries`, `delivery_summary`, `last_webhook_at`, `sandbox_image_id`, `review_trigger_mode`, the settings payload — remain behind the `canManageApp` branch; insights 403; every mutation 403. Non-managers receive no operational payload. |
-| D5 | The insights tab (and its data endpoint) is **workspace owner-or-admin** (`canManageApp`, which is `canManageRole(scope.role)`), consistent with D4. Creating an App grants nothing: the creator of an App they are a plain member of gets the same 403 as any other member. |
+| D2 | Insights and pull requests are read at exactly two scopes: one repository target and the whole workspace behind the 所有仓库 entry. No application-scoped and no deployment-global face exists. |
+| D3 | `/dashboard/apps/:appId` (the numeric `github_app_id`) is the **应用详情 (App detail)** page and carries exactly two tabs: **应用设置** and **已安装**. Review policy belongs to the repository detail, `/dashboard/{workspaceRef}/targets/<targetId>` (target UUID). |
+| D4 | A member without the workspace owner/admin role sees **GitHub App identity info only** on the detail face. The identity set: `github_app_id`, `status`, `review_enabled`, `created_by`, `created_at` — the App identity fields, plus creation time — **and** the App's cached public GitHub profile (`github_name`, `github_slug`, `github_description`, `github_html_url`, `github_avatar_url`, `github_metadata_synced_at`), plus local App `id` and top-level server-resolved `workspace_id` (the pair composing the manager-visible webhook URL). Operational fields — `installations`, `deliveries`, `delivery_summary`, `last_webhook_at`, `sandbox_image_id`, the settings payload — remain behind the `canManageApp` branch; insight and pull-request reads 403; every mutation 403. Non-managers receive no operational payload. `review_trigger_mode` is not an operational field of the application: it is a target-owned fact the payload echoes as read-only context only when the workspace holds exactly one target under the app. |
+| D5 | Insight and pull-request reads are **workspace owner-or-admin** at both scopes: the target routes (`…/api/targets/:targetId/insights/summary`, `…/pull-requests`) and the workspace routes (`…/api/insights/summary`, `…/api/pull-requests`), both gated by `canManageApp`, which is `canManageRole(scope.role)`. Creating an App grants nothing: the creator of an App they are a plain member of gets the same 403 as any other member. |
 | D6 | The Apps list stays visible to all members with its current columns/payload; every row links into the detail page. The list renders no manage affordances today; any affordance added later must be `can_manage`-gated. |
 
 ### AuthZ matrix
@@ -23,22 +23,23 @@ Dashboard App detail routing, member identity-only reads, manager-only operation
 | `GET /api/apps` (list) | visible (unchanged) | visible |
 | App detail identity set (github_app_id, status, review_enabled, created_by, created_at, cached public GitHub profile `github_*`, local App `id`; top-level `workspace_id`) | visible | visible |
 | Install health / delivery payload (`installations`, `deliveries`, `delivery_summary`, `last_webhook_at`) | **absent from payload** | visible |
-| Runtime/ops config fields (`sandbox_image_id`, `review_trigger_mode`) | **absent from payload** | visible |
-| Settings payload (keys, chains, providers, trigger mode, top-level `target_id`) | hidden (`can_manage: false` shape; the identity face still carries `target_id`) | visible |
-| `GET /api/apps/:appId/insights/summary` | 403 | 200 |
+| Runtime/ops config fields (`sandbox_image_id`) | **absent from payload** | visible |
+| Settings payload (keys, chains, providers, application-scoped operations). The payload may echo the single target's review facts (`target_id`, `check_gate`, `review_trigger_mode`, `review_level`) as read-only context; it carries no review control and no allowlist. | hidden (`can_manage: false` shape) | visible |
+| `GET …/api/targets/:targetId/insights/summary` | 403 | 200 |
+| `GET …/api/insights/summary` (workspace scope) | 403 | 200 |
 | Mutations (disable/enable/delete, pause/resume, settings writes, key/delete) | 403 (unchanged) | allowed (unchanged) |
-| Global insights page + `GET /api/insights/summary` | **removed for everyone** | removed |
+| Global insights page | **removed for everyone** | removed |
 
 Membership bootstrap, invite/remove/role flows, and the per-request membership guard are **unchanged**.
 
 ### Information architecture
 
-- `/dashboard/apps/:appId` → App detail page (D3), with the workspace-scoped twin `/dashboard/{workspaceRef}/apps/{github_app_id}` served by the same page id and consuming `GET /api/apps/:appId/settings`. The default tab is 洞察; tab state derives from the query via the shared pure URL-state helpers.
-- The app detail's settings tab moved to the review-target surface: `GET /dashboard/{workspaceRef}/apps/:appId/settings` and `GET /dashboard/{workspaceRef}/apps/:appId?tab=settings` each answer **one 302** to `/dashboard/{workspaceRef}/targets/:appId` — one hop for an authorised navigation (the redirect is address-level, so an anonymous request then takes the target page's own login bounce; the destination enforces its own access). The settings POST family's HTML-navigation 302 targets (`settingsPostResponse`, `settingsRemoveResponse`, `settings400Response`, `settingsVerifyFailResponse`, `settingsMembershipFailResponse`, `reviewActionRedirect`'s target-origin branch, and the park action's 409/200 answers) point at that same target path, so a native form lands in one hop. The workspace-scoped POST shapes (`/dashboard/{workspaceRef}/apps/:appId/{settings,settings/key/delete,pause,resume,park}`) keep their own paths: a form action is never bookmarked, and a 302 on its POST would break the form.
-- The App detail and the bot page keep their paths: only the settings tab's address moved. `/dashboard/{workspaceRef}/apps/:appId/bot` stays the bot-owned configuration page.
-- The 洞察 tab renders only on the `can_manage: true` face; a non-manager sees the D4 identity card instead of any tab, and reaches nothing of the review policy. The tab set's absence for non-managers is pinned by tests.
+- `/dashboard/apps/:appId` → App detail page (D3), with the workspace-scoped twin `/dashboard/{workspaceRef}/apps/{github_app_id}` served by the same page id and consuming `GET /api/apps/:appId/settings`. The tab set is 应用设置 | 已安装, derived from `?tab=`; a request without the parameter lands on 应用设置.
+- The retired spellings `…/apps/:appId/settings` and `…/apps/:appId/bot` each answer one 302 to the canonical `…/apps/:appId?tab=settings`. The retired app-target policy POST family and its redirect helpers are deleted with the routes.
+- The bot page is no longer a page: `/apps/:appId/bot` redirects into the 应用设置 tab, whose body renders the bot-scoped configuration.
+- A non-manager sees the D4 identity card and neither tab's data: both tabs read manager payloads.
 - `/dashboard/insights` is removed from `SPA_PAGES`, the sidebar, and i18n nav keys. Deep links to it fall through the normal unknown-route behavior (no longer shell-served: an HTML GET falls past the SPA dispatch to the guarded dashboard app's 404, exactly like any other unknown `/dashboard` path).
-- Sidebar: four entries — Apps, Review targets, Members, Settings — from one source (`NAV_ITEMS`); the Insights entry is gone.
+- Sidebar: four entries in the order 仓库 / 应用 / 成员 / 设置, from one source (`NAV_ITEMS`); the repository entry uses `FolderGit2`.
 - Apps list: every row navigates to the detail page (row click, name link, and row action all target `/dashboard/apps/:appId`); the row action's copy moves from settings semantics to detail semantics in both locales. The list renders no manage affordances today and must not grow any that are not `can_manage`-gated (D6 invariant); columns and the list payload are otherwise unchanged.
 
 #### App identity key
@@ -49,36 +50,36 @@ Membership bootstrap, invite/remove/role flows, and the per-request membership g
 
 ### Data faces
 
-- `insights-store` accepts an **optional `appId` filter** (the `github_apps.id` row PK — a string, not the numeric `github_app_id`) bound as `r.app_id = ?`. It is additive-only and applied to **both** WHERE faces inside the store: the shared WHERE (`whereSql`) used by every aggregation, **and** the opt-in window-scoped `repos` aggregation, which deliberately shares only the window+era predicates (`windowEraWhere`) and ignores `repo` today. Without the second composition the per-App endpoint's `repos` list would carry other Apps' repo names — the exact cross-App leak this spec removes. The existing zero-diff pin over time-bucket grids (knowledge: `d1-time-bucket-distribution-grids`) must keep holding when the filter is absent (both queries byte-identical); the era gate (`r.envelope IS NOT NULL`) and the single `WEEK_BUCKET_SQL` are untouched. Legacy `app_id IS NULL` rows are excluded by the filter, by design.
-- `GET /api/apps/:appId/insights/summary` — query params `window` (integer days; >90 clamped to 90 at the store entry; non-integer/negative → 400), `repo` (optional `owner/repo`, within the App's reviews), and `include=repos` (opt-in window-scoped distinct repo list, **app-scoped** — it feeds the insights tab's repo selector; same opt-in semantics as the retired global face). Response reuses the existing summary shape (per-App population) and echoes the effective `window_days` (and `repo` when present) exactly as the retired global face did. Gate: the mount-level membership guard + route-local App resolution (`requireAppVisible` pattern; unknown/soft-deleted App, or a non-numeric segment → 404) + `canManageApp` (→ 403). The endpoint's 4xx bodies are JSON (`{ error }`), consistent with its 400 face — the sole consumer is the SPA fetcher; no HTML face exists on this route (unlike the mutation routes' `forbiddenPage`, which serve zero-JS form navigation).
-- `GET /api/apps/:appId/settings` (SPA data face) — the `can_manage: false` base payload contains the D4 identity set + `can_manage: false`; `installations`, `deliveries`, `delivery_summary`, `last_webhook_at`, `sandbox_image_id`, and `review_trigger_mode` move behind the `canManageApp` branch. Managers receive the operational shape in full.
+- `insights-store` binds a target-id set (`ledgerScopeSql` promoted to `targetIds`); the workspace scope resolves the workspace's live targets in a subquery, so the bind count stays constant. No application-scoped filter exists.
+- `GET …/api/targets/:targetId/insights/summary` and `GET …/api/insights/summary` — same `window` / `repo` / `include=repos` semantics and payload keys, manager gate, and malformed params answering 400.
+- `GET /api/apps/:appId/settings` (SPA data face) — the `can_manage: false` base payload contains the D4 identity set + `can_manage: false`; `installations`, `deliveries`, `delivery_summary`, `last_webhook_at` and `sandbox_image_id` stay behind the `canManageApp` branch. Managers receive the operational shape in full. The payload echoes the single target's review facts (`target_id` as a string, then `check_gate`, `review_trigger_mode`, `review_level`, `review_enabled`) only when the workspace holds exactly one live target under the app; zero targets omits the slice, several send `target_id: null` with `targets_many: true`, and no allowlist or `owner_overlap` field is sent.
 
 ### Non-goals
 
 - No new roles beyond `admin` / `member`; no per-App ACL or sharing model.
-- No changes to review engine / pipeline / webhook behavior.
-- The insights filter itself needs no new data migration: `reviews.app_id` exists since `0005_reviews_app_id.sql`. App identity routing follows migrations `0036_app_identity.sql` and `0038_webhook_path_drop.sql`.
+- No change to review engine, publication or gate evaluation. Webhook routing now resolves the target by repository identity, described on the repository target model page.
+- No data migration is needed for the new scopes: the ledger already carries `target_id` (`0060_execution_ledger_target.sql`) and workspace scope resolves through `review_targets.workspace_id`. App identity routing follows migrations `0036_app_identity.sql` and `0038_webhook_path_drop.sql`.
 - No redesign of the Apps list beyond affordance gating (D6).
 - No Apps-list field-level narrowing this contract: status/health/creator columns stay member-visible as today (locked by D6). Whether non-managers should see the list's health column for Apps they do not manage is an **open product question**, deliberately not decided here (owner PM; trigger = explicit user request after live use).
-- No admin-only global dashboard variant (superseded by D2).
+- No deployment-global variant: the workspace scope replaces the former global face.
 
 ## Invariants
 
-- The App detail's manager face carries the App's own tabs (insights, installed, pull requests); the target-owned policy lives on the review-target surface. Non-managers see only the identity card. Both spellings of the retired settings-tab address answer one 302 to the target page.
-- Never compose the App predicate into `windowEraWhere` itself: compose alongside it on both aggregation faces and preserve byte-identical absent-filter queries.
+- The application detail's manager face carries 应用设置 and 已安装; review policy lives on the repository detail keyed by target UUID. Non-managers see only the identity card. Both retired spellings answer one 302 to `?tab=settings`.
+- The scope predicate is a bound target-id set composed alongside `windowEraWhere`; no application predicate exists.
 - SPA and API ship in one Worker bundle; payload narrowing and its parser change must deploy together.
 - Membership bootstrap, invitations, removal, role flows and per-request membership guards retain their contracts.
 
 ## Where it lives
 
-- `src/dashboard/index.ts`: `requireAppVisible`, `appSettingsRoute`, per-App insights routes and `canManageApp` branches.
-- `src/dashboard/insights-store.ts`: `whereSql`, `windowEraWhere`, optional internal App filter.
-- `src/spa/pages/data.ts`: settings and insights payload parsing.
-- `tests/worker/app-permission-matrix.test.ts`, `tests/dashboard/insights-store.test.ts`, `tests/spa/`, `tests/i18n/`: authorization, additive filter, routing/tabs, links and both locale contracts.
+- `src/dashboard/index.ts`: `requireAppVisible`, `appSettingsRoute`, `targetInsightsRoute`, `targetPullRequestsRoute`, `workspaceInsightsRoute`, `workspacePullRequestsRoute`, the application settings read and the `canManageApp` branches.
+- `src/dashboard/insights-store.ts`: `whereSql`, `windowEraWhere`, the bound target-id set.
+- `src/spa/pages/data.ts`, `src/spa/pages/TargetsPage.tsx`: settings and insight payload parsing on the application and repository pages.
+- `tests/worker/app-permission-matrix.test.ts`, `tests/dashboard/insights-store.test.ts`, `tests/spa/`, `tests/i18n/`: authorization, the bound target-id filter, routing/tabs, links and both locale contracts.
 - `migrations/0036_app_identity.sql`, `migrations/0038_webhook_path_drop.sql`: numeric detail routing and internal-id webhook routing.
 
 ## Change obligations
 
-Keep every authorization matrix row pinned, including field absence rather than display-only hiding. Update routing, tabs, row links, redirects, en/zh-CN keys and parsers with payload changes. Preserve app-scoped `include=repos`, era gating, and the distribution grid when no App filter is supplied.
+Keep every authorization matrix row pinned, including field absence rather than display-only hiding. Update routing, tabs, row links, redirects, en/zh-CN keys and parsers with payload changes. Preserve `include=repos` at both scopes, era gating, and the distribution grid when no repository filter is supplied; keep the identity-only face's field absence pinned.
 
 Decision history: [remove global insights](../../../.agents/adr/implemented/feature/2026-09-18-per-app-insights-only.md).

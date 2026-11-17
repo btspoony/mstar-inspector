@@ -183,7 +183,7 @@ moved to a plan without the capability, and a bot unshared after the fact are
 all closed on the next delivery. The capability's other inputs can change after
 creation (`plans.shared_bot_allowed`, `review_bots.scope`, the workspace's
 plan); a target's `bot_id` cannot — it is written once by an INSERT
-([review targets](../feature/review-targets.md) § Invariants), so the next
+([repository target model](../feature/repository-target-model.md) § Invariants), so the next
 writer of that column must consult this same function rather than add a second
 guard.
 
