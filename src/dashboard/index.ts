@@ -74,7 +74,6 @@ import {
   checkGateOf,
   createTargetsStore,
   getWorkspaceReviewDefaults,
-  parseTargetReviewLevel,
   readEffectiveTargetSettings,
   REVIEW_TRIGGER_MODES,
   setWorkspaceReviewDefaults,
@@ -2764,8 +2763,7 @@ async function resolveScopedApp(
 
 /**
  * The bot's LIVE targets in this workspace, newest-first ordering left to the
- * store. Callers that need "is there exactly one?" ask {@link firstTargetForBot};
- * the ones that must tell "none" from "several" read this.
+ * store. The App settings read tells "none" from "several" off this list.
  */
 async function liveTargetsForBot(
   db: DashboardD1,
@@ -2775,26 +2773,6 @@ async function liveTargetsForBot(
   return (await createTargetsStore(db).listLiveByBot(botId)).filter(
     (target) => target.workspace_id === workspaceId,
   );
-}
-
-/**
- * The bot's ONE live target in this workspace — the app-scoped routes' local
- * replacement for the retired store read. Plan 371 replaces this surface with
- * the repository list; until then every app-scoped route keeps behaving as it
- * did for the one-target-per-bot shape.
- *
- * Ambiguity is REFUSED, never resolved newest-wins: a bot holding two live
- * targets in one workspace names no single configuration, so the answer is
- * null and each caller keeps its "no single target" branch (404 / absent
- * facts) rather than acting on a guessed row.
- */
-async function firstTargetForBot(
-  db: DashboardD1,
-  workspaceId: string,
-  botId: string,
-): Promise<ReviewTargetRow | null> {
-  const live = await liveTargetsForBot(db, workspaceId, botId);
-  return live.length === 1 ? live[0]! : null;
 }
 
 /**
@@ -2941,140 +2919,6 @@ async function appStatusAction(
     await apps.setAppStatus(app.id, action === "disable" ? "disabled" : "active");
   }
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
-}
-
-// --- Per-App review pause/resume (spec § IA, pinned action
-// paths) ---
-//
-// The per-App pause switch (migration 0008 review_enabled) surfaced on the
-// pinned zero-JS action paths — both the settings-page Review switch and the
-// Apps-list actions POST here (spec § IA). Gate/order mirror appStatusAction
-// exactly: the per-request guard has verified membership, then unknown and
-// soft-deleted apps are equally invisible (→ 404, zero writes), then
-// the workspace owner/admin role (→ 403 forbiddenPage, zero writes).
-// Confirm-free and
-// reversible (pause ≠ disable — the webhook face stays healthy while
-// paused). The response is plain 200 "ok"; the SPA refetches
-// the JSON face rather than re-rendering HTML.
-
-/**
- * HTML-nav 302 target for pause/resume. The target page is the only
- * native-form caller (`<form method="post">` on the Review card); Apps-list
- * uses fetch `postForm`. Origin is a sanitized Referer pathname — never echoed
- * as Location. Target-origin → `/dashboard/targets/:appId` (GitHub App id);
- * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`. Both
- * targets carry the request's workspace prefix (`scopedAppPath`).
- */
-function reviewActionRedirect(c: DashboardContext, appId: number): string {
-  const targetPath = scopedAppPath(c, `/dashboard/targets/${appId}`);
-  const listPath = scopedAppPath(c, APPS_LIST_REDIRECT);
-  const origin = new URL(c.req.raw.url).origin;
-  const refererPath = new URL(safeLocaleRedirect(c.req.header("Referer"), origin), origin).pathname;
-  if (refererPath === targetPath) return targetPath;
-  if (refererPath === listPath) return listPath;
-  return DASHBOARD_SHELL_REDIRECT;
-}
-
-/**
- * One handler for the two pinned review-action routes. The idempotent no-op
- * case is short-circuited BEFORE the store write — pausing a paused App /
- * resuming an active one never touches the row (setReviewEnabled would
- * count a same-value UPDATE as changed and would churn updated_at, the
- * operator-mutation timestamp). The response is a plain 2xx the
- * SPA's postForm treats as success (it refetches the JSON face); the
- * re-rendered HTML page is retired. QC round 2: HTML-nav 302 target
- * depends on origin (settings vs apps list); fetch is unchanged.
- */
-async function appReviewAction(
-  c: DashboardContext,
-  action: "pause" | "resume",
-): Promise<Response> {
-  const gate = await requireMember(c);
-  if (!gate.ok) return gate.response;
-  const apps = createReviewBotsStore(gate.db);
-  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
-  if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
-  const htmlRedirect = reviewActionRedirect(c, app.github_app_id);
-  // The switch users flip is the TARGET's business pause; `review_bots`'
-  // review_enabled is the operational pause and has no dashboard writer.
-  const targets = createTargetsStore(gate.db);
-  const target = await firstTargetForBot(gate.db, gate.scope.workspaceId, app.id);
-  if (!target) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  const paused = target.review_enabled === 0;
-  if (action === "pause" ? paused : !paused) return pinnedPostMutationResponse(c, htmlRedirect, "ok"); // idempotent no-op — never touch the row
-  await targets.setReviewEnabled(gate.scope.workspaceId, target.id, action === "resume");
-  return pinnedPostMutationResponse(c, htmlRedirect, "ok");
-}
-
-
-// --- Per-App review trigger mode (spec review-trigger-policy §2, pinned
-// action path beside pause/resume) ---
-//
-// The App's auto-trigger selection: 'open' (first open only) |
-// 'every_push' (opened + synchronize + reopened — today's behavior, the DDL
-// default) | 'manual' (never auto-review). The bot-mention comment trigger
-// is orthogonal and works in every mode (spec §3). Gate/order mirror
-// appReviewAction exactly: the per-request guard has verified membership,
-// then unknown and soft-deleted apps are equally invisible (→ 404, zero
-// writes), then the workspace owner/admin role (→ 403 forbiddenPage, zero
-// writes). The
-// mode is validated BEFORE any write — an unknown/invalid value fails
-// closed with the keyed settings 400 and the stored row is left unchanged
-// (no silent coercion to the default, spec §2); the store setter throws as
-// the backstop for direct callers. Success is the plain 2xx "ok" the SPA's
-// postForm treats as success (it refetches the JSON face); HTML-nav keeps
-// the pinned 302 to the settings page via settingsPostResponse — this
-// control lives on the settings page only, so unlike pause/resume the
-// target is fixed, not referer-derived.
-
-/** True exactly when `value` is a migration 0022 vocabulary mode. */
-function isReviewTriggerMode(value: string): value is ReviewTriggerMode {
-  return (REVIEW_TRIGGER_MODES as readonly string[]).includes(value);
-}
-
-/**
- * One handler for the pinned review-trigger-mode route. The idempotent
- * no-op case is short-circuited BEFORE the store write — selecting the
- * already-stored mode never touches the row (a same-value UPDATE would
- * churn updated_at, the operator-mutation timestamp — the appReviewAction
- * discipline).
- */
-async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response> {
-  const gate = await requireMember(c);
-  if (!gate.ok) return gate.response;
-  const apps = createReviewBotsStore(gate.db);
-  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
-  if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
-  const form = await c.req.parseBody();
-  const mode = typeof form["mode"] === "string" ? form["mode"] : "";
-  if (!isReviewTriggerMode(mode)) {
-    return settings400Response(c, app.github_app_id, SETTINGS_400_KEYS.triggerModeUnknown, { mode });
-  }
-  const targets = createTargetsStore(gate.db);
-  const target = await firstTargetForBot(gate.db, gate.scope.workspaceId, app.id);
-  if (!target) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  // Compared against the EFFECTIVE mode, not the row's placeholder: saving the
-  // mode an inheriting target already runs leaves a real change to make (the
-  // row must stop inheriting), so only an own-columns row can no-op here.
-  const current = await readEffectiveTargetSettings(gate.db, target);
-  if (current.triggerMode !== mode || target.follow_workspace_defaults === 1) {
-    // `follow: 0` in the SAME statement: a mode saved on an inheriting target
-    // would otherwise be inert — the effective answer would stay the
-    // workspace's, and the manager's choice would never take effect. The other
-    // three columns carry the values the manager was just looking at, so the
-    // flip to explicit changes the mode alone instead of exposing the row's
-    // inert DDL placeholders.
-    await targets.setReviewConfig(gate.scope.workspaceId, target.id, {
-      triggerMode: mode,
-      level: current.level,
-      checkMinScore: current.checkMinScore,
-      checkPassVerdicts: current.checkPassVerdicts,
-      follow: 0,
-    });
-  }
-  return settingsPostResponse(c, app.github_app_id, "ok");
 }
 
 // --- Per-App AI configuration settings (spec § Per-App BYOK) ---
@@ -4505,16 +4349,6 @@ const appKeyUsageRoute = async (c: DashboardContext) => {
 };
 
 /**
- * The review-depth control's inherit face (migration 0047): the wire field
- * `op: "save-review-level"` carries the sentinel value `"inherit"`, which maps
- * to the NULL column ("follow the operator default").
- * It is a form protocol value, never a stored one — the column holds a
- * REVIEW_LEVELS value or NULL. The SPA restates it as REVIEW_DEPTH_INHERIT
- * across the bundle boundary (the REVIEW_TRIGGER_MODES convention).
- */
-const REVIEW_LEVEL_INHERIT = "inherit";
-
-/**
  * The settings POST: the operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
  * other id — the allowlist is the plan's Global Constraint) + the
@@ -4550,10 +4384,7 @@ const REVIEW_LEVEL_INHERIT = "inherit";
  * absent. save-sandbox-image = the
  * App's runtime-harness selection (mounted into the sandbox image): only ENABLED
  * src/contracts/sandbox-images.ts registry ids are storable (unknown or
- * disabled → 400, nothing stored). save-review-level = the App's review depth
- * (migration 0047): a REVIEW_LEVELS value is stored, the inherit sentinel
- * writes the column back to NULL (follow the operator default), and anything
- * else is a keyed 400 with zero writes. The settings page is
+ * disabled → 400, nothing stored). The settings page is
  * SPA-owned — 2xx = the SPA refetches the JSON face, 4xx/5xx = the reason
  * (400s are keyed JSON via settings400Response — native form
  * posts keep the 302); the re-rendered HTML page is retired.
@@ -4562,8 +4393,7 @@ const REVIEW_LEVEL_INHERIT = "inherit";
  * The BOT-scoped settings ops. They require `canWriteBotScope`: only the bot's
  * owning workspace, while it is `owned`, may run one. A retained target on
  * another workspace's bot grants none of them, and a `shared` bot belongs to
- * the platform. The target-scoped ops (review level, Check gate, owner
- * allowlist) stay available, because the target is what this workspace owns.
+ * the platform.
  */
 const BOT_SCOPED_SETTINGS_OPS: ReadonlySet<string> = new Set([
   "add-key",
@@ -5304,116 +5134,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.github_app_id, `Saved the ${image.id} runtime harness for ${appDisplayName(gate.app)}.`);
-  }
-  if (op === "save-review-level") {
-    // The review depth (migration 0047): a REVIEW_LEVELS value is stored, the
-    // inherit sentinel writes the column back to NULL (follow the operator
-    // default — a real choice, not a no-op), and anything else is a keyed 400
-    // with zero writes. The store's isReviewLevel guard and the DDL CHECK are
-    // the backstops; setReviewLevel stamps updated_at.
-    const rawLevel = typeof form.level === "string" ? form.level.trim() : "";
-    const level = rawLevel === REVIEW_LEVEL_INHERIT ? null : parseTargetReviewLevel(rawLevel);
-    if (level === null && rawLevel !== REVIEW_LEVEL_INHERIT) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.reviewLevelUnknown, {
-        level: rawLevel,
-      });
-    }
-    // The depth is the TARGET's column: with no repository under this App there
-    // is no row to write, and `404 unknown app` is the family's answer (the
-    // same one the pause/resume routes give). The settings face renders no
-    // depth control in that state, so this is the direct-caller backstop.
-    if (gate.target === null) {
-      return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-    }
-    try {
-      // The other three columns take the values the target is running with
-      // right now (workspace defaults while inheriting), so this save changes
-      // the depth alone rather than exposing the row's inert placeholders.
-      const current = await readEffectiveTargetSettings(gate.db, gate.target);
-      // `false` = the App row vanished (or was soft-deleted) before this
-      // write: nothing was saved, so the success notice would lie.
-      if (
-        !(await createTargetsStore(gate.db).setReviewConfig(gate.scope.workspaceId, gate.target.id, {
-          level,
-          triggerMode: current.triggerMode,
-          checkMinScore: current.checkMinScore,
-          checkPassVerdicts: current.checkPassVerdicts,
-          follow: 0,
-        }))
-      ) {
-        throw new Error(`app ${gate.app.id} vanished before its review level save`);
-      }
-    } catch (err) {
-      logSettingsFailure("save_review_level", gate.app.id, err);
-      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
-    }
-    return settingsPostResponse(
-      c,
-      gate.app.github_app_id,
-      `Saved the review depth for ${appDisplayName(gate.app)} — ${level ?? "following the operator default"}.`,
-    );
-  }
-  if (op === "save-check-gate") {
-    // The review gate (migration 0045): the score floor plus the set of
-    // verdicts that satisfy it. Both bounds are checked HERE — an invalid
-    // submission is a keyed 400 with zero writes (saveCheckGate re-validates
-    // as the backstop and the DDL CHECK is the last line for the score). An
-    // empty verdict set is legal and fails closed: no review can pass.
-    const rawScore = typeof form.min_score === "string" ? form.min_score.trim() : "";
-    if (!/^\d+$/.test(rawScore) || Number(rawScore) > 100) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.checkScoreInvalid, {
-        min: CHECK_MIN_SCORE_MIN,
-        max: CHECK_MIN_SCORE_MAX,
-      });
-    }
-    // Repeated `pass_verdicts` fields are the shape this op expects (the SPA
-    // posts one per checked box); parseBody({ all: true }) aggregates them.
-    // Duplicates collapse, so the stored set (and the notice below) is a SET.
-    const rawVerdicts = form.pass_verdicts;
-    const fields = rawVerdicts === undefined ? [] : Array.isArray(rawVerdicts) ? rawVerdicts : [rawVerdicts];
-    const submitted = [...new Set(fields)];
-    const unknownVerdict = submitted.find(
-      (entry) => typeof entry !== "string" || !PR_VERDICTS.includes(entry as PrVerdict),
-    );
-    if (unknownVerdict !== undefined) {
-      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.checkVerdictUnknown, {
-        verdict: typeof unknownVerdict === "string" ? unknownVerdict : "",
-        verdicts: PR_VERDICTS.join(", "),
-      });
-    }
-    const minScore = Number(rawScore);
-    const passVerdicts = submitted as PrVerdict[];
-    // Same target-owned rule as the depth save above: no repository, no row.
-    if (gate.target === null) {
-      return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-    }
-    try {
-      // The two columns this op does not submit take the values the target is
-      // running with right now (workspace defaults while inheriting), so a
-      // gate save on an inheriting row changes the gate alone.
-      const current = await readEffectiveTargetSettings(gate.db, gate.target);
-      // `false` = the App row vanished (or was soft-deleted) before this
-      // write: nothing was saved, so the success notice would lie.
-      if (
-        !(await createTargetsStore(gate.db).setReviewConfig(gate.scope.workspaceId, gate.target.id, {
-          checkMinScore: minScore,
-          checkPassVerdicts: passVerdicts,
-          triggerMode: current.triggerMode,
-          level: current.level,
-          follow: 0,
-        }))
-      ) {
-        throw new Error(`app ${gate.app.id} vanished before its review gate save`);
-      }
-    } catch (err) {
-      logSettingsFailure("save_check_gate", gate.app.id, err);
-      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
-    }
-    return settingsPostResponse(
-      c,
-      gate.app.github_app_id,
-      `Saved the review gate for ${appDisplayName(gate.app)} — passes at ${minScore}+ points on: ${passVerdicts.join(", ") || "no verdicts"}.`,
-    );
   }
   // Review fold-in: an unknown op is a validation failure like any
   // other — 400 with the reason.
@@ -6687,8 +6407,6 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/disable", handler: (c) => appStatusAction(c, "disable"), access: "write" },
   { method: "post", path: "/apps/:appId/enable", handler: (c) => appStatusAction(c, "enable"), access: "write" },
   { method: "post", path: "/apps/:appId/delete", handler: (c) => appStatusAction(c, "delete"), access: "write" },
-  { method: "post", path: "/apps/:appId/pause", handler: (c) => appReviewAction(c, "pause"), access: "write" },
-  { method: "post", path: "/apps/:appId/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
   // Workspace-scoped target creation on a shared bot — not App-addressed: the
   // body names the bot, and the route re-checks its scope inside the write.
   { method: "get", path: "/api/targets", handler: targetListRoute, access: "read" },
@@ -6707,7 +6425,6 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
     handler: appInstallationRepositoriesRoute,
     access: "write",
   },
-  { method: "post", path: "/apps/:appId/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
