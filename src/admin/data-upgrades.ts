@@ -231,12 +231,15 @@ export async function listDataUpgrades(db: DashboardD1): Promise<DataUpgradeList
 }
 
 /** Clears the in-flight claim after a phase that threw (the stored status stays). */
-const CLAIM_RELEASE_SQL = "UPDATE operator_data_upgrades SET started_at = NULL WHERE id = ?1";
+const CLAIM_RELEASE_SQL = `
+  UPDATE operator_data_upgrades
+     SET started_at = NULL, claim_token = NULL
+   WHERE id = ?1 AND claim_token = ?2 AND started_at = ?3`;
 
 /** Drop the claim a phase took, keeping the error that is about to surface. */
-async function releaseClaim(db: DashboardD1, id: string): Promise<void> {
+async function releaseClaim(db: DashboardD1, id: string, now: string, token: string): Promise<void> {
   // A release that fails must not mask the real error: the lease self-heals.
-  await db.prepare(CLAIM_RELEASE_SQL).bind(id).run().catch(() => {});
+  await db.prepare(CLAIM_RELEASE_SQL).bind(id, token, now).run().catch(() => {});
 }
 
 /**
@@ -257,6 +260,12 @@ const CLAIM_LEASE_MS = 5 * 60_000;
  * somebody else holds the lease — the caller refuses with `upgrade_running`
  * instead of acting on a row another phase is about to rewrite.
  *
+ * `claim_token` is the claim's IDENTITY, written fresh on every successful
+ * claim. `started_at` cannot name a claim: two claims taken within the same
+ * stamp are indistinguishable, so a caller that lost a takeover could still
+ * pass a stamp guard and write the winner's window. Every downstream guard
+ * binds the token, so only the claim that currently holds the row can write.
+ *
  * `allowed` is the status set the phase may take the item from, so a phase that
  * lost a read-then-claim race against a DIFFERENT phase also refuses instead of
  * resurrecting a state that phase already wrote.
@@ -271,12 +280,13 @@ function claimSql(allowed: readonly DataUpgradeStatus[], stampsRunStart: boolean
     ? ",\n    run_started_at = COALESCE(operator_data_upgrades.run_started_at, ?4)"
     : "";
   return `
-  INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at${runColumn})
-  VALUES (?1, ?2, ?3, ?4${runValue})
+  INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at, claim_token${runColumn})
+  VALUES (?1, ?2, ?3, ?4, ?6${runValue})
   ON CONFLICT (id) DO UPDATE SET
     status = ?2,
     maintenance_owned = ?3,
-    started_at = ?4${runSet}
+    started_at = ?4,
+    claim_token = ?6${runSet}
   WHERE operator_data_upgrades.status IN (${list})
     AND (operator_data_upgrades.started_at IS NULL
          OR operator_data_upgrades.started_at < ?5)`;
@@ -289,7 +299,7 @@ const STEP_CLAIM_SQL = claimSql(["pending", "running"], true);
 const VERIFY_CLAIM_SQL = claimSql(VERIFIABLE_STATUSES, false);
 const RESET_CLAIM_SQL = claimSql(["pending", "running", "verifying", "completed", "failed"], false);
 
-/** Take the phase's claim; `false` means another phase holds the item. */
+/** Take the phase's claim; `null` means another phase holds the item. */
 async function claimUpgrade(
   db: DashboardD1,
   sql: string,
@@ -297,12 +307,20 @@ async function claimUpgrade(
   status: DataUpgradeStatus,
   maintenanceOwned: 0 | 1,
   now: string,
-): Promise<boolean> {
+): Promise<string | null> {
+  const token = crypto.randomUUID();
   const claim = await db
     .prepare(sql)
-    .bind(id, status, maintenanceOwned, now, new Date(Date.parse(now) - CLAIM_LEASE_MS).toISOString())
+    .bind(
+      id,
+      status,
+      maintenanceOwned,
+      now,
+      new Date(Date.parse(now) - CLAIM_LEASE_MS).toISOString(),
+      token,
+    )
     .run();
-  return claim.meta.changes !== 0;
+  return claim.meta.changes === 0 ? null : token;
 }
 
 /** One claim-guarded write's verdict: `refused` means the row no longer carries our stamp. */
@@ -315,10 +333,10 @@ async function guardedWrite(db: DashboardD1, sql: string, ...binds: unknown[]): 
 }
 
 /**
- * Step 1 of a verify: settle the status while OUR stamp still guards the row.
- * `started_at` stays set — the claim is released by step 3, so no later phase
- * can claim the row while this one still has maintenance side effects to run.
- * `finished_at` is written only on completion: a failed item never finished.
+ * Step 1 of a verify: settle the status while OUR claim (token) still guards the
+ * row. `started_at` stays set — the claim is released by step 3, so no later
+ * phase can claim the row while this one still has maintenance side effects to
+ * run. `finished_at` is written only on completion: a failed item never finished.
  */
 export async function settleVerifyState(
   db: DashboardD1,
@@ -326,42 +344,47 @@ export async function settleVerifyState(
   status: "completed" | "failed",
   lastError: string | null,
   now: string,
+  token: string,
 ): Promise<ClaimStep> {
   return status === "completed"
     ? guardedWrite(
         db,
         `UPDATE operator_data_upgrades
             SET status = 'completed', finished_at = ?2, last_error = NULL
-          WHERE id = ?1 AND status = 'verifying' AND started_at = ?3`,
+          WHERE id = ?1 AND status = 'verifying' AND started_at = ?3 AND claim_token = ?4`,
         id,
         now,
         now,
+        token,
       )
     : guardedWrite(
         db,
         `UPDATE operator_data_upgrades
             SET status = 'failed', last_error = ?2
-          WHERE id = ?1 AND status = 'verifying' AND started_at = ?3`,
+          WHERE id = ?1 AND status = 'verifying' AND started_at = ?3 AND claim_token = ?4`,
         id,
         lastError,
         now,
+        token,
       );
 }
 
 /**
  * Drop the ownership flag. Its `changes` is the batch's veto: every window
- * statement below is guarded by the flag this one cleared, so a stamp taken
+ * statement below is guarded by the flag this one cleared, so a claim taken
  * over between the read and the batch leaves the newer run's window untouched.
+ * The claim TOKEN names the claim, so a takeover that reused the same stamp
+ * cannot pass either.
  */
 const MAINTENANCE_RELEASE_SQL = `
   UPDATE operator_data_upgrades
      SET maintenance_owned = 0
-   WHERE id = ?1 AND started_at = ?2 AND maintenance_owned = 1`;
+   WHERE id = ?1 AND claim_token = ?2 AND started_at = ?3 AND maintenance_owned = 1`;
 
-/** The window is this run's to close: the flag is down AND somebody opened it. */
+/** The window is this claim's to close: the flag is down AND somebody opened it. */
 const MAINTENANCE_CLOSE_GUARD = `
   EXISTS (SELECT 1 FROM operator_data_upgrades
-           WHERE id = ?1 AND started_at = ?2 AND maintenance_owned = 0)
+           WHERE id = ?1 AND claim_token = ?2 AND maintenance_owned = 0)
   AND EXISTS (SELECT 1 FROM review_runtime_settings
                WHERE key = 'platform.maintenance.enabled' AND value = '1')`;
 
@@ -392,18 +415,20 @@ const MAINTENANCE_CLOSE_WINDOW_SQL = `
    WHERE key = ?3 AND ${MAINTENANCE_CLOSE_GUARD}`;
 
 /**
- * Step 2: close the window this item owns and drop its ownership flag in ONE
- * batch, so a lease taken over between the read and the write cannot have its
- * window closed by a phase that no longer holds the stamp. The flag write
- * comes first and every window statement is guarded by it, so a takeover
- * makes the whole close a no-op instead of a stale side effect. An
- * operator-closed window is left alone: re-stating "off" would append an audit
- * row for a change nobody made.
+ * Step 2: close the window this claim owns and drop its ownership flag in ONE
+ * batch, so a claim taken over between the read and the write cannot have its
+ * window closed by a phase that no longer holds the row. The flag write comes
+ * first and every window statement is guarded by it, so a takeover makes the
+ * whole close a no-op instead of a stale side effect. An operator-closed window
+ * is left alone: re-stating "off" would append an audit row for a change
+ * nobody made.
  *
- * A row we no longer carry the stamp for (or whose status moved) is `refused`
- * with no side effect at all; a row that carries our stamp but no longer owns
- * the window has nothing to close and is `ok`, so the caller still releases
- * the claim.
+ * The guard is the TOKEN, not the stamp: a replacement claim can carry the same
+ * `started_at` (the runner stamps phases from the request clock), and only its
+ * token proves which claim holds the row. A row we no longer hold (or whose
+ * status moved) is `refused` with no side effect at all; a row we hold that no
+ * longer owns the window has nothing to close and is `ok`, so the caller still
+ * releases the claim.
  */
 export async function settleUpgradeMaintenance(
   db: DashboardD1,
@@ -411,40 +436,48 @@ export async function settleUpgradeMaintenance(
   status: DataUpgradeStatus,
   actor: string,
   now: string,
+  token: string,
 ): Promise<ClaimStep> {
   const row = await db
-    .prepare("SELECT status, maintenance_owned, started_at FROM operator_data_upgrades WHERE id = ?1")
+    .prepare("SELECT status, maintenance_owned, started_at, claim_token FROM operator_data_upgrades WHERE id = ?1")
     .bind(id)
-    .first<{ status: string; maintenance_owned: number; started_at: string | null }>();
-  if (row === null || row.started_at !== now || row.status !== status) {
+    .first<{ status: string; maintenance_owned: number; started_at: string | null; claim_token: string | null }>();
+  if (row === null || row.started_at !== now || row.claim_token !== token || row.status !== status) {
     return "refused";
   }
   if (row.maintenance_owned !== 1) {
     return "ok";
   }
   const released = (await db.batch([
-    db.prepare(MAINTENANCE_RELEASE_SQL).bind(id, now),
-    db.prepare(MAINTENANCE_CLOSE_AUDIT_SQL).bind(id, now, crypto.randomUUID(), actor, now),
-    db.prepare(MAINTENANCE_CLOSE_WINDOW_SQL).bind(id, now, "platform.maintenance.since"),
-    db.prepare(MAINTENANCE_CLOSE_WINDOW_SQL).bind(id, now, "platform.maintenance.reason"),
-    db.prepare(MAINTENANCE_CLOSE_FLAG_SQL).bind(id, now, now, actor),
+    db.prepare(MAINTENANCE_RELEASE_SQL).bind(id, token, now),
+    db.prepare(MAINTENANCE_CLOSE_AUDIT_SQL).bind(id, token, crypto.randomUUID(), actor, now),
+    db.prepare(MAINTENANCE_CLOSE_WINDOW_SQL).bind(id, token, "platform.maintenance.since"),
+    db.prepare(MAINTENANCE_CLOSE_WINDOW_SQL).bind(id, token, "platform.maintenance.reason"),
+    db.prepare(MAINTENANCE_CLOSE_FLAG_SQL).bind(id, token, now, actor),
   ]))[0];
   return released === undefined || released.meta.changes === 0 ? "refused" : "ok";
 }
 
-/** Last step of every phase: clearing the stamp is what re-opens the row to another phase. */
+/**
+ * Last step of every phase: clearing the claim is what re-opens the row to
+ * another phase. Both columns go, so no stale token outlives its claim.
+ */
 export async function releaseUpgradeClaim(
   db: DashboardD1,
   id: string,
   status: DataUpgradeStatus,
   now: string,
+  token: string,
 ): Promise<ClaimStep> {
   return guardedWrite(
     db,
-    "UPDATE operator_data_upgrades SET started_at = NULL WHERE id = ?1 AND status = ?2 AND started_at = ?3",
+    `UPDATE operator_data_upgrades
+        SET started_at = NULL, claim_token = NULL
+      WHERE id = ?1 AND status = ?2 AND started_at = ?3 AND claim_token = ?4`,
     id,
     status,
     now,
+    token,
   );
 }
 
@@ -452,13 +485,15 @@ export async function releaseUpgradeClaim(
  * The batch's outcome: cursor, counter, log entry AND the lease release commit
  * together, after the data move. The log is append-only JSON so the operator
  * keeps the counts of every batch a later reset would otherwise erase; clearing
- * `started_at` is what lets the next step claim again.
+ * `started_at` is what lets the next step claim again, and `claim_token` goes
+ * with it so no stale claim identity outlives its claim.
  */
 const STEP_PROGRESS_SQL = `
   UPDATE operator_data_upgrades
      SET cursor_json = ?2,
          processed = processed + ?3,
          started_at = NULL,
+         claim_token = NULL,
          log_json = CASE WHEN ?4 IS NULL THEN log_json
                          WHEN log_json IS NULL THEN json_array(json(?4))
                          ELSE json_insert(log_json, '$[#]', json(?4)) END
@@ -534,8 +569,8 @@ export async function stepDataUpgrade(
     }
   }
   const owned = item.requiresDowntime && (opensWindow || before.maintenanceOwned);
-  const claim = await claimUpgrade(db, STEP_CLAIM_SQL, item.id, "running", owned ? 1 : 0, now);
-  if (!claim) {
+  const token = await claimUpgrade(db, STEP_CLAIM_SQL, item.id, "running", owned ? 1 : 0, now);
+  if (token === null) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   if (opensWindow) {
@@ -544,7 +579,7 @@ export async function stepDataUpgrade(
   const batch = await item.runBatch(db, before.cursor).catch(async (err: unknown) => {
     // The batch is ONE transaction, so a throw moved nothing: release the claim
     // (a hard process death leaves it to expire instead) and surface the real error.
-    await releaseClaim(db, item.id);
+    await releaseClaim(db, item.id, now, token);
     throw err;
   });
   await db.batch([
@@ -589,7 +624,7 @@ export async function verifyDataUpgrade(
   if (!VERIFIABLE_STATUSES.includes(before.status)) {
     return { kind: "refused", reason: `cannot verify a ${before.status} upgrade`, state: before };
   }
-  const claimed = await claimUpgrade(
+  const token = await claimUpgrade(
     db,
     VERIFY_CLAIM_SQL,
     item.id,
@@ -597,7 +632,7 @@ export async function verifyDataUpgrade(
     before.maintenanceOwned ? 1 : 0,
     now,
   );
-  if (!claimed) {
+  if (token === null) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   // A throw is NOT caught: the claim stays and its 5-minute lease expiry is the
@@ -613,24 +648,28 @@ export async function verifyDataUpgrade(
   const lastError =
     failing.length > 0 ? `verify failed: ${failing.map(([name, count]) => `${name}=${count}`).join(", ")}` : null;
   // The claim outlives the status write: cleanup below runs under the same
-  // stamp, so a reset cannot claim the row and have its window closed by us.
-  if ((await settleVerifyState(db, item.id, status, lastError, now)) === "refused") {
+  // token, so a reset cannot claim the row and have its window closed by us.
+  if ((await settleVerifyState(db, item.id, status, lastError, now, token)) === "refused") {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   await upgradeAudit(db, "verify", actor, item.id, status, now).run();
-  if (before.maintenanceOwned && (await settleUpgradeMaintenance(db, item.id, status, actor, now)) === "refused") {
+  if (
+    before.maintenanceOwned &&
+    (await settleUpgradeMaintenance(db, item.id, status, actor, now, token)) === "refused"
+  ) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
-  if ((await releaseUpgradeClaim(db, item.id, status, now)) === "refused") {
+  if ((await releaseUpgradeClaim(db, item.id, status, now, token)) === "refused") {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   return { kind: "ok", state: await readDataUpgradeState(db, item.id), checks };
 }
 
 /**
- * The reset's state write: `pending` with no cursor, counter or finish — but
- * `started_at` stays, because the window close and ownership clear below run
- * under the same stamp, and only the last step re-opens the row.
+ * The reset's state write: `pending` with no cursor, counter or finish.
+ * `started_at` and `claim_token` stay — the window close and ownership clear
+ * below run under the same claim, and only the last step clears them and
+ * re-opens the row.
  *
  * `run_started_at` ALSO stays: it is the item's lifetime boundary, not a
  * per-attempt value. A row an earlier attempt of this item retired still blocks
@@ -643,7 +682,7 @@ const RESET_SQL = `
          processed = 0,
          finished_at = NULL,
          last_error = NULL
-   WHERE id = ?1 AND started_at = ?2 AND maintenance_owned = ?3`;
+   WHERE id = ?1 AND claim_token = ?2 AND maintenance_owned = ?3`;
 
 export type UpgradeResetOutcome =
   | { kind: "ok"; state: DataUpgradeState }
@@ -668,7 +707,7 @@ export async function resetDataUpgrade(
   // The claim keeps a reset from clearing the row a step or verify is writing.
   // The bind states the row as it already is, so a refused or failed reset
   // leaves the status where it was.
-  const claimed = await claimUpgrade(
+  const token = await claimUpgrade(
     db,
     RESET_CLAIM_SQL,
     item.id,
@@ -676,21 +715,24 @@ export async function resetDataUpgrade(
     before.maintenanceOwned ? 1 : 0,
     now,
   );
-  if (!claimed) {
+  if (token === null) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   // State first, window second: a reset that died between the two leaves the
   // row `pending` still holding its claim and ownership, which the next claim's
   // stale window adopts and its own cleanup closes. A throw is NOT caught here:
   // the claim stays and its lease expires, so no half-cleaned row is claimable.
-  if ((await guardedWrite(db, RESET_SQL, item.id, now, before.maintenanceOwned ? 1 : 0)) === "refused") {
+  if ((await guardedWrite(db, RESET_SQL, item.id, token, before.maintenanceOwned ? 1 : 0)) === "refused") {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   await upgradeAudit(db, "reset", actor, item.id, "pending", now).run();
-  if (before.maintenanceOwned && (await settleUpgradeMaintenance(db, item.id, "pending", actor, now)) === "refused") {
+  if (
+    before.maintenanceOwned &&
+    (await settleUpgradeMaintenance(db, item.id, "pending", actor, now, token)) === "refused"
+  ) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
-  if ((await releaseUpgradeClaim(db, item.id, "pending", now)) === "refused") {
+  if ((await releaseUpgradeClaim(db, item.id, "pending", now, token)) === "refused") {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   return { kind: "ok", state: await readDataUpgradeState(db, item.id) };

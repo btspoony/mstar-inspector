@@ -19,6 +19,11 @@ CREATE TABLE operator_data_upgrades (
   maintenance_owned INTEGER NOT NULL DEFAULT 0
                     CHECK (maintenance_owned IN (0, 1)),
   started_at        TEXT,
+  -- The claim's identity: a fresh UUID written by every successful claim, so
+  -- a guard can name THIS claim. `started_at` cannot serve — two claims taken
+  -- with the same stamp are otherwise indistinguishable, which lets the loser
+  -- of a takeover write the winner's maintenance window.
+  claim_token       TEXT,
   -- When the CURRENT run began retiring rows, stamped once by its first claim
   -- and cleared by a reset. `started_at` cannot serve: it is the per-phase
   -- in-flight claim, cleared between phases. Verify reads this to tell rows the

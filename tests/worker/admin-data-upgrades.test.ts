@@ -153,6 +153,26 @@ function movedCount(db: TestD1): number {
   return row.n;
 }
 
+/** The claim token on the fixture row, or `null` when no claim is held. */
+function claimToken(db: TestD1): string | null {
+  const row = db.raw
+    .prepare("SELECT claim_token FROM operator_data_upgrades WHERE id = ?")
+    .get(ITEM_ID) as { claim_token: string | null } | null;
+  return row?.claim_token ?? null;
+}
+
+/** A row that already carries a claim: the helpers below are called directly. */
+function seedClaimedRow(
+  db: TestD1,
+  opts: { status: string; maintenanceOwned: 0 | 1; startedAt: string; token: string },
+): void {
+  db.raw
+    .prepare(
+      "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at, claim_token) VALUES (?, ?, ?, ?, ?)",
+    )
+    .run(ITEM_ID, opts.status, opts.maintenanceOwned, opts.startedAt, opts.token);
+}
+
 describe("the data-upgrade runner", () => {
   test("a second step over finished work processes nothing", async () => {
     const db = fixture(3);
@@ -370,16 +390,13 @@ describe("the data-upgrade runner", () => {
   test("a reset between verify's state write and its cleanup cannot take the claim", async () => {
     const db = fixture(1);
     const stamp = "2026-11-17T03:00:00.000Z";
-    // A verify owns the row: `verifying` plus its claim stamp, and the window it opened.
-    db.raw
-      .prepare(
-        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'verifying', 1, ?)",
-      )
-      .run(ITEM_ID, stamp);
+    const token = "claim-verify";
+    // A verify owns the row: `verifying` plus its claim, and the window it opened.
+    seedClaimedRow(db, { status: "verifying", maintenanceOwned: 1, startedAt: stamp, token });
     await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
 
     // Step 1 lands the status but KEEPS the claim, so the row is not yet claimable.
-    expect(await settleVerifyState(db, ITEM_ID, "completed", null, stamp)).toBe("ok");
+    expect(await settleVerifyState(db, ITEM_ID, "completed", null, stamp, token)).toBe("ok");
     expect(db.raw.prepare("SELECT status, started_at FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID)).toEqual({
       status: "completed",
       started_at: stamp,
@@ -394,47 +411,66 @@ describe("the data-upgrade runner", () => {
     expect((await getMaintenanceMode(db)).enabled).toBe(true);
 
     // Steps 2 and 3 finish the verify: window closed, ownership cleared, claim released.
-    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp)).toBe("ok");
-    expect(await releaseUpgradeClaim(db, ITEM_ID, "completed", stamp)).toBe("ok");
+    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, token)).toBe("ok");
+    expect(await releaseUpgradeClaim(db, ITEM_ID, "completed", stamp, token)).toBe("ok");
     expect((await getMaintenanceMode(db)).enabled).toBe(false);
     expect(
-      db.raw.prepare("SELECT maintenance_owned, started_at FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
-    ).toEqual({ maintenance_owned: 0, started_at: null });
+      db.raw.prepare("SELECT maintenance_owned, started_at, claim_token FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
+    ).toEqual({ maintenance_owned: 0, started_at: null, claim_token: null });
   });
 
   test("a guarded cleanup that matches no row is refused and keeps maintenance ownership", async () => {
     const db = fixture(1);
-    db.raw
-      .prepare(
-        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'completed', 1, ?)",
-      )
-      .run(ITEM_ID, "2026-11-17T03:00:00.000Z");
-    await setMaintenanceMode(
-      db,
-      { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR },
-      "2026-11-17T03:00:00.000Z",
-    );
+    const stamp = "2026-11-17T03:00:00.000Z";
+    seedClaimedRow(db, { status: "completed", maintenanceOwned: 1, startedAt: stamp, token: "claim-owner" });
+    await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
 
-    // Another phase's stamp: the guard matches nothing, so nothing is released.
+    // Another claim's token: the guard matches nothing, so nothing is released.
     expect(
-      await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, "2026-11-17T03:05:00.000Z"),
+      await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-other"),
     ).toBe("refused");
     expect(
       db.raw.prepare("SELECT status, maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
     ).toEqual({ status: "completed", maintenance_owned: 1 });
-    // The stale stamp closed no window: that window now belongs to the newer run.
+    // The stale claim closed no window: that window now belongs to the newer run.
     expect((await getMaintenanceMode(db)).enabled).toBe(true);
+  });
+
+  test("a claim replaced under the SAME stamp cannot close the window it lost", async () => {
+    const db = fixture(1);
+    const stamp = "2026-11-17T03:00:00.000Z";
+    seedClaimedRow(db, { status: "completed", maintenanceOwned: 1, startedAt: stamp, token: "claim-lost" });
+    await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
+
+    // A takeover that reused the stamp: `started_at` still matches the loser's
+    // read, so only the token tells the two claims apart.
+    db.raw
+      .prepare("UPDATE operator_data_upgrades SET claim_token = ? WHERE id = ?")
+      .run("claim-winner", ITEM_ID);
+
+    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-lost")).toBe("refused");
+    // The winner's window stands, its ownership flag stands, and no audit row appeared.
+    expect(await getMaintenanceMode(db)).toEqual({ enabled: true, reason: "data upgrade: fixture", since: stamp });
+    expect(
+      db.raw.prepare("SELECT maintenance_owned, claim_token FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
+    ).toEqual({ maintenance_owned: 1, claim_token: "claim-winner" });
+    expect(
+      db.raw
+        .prepare("SELECT COUNT(*) AS n FROM platform_audit_events WHERE action = 'platform.maintenance.set'")
+        .get(),
+    ).toEqual({ n: 1 });
+    // The lost claim's release is refused too: it cannot clear the winner's claim.
+    expect(await releaseUpgradeClaim(db, ITEM_ID, "completed", stamp, "claim-lost")).toBe("refused");
+    expect(
+      db.raw.prepare("SELECT started_at, claim_token FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
+    ).toEqual({ started_at: stamp, claim_token: "claim-winner" });
   });
 
   test("a lease taken over before the batch closes no window and writes no audit", async () => {
     const db = fixture(1);
     const stamp = "2026-11-17T03:00:00.000Z";
     const nextStamp = "2026-11-17T03:01:00.000Z";
-    db.raw
-      .prepare(
-        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'completed', 1, ?)",
-      )
-      .run(ITEM_ID, stamp);
+    seedClaimedRow(db, { status: "completed", maintenanceOwned: 1, startedAt: stamp, token: "claim-old" });
     await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
 
     // The lease is taken over BETWEEN the helper's read and its batch.
@@ -442,12 +478,12 @@ describe("the data-upgrade runner", () => {
       prepare: (sql) => db.prepare(sql),
       async batch(statements) {
         db.raw
-          .prepare("UPDATE operator_data_upgrades SET started_at = ? WHERE id = ?")
-          .run(nextStamp, ITEM_ID);
+          .prepare("UPDATE operator_data_upgrades SET started_at = ?, claim_token = ? WHERE id = ?")
+          .run(nextStamp, "claim-new", ITEM_ID);
         return db.batch(statements);
       },
     };
-    expect(await settleUpgradeMaintenance(racing, ITEM_ID, "completed", OPERATOR, stamp)).toBe("refused");
+    expect(await settleUpgradeMaintenance(racing, ITEM_ID, "completed", OPERATOR, stamp, "claim-old")).toBe("refused");
 
     // The newer run's window stands, and its first statement moved no row.
     const mode = await getMaintenanceMode(db);
@@ -465,14 +501,10 @@ describe("the data-upgrade runner", () => {
   test("a row that no longer owns the window is settled without touching it", async () => {
     const db = fixture(1);
     const stamp = "2026-11-17T03:00:00.000Z";
-    db.raw
-      .prepare(
-        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'completed', 0, ?)",
-      )
-      .run(ITEM_ID, stamp);
+    seedClaimedRow(db, { status: "completed", maintenanceOwned: 0, startedAt: stamp, token: "claim-operator" });
     await setMaintenanceMode(db, { enabled: true, reason: "planned incident", actor: OPERATOR }, stamp);
 
-    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp)).toBe("ok");
+    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-operator")).toBe("ok");
     // An operator's window is not the runner's to close.
     expect(await getMaintenanceMode(db)).toEqual({ enabled: true, reason: "planned incident", since: stamp });
   });
@@ -480,14 +512,10 @@ describe("the data-upgrade runner", () => {
   test("the owner closes the window and audits it once", async () => {
     const db = fixture(1);
     const stamp = "2026-11-17T03:00:00.000Z";
-    db.raw
-      .prepare(
-        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'completed', 1, ?)",
-      )
-      .run(ITEM_ID, stamp);
+    seedClaimedRow(db, { status: "completed", maintenanceOwned: 1, startedAt: stamp, token: "claim-owner" });
     await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
 
-    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp)).toBe("ok");
+    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-owner")).toBe("ok");
     expect(await getMaintenanceMode(db)).toEqual({ enabled: false, reason: null, since: null });
     expect(
       db.raw.prepare("SELECT maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
@@ -561,7 +589,7 @@ describe("the data-upgrade runner", () => {
     expect(mode.reason).toBe("planned incident");
   });
 
-  test("reset clears the cursor and counter but keeps the migrated rows", async () => {
+  test("reset clears the cursor, counter and claim token but keeps the migrated rows", async () => {
     const db = fixture(3);
     register(fixtureItem());
     await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
@@ -572,12 +600,30 @@ describe("the data-upgrade runner", () => {
     const body = (await res.json()) as { state: { status: string; processed: number; cursor: unknown } };
     expect(body.state).toMatchObject({ status: "pending", processed: 0, cursor: null, startedAt: null });
     expect(movedCount(db)).toBe(2);
+    // The release clears the claim's identity with its stamp: no token outlives it.
+    expect(claimToken(db)).toBeNull();
 
     // The re-run is a no-op pass over the moved rows: the worklist excludes them.
     const rerun = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
     const rerunBody = (await rerun.json()) as { batch: { processed: number } };
     expect(rerunBody.batch.processed).toBe(1);
     expect(movedCount(db)).toBe(3);
+  });
+
+  test("a step's claim carries a fresh token and releases it", async () => {
+    const db = fixture(3);
+    const inner = fixtureItem();
+    register({
+      ...inner,
+      async runBatch(dbApi, cursor) {
+        // The claim is in flight while the batch runs: a token names it.
+        expect(claimToken(db)).not.toBeNull();
+        return inner.runBatch(dbApi, cursor);
+      },
+    });
+
+    await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    expect(claimToken(db)).toBeNull();
   });
 });
 
