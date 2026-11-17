@@ -5859,20 +5859,20 @@ function pullRequestNumberOf(c: DashboardContext): number | null {
   return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
-const appPullRequestRoute = async (c: DashboardContext) => {
+const targetPullRequestRoute = async (c: DashboardContext) => {
   c.header("Cache-Control", "private, no-store");
-  const gate = await requireAppManagerJson(c);
+  const gate = await requireTargetManagerJson(c);
   if (!gate.ok) return gate.response;
   const number = pullRequestNumberOf(c);
   if (number === null) return c.json({ error: "unknown pull request" }, 404);
-  // The address is the ledger's own key — owner AND repo AND number. One App
-  // serves several repos, so a number alone is ambiguous; a miss is a 404,
-  // never a same-number row from another repo.
+  // The address is the ledger's own key — owner AND repo AND number. One
+  // target is one repo, but the store's key includes both segments, so a miss
+  // is a 404, never a same-number row from another repo.
   const owner = c.req.param("owner") ?? "";
   const repo = c.req.param("repo") ?? "";
-  const head = await gate.store.getPullRequestHead(ledgerScopeOf(gate), owner, repo, number);
+  const head = await gate.store.getPullRequestHead(gate.scope, owner, repo, number);
   if (head === null) return c.json({ error: "unknown pull request" }, 404);
-  const counts = await gate.store.countPullRequestRecords(ledgerScopeOf(gate), owner, repo, number);
+  const counts = await gate.store.countPullRequestRecords(gate.scope, owner, repo, number);
   // Same total-shape rule as the list, from the same mapping: the store reports
   // the tables' actual columns, and this boundary is where a nullable column
   // becomes "". The record families are paged separately — the head carries
@@ -5921,12 +5921,12 @@ type PullRequestRecordSection = "findings" | "reviews" | "failures";
  * `limit` the clamp applied, so the pager strides on the server's page size
  * instead of re-deriving it.
  */
-const appPullRequestRecordsRoute = async (
+const targetPullRequestRecordsRoute = async (
   c: DashboardContext,
   section: PullRequestRecordSection,
 ) => {
   c.header("Cache-Control", "private, no-store");
-  const gate = await requireAppManagerJson(c);
+  const gate = await requireTargetManagerJson(c);
   if (!gate.ok) return gate.response;
   const number = pullRequestNumberOf(c);
   if (number === null) return c.json({ error: "unknown pull request" }, 404);
@@ -5953,16 +5953,16 @@ const appPullRequestRecordsRoute = async (
       (rawSeverity !== "" && !isFindingSeverity(rawSeverity));
     // A spelling the route refuses must not drive the read: decide it BEFORE
     // the page query, so the 400 never pays for the count + paged scan it
-    // discards. 404 still outranks 400 — a PR this App never received beats a
+    // discards. 404 still outranks 400 — a PR this target never received beats a
     // malformed filter on it — so the refusal keeps one head probe instead of
     // the family's batch.
     if (malformed) {
-      const head = await gate.store.getPullRequestHead(ledgerScopeOf(gate), owner, repo, number);
+      const head = await gate.store.getPullRequestHead(gate.scope, owner, repo, number);
       if (head === null) return c.json({ error: "unknown pull request" }, 404);
       const outsideVocabulary = rawSeverity !== "" && !isFindingSeverity(rawSeverity);
       return c.json({ error: outsideVocabulary ? "invalid severity" : "invalid filter" }, 400);
     }
-    const page = await gate.store.listPullRequestFindings(ledgerScopeOf(gate), owner, repo, number, {
+    const page = await gate.store.listPullRequestFindings(gate.scope, owner, repo, number, {
       offset,
       limit,
       severity: rawSeverity === "" ? null : rawSeverity,
@@ -5984,7 +5984,7 @@ const appPullRequestRecordsRoute = async (
     });
   }
   if (section === "reviews") {
-    const page = await gate.store.listPullRequestReviews(ledgerScopeOf(gate), owner, repo, number, { offset, limit });
+    const page = await gate.store.listPullRequestReviews(gate.scope, owner, repo, number, { offset, limit });
     if (page === null) return c.json({ error: "unknown pull request" }, 404);
     return c.json({
       items: page.items.map((review) => ({
@@ -6001,7 +6001,7 @@ const appPullRequestRecordsRoute = async (
       limit,
     });
   }
-  const page = await gate.store.listPullRequestFailures(ledgerScopeOf(gate), owner, repo, number, { offset, limit });
+  const page = await gate.store.listPullRequestFailures(gate.scope, owner, repo, number, { offset, limit });
   if (page === null) return c.json({ error: "unknown pull request" }, 404);
   return c.json({ items: page.items, total: page.total, limit });
 };
