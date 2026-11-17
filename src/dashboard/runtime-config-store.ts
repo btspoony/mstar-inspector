@@ -31,7 +31,10 @@
  * `{ concurrency, degraded }` for the same reason: a settings face that renders
  * the conservative fallback as a normal value invites a save of a number
  * nobody stored. The structured warn belongs
- * to the consumer that has a logger (the pipeline reader), not here.
+ * to the consumer that has a logger (the pipeline reader), not here — with one
+ * exception: the maintenance reader logs its own `maintenance_read_failed`
+ * line, because a gate cannot tell a read fault from an open window and would
+ * otherwise fail open.
  *
  * Check budgets (spec §7.10) are the same table, global rather than
  * per-workspace: `review.check.terminalize_timeout_ms` (the consumer's wait on
@@ -1129,21 +1132,40 @@ export const MAINTENANCE_SINCE_KEY = "platform.maintenance.since";
 /** The audit ledger's target id for the trio (one operator save, one row). */
 const MAINTENANCE_TARGET = "platform.maintenance";
 
-/** Whether the platform is closed, and the window it was closed in. */
+/**
+ * Whether the platform is closed, and the window it was closed in.
+ *
+ * `unreadable` is the third state: the read failed, so nobody knows whether the
+ * window is open. `enabled` stays `false` (nothing stated a close), but every
+ * gate treats this as CLOSED — the window is the only fence around the
+ * destructive backfill, and an unknowable fence is not an open one.
+ */
 export type MaintenanceMode = {
   enabled: boolean;
   reason: string | null;
   since: string | null;
+  unreadable: boolean;
 };
 
 /**
- * The maintenance window in ONE statement. An ABSENT `enabled` row is the
+ * The one predicate every traffic gate asks: is the platform closed? An
+ * unreadable window counts as closed, so the backfill's only fence never
+ * disappears because a settings read broke.
+ */
+export function maintenanceClosed(mode: MaintenanceMode): boolean {
+  return mode.enabled || mode.unreadable;
+}
+
+/**
+ * The maintenance window in ONE statement. Only an ABSENT `enabled` row is the
  * documented default — off. `reason` / `since` describe a running window only,
  * and the writer deletes both on disable, so a closed platform carries neither.
  *
- * Like every reader in this store it never throws: a read fault answers the
- * documented default (off, i.e. OPEN) — the window is a convenience over live
- * services, and a broken settings read must not become a platform-wide outage.
+ * It never throws, and it does not answer OPEN on a fault either: a read error
+ * answers `unreadable: true` (with `enabled: false`) and logs one
+ * `maintenance_read_failed` line, leaving the fail-closed decision to the gate.
+ * Answering "open" here would let a settings outage unlock traffic mid-backfill
+ * — the one thing the window exists to prevent.
  */
 export async function getMaintenanceMode(db: DashboardD1): Promise<MaintenanceMode> {
   try {
@@ -1156,9 +1178,16 @@ export async function getMaintenanceMode(db: DashboardD1): Promise<MaintenanceMo
       enabled: stored.get(MAINTENANCE_ENABLED_KEY) === "1",
       reason: stored.get(MAINTENANCE_REASON_KEY) ?? null,
       since: stored.get(MAINTENANCE_SINCE_KEY) ?? null,
+      unreadable: false,
     };
-  } catch {
-    return { enabled: false, reason: null, since: null };
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "maintenance_read_failed",
+        detail: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return { enabled: false, reason: null, since: null, unreadable: true };
   }
 }
 

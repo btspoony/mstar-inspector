@@ -174,30 +174,28 @@ describe("the maintenance gate", () => {
     expect(statements.filter((sql) => sql.includes("review_runtime_settings WHERE key IN"))).toHaveLength(1);
   });
 
-  test("a read fault keeps the platform open instead of closing it", async () => {
+  test("a read fault closes the platform instead of unlocking it", async () => {
     const { db } = await fixture();
-    // The window is a convenience over live services: a settings read that
-    // throws must answer the documented default (off), never a 503.
-    let faulted = false;
+    // The window is the only fence around the destructive backfill: a settings
+    // read that throws answers the THIRD state, and every gate treats it as
+    // closed. Failing open here would let a settings outage unlock traffic.
     const broken = {
       ...db,
       prepare(query: string) {
-        if (query.includes("review_runtime_settings WHERE key IN")) {
-          faulted = true;
-          throw new Error("settings unavailable");
-        }
+        if (query.includes("review_runtime_settings WHERE key IN")) throw new Error("settings unavailable");
         return db.prepare(query);
       },
     } as TestD1;
-    const res = await worker.fetch(
-      htmlGetRequest("/dashboard/acme/apps", {
-        Cookie: `${SESSION_COOKIE}=${await createSessionValue(MEMBER, null, SESSION_SECRET)}`,
-      }),
+    const cookie = { Cookie: `${SESSION_COOKIE}=${await createSessionValue(MEMBER, null, SESSION_SECRET)}` };
+    const page = await worker.fetch(htmlGetRequest("/dashboard/acme/apps", cookie), withSpaAssets(envFor(broken)));
+    expect(page.status).toBe(503);
+    expect(await page.text()).toContain("Under maintenance");
+    // An API path answers the machine-readable state, never its own payload.
+    const api = await worker.fetch(
+      new Request("https://worker.local/dashboard/acme/api/settings/concurrency", { headers: cookie }),
       withSpaAssets(envFor(broken)),
     );
-    // The page load still answers the shell (200), not the window.
-    expect(faulted).toBe(true);
-    expect(res.status).toBe(200);
-    expect(await res.text()).not.toContain("Under maintenance");
+    expect(api.status).toBe(503);
+    expect(await api.json()).toEqual({ maintenance: true, reason: null, since: null });
   });
 });

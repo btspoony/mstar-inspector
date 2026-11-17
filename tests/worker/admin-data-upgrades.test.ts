@@ -487,7 +487,12 @@ describe("the data-upgrade runner", () => {
 
     expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-lost")).toBe("refused");
     // The winner's window stands, its ownership flag stands, and no audit row appeared.
-    expect(await getMaintenanceMode(db)).toEqual({ enabled: true, reason: "data upgrade: fixture", since: stamp });
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: true,
+      reason: "data upgrade: fixture",
+      since: stamp,
+      unreadable: false,
+    });
     expect(
       db.raw.prepare("SELECT maintenance_owned, claim_token FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
     ).toEqual({ maintenance_owned: 1, claim_token: "claim-winner" });
@@ -524,7 +529,12 @@ describe("the data-upgrade runner", () => {
 
     // The newer run's window stands, and its first statement moved no row.
     const mode = await getMaintenanceMode(db);
-    expect(mode).toEqual({ enabled: true, reason: "data upgrade: fixture", since: stamp });
+    expect(mode).toEqual({
+      enabled: true,
+      reason: "data upgrade: fixture",
+      since: stamp,
+      unreadable: false,
+    });
     expect(
       db.raw.prepare("SELECT maintenance_owned, started_at FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
     ).toEqual({ maintenance_owned: 1, started_at: nextStamp });
@@ -543,7 +553,12 @@ describe("the data-upgrade runner", () => {
 
     expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-operator")).toBe("ok");
     // An operator's window is not the runner's to close.
-    expect(await getMaintenanceMode(db)).toEqual({ enabled: true, reason: "planned incident", since: stamp });
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: true,
+      reason: "planned incident",
+      since: stamp,
+      unreadable: false,
+    });
   });
 
   test("the owner closes the window and audits it once", async () => {
@@ -553,7 +568,12 @@ describe("the data-upgrade runner", () => {
     await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
 
     expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-owner")).toBe("ok");
-    expect(await getMaintenanceMode(db)).toEqual({ enabled: false, reason: null, since: null });
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: false,
+      reason: null,
+      since: null,
+      unreadable: false,
+    });
     expect(
       db.raw.prepare("SELECT maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
     ).toEqual({ maintenance_owned: 0 });

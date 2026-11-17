@@ -195,7 +195,7 @@ const DEFAULT_ADMISSION_DROPS = {
 const DEFAULT_QUEUE = { backlogCount: 0, backlogBytes: 0, oldestMessageTimestamp: null };
 
 /** The documented absent-row maintenance window: the platform is open. */
-const DEFAULT_MAINTENANCE = { enabled: false, reason: null, since: null };
+const DEFAULT_MAINTENANCE = { enabled: false, reason: null, since: null, unreadable: false };
 
 /** The stored recheck ask-budget row, raw so a refused write is observable. */
 function storedRecheckBudget(db: TestD1): string | null {
@@ -903,7 +903,7 @@ describe("PATCH /_internal_admin/api/runtime maintenance", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      maintenance: { enabled: false, reason: null, since: null },
+      maintenance: { enabled: false, reason: null, since: null, unreadable: false },
     });
     // Only the off flag survives: no stale window outlives the close.
     expect(storedBudgets(db)).toEqual({ "platform.maintenance.enabled": "0" });
@@ -918,7 +918,12 @@ describe("PATCH /_internal_admin/api/runtime maintenance", () => {
     });
     const saved = (await patch.json()) as { maintenance: { since: string } };
     const body = (await (await runtimeApi(db, { method: "GET" })).json()) as Record<string, unknown>;
-    expect(body.maintenance).toEqual({ enabled: true, reason: "backfill", since: saved.maintenance.since });
+    expect(body.maintenance).toEqual({
+      enabled: true,
+      reason: "backfill",
+      since: saved.maintenance.since,
+      unreadable: false,
+    });
   });
 
   test("a malformed body is a 400 that writes nothing", async () => {

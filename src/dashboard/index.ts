@@ -223,6 +223,7 @@ import {
   getWorkspaceCheckMinScore,
   getWorkspaceConcurrency,
   isConcurrencyValue,
+  maintenanceClosed,
   readDefaultReviewLevel,
   setWorkspaceConcurrency,
   type DegradedReason,
@@ -861,8 +862,9 @@ export function maintenanceResponse(c: DashboardContext, mode: MaintenanceMode):
  * EN/中文 toggle, and a closed platform must never trap a cookie on the browser
  * — neither route touches workspace data.
  *
- * The window is read ONCE per request and parked on the context; a read fault
- * is off (`getMaintenanceMode`), so a settings outage cannot close the platform.
+ * The window is read ONCE per request and parked on the context; an unreadable
+ * window (`getMaintenanceMode`) counts as CLOSED — the fence around the
+ * destructive backfill must not vanish because a settings read broke.
  */
 export const dashboardMaintenanceGate: Handler<{
   Bindings: Env;
@@ -871,9 +873,12 @@ export const dashboardMaintenanceGate: Handler<{
   if (c.get("maintenance") !== undefined) return next();
   if (WINDOW_OPEN_PATHS.has(c.req.path)) return next();
   const db = dashboardD1(c.env);
-  const mode = db === null ? { enabled: false, reason: null, since: null } : await getMaintenanceMode(db);
+  const mode =
+    db === null
+      ? { enabled: false, reason: null, since: null, unreadable: false }
+      : await getMaintenanceMode(db);
   c.set("maintenance", mode);
-  return mode.enabled ? maintenanceResponse(c, mode) : next();
+  return maintenanceClosed(mode) ? maintenanceResponse(c, mode) : next();
 };
 
 /**
