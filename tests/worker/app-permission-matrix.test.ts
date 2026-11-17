@@ -310,8 +310,6 @@ const MATRIX_ROUTES: MatrixRoute[] = [
     fields: { installationId: String(SHARED_INSTALLATION_ID) },
   },
   // --- ops family: pinned action paths ---
-  { name: "pause", path: `/dashboard/default/apps/${APP_ID}/pause` },
-  { name: "resume", path: `/dashboard/default/apps/${APP_ID}/resume` },
   { name: "disable", path: `/dashboard/default/apps/${APP_ID}/disable` },
   { name: "enable", path: `/dashboard/default/apps/${APP_ID}/enable` },
   { name: "delete", path: `/dashboard/default/apps/${APP_ID}/delete` },

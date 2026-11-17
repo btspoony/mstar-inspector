@@ -72,7 +72,6 @@ import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../src/contracts/provider-mode
 import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { t } from "../../src/i18n";
-import { CHECK_MIN_SCORE_MAX, CHECK_MIN_SCORE_MIN } from "../../src/contracts/review-gate";
 import { PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../packages/runner/src/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -2732,76 +2731,8 @@ describe("API settings face — several repositories under one App (targets_many
   });
 });
 
-describe("saving one settings control on an inheriting target snapshots the other three (F-007)", () => {
-  const TRIGGER = `/dashboard/default/apps/${APP_ID}/review-trigger-mode`;
-
-  /** The row's four policy columns plus the inheritance flag, as one snapshot. */
-  const policyRow = (db: TestD1, appId: string) =>
-    db.raw
-      .query(
-        `SELECT t.follow_workspace_defaults, t.review_trigger_mode, t.review_level,
-                t.check_min_score, t.check_pass_verdicts
-           FROM review_targets t WHERE t.bot_id = ?`,
-      )
-      .get(appId) as {
-      follow_workspace_defaults: number;
-      review_trigger_mode: string;
-      review_level: string | null;
-      check_min_score: number;
-      check_pass_verdicts: string;
-    };
-
-  test("saving only the trigger mode keeps the effective floor, depth and verdicts instead of the DDL placeholders", async () => {
-    const { db, app } = await seededWorld();
-    // The workspace the target inherits: floor 60, depth deep, two passing
-    // verdicts. The row itself still carries the DDL placeholders (NULL level,
-    // floor 80, one verdict) that the manager never saw.
-    rawRun(
-      db,
-      `UPDATE workspaces
-          SET check_min_score = 60, default_review_level = 'deep',
-              default_check_pass_verdicts = '["ship it","blocked"]'
-        WHERE id = 'default'`,
-    );
-    rawRun(
-      db,
-      `UPDATE review_targets
-          SET follow_workspace_defaults = 1, review_trigger_mode = 'every_push',
-              review_level = NULL, check_min_score = 80,
-              check_pass_verdicts = '["ship it"]'
-        WHERE bot_id = ?`,
-      app.id,
-    );
-
-    const res = await postForm(TRIGGER, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
-      mode: "manual",
-    });
-    expect(res.status).toBe(200);
-    expect(policyRow(db, app.id)).toEqual({
-      follow_workspace_defaults: 0,
-      review_trigger_mode: "manual",
-      review_level: "deep",
-      check_min_score: 60,
-      check_pass_verdicts: '["ship it","blocked"]',
-    });
-  });
-});
-
 describe("review gate (payload and ops)", () => {
   const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
-
-  /** The gate columns as one snapshot, so a zero-write case compares exactly. */
-  const gateRow = (db: TestD1, appId: string) =>
-    db.raw
-      .query(
-        `SELECT t.check_min_score, t.check_pass_verdicts, t.updated_at
-           FROM review_targets t WHERE t.bot_id = ?`,
-      )
-      .get(appId) as {
-      check_min_score: number;
-      check_pass_verdicts: string;
-      updated_at: string;
-    };
 
   test("manager face: gate and visibility defaults; the member face carries neither", async () => {
     const { db } = await seededWorld();
@@ -2844,129 +2775,6 @@ describe("review gate (payload and ops)", () => {
     expect(body.app.id).toBe(app.id);
   });
 
-  test("save-check-gate: two distinct pass_verdicts persist in submission order, and the next read serves them", async () => {
-    const { db } = await seededWorld();
-    const res = await worker.fetch(
-      new Request(`https://worker.local${SETTINGS}`, {
-        method: "POST",
-        headers: {
-          Cookie: `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: "op=save-check-gate&min_score=90&pass_verdicts=ship+it&pass_verdicts=needs+fixes",
-      }),
-      makeEnv(db),
-    );
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Saved the review gate for mallorys-app");
-    const read = (await (
-      await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db))
-    ).json()) as { check_gate: { min_score: number; pass_verdicts: string[] } };
-    expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it", "needs fixes"] });
-  });
-
-  test("save-check-gate: the same verdict submitted twice is stored once", async () => {
-    const { db, app } = await seededWorld();
-    const res = await worker.fetch(
-      new Request(`https://worker.local${SETTINGS}`, {
-        method: "POST",
-        headers: {
-          Cookie: `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: "op=save-check-gate&min_score=90&pass_verdicts=ship+it&pass_verdicts=ship+it",
-      }),
-      makeEnv(db),
-    );
-    expect(res.status).toBe(200);
-    // The gate is a SET: a duplicated checkbox cannot inflate the stored row.
-    expect(JSON.parse(gateRow(db, app.id).check_pass_verdicts)).toEqual(["ship it"]);
-    const read = (await (
-      await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db))
-    ).json()) as { check_gate: { min_score: number; pass_verdicts: string[] } };
-    expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it"] });
-  });
-
-  test("save-check-gate: an empty pass_verdicts saves as [] — not a 400 — and reads back readable", async () => {
-    const { db, app } = await seededWorld();
-    // The SPA posts no `pass_verdicts` when every box is unchecked. An empty
-    // gate is legal and fails closed (no review can pass it), and it is
-    // READABLE configuration — not the null an unparseable array reads as — so
-    // the settings face plays an empty set back instead of a read-only notice.
-    const res = await worker.fetch(
-      new Request(`https://worker.local${SETTINGS}`, {
-        method: "POST",
-        headers: {
-          Cookie: `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: "op=save-check-gate&min_score=90",
-      }),
-      makeEnv(db),
-    );
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain("no verdicts");
-    expect(gateRow(db, app.id)).toMatchObject({ check_min_score: 90, check_pass_verdicts: "[]" });
-    const read = (await (
-      await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db))
-    ).json()) as { check_gate: { min_score: number; pass_verdicts: string[] } | null };
-    expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: [] });
-  });
-
-  test("save-check-gate: out-of-range or non-integer score → keyed 400, zero writes", async () => {
-    const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
-    const before = gateRow(db, app.id);
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    for (const minScore of ["101", "-1", "80.5", "eighty", ""]) {
-      const res = await postForm(SETTINGS, cookie, makeEnv(db), {
-        op: "save-check-gate",
-        min_score: minScore,
-        pass_verdicts: "ship it",
-      });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { key: string; message: string };
-      expect(body.key).toBe("settings.error.checkScoreInvalid");
-      // The accepted range comes from the contract constants, so the message
-      // cannot drift from the values the route actually validates against.
-      expect(body.message).toBe(
-        t("en", "settings.error.checkScoreInvalid", {
-          min: CHECK_MIN_SCORE_MIN,
-          max: CHECK_MIN_SCORE_MAX,
-        }),
-      );
-    }
-    expect(gateRow(db, app.id)).toEqual(before);
-  });
-
-  test("save-check-gate: an off-vocabulary verdict → keyed 400, zero writes", async () => {
-    const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
-    const before = gateRow(db, app.id);
-    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
-      op: "save-check-gate",
-      min_score: "80",
-      pass_verdicts: "banana",
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { key: string; message: string };
-    expect(body.key).toBe("settings.error.checkVerdictUnknown");
-    expect(body.message).toContain("banana");
-    expect(gateRow(db, app.id)).toEqual(before);
-  });
-
-  test("save-check-gate: non-owner member → 403, zero mutation", async () => {
-    const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
-    const before = gateRow(db, app.id);
-    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
-      op: "save-check-gate",
-      min_score: "90",
-      pass_verdicts: "ship it",
-    });
-    expect(res.status).toBe(403);
-    expect(gateRow(db, app.id)).toEqual(before);
-  });
 });
 
 describe("POST /dashboard/default/apps/:appId/settings — add-key (op=add-key)", () => {
