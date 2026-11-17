@@ -333,8 +333,11 @@ describe("tab shell rendering (static SSR)", () => {
 
   test("应用设置 composes the identity header, the ops zone and the bot's own sections", () => {
     const settings = renderDetail(managePayload);
-    // The ops zone is the App's own (pause / disable / delete).
+    // The ops zone is the App's own (disable / delete); the review pause is
+    // the repository's, so no control here may POST it.
     expect(settings).toContain(t("en", "settings.ops"));
+    expect(settings).not.toContain(t("en", "settings.pauseReviews"));
+    expect(settings).not.toContain(t("en", "settings.resumeReviews"));
     // The bot-owned configuration the plan moves onto this tab.
     for (const key of [
       "settings.providers.title",
@@ -396,6 +399,23 @@ describe("tab shell rendering (static SSR)", () => {
     // The bot's own sections are the whole settings face.
     expect(markup).toContain(t("en", "settings.providers.title"));
     expect(markup).toContain(t("en", "botSettings.health"));
+  });
+
+  test("an App with several repositories says so and links to them, not to the zero-repository state", () => {
+    const many = { ...untargetedPayload, targets_many: true };
+    // The flag is a plain optional boolean on the parsed face.
+    expect(parseSettings(many)?.targets_many).toBe(true);
+    const markup = renderDetail(many);
+    expect(markup).toContain(t("en", "appDetail.targetsMany"));
+    expect(markup).toContain(`href="${apiBase()}/targets"`);
+    expect(markup).toContain(t("en", "targets.heading"));
+    // The zero-repository copy would be a lie here: at least two exist.
+    expect(markup).not.toContain(t("en", "appDetail.noRepository"));
+    // No single repository's policy is this page's to edit.
+    expect(markup).not.toContain(t("en", "settings.ops"));
+    expect(markup).toContain(t("en", "settings.providers.title"));
+    // A non-boolean flag is a malformed read, not a silent "not many".
+    expect(parseSettings({ ...untargetedPayload, targets_many: "yes" })).toBeNull();
   });
 
   test("the detail links to the bot's own settings page", () => {

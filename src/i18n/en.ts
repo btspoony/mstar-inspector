@@ -153,6 +153,13 @@ export const en = {
      * and the way there is the repository surface (`targets.add` is its link).
      */
     noRepository: "This App has no repository yet, so it reviews nothing.",
+    /**
+     * The App's several-repository state: it reviews more than one, so no
+     * single review policy is this page's to edit (`targets.heading` links
+     * to the repository surface).
+     */
+    targetsMany:
+      "This App reviews several repositories, so its review settings live on the Repositories page.",
     // The derived Blocked banner: the server reads the bot's scope and the
     // target's workspace on every read, so the copy names the one cause.
     blockedBotNotShared:

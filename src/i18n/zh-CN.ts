@@ -126,6 +126,8 @@ export const zhCN: Dictionary = {
     tabInstallations: "已安装",
     /** App 尚无仓库：没有任何评审，入口在仓库页面（`targets.add` 即该链接）。 */
     noRepository: "该应用还没有对应仓库，因此不会进行任何评审。",
+    /** App 有多个仓库：没有单独的评审策略可供本页编辑（`targets.heading` 指向仓库页）。 */
+    targetsMany: "该应用审查多个仓库，各仓库的评审配置在仓库页中编辑。",
     blockedBotNotShared:
       "该机器人已不再共享给本工作区，因此此目标不会进行任何评审。请联系平台运营者重新共享。",
   },

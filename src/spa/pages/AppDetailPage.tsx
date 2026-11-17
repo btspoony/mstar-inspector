@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
-import { t } from "../../i18n";
+import { t, type DictionaryKey } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
 import { MetricBand, type Metric } from "@/components/MetricBand";
 import {
@@ -336,21 +336,29 @@ export function TargetHeader({
 }
 
 /**
- * The App's zero-repository state: an App the workspace has not added a
- * repository under has no review configuration at all, so 应用设置 states that
- * and points at the surface that creates one.
+ * The App's repository-count states — no repository at all, or several — both
+ * state the fact and point at the repository surface, which is where the
+ * review policy and the repositories themselves are created.
  */
-function NoRepositoryNotice({ locale }: { locale: SpaBoot["locale"] }) {
+function TargetsNotice({
+  locale,
+  copy,
+  link,
+}: {
+  locale: SpaBoot["locale"];
+  copy: DictionaryKey;
+  link: DictionaryKey;
+}) {
   const href = `${apiBase()}/targets`;
   return (
     <div className="flex flex-col gap-2 py-3">
-      <p className="text-sm text-muted-foreground">{t(locale, "appDetail.noRepository")}</p>
+      <p className="text-sm text-muted-foreground">{t(locale, copy)}</p>
       <a
         className="w-fit text-sm text-primary underline-offset-4 hover:underline"
         href={href}
         onClick={(event) => spaClick(href, event)}
       >
-        {t(locale, "targets.add")}
+        {t(locale, link)}
       </a>
     </div>
   );
@@ -361,6 +369,8 @@ function NoRepositoryNotice({ locale }: { locale: SpaBoot["locale"] }) {
  * that guards it: the section renders the rows and this wrapper owns the one
  * pending action and its outcome. Bot-scoped lifecycle rows render only for
  * the workspace that owns an `owned` bot — the server refuses them otherwise.
+ * The review pause is the repository's own (target policy): this App-scoped
+ * surface never renders it.
  */
 function TargetOpsZone({
   locale,
@@ -410,6 +420,7 @@ function TargetOpsZone({
         onPending={setPending}
         notice={notice}
         botWritable={!payload.blocked && payload.app.scope === "owned"}
+        targetOwned={false}
       />
       <Dialog
         open={pending !== null}
@@ -521,7 +532,13 @@ export function AppDetailView({
             the one-visible-panel invariant (ui-bugs knowledge pin). */}
         <TabsContent value="settings" forceMount>
           <div className="flex flex-col">
-            {target === null ? <NoRepositoryNotice locale={locale} /> : null}
+            {target === null ? (
+              payload.targets_many ? (
+                <TargetsNotice locale={locale} copy="appDetail.targetsMany" link="targets.heading" />
+              ) : (
+                <TargetsNotice locale={locale} copy="appDetail.noRepository" link="targets.add" />
+              )
+            ) : null}
             {target === null ? null : (
               <TargetOpsZone locale={locale} payload={target} onReload={onReload} />
             )}

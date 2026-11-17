@@ -818,6 +818,8 @@ export type SettingsReadOnlyPayload = {
    * to name.
    */
   target_id?: string;
+  /** Manager fact (see {@link SettingsManageBase.targets_many}); absent here. */
+  targets_many?: boolean;
   app: SettingsIdentityAppMeta;
 };
 
@@ -853,6 +855,13 @@ type SettingsManageBase = {
   pending_installations: PendingInstallation[];
   blocked: false;
   blocked_reason: null;
+  /**
+   * The App holds two or more live repositories in this workspace, so no
+   * single one's review policy is an App-page subject (`target_id` is then
+   * absent). The server always sends it on the manager face; absent reads as
+   * "not many".
+   */
+  targets_many?: boolean;
 } & BotConfigSections;
 
 /**
@@ -908,6 +917,8 @@ export type SettingsBlockedPayload = {
   workspace_id: string;
   target_id: string;
   app: BlockedAppIdentity;
+  /** See {@link SettingsManageBase.targets_many} — this face is always a single target's. */
+  targets_many?: boolean;
   /** The target's own binding (`null` = unbound) — target-owned state. */
   installation: BoundInstallation | null;
 } & TargetOwnedSections;
@@ -2376,6 +2387,9 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (typeof data.blocked !== "boolean") return null;
   if (data.blocked_reason !== null && !isBlockedReason(data.blocked_reason)) return null;
   if (data.blocked !== (data.blocked_reason !== null)) return null;
+  // The several-repository state is a plain flag (absent = not many); a
+  // non-boolean value fails the read rather than rendering an invented state.
+  if (data.targets_many !== undefined && typeof data.targets_many !== "boolean") return null;
   // A Blocked face omits the bot's own metadata stamp; the identity face
   // still requires it (nullable — NULL = never synced), exactly as before.
   if (data.blocked) {

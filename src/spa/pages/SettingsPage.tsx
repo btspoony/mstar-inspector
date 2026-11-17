@@ -426,6 +426,7 @@ export function SettingsView({
           onPending={setPending}
           notice={opsNotice}
           botWritable={!blocked}
+          targetOwned
         />
       </div>
 
@@ -1352,6 +1353,7 @@ export function OpsSection({
   onPending,
   notice,
   botWritable,
+  targetOwned,
 }: {
   locale: SpaBoot["locale"];
   payload: TargetReviewSlice;
@@ -1364,6 +1366,12 @@ export function OpsSection({
    * disable/enable/delete would be refused by the server, so they never render.
    */
   botWritable: boolean;
+  /**
+   * Whether this surface speaks for the review TARGET. The App page does not:
+   * its pause belongs to the repository's own page, so the row never renders
+   * there — a POST from the App address would edit policy the page does not own.
+   */
+  targetOwned: boolean;
 }) {
   const { app } = payload;
   const paused = isPaused(app);
@@ -1376,7 +1384,7 @@ export function OpsSection({
     >
       <div className="flex flex-col gap-3">
         <div className="flex flex-col divide-y divide-(--border-subtle)">
-          {app.status === "active" ? (
+          {targetOwned && app.status === "active" ? (
             <OpsRow title={t(locale, "settings.opsReviewsTitle")} copy={t(locale, "settings.opsReviewsCopy")}>
               {paused ? (
                 <Button type="button" onClick={() => onPending({ kind: "resume" })}>
