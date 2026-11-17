@@ -48,8 +48,6 @@ function makeEnv(db: TestD1, overrides: Partial<Env> = {}): Env {
 type World = {
   db: TestD1;
   botId: string;
-  /** The bot's first target — the row a delivery would resolve. */
-  targetId: string;
   userId: string;
   store: ReturnType<typeof createInstallClaimsStore>;
 };
@@ -69,13 +67,10 @@ async function seededWorld(): Promise<World> {
     workspaceId: WS,
   });
   db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(botId);
-  const targetRow = db.raw.query("SELECT id FROM review_targets WHERE bot_id = ?").get(botId);
-  if (targetRow === null || typeof targetRow !== "object" || !("id" in targetRow) || typeof targetRow.id !== "string") {
-    throw new Error(`createApp wrote no target for ${botId}`);
-  }
-  const targetId = targetRow.id;
+  // No target is minted at setup (0067/D19): a claim names the App, and the
+  // repositories a manager adds are the targets.
   const userId = (await createUser(db, { login: LOGIN, role: "member" })).id;
-  return { db, botId, targetId, userId, store: createInstallClaimsStore(db) };
+  return { db, botId, userId, store: createInstallClaimsStore(db) };
 }
 
 /** A second shared bot — the fixture for "N live claims" (one per bot). */
@@ -328,10 +323,8 @@ describe("POST /bot/setup — the confirming action", () => {
     expect(body).toContain(botId);
     expect(claimRow(db, claim.id)?.consumed_at).not.toBeNull();
     expect(installedIds(db, botId)).toEqual([INSTALLATION]);
-    // The app's installation, never a target.
-    expect(db.raw.query("SELECT repo_id, repo_owner FROM review_targets").all()).toEqual([
-      { repo_id: null, repo_owner: null },
-    ]);
+    // The App's installation, never a target: setup mints no target row.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get()).toEqual({ n: 0 });
   });
 
   test("naming one of two claims binds it and leaves the other live", async () => {

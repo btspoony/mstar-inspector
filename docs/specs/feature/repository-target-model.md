@@ -1,7 +1,5 @@
 # Feature: repository target model
 
-Promoted from: iteration v1.18 (package specs repository-surface / repository-target-model / operator-data-upgrade).
-
 ## Scope
 
 The data and execution contract behind the repository surface: target identity and schema, webhook resolution, effective review settings, the target store, the add-repository API, installation claims, and the application-settings gates that survive the surface split. This page also states what the previous installation-bound model no longer does.

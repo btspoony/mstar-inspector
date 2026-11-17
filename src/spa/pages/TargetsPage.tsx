@@ -10,7 +10,7 @@
  *
  * The detail address (`…/targets/<targetId>`) renders `TargetDetailPage`: one
  * target's 评审配置 (its own policy plus the inheritance toggle), 洞察 and
- * 拉取请求 (plan 372's scoped reads).
+ * 拉取请求 (the scoped read families).
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";

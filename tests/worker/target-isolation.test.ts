@@ -377,7 +377,7 @@ describe("the execution ledgers are tenant-scoped by their own target", () => {
 });
 
 describe("the dashboard routes resolve the target inside the session workspace", () => {
-  // Plan 372: insights and the ledger are target-addressed; settings stays
+  // Insights and the ledger are target-addressed; settings stays
   // App-addressed (a bot is still the configuration subject).
   const INSIGHTS = `/dashboard/${WORKSPACE_A}/api/targets/target-a/insights/summary?include=repos`;
   const LEDGER = `/dashboard/${WORKSPACE_A}/api/targets/target-a/pull-requests`;

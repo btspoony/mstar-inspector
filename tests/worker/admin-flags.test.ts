@@ -249,7 +249,7 @@ const PR_PAYLOAD = {
   number: 42,
   installation: { id: 123 },
   pull_request: { number: 42, head: { sha: "abc123" }, user: { login: "alice" } },
-  repository: { name: "test-repo", owner: { login: "test-owner" } },
+  repository: { id: 9001, name: "test-repo", owner: { login: "test-owner" } },
 };
 
 /** An active App row with real secretbox envelopes plus its workspace mapping. */
@@ -272,9 +272,15 @@ async function seedApp(db: TestD1): Promise<void> {
     )
     .run(id, privateKeyEnc, webhookSecretEnc);
   db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
-  // The webhook resolves the bot's target before it classifies anything, so a
+  // The webhook resolves the bot's target by the delivery's own repository
+  // before it classifies anything, so the row has to carry that identity — a
   // bot without one answers `ignored` and the flag under test never runs.
-  seedTarget(db, id, { id: "target-app-x" });
+  seedTarget(db, id, {
+    id: "target-app-x",
+    repoId: PR_PAYLOAD.repository.id,
+    repoOwner: PR_PAYLOAD.repository.owner.login,
+    repoName: PR_PAYLOAD.repository.name,
+  });
 }
 
 function queueCapture(): { queue: Env["REVIEW_QUEUE"]; sent: ReviewJobPayload[] } {

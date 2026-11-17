@@ -2,7 +2,7 @@
  * GET /api/targets/:targetId/pull-requests,
  * GET /api/targets/:targetId/pull-requests/:owner/:repo/:number and its three
  * `findings` / `reviews` / `failures` section reads — the target-scoped PR
- * ledger faces (plan 372; migration 0039 for the tables).
+ * ledger faces (migration 0039 for the tables).
  *
  * Both ride the SAME gate ladder as every other target JSON read: membership →
  * the target-id resolution INSIDE the session workspace (unknown / soft-deleted

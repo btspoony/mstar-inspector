@@ -1,5 +1,5 @@
 /**
- * The two workspace-scope read faces (plan 372 task 2 round A), driven through
+ * The two workspace-scope read faces, driven through
  * the real worker mount:
  *
  *   GET /dashboard/<ref>/api/insights/summary

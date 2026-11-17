@@ -2793,24 +2793,29 @@ describe("migrations/0057_review_targets.sql", () => {
     "github_visibility",
   ];
 
-  /** The target's declaration order. */
+  /**
+   * The target's declaration order at the shipped schema: 0057's columns minus
+   * the installation-keyed trio 0067 dropped, plus the repository identity and
+   * the inheritance switch it appended.
+   */
   const TARGET_COLUMNS = [
     "id",
     "workspace_id",
     "bot_id",
     "name",
-    "installation_id",
-    "account_login",
     "review_enabled",
     "review_trigger_mode",
     "review_level",
     "check_min_score",
     "check_pass_verdicts",
-    "allowlist_enabled",
     "created_by",
     "created_at",
     "updated_at",
     "deleted_at",
+    "repo_id",
+    "repo_owner",
+    "repo_name",
+    "follow_workspace_defaults",
   ];
 
   /** The bot columns the target inherits, projected the same on both sides. */
@@ -3213,24 +3218,25 @@ describe("migrations/0057_review_targets.sql", () => {
   });
 
   test("the per-bot target lookup uses the index, not a table scan (EXPLAIN QUERY PLAN)", () => {
-    // The partial unique (bot_id, installation_id) index cannot serve this
-    // predicate — installation_id is unknown here — so without its own index
-    // every dashboard read, webhook fallback and backfill UPDATE scans.
+    // 0067 replaced the single-column index with the composite `(bot_id,
+    // repo_id)`: its leading column still answers a bare `bot_id` predicate, so
+    // every dashboard read, webhook fallback and backfill UPDATE seeks.
     const db = createMigratedTestD1();
     const plan = db.raw
       .query("EXPLAIN QUERY PLAN SELECT id FROM review_targets WHERE bot_id = 'bot-1'")
       .all() as Array<{ detail: string }>;
-    expect(plan.some((p) => p.detail.includes("USING INDEX idx_review_targets_bot_id"))).toBe(true);
+    expect(plan.some((p) => p.detail.includes("USING INDEX idx_review_targets_bot_repo"))).toBe(true);
     expect(plan.some((p) => p.detail.includes("SCAN review_targets"))).toBe(false);
   });
 
-  test("creates the target tables with the contract's columns, defaults and checks", () => {
+  test("creates the target table with the shipped columns, defaults and checks", () => {
     const db = createMigratedTestD1();
     expect(columnNames(db, "review_targets")).toEqual(TARGET_COLUMNS);
-    expect(columnNames(db, "target_owner_allowlist")).toEqual(["target_id", "owner_login", "created_at"]);
     expect(columnNames(db, "reviews")).toContain("target_id");
     expect(columnNames(db, "pull_requests")).toContain("target_id");
+    // 0067 dropped the installation-keyed identity and the owner allowlist.
     expect(schemaNames(db, "table")).not.toContain("app_owner_allowlist");
+    expect(schemaNames(db, "table")).not.toContain("target_owner_allowlist");
 
     db.raw
       .prepare(
@@ -3249,7 +3255,7 @@ describe("migrations/0057_review_targets.sql", () => {
       db.raw
         .query(
           `SELECT review_enabled, review_trigger_mode, review_level, check_min_score, check_pass_verdicts,
-                  allowlist_enabled, installation_id, account_login, deleted_at
+                  follow_workspace_defaults, repo_id, repo_owner, repo_name, deleted_at
              FROM review_targets WHERE id = 'target-fresh'`,
         )
         .get(),
@@ -3259,9 +3265,12 @@ describe("migrations/0057_review_targets.sql", () => {
       review_level: null,
       check_min_score: 80,
       check_pass_verdicts: '["ship it"]',
-      allowlist_enabled: 0,
-      installation_id: null,
-      account_login: null,
+      // 0067's added columns: a row created with its own config does not
+      // inherit, and an unclaimed target carries no repository identity.
+      follow_workspace_defaults: 0,
+      repo_id: null,
+      repo_owner: null,
+      repo_name: null,
       deleted_at: null,
     });
 
@@ -3271,7 +3280,7 @@ describe("migrations/0057_review_targets.sql", () => {
       ["check_min_score", 101],
       ["check_min_score", 80.5],
       ["check_pass_verdicts", "{not json"],
-      ["allowlist_enabled", 2],
+      ["follow_workspace_defaults", 2],
     ] as const) {
       expect(
         () => db.raw.prepare(`UPDATE review_targets SET ${column} = ? WHERE id = 'target-fresh'`).run(bad),
@@ -3361,8 +3370,13 @@ describe("migrations/0058_review_bot_scope.sql", () => {
   });
 });
 
-describe("install_claims (migrations/0059_install_claims.sql)", () => {
-  /** The claim's three foreign keys need a user, a bot, its workspace and a target. */
+/**
+ * Install claims at the shipped schema: 0067 recreated the table bot-level (D19)
+ * — a claim bridges the stateless setup redirect to the App a signed-in user
+ * installs, so it names the bot, never a target.
+ */
+describe("install_claims (bot-level, 0067)", () => {
+  /** The claim's three foreign keys need a user, a workspace and a bot. */
   function seedClaimParents(db: TestD1): void {
     db.raw
       .prepare(
@@ -3379,21 +3393,13 @@ describe("install_claims (migrations/0059_install_claims.sql)", () => {
                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
       )
       .run();
-    db.raw.prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-claims', 'default')`).run();
-    db.raw
-      .prepare(
-        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
-         VALUES ('target-claims', 'default', 'bot-claims', 'target-claims', 'acme',
-                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
-      )
-      .run();
   }
 
   function insertClaim(db: TestD1, id: string, consumedAt: string | null = null): void {
     db.raw
       .prepare(
-        `INSERT INTO install_claims (id, user_id, workspace_id, target_id, created_at, expires_at, consumed_at)
-         VALUES (?, 'user-claims', 'default', 'target-claims',
+        `INSERT INTO install_claims (id, user_id, workspace_id, bot_id, created_at, expires_at, consumed_at)
+         VALUES (?, 'user-claims', 'default', 'bot-claims',
                  '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', ?)`,
       )
       .run(id, consumedAt);
@@ -3410,13 +3416,13 @@ describe("install_claims (migrations/0059_install_claims.sql)", () => {
       "id",
       "user_id",
       "workspace_id",
-      "target_id",
+      "bot_id",
       "created_at",
       "expires_at",
       "consumed_at",
       "consumed_token",
     ]);
-    for (const column of ["user_id", "workspace_id", "target_id", "created_at", "expires_at"]) {
+    for (const column of ["user_id", "workspace_id", "bot_id", "created_at", "expires_at"]) {
       expect(columns.find((c) => c.name === column)?.notnull, column).toBe(1);
     }
     // `consumed_at` is the live predicate: unclaimed means NULL, and nothing
@@ -3431,7 +3437,7 @@ describe("install_claims (migrations/0059_install_claims.sql)", () => {
       }>
     ).map((row) => row.name);
     expect(indexNames).toContain("install_claims_user_open");
-    expect(indexNames).toContain("install_claims_live_target");
+    expect(indexNames).toContain("install_claims_live_bot");
 
     const openColumns = (
       db.raw.query("PRAGMA index_info(install_claims_user_open)").all() as Array<{ name: string }>
@@ -3439,20 +3445,20 @@ describe("install_claims (migrations/0059_install_claims.sql)", () => {
     expect(openColumns).toEqual(["user_id", "consumed_at"]);
 
     const liveColumns = (
-      db.raw.query("PRAGMA index_info(install_claims_live_target)").all() as Array<{ name: string }>
+      db.raw.query("PRAGMA index_info(install_claims_live_bot)").all() as Array<{ name: string }>
     ).map((row) => row.name);
-    expect(liveColumns).toEqual(["user_id", "target_id"]);
+    expect(liveColumns).toEqual(["user_id", "bot_id"]);
     const liveSqlRow = db.raw
-      .query("SELECT sql FROM sqlite_master WHERE name = 'install_claims_live_target'")
+      .query("SELECT sql FROM sqlite_master WHERE name = 'install_claims_live_bot'")
       .get();
     if (liveSqlRow === null || typeof liveSqlRow !== "object" || !("sql" in liveSqlRow) || typeof liveSqlRow.sql !== "string") {
-      throw new Error("install_claims_live_target is missing from the migrated schema");
+      throw new Error("install_claims_live_bot is missing from the migrated schema");
     }
     // Partial: only an UNCONSUMED claim holds the slot.
     expect(liveSqlRow.sql).toContain("WHERE consumed_at IS NULL");
   });
 
-  test("install_claims_live_target refuses a second live claim for one target and admits consumed rows", () => {
+  test("install_claims_live_bot refuses a second live claim for one bot and admits consumed rows", () => {
     const db = createMigratedTestD1();
     seedClaimParents(db);
     insertClaim(db, "claim-live");
@@ -3461,11 +3467,11 @@ describe("install_claims (migrations/0059_install_claims.sql)", () => {
       consumed_token: null,
     });
 
-    // A second LIVE claim for the same (user, target) is refused: "N claims"
-    // always means N different targets.
+    // A second LIVE claim for the same (user, bot) is refused: "N claims"
+    // always means N different Apps.
     expect(() => insertClaim(db, "claim-live-2")).toThrow();
 
-    // Consuming the first frees the slot, so the same target can be claimed again.
+    // Consuming the first frees the slot, so the same bot can be claimed again.
     db.raw
       .prepare("UPDATE install_claims SET consumed_at = '2026-01-01T00:05:00.000Z' WHERE id = 'claim-live'")
       .run();

@@ -1,5 +1,5 @@
 /**
- * The repository surface's three routes (plan 371.2, product spec J1/J2):
+ * The repository surface's three routes (product spec J1/J2):
  *
  *   - `GET  /dashboard/:ref/api/targets` — the list: one row per live target,
  *     `repo_id: null` for a 待安装 row, the bot name and the newest review

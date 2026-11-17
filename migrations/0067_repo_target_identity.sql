@@ -41,8 +41,8 @@
 -- 0057:27-36 recipe, precedent 0057:236-240). Each dropped column carries only
 -- its own inline CHECK, which SQLite drops with it.
 --
--- No data movement: no backfill of `repo_id` (plan 373 owns it) and no guard
--- table for one. Forward-only.
+-- No data movement: no backfill of `repo_id` (the operator data-upgrade item
+-- owns it) and no guard table for one. Forward-only.
 
 ALTER TABLE review_targets ADD COLUMN repo_id INTEGER;
 ALTER TABLE review_targets ADD COLUMN repo_owner TEXT;

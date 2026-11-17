@@ -385,6 +385,69 @@ describe("repo-backfill item", () => {
     expect((await repoBackfill.verify(db, { runStartedAt: null })).duplicate_repository_groups).toBe(0);
   });
 
+  test("one bot's two workspaces collapse into ONE repository target", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+         VALUES ('second', 'second', 'Second', NULL, '2026-01-01T00:00:00.000Z', NULL)`,
+      )
+      .run();
+    seedLeftoverTarget(db, "target-default", { minScore: 60 });
+    seedLeftoverTarget(db, "target-second", { minScore: 90, workspaceId: "second" });
+    seedPr(db, "pr-default", "target-default", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
+    seedPr(db, "pr-second", "target-second", "acme", "alpha", 2, "2026-03-01T00:00:00.000Z");
+
+    // Both rows claim one repository: 0068's claim is bot-scoped, so is this.
+    expect(await repoBackfill.preflight(db)).toMatchObject({ conflicting_groups: 1 });
+    const batch = await repoBackfill.runBatch(db, null);
+    expect(batch.log).toMatchObject({ created: 1, discarded: 1 });
+
+    const live = db.raw
+      .query("SELECT workspace_id, check_min_score FROM review_targets WHERE deleted_at IS NULL")
+      .all() as Array<{ workspace_id: string; check_min_score: number }>;
+    // ONE target, born in the D22 winner's workspace — not one per workspace.
+    expect(live).toEqual([{ workspace_id: "second", check_min_score: 90 }]);
+    const prs = db.raw.query("SELECT target_id FROM pull_requests").all() as Array<{
+      target_id: string;
+    }>;
+    expect(prs).toHaveLength(2);
+    expect(new Set(prs.map((row) => row.target_id)).size).toBe(1);
+    expect((await repoBackfill.verify(db, { runStartedAt: null })).duplicate_repository_groups).toBe(0);
+  });
+
+  test("a run that drains mid-row leaves no live all-NULL target", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    // The first row spends the whole group budget on its 20 repositories.
+    seedLeftoverTarget(db, "target-a");
+    for (let index = 0; index < 20; index += 1) {
+      seedPr(db, `pr-a-${index}`, "target-a", "acme", `repo-${index}`, 1, "2026-02-01T00:00:00.000Z");
+    }
+    // The second row is cut off mid-way: it shares `repo-0` (already planned)
+    // and adds `repo-99`, the 21st group.
+    seedLeftoverTarget(db, "target-b");
+    seedPr(db, "pr-b-shared", "target-b", "acme", "repo-0", 1, "2026-02-01T00:00:00.000Z");
+    seedPr(db, "pr-b-own", "target-b", "acme", "repo-99", 1, "2026-02-01T00:00:00.000Z");
+    // The third row sits past the cutoff and holds ONLY the shared repository:
+    // the first row's group moves its ledger row away, and the worklist — which
+    // finds a row by a `pull_requests` row — would never visit it again.
+    seedLeftoverTarget(db, "target-c");
+    seedPr(db, "pr-c-shared", "target-c", "acme", "repo-0", 1, "2026-02-01T00:00:00.000Z");
+
+    const batches = await drain(db);
+    expect(batches.at(-1)!.done).toBe(true);
+    expect(liveTargets(db)).toHaveLength(21);
+    expect(liveTargets(db).filter((row) => row.repo_owner === null)).toEqual([]);
+    expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      historical_rows: 0,
+      duplicate_repository_groups: 0,
+    });
+  });
+
   test("a case-variant owner name joins the same group instead of creating a second target", async () => {
     const db = createMigratedTestD1();
     seedBot(db, BOT, 7001);

@@ -1,5 +1,5 @@
 /**
- * The repository detail page's settings routes (plan 371.3, product spec J4):
+ * The repository detail page's settings routes (product spec J4):
  *
  *   - `GET  /dashboard/:ref/api/targets/:targetId` — one live target with what
  *     it runs with plus the workspace defaults. A foreign or soft-deleted

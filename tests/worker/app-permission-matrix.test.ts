@@ -5,7 +5,7 @@
  * add-key / save-chain / save-roles / add-custom-provider /
  * add-template-provider / remove-custom-provider / key/delete / keys/verify /
  * keys/usage, plus the chain ops add-chain / remove-chain) and ops
- * (pause / resume / disable / enable / delete) — funnels through the SAME
+ * (disable / enable / delete) — funnels through the SAME
  * server-side workspace owner/admin gate (`canManageApp` in
  * src/dashboard/index.ts,
  * `canManageRole` = workspace owner/admin). This file locks that matrix as
@@ -587,7 +587,7 @@ describe("Bot settings read-face permission matrix", () => {
   });
 });
 
-// --- PR-ledger read faces: the list and one-PR detail (plan 372 / 0039) ---
+// --- PR-ledger read faces: the list and one-PR detail (migration 0039) ---
 // Same canManageApp rule as every other target read: the workspace role decides,
 // and target authorship grants nothing. The address is the target plus the
 // ledger's own key (owner/repo/number).

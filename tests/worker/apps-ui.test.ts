@@ -346,7 +346,7 @@ describe("the Apps list's per-App pause state (target-owned)", () => {
       .run(MALLORY_APP_ID);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
-    // Visibility is the APP's (plan 371): this workspace owns the bot, so the
+    // Visibility is the APP's: this workspace owns the bot, so the
     // App opens even though it holds no repository here. The foreign target is
     // invisible as target-owned FACT — no id, no pause, no policy.
     const detail = await get(`/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`, cookie, makeEnv(db));

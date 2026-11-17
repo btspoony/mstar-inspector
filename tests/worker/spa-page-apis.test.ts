@@ -139,11 +139,13 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     const body = (await owner.json()) as {
       can_manage: boolean;
       workspace_id: string;
+      targets_many: boolean;
+      target_id?: string;
       app: {
         github_app_id: number;
         github_slug: string | null;
         id: string;
-        review_enabled: boolean;
+        review_enabled?: boolean;
         created_by: string;
         sandbox_image_id: string;
       };
@@ -156,7 +158,13 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(body.app.github_slug).toBe("mstar-inspector-mallory");
     expect(body.app.id).toBe("app-mallory");
     expect(body.workspace_id).toBe("default");
-    expect(body.app.review_enabled).toBe(true);
+    // Creation writes the App and its workspace mapping only (D13), so this
+    // workspace holds no repository under it: the target-owned policy is
+    // absent rather than invented, and `targets_many: false` is what separates
+    // "none" from "several". The App stays fully readable either way.
+    expect(body.targets_many).toBe(false);
+    expect(body.target_id).toBeUndefined();
+    expect(body.app.review_enabled).toBeUndefined();
     expect(body.can_manage).toBe(true);
     // clean cutover: the old `providers` catalog dump is gone; the
     // manage face splits persisted state from the discovery catalog.
@@ -206,14 +214,14 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(otherBody.can_manage).toBe(false);
     expect(otherBody.app.github_app_id).toBe(1001);
     expect(otherBody.app.github_slug).toBe("mstar-inspector-mallory");
-    // The derived Blocked pair rides both faces, so the identity-only set
-    // names them beside the target id.
+    // The derived Blocked pair rides both faces. No repository target exists
+    // here, so neither `target_id` nor its pause state is named: the identity
+    // set is exactly the App's own fields.
     expect(Object.keys(otherBody).sort()).toEqual([
       "app",
       "blocked",
       "blocked_reason",
       "can_manage",
-      "target_id",
       "workspace_id",
     ]);
     expect(Object.keys(otherBody.app).sort()).toEqual([
@@ -227,7 +235,6 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       "github_name",
       "github_slug",
       "id",
-      "review_enabled",
       "status",
     ]);
     expect(typeof otherBody.app.created_at).toBe("string");
