@@ -287,6 +287,38 @@ describe("repo-backfill item", () => {
     expect((await repoBackfill.verify(db, { runStartedAt: null })).unrepointed_ledger_rows).toBe(0);
   });
 
+  test("a PR the adopted destination already holds does not collide with the repoint", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    // The repository's live home, and a leftover row that also holds its PRs.
+    seedLeftoverTarget(db, "target-home", { owner: "acme", repo: "alpha" });
+    seedLeftoverTarget(db, "target-old");
+    // #7: the destination's own row is later, so it stays and the member's goes.
+    seedPr(db, "pr-home-7", "target-home", "acme", "alpha", 7, "2026-05-01T00:00:00.000Z");
+    seedPr(db, "pr-old-7", "target-old", "acme", "alpha", 7, "2026-01-01T00:00:00.000Z");
+    // #8: the member's row is later, so it repoints and the destination's goes.
+    seedPr(db, "pr-home-8", "target-home", "acme", "alpha", 8, "2026-01-01T00:00:00.000Z");
+    seedPr(db, "pr-old-8", "target-old", "acme", "alpha", 8, "2026-05-01T00:00:00.000Z");
+
+    const batch = await repoBackfill.runBatch(db, null);
+    expect(batch.done).toBe(true);
+    expect(batch.log).toMatchObject({ adopted: 1, created: 0 });
+
+    const rows = db.raw
+      .query("SELECT id, target_id FROM pull_requests WHERE pr_number IN (7, 8) ORDER BY pr_number")
+      .all() as Array<{ id: string; target_id: string }>;
+    expect(rows).toEqual([
+      { id: "pr-home-7", target_id: "target-home" },
+      { id: "pr-old-8", target_id: "target-home" },
+    ]);
+    expect((await repoBackfill.verify(db, { runStartedAt: null })).unrepointed_ledger_rows).toBe(0);
+
+    // A replay is a no-op: the collision is settled, not retried.
+    const replay = await repoBackfill.runBatch(db, null);
+    expect(replay.processed).toBe(0);
+    expect(replay.done).toBe(true);
+  });
+
   test("a leftover row with no ledger rows keeps its configuration", async () => {
     const db = createMigratedTestD1();
     seedBot(db, BOT, 7001);

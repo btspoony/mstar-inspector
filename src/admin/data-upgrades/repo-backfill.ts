@@ -399,11 +399,40 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
       (b.last_seen_at ?? "").localeCompare(a.last_seen_at ?? "") ||
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
+  // An adopted destination may already hold a PR of its own: the repoint would
+  // collide with it just the same. The destination's row wins only when its
+  // `last_seen_at` is LATER; otherwise it is dropped and the member's row takes
+  // its place. `reviews`/`review_findings`/`review_failures` key on
+  // installation/bot plus PR identity, never on `target_id`, so only this
+  // table's unique index can collide.
+  const destination =
+    named === null
+      ? []
+      : (
+          await db
+            .prepare(
+              `SELECT id, pr_number, last_seen_at FROM pull_requests
+                WHERE target_id = ?1 AND owner = ?2 COLLATE NOCASE AND repo = ?3 COLLATE NOCASE`,
+            )
+            .bind(named, group.owner, group.repo)
+            .all<{ id: string; pr_number: number; last_seen_at: string | null }>()
+        ).results;
+  const destinationByPr = new Map(destination.map((pr) => [pr.pr_number, pr]));
+
   const keepers = new Set<number>();
   const drops: string[] = [];
   for (const pr of prs) {
-    if (keepers.has(pr.pr_number)) drops.push(pr.id);
-    else keepers.add(pr.pr_number);
+    if (keepers.has(pr.pr_number)) {
+      drops.push(pr.id);
+      continue;
+    }
+    const home = destinationByPr.get(pr.pr_number);
+    if (home !== undefined && (home.last_seen_at ?? "") > (pr.last_seen_at ?? "")) {
+      drops.push(pr.id);
+      continue;
+    }
+    keepers.add(pr.pr_number);
+    if (home !== undefined) drops.push(home.id);
   }
   for (const ids of chunked(drops)) {
     plan.statements.push(

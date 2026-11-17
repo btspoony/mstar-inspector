@@ -21,7 +21,7 @@ import { defaultSweepLog } from "../../src/worker/sweep";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { setMaintenanceMode } from "../../src/dashboard/runtime-config-store";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedBot, type TestD1 } from "../store/helpers";
 
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const SECRET = "test-webhook-secret";
@@ -235,6 +235,15 @@ describe("the cron maintenance gate", () => {
 
   test("the absent-row default still runs the sweep", async () => {
     const db = createMigratedTestD1();
+    // One stale delivery row: the sweep's own retention delete is the positive
+    // proof it reached the store, so an early return cannot pass silently.
+    seedBot(db, "bot-sweep", 7001);
+    db.raw
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, created_at)
+         VALUES ('wd-stale', 'bot-sweep', 'pull_request', 'accepted', 202, '2020-01-01 00:00:00')`,
+      )
+      .run();
     let fetchCalls = 0;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => {
@@ -242,8 +251,6 @@ describe("the cron maintenance gate", () => {
       return new Response("ok");
     }) as unknown as typeof fetch;
     try {
-      // A quiet sweep raises no alert, so zero POSTs is the healthy answer; the
-      // run's own evidence is that it reached the store without a skip line.
       const warns: Array<Record<string, unknown>> = [];
       const originalWarn = defaultSweepLog.warn;
       defaultSweepLog.warn = (fields) => void warns.push(fields as Record<string, unknown>);
@@ -252,8 +259,12 @@ describe("the cron maintenance gate", () => {
       } finally {
         defaultSweepLog.warn = originalWarn;
       }
+      // A quiet sweep raises no alert: zero POSTs and no skip line.
       expect(fetchCalls).toBe(0);
       expect(warns.map((call) => call.event)).not.toContain("maintenance_skip");
+      // ...but it did reach the store: the stale row is gone.
+      expect(db.raw.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries").get()).toEqual({ n: 0 });
+      expect(warns.map((call) => call.event)).toContain("retention_swept");
     } finally {
       globalThis.fetch = originalFetch;
     }
