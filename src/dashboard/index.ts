@@ -73,11 +73,16 @@ import {
 import {
   checkGateOf,
   createTargetsStore,
+  getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
   readEffectiveTargetSettings,
   REVIEW_TRIGGER_MODES,
+  setWorkspaceReviewDefaults,
+  type EffectiveTargetSettings,
   type ReviewTargetRow,
   type ReviewTriggerMode,
+  type TargetReviewConfig,
+  type WorkspaceReviewDefaults,
 } from "./targets-store";
 import {
   countFreeMembershipsForLogin,
@@ -212,6 +217,7 @@ import { clampWindow, createInsightsStore } from "./insights-store";
 import {
   CONCURRENCY_MIN,
   RuntimeConfigError,
+  UnknownWorkspaceError,
   WORKSPACE_CONCURRENCY_MAX,
   getWorkspaceCheckMinScore,
   getWorkspaceConcurrency,
@@ -221,6 +227,7 @@ import {
   setWorkspaceConcurrency,
   type DegradedReason,
 } from "./runtime-config-store";
+import { isReviewLevel, type ReviewLevel } from "../../packages/shared/src/runtime";
 import {
   CHECK_MIN_SCORE_MAX,
   CHECK_MIN_SCORE_MIN,
@@ -6168,6 +6175,325 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   return c.json({ created, duplicates }, 201);
 };
 
+// --- Repository settings: one target, and the workspace defaults -----------
+//
+// The detail page's 评审配置 tab (plan 371.3, product spec J4). Both faces read
+// the SAME effective settings every runtime lane reads (`readEffectiveTargetSettings`),
+// so the page can never show a policy the review path does not run with.
+
+/** One settings block on the wire — the four policy answers, snake_case keys. */
+type ReviewSettingsPayload = {
+  trigger_mode: ReviewTriggerMode;
+  review_level: ReviewLevel | null;
+  check_min_score: number;
+  check_pass_verdicts: PrVerdict[];
+  /**
+   * False = the stored verdict array is unreadable, so the empty list above is
+   * a fail-closed placeholder rather than a gate anyone saved. The page renders
+   * its read-only recovery notice instead of an editable gate (the app-settings
+   * face's `check_gate: null` distinction, same meaning).
+   */
+  check_pass_verdicts_readable: boolean;
+};
+
+function reviewSettingsPayload(settings: EffectiveTargetSettings): ReviewSettingsPayload {
+  return {
+    trigger_mode: settings.triggerMode,
+    review_level: settings.level,
+    check_min_score: settings.checkMinScore,
+    check_pass_verdicts: [...settings.checkPassVerdicts],
+    check_pass_verdicts_readable: settings.checkPassVerdictsReadable,
+  };
+}
+
+function workspaceDefaultsPayload(defaults: WorkspaceReviewDefaults): ReviewSettingsPayload {
+  return reviewSettingsPayload({
+    triggerMode: defaults.triggerMode,
+    level: defaults.level,
+    checkMinScore: defaults.checkMinScore,
+    checkPassVerdicts: defaults.checkPassVerdicts,
+    checkPassVerdictsReadable: defaults.checkPassVerdictsReadable,
+  });
+}
+
+/** One target on the wire — the identity the page names, no policy columns. */
+type TargetSettingsPayload = {
+  target_id: string;
+  repo_id: number | null;
+  repo_owner: string | null;
+  repo_name: string | null;
+  bot_id: string;
+  app_name: string;
+  review_enabled: number;
+  follow_workspace_defaults: number;
+};
+
+async function targetSettingsPayload(
+  db: DashboardDb,
+  target: ReviewTargetRow,
+): Promise<{ target: TargetSettingsPayload; effective: ReviewSettingsPayload }> {
+  const app = await createReviewBotsStore(db).getAppById(target.bot_id);
+  return {
+    target: {
+      target_id: target.id,
+      repo_id: target.repo_id,
+      repo_owner: target.repo_owner,
+      repo_name: target.repo_name,
+      bot_id: target.bot_id,
+      app_name: app === null ? "" : appDisplayName(app),
+      review_enabled: target.review_enabled,
+      follow_workspace_defaults: target.follow_workspace_defaults,
+    },
+    effective: reviewSettingsPayload(await readEffectiveTargetSettings(db, target)),
+  };
+}
+
+/**
+ * `GET /api/targets/:targetId` — one live target of this workspace with what it
+ * runs with AND the workspace defaults beside it, so the inheritance toggle can
+ * show "following: <value>" without a second read. Another workspace's target
+ * and a soft-deleted one are equally invisible (404).
+ */
+const targetSettingsReadRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const store = createTargetsStore(member.db);
+  const target = await store.getInWorkspace(member.scope.workspaceId, c.req.param("targetId") ?? "");
+  if (!target) return c.json({ error: "unknown target" }, 404);
+  const payload = await targetSettingsPayload(member.db, target);
+  return c.json({
+    ...payload,
+    defaults: workspaceDefaultsPayload(await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId)),
+  });
+};
+
+/**
+ * `GET /api/targets/all` — the fixed 所有仓库 entry's settings tab: the workspace
+ * defaults themselves (this page IS the default — no inheritance toggle) plus
+ * the live target count the list's pill shows.
+ */
+const workspaceDefaultsReadRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  return c.json({
+    defaults: workspaceDefaultsPayload(await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId)),
+    target_count: await createTargetsStore(member.db).countLive(member.scope.workspaceId),
+  });
+};
+
+/** A parsed settings body; a refusal is the keyed 400 the SPA replays. */
+type ReviewSettingsPatch = {
+  triggerMode?: ReviewTriggerMode;
+  level?: ReviewLevel | null;
+  checkMinScore?: number;
+  checkPassVerdicts?: PrVerdict[];
+  follow?: 0 | 1;
+  reviewEnabled?: boolean;
+};
+
+type ReviewSettingsParse =
+  | { ok: true; patch: ReviewSettingsPatch }
+  | { ok: false; error: string; key?: DictionaryKey; params?: Record<string, string | number> };
+
+/**
+ * The one body parser both settings POSTs share. Every value is checked BEFORE
+ * any write, using the vocabularies the store re-checks as its backstop, so an
+ * off-vocabulary submission is a 400 with zero columns touched. A `null`
+ * `review_level` is a real answer (follow the operator default).
+ */
+function parseReviewSettingsBody(raw: unknown, withSwitch: boolean): ReviewSettingsParse {
+  if (typeof raw !== "object" || raw === null) return { ok: false, error: "invalid body" };
+  const body = raw as Record<string, unknown>;
+  const patch: ReviewSettingsPatch = {};
+  if ("trigger_mode" in body) {
+    const mode = body.trigger_mode;
+    if (!REVIEW_TRIGGER_MODES.includes(mode as ReviewTriggerMode)) {
+      return {
+        ok: false,
+        error: "invalid trigger mode",
+        key: SETTINGS_400_KEYS.triggerModeUnknown,
+        params: { mode: typeof mode === "string" ? mode : "" },
+      };
+    }
+    patch.triggerMode = mode as ReviewTriggerMode;
+  }
+  if ("review_level" in body) {
+    const level = body.review_level;
+    if (level !== null && !isReviewLevel(level)) {
+      return {
+        ok: false,
+        error: "invalid review level",
+        key: SETTINGS_400_KEYS.reviewLevelUnknown,
+        params: { level: typeof level === "string" ? level : "" },
+      };
+    }
+    patch.level = level;
+  }
+  if ("check_min_score" in body) {
+    if (!isCheckMinScoreValue(body.check_min_score)) {
+      return {
+        ok: false,
+        error: "invalid check min score",
+        key: SETTINGS_400_KEYS.checkScoreInvalid,
+        params: { min: CHECK_MIN_SCORE_MIN, max: CHECK_MIN_SCORE_MAX },
+      };
+    }
+    patch.checkMinScore = body.check_min_score;
+  }
+  if ("check_pass_verdicts" in body) {
+    const verdicts = body.check_pass_verdicts;
+    const list = Array.isArray(verdicts) ? verdicts : [verdicts];
+    const unknownVerdict = list.find((entry) => !PR_VERDICTS.includes(entry as PrVerdict));
+    if (unknownVerdict !== undefined) {
+      return {
+        ok: false,
+        error: "invalid check pass verdict",
+        key: SETTINGS_400_KEYS.checkVerdictUnknown,
+        params: {
+          verdict: typeof unknownVerdict === "string" ? unknownVerdict : "",
+          verdicts: PR_VERDICTS.join(", "),
+        },
+      };
+    }
+    // The stored set is a SET: a repeated spelling collapses.
+    patch.checkPassVerdicts = [...new Set(list as PrVerdict[])];
+  }
+  if (!withSwitch) return { ok: true, patch };
+  if ("follow" in body) {
+    if (body.follow !== 0 && body.follow !== 1) return { ok: false, error: "invalid follow" };
+    patch.follow = body.follow;
+  }
+  if ("review_enabled" in body) {
+    if (typeof body.review_enabled !== "boolean") return { ok: false, error: "invalid review_enabled" };
+    patch.reviewEnabled = body.review_enabled;
+  }
+  return { ok: true, patch };
+}
+
+/**
+ * `POST /api/targets/:targetId` — the detail page's ONE save. Manager-gated
+ * (the target's workspace role governs target-owned settings); an unknown,
+ * foreign or soft-deleted target is the family's 404, never a write.
+ *
+ * Inheritance (D16, product spec J4): naming any policy column means "this row
+ * answers from now on", so `follow` flips to 0 in the SAME statement and every
+ * column the caller did not submit is snapshotted from the values the target is
+ * running with right now — never the inert DDL placeholders. `follow: 1` sets
+ * the flag alone: the row's own columns become inert, so nothing is written to
+ * them.
+ */
+const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  const store = createTargetsStore(member.db);
+  const target = await store.getInWorkspace(member.scope.workspaceId, c.req.param("targetId") ?? "");
+  if (!target) return c.json({ error: "unknown target" }, 404);
+  let raw: unknown = null;
+  try {
+    raw = await c.req.json();
+  } catch {
+    // malformed body → the parser's 400, never a 500
+  }
+  const parsed = parseReviewSettingsBody(raw, true);
+  if (!parsed.ok) {
+    return parsed.key === undefined
+      ? c.json({ error: parsed.error }, 400)
+      : keyed400(c, parsed.key, parsed.params);
+  }
+  const { patch } = parsed;
+  const touchesPolicy =
+    patch.triggerMode !== undefined ||
+    patch.level !== undefined ||
+    patch.checkMinScore !== undefined ||
+    patch.checkPassVerdicts !== undefined;
+  // Supplying a policy column without saying otherwise is an explicit save;
+  // `follow: 1` is the one way to stay (or go back to) inheriting.
+  const follow: 0 | 1 | undefined =
+    patch.follow ?? (touchesPolicy ? 0 : undefined);
+  const config: TargetReviewConfig = {
+    triggerMode: follow === 1 ? undefined : patch.triggerMode,
+    level: follow === 1 ? undefined : patch.level,
+    checkMinScore: follow === 1 ? undefined : patch.checkMinScore,
+    checkPassVerdicts: follow === 1 ? undefined : patch.checkPassVerdicts,
+    follow,
+  };
+  if (follow === 0) {
+    // The snapshot: the columns this save does not name take the values the
+    // target runs with now (workspace defaults while it was inheriting).
+    const current = await readEffectiveTargetSettings(member.db, target);
+    config.triggerMode ??= current.triggerMode;
+    if (config.level === undefined) config.level = current.level;
+    config.checkMinScore ??= current.checkMinScore;
+    config.checkPassVerdicts ??= current.checkPassVerdicts;
+  }
+  try {
+    await store.setReviewConfig(member.scope.workspaceId, target.id, config);
+    if (patch.reviewEnabled !== undefined) {
+      await store.setReviewEnabled(member.scope.workspaceId, target.id, patch.reviewEnabled);
+    }
+  } catch (err) {
+    // The store's own vocabulary guards: unreachable through this route's
+    // parser, so a hit here is a real defect rather than a 400.
+    logSettingsFailure("target_settings_save", target.id, err);
+    return c.json({ error: "save failed" }, 500);
+  }
+  const saved = await store.getInWorkspace(member.scope.workspaceId, target.id);
+  if (!saved) return c.json({ error: "unknown target" }, 404);
+  const payload = await targetSettingsPayload(member.db, saved);
+  return c.json({
+    ...payload,
+    defaults: workspaceDefaultsPayload(await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId)),
+  });
+};
+
+/**
+ * `POST /api/targets/defaults` — the 所有仓库 entry's settings save: the three
+ * `workspaces.default_*` columns plus the gate floor, which keeps its own
+ * audited writer (`setWorkspaceCheckMinScore`). Manager only. Every value is
+ * checked before the first write, so a refusal stores nothing.
+ */
+const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  let raw: unknown = null;
+  try {
+    raw = await c.req.json();
+  } catch {
+    // malformed body → the parser's 400, never a 500
+  }
+  const parsed = parseReviewSettingsBody(raw, false);
+  if (!parsed.ok) {
+    return parsed.key === undefined
+      ? c.json({ error: parsed.error }, 400)
+      : keyed400(c, parsed.key, parsed.params);
+  }
+  const { patch } = parsed;
+  try {
+    await setWorkspaceReviewDefaults(member.db, member.scope.workspaceId, {
+      triggerMode: patch.triggerMode,
+      level: patch.level,
+      checkPassVerdicts: patch.checkPassVerdicts,
+    });
+    if (patch.checkMinScore !== undefined) {
+      await setWorkspaceCheckMinScore(
+        member.db,
+        member.scope.workspaceId,
+        patch.checkMinScore,
+        member.user.github_login,
+      );
+    }
+  } catch (err) {
+    if (err instanceof UnknownWorkspaceError) return await tenantNotFound(c);
+    logSettingsFailure("workspace_defaults_save", member.scope.workspaceId, err);
+    return c.json({ error: "save failed" }, 500);
+  }
+  return c.json({
+    defaults: workspaceDefaultsPayload(await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId)),
+  });
+};
+
 // --- App + member route table ----------------------------------------------
 //
 // ONE table, ONE registration loop: every route lives under a workspace ref
@@ -6204,6 +6530,14 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   // body names the bot, and the route re-checks its scope inside the write.
   { method: "get", path: "/api/targets", handler: targetListRoute, access: "read" },
   { method: "post", path: "/api/targets", handler: targetCreateRoute, access: "write" },
+  // The detail page's settings tab (plan 371.3). `/api/targets/all` is the
+  // fixed 所有仓库 entry and MUST stay registered before the `:targetId` read:
+  // Hono matches in registration order, so the literal would otherwise be
+  // swallowed as a target UUID.
+  { method: "get", path: "/api/targets/all", handler: workspaceDefaultsReadRoute, access: "read" },
+  { method: "post", path: "/api/targets/defaults", handler: workspaceDefaultsWriteRoute, access: "write" },
+  { method: "get", path: "/api/targets/:targetId", handler: targetSettingsReadRoute, access: "read" },
+  { method: "post", path: "/api/targets/:targetId", handler: targetSettingsWriteRoute, access: "write" },
   {
     method: "get",
     path: "/api/apps/:appId/installation-repositories",

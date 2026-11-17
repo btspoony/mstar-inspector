@@ -297,6 +297,71 @@ export async function getWorkspaceReviewDefaults(
 }
 
 /**
+ * `setWorkspaceReviewDefaults`'s input: the `workspaces` `default_*` columns a
+ * caller names. An absent key is left untouched, like `setReviewConfig`.
+ */
+export type WorkspaceReviewDefaultPatch = {
+  triggerMode?: ReviewTriggerMode;
+  level?: ReviewLevel | null;
+  checkPassVerdicts?: readonly PrVerdict[];
+};
+
+/**
+ * Write the workspace defaults a caller names (the `/targets/all` settings
+ * face). Validated before the write exactly like `setReviewConfig`, so an
+ * off-vocabulary value leaves every column untouched. Returns whether a live
+ * workspace row changed; `false` also covers an unknown or retired workspace.
+ * The gate floor is NOT here: it is `workspaces.check_min_score`, written by its
+ * own audited route.
+ */
+export async function setWorkspaceReviewDefaults(
+  db: TargetsStoreD1,
+  workspaceId: string,
+  patch: WorkspaceReviewDefaultPatch,
+): Promise<boolean> {
+  const assignments: string[] = [];
+  const values: unknown[] = [];
+  if (patch.triggerMode !== undefined) {
+    if (!REVIEW_TRIGGER_MODES.includes(patch.triggerMode)) {
+      throw new Error(
+        `targets-store: default review trigger mode ${JSON.stringify(patch.triggerMode)} is not on the vocabulary (${REVIEW_TRIGGER_MODES.join(" | ")}) — zero rows written`,
+      );
+    }
+    assignments.push("default_review_trigger_mode = ?");
+    values.push(patch.triggerMode);
+  }
+  if (patch.level !== undefined) {
+    if (patch.level !== null && !isReviewLevel(patch.level)) {
+      throw new Error(
+        `targets-store: default review level ${JSON.stringify(patch.level)} is not on the vocabulary (${REVIEW_LEVELS.join(" | ")}) — zero rows written`,
+      );
+    }
+    assignments.push("default_review_level = ?");
+    values.push(patch.level);
+  }
+  if (patch.checkPassVerdicts !== undefined) {
+    for (const verdict of patch.checkPassVerdicts) {
+      if (!PR_VERDICTS.includes(verdict)) {
+        throw new Error(
+          `targets-store: default check gate verdict ${JSON.stringify(verdict)} is not on PR_VERDICTS (${PR_VERDICTS.join(" | ")}) — zero rows written`,
+        );
+      }
+    }
+    assignments.push("default_check_pass_verdicts = ?");
+    values.push(JSON.stringify(patch.checkPassVerdicts));
+  }
+  if (assignments.length === 0) return false;
+  const res = await db
+    .prepare(
+      `UPDATE workspaces SET ${assignments.join(", ")}
+        WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .bind(...values, workspaceId)
+    .run();
+  return res.meta.changes > 0;
+}
+
+/**
  * The four policy columns a non-inheriting row answers with. Split out because
  * `readEffectiveTargetSettings` decides the inheritance branch BEFORE the
  * defaults read, and must not need a defaults object to say so.
@@ -439,6 +504,18 @@ export function createTargetsStore(db: TargetsStoreD1) {
         .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
         .bind(targetId, workspaceId)
         .first<ReviewTargetRow>();
+    },
+
+    /** How many live targets this workspace holds — the list's count pill. */
+    async countLive(workspaceId: string): Promise<number> {
+      const row = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM review_targets
+            WHERE workspace_id = ? AND deleted_at IS NULL`,
+        )
+        .bind(workspaceId)
+        .first<{ n: number }>();
+      return row?.n ?? 0;
     },
 
     /** The workspace's live targets, newest first (stable id tiebreak). */
