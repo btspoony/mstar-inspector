@@ -148,6 +148,10 @@ describe("runSweep", () => {
     expect(captured[2]).toContain("UPDATE workspace_invites");
     expect(captured[3]).toContain("FROM review_failures");
     expect(captured[3]).toContain("created_at > datetime('now', '-24 hours')");
+    // ONE grouped read: the same result supplies the total and the payload's
+    // per-stage breakdown, so neither can describe a different instant.
+    expect(captured[3]).toContain("SELECT stage, COUNT(*) AS count");
+    expect(captured[3]).toContain("GROUP BY stage ORDER BY stage");
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,
@@ -541,6 +545,39 @@ describe("runSweep", () => {
     });
   }
 
+  test("a quota refusal does not page ops while a sandbox failure does, and the breakdown names it", async () => {
+    const db = failureDb();
+    const store = createFailureStore(db);
+    // One tenant's exhausted month beside one real infrastructure failure: the
+    // first is a dashboard failure (commercial ceiling), the second is an
+    // incident. Only the second belongs in the global alert.
+    await store.record({ ...BASE, stage: "quota", error: "quota exceeded" });
+    await store.record({ ...BASE, stage: "sandbox", error: "container acquisition failed" });
+
+    const { log, calls } = captureLog();
+    const quiet = await runSweep(db, { log });
+    expect(quiet).toEqual({
+      failures24h: 1,
+      thresholdBreached: false,
+      invitesExpired: 0,
+      webhook: "not_attempted",
+    });
+    expect(calls).toHaveLength(0);
+    // The quota row is still a stored failure — only paging ignores it.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
+
+    // Push the sandbox stage over the threshold: the payload's parts are the
+    // excluded-nothing total, quota absent from both.
+    for (let i = 0; i < SWEEP_FAILURE_THRESHOLD; i++) {
+      await store.record({ ...BASE, stage: "sandbox", error: `boom-${i}` });
+    }
+    const { log: breachLog, calls: breachCalls } = captureLog();
+    await runSweep(db, { log: breachLog });
+    const alert = breachCalls[0]!.fields as SweepAlertFields;
+    expect(alert.failures_24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
+    expect(alert.stages).toEqual([{ stage: "sandbox", count: SWEEP_FAILURE_THRESHOLD + 1 }]);
+  });
+
   test("threshold boundary: ONE fully-failed message's rows do not alert", async () => {
     const db = failureDb();
     // The threshold's own case: a single DLQ'd job leaves exactly this many rows
@@ -578,6 +615,8 @@ describe("runSweep", () => {
       failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
+      // The seeded rows are all `runner`: the breakdown is the total's parts.
+      stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
     });
   });
 
@@ -603,6 +642,7 @@ describe("runSweep", () => {
       failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
+      stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
     });
   });
 

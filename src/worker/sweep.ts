@@ -6,14 +6,20 @@
  * the "DLQ-bound failure leaves zero D1 trace" blind spot) and alert when
  * the count breaches the threshold.
  *
- * The attribution stages (PAGING_EXCLUDED_STAGES) are EXCLUDED from that
- * count — all of them are degraded-but-successful attribution written for a
- * review that continued: `recheck` marks a budget skip, a dead seat or one
- * invalid document; `usage` marks a `usage_events` insert that failed while
- * the review went on; `rate-limit` marks a degraded-comment sweep GitHub
- * throttled while the review itself stood.
- * Counting them would page ops for reviews that published normally. They stay
- * in `review_failures` — only the paging signal ignores them.
+ * The paging-excluded stages (PAGING_EXCLUDED_STAGES) are EXCLUDED from that
+ * count: the attribution stages are degraded-but-successful attribution
+ * written for a review that continued (`recheck` marks a budget skip, a dead
+ * seat or one invalid document; `usage` marks a `usage_events` insert that
+ * failed while the review went on; `rate-limit` marks a degraded-comment sweep
+ * GitHub throttled while the review itself stood), and `quota` marks one
+ * tenant's exhausted month. Counting them would page ops for reviews that
+ * published normally, or for a commercial ceiling that is not an incident.
+ * They stay in `review_failures` — only the paging signal ignores them, and
+ * the dashboard still counts `quota` as a failure.
+ *
+ * The same query returns the per-stage breakdown (`stages`) that travels in
+ * the alert payload: one grouped read, so the total and its parts always
+ * describe the same instant.
  *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
  * - DLQ depth is NOT read: there is no CF API token surface,
@@ -96,13 +102,16 @@ export const SWEEP_INVITE_LAPSE_CAP = 500;
  * channel (SweepLog below), also POSTed verbatim to the webhook.
  * `dlq_check` is always "skipped" (AL-6: no CF API token surface);
  * `thresholds` echoes the pinned constants so an alert is
- * self-describing when the constants later move.
+ * self-describing when the constants later move. `stages` is the same
+ * grouped read that produced `failures_24h`, stage-ordered: the parts of the
+ * total an operator can act on, never a second snapshot.
  */
 export type SweepAlertFields = {
   event: "ops_sweep_alert";
   failures_24h: number;
   dlq_check: "skipped";
   thresholds: { failures_24h: number; window_hours: number };
+  stages: Array<{ stage: string; count: number }>;
 };
 
 /**
@@ -401,17 +410,21 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // the single source) so the SQL cannot drift from the pinned threshold
   // table. The composed text is byte-identical to the pre-constant form
   // (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
-  // `stage NOT IN (<attribution stages>)` is the paging exclusion: both rows are
-  // attribution for reviews that continued (see the header). The list comes
-  // from the failure store's one written partition, never a local literal.
-  const row = await db
+  // `stage NOT IN (<paging stages>)` is the paging exclusion: attribution rows
+  // are reviews that continued, and `quota` is one tenant's spent month (see
+  // the header). The list comes from the contract's written partition, never a
+  // local literal. ONE grouped read supplies both the total and its breakdown,
+  // so a payload can never describe a different instant than its own count.
+  const { results: stageRows } = await db
     .prepare(
-      `SELECT COUNT(*) AS n FROM review_failures
+      `SELECT stage, COUNT(*) AS count FROM review_failures
        WHERE created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
-         AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})`,
+         AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+       GROUP BY stage ORDER BY stage`,
     )
-    .first<{ n: number }>();
-  const failures24h = row?.n ?? 0;
+    .all<{ stage: string; count: number }>();
+  const stages = stageRows.map((row) => ({ stage: row.stage, count: row.count }));
+  const failures24h = stages.reduce((sum, row) => sum + row.count, 0);
   const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
   if (!thresholdBreached) {
     return { failures24h, thresholdBreached, invitesExpired, webhook: "not_attempted" };
@@ -422,6 +435,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     failures_24h: failures24h,
     dlq_check: "skipped",
     thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+    stages,
   };
   log.warn(alert, "review failure threshold breached");
   if (!deps.alertUrl) {
