@@ -39,7 +39,7 @@ describe("shell models", () => {
     // actions carry the role gate. Nav visibility must not hide the entry.
     const sidebar = buildSidebarModel(member, "/dashboard/apps");
     expect(sidebar.items.map((item) => item.label)).toEqual([
-      "Review targets",
+      "Repositories",
       "Apps",
       "Members",
       "Settings",
@@ -63,7 +63,7 @@ describe("shell models", () => {
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
-    expect(sidebar.items.map((item) => item.label)).toEqual(["审查目标", "应用", "成员", "设置"]);
+    expect(sidebar.items.map((item) => item.label)).toEqual(["仓库", "应用", "成员", "设置"]);
   });
 
   test("navbar is slim: theme + Lang + account + logout only", () => {

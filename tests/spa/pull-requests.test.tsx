@@ -155,7 +155,7 @@ describe("tab shell rendering (static SSR)", () => {
       const tabNames = await withMarkup(renderDetail(payload), (container) =>
         [...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent ?? ""),
       );
-      expect(tabNames).not.toContain(t("en", "appDetail.tabPullRequests"));
+      expect(tabNames).not.toContain(t("en", "targets.tabPullRequests"));
       expect(renderDetail(payload)).not.toContain(t("en", "pullRequests.columnPr"));
     }
   });

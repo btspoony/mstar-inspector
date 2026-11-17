@@ -22,7 +22,6 @@ import { settingsOpOutcome } from "./SettingsPage";
 import type { OpNotice } from "./PageNotice";
 import {
   ReviewPolicyFields,
-  TARGET_SETTINGS_COPY,
   type TargetPolicySettings,
 } from "./TargetSettingsTab";
 
@@ -95,7 +94,7 @@ export function WorkspaceDefaultsTab({
   return (
     <SectionCard tier="secondary">
       <CardHeader>
-        <SectionCardTitle>{TARGET_SETTINGS_COPY[locale].heading}</SectionCardTitle>
+        <SectionCardTitle>{t(locale, "targets.settings.heading")}</SectionCardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-5">
         <ReviewPolicyFields

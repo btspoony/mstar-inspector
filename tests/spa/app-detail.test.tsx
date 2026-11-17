@@ -372,9 +372,8 @@ describe("tab shell rendering (static SSR)", () => {
     );
     expect(installed).toContain(">Installed</button>");
     expect(installed).toContain(t("en", "settings.install"));
-    // The owner allowlist was deleted, and the bot's installations table moved
+    // The owner allowlist surface and the bot's installations table both moved
     // off this page entirely (bot health reports deliveries, not rows).
-    expect(installed).not.toContain(t("en", "settings.allowlist"));
     expect(installed).not.toContain(t("en", "settings.installationsAccount"));
   });
 
@@ -1042,10 +1041,6 @@ describe("Blocked and pending installations (static SSR)", () => {
     // cannot make.
     expect(installed).not.toContain(t("en", "settings.appInfoDeliveryUrl"));
     expect(installed).not.toContain(t("en", "settings.appInfoRefresh"));
-    // The bot's installation table is not on this page at all any more; the
-    // install block still states WHY it offers nothing.
-    const installedText = await withMarkup(installed, (container) => container.textContent ?? "");
-    expect(installedText).not.toContain(t("en", "settings.noInstallations"));
   });
 
   test("an unbound shared target renders one bind action per pending installation", () => {

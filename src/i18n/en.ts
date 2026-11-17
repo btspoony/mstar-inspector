@@ -23,7 +23,8 @@ export const en = {
     brand: "Morning Star Inspector",
     primary: "Primary navigation",
     apps: "Apps",
-    targets: "Review targets",
+    /** The repository surface (`/dashboard/<ref>/targets`). */
+    targets: "Repositories",
     members: "Members",
     settings: "Settings",
     /** Sidebar-footer entry to the platform console (operators on `saas`). */
@@ -152,8 +153,6 @@ export const en = {
      * and the way there is the repository surface (`targets.add` is its link).
      */
     noRepository: "This App has no repository yet, so it reviews nothing.",
-    tabInsights: "Insights",
-    tabPullRequests: "Pull requests",
     // The derived Blocked banner: the server reads the bot's scope and the
     // target's workspace on every read, so the copy names the one cause.
     blockedBotNotShared:
@@ -167,6 +166,16 @@ export const en = {
   targets: {
     heading: "Repositories",
     backToList: "Back to repositories",
+    /** The three detail tabs. */
+    tabInsights: "Insights",
+    tabPullRequests: "Pull requests",
+    /** The 评审配置 tab's own copy; `heading` doubles as the tab label. */
+    settings: {
+      heading: "Review settings",
+      follow: "Follow workspace defaults",
+      following:
+        "Following the workspace defaults; turn inheritance off to override them individually.",
+    },
     /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No repositories yet",
     emptyDescription: "Add one of the repositories your App is installed on.",
@@ -202,21 +211,15 @@ export const en = {
       loadReposFailed: "Could not load this App's repositories.",
       alreadyAdded: "Added",
       degraded: "Some installations could not be read — this list may be incomplete.",
-      noSelection: "Select at least one repository.",
       duplicates: "Already added: {names}",
       confirm: "Add",
     },
   },
   /**
-   * The bot settings page: the bot-owned configuration (credentials health,
-   * providers, chains, sandbox image, installations) that a target's workspace
-   * may use but not configure. The target-scoped labels stay under `settings.*`.
+   * The bot-owned configuration the App detail's 应用设置 tab composes under
+   * the App's identity header. The target-scoped labels stay under `settings.*`.
    */
   botSettings: {
-    /** The page's name in the document title (`common.pageTitle` slot). */
-    botPage: "Bot settings",
-    backToDetail: "Back to the target",
-    subtitle: "Configuration this bot owns — the workspace's review policy lives on the target.",
     scopeOwned: "Owned",
     scopeShared: "Shared",
     /** Shown whenever `can_manage` is false — a shared bot, or a non-manager. */
@@ -704,28 +707,18 @@ export const en = {
     lastWebhook: "Last webhook: {time}",
     /**
      * The installations section of the settings flow: heading, count subtitle
-     * and the table's four columns (the availability badge is derived from
-     * the stored owner allowlist, migration 0045). `installations.length`
-     * is the only installation figure the product carries (compass D13); the
-     * settings payload has no per-installation repository count, so there is
-     * no repository column.
+     * and the table's columns. `installations.length` is the only installation
+     * figure the product carries (compass D13); the settings payload has no
+     * per-installation repository count, so there is no repository column.
      */
     installations: "Installations",
     installationsCount: "{count} installations",
     installationsCountOne: "{count} installation",
     installationsAccount: "Account",
-    installationsAvailability: "Availability",
-    availabilityValid: "Valid",
-    availabilityInvalid: "Invalid",
     installationsId: "Installation ID",
     installationsLastSync: "Last sync",
     /** Metric-band label for the provider-key count on the App detail face. */
     metricKeys: "Keys",
-    noInstallations: "No installations yet.",
-    // A Blocked target: the bot's installation rows belong to its owning
-    // workspace, so the table states the absence instead of a false "none".
-    installationsNotVisible:
-      "This bot's installations belong to its owning workspace, so they are not listed here.",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy:
       "Up to 10 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",
@@ -1190,16 +1183,6 @@ export const en = {
     installPendingUnknownAccount: "Installation {id} (account not reported yet)",
     installPendingBind: "Bind to this target",
     installBindFailed: "The installation could not be bound. Reload this page and try again.",
-    // Installed tab: the owner allowlist (migration 0045).
-    allowlist: "Owner allowlist",
-    allowlistCopy: "With the switch on, only these repository owners are reviewed.",
-    allowlistEnable: "Restrict reviews to allowlisted owners",
-    allowlistOwners: "Allowed owners (one GitHub login per line)",
-    allowlistFailClosed:
-      "The switch is on and the list is empty: every delivery is refused, so no review will run.",
-    allowlistPrivateStillApplies:
-      "This App is private, but the stored list still applies to its deliveries — the control stays visible so you can manage it.",
-    allowlistSave: "Save allowlist",
     // Settings tab: the review gate the Check reports (migration 0045).
     reviewGate: "Review gate",
     reviewGateCopy: "The Check passes only when the verdict is one of these and the score meets the floor.",

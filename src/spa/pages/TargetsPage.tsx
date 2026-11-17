@@ -48,7 +48,6 @@ import { AppInsightsTab } from "./AppInsightsTab";
 import { AppPullRequestsTab } from "./AppPullRequestsTab";
 import { PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import {
-  TARGET_SETTINGS_COPY,
   TargetSettingsTab,
   parseTargetPolicyPayload,
   type TargetPolicyPayload,
@@ -809,9 +808,9 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
           variant="line"
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
-          <TabsTrigger value="settings">{TARGET_SETTINGS_COPY[locale].heading}</TabsTrigger>
-          <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger>
-          <TabsTrigger value="pull-requests">{t(locale, "appDetail.tabPullRequests")}</TabsTrigger>
+          <TabsTrigger value="settings">{t(locale, "targets.settings.heading")}</TabsTrigger>
+          <TabsTrigger value="insights">{t(locale, "targets.tabInsights")}</TabsTrigger>
+          <TabsTrigger value="pull-requests">{t(locale, "targets.tabPullRequests")}</TabsTrigger>
         </TabsList>
         {/* forceMount on every panel (mount-once tab switching, the App detail's
             contract): the settings tab's typed gate draft and the two data tabs'

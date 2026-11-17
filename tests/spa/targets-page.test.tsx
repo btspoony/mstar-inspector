@@ -658,9 +658,9 @@ describe("repository detail page (mounted)", () => {
     );
     try {
       expect(view.tabs()).toEqual([
-        "Review settings",
-        t("en", "appDetail.tabInsights"),
-        t("en", "appDetail.tabPullRequests"),
+        t("en", "targets.settings.heading"),
+        t("en", "targets.tabInsights"),
+        t("en", "targets.tabPullRequests"),
       ]);
       // The settings panel is the default face and renders the payload's
       // EFFECTIVE policy (Every push / 45), not the defaults beside it.
@@ -712,15 +712,15 @@ describe("all-repositories detail (mounted)", () => {
       expect(view.text()).toContain(t("en", "targets.allRepositories"));
       expect(view.text()).toContain(t("en", "targets.repositoryCountMany", { count: 3 }));
       expect(view.tabs()).toEqual([
-        "Review settings",
-        t("en", "appDetail.tabInsights"),
-        t("en", "appDetail.tabPullRequests"),
+        t("en", "targets.settings.heading"),
+        t("en", "targets.tabInsights"),
+        t("en", "targets.tabPullRequests"),
       ]);
       // The workspace defaults, editable — and the two per-target switches are
       // absent, because neither inherits nor pauses anything at this level.
       expect(view.text()).toContain(t("en", "settings.triggerModeOpen"));
       expect(view.text()).not.toContain(t("en", "settings.pauseReviews"));
-      expect(view.text()).not.toContain("Follow workspace defaults");
+      expect(view.text()).not.toContain(t("en", "targets.settings.follow"));
       const score = view.win.document.querySelector('input[type="number"]');
       expect((score as unknown as { value: string } | null)?.value).toBe("60");
       expect((score as unknown as { disabled: boolean } | null)?.disabled).toBe(false);
@@ -792,9 +792,9 @@ describe("all-repositories detail (mounted)", () => {
       { path: "/dashboard/acme/targets/all?tab=insights", targetId: "all" },
     );
     try {
-      expect(view.activeTab()).toBe(t("en", "appDetail.tabInsights"));
+      expect(view.activeTab()).toBe(t("en", "targets.tabInsights"));
       const prs = [...view.win.document.querySelectorAll('[role="tab"]')].find(
-        (node) => node.textContent === t("en", "appDetail.tabPullRequests"),
+        (node) => node.textContent === t("en", "targets.tabPullRequests"),
       );
       await act(async () => {
         prs?.dispatchEvent(

@@ -13,7 +13,8 @@ export const zhCN: Dictionary = {
     brand: "Morning Star Inspector",
     primary: "主导航",
     apps: "应用",
-    targets: "审查目标",
+    /** 仓库页（`/dashboard/<ref>/targets`）。 */
+    targets: "仓库",
     members: "成员",
     settings: "设置",
     /** 侧栏底部的平台运营入口（仅 saas 上的 operator 可见）。 */
@@ -113,27 +114,34 @@ export const zhCN: Dictionary = {
       revokeFailed: "无法撤销给 {login} 的邀请 — 请重试。",
     },
   },
-  /** App 详情页：标签页外壳。原先的“应用设置”标签内容已移到审查目标页（`targets.*`），这里的标签只保留 App 自身的面。 */
+  /** App 详情页：标签页外壳。评审策略属于仓库页（`targets.*`），这里的标签只保留 App 自身的面。 */
   appDetail: {
     /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
     documentPage: "应用",
     backToApps: "返回应用",
-    /** 从 App 详情与目标详情指向机器人设置页的链接。 */
+    /** 从 App 详情与目标详情指向机器人自身设置的链接。 */
     botSettingsLink: "机器人设置",
     /** App 详情页的两个面：应用自身的配置，然后安装块。 */
     tabSettings: "应用设置",
     tabInstallations: "已安装",
     /** App 尚无仓库：没有任何评审，入口在仓库页面（`targets.add` 即该链接）。 */
     noRepository: "该应用还没有对应仓库，因此不会进行任何评审。",
-    tabInsights: "洞察",
-    tabPullRequests: "拉取请求",
     blockedBotNotShared:
       "该机器人已不再共享给本工作区，因此此目标不会进行任何评审。请联系平台运营者重新共享。",
   },
-  /** 审查目标页（`/dashboard/<ref>/targets`）：工作区对某个机器人的认领，独立成页。详情页沿用被移出的“应用设置”标签的 `settings.*` 文案。 */
+  /** 仓库页（`/dashboard/<ref>/targets`）：工作区对一个仓库的认领，独立成页。详情页沿用被移出的“应用设置”标签的 `settings.*` 文案。 */
   targets: {
     heading: "仓库",
     backToList: "返回仓库",
+    /** 详情页的三个标签。 */
+    tabInsights: "洞察",
+    tabPullRequests: "拉取请求",
+    /** 评审配置标签自身的文案；`heading` 同时作为标签名。 */
+    settings: {
+      heading: "评审配置",
+      follow: "继承工作区默认",
+      following: "跟随工作区默认；关闭继承后可单独覆盖。",
+    },
     /** 组合空状态（EmptyState 的标题 + 描述）。 */
     emptyTitle: "还没有仓库",
     emptyDescription: "添加一个你的应用已安装的仓库。",
@@ -169,17 +177,12 @@ export const zhCN: Dictionary = {
       loadReposFailed: "无法加载该应用的仓库。",
       alreadyAdded: "已添加",
       degraded: "部分安装无法读取 — 此列表可能不完整。",
-      noSelection: "至少选择一个仓库。",
       duplicates: "以下仓库已存在：{names}",
       confirm: "添加",
     },
   },
-  /** 机器人设置页：机器人自身拥有的配置（凭据健康、提供方、模型链、沙箱镜像、安装）。使用该机器人的工作区可读，但不能配置。 */
+  /** 机器人自身拥有的配置，由 App 详情页的“应用设置”标签组合在身份头下。target 级文案沿用 `settings.*`。 */
   botSettings: {
-    /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
-    botPage: "机器人设置",
-    backToDetail: "返回目标",
-    subtitle: "此机器人自身拥有的配置——工作区的评审策略保留在目标上。",
     scopeOwned: "自有",
     scopeShared: "共享",
     /** `can_manage` 为 false 时显示（共享机器人，或非管理员）。 */
@@ -618,15 +621,10 @@ export const zhCN: Dictionary = {
     installationsCount: "{count} 个安装",
     installationsCountOne: "{count} 个安装",
     installationsAccount: "账号",
-    installationsAvailability: "可用性",
-    availabilityValid: "有效",
-    availabilityInvalid: "无效",
     installationsId: "安装 ID",
     installationsLastSync: "最近同步",
     /** App 详情页指标带中 provider 密钥数的标签。 */
     metricKeys: "密钥",
-    noInstallations: "还没有安装。",
-    installationsNotVisible: "该机器人的安装属于其所属工作区，因此不在此处列出。",
     recentDeliveries: "最近投递",
     recentDeliveriesCopy: "最多 10 次 webhook 投递 — 带结论的（正常 / 已暂停 / 已拒绝）排在前，其余按时间从新到旧。",
     noDeliveries: "还没有投递。",
@@ -979,15 +977,6 @@ export const zhCN: Dictionary = {
     installPendingUnknownAccount: "安装 {id}（GitHub 尚未报告其账号）",
     installPendingBind: "绑定到本目标",
     installBindFailed: "安装绑定失败。请刷新本页后重试。",
-    // 已安装标签页：仓库所有者允许名单（迁移 0045）。
-    allowlist: "所有者允许名单",
-    allowlistCopy: "开关打开时，仅审查这些仓库所有者发起的交付。",
-    allowlistEnable: "仅审查允许名单中的所有者",
-    allowlistOwners: "允许的所有者（每行一个 GitHub 登录名）",
-    allowlistFailClosed: "开关已打开但名单为空：所有交付都会被拒绝，不会有任何审查运行。",
-    allowlistPrivateStillApplies:
-      "此 App 为私有，但已存储的名单仍会作用于其交付 — 控件保持显示，以便你管理名单。",
-    allowlistSave: "保存允许名单",
     // 设置标签页：Check 所报告的审查门禁（迁移 0045）。
     reviewGate: "审查门禁",
     reviewGateCopy: "仅当结论属于以下之一且分数达到下限时，Check 才通过。",

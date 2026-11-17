@@ -237,8 +237,10 @@ describe("App detail IA copy", () => {
   });
 
   test("the repository surface copy exists atomically in both locales", () => {
-    // The nav LABEL is plan 371.5's; this pins the surface copy the repository
-    // list renders (plan 371.2).
+    // The nav label and every repository surface string — list, add dialog,
+    // detail tabs — live under `targets.*`; nothing is inline.
+    expect(t("en", "nav.targets")).toBe("Repositories");
+    expect(t("zh_CN", "nav.targets")).toBe("仓库");
     expect(t("en", "targets.heading")).toBe("Repositories");
     expect(t("zh_CN", "targets.heading")).toBe("仓库");
     expect(t("en", "targets.emptyTitle")).toBe("No repositories yet");
@@ -248,6 +250,16 @@ describe("App detail IA copy", () => {
       "This App is not installed on any repository.",
     );
     expect(t("zh_CN", "targets.addDialog.duplicates").length).toBeGreaterThan(0);
+    // The three detail tabs and the 评审配置 tab's own copy.
+    expect(t("en", "targets.tabInsights")).toBe("Insights");
+    expect(t("zh_CN", "targets.tabPullRequests")).toBe("拉取请求");
+    expect(t("en", "targets.settings.heading")).toBe("Review settings");
+    expect(t("zh_CN", "targets.settings.heading")).toBe("评审配置");
+    expect(t("en", "targets.settings.follow")).toBe("Follow workspace defaults");
+    expect(t("zh_CN", "targets.settings.following").length).toBeGreaterThan(0);
+    // The App detail's data tabs left this page with the surfaces themselves.
+    expect(isDictionaryKey("appDetail.tabInsights")).toBe(false);
+    expect(isDictionaryKey("appDetail.tabPullRequests")).toBe(false);
   });
 
   test("the back-to-apps wayfinding key lives under appDetail atomically; the old settings key is removed, not aliased", () => {
@@ -279,12 +291,25 @@ describe("App detail IA copy", () => {
     }
     // The settings tab is a section flow now: the two tier-group eyebrow keys
     // and the per-row installation sentence (replaced by the table's account /
-    // installation / last-sync columns) leave with it.
+    // installation / last-sync columns) leave with it. The availability badge
+    // and the allowlist copy leave with the allowlist surface.
     for (const key of [
       "settings.group.appInfo",
       "settings.group.configuration",
       "settings.installation",
       "settings.lastSeen",
+      "settings.installationsAvailability",
+      "settings.availabilityValid",
+      "settings.availabilityInvalid",
+      "settings.installationsNotVisible",
+      "settings.noInstallations",
+      "settings.allowlist",
+      "settings.allowlistCopy",
+      "settings.allowlistEnable",
+      "settings.allowlistOwners",
+      "settings.allowlistFailClosed",
+      "settings.allowlistPrivateStillApplies",
+      "settings.allowlistSave",
     ] as const) {
       expect(isDictionaryKey(key), key).toBe(false);
     }

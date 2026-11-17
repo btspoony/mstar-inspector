@@ -120,28 +120,6 @@ export function parseTargetPolicyPayload(data: unknown): TargetPolicyPayload | n
   };
 }
 
-/**
- * The copy the 评审配置 tab introduces has no dictionary key yet — plan 371.5
- * owns the i18n pass, so these three strings live here in one block. The page's
- * tab label reads the same map, so the tab and its panel heading cannot drift.
- *
- * shortcut: the tab's own copy is outside `src/i18n`; plan 371.5 moves it into
- * `targets.*` and deletes this map.
- */
-export const TARGET_SETTINGS_COPY: Record<Locale, { heading: string; inherit: string; following: string }> = {
-  en: {
-    heading: "Review settings",
-    inherit: "Follow workspace defaults",
-    following:
-      "Following the workspace defaults; turn inheritance off to override them individually.",
-  },
-  zh_CN: {
-    heading: "评审配置",
-    inherit: "继承工作区默认",
-    following: "跟随工作区默认；关闭继承后可单独覆盖。",
-  },
-};
-
 const TRIGGER_LABEL_KEYS: Record<ReviewTriggerMode, DictionaryKey> = {
   open: "settings.triggerModeOpen",
   every_push: "settings.triggerModeEveryPush",
@@ -315,7 +293,6 @@ export function TargetSettingsTab({
   onNotice: (notice: OpNotice) => void;
 }) {
   const { target, effective, defaults } = payload;
-  const copy = TARGET_SETTINGS_COPY[locale];
   const inheriting = target.follow_workspace_defaults === 1;
   const [busy, setBusy] = useState(false);
   const path = `${apiBase()}/api/targets/${encodeURIComponent(target.target_id)}`;
@@ -344,7 +321,7 @@ export function TargetSettingsTab({
   return (
     <SectionCard tier="secondary">
       <CardHeader>
-        <SectionCardTitle>{copy.heading}</SectionCardTitle>
+        <SectionCardTitle>{t(locale, "targets.settings.heading")}</SectionCardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-5">
         <ReviewPolicyFields
@@ -363,9 +340,11 @@ export function TargetSettingsTab({
             disabled={busy}
             onChange={(event) => void save({ follow: event.target.checked ? 1 : 0 })}
           />
-          {copy.inherit}
+          {t(locale, "targets.settings.follow")}
         </label>
-        {inheriting ? <p className="text-sm text-muted-foreground">{copy.following}</p> : null}
+        {inheriting ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "targets.settings.following")}</p>
+        ) : null}
 
         <label className="flex w-fit items-center gap-2 text-sm font-medium">
           <input

@@ -22,7 +22,6 @@ import {
   SelectLabel,
   SelectTrigger,
   SelectValue,
-  StatusBadge,
   Tabs,
   TabsContent,
   TabsList,
@@ -65,7 +64,6 @@ import {
   seatSelectValue,
   splitModelChain,
   type ChainTab,
-  type AllowlistSettings,
   type BotConfigSections,
   type CheckGateSettings,
   type ModelOptionGroup,
@@ -893,173 +891,6 @@ export function AppInstallSection({
           ) : null}
         </div>
       </div>
-    </FlowSection>
-  );
-}
-
-/**
- * The Installed tab's second block: the owner allowlist (it sits above the
- * installation table and below the install link — owners arrive through
- * installations). The caller renders it for EVERY visibility: admission
- * enforces the stored list whatever the cached visibility, so hiding the
- * control for a private App would leave a live filter unmanageable — a
- * private App gets a line saying the control is shown for that reason
- * (`privateApp`). The switch and the logins save together: `enabled` rides as
- * exactly one `"1"` / `"0"` field and `owners` as one newline-separated text
- * field the server splits, trims and de-duplicates.
- */
-export function AllowlistSection({
-  locale,
-  appId,
-  allowlist,
-  privateApp,
-  installations,
-  onReload,
-}: {
-  locale: SpaBoot["locale"];
-  appId: string;
-  allowlist: AllowlistSettings;
-  /** The cached visibility is `private` — only the note below changes. */
-  privateApp: boolean;
-  /**
-   * The bot's installations — the rows this allowlist admits or refuses.
-   * `null` = not readable here (a Blocked target): the table is replaced by a
-   * line saying so instead of a false "no installations".
-   */
-  installations: SettingsManagePayload["installations"] | null;
-  onReload: (options?: { background?: boolean }) => Promise<boolean>;
-}) {
-  const [enabled, setEnabled] = useState(allowlist.enabled);
-  const [owners, setOwners] = useState(allowlist.owners.join("\n"));
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<OpNotice | null>(null);
-  // The save rides the button: the signal drives its face, the success copy
-  // survives as assistive text beside it — never as a notice box.
-  const signal = useSaveSignal();
-  const [savedCopy, setSavedCopy] = useState<string | null>(null);
-  // Server-state mirror: the deps compare by content, so an unrelated
-  // background reload (same stored values) never discards unsaved typing,
-  // while this save's reload — or a failed one — resyncs from the row.
-  const storedOwners = allowlist.owners.join("\n");
-  useEffect(() => {
-    setEnabled(allowlist.enabled);
-    setOwners(storedOwners);
-  }, [allowlist.enabled, storedOwners]);
-
-  const listed = owners
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
-
-  async function save(): Promise<void> {
-    setBusy(true);
-    signal.start();
-    setNotice(null); // the retry clears this cluster's own stale outcome first
-    try {
-      const outcome = await postPinnedOutcome(
-        `${apiBase()}/apps/${encodeURIComponent(appId)}/settings`,
-        { op: "save-allowlist", enabled: enabled ? "1" : "0", owners },
-        locale,
-        () => onReload({ background: true }),
-      );
-      if (outcome.kind === "success") {
-        setSavedCopy(outcome.message);
-        signal.succeed();
-      } else {
-        setNotice(outcome);
-        if (outcome.kind === "error") signal.fail();
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <FlowSection title={t(locale, "settings.allowlist")} subtitle={t(locale, "settings.allowlistCopy")}>
-      <form
-        className="flex flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void save();
-        }}
-      >
-        {privateApp ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "settings.allowlistPrivateStillApplies")}</p>
-        ) : null}
-        {/* The switch: a native binary control bound to its label — the house
-            primitives carry no switch, and a bespoke widget would duplicate
-            keyboard and state handling the platform already gets right. */}
-        <label className="flex w-fit items-center gap-2 text-sm font-medium">
-          <input
-            type="checkbox"
-            className="size-4 accent-(--tone-accent-solid)"
-            checked={enabled}
-            disabled={busy}
-            onChange={(event) => setEnabled(event.target.checked)}
-          />
-          {t(locale, "settings.allowlistEnable")}
-        </label>
-        {enabled ? (
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            {t(locale, "settings.allowlistOwners")}
-            <textarea
-              className="min-h-28 w-full rounded-sm border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring disabled:pointer-events-none disabled:opacity-50"
-              value={owners}
-              disabled={busy}
-              onChange={(event) => setOwners(event.target.value)}
-            />
-          </label>
-        ) : null}
-        {enabled && listed.length === 0 ? (
-          <p role="status" className="text-sm text-(--tone-warn-fg)">
-            {t(locale, "settings.allowlistFailClosed")}
-          </p>
-        ) : null}
-        {/* Admission, per installation: the allowlist is what decides it, so
-            the verdict renders HERE beside the owners it judges — the bot's
-            installation rows themselves live on the bot page. */}
-        <div className="flex flex-col gap-1">
-          <span className="text-sm font-medium">{t(locale, "settings.installationsAvailability")}</span>
-          {installations === null ? (
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.installationsNotVisible")}</p>
-          ) : installations.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.noInstallations")}</p>
-          ) : (
-            <ul className="flex flex-col gap-1">
-              {installations.map((inst) => {
-                // Admission mirrors the server rule (migration 0045): the
-                // switch off admits everyone; on, only a login on the owners
-                // list (GitHub logins are case-insensitive) is admitted.
-                const login = inst.account_login;
-                const valid =
-                  !enabled ||
-                  (login !== null &&
-                    listed.some((owner) => owner.toLowerCase() === login.toLowerCase()));
-                return (
-                  <li key={inst.installation_id} className="flex items-center gap-2 text-sm">
-                    <span>{login ?? t(locale, "common.time.unknown")}</span>
-                    <StatusBadge tone={valid ? "success" : "neutral"}>
-                      {t(locale, valid ? "settings.availabilityValid" : "settings.availabilityInvalid")}
-                    </StatusBadge>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-        <div>
-          <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
-            {t(locale, "settings.allowlistSave")}
-          </Button>
-          <SaveInFlight show={signal.status === "loading"} locale={locale} />
-          {signal.status === "success" && savedCopy !== null ? (
-            <span role="status" className="sr-only">
-              {savedCopy}
-            </span>
-          ) : null}
-        </div>
-        <NoticeRegion notice={notice} />
-      </form>
     </FlowSection>
   );
 }
