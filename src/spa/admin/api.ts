@@ -294,7 +294,9 @@ function parseMaintenance(row: Json): MaintenanceConfig | null {
     enabled: bool(window, "enabled"),
     reason: maybeText(window, "reason"),
     since: maybeText(window, "since"),
-    unreadable: bool(window, "unreadable"),
+    // Additive field: an older Worker omits it, and its absence is "readable"
+    // (that Worker had no unreadable state to report).
+    unreadable: window.unreadable === true,
   };
 }
 
