@@ -273,6 +273,9 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     // Live queue depth for the same page; `null` means the gauge is not
     // readable, never that the queue is empty.
     queue,
+    // The maintenance window as the gate reads it (D20), so the console states
+    // what `/dashboard/*` is answering rather than echoing its own last save.
+    maintenance: await getMaintenanceMode(db),
   });
 }
 
