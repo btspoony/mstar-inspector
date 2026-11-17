@@ -2,10 +2,11 @@
  * The global insights page is retired — /dashboard/insights is no longer a
  * SPA page and no longer dispatches to the SPA shell (neither an HTML
  * navigation GET nor any other GET reaches the SPA boot document on this
- * path). The data contract lives on the per-App JSON face
- * (GET /dashboard/api/apps/:appId/insights/summary); this file also pins
- * that face: membership + the workspace owner/admin gate with app-scoped data, and
- * the cross-App global endpoint removed with no compat shim.
+ * path). The data contract lives on the target-addressed JSON face
+ * (GET /dashboard/api/targets/:targetId/insights/summary); this file also pins
+ * that face: membership + the workspace owner/admin gate with target-scoped
+ * data, and the removed App-addressed + cross-App endpoints with no compat
+ * shim.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -74,28 +75,30 @@ describe("GET /dashboard/insights (retired)", () => {
   });
 });
 
-// --- Per-App insights summary API -------------------------------
-// GET /dashboard/api/apps/:appId/insights/summary — the JSON read face for
-// the insights aggregation, scoped to one App via the store's `appId`
-// filter. Gate: mount-level membership → App-id lookup (unknown and
-// soft-deleted are equally invisible, 404) → workspace owner/admin (403). All
-// deny bodies are `{ error }` JSON. The former cross-App global endpoint
-// (GET /dashboard/api/insights/summary) is removed — no compat shim.
+// --- Target insights summary API -------------------------------
+// GET /dashboard/api/targets/:targetId/insights/summary — the JSON read face
+// for the insights aggregation, scoped to one review target. Gate:
+// mount-level membership → target-in-workspace lookup (unknown, soft-deleted
+// and foreign are equally invisible, 404) → workspace owner/admin (403). All
+// deny bodies are `{ error }` JSON. Both removed endpoints — the App-addressed
+// face and the former cross-App global one
+// (GET /dashboard/api/insights/summary) — answer 404, no compat shim.
 const SESSION_SECRET_API = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const API_TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 /**
- * Fixture world (per-App scoping): mallory owns "widgets-app"; octocat is
- * admin; hubot is a plain member. Reviews: three attributed to widgets-app
+ * Fixture world (per-target scoping): mallory owns "widgets-app"'s target;
+ * octocat is admin; hubot is a plain member. Reviews: three on the target
  * (25d / 15d ago sharing fingerprint fp-x → recurrence count 2, plus a
- * 10d approve in the app's second repo acme/portal), one attributed to a
- * DIFFERENT app (5d ago) that must never leak into widgets-app's numbers.
+ * 10d approve in acme/portal), one attributed to a DIFFERENT target (5d ago)
+ * that must never leak into this target's numbers.
  */
 async function insightsWorld(): Promise<{
   db: TestD1;
   env: Env;
-  appId: string;
+  /** The widgets-app target id — the address every face below takes. */
+  targetId: string;
   /** Same seed-time helper used for the fixture's reviewed_at values. */
   daysAgo: (n: number) => string;
 }> {
@@ -117,7 +120,7 @@ async function insightsWorld(): Promise<{
     createdBy: "mallory",
     workspaceId: "default",
   });
-  seedTarget(db, appId, { name: "widgets-app", repoName: "widgets" });
+  const targetId = seedTarget(db, appId, { name: "widgets-app", repoName: "widgets" });
   await createReviewBotsStore(db).createApp({
     id: otherAppId,
     githubSlug: "other-app",
@@ -159,7 +162,7 @@ async function insightsWorld(): Promise<{
     DASHBOARD_SESSION_SECRET: SESSION_SECRET_API,
     DB: db,
   } as unknown as Env;
-  return { db, env, appId, daysAgo };
+  return { db, env, targetId, daysAgo };
 }
 
 function apiCookie(sessionSecret: string, login: string): Promise<string> {
@@ -170,19 +173,19 @@ function apiCookie(sessionSecret: string, login: string): Promise<string> {
 const WIDGETS_APP_ID = 1001;
 const OTHER_APP_ID = 1002;
 
-function appsInsightsGet(env: Env, appId: number, cookie: string, query = "") {
+function targetInsightsGet(env: Env, targetId: string, cookie: string, query = "") {
   return worker.fetch(
-    new Request(`https://worker.local/dashboard/default/api/apps/${appId}/insights/summary${query === "" ? "" : `?${query}`}`, {
+    new Request(`https://worker.local/dashboard/default/api/targets/${targetId}/insights/summary${query === "" ? "" : `?${query}`}`, {
       headers: { Cookie: `${SESSION_COOKIE}=${cookie}` },
     }),
     env,
   );
 }
 
-describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
-  test("manager sees the app-scoped summary: full JSON shape, own-App reviews only", async () => {
-    const { env, daysAgo } = await insightsWorld();
-    const res = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "mallory"));
+describe("GET /dashboard/api/targets/:targetId/insights/summary", () => {
+  test("manager sees the target-scoped summary: full JSON shape, own-target reviews only", async () => {
+    const { env, targetId, daysAgo } = await insightsWorld();
+    const res = await targetInsightsGet(env, targetId, await apiCookie(SESSION_SECRET_API, "mallory"));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       window_days: number;
@@ -208,8 +211,8 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
       ].sort(),
     );
     expect(body.window_days).toBe(30);
-    // r-a + r-b + r-d are the app's in-window reviews; r-c belongs to
-    // another App.
+    // r-a + r-b + r-d are this target's in-window reviews; r-c belongs to
+    // another target.
     expect(body.reviews_total).toBe(3);
     expect(body.findings_by_severity).toEqual([
       { severity: "must-fix", count: 2 },
@@ -234,8 +237,8 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
   });
 
   test("the distribution carries the shared four-class series map, zero-filled in class order", async () => {
-    const { env } = await insightsWorld();
-    const res = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "mallory"));
+    const { env, targetId } = await insightsWorld();
+    const res = await targetInsightsGet(env, targetId, await apiCookie(SESSION_SECRET_API, "mallory"));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       findings_distribution: Array<{ by_severity: Record<string, number> }>;
@@ -249,88 +252,88 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
     }
   });
 
-  test("include=repos is app-scoped: another App's repo never appears", async () => {
-    const { env } = await insightsWorld();
-    const res = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "mallory"), "include=repos");
+  test("include=repos is target-scoped: another target's repo never appears", async () => {
+    const { env, targetId } = await insightsWorld();
+    const res = await targetInsightsGet(env, targetId, await apiCookie(SESSION_SECRET_API, "mallory"), "include=repos");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { repos: string[] };
-    // Both of the app's own repos, ascending — never the other App's.
+    // Both of the target's own repos, ascending — never the other target's.
     expect(body.repos).toEqual(["acme/portal", "acme/widgets"]);
   });
 
-  test("repo= filter: valid owner/repo echoed AND applied — the app's other-repo review drops out", async () => {
-    const { env } = await insightsWorld();
-    const res = await appsInsightsGet(
+  test("repo= filter: valid owner/repo echoed AND applied — the other-repo review drops out", async () => {
+    const { env, targetId } = await insightsWorld();
+    const res = await targetInsightsGet(
       env,
-      WIDGETS_APP_ID,
+      targetId,
       await apiCookie(SESSION_SECRET_API, "mallory"),
       "repo=acme/widgets&include=repos",
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { repo: string; reviews_total: number };
     expect(body.repo).toBe("acme/widgets");
-    // Applied, not just echoed: the app has 3 in-window reviews, but r-d
+    // Applied, not just echoed: the target has 3 in-window reviews, but r-d
     // (acme/portal) is outside the owner/repo filter.
     expect(body.reviews_total).toBe(2);
   });
 
   test("malformed repo= → 400 (parseInsightsParams owner/repo semantics)", async () => {
-    const { env } = await insightsWorld();
+    const { env, targetId } = await insightsWorld();
     const cookie = await apiCookie(SESSION_SECRET_API, "mallory");
     for (const repo of ["oops", "owner/repo/extra", "/repo", "owner/"]) {
-      const res = await appsInsightsGet(env, WIDGETS_APP_ID, cookie, `repo=${encodeURIComponent(repo)}`);
+      const res = await targetInsightsGet(env, targetId, cookie, `repo=${encodeURIComponent(repo)}`);
       expect(res.status, `repo=${repo}`).toBe(400);
       expect(((await res.json()) as { error?: string }).error, `repo=${repo}`).toContain("repo");
     }
   });
 
   test("malformed include= → 400 (only `repos` is a valid extra)", async () => {
-    const { env } = await insightsWorld();
+    const { env, targetId } = await insightsWorld();
     const cookie = await apiCookie(SESSION_SECRET_API, "mallory");
     for (const include of ["foo", "repos,foo", "repos,"]) {
-      const res = await appsInsightsGet(env, WIDGETS_APP_ID, cookie, `include=${include}`);
+      const res = await targetInsightsGet(env, targetId, cookie, `include=${include}`);
       expect(res.status, `include=${include}`).toBe(400);
       expect(((await res.json()) as { error?: string }).error, `include=${include}`).toContain("include");
     }
   });
 
   test("non-manager member → 403 JSON; admin (non-creator) → 200", async () => {
-    const { env } = await insightsWorld();
-    const hubot = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "hubot"));
+    const { env, targetId } = await insightsWorld();
+    const hubot = await targetInsightsGet(env, targetId, await apiCookie(SESSION_SECRET_API, "hubot"));
     expect(hubot.status).toBe(403);
     expect(((await hubot.json()) as { error?: string }).error).toBeDefined();
 
-    const admin = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "octocat"));
+    const admin = await targetInsightsGet(env, targetId, await apiCookie(SESSION_SECRET_API, "octocat"));
     expect(admin.status).toBe(200);
   });
 
-  test("unknown App id and soft-deleted App → 404 JSON", async () => {
-    const { db, env } = await insightsWorld();
-    const unknown = await appsInsightsGet(env, 9999, await apiCookie(SESSION_SECRET_API, "mallory"));
+  test("unknown and soft-deleted targets → 404 JSON", async () => {
+    const { db, env, targetId } = await insightsWorld();
+    const unknown = await targetInsightsGet(env, "no-such-target", await apiCookie(SESSION_SECRET_API, "mallory"));
     expect(unknown.status).toBe(404);
-    expect(((await unknown.json()) as { error?: string }).error).toBeDefined();
+    expect(await unknown.json()).toEqual({ error: "unknown target" });
 
-    db.raw.query("UPDATE review_bots SET deleted_at = datetime('now') WHERE github_app_id = ?").run(WIDGETS_APP_ID);
-    const deleted = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "mallory"));
+    db.raw.query("UPDATE review_targets SET deleted_at = datetime('now') WHERE id = ?").run(targetId);
+    const deleted = await targetInsightsGet(env, targetId, await apiCookie(SESSION_SECRET_API, "mallory"));
     expect(deleted.status).toBe(404);
   });
 
   test("window parse: malformed → 400; window=400 clamps to 90 with the effective window echoed", async () => {
-    const { env } = await insightsWorld();
+    const { env, targetId } = await insightsWorld();
     const cookie = await apiCookie(SESSION_SECRET_API, "mallory");
     for (const window of ["abc", "30.5", "-5", ""]) {
-      const res = await appsInsightsGet(env, WIDGETS_APP_ID, cookie, `window=${window}`);
+      const res = await targetInsightsGet(env, targetId, cookie, `window=${window}`);
       expect(res.status, `window=${window}`).toBe(400);
       expect(((await res.json()) as { error?: string }).error, `window=${window}`).toContain("window");
     }
-    const clamped = await appsInsightsGet(env, WIDGETS_APP_ID, cookie, "window=400");
+    const clamped = await targetInsightsGet(env, targetId, cookie, "window=400");
     expect(clamped.status).toBe(200);
     expect(((await clamped.json()) as { window_days: number }).window_days).toBe(90);
   });
 
   test("daily_trend is [] on a week window while weekly_trend keeps its raw buckets", async () => {
-    const { env } = await insightsWorld();
-    const res = await appsInsightsGet(env, WIDGETS_APP_ID, await apiCookie(SESSION_SECRET_API, "mallory"), "window=90");
+    const { env, targetId } = await insightsWorld();
+    const res = await targetInsightsGet(env, targetId, await apiCookie(SESSION_SECRET_API, "mallory"), "window=90");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       window_days: number;
@@ -344,14 +347,21 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
     expect(body.weekly_trend.length).toBeGreaterThan(0);
   });
 
-  test("the cross-App global endpoint is removed: member GET → 404, never a summary", async () => {
+  test("the removed family answers 404, never a summary", async () => {
     const { env } = await insightsWorld();
-    const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/api/insights/summary", {
-        headers: { Cookie: `${SESSION_COOKIE}=${await apiCookie(SESSION_SECRET_API, "mallory")}` },
-      }),
-      env,
-    );
-    expect(res.status).toBe(404);
+    const cookie = await apiCookie(SESSION_SECRET_API, "mallory");
+    // The App-addressed face (round B removed it) and the cross-App global one
+    // are both gone with no compat shim.
+    for (const path of [
+      `/dashboard/default/api/apps/${WIDGETS_APP_ID}/insights/summary`,
+      "/dashboard/api/insights/summary",
+    ]) {
+      const res = await worker.fetch(
+        new Request(`https://worker.local${path}`, { headers: { Cookie: `${SESSION_COOKIE}=${cookie}` } }),
+        env,
+      );
+      expect(res.status, path).toBe(404);
+    }
   });
+
 });

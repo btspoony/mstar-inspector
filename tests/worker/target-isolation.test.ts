@@ -238,10 +238,10 @@ function isolationFixture() {
   return { db, targetA, targetB };
 }
 
-const SCOPE_A = { targetId: "target-a", workspaceId: WORKSPACE_A, botId: BOT_ID };
-const SCOPE_B = { targetId: "target-b", workspaceId: WORKSPACE_B, botId: BOT_ID };
+const SCOPE_A = { kind: "target", targetId: "target-a", workspaceId: WORKSPACE_A } as const;
+const SCOPE_B = { kind: "target", targetId: "target-b", workspaceId: WORKSPACE_B } as const;
 /** A foreign pair: target B's id presented under target A's workspace. */
-const SCOPE_CROSSED = { targetId: "target-b", workspaceId: WORKSPACE_A, botId: BOT_ID };
+const SCOPE_CROSSED = { kind: "target", targetId: "target-b", workspaceId: WORKSPACE_A } as const;
 
 describe("insights aggregation is tenant-scoped", () => {
   test("each target's workspace reads only its own reviews", async () => {
@@ -377,8 +377,10 @@ describe("the execution ledgers are tenant-scoped by their own target", () => {
 });
 
 describe("the dashboard routes resolve the target inside the session workspace", () => {
-  const INSIGHTS = `/dashboard/${WORKSPACE_A}/api/apps/${GITHUB_APP_ID}/insights/summary?include=repos`;
-  const LEDGER = `/dashboard/${WORKSPACE_A}/api/apps/${GITHUB_APP_ID}/pull-requests`;
+  // Plan 372: insights and the ledger are target-addressed; settings stays
+  // App-addressed (a bot is still the configuration subject).
+  const INSIGHTS = `/dashboard/${WORKSPACE_A}/api/targets/target-a/insights/summary?include=repos`;
+  const LEDGER = `/dashboard/${WORKSPACE_A}/api/targets/target-a/pull-requests`;
   const SETTINGS = `/dashboard/${WORKSPACE_A}/api/apps/${GITHUB_APP_ID}/settings`;
 
   test("insights and the ledger serve this workspace's target only, with no GitHub call", async () => {
@@ -419,7 +421,7 @@ describe("the dashboard routes resolve the target inside the session workspace",
     expect(body.app.review_trigger_mode).toBe("manual");
   });
 
-  test("the bot is invisible from a workspace with no target on it: 404 on every face", async () => {
+  test("a target is invisible from a workspace that does not own it: 404 on both faces", async () => {
     const { db } = isolationFixture();
     // A third workspace, no target on this bot: the resolution's own verdict,
     // not a membership failure — octocat owns this workspace too.
@@ -434,9 +436,11 @@ describe("the dashboard routes resolve the target inside the session workspace",
        VALUES ('ws-c', 'user-octocat', 'owner', datetime('now'))`,
     );
     const env = envFor(db);
+    // Target A belongs to ws-a: presenting it under ws-c is a foreign id, and
+    // the App-addressed settings face has no target there to resolve.
     for (const path of [
-      `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/insights/summary`,
-      `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/pull-requests`,
+      `/dashboard/ws-c/api/targets/target-a/insights/summary`,
+      `/dashboard/ws-c/api/targets/target-a/pull-requests`,
       `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/settings`,
     ]) {
       const response = await worker.fetch(await request(path, "octocat"), env);
@@ -444,15 +448,15 @@ describe("the dashboard routes resolve the target inside the session workspace",
     }
   });
 
-  test("a workspace holding a target on the bot reads it, even when the bot is owned elsewhere", async () => {
+  test("a workspace holding a target on the bot reads that target, even when the bot is owned elsewhere", async () => {
     const { db } = isolationFixture();
     const env = envFor(db);
-    // `ws-b` holds target-b on the bot owned by `ws-a`: its own target's
-    // settings are readable (the revoked-share state — Blocked — must name
-    // itself instead of silently reviewing nothing).
+    // `ws-b` holds target-b on the bot owned by `ws-a`: its own target is
+    // readable (the revoked-share state — Blocked — must name itself instead
+    // of silently reviewing nothing), and its numbers are target-b's.
     for (const path of [
-      `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/insights/summary`,
-      `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/pull-requests`,
+      `/dashboard/${WORKSPACE_B}/api/targets/target-b/insights/summary`,
+      `/dashboard/${WORKSPACE_B}/api/targets/target-b/pull-requests`,
       `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/settings`,
     ]) {
       const response = await worker.fetch(await request(path, "octocat"), env);

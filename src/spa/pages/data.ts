@@ -1153,22 +1153,40 @@ export function insightsTrendPoints(data: InsightsSummary): InsightsTrendPoint[]
 }
 
 /**
- * Per-App insights summary URL — `base` is the page's workspace prefix
- * (`/dashboard`, or `/dashboard/<slug>` under strict) plus the Worker's
- * `GET /api/apps/:appId/insights/summary` face. `repo` is omitted when empty
+ * What a read covers: one target (a repository the workspace reviews) or the
+ * whole workspace ("所有仓库"). A workspace scope is every LIVE target of the
+ * caller's own workspace, resolved server-side.
+ */
+export type ReadScope = { kind: "target"; targetId: string } | { kind: "workspace" };
+
+/** The scope's read stamp — two scopes with the same key are the same read. */
+export function readScopeKey(scope: ReadScope): string {
+  return scope.kind === "target" ? `target:${scope.targetId}` : "workspace";
+}
+
+/** The API prefix a scope's read family lives under. */
+function scopePath(scope: ReadScope): string {
+  return scope.kind === "target" ? `/api/targets/${encodeURIComponent(scope.targetId)}` : "/api";
+}
+
+/**
+ * Insights summary URL — `base` is the page's workspace prefix (`/dashboard`,
+ * or `/dashboard/<slug>` under strict) plus the scope's own summary face:
+ * `GET /api/targets/:targetId/insights/summary` for one target,
+ * `GET /api/insights/summary` for the workspace. `repo` is omitted when empty
  * (the no-filter default). `include=repos` rides every read: the repo Select
  * needs the window-scoped distinct repo set on every face it can render (the
  * insights tab has no repo-less summary consumer).
  */
-export function appInsightsSummaryUrl(
+export function scopedInsightsSummaryUrl(
   base: string,
-  appId: string,
+  scope: ReadScope,
   window: string,
   repo: string,
 ): string {
   const params = new URLSearchParams({ window, include: "repos" });
   if (repo !== "") params.set("repo", repo);
-  return `${base}/api/apps/${encodeURIComponent(appId)}/insights/summary?${params.toString()}`;
+  return `${base}${scopePath(scope)}/insights/summary?${params.toString()}`;
 }
 
 export type PullRequestState = "open" | "closed" | "merged";
@@ -1572,8 +1590,8 @@ export function parseRecordPage<S extends RecordSection>(
   };
 }
 
-export function appPullRequestsUrl(base: string, appId: string, repo?: string): string {
-  const path = `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests`;
+export function scopedPullRequestsUrl(base: string, scope: ReadScope, repo?: string): string {
+  const path = `${base}${scopePath(scope)}/pull-requests`;
   // A selected repository filters on the server, BEFORE the row cap — no
   // selection is exactly the unfiltered URL.
   return repo ? `${path}?repo=${encodeURIComponent(repo)}` : path;
@@ -1587,9 +1605,16 @@ export function appPullRequestsUrl(base: string, appId: string, repo?: string): 
  * segments before this builder runs, so a dot-segment can only reach the
  * API by normalising into a same-family 404 — never another route. The
  * `number` segment is validated decimal digits at the parse site.
+ *
+ * The record sections hang off this SAME address ({@link scopedPullRequestRecordsUrl}),
+ * so the detail and its pages can never name different PRs.
  */
-export function appPullRequestDetailUrl(base: string, appId: string, ref: PullRequestRef): string {
-  return `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`;
+export function scopedPullRequestDetailUrl(
+  base: string,
+  scope: ReadScope,
+  ref: PullRequestRef,
+): string {
+  return `${base}${scopePath(scope)}/pull-requests/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`;
 }
 
 /**
@@ -1606,9 +1631,9 @@ export const CATCH_ALL_SEVERITY = "other";
  * filter is set; the query is encoded, so a free-form value cannot break out
  * of it.
  */
-export function appPullRequestRecordsUrl(
+export function scopedPullRequestRecordsUrl(
   base: string,
-  appId: string,
+  scope: ReadScope,
   ref: PullRequestRef,
   section: RecordSection,
   page: { offset: number; limit: number; severity?: string },
@@ -1616,7 +1641,7 @@ export function appPullRequestRecordsUrl(
   const params = new URLSearchParams({ offset: String(page.offset), limit: String(page.limit) });
   if (page.severity === CATCH_ALL_SEVERITY) params.set("unclassified", "1");
   else if (page.severity !== undefined && page.severity !== "") params.set("severity", page.severity);
-  return `${appPullRequestDetailUrl(base, appId, ref)}/${section}?${params.toString()}`;
+  return `${scopedPullRequestDetailUrl(base, scope, ref)}/${section}?${params.toString()}`;
 }
 
 /**

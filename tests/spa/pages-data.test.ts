@@ -70,6 +70,29 @@ describe("insights search wiring", () => {
     expect("searchHref" in (await import("../../src/spa/pages/data"))).toBe(false);
   });
 
+  test("the App-addressed read builders are retired with their routes", async () => {
+    // Plan 372 moved both read faces to target and workspace scopes; only the
+    // scoped builders remain, so no module can emit a removed path.
+    const data = await import("../../src/spa/pages/data");
+    for (const retired of [
+      "appInsightsSummaryUrl",
+      "appPullRequestsUrl",
+      "appPullRequestDetailUrl",
+      "appPullRequestRecordsUrl",
+    ]) {
+      expect(retired in data).toBe(false);
+    }
+    for (const kept of [
+      "scopedInsightsSummaryUrl",
+      "scopedPullRequestsUrl",
+      "scopedPullRequestDetailUrl",
+      "scopedPullRequestRecordsUrl",
+      "readScopeKey",
+    ]) {
+      expect(kept in data).toBe(true);
+    }
+  });
+
   test("repo Select maps 全部 ↔ empty filter and keeps out-of-set current values", () => {
     expect(INSIGHTS_REPO_ALL).toBe("all");
     expect(insightsRepoSelectValue("")).toBe("all");

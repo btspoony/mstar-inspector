@@ -3,7 +3,7 @@
  * (src/dashboard/insights-store.ts) — the review-health panel's read face.
  *
  * Locked surface (AL-22-1):
- *   - createInsightsStore(db, { targetId, workspaceId, windowDays, repo? }) resolves to
+ *   - createInsightsStore(db, { scope, windowDays, repo? }) resolves to
  *     { reviewsTotal, findingsBySeverity, verdictDistribution, weeklyTrend,
  *       dailyTrend, findingsDistribution, repos }.
  *   - windowDays: integer days, default 30; >90 is CLAMPED to 90 at the
@@ -73,7 +73,8 @@ type SeedFinding = {
 /** The workspace every fixture target lives in (0026 seeds it). */
 const WORKSPACE = "default";
 /** The tenant the plain fixtures belong to. */
-const FIXTURE_SCOPE = { targetId: "target-fixture", workspaceId: WORKSPACE };
+const FIXTURE_TARGET = "target-fixture";
+const FIXTURE_SCOPE = { kind: "target", targetId: FIXTURE_TARGET, workspaceId: WORKSPACE } as const;
 
 /**
  * Idempotently seed one bot + its target. A review row carries `target_id`
@@ -122,7 +123,7 @@ function insertReview(
     targetId?: string | null;
   },
 ): void {
-  const targetId = opts.targetId === undefined ? FIXTURE_SCOPE.targetId : opts.targetId;
+  const targetId = opts.targetId === undefined ? FIXTURE_TARGET : opts.targetId;
   seedTenant(db, targetId ?? "target-legacy", `app-${targetId ?? "legacy"}`);
   db.raw
     .query(
@@ -753,7 +754,7 @@ describe("createInsightsStore", () => {
   }
 
   /** target-a's scope; target-b and the legacy NULL row must never reach it. */
-  const SCOPE_A = { targetId: "target-a", workspaceId: WORKSPACE };
+  const SCOPE_A = { kind: "target", targetId: "target-a", workspaceId: WORKSPACE } as const;
 
   test("the target filter excludes every other target's rows and the legacy NULL rows", async () => {
     const db = createMigratedTestD1();
@@ -796,6 +797,7 @@ describe("createInsightsStore", () => {
     seedAppFixture(db);
 
     const insights = await createInsightsStore(db, {
+      kind: "target",
       targetId: "target-a",
       workspaceId: "another-workspace",
       includeRepos: true,
@@ -806,5 +808,87 @@ describe("createInsightsStore", () => {
     expect(insights.verdictDistribution).toEqual([]);
     expect(insights.weeklyTrend).toEqual([]);
     expect(insights.repos).toEqual([]);
+  });
+
+  test("the workspace scope aggregates every live target and nothing else", async () => {
+    const db = createMigratedTestD1();
+    seedAppFixture(db);
+
+    // The workspace scope resolves its OWN live target set, so it counts both
+    // of the fixture's targets without the caller listing an id.
+    const insights = await createInsightsStore(db, {
+      kind: "workspace",
+      workspaceId: WORKSPACE,
+      includeRepos: true,
+    });
+
+    expect(insights.reviewsTotal).toBe(2);
+    expect(insights.findingsBySeverity).toEqual([
+      { severity: "must-fix", count: 1 },
+      { severity: "nit", count: 1 },
+    ]);
+    expect(insights.verdictDistribution).toEqual([
+      { verdict: "approved", count: 1 },
+      { verdict: "needs fixes", count: 1 },
+    ]);
+    // The legacy NULL row is still excluded, and the repo set spans both
+    // targets.
+    expect(insights.repos).toEqual(["acme/portal", "acme/widgets"]);
+  });
+
+  test("a workspace with no live target reads nothing and answers like an empty database", async () => {
+    const empty = createMigratedTestD1();
+    const seeded = createMigratedTestD1();
+    seedAppFixture(seeded);
+
+    // Soft-delete both targets: the subquery matches no LIVE id, so the
+    // predicate reads nothing and the result is the zero-filled payload.
+    seeded.raw.prepare("UPDATE review_targets SET deleted_at = datetime('now')").run();
+    const insights = await createInsightsStore(seeded, { kind: "workspace", workspaceId: WORKSPACE });
+
+    expect(insights).toEqual(await createInsightsStore(empty, FIXTURE_SCOPE));
+  });
+
+  test("the workspace scope emits the SAME SQL whatever its target count", async () => {
+    // The bind count is a property of the scope KIND: a spliced id list would
+    // grow one placeholder per target and hit D1's parameter cap. So the
+    // statements for a one-target and a three-target workspace must be textually
+    // identical — one `?` for the scope in each.
+    const statements = async (targets: number): Promise<string[]> => {
+      const db = createMigratedTestD1();
+      for (let i = 0; i < targets; i += 1) {
+        insertReview(db, {
+          id: `r-${i}`,
+          owner: "acme",
+          repo: `repo-${i}`,
+          pr_number: i + 1,
+          reviewedAt: reviewedAt(1),
+          verdict: "approved",
+          targetId: `target-${i}`,
+          findings: [],
+        });
+      }
+      const seen: string[] = [];
+      const counting = {
+        prepare(query: string) {
+          seen.push(query);
+          return db.prepare(query);
+        },
+      };
+      await createInsightsStore(counting, { kind: "workspace", workspaceId: WORKSPACE, includeRepos: true });
+      return seen;
+    };
+
+    const one = await statements(1);
+    const three = await statements(3);
+    expect(three).toEqual(one);
+    // …and every tenant predicate is the one-placeholder live-target subquery:
+    // no statement carries a comma-separated placeholder list.
+    const scoped = one.filter((query) => query.includes("review_targets"));
+    expect(scoped.length).toBeGreaterThan(0);
+    for (const query of scoped) {
+      const subquery = query.slice(query.indexOf("review_targets"));
+      expect(subquery.slice(0, subquery.indexOf(")")).match(/\?/g)?.length).toBe(1);
+    }
   });
 });

@@ -1,12 +1,13 @@
 /**
- * GET /api/apps/:appId/pull-requests,
- * GET /api/apps/:appId/pull-requests/:owner/:repo/:number and its three
- * `findings` / `reviews` / `failures` section reads — the App-scoped PR ledger
- * faces (migration 0039).
+ * GET /api/targets/:targetId/pull-requests,
+ * GET /api/targets/:targetId/pull-requests/:owner/:repo/:number and its three
+ * `findings` / `reviews` / `failures` section reads — the target-scoped PR
+ * ledger faces (plan 372; migration 0039 for the tables).
  *
- * Both ride the SAME gate ladder as every other App JSON read: membership →
- * App-id resolution (unknown / soft-deleted / CROSS-WORKSPACE all collapse into
- * the one `unknown app` 404) → the workspace owner/admin role. The head answers
+ * Both ride the SAME gate ladder as every other target JSON read: membership →
+ * the target-id resolution INSIDE the session workspace (unknown / soft-deleted
+ * / CROSS-WORKSPACE all collapse into the one `unknown target` 404) → the
+ * workspace owner/admin role. The head answers
  * `{ pull_request, counts, latest_review }`; each section answers one page plus
  * its total. A
  * tuple this App never received is a 404 on every path — the address is the
@@ -110,7 +111,7 @@ async function getFace(path: string, db: TestD1, login = "octocat"): Promise<Res
   );
 }
 
-describe("GET /api/apps/:appId/pull-requests", () => {
+describe("GET /api/targets/:targetId/pull-requests", () => {
   test("a PR with null title / head_sha still appears, with empty strings", async () => {
     const db = await fixture();
     // The payload for a sparse delivery omits both (migration 0039 keeps them
@@ -123,7 +124,7 @@ describe("GET /api/apps/:appId/pull-requests", () => {
       prNumber: 132,
       state: "open",
     });
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`, db);
+    const res = await getFace(`/dashboard/acme/api/targets/target-app-acme/pull-requests`, db);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { pull_requests: Array<Record<string, unknown>> };
     const sparse = body.pull_requests.find((row) => row.number === 132);
@@ -135,13 +136,13 @@ describe("GET /api/apps/:appId/pull-requests", () => {
     db.raw
       .prepare("UPDATE pull_requests SET state = 'draft-ish' WHERE bot_id = 'app-acme' AND pr_number = 131")
       .run();
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`, db);
+    const res = await getFace(`/dashboard/acme/api/targets/target-app-acme/pull-requests`, db);
     const body = (await res.json()) as { pull_requests: Array<Record<string, unknown>> };
     expect(body.pull_requests[0]!.state).toBe("open");
   });
 
   test("lists this App's PRs with the contract row shape", async () => {
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`, await fixture());
+    const res = await getFace(`/dashboard/acme/api/targets/target-app-acme/pull-requests`, await fixture());
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       pull_requests: Array<Record<string, unknown>>;
@@ -174,7 +175,7 @@ describe("GET /api/apps/:appId/pull-requests", () => {
       prNumber: 7,
       state: "open",
     });
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests?repo=acme/gadgets`, db);
+    const res = await getFace(`/dashboard/acme/api/targets/target-app-acme/pull-requests?repo=acme/gadgets`, db);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { pull_requests: Array<{ number: number }>; repos: string[] };
     expect(body.pull_requests.map((row) => row.number)).toEqual([7]);
@@ -183,7 +184,7 @@ describe("GET /api/apps/:appId/pull-requests", () => {
 
   test("a well-formed repository with no rows answers an empty list, not a 404", async () => {
     const db = await fixture();
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests?repo=acme/nothing`, db);
+    const res = await getFace(`/dashboard/acme/api/targets/target-app-acme/pull-requests?repo=acme/nothing`, db);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ pull_requests: [], repos: ["acme/widgets"] });
   });
@@ -194,7 +195,7 @@ describe("GET /api/apps/:appId/pull-requests", () => {
     test(`a malformed repo query (${JSON.stringify(malformed)}) is a 400, never a filtered 200`, async () => {
       const db = await fixture();
       const res = await getFace(
-        `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests?repo=${encodeURIComponent(malformed)}`,
+        `/dashboard/acme/api/targets/target-app-acme/pull-requests?repo=${encodeURIComponent(malformed)}`,
         db,
       );
       expect(res.status).toBe(400);
@@ -202,18 +203,19 @@ describe("GET /api/apps/:appId/pull-requests", () => {
     });
   }
 
-  test("an App from another workspace answers the same 404 as an unknown one", async () => {
+  test("a target from another workspace answers the same 404 as an unknown one", async () => {
     const db = await fixture();
-    // `octocat` owns acme; app-other lives in ws-other. Addressing it under the
-    // acme workspace ref must not resolve, and the body must not name it.
-    const cross = await getFace(`/dashboard/acme/api/apps/${OTHER_APP_ID}/pull-requests`, db);
+    // `octocat` owns acme; app-other's target lives in ws-other. Addressing it
+    // under the acme workspace ref must not resolve, and the body must not
+    // name it: the 404 is the resolution's own verdict, not a membership deny.
+    const cross = await getFace(`/dashboard/acme/api/targets/target-app-other/pull-requests`, db);
     expect(cross.status).toBe(404);
-    expect(await cross.json()).toEqual({ error: "unknown app" });
+    expect(await cross.json()).toEqual({ error: "unknown target" });
   });
 
   test("without a session → 302 to login", async () => {
     const res = await worker.fetch(
-      new Request(`https://worker.local/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`),
+      new Request(`https://worker.local/dashboard/acme/api/targets/target-app-acme/pull-requests`),
       envFor(await fixture()),
     );
     expect(res.status).toBe(302);
@@ -221,7 +223,7 @@ describe("GET /api/apps/:appId/pull-requests", () => {
   });
 });
 
-const detailPath = `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/131`;
+const detailPath = `/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/widgets/131`;
 const sectionPath = (section: "findings" | "reviews" | "failures") => `${detailPath}/${section}`;
 
 /** The installation the failure join reads (one App, one installation). */
@@ -302,7 +304,7 @@ function seedFindings(
   }
 }
 
-describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
+describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => {
   test("a review with NULL provider / model round-trips as empty strings", async () => {
     const db = await fixture();
     // The v1 pipeline always writes reviews.provider NULL (the artifact store
@@ -559,7 +561,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     // when the filter is also malformed. The refusal is decided BEFORE the
     // section read, so the existence probe is what keeps this order.
     const unknownPr = await getFace(
-      `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999/findings?severity=blocker`,
+      `/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/widgets/999/findings?severity=blocker`,
       db,
     );
     expect(unknownPr.status).toBe(404);
@@ -598,7 +600,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
 
     // The same 404-outranks-400 rule the severity guard keeps.
     const unknownPr = await getFace(
-      `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999/findings?unclassified=yes`,
+      `/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/widgets/999/findings?unclassified=yes`,
       db,
     );
     expect(unknownPr.status).toBe(404);
@@ -659,7 +661,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
   });
 
   test("an unknown PR number → 404", async () => {
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999`, await fixture());
+    const res = await getFace(`/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/widgets/999`, await fixture());
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "unknown pull request" });
   });
@@ -667,7 +669,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
   test("an unknown PR is a 404 on every section path", async () => {
     for (const section of ["findings", "reviews", "failures"] as const) {
       const res = await getFace(
-        `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999/${section}`,
+        `/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/widgets/999/${section}`,
         await fixture(),
       );
       expect(res.status, section).toBe(404);
@@ -676,7 +678,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
   });
 
   test("the number in a repo this App never received → 404, no same-number fallback", async () => {
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/gadgets/131`, await fixture());
+    const res = await getFace(`/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/gadgets/131`, await fixture());
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "unknown pull request" });
   });
@@ -684,20 +686,20 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
   test("a non-numeric number is the same 404 (no number-spelling alias)", async () => {
     for (const number of ["0x1f", "1e3", "1.5"]) {
       const res = await getFace(
-        `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/${number}`,
+        `/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/widgets/${number}`,
         await fixture(),
       );
       expect(res.status, number).toBe(404);
     }
   });
 
-  test("a cross-workspace App → 404 before the PR lookup", async () => {
+  test("a cross-workspace target → 404 before the PR lookup", async () => {
     const res = await getFace(
-      `/dashboard/acme/api/apps/${OTHER_APP_ID}/pull-requests/acme/widgets/131`,
+      `/dashboard/acme/api/targets/target-app-other/pull-requests/acme/widgets/131`,
       await fixture(),
     );
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: "unknown app" });
+    expect(await res.json()).toEqual({ error: "unknown target" });
   });
 });
 
@@ -708,7 +710,7 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
  * rather than as the idle `none` or as a failed face.
  */
 describe("GET pull-requests — reviewing projection", () => {
-  const LIST_PATH = `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`;
+  const LIST_PATH = `/dashboard/acme/api/targets/target-app-acme/pull-requests`;
 
   /**
    * One lock row for #131 as the pipeline writes it, and its `acquired_at`.

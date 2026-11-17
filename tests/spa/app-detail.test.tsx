@@ -23,12 +23,12 @@ import { type Element as DomElement, type HTMLElement as DomHTMLElement, type Wi
 import { t } from "../../src/i18n";
 import {
   appDetailSearchQuery,
-  appInsightsSummaryUrl,
   appStatusPill,
   parseAppDetailSearch,
   parseSettings,
   PR_VERDICTS,
   pullRequestRefOf,
+  scopedInsightsSummaryUrl,
   type AppDetailSearch,
   type AppDetailTab,
   type SettingsBlockedPayload,
@@ -279,14 +279,22 @@ describe("app detail URL state (shared pure helpers)", () => {
     ).toBe("?tab=installations&pr=acme%2Fweb%2F42");
   });
 
-  test("the per-App summary URL is base-prefixed and encodes appId + filters; include=repos always rides", () => {
-    expect(appInsightsSummaryUrl("/dashboard", "1", "30", "")).toBe(
-      "/dashboard/api/apps/1/insights/summary?window=30&include=repos",
+  test("the summary URL is base-prefixed and addresses the scope; include=repos always rides", () => {
+    // One repository: the target-addressed family.
+    expect(scopedInsightsSummaryUrl("/dashboard", { kind: "target", targetId: "1" }, "30", "")).toBe(
+      "/dashboard/api/targets/1/insights/summary?window=30&include=repos",
     );
-    // A workspace-scoped page rides its own prefix (no legacy App family there).
-    expect(appInsightsSummaryUrl("/dashboard/acme", "12345", "7", "acme/web")).toBe(
-      "/dashboard/acme/api/apps/12345/insights/summary?window=7&include=repos&repo=acme%2Fweb",
+    // A workspace-scoped page rides its own prefix and the workspace face.
+    expect(
+      scopedInsightsSummaryUrl("/dashboard/acme", { kind: "target", targetId: "12345" }, "7", "acme/web"),
+    ).toBe("/dashboard/acme/api/targets/12345/insights/summary?window=7&include=repos&repo=acme%2Fweb");
+    expect(scopedInsightsSummaryUrl("/dashboard", { kind: "workspace" }, "90", "")).toBe(
+      "/dashboard/api/insights/summary?window=90&include=repos",
     );
+    // The removed App-addressed family is never emitted.
+    expect(
+      scopedInsightsSummaryUrl("/dashboard", { kind: "target", targetId: "1" }, "30", ""),
+    ).not.toContain("/api/apps/");
   });
 });
 

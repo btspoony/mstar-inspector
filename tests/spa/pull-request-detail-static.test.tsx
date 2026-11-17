@@ -1,5 +1,5 @@
 /**
- * Pull request detail face (App detail IA): the static faces and pure helpers.
+ * Pull request detail face: the static faces and pure helpers.
  *
  * Static-SSR pins over the pure face (the InsightsRecordsView idiom): the
  * header facts and metric band, the severity buckets, the folds, the failures
@@ -16,14 +16,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { t, type DictionaryKey, type Locale } from "../../src/i18n";
 import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
-  appPullRequestDetailUrl,
-  appPullRequestRecordsUrl,
   CATCH_ALL_SEVERITY,
   githubCommitUrl,
   githubPullRequestUrl,
   githubRepoUrl,
   parsePullRequestDetail,
   parseRecordPage,
+  scopedPullRequestDetailUrl,
+  scopedPullRequestRecordsUrl,
   type PullRequestDetail,
   type PullRequestLatestReview,
   type PullRequestHead,
@@ -82,47 +82,61 @@ void asyncReadIsRejected;
 
 describe("pull request detail data plane (pure helpers)", () => {
   test("the detail URL builder encodes owner/repo so a value cannot break out of the path family", () => {
-    expect(appPullRequestDetailUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 })).toBe(
-      "/dashboard/api/apps/1/pull-requests/acme/web/42",
+    const target = { kind: "target", targetId: "1" } as const;
+    expect(scopedPullRequestDetailUrl("/dashboard", target, { owner: "acme", repo: "web", number: 42 })).toBe(
+      "/dashboard/api/targets/1/pull-requests/acme/web/42",
     );
     // Segment-boundary characters are encoded, not trusted raw.
     expect(
-      appPullRequestDetailUrl("/dashboard", "1", { owner: "a/b", repo: "settings?x", number: 42 }),
-    ).toBe("/dashboard/api/apps/1/pull-requests/a%2Fb/settings%3Fx/42");
+      scopedPullRequestDetailUrl("/dashboard", target, { owner: "a/b", repo: "settings?x", number: 42 }),
+    ).toBe("/dashboard/api/targets/1/pull-requests/a%2Fb/settings%3Fx/42");
+    // The workspace scope addresses the same PR family with no target segment.
+    expect(
+      scopedPullRequestDetailUrl("/dashboard", { kind: "workspace" }, { owner: "acme", repo: "web", number: 42 }),
+    ).toBe("/dashboard/api/pull-requests/acme/web/42");
   });
 
   test("the record URL carries the page window, and severity only for findings", () => {
+    const target = { kind: "target", targetId: "1" } as const;
+    const ref = { owner: "acme", repo: "web", number: 42 } as const;
     expect(
-      appPullRequestRecordsUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 }, "findings", {
+      scopedPullRequestRecordsUrl("/dashboard", target, ref, "findings", {
         offset: 20,
         limit: 10,
         severity: "must-fix",
       }),
-    ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/findings?offset=20&limit=10&severity=must-fix");
+    ).toBe("/dashboard/api/targets/1/pull-requests/acme/web/42/findings?offset=20&limit=10&severity=must-fix");
     // The filter value is encoded, and an empty filter is simply absent.
     expect(
-      appPullRequestRecordsUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 }, "findings", {
+      scopedPullRequestRecordsUrl("/dashboard", target, ref, "findings", {
         offset: 0,
         limit: 10,
         severity: "a&b",
       }),
-    ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/findings?offset=0&limit=10&severity=a%26b");
+    ).toBe("/dashboard/api/targets/1/pull-requests/acme/web/42/findings?offset=0&limit=10&severity=a%26b");
     expect(
-      appPullRequestRecordsUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 }, "reviews", {
+      scopedPullRequestRecordsUrl("/dashboard", target, ref, "reviews", {
         offset: 0,
         limit: 10,
         severity: "",
       }),
-    ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/reviews?offset=0&limit=10");
+    ).toBe("/dashboard/api/targets/1/pull-requests/acme/web/42/reviews?offset=0&limit=10");
     // The catch-all choice is a filter MODE, not a severity spelling: it rides
     // the route's `unclassified` flag so `severity` keeps its closed vocabulary.
     expect(
-      appPullRequestRecordsUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 }, "findings", {
+      scopedPullRequestRecordsUrl("/dashboard", target, ref, "findings", {
         offset: 0,
         limit: 10,
         severity: CATCH_ALL_SEVERITY,
       }),
-    ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/findings?offset=0&limit=10&unclassified=1");
+    ).toBe("/dashboard/api/targets/1/pull-requests/acme/web/42/findings?offset=0&limit=10&unclassified=1");
+    // The workspace scope's record pages hang off the workspace detail family.
+    expect(
+      scopedPullRequestRecordsUrl("/dashboard", { kind: "workspace" }, ref, "reviews", {
+        offset: 0,
+        limit: 10,
+      }),
+    ).toBe("/dashboard/api/pull-requests/acme/web/42/reviews?offset=0&limit=10");
   });
 
   test("the GitHub builders encode each segment and cannot escape the path", () => {
@@ -1728,7 +1742,7 @@ describe("pull request detail face (static SSR)", () => {
       renderToStaticMarkup(
         createElement(PullRequestDetailFace, {
           locale: "en",
-          appId: "1",
+          scope: { kind: "target", targetId: "1" },
           prKey: "acme/web/133",
           prRef: { owner: "acme", repo: "web", number: 133 },
           onBack: () => {},
