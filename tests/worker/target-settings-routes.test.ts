@@ -66,6 +66,18 @@ const post = (db: TestD1, path: string, login: string, body: unknown): Promise<R
     ),
   );
 
+const put = (db: TestD1, path: string, login: string, body: unknown): Promise<Response> =>
+  session(login).then((headers) =>
+    worker.fetch(
+      new Request(`https://worker.local${path}`, {
+        method: "PUT",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      makeEnv(db),
+    ),
+  );
+
 const origFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = origFetch;
@@ -305,6 +317,62 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     });
   });
 
+  /**
+   * The wire carries what the column holds: the SPA posts `0|1`, an HTML form
+   * posts `"0"|"1"`. Both must persist the same pause the boolean does.
+   */
+  test("review_enabled accepts the 0|1 wire value and its string form", async () => {
+    const { db, targetId } = await seededWorld();
+
+    for (const value of [0, "0"]) {
+      await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", { review_enabled: 1 });
+      const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+        review_enabled: value,
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json() as { target: { review_enabled: number } }).target.review_enabled).toBe(0);
+    }
+    for (const value of [1, "1"]) {
+      const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+        review_enabled: value,
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json() as { target: { review_enabled: number } }).target.review_enabled).toBe(1);
+    }
+    // Anything else stays a refusal with nothing written.
+    const refused = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+      review_enabled: 2,
+    });
+    expect(refused.status).toBe(400);
+    expect(targetRow(db, targetId).review_enabled).toBe(1);
+  });
+
+  /**
+   * An unreadable stored gate has no values to snapshot, so a policy save would
+   * write the fail-closed `[]` over the manager's list. The pause is the only
+   * save allowed while it is corrupt.
+   */
+  test("a policy save is refused while the effective gate is unreadable", async () => {
+    const { db, targetId } = await seededWorld();
+    const before = targetRow(db, targetId);
+    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.prepare("UPDATE workspaces SET default_check_pass_verdicts = 'not json' WHERE id = 'default'").run();
+    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+
+    for (const body of [{ trigger_mode: "manual" }, { check_min_score: 70 }, { follow: 1 }]) {
+      const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", body);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "review_gate_unreadable" });
+    }
+    expect(targetRow(db, targetId)).toEqual(before);
+
+    const paused = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+      review_enabled: 0,
+    });
+    expect(paused.status).toBe(200);
+    expect(targetRow(db, targetId)).toMatchObject({ review_enabled: 0, follow_workspace_defaults: 1 });
+  });
+
   test("off-vocabulary values are a 400 with nothing written", async () => {
     const { db, targetId } = await seededWorld();
     const before = targetRow(db, targetId);
@@ -398,5 +466,25 @@ describe("POST /dashboard/:workspaceRef/api/targets/defaults", () => {
     expect(res.status).toBe(403);
     const read = await get(db, "/dashboard/default/api/targets/all", "trudy");
     expect(((await read.json()) as { defaults: { trigger_mode: string } }).defaults.trigger_mode).toBe("open");
+  });
+
+  /**
+   * ONE floor writer: this legacy address delegates to the same store function
+   * the defaults face above uses, so the two cannot drift — and the change is
+   * still ledgered.
+   */
+  test("the legacy check-min-score address writes through the same store function", async () => {
+    const { db } = await seededWorld();
+
+    const res = await put(db, "/dashboard/default/api/settings/check-min-score", "mallory", { min_score: 70 });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ min_score: 70 });
+    const read = await get(db, "/dashboard/default/api/targets/all", "trudy");
+    expect(((await read.json()) as { defaults: { check_min_score: number } }).defaults.check_min_score).toBe(70);
+    const audits = db.raw
+      .query("SELECT COUNT(*) AS n FROM platform_audit_events WHERE action = 'workspace.check_min_score.set'")
+      .get() as { n: number };
+    expect(audits.n).toBe(1);
   });
 });

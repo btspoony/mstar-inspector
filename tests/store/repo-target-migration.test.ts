@@ -208,3 +208,50 @@ describe("migration 0067: repository-keyed review targets", () => {
     expect(indexNames(db).has("install_claims_live_bot")).toBe(true);
   });
 });
+
+const MIGRATION_0068 = "0068_target_repo_global_unique.sql";
+
+describe("migration 0068: one repository, one workspace per bot", () => {
+  test("the workspace-scoped claim is replaced by the bot-scoped one", () => {
+    const db = dbAt0066();
+    applyMigrations(db, [MIGRATION, MIGRATION_0068]);
+
+    const indexes = indexNames(db);
+    expect(indexes.has("review_targets_workspace_repo")).toBe(false);
+    expect(indexes.has("review_targets_bot_repo_unique")).toBe(true);
+  });
+
+  test("a live duplicate across two workspaces of the SAME bot is refused", () => {
+    const db = dbAt0066();
+    applyMigrations(db, [MIGRATION, MIGRATION_0068]);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('other', 'other', 'other', 'acme', '2026-01-01')`,
+      )
+      .run();
+    seedBot(db, "bot-2", 7002);
+    seedBot(db, "bot-3", 7003);
+    const insert = (id: string, workspaceId: string, botId: string, repoId: number | null, deletedAt: string | null = null) =>
+      db.raw
+        .prepare(
+          `INSERT INTO review_targets
+             (id, workspace_id, bot_id, name, repo_id, created_by, created_at, updated_at, deleted_at)
+           VALUES (?, ?, ?, ?, ?, 'fixture', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ?)`,
+        )
+        .run(id, workspaceId, botId, `acme/repo-${id}`, repoId, deletedAt);
+
+    insert("t-here", "default", "bot-1", 501);
+    // One repository belongs to one workspace PER BOT: a sibling workspace's
+    // row is the same claim.
+    expect(() => insert("t-sibling", "other", "bot-1", 501)).toThrow();
+    // Another bot is a separate claim, and a soft-deleted row releases its own.
+    insert("t-other-bot", "other", "bot-2", 501);
+    insert("t-released", "other", "bot-1", 501, "2026-02-01T00:00:00.000Z");
+    // An unclaimed row (repo_id NULL) is outside the repository claim.
+    insert("t-unclaimed", "other", "bot-1", null);
+    insert("t-unclaimed-2", "default", "bot-3", null);
+
+    expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(6);
+  });
+});

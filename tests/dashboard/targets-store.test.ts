@@ -27,7 +27,9 @@ import {
   parseTargetReviewLevel,
   readEffectiveTargetSettings,
   setInheritance,
+  setWorkspaceReviewDefaults,
 } from "../../src/dashboard/targets-store";
+import { UnknownWorkspaceError } from "../../src/dashboard/runtime-config-store";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 
 const WS = "default";
@@ -268,7 +270,7 @@ describe("create (one repository, one workspace)", () => {
     expect(targetCount(db)).toBe(1);
   });
 
-  test("a repository in another workspace, and a soft-deleted one here, are not duplicates", async () => {
+  test("a sibling workspace's row on the SAME bot is the same claim; a soft-deleted row releases it", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, OTHER_WS);
     seedBot(db, "bot-scope");
@@ -290,16 +292,18 @@ describe("create (one repository, one workspace)", () => {
     });
     const store = createTargetsStore(db);
 
+    // 0068: one repository belongs to one workspace PER BOT, so a live row of
+    // a sibling workspace is the same claim — the guarded insert refuses.
     expect(
-      (await store.create({
+      await store.create({
         workspaceId: WS,
         botId: "bot-scope",
         repoId: 9400,
         repoOwner: "acme",
         repoName: "widgets",
         createdBy: "octocat",
-      })).outcome,
-    ).toBe("created");
+      }),
+    ).toEqual({ outcome: "duplicate" });
     // A soft-deleted row releases its repository: the partial index admits a re-add.
     expect(
       (await store.create({
@@ -311,6 +315,18 @@ describe("create (one repository, one workspace)", () => {
         createdBy: "octocat",
       })).outcome,
     ).toBe("created");
+  });
+
+  test("the same repository under ANOTHER bot is a separate claim", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-1");
+    seedBot(db, "bot-2");
+    const store = createTargetsStore(db);
+    const input = { workspaceId: WS, repoId: 9410, repoOwner: "acme", repoName: "widgets", createdBy: "octocat" };
+
+    expect((await store.create({ ...input, botId: "bot-1" })).outcome).toBe("created");
+    expect((await store.create({ ...input, botId: "bot-2" })).outcome).toBe("created");
+    expect(targetCount(db)).toBe(2);
   });
 
   test("an identity the resolver could never find is refused before any write", async () => {
@@ -733,5 +749,129 @@ describe("setReviewConfig", () => {
     expect(targetRow(db, targetId).deleted_at).not.toBeNull();
     expect(await store.getInWorkspace(WS, targetId)).toBeNull();
     expect(await store.delete(WS, targetId)).toBe(false);
+  });
+});
+
+/**
+ * The workspace defaults face's ONE store function: it stores the three
+ * `default_*` columns AND the gate floor (`workspaces.check_min_score`), so the
+ * legacy `/api/settings/check-min-score` address cannot drift from it.
+ */
+describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
+  const ACTION = "workspace.check_min_score.set";
+
+  const floorAudits = (db: TestD1): Array<{ before: unknown; after: unknown }> =>
+    (
+      db.raw
+        .prepare("SELECT detail_json FROM platform_audit_events WHERE action = ?1 ORDER BY rowid")
+        .all(ACTION) as Array<{ detail_json: string }>
+    ).map((row) => JSON.parse(row.detail_json) as { before: unknown; after: unknown });
+
+  const workspaceRow = (db: TestD1) =>
+    db.raw
+      .prepare(
+        `SELECT default_review_trigger_mode, default_review_level,
+                default_check_pass_verdicts, check_min_score
+           FROM workspaces WHERE id = ?`,
+      )
+      .get(WS) as Record<string, unknown>;
+
+  test("writes the three defaults and the floor in one call, and ledgers the floor", async () => {
+    const db = createMigratedTestD1();
+    // The migrated fixture already holds the `default` workspace.
+
+    expect(
+      await setWorkspaceReviewDefaults(
+        db,
+        WS,
+        {
+          triggerMode: "open",
+          level: "deep",
+          checkPassVerdicts: ["ship it", "blocked"],
+          checkMinScore: 45,
+        },
+        "operator",
+      ),
+    ).toBe(true);
+    expect(workspaceRow(db)).toEqual({
+      default_review_trigger_mode: "open",
+      default_review_level: "deep",
+      default_check_pass_verdicts: '["ship it","blocked"]',
+      check_min_score: 45,
+    });
+    // NULL was never a floor in effect, so the ledger's `before` is the absent
+    // state rather than the platform default it degraded to.
+    expect(floorAudits(db)).toEqual([{ before: null, after: 45 }]);
+  });
+
+  test("each later floor save ledgers the value it replaced", async () => {
+    const db = createMigratedTestD1();
+    // The migrated fixture already holds the `default` workspace.
+
+    for (const value of [45, 0, 100]) {
+      await setWorkspaceReviewDefaults(db, WS, { checkMinScore: value }, "operator");
+    }
+
+    expect(workspaceRow(db).check_min_score).toBe(100);
+    expect(floorAudits(db)).toEqual([
+      { before: null, after: 45 },
+      { before: 45, after: 0 },
+      { before: 0, after: 100 },
+    ]);
+  });
+
+  test("an off-vocabulary value is refused before any write", async () => {
+    const db = createMigratedTestD1();
+    // The migrated fixture already holds the `default` workspace.
+
+    for (const bad of [-1, 101, 60.5, Number.NaN]) {
+      await expect(
+        setWorkspaceReviewDefaults(db, WS, { checkMinScore: bad }, "operator"),
+      ).rejects.toThrow(/min score/);
+    }
+    await expect(
+      setWorkspaceReviewDefaults(db, WS, { triggerMode: "sometimes" as never }, "operator"),
+    ).rejects.toThrow(/trigger mode/);
+    await expect(
+      setWorkspaceReviewDefaults(db, WS, { checkPassVerdicts: ["lgtm" as never] }, "operator"),
+    ).rejects.toThrow(/PR_VERDICTS/);
+
+    expect(workspaceRow(db)).toEqual({
+      default_review_trigger_mode: "every_push",
+      default_review_level: null,
+      default_check_pass_verdicts: '["ship it"]',
+      check_min_score: null,
+    });
+    expect(floorAudits(db)).toEqual([]);
+  });
+
+  test("a patch that names nothing writes nothing", async () => {
+    const db = createMigratedTestD1();
+    // The migrated fixture already holds the `default` workspace.
+
+    expect(await setWorkspaceReviewDefaults(db, WS, {}, "operator")).toBe(false);
+    expect(floorAudits(db)).toEqual([]);
+  });
+
+  test("an unknown workspace is refused as such", async () => {
+    const db = createMigratedTestD1();
+    // The migrated fixture already holds the `default` workspace.
+
+    await expect(
+      setWorkspaceReviewDefaults(db, "ws_missing", { checkMinScore: 50 }, "operator"),
+    ).rejects.toBeInstanceOf(UnknownWorkspaceError);
+  });
+
+  test("an untrusted stored floor is ledgered as absent, not as the default", async () => {
+    const db = createMigratedTestD1();
+    // The migrated fixture already holds the `default` workspace.
+    // Wrong RANGE, written by a foreign writer (the DDL CHECK refuses it).
+    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 150 WHERE id = ?").run(WS);
+    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+
+    await setWorkspaceReviewDefaults(db, WS, { checkMinScore: 75 }, "operator");
+
+    expect(floorAudits(db)).toEqual([{ before: null, after: 75 }]);
   });
 });

@@ -564,6 +564,39 @@ describe("an App with no repository yet", () => {
       db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get() as { n: number },
     ).toEqual({ n: 1 }); // ada's row is untouched
   });
+
+  /**
+   * The add flow routinely gives one App several repositories. The App page
+   * owns no target policy any more, so its own configuration must stay
+   * reachable: the gate answers `target: null` instead of refusing the App.
+   */
+  test("an App with SEVERAL repositories still opens, with the target slice absent", async () => {
+    const db = await seededWorld();
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+            created_by, created_at, updated_at)
+         SELECT 'target-second', 'default', b.id, 'acme/second', 901003, 'acme', 'second',
+                'mallory', datetime('now'), datetime('now')
+           FROM review_bots b WHERE b.github_app_id = ?`,
+      )
+      .run(MALLORY_APP_ID);
+
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+    expect(body.can_manage).toBe(true);
+    // Target-owned facts are ABSENT: two rows name no single configuration.
+    for (const key of ["target_id", "check_gate"]) expect(body).not.toHaveProperty(key);
+    for (const key of ["review_enabled", "review_trigger_mode", "review_level"]) {
+      expect(body.app).not.toHaveProperty(key);
+    }
+    // The App's own sections still render.
+    expect(body).toHaveProperty("keys");
+    expect(body).toHaveProperty("installations");
+  });
 });
 
 describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App review trigger mode)", () => {
@@ -1282,15 +1315,15 @@ describe("a retained target on another workspace's bot grants no bot-scope write
       )
       .run(CONSUMER_WS);
     // The target C created while the bot was shared. Nothing about the bot
-    // changed except its scope: it was never C's. It carries the repository
-    // identity a target needs (0067) — the same repo the App's own target
-    // points at, since one repository belongs to one workspace.
+    // changed except its scope: it was never C's. It carries its OWN
+    // repository identity (0068: one repository belongs to one workspace per
+    // bot, so C's row cannot name the repository A's target already holds).
     db.raw
       .prepare(
         `INSERT INTO review_targets
            (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
             created_by, created_at, updated_at)
-         SELECT 'target-consumer', ?, b.id, 'consumer', 901001, 'acme', 'mstar-inspector-mallory',
+         SELECT 'target-consumer', ?, b.id, 'consumer', 901002, 'acme', 'consumer-only',
                 'mallory', datetime('now'), datetime('now')
            FROM review_bots b WHERE b.github_app_id = ?`,
       )

@@ -223,7 +223,6 @@ import {
   getWorkspaceConcurrency,
   isConcurrencyValue,
   readDefaultReviewLevel,
-  setWorkspaceCheckMinScore,
   setWorkspaceConcurrency,
   type DegradedReason,
 } from "./runtime-config-store";
@@ -2592,8 +2591,10 @@ const workspaceCheckMinScoreWriteRoute = async (c: DashboardContext) => {
     });
   }
   try {
-    const stored = await setWorkspaceCheckMinScore(db, scope.workspaceId, value, user.github_login);
-    return c.json({ min_score: stored });
+    // ONE floor writer: the store function the workspace-defaults face uses,
+    // so this legacy address cannot drift from it (no second SQL).
+    await setWorkspaceReviewDefaults(db, scope.workspaceId, { checkMinScore: value }, user.github_login);
+    return c.json({ min_score: value });
   } catch (err) {
     if (!(err instanceof RuntimeConfigError)) throw err;
     if (err.reason === "unknown_workspace") return await tenantNotFound(c);
@@ -3108,12 +3109,17 @@ type AppSettingsGate =
        * The bot's ONE review target in this workspace — where the
        * workspace-owned review configuration lives. `null` = the workspace
        * holds no repository under this App yet (a real state since the
-       * repository surface owns creation): the App is still a valid settings
-       * subject, and its target-owned facts are simply absent. Ambiguity (two
-       * or more live targets) is NOT represented here — it is refused as
-       * `404 unknown app` before the gate resolves.
+       * repository surface owns creation), OR it holds several
+       * (`targets_many`): the App is still a valid settings subject, and its
+       * target-owned facts are simply absent.
        */
       target: ReviewTargetRow | null;
+      /**
+       * True when the bot holds two or more live targets here. The App page
+       * owns no target policy, so this names the state instead of refusing the
+       * whole App (its provider keys, chains, seats and sandbox are App-owned).
+       */
+      targets_many: boolean;
       user: DashboardUserRow;
       scope: WorkspaceScope;
     }
@@ -3135,23 +3141,19 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
   );
   if (!app) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
   // Visibility is the APP's: the repository surface creates targets now, so a
-  // workspace may open an App it has added no repository to yet. `target` is
-  // then null and the payload renders the target-owned facts as absent.
-  //
-  // Ambiguity is still refused: a bot holding several live targets in one
-  // workspace names no single configuration, and serving either one would
-  // show a policy the manager is not editing. That stays the 404 it has always
-  // been — "no single target" is a different fact from "no target".
+  // workspace may open an App it has added no repository to yet (or several —
+  // the App page owns no target policy, so its provider keys, chains, seats
+  // and sandbox must stay reachable). `target` answers only when the workspace
+  // holds EXACTLY ONE repository under the App; anything else is `null` plus
+  // `targets_many`, and the target-owned facts render as absent.
   const live = await liveTargetsForBot(member.db, member.scope.workspaceId, app.id);
-  if (live.length > 1) {
-    return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  }
   return {
     ok: true,
     session: member.session,
     db: member.db,
     app,
-    target: live[0] ?? null,
+    target: live.length === 1 ? live[0]! : null,
+    targets_many: live.length > 1,
     user: member.user,
     scope: member.scope,
   };
@@ -6151,6 +6153,51 @@ const targetListRoute = async (c: DashboardContext): Promise<Response> => {
 };
 
 /**
+ * Walk every live installation of the App ONCE and collect the repositories
+ * GitHub grants, deduped by `repo_id`. `failures` counts the installations
+ * that gave no usable answer, so a caller can tell "grants nothing" from
+ * "could not ask": the dialog reports the former, the write face refuses both.
+ * `null` = the walk never ran (no master key, an undecryptable App key, a JWT
+ * that cannot be minted).
+ */
+async function walkInstallationRepositories(
+  db: DashboardDb,
+  app: GithubAppRow,
+  encryptionKey: string | undefined,
+): Promise<{
+  byRepoId: Map<number, InstallationRepository>;
+  installations: number;
+  failures: number;
+} | null> {
+  if (!encryptionKey) return null;
+  let jwt: string;
+  try {
+    const pem = await createSecretbox(encryptionKey).decryptSecret(
+      app.private_key_enc,
+      `github_apps.private_key_enc:${app.id}`,
+    );
+    jwt = await mintInstallationJwt(app.github_app_id, pem);
+  } catch (err) {
+    logSettingsFailure("installation_repositories_key", app.id, err);
+    return null;
+  }
+  const installations = await createReviewBotsStore(db).listInstallations(app.id);
+  const byRepoId = new Map<number, InstallationRepository>();
+  let failures = 0;
+  for (const installation of installations) {
+    const repositories = await fetchInstallationRepositories(installation.installation_id, jwt);
+    if (repositories === null) {
+      failures += 1;
+      continue;
+    }
+    for (const repository of repositories) {
+      if (!byRepoId.has(repository.repo_id)) byRepoId.set(repository.repo_id, repository);
+    }
+  }
+  return { byRepoId, installations: installations.length, failures };
+}
+
+/**
  * `GET /api/apps/:appId/installation-repositories` — the repositories the App's
  * live installations grant, deduped by `repo_id` across installations. One App
  * JWT serves every installation; a failed installation leaves `degraded: true`
@@ -6167,36 +6214,14 @@ const appInstallationRepositoriesRoute = async (c: DashboardContext): Promise<Re
   );
   if (!app) return c.json({ error: "unknown app" }, 404);
   if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
-  const encryptionKey = c.env.DASHBOARD_ENCRYPTION_KEY;
-  if (!encryptionKey) return c.json({ error: "installation_repositories_unavailable" }, 502);
-  const installations = await createReviewBotsStore(member.db).listInstallations(app.id);
-  let jwt: string;
-  try {
-    const pem = await createSecretbox(encryptionKey).decryptSecret(
-      app.private_key_enc,
-      `github_apps.private_key_enc:${app.id}`,
-    );
-    jwt = await mintInstallationJwt(app.github_app_id, pem);
-  } catch (err) {
-    logSettingsFailure("installation_repositories_key", app.id, err);
+  const walked = await walkInstallationRepositories(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY);
+  if (walked === null || (walked.installations > 0 && walked.failures === walked.installations)) {
     return c.json({ error: "installation_repositories_unavailable" }, 502);
   }
-  const byRepoId = new Map<number, InstallationRepository>();
-  let failures = 0;
-  for (const installation of installations) {
-    const repositories = await fetchInstallationRepositories(installation.installation_id, jwt);
-    if (repositories === null) {
-      failures += 1;
-      continue;
-    }
-    for (const repository of repositories) {
-      if (!byRepoId.has(repository.repo_id)) byRepoId.set(repository.repo_id, repository);
-    }
-  }
-  if (installations.length > 0 && failures === installations.length) {
-    return c.json({ error: "installation_repositories_unavailable" }, 502);
-  }
-  return c.json({ repositories: [...byRepoId.values()], degraded: failures > 0 });
+  return c.json({
+    repositories: [...walked.byRepoId.values()],
+    degraded: walked.failures > 0,
+  });
 };
 
 /** An add-repository body row; anything not shaped like this is a 400. */
@@ -6211,10 +6236,14 @@ function parseRepositoryBodyRow(value: unknown): { repo_id: number; owner: strin
 
 /**
  * `POST /api/targets` — one target per selected repository, each inheriting the
- * workspace defaults (`follow_workspace_defaults = 1`, J4). The store's duplicate
- * rule is a VALUE, so a repository the workspace already holds lands in
- * `duplicates` while every other row of the same batch stays written: a partial
- * add is reported, never rolled back and never a 409 for the whole batch.
+ * workspace defaults (`follow_workspace_defaults = 1`, J4). Every submitted
+ * `repo_id` must be one the App's live installations grant (the add dialog's
+ * own list): an unproven id is `400 repository_not_installed` and NOTHING is
+ * written, so a manager cannot pre-claim a repository another workspace would
+ * then receive deliveries for. The store's duplicate rule is a VALUE, so a
+ * repository this BOT already holds lands in `duplicates` while every other row
+ * of the same batch stays written: a partial add is reported, never rolled back
+ * and never a 409 for the whole batch.
  */
 const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
@@ -6250,6 +6279,18 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   if (!named || named.deleted_at !== null) return c.json({ error: "unknown app" }, 404);
   const app = await resolveScopedApp(apps, String(named.github_app_id), member.scope);
   if (!app) return c.json({ error: "unknown app" }, 404);
+  // The repository PROOF: a target binds GitHub's numeric id, so the App must
+  // actually grant it. One walk of the App's live installations; an id outside
+  // that set refuses the WHOLE request before any row is written, and an
+  // incomplete walk proves nothing, so it refuses too (fail closed).
+  const walked = await walkInstallationRepositories(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY);
+  if (walked === null || walked.failures > 0) {
+    return c.json({ error: "installation_repositories_unavailable" }, 502);
+  }
+  const repoIds = repositories.filter((repository) => !walked.byRepoId.has(repository.repo_id)).map((repository) => repository.repo_id);
+  if (repoIds.length > 0) {
+    return c.json({ error: "repository_not_installed", repo_ids: [...new Set(repoIds)] }, 400);
+  }
   const store = createTargetsStore(member.db);
   const created: Array<{ target_id: string; repo_id: number; repo_owner: string; repo_name: string }> = [];
   const duplicates: Array<{ repo_id: number; owner: string; name: string }> = [];
@@ -6465,8 +6506,20 @@ function parseReviewSettingsBody(raw: unknown, withSwitch: boolean): ReviewSetti
     patch.follow = body.follow;
   }
   if ("review_enabled" in body) {
-    if (typeof body.review_enabled !== "boolean") return { ok: false, error: "invalid review_enabled" };
-    patch.reviewEnabled = body.review_enabled;
+    // The wire carries what the column holds: the SPA posts `0|1`, a form may
+    // post `"0"|"1"`, and a JSON client may post a boolean. One normalisation
+    // here, so the store keeps its single boolean contract.
+    const raw = body.review_enabled;
+    const enabled =
+      typeof raw === "boolean"
+        ? raw
+        : raw === 1 || raw === "1"
+          ? true
+          : raw === 0 || raw === "0"
+            ? false
+            : undefined;
+    if (enabled === undefined) return { ok: false, error: "invalid review_enabled" };
+    patch.reviewEnabled = enabled;
   }
   return { ok: true, patch };
 }
@@ -6512,6 +6565,17 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
   // `follow: 1` is the one way to stay (or go back to) inheriting.
   const follow: 0 | 1 | undefined =
     patch.follow ?? (touchesPolicy ? 0 : undefined);
+  // An unreadable stored gate (a corrupt `check_pass_verdicts`) has no values
+  // to snapshot, so a policy save would write the fail-closed `[]` over the
+  // manager's list and report success. Refuse every policy column — including
+  // the `follow -> 0` snapshot — and leave the pause switch as the only save.
+  const current =
+    touchesPolicy || patch.follow !== undefined
+      ? await readEffectiveTargetSettings(member.db, target)
+      : null;
+  if (current !== null && !current.checkPassVerdictsReadable) {
+    return c.json({ error: "review_gate_unreadable" }, 400);
+  }
   const config: TargetReviewConfig = {
     triggerMode: follow === 1 ? undefined : patch.triggerMode,
     level: follow === 1 ? undefined : patch.level,
@@ -6519,10 +6583,9 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
     checkPassVerdicts: follow === 1 ? undefined : patch.checkPassVerdicts,
     follow,
   };
-  if (follow === 0) {
+  if (follow === 0 && current !== null) {
     // The snapshot: the columns this save does not name take the values the
     // target runs with now (workspace defaults while it was inheriting).
-    const current = await readEffectiveTargetSettings(member.db, target);
     config.triggerMode ??= current.triggerMode;
     if (config.level === undefined) config.level = current.level;
     config.checkMinScore ??= current.checkMinScore;
@@ -6550,9 +6613,10 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
 
 /**
  * `POST /api/targets/defaults` — the 所有仓库 entry's settings save: the three
- * `workspaces.default_*` columns plus the gate floor, which keeps its own
- * audited writer (`setWorkspaceCheckMinScore`). Manager only. Every value is
- * checked before the first write, so a refusal stores nothing.
+ * `workspaces.default_*` columns plus the gate floor, in ONE store call (the
+ * only writer of all four columns; the legacy `PUT /api/settings/check-min-score`
+ * delegates to the same function). Manager only. Every value is checked before
+ * the first write, so a refusal stores nothing.
  */
 const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
@@ -6572,19 +6636,17 @@ const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Respons
   }
   const { patch } = parsed;
   try {
-    await setWorkspaceReviewDefaults(member.db, member.scope.workspaceId, {
-      triggerMode: patch.triggerMode,
-      level: patch.level,
-      checkPassVerdicts: patch.checkPassVerdicts,
-    });
-    if (patch.checkMinScore !== undefined) {
-      await setWorkspaceCheckMinScore(
-        member.db,
-        member.scope.workspaceId,
-        patch.checkMinScore,
-        member.user.github_login,
-      );
-    }
+    await setWorkspaceReviewDefaults(
+      member.db,
+      member.scope.workspaceId,
+      {
+        triggerMode: patch.triggerMode,
+        level: patch.level,
+        checkPassVerdicts: patch.checkPassVerdicts,
+        checkMinScore: patch.checkMinScore,
+      },
+      member.user.github_login,
+    );
   } catch (err) {
     if (err instanceof UnknownWorkspaceError) return await tenantNotFound(c);
     logSettingsFailure("workspace_defaults_save", member.scope.workspaceId, err);
