@@ -1441,6 +1441,20 @@ export const en = {
       admissionDropsSystemCap: "System cap",
       admissionDropsWorkspaceCap: "Workspace cap",
       admissionDropsError: "Storage error",
+      /** The maintenance window: the operator's one write surface for it. */
+      maintenanceTitle: "Maintenance mode",
+      maintenanceDescription:
+        "While on, the dashboard answers 503, the webhook returns 503 so GitHub retries, and queued reviews are dropped. Health checks and this console stay reachable.",
+      maintenanceStateOn: "On — the platform is closed",
+      maintenanceStateOff: "Off — the platform is serving",
+      maintenanceReasonLabel: "Reason (shown to users)",
+      maintenanceOn: "Close the platform",
+      maintenanceOff: "Reopen the platform",
+      maintenanceSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      maintenanceFailed: "Could not change the maintenance mode.",
+      /** The window's opening stamp, rendered as a relative time. */
+      maintenanceSinceLabel: "Closed since",
       /** The live queue gauge plus the 24 h GitHub secondary-rate-limit count. */
       queueTitle: "Queue backlog and GitHub rate limits",
       queueDescription:

@@ -222,7 +222,7 @@ import { createSecretbox } from "../dashboard/secretbox";
 // The operator default review depth (migration 0047 pairing): read ONLY when
 // the target row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
-import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel } from "../dashboard/runtime-config-store";
+import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel, getMaintenanceMode } from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads bot_provider_keys / bot_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
@@ -466,8 +466,11 @@ export type ConsumerLogFields = {
    * the discussion, with no body and no catalog — overruns the operator's byte
    * budget, so nothing is sent. It names both figures and is NOT a seat skip:
    * no seat was started.
+   * `maintenance_skip` (same channel, additive): the invocation found the
+   * platform closed (D20) and acked the delivery without starting a round — the
+   * only record of a review the maintenance window dropped.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_skip";
   action: string;
   installation_id: number;
   owner: string;
@@ -479,6 +482,11 @@ export type ConsumerLogFields = {
   app_id?: string;
   /** review_targets.id the job's configuration came from (per-bot jobs only). */
   target_id?: string;
+  /**
+   * The queue binding the deferred delivery arrived on (`maintenance_skip`
+   * only — the window names the queue it drained, not just the PR).
+   */
+  queue?: string;
   idempotency_key?: string;
   /**
    * review_checks.id — the Check attempt row a line is about, and the only
@@ -4026,6 +4034,27 @@ export function createReviewConsumer(
       },
     });
   return async (batch) => {
+    // The maintenance window (D20) defers the whole invocation: a mid-upgrade
+    // pipeline write could land on a ledger row the backfill just repointed.
+    // ONE read per invocation; nothing else in the batch runs. Each deferred
+    // delivery is acked (GitHub is already 503ing, so the window drains the
+    // backlog rather than replaying it) and leaves one line naming its PR —
+    // those lines are the only record of a review this window dropped.
+    const maintenance = await getMaintenanceMode(env.DB);
+    if (maintenance.enabled) {
+      for (const message of batch.messages) {
+        log.warn(
+          {
+            ...payloadIdentityFields(message.body),
+            event: "maintenance_skip",
+            queue: batch.queue,
+          },
+          "delivery skipped — the platform is in its maintenance window",
+        );
+        message.ack();
+      }
+      return;
+    }
     for (const message of batch.messages) {
       const outcome = await processMessage(message.body, deps, message.attempts);
       // BB-3: guard-held is a typed outcome — schedule the per-message

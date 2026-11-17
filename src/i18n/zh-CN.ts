@@ -1199,6 +1199,20 @@ export const zhCN: Dictionary = {
       admissionDropsSystemCap: "系统上限",
       admissionDropsWorkspaceCap: "工作区上限",
       admissionDropsError: "存储错误",
+      /** 维护窗口：运维对它的唯一写入面。 */
+      maintenanceTitle: "维护模式",
+      maintenanceDescription:
+        "开启后，控制台返回 503，Webhook 返回 503 以便 GitHub 重试，队列中的审查会被丢弃。健康检查与本控制台保持可用。",
+      maintenanceStateOn: "已开启 — 平台已关闭",
+      maintenanceStateOff: "已关闭 — 平台正常服务",
+      maintenanceReasonLabel: "原因（展示给用户）",
+      maintenanceOn: "关闭平台",
+      maintenanceOff: "恢复平台",
+      maintenanceSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      maintenanceFailed: "修改维护模式失败。",
+      /** 窗口开启时间，渲染为相对时间。 */
+      maintenanceSinceLabel: "关闭于",
       /** 实时队列积压，以及最近 24 小时的 GitHub 次级限流次数。 */
       queueTitle: "队列积压与 GitHub 限流",
       queueDescription:

@@ -20,6 +20,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Toggle,
 } from "@design-system";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 import { APP_VERSION } from "../../version";
@@ -35,12 +36,14 @@ import {
   setCheckBudgets,
   setCommentClaimSettings,
   setDefaultReviewLevel,
+  setMaintenance,
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
   useLoaded,
   type AdmissionDropCounts,
   type CheckBudgetConfig,
   type CommentClaimConfig,
+  type MaintenanceConfig,
   type QueueBacklog,
   type RecheckAssignmentConfig,
   type ReviewLevelConfig,
@@ -111,6 +114,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [outboxDraft, setOutboxDraft] = useState<string | null>(null);
   const [levelDraft, setLevelDraft] = useState<string | null>(null);
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
+  /** The window's pending state: `null` = untouched, so the stored one shows. */
+  const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
+  const [reasonDraft, setReasonDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Every card's save rides its own button: the signal drives the spinner →
   // check → alert face; the shared notice state carries the copy (the
@@ -120,13 +126,20 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const commentClaimSignal = useSaveSignal();
   const reviewLevelSignal = useSaveSignal();
   const recheckAssignmentSignal = useSaveSignal();
+  const maintenanceSignal = useSaveSignal();
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
   // the terminalize/update relation included — reads as that field's error
   // instead of a page-wide banner.
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
     message: string;
-    source: "concurrency" | "checkBudgets" | "commentClaim" | "reviewLevel" | "recheckAssignment";
+    source:
+      | "concurrency"
+      | "checkBudgets"
+      | "commentClaim"
+      | "reviewLevel"
+      | "recheckAssignment"
+      | "maintenance";
   } | null>(null);
 
   async function onSubmit(
@@ -346,6 +359,46 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
+  /**
+   * Close or reopen the platform. `enabled` is the state the operator asked
+   * for; the reason rides only a close (the store drops it on reopen, so
+   * sending it then would be dead input).
+   */
+  async function onSaveMaintenance(stored: MaintenanceConfig, enabled: boolean): Promise<void> {
+    if (busy) return; // in-flight guard — no double submit
+    setBusy(true);
+    setNotice(null);
+    maintenanceSignal.start();
+    try {
+      const saved = await setMaintenance(
+        enabled ? { enabled, reason: (reasonDraft ?? "").trim() || undefined } : { enabled },
+        stored,
+      );
+      update((data) => ({ ...data, maintenance: saved }));
+      setMaintenanceTarget(null);
+      setReasonDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.maintenanceSaved"),
+        source: "maintenance",
+      });
+      maintenanceSignal.succeed();
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.maintenanceFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "maintenance",
+      });
+      maintenanceSignal.fail();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="flex flex-col gap-6">
       <PageHeader
@@ -376,8 +429,112 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const drops = data.admissionDrops24h;
           // The live queue gauge; `null` is "not readable", never an empty queue.
           const queue = data.queue;
+          // And for the maintenance window (older Worker → no card).
+          const maintenance = data.maintenance;
+          // The state the toggle shows: what the operator picked, else stored.
+          const maintenanceOn = maintenanceTarget ?? maintenance?.enabled ?? false;
           return (
           <div className="flex flex-col gap-4">
+            {maintenance === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.maintenanceTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.maintenanceDescription")}
+                </p>
+                {notice?.source === "maintenance" ? (
+                  <CardOutcome notice={notice} status={maintenanceSignal.status} />
+                ) : null}
+                {/* The stored window as the gates read it: state, the operator's
+                    own reason and when it opened — never the pending target. */}
+                <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
+                  <div className="flex flex-col gap-1">
+                    <dt className="text-muted-foreground">{t(locale, "admin.flags.stateColumn")}</dt>
+                    <dd className="font-medium" data-maintenance="state">
+                      {t(
+                        locale,
+                        maintenance.enabled
+                          ? "admin.runtime.maintenanceStateOn"
+                          : "admin.runtime.maintenanceStateOff",
+                      )}
+                    </dd>
+                  </div>
+                  {maintenance.enabled && maintenance.since !== null ? (
+                    <div className="flex flex-col gap-1">
+                      <dt className="text-muted-foreground">
+                        {t(locale, "admin.runtime.maintenanceSinceLabel")}
+                      </dt>
+                      <dd className="font-medium" data-maintenance="since">
+                        {formatRelativeTime(maintenance.since, locale)}
+                      </dd>
+                    </div>
+                  ) : null}
+                  {maintenance.enabled && maintenance.reason !== null ? (
+                    <div className="flex flex-col gap-1">
+                      <dt className="text-muted-foreground">
+                        {t(locale, "admin.runtime.maintenanceReasonLabel")}
+                      </dt>
+                      <dd className="font-medium" data-maintenance="reason">
+                        {maintenance.reason}
+                      </dd>
+                    </div>
+                  ) : null}
+                </dl>
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void onSaveMaintenance(maintenance, maintenanceOn);
+                  }}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="maintenance-reason">
+                      {t(locale, "admin.runtime.maintenanceReasonLabel")}
+                    </label>
+                    <Input
+                      id="maintenance-reason"
+                      className="w-64"
+                      autoComplete="off"
+                      // A reopen writes no reason (the store deletes it), so the
+                      // field is inert until the operator is closing again.
+                      disabled={busy || !maintenanceOn}
+                      value={reasonDraft ?? ""}
+                      onChange={(event) => setReasonDraft(event.target.value)}
+                    />
+                  </div>
+                  <Toggle
+                    variant="outline"
+                    pressed={maintenanceOn}
+                    disabled={busy}
+                    aria-label={t(locale, "admin.flags.stateAria", {
+                      flag: t(locale, "admin.runtime.maintenanceTitle"),
+                      state: t(
+                        locale,
+                        maintenanceOn ? "admin.runtime.maintenanceStateOn" : "admin.runtime.maintenanceStateOff",
+                      ),
+                    })}
+                    onPressedChange={(next) => setMaintenanceTarget(next)}
+                  >
+                    {t(locale, maintenanceOn ? "admin.flags.stateOn" : "admin.flags.stateOff")}
+                  </Toggle>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={maintenanceSignal.status === "idle" ? undefined : maintenanceSignal.status}
+                  >
+                    {t(
+                      locale,
+                      maintenanceOn ? "admin.runtime.maintenanceOn" : "admin.runtime.maintenanceOff",
+                    )}
+                  </Button>
+                  <SaveInFlight show={maintenanceSignal.status === "loading"} locale={locale} />
+                </form>
+              </CardContent>
+            </SectionCard>
+            )}
+
             <SectionCard tier="secondary">
               <CardHeader>
                 <SectionCardTitle>{t(locale, "admin.runtime.concurrencyTitle")}</SectionCardTitle>

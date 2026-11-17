@@ -124,7 +124,10 @@ export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
     // §7.11.2: the composition's THIRD independent catch, for the M7
     // Check reconciler — same shape and the same type-only rationale as the
     // M8 line above.
-    | "ops_check_reconcile_failed";
+    | "ops_check_reconcile_failed"
+    // D20: the invocation found the platform closed and returned before any
+    // lane ran — a queue batch or a cron expression, named in `detail`.
+    | "maintenance_skip";
 };
 
 /**

@@ -158,6 +158,18 @@ export type RecheckAssignmentConfig = {
   degraded: boolean;
 };
 
+/**
+ * The maintenance window (D20): whether the platform is closed, the Operator's
+ * reason and when it closed. `reason` / `since` are `null` whenever the window
+ * is open — the store deletes both on disable, so a closed platform never
+ * carries a stale window.
+ */
+export type MaintenanceConfig = {
+  enabled: boolean;
+  reason: string | null;
+  since: string | null;
+};
+
 /** Admission drops in the trailing 24h, one count per refusal reason. */
 export type AdmissionDropCounts = {
   "pr-held": number;
@@ -200,6 +212,8 @@ export type RuntimeConfig = {
   reviewLevel: ReviewLevelConfig | null;
   /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
   recheckAssignment: RecheckAssignmentConfig | null;
+  /** The maintenance window; `null` under the same older-Worker rule. */
+  maintenance: MaintenanceConfig | null;
   /** The 24h admission-drop counts; `null` under the same older-Worker rule. */
   admissionDrops24h: AdmissionDropCounts | null;
   /**
@@ -269,6 +283,18 @@ function parseRecheckAssignment(row: Json): RecheckAssignmentConfig | null {
   };
 }
 
+/** The maintenance window; absent (older Worker) answers `null`. */
+function parseMaintenance(row: Json): MaintenanceConfig | null {
+  const raw = row.maintenance;
+  if (raw === undefined) return null;
+  const window = map(raw, "runtime maintenance");
+  return {
+    enabled: bool(window, "enabled"),
+    reason: maybeText(window, "reason"),
+    since: maybeText(window, "since"),
+  };
+}
+
 function parseAdmissionDrops(row: Json): AdmissionDropCounts | null {
   const raw = row.admissionDrops24h;
   if (raw === undefined) return null;
@@ -315,6 +341,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     commentClaim: parseCommentClaim(body),
     reviewLevel: parseReviewLevel(body),
     recheckAssignment: parseRecheckAssignment(body),
+    maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
     githubRateLimited24h: parseGithubRateLimited(body),
@@ -444,6 +471,33 @@ export async function setRecheckAssignmentMaxBytes(
     }
   }
   return { ...stored, maxBytes, degraded: false };
+}
+
+/**
+ * Open or close the maintenance window, answering the state the server stored.
+ * The server owns `since`, so an unreadable echo answers the REQUEST's flag —
+ * the write already landed — but keeps the loaded window's stamps: claiming a
+ * start time the console never read would be a guess.
+ */
+export async function setMaintenance(
+  value: { enabled: boolean; reason?: string },
+  stored: MaintenanceConfig,
+): Promise<MaintenanceConfig> {
+  const answer = await write("PATCH", "/runtime", { maintenance: value });
+  if (typeof answer === "object" && answer !== null && "maintenance" in answer) {
+    const saved = answer.maintenance;
+    if (typeof saved === "object" && saved !== null && "enabled" in saved) {
+      const { enabled, reason, since } = saved as Json;
+      if (typeof enabled === "boolean") {
+        return {
+          enabled,
+          reason: typeof reason === "string" ? reason : null,
+          since: typeof since === "string" ? since : null,
+        };
+      }
+    }
+  }
+  return { ...stored, enabled: value.enabled };
 }
 
 export async function readWorkspaces(): Promise<WorkspaceRow[]> {
