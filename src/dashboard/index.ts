@@ -5488,10 +5488,9 @@ async function insightsSummaryJson(
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
-    // The target set and the workspace that owns those ids: the store binds
-    // both, so another tenant's reviews can never reach this payload.
-    targetIds: scope.targetIds,
-    workspaceId: scope.workspaceId,
+    // The tenant scope: its SQL binds either the target/workspace pair or the
+    // workspace alone, so another tenant's reviews can never reach this payload.
+    ...scope,
   });
   return c.json({
     window_days: clampWindow(params.windowDays),
@@ -5530,21 +5529,27 @@ const targetInsightsRoute = async (c: DashboardContext) => {
 
 /**
  * The workspace-scope JSON gate: membership, then the manage rule the App
- * faces already carry. It also resolves the workspace's LIVE target set as the
- * ledger scope both workspace faces bind — a workspace with no target yet
- * resolves to an empty list, which the stores answer with the zero-filled
- * payload rather than an error (nothing is wrong, there is just no data).
+ * faces already carry. It hands back the WORKSPACE scope, which the stores
+ * resolve to their own live-target subquery — no id list is built here, so the
+ * bind count stays constant however many repositories the workspace reviews.
+ * A workspace with no target yet resolves to an empty payload rather than an
+ * error (nothing is wrong, there is just no data).
  */
 async function requireWorkspaceManagerJson(
   c: DashboardContext,
-): Promise<{ ok: true; scope: LedgerScope; db: DashboardDb } | { ok: false; response: Response }> {
+): Promise<
+  | { ok: true; scope: LedgerScope; db: DashboardDb; store: ReturnType<typeof createReviewBotsStore> }
+  | { ok: false; response: Response }
+> {
   const member = await requireMember(c);
   if (!member.ok) return member;
   if (!canManageApp(member.scope)) return { ok: false, response: c.json({ error: "forbidden" }, 403) };
-  const targetIds = (await createTargetsStore(member.db).listLive(member.scope.workspaceId)).map(
-    (target) => target.id,
-  );
-  return { ok: true, scope: { targetIds, workspaceId: member.scope.workspaceId }, db: member.db };
+  return {
+    ok: true,
+    scope: { kind: "workspace", workspaceId: member.scope.workspaceId },
+    db: member.db,
+    store: createReviewBotsStore(member.db),
+  };
 }
 
 /**
@@ -5606,7 +5611,7 @@ async function requireTargetManagerJson(
   return {
     ok: true,
     target,
-    scope: { targetIds: [target.id], workspaceId: member.scope.workspaceId },
+    scope: { kind: "target", targetId: target.id, workspaceId: member.scope.workspaceId },
     db: member.db,
     store: createReviewBotsStore(member.db),
   };
@@ -5859,9 +5864,29 @@ function pullRequestNumberOf(c: DashboardContext): number | null {
   return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
-const targetPullRequestRoute = async (c: DashboardContext) => {
+/**
+ * The scope gate a ledger face runs before reading: both workspace and target
+ * faces answer with the same `{ scope, store }` pair, so ONE handler serves
+ * both registrations and the two can never drift apart.
+ */
+type LedgerGate = () => Promise<
+  | {
+      ok: true;
+      scope: LedgerScope;
+      db: DashboardDb;
+      store: ReturnType<typeof createReviewBotsStore>;
+    }
+  | { ok: false; response: Response }
+>;
+
+/**
+ * One PR's head + record totals. TWO routes answer it — the target scope (one
+ * repository) and the workspace scope (every live target) — and only the gate
+ * differs: the address is the ledger's own key and the store binds the scope.
+ */
+const pullRequestDetailRoute = async (c: DashboardContext, gateOf: LedgerGate) => {
   c.header("Cache-Control", "private, no-store");
-  const gate = await requireTargetManagerJson(c);
+  const gate = await gateOf();
   if (!gate.ok) return gate.response;
   const number = pullRequestNumberOf(c);
   if (number === null) return c.json({ error: "unknown pull request" }, 404);
@@ -5921,12 +5946,13 @@ type PullRequestRecordSection = "findings" | "reviews" | "failures";
  * `limit` the clamp applied, so the pager strides on the server's page size
  * instead of re-deriving it.
  */
-const targetPullRequestRecordsRoute = async (
+const pullRequestRecordsRoute = async (
   c: DashboardContext,
+  gateOf: LedgerGate,
   section: PullRequestRecordSection,
 ) => {
   c.header("Cache-Control", "private, no-store");
-  const gate = await requireTargetManagerJson(c);
+  const gate = await gateOf();
   if (!gate.ok) return gate.response;
   const number = pullRequestNumberOf(c);
   if (number === null) return c.json({ error: "unknown pull request" }, 404);
@@ -6057,16 +6083,22 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   // is the ledger's own key — owner/repo/number — and a miss is a 404.
   { method: "get", path: "/api/targets/:targetId/insights/summary", handler: targetInsightsRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests", handler: targetPullRequestsRoute, access: "write" },
-  { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number", handler: targetPullRequestRoute, access: "write" },
-  { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/findings", handler: (c) => targetPullRequestRecordsRoute(c, "findings"), access: "write" },
-  { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/reviews", handler: (c) => targetPullRequestRecordsRoute(c, "reviews"), access: "write" },
-  { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/failures", handler: (c) => targetPullRequestRecordsRoute(c, "failures"), access: "write" },
+  { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number", handler: (c) => pullRequestDetailRoute(c, () => requireTargetManagerJson(c)), access: "write" },
+  { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/findings", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "findings"), access: "write" },
+  { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/reviews", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "reviews"), access: "write" },
+  { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/failures", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "failures"), access: "write" },
   // Workspace-scope reads (plan 372): the same payloads over every live target
   // of the workspace. Target-owned data reads are `write` in this table (AC3)
-  // — only the workspace-scoped member list is `read`. The section reads share
-  // one handler; each path fixes its family.
+  // — only the workspace-scoped member list is `read`. The detail and its
+  // three record families reuse the target handlers' bodies via the gate
+  // parameter: the SPA emits this same address family for `{kind:"workspace"}`,
+  // so the list's row click must reach the same readers.
   { method: "get", path: "/api/insights/summary", handler: workspaceInsightsRoute, access: "write" },
   { method: "get", path: "/api/pull-requests", handler: workspacePullRequestsRoute, access: "write" },
+  { method: "get", path: "/api/pull-requests/:owner/:repo/:number", handler: (c) => pullRequestDetailRoute(c, () => requireWorkspaceManagerJson(c)), access: "write" },
+  { method: "get", path: "/api/pull-requests/:owner/:repo/:number/findings", handler: (c) => pullRequestRecordsRoute(c, () => requireWorkspaceManagerJson(c), "findings"), access: "write" },
+  { method: "get", path: "/api/pull-requests/:owner/:repo/:number/reviews", handler: (c) => pullRequestRecordsRoute(c, () => requireWorkspaceManagerJson(c), "reviews"), access: "write" },
+  { method: "get", path: "/api/pull-requests/:owner/:repo/:number/failures", handler: (c) => pullRequestRecordsRoute(c, () => requireWorkspaceManagerJson(c), "failures"), access: "write" },
   // The member list is `read` (every member sees it, and the operator's AC2
   // field set is this same list); every App/settings read and invite face is
   // `write` (AC3).

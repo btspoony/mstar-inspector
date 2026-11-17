@@ -6,7 +6,7 @@
  *   GET /dashboard/<ref>/api/targets/<targetId>/pull-requests[/<id>[/<section>]]
  *
  * Each resolves the target with `getInWorkspace(workspaceId, targetId)` and
- * binds `{ targetIds: [target.id], workspaceId }` to the same store call the
+ * binds `{ kind: "target", targetId, workspaceId }` to the same store call the
  * workspace face makes, so the payload keys cannot drift and a foreign id is
  * the resolution's own 404. The App-addressed family is removed with it.
  */
@@ -219,10 +219,10 @@ describe("GET /dashboard/<ref>/api/targets/:targetId/pull-requests", () => {
 describe("the target scope is the single-target scope", () => {
   test("the route payload equals the store's one-id aggregation", async () => {
     const { db } = fixture();
-    // The App-addressed face resolved its target via `firstTargetForBot` and
-    // bound `{ targetIds: [target.id], workspaceId }`; the target face binds the
-    // same pair for the id in the path, so the numbers cannot differ.
-    const scope = { targetIds: ["t-portal"], workspaceId: "ws-two" };
+    // The route resolves its target with `getInWorkspace(workspaceId, id)` and
+    // binds `{ kind: "target", targetId, workspaceId }`; hand-building the same
+    // scope must produce the same numbers.
+    const scope = { kind: "target", targetId: "t-portal", workspaceId: "ws-two" } as const;
     const expected = await createInsightsStore(db, { ...scope, windowDays: 30, includeRepos: true });
     const res = await get(db, "ws-two/api/targets/t-portal/insights/summary?include=repos", "dana");
     const body = (await res.json()) as { reviews_total: number; repos: string[]; verdict_distribution: unknown[] };

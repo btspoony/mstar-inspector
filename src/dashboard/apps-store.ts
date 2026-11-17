@@ -413,36 +413,41 @@ const PULL_REQUEST_LEDGER_ORDER = "last_seen_at DESC, pr_number DESC";
 const PULL_REQUEST_REPO_PREDICATE = " AND owner = ? AND repo = ?";
 
 /**
- * The tenant scope every ledger read binds: the review target set and the
- * workspace that must own those targets. One id is the repository scope, every
- * live id in a workspace is the workspace scope — which spans bots, so no bot
- * rides here. The route resolves the workspace from the session; the SQL
- * re-checks the target/workspace pair so a route bug cannot leak another
- * tenant's rows. An EMPTY `targetIds` reads nothing (see each face's guard).
+ * The tenant scope every ledger read binds: ONE repository target, or every
+ * live target of a workspace (which spans bots, so no bot rides here). The
+ * route resolves both from the session.
+ *
+ * The workspace arm is a SUBQUERY, never an id list: the bind count must be a
+ * property of the scope KIND, not of how many targets the tenant happens to
+ * own. D1 caps a statement's parameters, so a spliced list turns "this
+ * workspace has many repositories" into a runtime failure.
+ *
+ * The target arm re-checks the target/workspace pair in the SAME statement, so
+ * a route bug cannot leak another tenant's rows; the workspace arm carries the
+ * same re-check as its subquery's own predicate. An empty workspace reads
+ * nothing (the subquery matches no id) — an empty payload, not an error.
  */
-export type LedgerScope = { targetIds: readonly string[]; workspaceId: string };
+export type LedgerScope =
+  | { kind: "target"; targetId: string; workspaceId: string }
+  | { kind: "workspace"; workspaceId: string };
 
 /**
- * The tenant predicate for a ledger statement over `alias` — the target set
- * AND the workspace that owns it, bound in the SAME statement. `count` is
- * `scope.targetIds.length`; those bind values always come first in the
- * statement's bind list, followed by the workspace id. A ZERO count (a
- * workspace with no live target) is the literal `0`: a match-nothing predicate
- * that binds nothing, because `IN ()` is a syntax error in SQLite.
+ * The tenant predicate for a ledger statement over `alias`, binding a CONSTANT
+ * number of values per scope kind — one for a workspace scope, two for a
+ * target scope (its id and the workspace that must own it). Bind order is
+ * `ledgerScopeBinds`'.
  */
-function ledgerScopeSql(alias: string, count: number): string {
-  if (count === 0) return "0";
-  const placeholders = Array.from({ length: count }, () => "?").join(", ");
-  return `${alias}.target_id IN (${placeholders}) AND EXISTS (SELECT 1 FROM review_targets t WHERE t.id = ${alias}.target_id AND t.workspace_id = ?)`;
+function ledgerScopeSql(alias: string, scope: LedgerScope): string {
+  const target = `${alias}.target_id`;
+  if (scope.kind === "workspace") {
+    return `${target} IN (SELECT t.id FROM review_targets t WHERE t.workspace_id = ? AND t.deleted_at IS NULL)`;
+  }
+  return `${target} = ? AND EXISTS (SELECT 1 FROM review_targets t WHERE t.id = ${target} AND t.workspace_id = ? AND t.deleted_at IS NULL)`;
 }
 
-/**
- * The bind values `ledgerScopeSql` expects, in its own order: the target set
- * then the owning workspace. An empty set binds nothing — the statement's
- * predicate is then the match-nothing `"0"`.
- */
+/** The bind values `ledgerScopeSql` expects, in its own order. */
 function ledgerScopeBinds(scope: LedgerScope): string[] {
-  return scope.targetIds.length === 0 ? [] : [...scope.targetIds, scope.workspaceId];
+  return scope.kind === "workspace" ? [scope.workspaceId] : [scope.targetId, scope.workspaceId];
 }
 
 /**
@@ -451,9 +456,9 @@ function ledgerScopeBinds(scope: LedgerScope): string[] {
  * capped: the work is. A repository filter narrows the window ITSELF, so the
  * cap bounds the filtered set and the aggregates keep matching the rows.
  */
-function pullRequestWindowSql(repoPredicate: string, count: number): string {
+function pullRequestWindowSql(repoPredicate: string, scope: LedgerScope): string {
   return `SELECT owner, repo, pr_number FROM pull_requests
-  WHERE ${ledgerScopeSql("pull_requests", count)}${repoPredicate}
+  WHERE ${ledgerScopeSql("pull_requests", scope)}${repoPredicate}
   ORDER BY ${PULL_REQUEST_LEDGER_ORDER} LIMIT ?`;
 }
 
@@ -463,9 +468,9 @@ function pullRequestWindowSql(repoPredicate: string, count: number): string {
  * empty section and an unknown PR — so existence must be decided in the same
  * batch, and `null` (the route's 404) means "this target never received it".
  */
-function pullRequestExistsSql(count: number): string {
+function pullRequestExistsSql(scope: LedgerScope): string {
   return `SELECT 1 AS found FROM pull_requests p
-  WHERE ${ledgerScopeSql("p", count)} AND p.owner = ? AND p.repo = ? AND p.pr_number = ? LIMIT 1`;
+  WHERE ${ledgerScopeSql("p", scope)} AND p.owner = ? AND p.repo = ? AND p.pr_number = ? LIMIT 1`;
 }
 
 /**
@@ -1691,11 +1696,10 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       // ONE suffix feeds the row statement and the window, so a change to the
       // window helper cannot leave the rows filtering after the cap.
       const repoPredicate = filter === undefined ? "" : PULL_REQUEST_REPO_PREDICATE;
-      // The tenant binds (target set + owning workspace) leading every
-      // statement; an empty set binds nothing and the predicate matches nothing.
-      const count = scope.targetIds.length;
+      // The tenant binds leading every statement — one for a workspace scope,
+      // two for a target scope (its id and the workspace that owns it).
       const scopeBinds = ledgerScopeBinds(scope);
-      const window = pullRequestWindowSql(repoPredicate, count);
+      const window = pullRequestWindowSql(repoPredicate, scope);
       // The window's own binds (tenant set, repo filter, cap), spliced after
       // each aggregate's own leading predicate.
       const windowBinds = [
@@ -1711,7 +1715,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           db
             .prepare(
               `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-               FROM pull_requests WHERE ${ledgerScopeSql("pull_requests", count)}${repoPredicate}
+               FROM pull_requests WHERE ${ledgerScopeSql("pull_requests", scope)}${repoPredicate}
                ORDER BY ${PULL_REQUEST_LEDGER_ORDER}
                LIMIT ?`,
             )
@@ -1723,7 +1727,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                         ROW_NUMBER() OVER (PARTITION BY owner, repo, pr_number
                           ORDER BY reviewed_at DESC, rowid DESC) AS rn
                  FROM reviews r
-                 WHERE ${ledgerScopeSql("r", count)}
+                 WHERE ${ledgerScopeSql("r", scope)}
                    AND (owner, repo, pr_number) IN (${window})
                ) WHERE rn = 1`,
             )
@@ -1732,7 +1736,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             .prepare(
               `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
                FROM review_failures f
-               WHERE ${ledgerScopeSql("f", count)}
+               WHERE ${ledgerScopeSql("f", scope)}
                  AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                  AND (f.owner, f.repo, f.pr_number) IN (${window})
                GROUP BY f.owner, f.repo, f.pr_number`,
@@ -1741,7 +1745,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           db
             .prepare(
               `SELECT DISTINCT owner, repo FROM pull_requests
-               WHERE ${ledgerScopeSql("pull_requests", count)}
+               WHERE ${ledgerScopeSql("pull_requests", scope)}
                ORDER BY owner, repo`,
             )
             .bind(...scopeBinds),
@@ -1783,20 +1787,19 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       repo: string,
       prNumber: number,
     ): Promise<PullRequestHeadRow | null> {
-      const count = scope.targetIds.length;
       const scopeBinds = ledgerScopeBinds(scope);
       const [results, locks] = await Promise.all([
         db.batch([
           db
             .prepare(
               `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-               FROM pull_requests p WHERE ${ledgerScopeSql("p", count)} AND p.owner = ? AND p.repo = ? AND p.pr_number = ?`,
+               FROM pull_requests p WHERE ${ledgerScopeSql("p", scope)} AND p.owner = ? AND p.repo = ? AND p.pr_number = ?`,
             )
             .bind(...scopeBinds, owner, repo, prNumber),
           db
             .prepare(
               `SELECT verdict, model, provider, reviewed_at, head_sha FROM reviews r
-               WHERE ${ledgerScopeSql("r", count)} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?
+               WHERE ${ledgerScopeSql("r", scope)} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?
                ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
             )
             .bind(...scopeBinds, owner, repo, prNumber),
@@ -1838,26 +1841,25 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       repo: string,
       prNumber: number,
     ): Promise<PullRequestRecordCounts> {
-      const count = scope.targetIds.length;
       const scopeBinds = ledgerScopeBinds(scope);
       const results = await db.batch([
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings rf
-             WHERE ${ledgerScopeSql("rf", count)}
+             WHERE ${ledgerScopeSql("rf", scope)}
                AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'`,
           )
           .bind(...scopeBinds, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM reviews r
-             WHERE ${ledgerScopeSql("r", count)} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?`,
+             WHERE ${ledgerScopeSql("r", scope)} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?`,
           )
           .bind(...scopeBinds, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_failures f
-             WHERE ${ledgerScopeSql("f", count)}
+             WHERE ${ledgerScopeSql("f", scope)}
                AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
@@ -1865,7 +1867,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings rf
-             WHERE ${ledgerScopeSql("rf", count)}
+             WHERE ${ledgerScopeSql("rf", scope)}
                AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'
                AND json_extract(rf.original_json, '$.mergeClass') = ?`,
           )
@@ -1938,14 +1940,13 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         : page.severity === undefined || page.severity === null
           ? []
           : [page.severity];
-      const count = scope.targetIds.length;
       const scopeBinds = ledgerScopeBinds(scope);
       const results = await db.batch([
-        db.prepare(pullRequestExistsSql(count)).bind(...scopeBinds, owner, repo, prNumber),
+        db.prepare(pullRequestExistsSql(scope)).bind(...scopeBinds, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings rf
-             WHERE ${ledgerScopeSql("rf", count)}
+             WHERE ${ledgerScopeSql("rf", scope)}
                AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}`,
           )
           .bind(...scopeBinds, owner, repo, prNumber, ...filterBinds),
@@ -1959,7 +1960,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                     json_extract(rf.original_json, '$.body') AS body,
                     rf.first_seen_round AS review_round
              FROM review_findings rf
-             WHERE ${ledgerScopeSql("rf", count)}
+             WHERE ${ledgerScopeSql("rf", scope)}
                AND rf.owner = ? AND rf.repo = ? AND rf.pr_number = ? AND rf.state = 'open'${filter}
              ORDER BY rf.rowid DESC
              LIMIT ? OFFSET ?`,
@@ -2000,14 +2001,13 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       prNumber: number,
       page: PullRequestPageRequest,
     ): Promise<PullRequestRecordPage<PullRequestReviewDetailRow> | null> {
-      const count = scope.targetIds.length;
       const scopeBinds = ledgerScopeBinds(scope);
       const results = await db.batch([
-        db.prepare(pullRequestExistsSql(count)).bind(...scopeBinds, owner, repo, prNumber),
+        db.prepare(pullRequestExistsSql(scope)).bind(...scopeBinds, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM reviews r
-             WHERE ${ledgerScopeSql("r", count)} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?`,
+             WHERE ${ledgerScopeSql("r", scope)} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?`,
           )
           .bind(...scopeBinds, owner, repo, prNumber),
         db
@@ -2024,7 +2024,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                             ROW_NUMBER() OVER (ORDER BY r.reviewed_at ASC, r.rowid ASC)
                           ) AS round
                    FROM reviews r
-                   WHERE ${ledgerScopeSql("r", count)} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) x
+                   WHERE ${ledgerScopeSql("r", scope)} AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) x
              ORDER BY x.reviewed_at DESC, x.rid DESC
              LIMIT ? OFFSET ?`,
           )
@@ -2055,15 +2055,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       prNumber: number,
       page: PullRequestPageRequest,
     ): Promise<PullRequestRecordPage<PullRequestFailureDetailRow> | null> {
-      const count = scope.targetIds.length;
       const scopeBinds = ledgerScopeBinds(scope);
       const results = await db.batch([
-        db.prepare(pullRequestExistsSql(count)).bind(...scopeBinds, owner, repo, prNumber),
+        db.prepare(pullRequestExistsSql(scope)).bind(...scopeBinds, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n
              FROM review_failures f
-             WHERE ${ledgerScopeSql("f", count)}
+             WHERE ${ledgerScopeSql("f", scope)}
                AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
@@ -2072,7 +2071,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
-             WHERE ${ledgerScopeSql("f", count)}
+             WHERE ${ledgerScopeSql("f", scope)}
                AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC

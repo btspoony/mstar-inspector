@@ -69,27 +69,24 @@
 import { FINDING_SEVERITIES } from "../contracts/finding-severity";
 import { dayGrid, weekGrid } from "./insights-dates";
 
+/**
+ * The tenant scope of an aggregation, mirroring `LedgerScope` in the ledger
+ * store: a target arm binds its id AND the workspace that must own it; a
+ * workspace arm resolves to a subquery over the workspace's live targets.
+ * Either arm binds a CONSTANT number of values — never one per target (D1's
+ * parameter cap). REQUIRED: there is no unscoped tenant insights read. Rows
+ * with `target_id` NULL (legacy unattributed) stay excluded.
+ */
+export type InsightsScope =
+  | { kind: "target"; targetId: string; workspaceId: string }
+  | { kind: "workspace"; workspaceId: string };
+
 /** Optional filters for the insights aggregation (AL-22-1). */
-export type InsightsWindow = {
+export type InsightsWindow = InsightsScope & {
   /** Integer days, default 30; >90 is clamped to 90 at the store entry. */
   windowDays?: number;
   /** Restrict every aggregation to one owner/repo pair. */
   repo?: { owner: string; repo: string };
-  /**
-   * The review targets whose reviews are aggregated — `review_targets.id`
-   * values. REQUIRED: there is no unscoped tenant insights read. A single
-   * repository passes its own id; the workspace scope passes every live target
-   * id in the workspace. An EMPTY list reads nothing and resolves to the
-   * zero-filled shape (an empty workspace is not an error). Rows with
-   * `target_id` NULL (legacy unattributed) stay excluded.
-   */
-  targetIds: readonly string[];
-  /**
-   * The workspace that must own every id in `targetIds` — bound in the same
-   * statement as the target predicate, so a target id from another workspace
-   * aggregates to nothing instead of revealing that its reviews exist.
-   */
-  workspaceId: string;
   /**
    * Opt-in window-scoped distinct `repos` aggregation (QC F-001).
    * Skipped (resolves to []) unless requested — only the insights records
@@ -188,11 +185,11 @@ const WEEK_BUCKET_SQL = "date(r.reviewed_at, '-' || ((strftime('%w', r.reviewed_
  *
  * @param db   a D1 handle (real D1Database or the bun:sqlite test double)
  * @param opts windowDays (default 30, >90 clamped to 90) + optional
- *             owner/repo filter + the REQUIRED tenant scope (`targetIds` and
- *             the `workspaceId` that must own them), each applied to EVERY
+ *             owner/repo filter + the REQUIRED tenant `scope` (one target, or
+ *             the workspace's live targets), each applied to EVERY
  *             aggregation; the scope also narrows the opt-in `repos` list and
- *             excludes legacy `target_id` NULL rows. An empty `targetIds`
- *             resolves to the zero-filled shape.
+ *             excludes legacy `target_id` NULL rows. A workspace with no live
+ *             target resolves to the zero-filled shape.
  */
 export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow): Promise<Insights> {
   const windowDays = clampWindow(opts.windowDays);
@@ -217,20 +214,22 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
   // (QC F-003).
   const windowEraWhere = "r.reviewed_at >= datetime('now', '-' || ? || ' days') AND r.envelope IS NOT NULL";
 
-  // The tenant predicate every face carries: the target set AND the workspace
-  // that owns those ids, bound in the SAME statement. `target_id IN (…)` alone
-  // would trust the caller to have scoped the ids; the EXISTS is what makes a
-  // foreign target id aggregate to nothing instead of revealing its reviews.
-  // One id is the repository scope, many are the workspace scope. An EMPTY set
-  // (a workspace with no live target yet) is the literal `0` — a match-nothing
-  // predicate that binds no value: `IN ()` would be a syntax error, and the
-  // zero-filled payload is the honest answer, not an error.
-  const targetPlaceholders = opts.targetIds.map(() => "?").join(", ");
+  // The tenant predicate every face carries, in one of TWO constant-bind
+  // shapes. The target arm binds its id AND re-checks the workspace that owns
+  // it in the SAME statement (a foreign id aggregates to nothing instead of
+  // revealing that its reviews exist). The workspace arm is a SUBQUERY over
+  // the workspace's live targets — never an id list, whose bind count would
+  // grow with the tenant's repository count past D1's parameter cap. An empty
+  // workspace matches no id, which is the honest zero-filled payload, not an
+  // error.
   const tenantWhere =
-    opts.targetIds.length === 0
-      ? "0"
-      : `r.target_id IN (${targetPlaceholders}) AND EXISTS (SELECT 1 FROM review_targets t WHERE t.id = r.target_id AND t.workspace_id = ?)`;
-  const tenantBinds = opts.targetIds.length === 0 ? [] : [...opts.targetIds, opts.workspaceId];
+    opts.kind === "workspace"
+      ? "r.target_id IN (SELECT t.id FROM review_targets t WHERE t.workspace_id = ? AND t.deleted_at IS NULL)"
+      : "r.target_id = ? AND EXISTS (SELECT 1 FROM review_targets t WHERE t.id = r.target_id AND t.workspace_id = ? AND t.deleted_at IS NULL)";
+  const tenantBinds =
+    opts.kind === "workspace"
+      ? [opts.workspaceId]
+      : [opts.targetId, opts.workspaceId];
 
   const where: string[] = [];
   const binds: unknown[] = [];

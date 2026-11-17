@@ -36,7 +36,7 @@ function seed(db: TestD1, sql: string, ...params: Array<string | number | null>)
   db.raw.prepare(sql).run(...params);
 }
 
-function seedWorkspace(db: TestD1, id: string, login: string): void {
+function seedWorkspace(db: TestD1, id: string, login: string, role = "owner"): void {
   seed(
     db,
     "INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at) VALUES (?, ?, ?, NULL, ?, NULL)",
@@ -56,9 +56,10 @@ function seedWorkspace(db: TestD1, id: string, login: string): void {
   // The manage rule is the workspace role: a plain member would 403.
   seed(
     db,
-    "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)",
+    "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, ?, ?)",
     id,
     userId,
+    role,
     "2026-10-01T00:00:00.000Z",
   );
 }
@@ -181,5 +182,65 @@ describe("GET /dashboard/<ref>/api/pull-requests (workspace scope)", () => {
     const res = await get(db, "ws-empty/api/pull-requests", "erin");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ pull_requests: [], repos: [] });
+  });
+
+  test("a plain member (not owner/admin) is refused on both list faces", async () => {
+    const db = fixture();
+    seedWorkspace(db, "ws-member", "gina", "member");
+    seedBot(db, "bot-member", 9204);
+    seedTarget(db, "bot-member", { workspaceId: "ws-member", repoName: "memberrepo" });
+    for (const path of ["ws-member/api/insights/summary", "ws-member/api/pull-requests"]) {
+      const res = await get(db, path, "gina");
+      expect(res.status, path).toBe(403);
+      expect(await res.json()).toEqual({ error: "forbidden" });
+    }
+  });
+});
+
+describe("GET /dashboard/<ref>/api/pull-requests/:owner/:repo/:number (workspace scope)", () => {
+  test("the detail and its three record sections read a workspace's own PR", async () => {
+    const db = fixture();
+    for (const path of [
+      "ws-two/api/pull-requests/acme/widgets/1",
+      "ws-two/api/pull-requests/acme/widgets/1/findings",
+      "ws-two/api/pull-requests/acme/widgets/1/reviews",
+      "ws-two/api/pull-requests/acme/widgets/1/failures",
+    ]) {
+      expect((await get(db, path, "dana")).status, path).toBe(200);
+    }
+    const detail = (await (await get(db, "ws-two/api/pull-requests/acme/widgets/1", "dana")).json()) as {
+      pull_request: { number: number; owner: string; repo: string };
+      counts: { reviews: number };
+    };
+    expect(detail.pull_request).toMatchObject({ number: 1, owner: "acme", repo: "widgets" });
+    expect(detail.counts.reviews).toBe(1);
+  });
+
+  test("a foreign workspace's PR is a 404, never another tenant's row", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-two", "dana");
+    seedWorkspace(db, "ws-foreign", "frank");
+    seedBot(db, "bot-one", 9301);
+    seedBot(db, "bot-foreign", 9302);
+    const widgets = seedTarget(db, "bot-one", { workspaceId: "ws-two", repoOwner: "acme", repoName: "widgets" });
+    const own = seedTarget(db, "bot-foreign", { workspaceId: "ws-foreign", repoOwner: "acme", repoName: "portal" });
+    seedPullRequest(db, widgets, "bot-one", "acme", "widgets", 1);
+    seedPullRequest(db, own, "bot-foreign", "acme", "portal", 2);
+
+    // Both callers are managers of their own workspace, so only the SCOPE can
+    // decide: frank's own PR reads 200, the same address under dana's workspace
+    // is dana's 200, and a foreign workspace asking for it is a 404.
+    expect((await get(db, "ws-foreign/api/pull-requests/acme/portal/2", "frank")).status).toBe(200);
+    expect((await get(db, "ws-two/api/pull-requests/acme/widgets/1", "dana")).status).toBe(200);
+    for (const path of [
+      "ws-foreign/api/pull-requests/acme/widgets/1",
+      "ws-foreign/api/pull-requests/acme/widgets/1/findings",
+      "ws-foreign/api/pull-requests/acme/widgets/1/reviews",
+      "ws-foreign/api/pull-requests/acme/widgets/1/failures",
+    ]) {
+      const res = await get(db, path, "frank");
+      expect(res.status, path).toBe(404);
+      expect(await res.json()).toEqual({ error: "unknown pull request" });
+    }
   });
 });
