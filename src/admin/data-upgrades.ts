@@ -62,10 +62,8 @@ export type DataUpgradeItem = {
   verify(db: DashboardD1): Promise<UpgradeCounts>;
 };
 
-/** The state machine's states, mirroring the CHECK on the table. */
-export const DATA_UPGRADE_STATUSES = ["pending", "running", "verifying", "completed", "failed"] as const;
-
-export type DataUpgradeStatus = (typeof DATA_UPGRADE_STATUSES)[number];
+/** The state machine's states; the table's CHECK is the runtime authority. */
+export type DataUpgradeStatus = "pending" | "running" | "verifying" | "completed" | "failed";
 
 /** One upgrade's row, as the console states it. */
 export type DataUpgradeState = {
@@ -156,7 +154,6 @@ function parseLog(value: string | null): UpgradeCursor[] {
 function stateFromRow(row: DataUpgradeRow): DataUpgradeState {
   return {
     id: row.id,
-    // The table's CHECK is the vocabulary's single source.
     status: row.status as DataUpgradeStatus,
     cursor: parseCursor(row.cursor_json),
     processed: row.processed,
@@ -169,7 +166,7 @@ function stateFromRow(row: DataUpgradeRow): DataUpgradeState {
 }
 
 /** One upgrade's state, `pending` when it was never started. */
-export async function readDataUpgradeState(db: DashboardD1, id: string): Promise<DataUpgradeState> {
+async function readDataUpgradeState(db: DashboardD1, id: string): Promise<DataUpgradeState> {
   const row = await db
     .prepare(`SELECT ${STATE_COLUMNS} FROM operator_data_upgrades WHERE id = ?1`)
     .bind(id)
