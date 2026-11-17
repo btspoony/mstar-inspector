@@ -2708,6 +2708,30 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
   });
 });
 
+describe("API settings face — several repositories under one App (targets_many)", () => {
+  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
+
+  test("two live targets: 200, targets_many true and no target_id (no single policy to name)", async () => {
+    const { db, app } = await seededWorld();
+    seedTarget(db, app.id, { name: "second-repo", repoName: "second-repo" });
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { targets_many?: boolean; target_id?: string };
+    expect(body.targets_many).toBe(true);
+    expect(body.target_id).toBeUndefined();
+  });
+
+  test("one live target: the payload names its target and targets_many is false", async () => {
+    const { db } = await seededWorld();
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { targets_many?: boolean; target_id?: string };
+    expect(body.targets_many).toBe(false);
+    // The single target the fixture App's creation seeded.
+    expect(body.target_id).toBeString();
+  });
+});
+
 describe("saving one settings control on an inheriting target snapshots the other three (F-007)", () => {
   const TRIGGER = `/dashboard/default/apps/${APP_ID}/review-trigger-mode`;
 

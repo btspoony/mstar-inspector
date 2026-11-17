@@ -3861,6 +3861,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: gate.scope.workspaceId,
+        // The several-repository state: `target_id` is absent when this
+        // workspace holds more than one live target under the bot, so the page
+        // must be able to name that state instead of reading it as none.
+        targets_many: gate.targets_many,
         ...(target === null
           ? {}
           : {
@@ -3925,6 +3929,11 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // never the request's path segment): with `app.id` it composes the
       // webhook delivery URL.
       workspace_id: gate.scope.workspaceId,
+      // The several-repository state (see AppSettingsGate.targets_many): with
+      // `target_id` absent this is the only thing separating "this App has no
+      // repository yet" from "it has several", and the page narrates them
+      // differently.
+      targets_many: gate.targets_many,
       app: {
         github_app_id: app.github_app_id,
         status: app.status,
