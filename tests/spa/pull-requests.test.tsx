@@ -77,6 +77,7 @@ const managePayload: SettingsManagePayload = {
   can_manage: true,
   blocked: false,
   blocked_reason: null,
+  target_id: "rt-501",
   installation: null,
   pending_installations: [],
   app: {
@@ -107,7 +108,7 @@ const managePayload: SettingsManagePayload = {
   deliveries: [],
 };
 
-const search = { tab: "insights" as const, window: "30" as const, repo: "", pr: "" };
+const search = { tab: "settings" as const, window: "30" as const, repo: "", pr: "" };
 const noReload = async () => true;
 const noSearch = () => {};
 
@@ -117,6 +118,7 @@ function renderDetail(payload: SettingsPayload) {
       locale: "en",
       appId: "1",
       payload,
+      groups: [],
       notice: null,
       search,
       onReload: noReload,
@@ -146,35 +148,17 @@ const DETAIL_B: PullRequestDetail = {
   latest_review: null,
 };
 
-/** The stateful wrapper AppDetailView expects: the harness owns the search. */
-function DetailHarness() {
-  const [search, setSearch] = useState<AppDetailSearch>({
-    tab: "insights",
-    window: "30",
-    repo: "",
-    pr: "",
-  });
-  return createElement(AppDetailView, {
-    locale: "en",
-    appId: "1",
-    payload: managePayload,
-    notice: null,
-    search,
-    onReload: noReload,
-    onSearch: setSearch,
-  });
-}
-
 describe("tab shell rendering (static SSR)", () => {
-  test("the Pull requests trigger appears ONLY on the manage face", async () => {
-    const tabNames = async (payload: SettingsPayload) =>
-      withMarkup(renderDetail(payload), (container) =>
+  test("the App detail hosts neither the ledger nor its trigger — the repository detail owns them", async () => {
+    // The App detail's two faces are 应用设置 and 已安装: the PR ledger moved to
+    // the repository surface, so no payload makes it appear here.
+    for (const payload of [managePayload, identityPayload]) {
+      const tabNames = await withMarkup(renderDetail(payload), (container) =>
         [...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent ?? ""),
       );
-    expect(await tabNames(managePayload)).toContain(t("en", "appDetail.tabPullRequests"));
-    expect(await tabNames(identityPayload)).not.toContain(t("en", "appDetail.tabPullRequests"));
-    // The ledger itself is absent too, not only its trigger.
-    expect(renderDetail(identityPayload)).not.toContain(t("en", "pullRequests.columnPr"));
+      expect(tabNames).not.toContain(t("en", "appDetail.tabPullRequests"));
+      expect(renderDetail(payload)).not.toContain(t("en", "pullRequests.columnPr"));
+    }
   });
 });
 
@@ -360,24 +344,6 @@ describe("pull requests data plane (pure helpers)", () => {
 });
 
 describe("pull requests tab (mounted)", () => {
-  test("clicking the Pull requests tab on the manage face opens the ledger", async () => {
-    // Every read answers the same empty ledger.
-    const { container, win, unmount } = await mountView(createElement(DetailHarness), {
-      fetch: (async () => jsonResponse({ pull_requests: [] })) as unknown as typeof fetch,
-    });
-    try {
-      const trigger = [...container.querySelectorAll("button")].find(
-        (button) => button.textContent === t("en", "appDetail.tabPullRequests"),
-      );
-      expect(trigger).toBeDefined();
-      await press(win, trigger as unknown as Element);
-      // The ledger's empty state is the opened tab's face.
-      expect(container.textContent ?? "").toContain(t("en", "pullRequests.emptyTitle"));
-    } finally {
-      await unmount();
-    }
-  });
-
   test("the failures column carries the row's failure count", async () => {
     const { container, unmount } = await mountView(
       createElement(PullRequestsListView, { locale: "en", rows: [ROW_OPEN, ROW_CLOSED], onOpen: noSearch }),

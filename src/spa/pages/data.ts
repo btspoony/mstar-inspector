@@ -472,7 +472,8 @@ export function isReviewLevel(value: unknown): value is ReviewLevel {
 export type SettingsIdentityAppMeta = {
   github_app_id: number;
   status: string;
-  review_enabled: boolean;
+  /** The target's pause state; ABSENT when the workspace holds no repository. */
+  review_enabled?: boolean;
   created_by: string;
   /** `datetime('now')` UTC string — joins the required identity keys. */
   created_at: string;
@@ -688,27 +689,19 @@ function isPendingInstallationList(value: unknown): value is PendingInstallation
   );
 }
 
-export type SettingsAppMeta = {
-  github_app_id: number;
-  status: string;
-  review_enabled: boolean;
+/**
+ * The manager face's App meta: the bot's identity plus the review policy the
+ * workspace's target holds. Those four review fields ride with the target —
+ * see {@link SettingsTargetFacts} — so an App with no repository carries the
+ * bot identity alone.
+ */
+export type SettingsAppMeta = BotSettingsAppMeta & {
   created_by: string;
-  last_webhook_at: string | null;
   /**
-   * The bot's scope (migration 0058). MANAGER face only: it decides whether
-   * the install block offers the claim action, and only a manager can claim.
+   * Cached GitHub App visibility (migration 0045) — an App fact, so it rides
+   * every manager face. Null = the row could not be read.
    */
-  scope: BotScope;
-  /**
-   * The local App UID — the webhook URL's app segment (never a GitHub fact).
-   * It rides BOTH payload faces — the member face returns it too, and
-   * parseSettings requires it either way — because it is part of the App's
-   * identity set. Only the MANAGER identity card composes the delivery URL
-   * from it (a webhook repoint needs that URL).
-   */
-  id: string;
-  /** The App's selected sandbox runtime image (registry id). */
-  sandbox_image_id: string;
+  github_visibility: GithubVisibility | null;
   /** The App's review trigger mode (spec §2) — the control's current value. */
   review_trigger_mode: ReviewTriggerMode;
   /**
@@ -719,24 +712,8 @@ export type SettingsAppMeta = {
   review_level: ReviewLevel | null;
   /** The operator level a `null` review_level currently resolves to. */
   default_review_level: ReviewLevel;
-  /**
-   * The cached public GitHub profile the settings route serves
-   * (migration 0019 columns). Every field nullable — NULL = never synced (old
-   * rows must render, per-field degradation on the card); the PEM / webhook
-   * secret never ride this face. Present on BOTH payload faces (AC3).
-   */
-  github_name: string | null;
-  github_slug: string | null;
-  github_description: string | null;
-  github_html_url: string | null;
-  github_avatar_url: string | null;
-  /** `datetime('now')` UTC string; NULL = never synced. */
-  github_metadata_synced_at: string | null;
-  /**
-   * Cached GitHub App visibility (migration 0045). Null = the row could not
-   * be read; the allowlist surface then stays visible (cannot prove private).
-   */
-  github_visibility: GithubVisibility | null;
+  /** Pause state (`review_enabled` on the wire): the target's switch. */
+  review_enabled: boolean;
 };
 
 type SettingsHealth = {
@@ -835,11 +812,12 @@ export type SettingsReadOnlyPayload = {
   blocked: boolean;
   blocked_reason: BlockedReason | null;
   /**
-   * The review configuration's id in this workspace — the settings a manager
-   * edits belong to a target. Required on both faces: a payload that cannot
-   * name its target is not a settings read.
+   * The review configuration's id in this workspace, ABSENT until the
+   * workspace adds a repository under this App: the repository surface owns
+   * target creation, so an App with none is a real state and it has no target
+   * to name.
    */
-  target_id: string;
+  target_id?: string;
   app: SettingsIdentityAppMeta;
 };
 
@@ -857,13 +835,10 @@ export function appDisplayName(app: {
 }
 
 /** Creator-or-admin adds the settings zones: keys, chains, providers. */
-export type SettingsManagePayload = {
+type SettingsManageBase = {
   can_manage: true;
   /** The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
-  /** The review configuration's id every review-policy key below is read from. */
-  target_id: string;
-  app: SettingsAppMeta;
   /**
    * The target's bound installation, or `null` when it has none. The install
    * block names the account it reviews as and, when `removed`, that reviews
@@ -876,13 +851,18 @@ export type SettingsManagePayload = {
    * (or when this workspace may not use the bot).
    */
   pending_installations: PendingInstallation[];
-  /**
-   * Why this target reviews nothing, if it does (derived per read, never
-   * stored). This face is the readable one; the Blocked face is its own
-   * variant, so the discriminant is a literal here.
-   */
   blocked: false;
   blocked_reason: null;
+} & BotConfigSections;
+
+/**
+ * The manager face of an App whose workspace holds a repository under it: the
+ * App's own facts, the bot's sections and the target-owned review policy.
+ */
+export type SettingsManagePayload = SettingsManageBase & {
+  /** The review configuration's id every review-policy key below is read from. */
+  target_id: string;
+  app: SettingsAppMeta;
   /**
    * The review gate (migration 0045) — the Check's pass condition. `null` =
    * the stored verdict list is unreadable: the section renders a read-only
@@ -897,7 +877,22 @@ export type SettingsManagePayload = {
    * it otherwise, so the affordance never offers a write that cannot land.
    */
   owner_overlap: boolean;
-} & BotConfigSections;
+};
+
+/**
+ * The manager face of an App the workspace has added no repository under yet:
+ * the App's own facts and the bot's sections, with NO target-owned fact — there
+ * is no target row to name, so every one of them is ABSENT rather than
+ * defaulted (`target_id?: undefined` is the discriminant {@link hasTargetFacts}
+ * reads).
+ */
+export type SettingsUntargetedPayload = SettingsManageBase & {
+  target_id?: undefined;
+  check_gate?: undefined;
+  allowlist?: undefined;
+  owner_overlap?: undefined;
+  app: BotSettingsAppMeta & { created_by: string; github_visibility: GithubVisibility | null };
+};
 
 /**
  * The Blocked manager face: this workspace's target on another workspace's
@@ -917,7 +912,22 @@ export type SettingsBlockedPayload = {
   installation: BoundInstallation | null;
 } & TargetOwnedSections;
 
-export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload | SettingsBlockedPayload;
+export type SettingsPayload =
+  | SettingsReadOnlyPayload
+  | SettingsManagePayload
+  | SettingsUntargetedPayload
+  | SettingsBlockedPayload;
+
+/**
+ * The faces that carry the target-owned review policy — the ones whose
+ * review controls a page may render. The server sends that slice
+ * all-or-nothing, so `target_id` presence decides.
+ */
+export type TargetSettingsPayload = SettingsManagePayload | SettingsBlockedPayload;
+
+export function hasTargetFacts(payload: SettingsPayload): payload is TargetSettingsPayload {
+  return payload.can_manage && payload.target_id !== undefined;
+}
 
 export type ModelOptionSource = "verified" | "probe" | "custom";
 
@@ -939,10 +949,14 @@ export function canInviteMembers(role: WorkspaceRole | null): boolean {
  * `review_enabled` — raw integer on the apps list face (dashboard/index.ts),
  * boolean on the settings face (`!== 0` coercion) — are normalized here, so
  * every reader shares one derivation: the pause axis (`isPaused`), the Apps
- * band's review-off count, and the status pill.
+ * band's review-off count, and the status pill. An absent value is the App
+ * with no repository: there is no pause switch to report, so reviews are not
+ * switched off.
  */
-export function reviewEnabled(app: { review_enabled: number | boolean }): boolean {
-  return typeof app.review_enabled === "boolean" ? app.review_enabled : app.review_enabled !== 0;
+export function reviewEnabled(app: { review_enabled?: number | boolean }): boolean {
+  const value = app.review_enabled;
+  if (value === undefined) return true;
+  return typeof value === "boolean" ? value : value !== 0;
 }
 
 /**
@@ -950,7 +964,7 @@ export function reviewEnabled(app: { review_enabled: number | boolean }): boolea
  * both faces) — over the same normalization, so the App status pill and
  * SettingsPage's OpsCard share one derivation.
  */
-export function isPaused(app: { status: string; review_enabled: number | boolean }): boolean {
+export function isPaused(app: { status: string; review_enabled?: number | boolean }): boolean {
   return app.status === "active" && !reviewEnabled(app);
 }
 
@@ -961,7 +975,7 @@ export function isPaused(app: { status: string; review_enabled: number | boolean
  */
 export function appStatusPill(
   locale: Locale,
-  app: { status: string; review_enabled: number | boolean },
+  app: { status: string; review_enabled?: number | boolean },
 ): { label: string; tone: "success" | "warn" } {
   const paused = isPaused(app);
   return {
@@ -1639,15 +1653,16 @@ export function pullRequestStatePill(
 }
 
 /**
- * The App detail page's manager tabs (已安装 / 洞察 / Pull requests). The
- * target-owned review policy that used to be the fourth (settings) tab lives
- * on the review-target surface's detail page.
+ * The App detail page's two faces: 应用设置 (the App's own configuration, the
+ * default) and 已安装. The data faces — 洞察 and Pull requests — belong to the
+ * repository detail, so they are not values a URL can open here.
  */
-export type AppDetailTab = "installations" | "insights" | "pull-requests";
+export type AppDetailTab = "settings" | "installations";
 
 /**
- * URL-derived detail state: the active tab, the insights filters, and the
- * open PR detail (`pr` = `owner/repo/number`).
+ * URL-derived detail state: the App detail's active tab. `window`/`repo`/`pr`
+ * are the repository detail's data-tab state, carried by the shared
+ * {@link AppDetailSearch} shape until that surface owns them.
  */
 export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string; pr: string };
 
@@ -1672,25 +1687,18 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
 }
 
 /**
- * The search string as the detail page states it — the ONE derivation
- * shared by the mount initializer and the popstate re-sync (the
- * spa-url-state-resync contract), built on the pinned insights helpers
- * (off-set windows resolve to the default segment). The three tab values are
- * honored only for managers; a non-manager — or any other tab value — always
- * resolves to the default insights tab. `pr` rides verbatim only when
+ * The search string as the App detail states it — the ONE derivation shared by
+ * the mount initializer and the popstate re-sync (the spa-url-state-resync
+ * contract). The bare path IS the 应用设置 tab; `?tab=installations` is the only
+ * other address this page opens, and any other value (including the retired
+ * data-tab spellings) resolves to the default. `pr` rides verbatim only when
  * `pullRequestRefOf` resolves it — the same predicate the detail face reads —
  * so the address bar never advertises an open detail that can never open.
  */
-export function parseAppDetailSearch(search: string, canManage: boolean): AppDetailSearch {
+export function parseAppDetailSearch(search: string): AppDetailSearch {
   const insights = parseInsightsSearch(search);
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  const rawTab = params.get("tab");
-  // The bare path IS insights — the only legal values are the three manager
-  // tabs, gated by the payload's can_manage.
-  const tab: AppDetailTab =
-    canManage && (rawTab === "installations" || rawTab === "insights" || rawTab === "pull-requests")
-      ? rawTab
-      : "insights";
+  const tab: AppDetailTab = params.get("tab") === "installations" ? "installations" : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
@@ -1701,15 +1709,14 @@ export function parseAppDetailSearch(search: string, canManage: boolean): AppDet
 
 /**
  * The query string for a detail state — the inverse of
- * {@link parseAppDetailSearch}: the tab param on every non-default tab
- * (the bare path IS the insights tab), the window param only off the 30
- * default, the repo param only when set, the pr param only when a detail
- * is open. Loop-free by construction: consumers write it with replaceState
- * only.
+ * {@link parseAppDetailSearch}: the tab param on every non-default tab (the
+ * bare path IS 应用设置), the window param only off the 30 default, the repo
+ * param only when set, the pr param only when a detail is open. Loop-free by
+ * construction: consumers write it with replaceState only.
  */
 export function appDetailSearchQuery(search: AppDetailSearch): string {
   const params = new URLSearchParams();
-  if (search.tab !== "insights") params.set("tab", search.tab);
+  if (search.tab !== "settings") params.set("tab", search.tab);
   if (search.window !== "30") params.set("window", search.window);
   if (search.repo !== "") params.set("repo", search.repo);
   if (search.pr !== "") params.set("pr", search.pr);
@@ -2308,12 +2315,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // The delivery URL's workspace segment: the server-resolved id, required on
   // both faces (a path ref may be a slug and must never be printed).
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
-  // The review configuration this App resolved to in this workspace (the
-  // target every review-policy key belongs to). Required on both faces — a
-  // payload that cannot name its target is not a settings read.
-  if (typeof data.target_id !== "string" || data.target_id.length === 0) return null;
   if (typeof data.app.status !== "string") return null;
-  if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
   // The local App UID rides BOTH faces; the cached GitHub slug is a nullable
   // GitHub fact (NULL = never synced).
@@ -2335,6 +2337,16 @@ export function parseSettings(data: unknown): SettingsPayload | null {
       return null;
     }
   }
+  // The target-owned review policy is ALL-OR-NOTHING, and `target_id` names
+  // it: the workspace's repository under this App. An App with none carries no
+  // review-policy key at all — absent, never defaulted — so a payload carrying
+  // part of the slice is not a settings read. The pause state rides BOTH faces
+  // with the target; the manager-only keys (`review_trigger_mode`,
+  // `review_level`, `default_review_level`) are validated in the manager
+  // branch below, where they are the whole contract.
+  const hasTarget = data.target_id !== undefined;
+  if (hasTarget && (typeof data.target_id !== "string" || data.target_id.length === 0)) return null;
+  if ((data.app.review_enabled !== undefined) !== hasTarget) return null;
   if (!data.can_manage) {
     // Identity-only non-manager face (App detail IA): the D4
     // identity set — created_at joins the required keys; everything from
@@ -2343,6 +2355,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
     // profile is required presence, nullable per field (NULL = never
     // synced) — the identity face has nothing else to render.
     if (typeof data.app.created_at !== "string") return null;
+    if (hasTarget && typeof data.app.review_enabled !== "boolean") return null;
     if (
       !isNullableString(data.app.github_name) ||
       !isNullableString(data.app.github_description) ||
@@ -2359,7 +2372,10 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (data.blocked) {
     // The Blocked manager face: the target's own review configuration and the
     // identity the page needs. The bot-owned sections are ABSENT by contract,
-    // so nothing here requires — or tolerates a guess for — them.
+    // so nothing here requires — or tolerates a guess for — them. A Blocked
+    // read is a TARGET's (the resolver only reaches a foreign `owned` bot
+    // through a live target), so the policy slice must be there.
+    if (!hasTarget) return null;
     if (
       !isNullableString(data.app.github_name) ||
       !isNullableString(data.app.github_description) ||
@@ -2382,27 +2398,6 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // The selected runtime-image id rides the MANAGER face (registry id
   // only — never image-local configuration or secrets).
   if (typeof data.app.sandbox_image_id !== "string") return null;
-  // The trigger mode too — the mode control's current value; an
-  // off-vocabulary value (DB CHECK makes it impossible from a correct
-  // worker) fails the parse instead of rendering a dead selection.
-  if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
-  // The review depth and the operator default it inherits (migration 0047):
-  // null = the inherit face. An off-vocabulary level fails the parse instead
-  // of rendering a dead selection.
-  if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
-  if (!isReviewLevel(data.app.default_review_level)) return null;
-  // The review gate and the owner allowlist ride the MANAGER face
-  // (migration 0045): the Check's pass condition and the owner admission
-  // set. A gate whose stored verdict list is unreadable arrives as explicit
-  // `null` (the server's honest degradation), which the section renders as a
-  // read-only notice; any other malformed shape fails the parse instead of
-  // rendering a control that cannot round-trip.
-  if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
-  if (!isAllowlistSettings(data.allowlist)) return null;
-  if (typeof data.owner_overlap !== "boolean") return null;
-  // Cached visibility is nullable (null = the row read failed); any other
-  // value must be on the probe's own vocabulary.
-  if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
   // The bot's scope and the target's bound installation (migration 0059): an
   // off-vocabulary scope or a malformed installation fails the whole read, so
   // the install block never renders an action the server would refuse.
@@ -2425,6 +2420,30 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (typeof data.model_limits_snapshot !== "string" || data.model_limits_snapshot.length === 0) return null;
   // The manage face: the selector choices — { id, enabled } rows only.
   if (!isSandboxImageList(data.sandbox_images)) return null;
+  // Cached visibility is nullable (null = the row read failed); any other
+  // value must be on the probe's own vocabulary. It is an APP fact, so it
+  // rides the target-less face too.
+  if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
+  // The App has no repository yet: the bot's sections are the whole face.
+  if (!hasTarget) return data as SettingsPayload;
+  // The trigger mode — the mode control's current value; an off-vocabulary
+  // value (DB CHECK makes it impossible from a correct worker) fails the parse
+  // instead of rendering a dead selection.
+  if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
+  // The review depth and the operator default it inherits (migration 0047):
+  // null = the inherit face. An off-vocabulary level fails the parse instead
+  // of rendering a dead selection.
+  if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
+  if (!isReviewLevel(data.app.default_review_level)) return null;
+  // The review gate and the owner allowlist ride the MANAGER face
+  // (migration 0045): the Check's pass condition and the owner admission
+  // set. A gate whose stored verdict list is unreadable arrives as explicit
+  // `null` (the server's honest degradation), which the section renders as a
+  // read-only notice; any other malformed shape fails the parse instead of
+  // rendering a control that cannot round-trip.
+  if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
+  if (!isAllowlistSettings(data.allowlist)) return null;
+  if (typeof data.owner_overlap !== "boolean") return null;
   return data as SettingsPayload;
 }
 

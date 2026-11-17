@@ -144,7 +144,14 @@ export const en = {
     backToApps: "Back to Apps",
     /** The link from the App detail and the target detail to the bot's own settings page. */
     botSettingsLink: "Bot settings",
+    /** The App detail's two faces: its own configuration, then the install block. */
+    tabSettings: "App settings",
     tabInstallations: "Installed",
+    /**
+     * The App's zero-repository state: nothing under the App is reviewed yet,
+     * and the way there is the repository surface (`targets.add` is its link).
+     */
+    noRepository: "This App has no repository yet, so it reviews nothing.",
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
     // The derived Blocked banner: the server reads the bot's scope and the

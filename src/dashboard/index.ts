@@ -3987,33 +3987,49 @@ const appSettingsRoute = async (c: DashboardContext) => {
     // installation binding (migration 0067), so the installation block stays
     // empty until the repository surface replaces this payload.
     const installationPayload = null;
-    if (blockedReason !== null && target !== null) {
+    if (blockedReason !== null) {
       // The Blocked manager face: this workspace's target on another
       // workspace's bot. It carries the target's OWN review configuration and
       // the identity needed to name the page — never the bot's sections
       // (installations, deliveries, provider keys, chains, sandbox image,
-      // metadata), which belong to the owning workspace.
-      const effective = await readEffectiveTargetSettings(gate.db, target);
-      const checkGate = checkGateOf(effective);
+      // metadata), which belong to the owning workspace. The guard is the
+      // Blocked state alone: the bot-owned sections below must never be
+      // reached for a bot this workspace does not own, whatever arm resolved
+      // it. The target-owned fields are the conditional part — a bot reached
+      // with no live target has none of them to report.
+      const effective = target === null ? null : await readEffectiveTargetSettings(gate.db, target);
+      const checkGate = effective === null ? null : checkGateOf(effective);
       // The level a NULL target column resolves to (migration 0047) — the depth
       // control's inherit face names it, so a manager never needs the operator
       // console to know what "follow the operator default" currently runs.
-      const defaultReviewLevel = (await readDefaultReviewLevel(gate.db)).value;
+      const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(gate.db)).value;
       return c.json({
         can_manage: true,
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: gate.scope.workspaceId,
-        target_id: target.id,
+        ...(target === null
+          ? {}
+          : {
+              target_id: target.id,
+              check_gate:
+                checkGate === null
+                  ? null
+                  : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+            }),
         app: {
           github_app_id: app.github_app_id,
           id: app.id,
           status: app.status,
           created_by: app.created_by,
-          review_enabled: target.review_enabled !== 0,
-          review_trigger_mode: effective.triggerMode,
-          review_level: effective.level,
-          default_review_level: defaultReviewLevel,
+          ...(target === null
+            ? {}
+            : {
+                review_enabled: target.review_enabled !== 0,
+                review_trigger_mode: effective!.triggerMode,
+                review_level: effective!.level,
+                default_review_level: defaultReviewLevel,
+              }),
           scope: app.scope,
           github_name: app.github_name ?? null,
           github_slug: app.github_slug ?? null,
@@ -4023,10 +4039,6 @@ const appSettingsRoute = async (c: DashboardContext) => {
           github_visibility: githubVisibility,
         },
         installation: installationPayload,
-        check_gate:
-          checkGate === null
-            ? null
-            : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
       });
     }
     // The target-owned facts, or nothing at all: a workspace that has added no
@@ -4046,7 +4058,6 @@ const appSettingsRoute = async (c: DashboardContext) => {
               review_trigger_mode: effective!.triggerMode,
               review_level: effective!.level,
               default_review_level: defaultReviewLevel,
-              github_visibility: githubVisibility,
             },
             top: {
               target_id: target.id,
@@ -4077,6 +4088,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // the PEM / webhook secret envelopes never leave the row.
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
+        // The cached visibility probe (migration 0045) is an App fact, so it
+        // rides base.app on every manager read — including an App with no
+        // repository (the target-owned slice is the conditional part).
+        github_visibility: githubVisibility,
         // The bot's scope (migration 0058). MANAGER face only: it decides
         // whether the install block offers the claim action, and only a
         // manager can claim.

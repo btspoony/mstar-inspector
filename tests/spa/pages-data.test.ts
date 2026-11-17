@@ -8,6 +8,7 @@ import {
   canInviteMembers,
   configuredKeySlot,
   DEFAULT_CHAIN_NAME,
+  hasTargetFacts,
   insightsRepoFromSelect,
   insightsRepoOptions,
   insightsRepoSelectValue,
@@ -453,7 +454,7 @@ describe("members/apps/settings parsers", () => {
     // today's required-field contract.
     for (const mode of REVIEW_TRIGGER_MODES) {
       const manage = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
-      expect(manage && manage.can_manage && !manage.blocked && manage.app.review_trigger_mode).toBe(mode);
+      expect(manage !== null && hasTargetFacts(manage) && manage.app.review_trigger_mode).toBe(mode);
     }
     // The review depth and the operator default it inherits (migration 0047)
     // are the same class of required manager fields; `null` is the inherit
@@ -465,10 +466,10 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({ ...base, app: { ...base.app, default_review_level: undefined } })).toBeNull();
     for (const level of REVIEW_LEVELS) {
       const manage = parseSettings({ ...base, app: { ...base.app, review_level: level } });
-      expect(manage && manage.can_manage && !manage.blocked && manage.app.review_level).toBe(level);
+      expect(manage !== null && hasTargetFacts(manage) && manage.app.review_level).toBe(level);
     }
     const inherit = parseSettings(base);
-    expect(inherit && inherit.can_manage && !inherit.blocked && inherit.app.review_level).toBeNull();
+    expect(inherit !== null && hasTargetFacts(inherit) && inherit.app.review_level).toBeNull();
   });
 
   test("parseSettings requires the review gate, allowlist and visibility on the manage face; malformed values fail the parse", () => {

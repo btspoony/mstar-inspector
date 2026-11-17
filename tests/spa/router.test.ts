@@ -76,18 +76,17 @@ describe("matchSpaRoute", () => {
     expect(matchRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
   });
 
-  test("the bot settings page is its own page id, keeping the numeric appId", () => {
-    expect(matchSpaRoute("/dashboard/apps/12345/bot")).toEqual({
-      page: "bot-settings",
-      pathname: "/dashboard/apps/12345/bot",
-      appId: "12345",
-    });
-    expect(matchSpaRoute("/dashboard/acme/apps/12345/bot")).toEqual({
-      page: "bot-settings",
-      pathname: "/dashboard/acme/apps/12345/bot",
-      appId: "12345",
-      workspaceRef: "acme",
-    });
+  test("the retired bot page is a redirect to the App's settings tab, not a page", () => {
+    // The `/bot` sub-path answers one 302 to the tab address: no page id
+    // serves it, on either family.
+    expect(matchSpaRoute("/dashboard/apps/12345/bot")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/apps/12345/bot")).toBeNull();
+    expect(settingsTabRedirect("/dashboard/acme/apps/12345/bot", "")).toBe(
+      "/dashboard/acme/apps/12345?tab=settings",
+    );
+    // A bare `/bot` with no workspace prefix belongs to the dead legacy family
+    // (404 before SPA dispatch), so it redirects nowhere either.
+    expect(settingsTabRedirect("/dashboard/apps/12345/bot", "")).toBeNull();
     // The detail stays on the detail page id; the retired settings address
     // matches no page at all.
     expect(matchSpaRoute("/dashboard/apps/12345")?.page).toBe("app-detail");
@@ -155,10 +154,10 @@ describe("matchSpaRoute — workspace-scoped surfaces", () => {
     for (const [path, search] of [
       ["/dashboard/acme/apps/12345", ""],
       ["/dashboard/acme/apps/12345", "?tab=insights"],
-      ["/dashboard/acme/apps/12345/bot", ""],
       ["/dashboard/acme/targets/12345", ""],
       ["/dashboard/acme/apps", ""],
       ["/dashboard/acme/api/apps/12345/settings", ""],
+      ["/dashboard/acme/api/apps/12345/bot", ""],
       ["/dashboard/acme/api/targets", ""],
       ["/dashboard/apps/12345/settings", ""],
     ] as const) {

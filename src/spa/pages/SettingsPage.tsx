@@ -73,6 +73,8 @@ import {
   type ReviewTriggerMode,
   type AppIdentityCardApp,
   type AppInstallApp,
+  hasTargetFacts,
+  type BotSettingsAppMeta,
   type SettingsAppMeta,
   type SettingsIdentityAppMeta,
   type SettingsManagePayload,
@@ -368,6 +370,26 @@ export function SettingsView({
     );
   }
 
+  // A manager read for an App the workspace has added no repository under yet
+  // carries no review policy at all (the target-owned slice is absent, not
+  // defaulted): the identity card is the whole face. The App detail's 应用设置
+  // tab renders the bot configuration for that state — the review controls it
+  // would otherwise offer are the repository surface's.
+  if (!hasTargetFacts(payload)) {
+    return (
+      <div className="flex flex-col gap-6">
+        <div className="flex flex-col">
+          <AppInfoSection
+            locale={locale}
+            app={payload.app}
+            workspaceId={payload.workspace_id}
+            canManage={false}
+          />
+        </div>
+      </div>
+    );
+  }
+
   // A Blocked target (its bot is `owned` by another workspace) keeps every
   // TARGET-owned control and loses the bot's: the identity card drops the
   // delivery URL and the refresh (both bot-scope writes this workspace cannot
@@ -572,7 +594,7 @@ export function AppInfoSection({
 }: {
   locale: SpaBoot["locale"];
   /** Every face — the identity, manage and Blocked app shapes share every field the card reads. */
-  app: SettingsIdentityAppMeta | SettingsAppMeta | AppIdentityCardApp;
+  app: SettingsIdentityAppMeta | SettingsAppMeta | AppIdentityCardApp | BotSettingsAppMeta;
   /**
    * The App's stable workspace id from the payload — the delivery URL's first
    * segment. Deliberately NOT derived from the pathname: a route ref may be a
@@ -1493,7 +1515,7 @@ function OpsRow({ title, copy, children }: { title: string; copy: string; childr
  * page's dialog, each one keeping its existing POST target and semantics.
  * The confirmed outcome renders in this section's own region.
  */
-function OpsSection({
+export function OpsSection({
   locale,
   payload,
   onPending,

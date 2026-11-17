@@ -226,14 +226,14 @@ describe("document title + login copy", () => {
 });
 
 describe("App detail IA copy", () => {
-  test("the App detail tab labels exist atomically in both locales — 洞察 / 已安装 / Pull requests", () => {
-    expect(t("en", "appDetail.tabInsights")).toBe("Insights");
-    expect(t("zh_CN", "appDetail.tabInsights")).toBe("洞察");
+  test("the App detail's two tab labels exist atomically in both locales — 应用设置 / 已安装", () => {
+    expect(t("en", "appDetail.tabSettings")).toBe("App settings");
+    expect(t("zh_CN", "appDetail.tabSettings")).toBe("应用设置");
     expect(t("en", "appDetail.tabInstallations")).toBe("Installed");
     expect(t("zh_CN", "appDetail.tabInstallations")).toBe("已安装");
-    // The settings tab moved to the review-target surface: its label is gone,
-    // not aliased.
-    expect(isDictionaryKey("appDetail.tabSettings")).toBe(false);
+    // The zero-repository state is copy, not an error, so it must exist too.
+    expect(t("en", "appDetail.noRepository").length).toBeGreaterThan(0);
+    expect(t("zh_CN", "appDetail.noRepository").length).toBeGreaterThan(0);
   });
 
   test("the repository surface copy exists atomically in both locales", () => {

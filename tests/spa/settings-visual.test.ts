@@ -244,8 +244,9 @@ describe("settings heading idiom (QC convergence)", () => {
           locale: "en",
           appId: "1",
           payload: detailPayload(),
+          groups: [],
           notice: null,
-          search: { tab: "insights", window: "30", repo: "", pr: "" },
+          search: { tab: "settings", window: "30", repo: "", pr: "" },
           onReload: async () => true,
           onSearch: () => {},
         }),
@@ -580,7 +581,7 @@ describe("the bot page carries the moved sections", () => {
     deliveries: [],
   });
 
-  test("a manager's bot page renders credentials health, providers, chains, seats, sandbox image and installations", () => {
+  test("a manager's bot sections render credentials health, providers, chains, seats and the sandbox image", () => {
     const markup = renderToStaticMarkup(
       createElement(BotSettingsView, {
         locale: "en",
@@ -602,8 +603,6 @@ describe("the bot page carries the moved sections", () => {
     expect(markup).toContain(t("en", "settings.seats"));
     // Sandbox image: the selector carries the stored id.
     expect(markup).toContain("omp");
-    // Installations: the bot's installation rows.
-    expect(markup).toContain("987654");
   });
 
   test("a shared bot's page renders the same sections read-only", () => {

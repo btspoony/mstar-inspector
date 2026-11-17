@@ -1,7 +1,6 @@
 /**
  * Enumerated SPA pages (the `SPA_PAGES` interface; the four workspace
- * surfaces — apps, targets, members, settings — the App detail, the bot
- * settings page, and login).
+ * surfaces — apps, targets, members, settings — the App detail and login).
  *
  * `/dashboard` and `/dashboard/apps` are one root-routing rule: both render
  * the Apps workbench (the insights home at the root is retired, as is the
@@ -17,7 +16,6 @@ export const SPA_PAGES = [
   "settings",
   "login",
   "app-detail",
-  "bot-settings",
 ] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
@@ -33,8 +31,7 @@ export type SpaRoute =
   | { page: "members"; pathname: string; workspaceRef: string }
   | { page: "settings"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
-  | { page: "app-detail"; pathname: string; appId: string; workspaceRef?: string }
-  | { page: "bot-settings"; pathname: string; appId: string; workspaceRef?: string };
+  | { page: "app-detail"; pathname: string; appId: string; workspaceRef?: string };
 
 /**
  * First path segments that can never name a workspace (today's routes). ONE
@@ -96,40 +93,41 @@ export function replaceWorkspaceRef(pathname: string, nextRef: string): string |
   return `/dashboard/${nextRef}${match[2] ?? ""}`;
 }
 
-const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/bot)?$/;
+const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
 const WORKSPACE_TARGETS_PATH = /^\/dashboard\/([^/]+)\/targets$/;
 const WORKSPACE_TARGET_PATH = /^\/dashboard\/([^/]+)\/targets\/([^/]+)$/;
 const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;
 const WORKSPACE_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/settings$/;
-const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/bot)?$/;
+const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)$/;
 const WORKSPACE_APP_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)\/settings$/;
-
-/** The page an App sub-path opens: the bot page, else the detail page. */
-function appPageOf(pathname: string): "app-detail" | "bot-settings" {
-  return pathname.endsWith("/bot") ? "bot-settings" : "app-detail";
-}
+const WORKSPACE_APP_BOT_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)\/bot$/;
 
 /**
- * The app-detail address a retired path spelling (`…/apps/:appId/settings`)
- * resolves to, or null for any other path. The settings tab lives on the app
- * detail itself, so the path spelling answers ONE redirect to the tab's own
- * query address and never renders a page. That query spelling is the canonical
+ * The app-detail address a retired path spelling resolves to, or null for any
+ * other path. Both spellings of the settings face — `…/apps/:appId/settings`
+ * and the bot page's `…/apps/:appId/bot` — answer ONE redirect to the tab's own
+ * query address and never render a page. That query spelling is the canonical
  * address, so `search` no longer decides the answer — the parameter stays for
  * the dispatch call site's shape. Only the workspace-scoped family can match:
  * the legacy `/dashboard/apps…` family is a 404 before SPA dispatch.
  */
 export function settingsTabRedirect(pathname: string, _search: string): string | null {
   const [, ref, appId] = WORKSPACE_APP_SETTINGS_PATH.exec(pathname) ?? [];
-  if (ref === undefined || appId === undefined) return null;
-  return `/dashboard/${ref}/apps/${appId}?tab=settings`;
+  if (ref !== undefined && appId !== undefined) return `/dashboard/${ref}/apps/${appId}?tab=settings`;
+  const [, botRef, botAppId] = WORKSPACE_APP_BOT_PATH.exec(pathname) ?? [];
+  if (botRef !== undefined && botAppId !== undefined) {
+    return `/dashboard/${botRef}/apps/${botAppId}?tab=settings`;
+  }
+  return null;
 }
 
 /**
  * ONE matcher entry / page id serves `/dashboard/apps/:appId` and its
  * workspace twin `/dashboard/<workspaceRef>/apps/:appId` — the App detail,
- * whose tabs are query-derived (`?tab=settings|installations`). The `/bot`
- * sub-path is that same detail page (its 应用设置 tab).
+ * whose tabs are query-derived (`?tab=settings|installations`). The retired
+ * `/settings` and `/bot` sub-paths are redirects, not pages, so a sub-path
+ * never matches here.
  *
  * A repositories detail is `/dashboard/<workspaceRef>/targets/:targetId`:
  * a target UUID, or `all` for the workspace-defaults entry.
@@ -151,12 +149,12 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     const targetId = WORKSPACE_TARGET_PATH.exec(pathname)?.[2];
     if (targetId) return { page: "targets", pathname, workspaceRef, targetId };
     const appId = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
-    if (appId) return { page: appPageOf(pathname), pathname, appId, workspaceRef };
+    if (appId) return { page: "app-detail", pathname, appId, workspaceRef };
     return null;
   }
-  const appId = APP_DETAIL_PATH.exec(pathname)?.[1];
-  if (!appId) return null;
-  return { page: appPageOf(pathname), pathname, appId };
+  const legacyAppId = APP_DETAIL_PATH.exec(pathname)?.[1];
+  if (!legacyAppId) return null;
+  return { page: "app-detail", pathname, appId: legacyAppId };
 }
 
 /**

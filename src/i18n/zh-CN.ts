@@ -120,7 +120,11 @@ export const zhCN: Dictionary = {
     backToApps: "返回应用",
     /** 从 App 详情与目标详情指向机器人设置页的链接。 */
     botSettingsLink: "机器人设置",
+    /** App 详情页的两个面：应用自身的配置，然后安装块。 */
+    tabSettings: "应用设置",
     tabInstallations: "已安装",
+    /** App 尚无仓库：没有任何评审，入口在仓库页面（`targets.add` 即该链接）。 */
+    noRepository: "该应用还没有对应仓库，因此不会进行任何评审。",
     tabInsights: "洞察",
     tabPullRequests: "拉取请求",
     blockedBotNotShared:
