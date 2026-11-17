@@ -22,12 +22,16 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, seedBot, type TestD1 } from "../store/helpers";
 import { repoBackfill } from "../../src/admin/data-upgrades/repo-backfill";
-import { DATA_UPGRADES } from "../../src/admin/data-upgrades";
+import { DATA_UPGRADES, type UpgradeCursor } from "../../src/admin/data-upgrades";
 
 const BOT = "bot-1";
 
 /** One old-shape target: no `repo_id`, no owner, no name — the 0067 leftover. */
-function seedLeftoverTarget(db: TestD1, id: string, opts: { minScore?: number; workspaceId?: string } = {}): void {
+function seedLeftoverTarget(
+  db: TestD1,
+  id: string,
+  opts: { minScore?: number; workspaceId?: string; botId?: string } = {},
+): void {
   db.raw
     .prepare(
       `INSERT INTO review_targets
@@ -36,7 +40,7 @@ function seedLeftoverTarget(db: TestD1, id: string, opts: { minScore?: number; w
        VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, 'deep', 'fixture',
                '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
     )
-    .run(id, opts.workspaceId ?? "default", BOT, id, opts.minScore ?? 80);
+    .run(id, opts.workspaceId ?? "default", opts.botId ?? BOT, id, opts.minScore ?? 80);
 }
 
 function seedPr(
@@ -47,6 +51,7 @@ function seedPr(
   repo: string,
   prNumber: number,
   lastSeenAt: string,
+  botId: string = BOT,
 ): void {
   db.raw
     .prepare(
@@ -54,7 +59,7 @@ function seedPr(
          (id, bot_id, owner, repo, pr_number, state, last_seen_at, target_id)
        VALUES (?, ?, ?, ?, ?, 'open', ?, ?)`,
     )
-    .run(id, BOT, owner, repo, prNumber, lastSeenAt, targetId);
+    .run(id, botId, owner, repo, prNumber, lastSeenAt, targetId);
 }
 
 function seedReview(
@@ -65,6 +70,7 @@ function seedReview(
   repo: string,
   prNumber: number,
   reviewedAt: string,
+  botId: string = BOT,
 ): void {
   db.raw
     .prepare(
@@ -72,7 +78,7 @@ function seedReview(
          (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, bot_id, target_id)
        VALUES (?, 1, ?, ?, ?, ?, ?, 'ship it', ?, ?)`,
     )
-    .run(id, owner, repo, prNumber, `sha-${id}`, reviewedAt, BOT, targetId);
+    .run(id, owner, repo, prNumber, `sha-${id}`, reviewedAt, botId, targetId);
 }
 
 function seedFailure(db: TestD1, id: string, targetId: string, owner: string, repo: string): void {
@@ -277,5 +283,122 @@ describe("repo-backfill item", () => {
       )
       .get() as { check_min_score: number; follow_workspace_defaults: number };
     expect(empty).toEqual({ check_min_score: 55, follow_workspace_defaults: 0 });
+  });
+
+  /** Step until the item reports done; returns every batch's log. */
+  async function drain(db: TestD1): Promise<Array<{ created: number; consumed: number; done: boolean }>> {
+    const batches: Array<{ created: number; consumed: number; done: boolean }> = [];
+    for (let cursor: UpgradeCursor | null = null; ; ) {
+      const batch = await repoBackfill.runBatch(db, cursor);
+      const log = batch.log ?? {};
+      batches.push({
+        created: typeof log.created === "number" ? log.created : 0,
+        consumed: typeof log.consumed === "number" ? log.consumed : 0,
+        done: batch.done,
+      });
+      if (batch.done) return batches;
+      cursor = batch.cursor;
+    }
+  }
+
+  test("only the batch's own rows retire: a member naming another repository stays live", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    // ONE old row naming 21 repositories: more groups than a step carries, so
+    // its last repository can only migrate in a LATER batch.
+    seedLeftoverTarget(db, "target-many");
+    for (let index = 0; index < 21; index += 1) {
+      seedPr(db, `pr-${index}`, "target-many", "acme", `repo-${index}`, 1, "2026-02-01T00:00:00.000Z");
+    }
+
+    const first = await repoBackfill.runBatch(db, null);
+    expect(first.done).toBe(false);
+    expect(first.log).toMatchObject({ created: 20, consumed: 0 });
+    // The row is NOT retired: it still holds `repo-20`'s ledger row.
+    const stillLive = db.raw
+      .prepare("SELECT deleted_at FROM review_targets WHERE id = 'target-many'")
+      .get() as { deleted_at: string | null };
+    expect(stillLive.deleted_at).toBeNull();
+
+    const batches = await drain(db);
+    expect(batches.at(-1)!.done).toBe(true);
+    expect(liveTargets(db)).toHaveLength(21);
+    expect(await repoBackfill.verify(db)).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      duplicate_repository_groups: 0,
+    });
+  });
+
+  test("two bots of one workspace keep separate targets for the same repository", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedBot(db, "bot-2", 7002);
+    seedLeftoverTarget(db, "target-bot-1", { minScore: 60 });
+    seedLeftoverTarget(db, "target-bot-2", { minScore: 90, botId: "bot-2" });
+    seedPr(db, "pr-bot-1", "target-bot-1", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
+    seedPr(db, "pr-bot-2", "target-bot-2", "acme", "alpha", 1, "2026-02-01T00:00:00.000Z", "bot-2");
+
+    const batch = await repoBackfill.runBatch(db, null);
+    expect(batch.log).toMatchObject({ created: 2, discarded: 0 });
+
+    const live = db.raw
+      .query(
+        "SELECT id, bot_id, check_min_score FROM review_targets WHERE deleted_at IS NULL ORDER BY bot_id",
+      )
+      .all() as Array<{ id: string; bot_id: string; check_min_score: number }>;
+    expect(live).toHaveLength(2);
+    expect(live.map((row) => [row.bot_id, row.check_min_score])).toEqual([
+      [BOT, 60],
+      ["bot-2", 90],
+    ]);
+    // Each bot's ledger row stayed on its own bot's target.
+    for (const [id, botId] of [["pr-bot-1", BOT], ["pr-bot-2", "bot-2"]] as const) {
+      const pr = db.raw.prepare("SELECT target_id FROM pull_requests WHERE id = ?").get(id) as {
+        target_id: string;
+      };
+      expect(pr.target_id, id).toBe(live.find((row) => row.bot_id === botId)!.id);
+    }
+    expect((await repoBackfill.verify(db)).duplicate_repository_groups).toBe(0);
+  });
+
+  test("a case-variant owner name joins the same group instead of creating a second target", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-lower");
+    seedLeftoverTarget(db, "target-upper");
+    seedPr(db, "pr-lower", "target-lower", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
+    seedPr(db, "pr-upper", "target-upper", "Acme", "alpha", 2, "2026-02-01T00:00:00.000Z");
+
+    const batch = await repoBackfill.runBatch(db, null);
+    expect(batch.log).toMatchObject({ created: 1, discarded: 1 });
+
+    const live = liveTargets(db);
+    expect(live).toHaveLength(1);
+    const prs = db.raw.query("SELECT target_id FROM pull_requests ORDER BY id").all() as Array<{
+      target_id: string;
+    }>;
+    expect(prs.map((row) => row.target_id)).toEqual([live[0]!.id, live[0]!.id]);
+    expect((await repoBackfill.verify(db)).duplicate_repository_groups).toBe(0);
+  });
+
+  test("a target naming many repositories migrates without overrunning the bind list", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-wide");
+    for (let index = 0; index < 60; index += 1) {
+      seedPr(db, `pr-${index}`, "target-wide", "acme", `repo-${index}`, 1, "2026-02-01T00:00:00.000Z");
+      seedReview(db, `rv-${index}`, "target-wide", "acme", `repo-${index}`, 1, "2026-02-01T00:00:00.000Z");
+    }
+
+    expect((await repoBackfill.preflight(db)).ledger_pairs).toBe(60);
+    const batches = await drain(db);
+    expect(batches.every((batch) => batch.created <= 20)).toBe(true);
+    expect(liveTargets(db)).toHaveLength(60);
+    expect(await repoBackfill.verify(db)).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      duplicate_repository_groups: 0,
+    });
   });
 });

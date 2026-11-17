@@ -349,10 +349,12 @@ export async function verifyDataUpgrade(
 
 /**
  * Return the item to `pending` from ANY state. Migrated rows are never undone —
- * a re-run is a no-op pass over work the worklist already excludes — and the
- * maintenance window is left exactly as it is: reset never closes it. The batch
- * log stays: it is the only evidence of what the batches already discarded, and
- * it describes work reset cannot undo.
+ * a re-run is a no-op pass over work the worklist already excludes. A window
+ * the RUNNER opened is closed first: `reset` clears ownership, so leaving the
+ * window open would strand a maintenance mode no later step or verify can
+ * close. An operator-enabled window stays on. The batch log stays: it is the
+ * only evidence of what the batches already discarded, and it describes work
+ * reset cannot undo.
  */
 const RESET_SQL = `
   UPDATE operator_data_upgrades
@@ -368,7 +370,13 @@ const RESET_SQL = `
 export async function resetDataUpgrade(
   db: DashboardD1,
   item: DataUpgradeItem,
+  actor: string,
+  now: string,
 ): Promise<DataUpgradeState> {
+  const before = await readDataUpgradeState(db, item.id);
+  if (before.maintenanceOwned && (await getMaintenanceMode(db)).enabled) {
+    await setMaintenanceMode(db, { enabled: false, actor }, now);
+  }
   await db.prepare(RESET_SQL).bind(item.id).run();
   return readDataUpgradeState(db, item.id);
 }

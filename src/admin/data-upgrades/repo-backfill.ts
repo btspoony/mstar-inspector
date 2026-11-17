@@ -15,12 +15,29 @@
  * a repository is left alone, including one still awaiting its first
  * delivery's `repo_id` claim (D15).
  *
- * Merge rule D22: several old rows of one workspace naming the same
+ * Identity is BOT-scoped: 0068's uniqueness claim and `resolveByRepo` both key
+ * a repository by `(bot_id, repo_id)`, so the group, its members, the
+ * already-named lookup and the verify checks all key
+ * `(bot_id, workspace_id, owner, repo)`. Two bots of one workspace reviewing
+ * the same repository own two targets, not one.
+ *
+ * Merge rule D22: several old rows of one bot's workspace naming the same
  * `(owner, repo)` collapse into ONE target. The winner is the row with the
  * newest `pull_requests.last_seen_at` for that repository, then the newest
  * `reviews.reviewed_at`, then the lowest id — a total order, so the item is
  * deterministic and its batches are replayable. Losers' configuration is
  * discarded and counted in the batch log; no user choice is ever surfaced.
+ *
+ * Owner and repository compare `COLLATE NOCASE` on every side — the store's
+ * own add path and `resolveByRepo` are case-insensitive, so a case variant
+ * spelling must join its group rather than create a second live target.
+ *
+ * One step is capped by GROUPS, not by worklist rows: a single target can name
+ * hundreds of repositories, and a row cap would both wedge the cursor and fan
+ * out unbounded reads. A target whose pairs did not all fit is left in the
+ * worklist (its migrated pairs are gone, so the next step resumes on what is
+ * left). `IN (…)` lists are chunked at IN_CHUNK values — D1 refuses a
+ * statement that binds more than 100 parameters.
  *
  * A batch is ONE `db.batch` transaction: the reads plan it, the write half
  * commits or rolls back as a whole, so a worker that dies leaves the previous
@@ -29,21 +46,27 @@
 import type { DashboardD1, DashboardD1Statement } from "../../dashboard/users";
 import type { DataUpgradeItem, UpgradeBatch, UpgradeCounts, UpgradeCursor } from "../data-upgrades";
 
-/** Targets per step (spec § Repository backfill item). */
-const BATCH_SIZE = 20;
+/** Repository groups per step (spec § Repository backfill item). */
+const GROUPS_PER_BATCH = 20;
+
+/** Worklist rows scanned per step: the reads planning one batch are bounded too. */
+const SCAN_LIMIT = 20;
+
+/** Values per `IN (…)` list (D1's bound-parameter cap leaves room for the rest). */
+const IN_CHUNK = 40;
 
 /** A live target of the 0067 leftover shape: no identity, no repository name. */
 const LEFTOVER_TARGET = `t.deleted_at IS NULL
   AND t.repo_id IS NULL AND t.repo_owner IS NULL AND t.repo_name IS NULL`;
 
-/** One worklist row: an old target and the workspace it belongs to. */
-type WorklistRow = { id: string; workspace_id: string };
+/** One worklist row: an old target, its bot and its workspace. */
+type WorklistRow = { id: string; workspace_id: string; bot_id: string };
 
 /** One old row's claim on a repository, with the D22 tie-breakers read in SQL. */
 type MemberRow = { id: string; last_seen: string | null; last_reviewed: string | null };
 
 /** One repository a batch collapses onto, and the rows it consumes. */
-type Group = { workspaceId: string; owner: string; repo: string };
+type Group = { botId: string; workspaceId: string; owner: string; repo: string };
 
 /** A planned batch: the statements to commit, and what they do. */
 type Plan = {
@@ -76,6 +99,13 @@ function placeholders(count: number): string {
   return new Array(count).fill("?").join(", ");
 }
 
+/** Split a bound list into D1-sized statements. */
+function chunked<T>(values: readonly T[]): T[][] {
+  const out: T[][] = [];
+  for (let at = 0; at < values.length; at += IN_CHUNK) out.push(values.slice(at, at + IN_CHUNK));
+  return out;
+}
+
 /** D22 over one member's two stamps: newest activity first, then the lowest id. */
 function compareMembers(a: MemberRow, b: MemberRow): number {
   const bySeen = (b.last_seen ?? "").localeCompare(a.last_seen ?? "");
@@ -92,50 +122,44 @@ async function countRows(db: DashboardD1, sql: string, ...values: unknown[]): Pr
 }
 
 /**
- * Every live leftover row of one workspace that holds ledger rows for
- * `owner/repo`, in D22 order. Members are resolved for the WHOLE workspace,
- * not just the current batch: two old rows naming the same repository may sit
- * in different batches, and the second batch must see that the first already
- * retired its sibling rather than create a second target for the same repo.
+ * Every live leftover row of one bot's workspace that holds ledger rows for
+ * this group's `owner/repo`, in D22 order. Members are resolved for the WHOLE
+ * bot workspace, not just the current batch: two old rows naming the same
+ * repository may sit in different batches, and the second batch must see that
+ * the first already retired its sibling rather than create a second target for
+ * the same repo.
  */
-async function readMembers(
-  db: DashboardD1,
-  workspaceId: string,
-  owner: string,
-  repo: string,
-): Promise<MemberRow[]> {
+async function readMembers(db: DashboardD1, group: Group): Promise<MemberRow[]> {
   const res = await db
     .prepare(
       `SELECT t.id,
               (SELECT MAX(p.last_seen_at) FROM pull_requests p
-                WHERE p.target_id = t.id AND p.owner = ?2 AND p.repo = ?3) AS last_seen,
+                WHERE p.target_id = t.id AND p.owner = ?3 COLLATE NOCASE
+                  AND p.repo = ?4 COLLATE NOCASE) AS last_seen,
               (SELECT MAX(r.reviewed_at) FROM reviews r
-                WHERE r.target_id = t.id AND r.owner = ?2 AND r.repo = ?3) AS last_reviewed
+                WHERE r.target_id = t.id AND r.owner = ?3 COLLATE NOCASE
+                  AND r.repo = ?4 COLLATE NOCASE) AS last_reviewed
          FROM review_targets t
-        WHERE t.workspace_id = ?1 AND ${LEFTOVER_TARGET}
+        WHERE t.bot_id = ?1 AND t.workspace_id = ?2 AND ${LEFTOVER_TARGET}
           AND EXISTS (SELECT 1 FROM pull_requests p
-                       WHERE p.target_id = t.id AND p.owner = ?2 AND p.repo = ?3)`,
+                       WHERE p.target_id = t.id AND p.owner = ?3 COLLATE NOCASE
+                         AND p.repo = ?4 COLLATE NOCASE)`,
     )
-    .bind(workspaceId, owner, repo)
+    .bind(group.botId, group.workspaceId, group.owner, group.repo)
     .all<MemberRow>();
   return res.results.slice().sort(compareMembers);
 }
 
-/** The live target that already names this repository, or null. */
-async function findNamedTarget(
-  db: DashboardD1,
-  workspaceId: string,
-  owner: string,
-  repo: string,
-): Promise<string | null> {
+/** The live target of this bot that already names this repository, or null. */
+async function findNamedTarget(db: DashboardD1, group: Group): Promise<string | null> {
   const row = await db
     .prepare(
       `SELECT id FROM review_targets
-        WHERE workspace_id = ?1 AND deleted_at IS NULL
-          AND repo_owner = ?2 COLLATE NOCASE AND repo_name = ?3 COLLATE NOCASE
+        WHERE bot_id = ?1 AND workspace_id = ?2 AND deleted_at IS NULL
+          AND repo_owner = ?3 COLLATE NOCASE AND repo_name = ?4 COLLATE NOCASE
         ORDER BY created_at, id LIMIT 1`,
     )
-    .bind(workspaceId, owner, repo)
+    .bind(group.botId, group.workspaceId, group.owner, group.repo)
     .first<{ id: string }>();
   return row?.id ?? null;
 }
@@ -148,36 +172,63 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
   const after = typeof cursor?.last_target_id === "string" ? cursor.last_target_id : "";
   const worklist = await db
     .prepare(
-      `SELECT t.id, t.workspace_id FROM review_targets t
+      `SELECT t.id, t.workspace_id, t.bot_id FROM review_targets t
         WHERE t.id > ?1 AND ${LEFTOVER_TARGET}
           AND EXISTS (SELECT 1 FROM pull_requests p WHERE p.target_id = t.id)
         ORDER BY t.id LIMIT ?2`,
     )
-    .bind(after, BATCH_SIZE)
+    .bind(after, SCAN_LIMIT)
     .all<WorklistRow>();
   const rows = worklist.results;
   if (rows.length === 0) return emptyPlan();
 
-  // The distinct repositories this batch's old rows hold ledger rows for.
+  const plan = emptyPlan();
+  plan.done = false;
+  plan.cursor = typeof cursor?.last_target_id === "string" ? cursor.last_target_id : null;
+  const batch = new Set<string>();
   const groups: Group[] = [];
   const seen = new Set<string>();
+  let complete = true;
+
+  // Collect up to GROUPS_PER_BATCH groups, batch row by batch row. A row whose
+  // pairs did not all fit stays OUT of this batch and out of the cursor: the
+  // next step re-reads it, and the pairs already migrated no longer show up.
   for (const row of rows) {
     const pairs = await db
       .prepare("SELECT DISTINCT owner, repo FROM pull_requests WHERE target_id = ?1")
       .bind(row.id)
       .all<{ owner: string; repo: string }>();
+    let drained = true;
     for (const pair of pairs.results) {
-      const key = JSON.stringify([row.workspace_id, pair.owner, pair.repo]);
+      const group = {
+        botId: row.bot_id,
+        workspaceId: row.workspace_id,
+        owner: pair.owner,
+        repo: pair.repo,
+      };
+      const key = JSON.stringify([
+        group.botId,
+        group.workspaceId,
+        group.owner.toLowerCase(),
+        group.repo.toLowerCase(),
+      ]);
       if (seen.has(key)) continue;
+      if (groups.length === GROUPS_PER_BATCH) {
+        drained = false;
+        break;
+      }
       seen.add(key);
-      groups.push({ workspaceId: row.workspace_id, owner: pair.owner, repo: pair.repo });
+      groups.push(group);
     }
+    if (!drained) {
+      complete = false;
+      break;
+    }
+    batch.add(row.id);
+    plan.cursor = row.id;
   }
 
-  const plan = emptyPlan();
-  plan.cursor = rows[rows.length - 1]!.id;
-  plan.done = rows.length < BATCH_SIZE;
-  for (const group of groups) await planGroup(db, plan, group);
+  for (const group of groups) await planGroup(db, plan, group, batch);
 
   // A leftover row with no ledger rows awaits its first delivery (待安装): it is
   // untouched apart from this flag, so its copied configuration keeps
@@ -191,11 +242,11 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
     ),
   );
 
-  // Retire the old rows LAST: one row may hold ledger rows for several
-  // repositories, so it is repointed by every group before it is retired
-  // (deleting it inside a group would hide it from the next group's reads).
-  if (plan.consumed.size > 0) {
-    const ids = [...plan.consumed];
+  // Retire the batch's own old rows LAST: one row may hold ledger rows for
+  // several repositories, so it is repointed by every group before it is
+  // retired (deleting it inside a group would hide it from the next group's
+  // reads). A member outside this batch stays live and is picked up later.
+  for (const ids of chunked([...plan.consumed])) {
     plan.statements.push(
       db
         .prepare(
@@ -205,19 +256,21 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
         .bind(...ids),
     );
   }
+
+  plan.done = complete && rows.length < SCAN_LIMIT;
   return plan;
 }
 
 /** Append one group's statements to `plan` and count what they do. */
-async function planGroup(db: DashboardD1, plan: Plan, group: Group): Promise<void> {
-  const members = await readMembers(db, group.workspaceId, group.owner, group.repo);
+async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<string>): Promise<void> {
+  const members = await readMembers(db, group);
   if (members.length === 0) return;
   const winner = members[0]!;
 
   // An already-named live target is the repository's home: repointing onto it
   // keeps one live target per repository instead of creating a duplicate the
   // store's own add path would refuse.
-  const named = await findNamedTarget(db, group.workspaceId, group.owner, group.repo);
+  const named = await findNamedTarget(db, group);
   const targetId = named ?? crypto.randomUUID();
   if (named === null) {
     const source = await db
@@ -237,7 +290,7 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group): Promise<voi
         .bind(
           targetId,
           group.workspaceId,
-          source!.bot_id,
+          group.botId,
           `${group.owner}/${group.repo}`,
           group.owner,
           group.repo,
@@ -258,47 +311,60 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group): Promise<voi
   plan.discarded += members.length - 1;
 
   const memberIds = members.map((member) => member.id);
-  const memberList = placeholders(memberIds.length);
 
   // `(target_id, owner, repo, pr_number)` is UNIQUE (0057:229-230): two old
   // rows of one group may hold the same PR. Keep the later `last_seen_at`
   // (then the lower id) and delete the rest BEFORE the repoint, so the update
-  // cannot collide with itself.
-  const prs = await db
-    .prepare(
-      `SELECT id, pr_number FROM pull_requests
-        WHERE target_id IN (${memberList}) AND owner = ? AND repo = ?
-        ORDER BY pr_number, last_seen_at DESC, id`,
-    )
-    .bind(...memberIds, group.owner, group.repo)
-    .all<{ id: string; pr_number: number }>();
+  // cannot collide with itself. The read is chunked, so the order is applied
+  // here over the merged result.
+  const prs: Array<{ id: string; pr_number: number; last_seen_at: string | null }> = [];
+  for (const ids of chunked(memberIds)) {
+    const res = await db
+      .prepare(
+        `SELECT id, pr_number, last_seen_at FROM pull_requests
+          WHERE target_id IN (${placeholders(ids.length)})
+            AND owner = ? COLLATE NOCASE AND repo = ? COLLATE NOCASE`,
+      )
+      .bind(...ids, group.owner, group.repo)
+      .all<{ id: string; pr_number: number; last_seen_at: string | null }>();
+    prs.push(...res.results);
+  }
+  prs.sort(
+    (a, b) =>
+      a.pr_number - b.pr_number ||
+      (b.last_seen_at ?? "").localeCompare(a.last_seen_at ?? "") ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
   const keepers = new Set<number>();
   const drops: string[] = [];
-  for (const pr of prs.results) {
+  for (const pr of prs) {
     if (keepers.has(pr.pr_number)) drops.push(pr.id);
     else keepers.add(pr.pr_number);
   }
-  if (drops.length > 0) {
+  for (const ids of chunked(drops)) {
     plan.statements.push(
-      db.prepare(`DELETE FROM pull_requests WHERE id IN (${placeholders(drops.length)})`).bind(...drops),
+      db.prepare(`DELETE FROM pull_requests WHERE id IN (${placeholders(ids.length)})`).bind(...ids),
     );
   }
 
   for (const table of ["pull_requests", "reviews", "review_findings", "review_failures"]) {
-    plan.statements.push(
-      db
-        .prepare(
-          `UPDATE ${table} SET target_id = ?1
-            WHERE target_id IN (${memberList}) AND owner = ? AND repo = ?`,
-        )
-        .bind(targetId, ...memberIds, group.owner, group.repo),
-    );
+    for (const ids of chunked(memberIds)) {
+      plan.statements.push(
+        db
+          .prepare(
+            `UPDATE ${table} SET target_id = ?1
+              WHERE target_id IN (${placeholders(ids.length)})
+                AND owner = ? COLLATE NOCASE AND repo = ? COLLATE NOCASE`,
+          )
+          .bind(targetId, ...ids, group.owner, group.repo),
+      );
+    }
   }
   plan.repointed += keepers.size;
 
   // Retired by `planBatch` after every group ran: this row may still hold
   // ledger rows for another repository of the same batch.
-  for (const id of memberIds) plan.consumed.add(id);
+  for (const id of memberIds) if (batch.has(id)) plan.consumed.add(id);
 }
 
 /**
@@ -320,22 +386,24 @@ export const repoBackfill: DataUpgradeItem = {
         db,
         `SELECT COUNT(*) AS n FROM review_targets t WHERE ${LEFTOVER_TARGET}`,
       ),
-      // The (target, repository) pairs the split moves rows for.
+      // The (target, repository) pairs the split moves rows for — filtered to
+      // the leftover shape, so the count is what a run will actually move.
       ledger_pairs: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (
            SELECT p.target_id, p.owner, p.repo FROM pull_requests p
-             JOIN review_targets t ON t.id = p.target_id AND t.deleted_at IS NULL
-            GROUP BY p.target_id, p.owner, p.repo)`,
+             JOIN review_targets t ON t.id = p.target_id
+            WHERE ${LEFTOVER_TARGET}
+            GROUP BY p.target_id, p.owner COLLATE NOCASE, p.repo COLLATE NOCASE)`,
       ),
       // Repositories covered by more than one live row: D22 collapses them.
       conflicting_groups: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (
            SELECT p.owner, p.repo FROM pull_requests p
-             JOIN review_targets t ON t.id = p.target_id AND t.deleted_at IS NULL
+             JOIN review_targets t ON t.id = p.target_id
             WHERE ${LEFTOVER_TARGET}
-            GROUP BY t.workspace_id, p.owner, p.repo
+            GROUP BY t.bot_id, t.workspace_id, p.owner COLLATE NOCASE, p.repo COLLATE NOCASE
            HAVING COUNT(DISTINCT t.id) > 1)`,
       ),
       // Awaiting-first-delivery rows: untouched except the follow flag.
@@ -371,9 +439,9 @@ export const repoBackfill: DataUpgradeItem = {
    * Read-only checks, every one of which must read 0.
    *
    * The second is the crash residual, not a data-quality opinion: a ledger row
-   * still naming a retired target WHILE a live target of the same workspace
-   * already covers that repository is exactly a batch that created the
-   * replacement and died before repointing every row. A target the user
+   * still naming a retired target WHILE a live target of the same bot and
+   * workspace already covers that repository is exactly a batch that created
+   * the replacement and died before repointing every row. A target the user
    * deleted through the dashboard has no such live coverage and is not
    * counted — that history is not this item's to judge.
    */
@@ -398,17 +466,19 @@ export const repoBackfill: DataUpgradeItem = {
          WHERE EXISTS (
            SELECT 1 FROM review_targets l
              JOIN pull_requests lp ON lp.target_id = l.id
-            WHERE l.deleted_at IS NULL AND l.workspace_id = d.workspace_id
+            WHERE l.deleted_at IS NULL AND l.bot_id = d.bot_id
+              AND l.workspace_id = d.workspace_id
               AND l.repo_owner = x.owner COLLATE NOCASE
               AND l.repo_name = x.repo COLLATE NOCASE)`,
       ),
       duplicate_repository_groups: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (
-           SELECT t.workspace_id, t.repo_owner, t.repo_name FROM review_targets t
+           SELECT t.bot_id, t.workspace_id, t.repo_owner, t.repo_name FROM review_targets t
             WHERE t.deleted_at IS NULL AND t.repo_owner IS NOT NULL AND t.repo_name IS NOT NULL
               AND EXISTS (SELECT 1 FROM pull_requests p WHERE p.target_id = t.id)
-            GROUP BY t.workspace_id, t.repo_owner, t.repo_name
+            GROUP BY t.bot_id, t.workspace_id,
+                     t.repo_owner COLLATE NOCASE, t.repo_name COLLATE NOCASE
            HAVING COUNT(*) > 1)`,
       ),
     };

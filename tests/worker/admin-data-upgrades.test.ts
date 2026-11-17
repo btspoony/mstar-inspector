@@ -220,6 +220,35 @@ describe("the data-upgrade runner", () => {
     expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(409);
   });
 
+  test("reset closes a window the runner opened, and only that one", async () => {
+    const db = fixture(3);
+    register(fixtureItem({ requiresDowntime: true }));
+    await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    expect((await getMaintenanceMode(db)).enabled).toBe(true);
+
+    const res = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/reset`);
+    expect(res.status).toBe(200);
+    // The claim is dropped, so no later `completed` could close the window: it
+    // must be closed now rather than stranded open.
+    expect((await getMaintenanceMode(db)).enabled).toBe(false);
+    expect(
+      db.raw.prepare("SELECT maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
+    ).toEqual({ maintenance_owned: 0 });
+
+    // An operator-opened window survives a reset: the runner never owned it.
+    const operatorDb = fixture(3);
+    await setMaintenanceMode(
+      operatorDb,
+      { enabled: true, reason: "planned incident", actor: OPERATOR },
+      "2026-11-17T02:00:00.000Z",
+    );
+    await api(operatorDb, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    expect((await api(operatorDb, "POST", `/api/data-upgrades/${ITEM_ID}/reset`)).status).toBe(200);
+    const mode = await getMaintenanceMode(operatorDb);
+    expect(mode.enabled).toBe(true);
+    expect(mode.reason).toBe("planned incident");
+  });
+
   test("a clean verify completes and closes only the window the runner opened", async () => {
     const db = fixture(1);
     register(fixtureItem({ requiresDowntime: true }));
