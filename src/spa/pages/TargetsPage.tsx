@@ -8,8 +8,9 @@
  * needs no installation call to say so, which is why the read carries the
  * discriminator instead of per-row installation facts.
  *
- * The detail address (`…/targets/<targetId>`) keeps rendering `TargetDetailPage`;
- * its three tabs are the sibling task's surface.
+ * The detail address (`…/targets/<targetId>`) renders `TargetDetailPage`: one
+ * target's 评审配置 (its own policy plus the inheritance toggle), 洞察 and
+ * 拉取请求 (plan 372's scoped reads).
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
@@ -28,36 +29,61 @@ import {
   SelectTrigger,
   SelectValue,
   StatusBadge,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
 } from "@design-system";
 import { PageHeader } from "@/components/PageHeader";
 import { ListRow, ListRowGroup } from "@/components/ListRow";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
-import { fetchJson, postJson } from "../api";
+import { fetchJson, ApiError, postJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import { spaClick } from "../spa-click";
 import { apiBase } from "../workspace-base";
-import { loadAppDetail, TargetHeader } from "./AppDetailPage";
-import { PageNotice, type NoticeKind } from "./PageNotice";
-import { SettingsView } from "./SettingsPage";
+import { AppInsightsTab } from "./AppInsightsTab";
+import { AppPullRequestsTab } from "./AppPullRequestsTab";
+import { PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
+import {
+  TARGET_SETTINGS_COPY,
+  TargetSettingsTab,
+  parseTargetPolicyPayload,
+  type TargetPolicyPayload,
+} from "./TargetSettingsTab";
 import {
   parseInstallationRepositories,
   parseTargetCreate,
   parseTargets,
+  type AppDetailSearch,
   type InstallationRepositoryOption,
   type RepositoryAppOption,
-  type SettingsPayload,
   type TargetListRow,
 } from "./data";
 
 /**
  * The page wayfinding link back to the list, derived from the page's own API
- * base so the rendered href is the real target under any workspace ref. A
- * separate component from the stateful page so the error and ok faces share
- * one exit.
+ * base so the rendered href is the real target under any workspace ref. ONE
+ * spelling for the detail's faces: the loaded face carries it in `PageHeader`'s
+ * back-link slot, the loading and not-found faces in {@link TargetDetailShell}.
  */
+export function TargetDetailBackLink({ locale }: { locale: SpaBoot["locale"] }) {
+  const href = `${apiBase()}/targets`;
+  return (
+    <a
+      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+      href={href}
+      onClick={(event) => spaClick(href, event)}
+    >
+      <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
+      {t(locale, "targets.backToList")}
+    </a>
+  );
+}
+
+/** The faces with no payload of their own: the skeleton and the not-found card. */
 export function TargetDetailShell({
   locale,
   children,
@@ -65,17 +91,9 @@ export function TargetDetailShell({
   locale: SpaBoot["locale"];
   children: ReactNode;
 }) {
-  const href = `${apiBase()}/targets`;
   return (
     <div className="flex flex-col gap-6">
-      <a
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-        href={href}
-        onClick={(event) => spaClick(href, event)}
-      >
-        <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
-        {t(locale, "targets.backToList")}
-      </a>
+      <TargetDetailBackLink locale={locale} />
       {children}
     </div>
   );
@@ -607,25 +625,51 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
   );
 }
 
-export function TargetDetailPage({ boot, appId }: { boot: SpaBoot; appId: string }) {
+/** One repository target's policy read: what it runs with plus the workspace defaults. */
+export async function loadTargetDetail(base: string, targetId: string): Promise<TargetPolicyPayload | null> {
+  return parseTargetPolicyPayload(await fetchJson(`${base}/api/targets/${encodeURIComponent(targetId)}`));
+}
+
+/** The detail's three tabs. A local vocabulary: `AppDetailSearch.tab` names the
+ *  App detail's two faces, so the repository detail must not reuse its values. */
+type TargetDetailTab = "settings" | "insights" | "pull-requests";
+
+/**
+ * One repository's detail page — the address is the target UUID
+ * (`/dashboard/<ref>/targets/<targetId>`), never an App id.
+ *
+ * Data plane: the page owns the policy read and the background reload. A
+ * background failure rides the page notice so the loaded tab tree never
+ * unmounts under a save, which would destroy the gate's typed draft.
+ */
+export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: string }) {
   const locale = boot.locale;
   const base = apiBase();
-  const [payload, setPayload] = useState<SettingsPayload | null>(null);
-  const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
+  const [payload, setPayload] = useState<TargetPolicyPayload | null>(null);
+  // `missing` is the 404 face: the address names no target of this workspace,
+  // which no retry can fix — the way out is the list, not a reload.
+  const [state, setState] = useState<"loading" | "ok" | "missing" | "error">("loading");
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+  const [tab, setTab] = useState<TargetDetailTab>("settings");
+  // The data tabs' filter state (window/repo/pr). In-page only this round: the
+  // repository detail does not carry them in the address bar yet.
+  const [search, setSearch] = useState<AppDetailSearch>({
+    tab: "settings",
+    window: "30",
+    repo: "",
+    pr: "",
+  });
   const cancelledRef = useRef(false);
 
-  // Background reloads (op-triggered refreshes) keep the loaded card tree
-  // mounted — an unmount would destroy every typed input and open dialog.
-  // A failed background refresh rides the page notice; the first load owns
-  // the page-level error face.
+  /** A reload: resolves whether a payload landed, so a save can tell a
+   *  completed refresh from a failed one. */
   const load = useCallback(
     async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
       if (!background) setState("loading");
       try {
-        const loaded = await loadAppDetail(base, appId);
+        const loaded = await loadTargetDetail(base, targetId);
         if (cancelledRef.current) return false;
-        if (!loaded) {
+        if (loaded === null) {
           if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
           else setState("error");
           return false;
@@ -634,15 +678,15 @@ export function TargetDetailPage({ boot, appId }: { boot: SpaBoot; appId: string
         setState("ok");
         setNotice(null);
         return true;
-      } catch {
-        if (!cancelledRef.current) {
-          if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
-          else setState("error");
-        }
+      } catch (error) {
+        if (cancelledRef.current) return false;
+        if (!background && error instanceof ApiError && error.status === 404) setState("missing");
+        else if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
+        else setState("error");
         return false;
       }
     },
-    [base, appId, locale],
+    [base, targetId, locale],
   );
 
   useEffect(() => {
@@ -653,7 +697,23 @@ export function TargetDetailPage({ boot, appId }: { boot: SpaBoot; appId: string
     };
   }, [load]);
 
-  if (state === "loading") {
+  if (state === "missing") {
+    return (
+      <TargetDetailShell locale={locale}>
+        <EmptyState title={t(locale, "common.error.notFoundTitle")} />
+      </TargetDetailShell>
+    );
+  }
+
+  if (state === "error") {
+    return (
+      <TargetDetailShell locale={locale}>
+        <ErrorState locale={locale} onRetry={() => void load()} />
+      </TargetDetailShell>
+    );
+  }
+
+  if (state === "loading" || payload === null) {
     return (
       <TargetDetailShell locale={locale}>
         <PageSkeleton locale={locale} kind="forms" />
@@ -661,16 +721,60 @@ export function TargetDetailPage({ boot, appId }: { boot: SpaBoot; appId: string
     );
   }
 
+  const { target } = payload;
+  // A migrated row carries no repository identity yet (D15): the title states
+  // the 待安装 fact the list's row states rather than printing an empty heading.
+  const repoLabel =
+    target.repo_owner === null || target.repo_name === null
+      ? t(locale, "targets.status.uninstalled")
+      : `${target.repo_owner}/${target.repo_name}`;
+
   return (
-    <TargetDetailShell locale={locale}>
-      {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
-      {state === "ok" && payload ? (
-        <div className="flex flex-col gap-6">
-          <TargetHeader locale={locale} appId={appId} payload={payload} />
-          {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-          <SettingsView locale={locale} payload={payload} onReload={load} />
-        </div>
-      ) : null}
-    </TargetDetailShell>
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title={repoLabel}
+        description={target.app_name ?? undefined}
+        backLink={<TargetDetailBackLink locale={locale} />}
+      />
+      {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
+      <Tabs value={tab} onValueChange={(value) => setTab(value as TargetDetailTab)}>
+        {/* Page-level tab face (DESIGN.md ### Tabs, line-tab idiom), the same bar
+            the App detail mounts: full width over a bottom hairline, 16px
+            triggers, so the two detail pages read as one family. */}
+        <TabsList
+          variant="line"
+          className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
+        >
+          <TabsTrigger value="settings">{TARGET_SETTINGS_COPY[locale].heading}</TabsTrigger>
+          <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger>
+          <TabsTrigger value="pull-requests">{t(locale, "appDetail.tabPullRequests")}</TabsTrigger>
+        </TabsList>
+        {/* forceMount on every panel (mount-once tab switching, the App detail's
+            contract): the settings tab's typed gate draft and the two data tabs'
+            loaded reads survive a switch — no unmount, no refetch. Radix does
+            NOT hide forced-mounted inactive panels itself; the panel's
+            `data-[state=inactive]:hidden` carries the one-visible-panel
+            invariant. */}
+        <TabsContent value="settings" forceMount>
+          <TargetSettingsTab locale={locale} payload={payload} onReload={load} onNotice={setNotice} />
+        </TabsContent>
+        <TabsContent value="insights" forceMount>
+          <AppInsightsTab
+            locale={locale}
+            scope={{ kind: "target", targetId: target.target_id }}
+            search={search}
+            onSearch={setSearch}
+          />
+        </TabsContent>
+        <TabsContent value="pull-requests" forceMount>
+          <AppPullRequestsTab
+            locale={locale}
+            scope={{ kind: "target", targetId: target.target_id }}
+            search={search}
+            onSearch={setSearch}
+          />
+        </TabsContent>
+      </Tabs>
+    </div>
   );
 }

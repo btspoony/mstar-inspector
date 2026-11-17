@@ -24,6 +24,7 @@ import {
   AddRepositoryDialogBody,
   AddRepositoryDialog,
   repositoryCountLabel,
+  TargetDetailPage,
   TargetsPage,
   TargetsView,
   targetStatusPill,
@@ -600,5 +601,72 @@ describe("target settings tab (static SSR)", () => {
     expect(paused).toContain(t("en", "settings.resumeReviews"));
     const running = renderSettingsTab(0, 1);
     expect(running).toContain(t("en", "settings.pauseReviews"));
+  });
+});
+
+/**
+ * The detail page's wiring (plan 371.3, second slice): the three tabs, the
+ * not-found face a 404 renders, and the settings tab reading the payload the
+ * page loaded. Asserted on the page, not the tab component — the tab's own
+ * faces are pinned above.
+ */
+async function mountDetail(respond: (wire: Wire) => Response | Promise<Response>) {
+  const { win, cleanup } = installDom("http://localhost/dashboard/acme/targets/t-1");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    return await respond({ url: String(input), method: init?.method ?? "GET", body: null });
+  }) as unknown as typeof fetch;
+  const container = win.document.createElement("div");
+  win.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  const settle = async () => {
+    for (let flush = 0; flush < 6; flush += 1) await act(async () => {});
+  };
+  await act(async () => root.render(createElement(TargetDetailPage, { boot: BOOT, targetId: "t-1" })));
+  await settle();
+  return {
+    win,
+    tabs: () => [...win.document.querySelectorAll('[role="tab"]')].map((node) => node.textContent),
+    text: () => container.textContent ?? "",
+    unmount: async () => {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    },
+  };
+}
+
+describe("repository detail page (mounted)", () => {
+  test("renders the three tabs and hands the loaded payload to the settings tab", async () => {
+    const view = await mountDetail((wire) =>
+      wire.url.endsWith("/api/targets/t-1") ? wireJson(targetPayload(1)) : wireJson({}, 500),
+    );
+    try {
+      expect(view.tabs()).toEqual([
+        "Review settings",
+        t("en", "appDetail.tabInsights"),
+        t("en", "appDetail.tabPullRequests"),
+      ]);
+      // The settings panel is the default face and renders the payload's
+      // EFFECTIVE policy (Every push / 45), not the defaults beside it.
+      expect(view.text()).toContain("Every push");
+      const score = view.win.document.querySelector('input[type="number"]');
+      expect((score as unknown as { value: string } | null)?.value).toBe("45");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a 404 payload renders the not-found face with the way back to the list", async () => {
+    const view = await mountDetail(() => wireJson({ error: "unknown target" }, 404));
+    try {
+      expect(view.text()).toContain(t("en", "common.error.notFoundTitle"));
+      // No retry: the address names no target of this workspace, so the only
+      // way out is the list.
+      expect(view.text()).not.toContain(t("en", "common.retry"));
+      expect(view.win.document.querySelector("a")?.getAttribute("href")).toBe("/dashboard/acme/targets");
+    } finally {
+      await view.unmount();
+    }
   });
 });

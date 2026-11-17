@@ -27,10 +27,8 @@ export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBo
     case "apps":
       return <AppsPage boot={boot} />;
     case "targets":
-      // The detail page is still app-addressed; task 371.3 re-keys it to the
-      // target id and its own prop.
       return route.targetId ? (
-        <TargetDetailPage boot={boot} appId={route.targetId} />
+        <TargetDetailPage boot={boot} targetId={route.targetId} />
       ) : (
         <TargetsPage boot={boot} />
       );

@@ -29,7 +29,13 @@ import {
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { postJson } from "../api";
 import { apiBase } from "../workspace-base";
-import { PR_VERDICTS, type ReviewLevel, type ReviewTriggerMode } from "./data";
+import {
+  PR_VERDICTS,
+  isReviewLevel,
+  isReviewTriggerMode,
+  type ReviewLevel,
+  type ReviewTriggerMode,
+} from "./data";
 import {
   REVIEW_DEPTH_INHERIT,
   reviewDepthOptions,
@@ -68,14 +74,61 @@ export type TargetPolicyPayload = {
   defaults: TargetPolicySettings;
 };
 
+function isPolicySettings(value: unknown): value is TargetPolicySettings {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    isReviewTriggerMode(row.trigger_mode) &&
+    (row.review_level === null || isReviewLevel(row.review_level)) &&
+    typeof row.check_min_score === "number" &&
+    Array.isArray(row.check_pass_verdicts) &&
+    row.check_pass_verdicts.every((verdict) => typeof verdict === "string")
+  );
+}
+
 /**
- * The copy this tab introduces has no dictionary key yet — plan 371.5 owns the
- * i18n pass, so these three strings live here in one block.
+ * The detail read, all-or-nothing: a payload missing `effective` or `defaults`
+ * would render a policy nobody stored, so a drifted body is no payload (the
+ * `parseTargets` rule). The read itself lives with the page.
+ */
+export function parseTargetPolicyPayload(data: unknown): TargetPolicyPayload | null {
+  if (typeof data !== "object" || data === null) return null;
+  const { target, effective, defaults } = data as Record<string, unknown>;
+  if (typeof target !== "object" || target === null) return null;
+  const row = target as Record<string, unknown>;
+  if (typeof row.target_id !== "string") return null;
+  const repoOwner = row.repo_owner;
+  const repoName = row.repo_name;
+  const appName = row.app_name;
+  if (repoOwner !== null && typeof repoOwner !== "string") return null;
+  if (repoName !== null && typeof repoName !== "string") return null;
+  if (appName !== null && typeof appName !== "string") return null;
+  if (typeof row.review_enabled !== "number") return null;
+  if (typeof row.follow_workspace_defaults !== "number") return null;
+  if (!isPolicySettings(effective) || !isPolicySettings(defaults)) return null;
+  return {
+    target: {
+      target_id: row.target_id,
+      repo_owner: repoOwner,
+      repo_name: repoName,
+      app_name: appName,
+      review_enabled: row.review_enabled,
+      follow_workspace_defaults: row.follow_workspace_defaults,
+    },
+    effective,
+    defaults,
+  };
+}
+
+/**
+ * The copy the 评审配置 tab introduces has no dictionary key yet — plan 371.5
+ * owns the i18n pass, so these three strings live here in one block. The page's
+ * tab label reads the same map, so the tab and its panel heading cannot drift.
  *
  * shortcut: the tab's own copy is outside `src/i18n`; plan 371.5 moves it into
  * `targets.*` and deletes this map.
  */
-const PENDING_COPY: Record<Locale, { heading: string; inherit: string; following: string }> = {
+export const TARGET_SETTINGS_COPY: Record<Locale, { heading: string; inherit: string; following: string }> = {
   en: {
     heading: "Review settings",
     inherit: "Follow workspace defaults",
@@ -112,7 +165,7 @@ export function TargetSettingsTab({
   onNotice: (notice: OpNotice) => void;
 }) {
   const { target, effective, defaults } = payload;
-  const copy = PENDING_COPY[locale];
+  const copy = TARGET_SETTINGS_COPY[locale];
   const inheriting = target.follow_workspace_defaults === 1;
   const [busy, setBusy] = useState(false);
 
