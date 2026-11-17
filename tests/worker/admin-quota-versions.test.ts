@@ -537,13 +537,14 @@ const PR_PAYLOAD = {
   number: 42,
   installation: { id: 123 },
   pull_request: { number: 42, state: "open", head: { sha: "abc123" }, user: { login: "alice" } },
-  repository: { name: "test-repo", owner: { login: "test-owner" } },
+  repository: { id: 7001, name: "test-repo", owner: { login: "test-owner" } },
 };
 
 /**
  * An active bot with an encrypted webhook secret, its workspace mapping and one
- * bound target. The route resolves the target from `(bot, installation)`, so
- * the target carries the payload's installation id.
+ * repository target. The route resolves the target from the delivery's own
+ * repository (migration 0067 dropped the installation binding), so the target
+ * carries the payload's owner/name and id.
  */
 async function seedDelivery(
   db: TestD1,
@@ -573,13 +574,16 @@ async function seedDelivery(
   seed(
     db,
     `INSERT INTO review_targets
-       (id, workspace_id, bot_id, name, installation_id, review_enabled,
-        review_trigger_mode, created_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 123, 1, 'every_push', 'tester', datetime('now'), datetime('now'))`,
+       (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+        review_enabled, review_trigger_mode, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'every_push', 'tester', datetime('now'), datetime('now'))`,
     targetId,
     workspaceId,
     appId,
     appId,
+    PR_PAYLOAD.repository.id,
+    PR_PAYLOAD.repository.owner.login,
+    PR_PAYLOAD.repository.name,
   );
   return { targetId };
 }
