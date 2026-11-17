@@ -1316,6 +1316,7 @@ export const en = {
       quotaVersions: "Quota versions",
       users: "Users",
       supportGrants: "Support access",
+      dataUpgrades: "Data upgrades",
     },
     /**
      * A refused console write: the page's generic failure message stays
@@ -1629,6 +1630,54 @@ export const en = {
       revokeAction: "Revoke",
       emptyTitle: "No open support windows",
       emptyDescription: "No operator holds cross-workspace access right now.",
+    },
+    /**
+     * Data upgrades page: the registry's items, their state and the batch run.
+     * The maintenance banner reuses the runtime page's window labels — one
+     * window, one wording.
+     */
+    dataUpgrades: {
+      description:
+        "Large data migrations, run as one transaction per batch. A batch is never interrupted; stopping waits for the one in flight.",
+      loadFailed: "Could not load the data upgrades.",
+      maintenanceTitle: "Maintenance window",
+      /** The banner's current item, progress and last error. */
+      currentLabel: "Current upgrade",
+      currentNone: "None",
+      progressLabel: "Progress",
+      errorLabel: "Last error",
+      /** {count} = the rows the batches have moved so far. */
+      progressProcessed: "{count} rows processed.",
+      /** {batch} = batches this run committed, {count} = rows processed. */
+      progressRunning: "Running — batch {batch}, {count} rows processed.",
+      progressDone: "Finished in {batch} batches — {count} rows processed.",
+      progressStopped: "Stopped after {batch} batches — {count} rows processed.",
+      /** The state pill's labels, one per state machine state. */
+      statusPending: "Pending",
+      statusRunning: "Running",
+      statusVerifying: "Verifying",
+      statusCompleted: "Completed",
+      statusFailed: "Failed",
+      /** The item refuses a second batch outside the maintenance window. */
+      downtimeBadge: "Needs downtime",
+      processedLabel: "Rows processed",
+      startedLabel: "Started",
+      finishedLabel: "Finished",
+      preflightLabel: "Preflight counts",
+      preflightAction: "Preflight",
+      startAction: "Start upgrade",
+      continueAction: "Continue",
+      verifyAction: "Verify",
+      /** Only live during a run: it lands after the batch in flight. */
+      stopAction: "Stop",
+      resetAction: "Reset",
+      /** {title} = the item's title; the server's refusal rides as detail. */
+      preflightFailed: "Could not run the preflight for {title}.",
+      stepFailed: "The batch for {title} was refused.",
+      verifyFailed: "Could not verify {title}.",
+      resetFailed: "Could not reset {title}.",
+      emptyTitle: "No data upgrades",
+      emptyDescription: "This deployment registers no data migration.",
     },
   },
 };

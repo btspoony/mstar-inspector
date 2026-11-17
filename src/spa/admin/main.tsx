@@ -6,6 +6,7 @@ import "../styles/shadcn-theme.css";
 import { t, type Locale } from "../../i18n";
 import { otherLocale } from "../shell";
 import { readBoot } from "../boot";
+import { DataUpgradePage } from "./DataUpgradePage";
 import { FlagsPage } from "./FlagsPage";
 import { RuntimePage } from "./RuntimePage";
 import { QuotaVersionsPage } from "./QuotaVersionsPage";
@@ -50,6 +51,7 @@ const SCREENS: Record<AdminPageId, ComponentType<{ locale: Locale }>> = {
   "quota-versions": QuotaVersionsPage,
   users: UsersPage,
   "support-grants": SupportGrantsPage,
+  "data-upgrades": DataUpgradePage,
 };
 
 export function App() {

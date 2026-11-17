@@ -45,6 +45,7 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarProvider } from "@design-system";
 import { App as AdminApp } from "../../src/spa/admin/main";
+import { DataUpgradePage as AdminDataUpgradePage } from "../../src/spa/admin/DataUpgradePage";
 import { FlagsPage as AdminFlagsPage } from "../../src/spa/admin/FlagsPage";
 import { RuntimePage as AdminRuntimePage } from "../../src/spa/admin/RuntimePage";
 import { SupportGrantsPage as AdminSupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
@@ -390,8 +391,39 @@ const ADMIN_GRANTS = [
   },
 ];
 
+/** The data-upgrade screen's one item: a running row paints every state face. */
+const ADMIN_UPGRADES = [
+  {
+    id: "repo-backfill",
+    title: "Repository identity backfill",
+    requiresDowntime: true,
+    state: {
+      status: "running",
+      processed: 20,
+      startedAt: "2026-11-16T08:00:00.000Z",
+      finishedAt: null,
+      lastError: null,
+    },
+    preflight: { unidentified_targets: 4, ledger_pairs: 12 },
+  },
+  {
+    id: "finding-index",
+    title: "Finding index rebuild",
+    requiresDowntime: false,
+    state: {
+      status: "failed",
+      processed: 7,
+      startedAt: "2026-11-15T08:00:00.000Z",
+      finishedAt: null,
+      lastError: "verify failed: orphan_rows=2",
+    },
+    preflight: { rows: 0 },
+  },
+];
+
 /** The console's read stub: one payload per endpoint the console calls. */
 const adminApi = (url: string): unknown => {
+  if (url.includes("/data-upgrades")) return { upgrades: ADMIN_UPGRADES };
   if (url.includes("/runtime"))
     return {
       concurrency: 24,
@@ -408,6 +440,8 @@ const adminApi = (url: string): unknown => {
         degraded: false,
         derived: false,
       },
+      // The upgrade banner's window: measured with the console's own labels.
+      maintenance: { enabled: true, reason: "data upgrade", since: "2026-11-16T07:59:00.000Z" },
     };
   if (url.includes("/workspaces")) return { workspaces: ADMIN_WORKSPACES };
   if (url.includes("/users")) return { users: ADMIN_USERS };
@@ -659,10 +693,19 @@ const SURFACES: readonly Surface[] = [
         "/_internal_admin/support-grants",
       ),
   },
+  {
+    name: "Console — data upgrades",
+    marker: t("en", "admin.dataUpgrades.maintenanceTitle"),
+    render: () =>
+      mountAdmin(
+        createElement(AdminDataUpgradePage, { locale: "en" }),
+        "/_internal_admin/data-upgrades",
+      ),
+  },
 ];
 
 describe("both-theme acceptance pass", () => {
-  test("the pass enumerates the ten customer faces and the console's six", () => {
+  test("the pass enumerates the ten customer faces and the console's seven", () => {
     expect(SURFACES.map((surface) => surface.name)).toEqual([
       "Apps list",
       "App detail — settings",
@@ -680,6 +723,7 @@ describe("both-theme acceptance pass", () => {
       "Console — workspaces",
       "Console — users",
       "Console — support access",
+      "Console — data upgrades",
     ]);
   });
 
@@ -696,10 +740,10 @@ describe("both-theme acceptance pass", () => {
     expect(findings).toEqual([]);
     // The verdict names what it compared: 14 surfaces, this many references.
     expect(Object.keys(measured)).toHaveLength(SURFACES.length);
-    // The console's six are part of the verdict, not appended to it: each one
+    // The console's seven are part of the verdict, not appended to it: each one
     // rendered a token vocabulary of its own.
     const consoleSurfaces = Object.entries(measured).filter(([name]) => name.startsWith("Console"));
-    expect(consoleSurfaces).toHaveLength(6);
+    expect(consoleSurfaces).toHaveLength(7);
     for (const [name, count] of consoleSurfaces) expect(count, name).toBeGreaterThan(0);
     const total = Object.values(measured).reduce((sum, count) => sum + count, 0);
     expect(total).toBeGreaterThan(150);
