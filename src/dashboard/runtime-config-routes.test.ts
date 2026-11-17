@@ -848,6 +848,82 @@ describe("PATCH /_internal_admin/api/runtime recheckAssignment", () => {
   });
 });
 
+describe("PATCH /_internal_admin/api/runtime maintenance", () => {
+  test("enabling writes the three rows, reports the new state and audits once", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ maintenance: { enabled: true, reason: "repository backfill" } }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      maintenance: { enabled: boolean; reason: string | null; since: string };
+    };
+    expect(body.maintenance.enabled).toBe(true);
+    expect(body.maintenance.reason).toBe("repository backfill");
+    expect(body.maintenance.since).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+
+    expect(storedBudgets(db)).toEqual({
+      "platform.maintenance.enabled": "1",
+      "platform.maintenance.reason": "repository backfill",
+      "platform.maintenance.since": body.maintenance.since,
+    });
+    expect(auditRows(db)).toEqual([
+      {
+        action: "platform.maintenance.set",
+        actor_login: OPERATOR,
+        target_type: "runtime",
+        target_id: "platform.maintenance",
+      },
+    ]);
+    const audit = db.raw
+      .prepare("SELECT detail_json FROM platform_audit_events")
+      .get() as { detail_json: string };
+    expect(JSON.parse(audit.detail_json)).toEqual({
+      before: { enabled: false, reason: null, since: null },
+      after: { enabled: true, reason: "repository backfill", since: body.maintenance.since },
+    });
+  });
+
+  test("disabling clears the reason and the start time", async () => {
+    const { db } = fixture();
+    await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ maintenance: { enabled: true, reason: "backfill" } }),
+    });
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ maintenance: { enabled: false } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      maintenance: { enabled: false, reason: null, since: null },
+    });
+    // Only the off flag survives: no stale window outlives the close.
+    expect(storedBudgets(db)).toEqual({ "platform.maintenance.enabled": "0" });
+    expect(auditRows(db)).toHaveLength(2);
+  });
+
+  test("a malformed body is a 400 that writes nothing", async () => {
+    const { db } = fixture();
+    for (const body of [
+      JSON.stringify({ maintenance: {} }),
+      JSON.stringify({ maintenance: null }),
+      JSON.stringify({ maintenance: "on" }),
+      JSON.stringify({ maintenance: { enabled: "true" } }),
+      JSON.stringify({ maintenance: { enabled: 1 } }),
+      JSON.stringify({ maintenance: { enabled: true, reason: 5 } }),
+      JSON.stringify({ concurrency: 8, maintenance: { enabled: true } }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+      expect(await res.json()).toHaveProperty("error");
+    }
+    expect(storedBudgets(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
 describe("workspace default review-gate floor", () => {
   /** The workspace column, raw so a refused write is observable. */
   const storedFloor = (db: TestD1): number | null =>

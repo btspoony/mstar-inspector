@@ -60,12 +60,16 @@
  * value off the vocabulary is untrusted — the default with `degraded: true`,
  * never a throw, because a review must still run.
  *
- * The official workspace is the one non-`review.` key: `platform.*` is a domain
- * of the same table because the designation is a global platform parameter, not
- * a switch and not a tenant column. `RUNTIME_SETTING_DOMAINS` is the registry
+ * The official workspace and maintenance mode are the non-`review.` keys:
+ * `platform.*` is a domain of the same table because both are global platform
+ * parameters, not per-tenant columns. `RUNTIME_SETTING_DOMAINS` is the registry
  * that keeps that honest — the table is the platform's parameter store whose
  * keys group by domain prefix, and a future rename is a mechanical migration,
- * not a behaviour change.
+ * not a behaviour change. Maintenance mode is three rows
+ * (`platform.maintenance.enabled|reason|since`) read in ONE statement: an
+ * absent `enabled` row is off, and the toggle DELETEs reason/since rather than
+ * blanking them, so an absent companion is the one "no reason" / "not running"
+ * shape there is.
  *
  * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
  * (the platform-wide quota; Cloudflare Queues delivers at most 250 of it at
@@ -1114,4 +1118,95 @@ export async function setOfficialWorkspace(
   ]);
   if ((upsert?.meta.changes ?? 0) === 0) throw new UnknownWorkspaceError(workspaceId);
   return id;
+}
+
+/** The maintenance toggle: `'1'` while the platform is closed, `'0'` otherwise. */
+export const MAINTENANCE_ENABLED_KEY = "platform.maintenance.enabled";
+/** Why it is closed, as the Operator typed it. Absent = no reason given. */
+export const MAINTENANCE_REASON_KEY = "platform.maintenance.reason";
+/** When it closed, ISO-8601 UTC. Absent = never closed. */
+export const MAINTENANCE_SINCE_KEY = "platform.maintenance.since";
+/** The audit ledger's target id for the trio (one operator save, one row). */
+const MAINTENANCE_TARGET = "platform.maintenance";
+
+/** Whether the platform is closed, and the window it was closed in. */
+export type MaintenanceMode = {
+  enabled: boolean;
+  reason: string | null;
+  since: string | null;
+};
+
+/**
+ * The maintenance window in ONE statement. An ABSENT `enabled` row is the
+ * documented default — off. `reason` / `since` describe a running window only,
+ * and the writer deletes both on disable, so a closed platform carries neither.
+ */
+export async function getMaintenanceMode(db: DashboardD1): Promise<MaintenanceMode> {
+  const rows = await db
+    .prepare("SELECT key, value FROM review_runtime_settings WHERE key IN (?1, ?2, ?3)")
+    .bind(MAINTENANCE_ENABLED_KEY, MAINTENANCE_REASON_KEY, MAINTENANCE_SINCE_KEY)
+    .all<{ key: string; value: string }>();
+  const stored = new Map(rows.results.map((row) => [row.key, row.value]));
+  return {
+    enabled: stored.get(MAINTENANCE_ENABLED_KEY) === "1",
+    reason: stored.get(MAINTENANCE_REASON_KEY) ?? null,
+    since: stored.get(MAINTENANCE_SINCE_KEY) ?? null,
+  };
+}
+
+/**
+ * One operator save, one audit row, in ONE batch. `before` reads the three
+ * rows as the getter would state them, `after` is the accepted window.
+ */
+const MAINTENANCE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'platform.maintenance.set', 'runtime', '${MAINTENANCE_TARGET}',
+          json_object('before', json_object(
+                      'enabled', json(CASE WHEN (SELECT value FROM review_runtime_settings
+                                                  WHERE key = '${MAINTENANCE_ENABLED_KEY}') = '1'
+                                          THEN 'true' ELSE 'false' END),
+                      'reason', (SELECT value FROM review_runtime_settings
+                                  WHERE key = '${MAINTENANCE_REASON_KEY}'),
+                      'since', (SELECT value FROM review_runtime_settings
+                                 WHERE key = '${MAINTENANCE_SINCE_KEY}')),
+                      'after', json_object('enabled', json(?3), 'reason', ?4, 'since', ?5)),
+          ?6)`;
+
+const MAINTENANCE_CLEAR_SQL = "DELETE FROM review_runtime_settings WHERE key = ?1";
+
+/**
+ * Open or close the maintenance window. Enabling stamps `since` with `now` and
+ * keeps `reason` when one was given; disabling DELETEs both, so a closed
+ * platform never carries a stale window into the next one. A blank reason is
+ * no reason. The flag, its two companions and the audit row share one batch:
+ * the caller's actor names the save, and a write error appends nothing.
+ */
+export async function setMaintenanceMode(
+  db: DashboardD1,
+  input: { enabled: boolean; reason?: string | null; actor: string },
+  now: string,
+): Promise<void> {
+  const { enabled, actor } = input;
+  const reason = enabled ? (input.reason?.trim() || null) : null;
+  /** Upsert a value, or DELETE the row when there is none to state. */
+  const put = (key: string, value: string | null) =>
+    value === null
+      ? db.prepare(MAINTENANCE_CLEAR_SQL).bind(key)
+      : db.prepare(SYSTEM_UPSERT_SQL).bind(key, value, now, actor);
+  await db.batch([
+    db
+      .prepare(MAINTENANCE_AUDIT_SQL)
+      .bind(
+        crypto.randomUUID(),
+        actor,
+        enabled ? "true" : "false",
+        reason,
+        enabled ? now : null,
+        now,
+      ),
+    put(MAINTENANCE_ENABLED_KEY, enabled ? "1" : "0"),
+    put(MAINTENANCE_SINCE_KEY, enabled ? now : null),
+    put(MAINTENANCE_REASON_KEY, reason),
+  ]);
 }

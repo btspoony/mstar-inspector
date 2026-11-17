@@ -33,6 +33,7 @@ import {
   UnknownWorkspaceError,
   getCheckBudgets,
   getCommentClaimSettings,
+  getMaintenanceMode,
   getRecheckAssignmentMaxBytes,
   getSystemConcurrency,
   isConcurrencyValue,
@@ -41,6 +42,7 @@ import {
   setCheckBudgets,
   setCommentClaimSettings,
   setDefaultReviewLevel,
+  setMaintenanceMode,
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
@@ -307,6 +309,15 @@ function checkBudgetsBody(value: unknown): CheckBudgetValues | null {
     : null;
 }
 
+/** The accepted `maintenance` body shape; the store owns the window. */
+function maintenanceBody(value: unknown): { enabled: boolean; reason?: string | null } | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { enabled, reason } = value as { enabled?: unknown; reason?: unknown };
+  if (typeof enabled !== "boolean") return null;
+  if (reason !== undefined && reason !== null && typeof reason !== "string") return null;
+  return { enabled, reason };
+}
+
 async function setRuntime(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -317,6 +328,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawClaim: unknown;
   let rawLevel: unknown;
   let rawRecheck: unknown;
+  let rawMaintenance: unknown;
   try {
     const body = (await c.req.json()) as {
       concurrency?: unknown;
@@ -324,28 +336,40 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       commentClaim?: unknown;
       reviewLevel?: unknown;
       recheckAssignment?: unknown;
+      maintenance?: unknown;
     };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
     rawClaim = body.commentClaim;
     rawLevel = body.reviewLevel;
     rawRecheck = body.recheckAssignment;
+    rawMaintenance = body.maintenance;
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
   // One save writes one parameter: a body carrying more than one is a shape
   // error, so a refused half can never leave another half written.
   if (
-    [concurrency, rawBudgets, rawClaim, rawLevel, rawRecheck].filter((value) => value !== undefined)
-      .length > 1
+    [concurrency, rawBudgets, rawClaim, rawLevel, rawRecheck, rawMaintenance].filter(
+      (value) => value !== undefined,
+    ).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | reviewLevel | recheckAssignment",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | reviewLevel | recheckAssignment | maintenance",
       },
       400,
     );
+  }
+  if (rawMaintenance !== undefined) {
+    const mode = maintenanceBody(rawMaintenance);
+    if (mode === null) {
+      return c.json({ error: "body must be { maintenance: { enabled, reason? } }" }, 400);
+    }
+    const now = new Date().toISOString();
+    await setMaintenanceMode(db, { ...mode, actor: login }, now);
+    return c.json({ maintenance: await getMaintenanceMode(db) });
   }
   if (rawClaim !== undefined) {
     const trio = commentClaimBody(rawClaim);
