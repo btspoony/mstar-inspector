@@ -1678,6 +1678,10 @@ describe("/dashboard manifest routes", () => {
     // under test stays the missing-table write, not an unreadable setting.
     const db = seededDashboardD1(3);
     applyMigrationFile(db.raw, "0026_workspaces.sql");
+    // 0040 puts the maintenance window's table in place: every dashboard
+    // request reads it through the gate, so a missing table would 503 before
+    // the commit path this test exercises is reached.
+    applyMigrationFile(db.raw, "0040_runtime_config.sql");
     applyMigrationFile(db.raw, "0049_workspace_check_min_score.sql");
     db.raw
       .prepare(
@@ -2063,11 +2067,25 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
 
   test("migrations not applied (no review_bots table) → 500 fail-closed, hold KEPT", async () => {
     const rec = stubFetchRecording();
-    // through=3: a pre-apps DB (users only — no review_bots table).
+    // through=3: a pre-apps DB (no review_bots table). 0026 + 0040 only put
+    // the workspace plane and the maintenance window's table in place, which
+    // every dashboard request's gate reads; the commit still fails on the
+    // missing App table.
+    const preApps = seededDashboardD1(3);
+    applyMigrationFile(preApps.raw, "0026_workspaces.sql");
+    applyMigrationFile(preApps.raw, "0040_runtime_config.sql");
+    // The seeded users predate 0026, so attribute them to the sole workspace:
+    // the creation gate denies a non-member before the commit path runs.
+    preApps.raw
+      .prepare(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+         SELECT 'default', id, 'owner', '2026-01-01T00:00:00.000Z' FROM users`,
+      )
+      .run();
     const res = await doCommit({
       env: {
         ...baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }),
-        DB: seededDashboardD1(3),
+        DB: preApps,
       } as unknown as Env,
       holdValue: await freshHold(),
     });
@@ -2840,6 +2858,10 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0023_removed_logins.sql",
   // 0026: createApp also writes the App's workspace mapping.
   "0026_workspaces.sql",
+  // 0040: every /dashboard request reads the maintenance window through the
+  // gate, so the settings table it lives in must exist (an unreadable window
+  // now fails closed and would 503 every route).
+  "0040_runtime_config.sql",
   // 0028: the SPA boot's pending-invite discovery read.
   "0028_workspace_invites.sql",
   // 0031: workspace creation writes its `free` subscription row.
