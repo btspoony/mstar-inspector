@@ -23,6 +23,10 @@ import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import {
   DATA_UPGRADES,
+  releaseUpgradeClaim,
+  resetDataUpgrade,
+  settleUpgradeMaintenance,
+  settleVerifyState,
   type DataUpgradeItem,
   type UpgradeCursor,
 } from "../../src/admin/data-upgrades";
@@ -361,6 +365,58 @@ describe("the data-upgrade runner", () => {
     release.resolve();
     expect((await verifying).status).toBe(200);
     expect(await state(db)).toMatchObject({ status: "completed" });
+  });
+
+  test("a reset between verify's state write and its cleanup cannot take the claim", async () => {
+    const db = fixture(1);
+    const stamp = "2026-11-17T03:00:00.000Z";
+    // A verify owns the row: `verifying` plus its claim stamp, and the window it opened.
+    db.raw
+      .prepare(
+        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'verifying', 1, ?)",
+      )
+      .run(ITEM_ID, stamp);
+    await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
+
+    // Step 1 lands the status but KEEPS the claim, so the row is not yet claimable.
+    expect(await settleVerifyState(db, ITEM_ID, "completed", null, stamp)).toBe("ok");
+    expect(db.raw.prepare("SELECT status, started_at FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID)).toEqual({
+      status: "completed",
+      started_at: stamp,
+    });
+
+    // The reset is refused: it cannot observe a released claim mid-cleanup.
+    const reset = await resetDataUpgrade(db, fixtureItem(), OPERATOR, "2026-11-17T03:00:30.000Z");
+    expect(reset.kind).toBe("refused");
+    expect(
+      db.raw.prepare("SELECT status, maintenance_owned, started_at FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
+    ).toEqual({ status: "completed", maintenance_owned: 1, started_at: stamp });
+    expect((await getMaintenanceMode(db)).enabled).toBe(true);
+
+    // Steps 2 and 3 finish the verify: window closed, ownership cleared, claim released.
+    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp)).toBe("ok");
+    expect(await releaseUpgradeClaim(db, ITEM_ID, "completed", stamp)).toBe("ok");
+    expect((await getMaintenanceMode(db)).enabled).toBe(false);
+    expect(
+      db.raw.prepare("SELECT maintenance_owned, started_at FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
+    ).toEqual({ maintenance_owned: 0, started_at: null });
+  });
+
+  test("a guarded cleanup that matches no row is refused and keeps maintenance ownership", async () => {
+    const db = fixture(1);
+    db.raw
+      .prepare(
+        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'verifying', 1, ?)",
+      )
+      .run(ITEM_ID, "2026-11-17T03:00:00.000Z");
+
+    // Another phase's stamp: the guard matches nothing, so nothing is released.
+    expect(
+      await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, "2026-11-17T03:05:00.000Z"),
+    ).toBe("refused");
+    expect(
+      db.raw.prepare("SELECT status, maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
+    ).toEqual({ status: "verifying", maintenance_owned: 1 });
   });
 
   test("step, verify and reset each write one audit row", async () => {

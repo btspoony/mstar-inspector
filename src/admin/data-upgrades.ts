@@ -277,6 +277,93 @@ async function claimUpgrade(
   return claim.meta.changes !== 0;
 }
 
+/** One claim-guarded write's verdict: `refused` means the row no longer carries our stamp. */
+type ClaimStep = "ok" | "refused";
+
+/** Run one claim-guarded UPDATE; `refused` when no row matched the stamp. */
+async function guardedWrite(db: DashboardD1, sql: string, ...binds: unknown[]): Promise<ClaimStep> {
+  const result = await db.prepare(sql).bind(...binds).run();
+  return result.meta.changes === 0 ? "refused" : "ok";
+}
+
+/**
+ * Step 1 of a verify: settle the status while OUR stamp still guards the row.
+ * `started_at` stays set — the claim is released by step 3, so no later phase
+ * can claim the row while this one still has maintenance side effects to run.
+ * `finished_at` is written only on completion: a failed item never finished.
+ */
+export async function settleVerifyState(
+  db: DashboardD1,
+  id: string,
+  status: "completed" | "failed",
+  lastError: string | null,
+  now: string,
+): Promise<ClaimStep> {
+  return status === "completed"
+    ? guardedWrite(
+        db,
+        `UPDATE operator_data_upgrades
+            SET status = 'completed', finished_at = ?2, last_error = NULL
+          WHERE id = ?1 AND status = 'verifying' AND started_at = ?3`,
+        id,
+        now,
+        now,
+      )
+    : guardedWrite(
+        db,
+        `UPDATE operator_data_upgrades
+            SET status = 'failed', last_error = ?2
+          WHERE id = ?1 AND status = 'verifying' AND started_at = ?3`,
+        id,
+        lastError,
+        now,
+      );
+}
+
+/**
+ * Step 2: close the window this item owns, then drop its ownership flag — both
+ * under our stamp, so a reset that claimed the row in between cannot have its
+ * window closed by a phase that already finished. An operator-closed window is
+ * left alone: re-stating "off" would append an audit row for a change nobody
+ * made.
+ */
+export async function settleUpgradeMaintenance(
+  db: DashboardD1,
+  id: string,
+  status: DataUpgradeStatus,
+  actor: string,
+  now: string,
+): Promise<ClaimStep> {
+  if ((await getMaintenanceMode(db)).enabled) {
+    await setMaintenanceMode(db, { enabled: false, actor }, now);
+  }
+  return guardedWrite(
+    db,
+    `UPDATE operator_data_upgrades
+        SET maintenance_owned = 0
+      WHERE id = ?1 AND status = ?2 AND maintenance_owned = 1 AND started_at = ?3`,
+    id,
+    status,
+    now,
+  );
+}
+
+/** Last step of every phase: clearing the stamp is what re-opens the row to another phase. */
+export async function releaseUpgradeClaim(
+  db: DashboardD1,
+  id: string,
+  status: DataUpgradeStatus,
+  now: string,
+): Promise<ClaimStep> {
+  return guardedWrite(
+    db,
+    "UPDATE operator_data_upgrades SET started_at = NULL WHERE id = ?1 AND status = ?2 AND started_at = ?3",
+    id,
+    status,
+    now,
+  );
+}
+
 /**
  * The batch's outcome: cursor, counter, log entry AND the lease release commit
  * together, after the data move. The log is append-only JSON so the operator
@@ -426,69 +513,55 @@ export async function verifyDataUpgrade(
   if (!claimed) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
-  const checks = await item.verify(db).catch(async (err: unknown) => {
-    await releaseClaim(db, item.id);
-    throw err;
-  });
+  // A throw is NOT caught: the claim stays and its 5-minute lease expiry is the
+  // recovery, so a half-run phase never looks claimable to a later one.
+  const checks = await item.verify(db);
   const failing = Object.entries(checks).filter(([, count]) => count !== 0);
-  if (failing.length > 0) {
-    const lastError = `verify failed: ${failing.map(([name, count]) => `${name}=${count}`).join(", ")}`;
-    await db.batch([
-      db
-        .prepare(
-          "UPDATE operator_data_upgrades SET status = 'failed', last_error = ?2, started_at = NULL WHERE id = ?1",
-        )
-        .bind(item.id, lastError),
-      upgradeAudit(db, "verify", actor, item.id, "failed", now),
-    ]);
-    return { kind: "ok", state: await readDataUpgradeState(db, item.id), checks };
+  const status = failing.length > 0 ? "failed" : "completed";
+  const lastError =
+    failing.length > 0 ? `verify failed: ${failing.map(([name, count]) => `${name}=${count}`).join(", ")}` : null;
+  // The claim outlives the status write: cleanup below runs under the same
+  // stamp, so a reset cannot claim the row and have its window closed by us.
+  if ((await settleVerifyState(db, item.id, status, lastError, now)) === "refused") {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
-  await db.batch([
-    db
-      .prepare(
-        "UPDATE operator_data_upgrades SET status = 'completed', finished_at = ?2, last_error = NULL, started_at = NULL WHERE id = ?1",
-      )
-      .bind(item.id, now),
-    upgradeAudit(db, "verify", actor, item.id, "completed", now),
-  ]);
-  if (before.maintenanceOwned) {
-    // A window the operator already closed is left alone: re-stating "off"
-    // would append an audit row for a change nobody made.
-    if ((await getMaintenanceMode(db)).enabled) {
-      await setMaintenanceMode(db, { enabled: false, actor }, now);
-    }
-    await db
-      .prepare("UPDATE operator_data_upgrades SET maintenance_owned = 0 WHERE id = ?1")
-      .bind(item.id)
-      .run();
+  await upgradeAudit(db, "verify", actor, item.id, status, now).run();
+  if (before.maintenanceOwned && (await settleUpgradeMaintenance(db, item.id, status, actor, now)) === "refused") {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
+  }
+  if ((await releaseUpgradeClaim(db, item.id, status, now)) === "refused") {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   return { kind: "ok", state: await readDataUpgradeState(db, item.id), checks };
 }
 
 /**
- * Return the item to `pending` from ANY state. Migrated rows are never undone —
- * a re-run is a no-op pass over work the worklist already excludes. A window
- * the RUNNER opened is closed first: `reset` clears ownership, so leaving the
- * window open would strand a maintenance mode no later step or verify can
- * close. An operator-enabled window stays on. The batch log stays: it is the
- * only evidence of what the batches already discarded, and it describes work
- * reset cannot undo.
+ * The reset's state write: `pending` with no cursor, counter or finish — but
+ * `started_at` stays, because the window close and ownership clear below run
+ * under the same stamp, and only the last step re-opens the row.
  */
 const RESET_SQL = `
   UPDATE operator_data_upgrades
      SET status = 'pending',
          cursor_json = NULL,
          processed = 0,
-         maintenance_owned = 0,
-         started_at = NULL,
          finished_at = NULL,
          last_error = NULL
-   WHERE id = ?1`;
+   WHERE id = ?1 AND started_at = ?2 AND maintenance_owned = ?3`;
 
 export type UpgradeResetOutcome =
   | { kind: "ok"; state: DataUpgradeState }
   | { kind: "refused"; reason: string; state: DataUpgradeState };
 
+/**
+ * Return the item to `pending` from ANY state. Migrated rows are never undone —
+ * a re-run is a no-op pass over work the worklist already excludes. A window
+ * the RUNNER opened is closed here: `reset` clears ownership, so leaving it
+ * open would strand a maintenance mode no later step or verify can close. An
+ * operator-enabled window stays on. The batch log stays: it is the only
+ * evidence of what the batches already discarded, and it describes work reset
+ * cannot undo.
+ */
 export async function resetDataUpgrade(
   db: DashboardD1,
   item: DataUpgradeItem,
@@ -510,18 +583,19 @@ export async function resetDataUpgrade(
   if (!claimed) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
-  try {
-    if (before.maintenanceOwned && (await getMaintenanceMode(db)).enabled) {
-      await setMaintenanceMode(db, { enabled: false, actor }, now);
-    }
-    // RESET_SQL clears `started_at` itself: the release lands with the state.
-    await db.batch([
-      db.prepare(RESET_SQL).bind(item.id),
-      upgradeAudit(db, "reset", actor, item.id, "pending", now),
-    ]);
-  } catch (err: unknown) {
-    await releaseClaim(db, item.id);
-    throw err;
+  // State first, window second: a reset that died between the two leaves the
+  // row `pending` still holding its claim and ownership, which the next claim's
+  // stale window adopts and its own cleanup closes. A throw is NOT caught here:
+  // the claim stays and its lease expires, so no half-cleaned row is claimable.
+  if ((await guardedWrite(db, RESET_SQL, item.id, now, before.maintenanceOwned ? 1 : 0)) === "refused") {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
+  }
+  await upgradeAudit(db, "reset", actor, item.id, "pending", now).run();
+  if (before.maintenanceOwned && (await settleUpgradeMaintenance(db, item.id, "pending", actor, now)) === "refused") {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
+  }
+  if ((await releaseUpgradeClaim(db, item.id, "pending", now)) === "refused") {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   return { kind: "ok", state: await readDataUpgradeState(db, item.id) };
 }
