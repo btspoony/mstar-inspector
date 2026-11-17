@@ -8,9 +8,11 @@
  * operator can spot bad configurations / probes (Phase 5 B6).
  *
  * Event whitelist (spec review-trigger-policy §2.1):
- * - `pull_request.{opened,synchronize,reopened}` filtered by the resolved
- *   App's `review_trigger_mode`: `open` auto-triggers `opened` only,
- *   `every_push` (the default) all three, `manual` none.
+ * - `pull_request.{opened,synchronize,reopened,ready_for_review}` filtered by
+ *   the resolved target's `review_trigger_mode`: `open` auto-triggers `opened`
+ *   and `ready_for_review` only, `every_push` (the default) all four,
+ *   `manual` none. A draft PR is additionally held back unless the target's
+ *   `review_drafts` switch is on; `ready_for_review` bypasses that draft gate.
  * - `issue_comment.created` whose body contains the App's bot mention
  *   `@{github_slug}` as a standalone token (spec §3 grammar), on a pull request
  *   thread, sent by a non-bot whose login is the PR author or the repository
@@ -31,7 +33,7 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import type { ReviewTriggerMode } from "../dashboard/targets-store";
 import type { HandlerLog } from "./handlers";
 
-export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as const;
+export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened", "ready_for_review"] as const;
 
 /**
  * The install actions that carry the installing account's login
@@ -54,7 +56,17 @@ export const INSTALLATION_ACTIONS = ["created", "new_permissions_accepted"] as c
  * (empty slug never matches — fail-safe: no trigger rather than a spurious
  * one).
  */
-export type ReviewTriggerContext = { mode: ReviewTriggerMode; appSlug: string };
+export type ReviewTriggerContext = {
+  mode: ReviewTriggerMode;
+  appSlug: string;
+  /**
+   * The resolved target's draft switch (migration 0070). Whether a PR its
+   * author is still drafting is reviewed at all. Optional — absent means
+   * true, so a caller that states no policy keeps today's behaviour (a draft
+   * is reviewed like any other PR).
+   */
+  reviewDrafts?: boolean;
+};
 
 /** The one trigger context a delivery without a resolver is classified with. */
 const DEFAULT_TRIGGER: ReviewTriggerContext = { mode: "every_push", appSlug: "" };
@@ -206,15 +218,16 @@ export function payloadMentionsALogin(rawBody: string): boolean {
 }
 
 /**
- * §2.1 matrix for the auto (pull_request) face: `open` enqueues `opened`
- * only; `every_push` enqueues all whitelisted actions; `manual` never
- * auto-triggers (a bot mention is the only trigger).
+ * §2.1 matrix for the auto (pull_request) face: `open` enqueues `opened` and
+ * `ready_for_review` (the draft the user just published — the one delivery
+ * that must not be missed); `every_push` enqueues all whitelisted actions;
+ * `manual` never auto-triggers (a bot mention is the only trigger).
  */
 function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
   if (mode === "manual") {
     return false;
   }
-  return mode === "open" ? action === "opened" : true;
+  return mode === "open" ? action === "opened" || action === "ready_for_review" : true;
 }
 
 /**
@@ -230,6 +243,14 @@ const BOT_LOGIN = /\[bot\]$/i;
 const BOT_PR_REASON = "PR authored by a bot account";
 
 const MISSING_AUTHOR_REASON = "payload carried no PR author login";
+
+/**
+ * The classifier's ignore reason for a draft PR the target holds back
+ * (migration 0070). An ORDINARY ignore — 200, delivery row `ignored`, PR
+ * ledger row recorded, no queue send, no Check attach, no failure insert —
+ * never a new failure stage.
+ */
+export const DRAFT_PULL_REQUEST_REASON = "draft pull request";
 
 // Stable labels for reason-keyed log greps: the outcome `reason` stays prose,
 // the log line uses snake_case like every other webhook-face diagnostic.
@@ -465,6 +486,10 @@ const pullRequestSchema = z.object({
       number: z.number().optional(),
       // PR author — a bot-authored PR is never reviewed (either face).
       user: z.object({ login: z.string().optional() }).nullable().optional(),
+      // Draft state (migration 0070): `true` = the author is still drafting.
+      // Optional, absent meaning false; a non-boolean keeps the existing 400
+      // (it is a malformed payload, which a retry cannot repair).
+      draft: z.boolean().optional(),
       // Display fields for the per-App PR ledger (`pullRequestRecord`). All
       // optional *and* nullable: a delivery may omit them and every existing
       // classifier guard stays decided by `number` / `head.sha` alone.
@@ -662,7 +687,7 @@ function classifyParsed(
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }
   if (eventName === "pull_request") {
-    return classifyPullRequest(parsed, trigger.mode, log);
+    return classifyPullRequest(parsed, trigger.mode, log, trigger.reviewDrafts);
   }
   if (eventName === "issue_comment") {
     return classifyIssueComment(parsed, log, trigger.appSlug);
@@ -710,7 +735,12 @@ function classifyInstallation(parsed: unknown): WebhookOutcome {
   };
 }
 
-function classifyPullRequest(parsed: unknown, mode: ReviewTriggerMode, log?: HandlerLog): WebhookOutcome {
+function classifyPullRequest(
+  parsed: unknown,
+  mode: ReviewTriggerMode,
+  log?: HandlerLog,
+  reviewDrafts?: boolean,
+): WebhookOutcome {
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
   }
@@ -739,6 +769,15 @@ function classifyPullRequest(parsed: unknown, mode: ReviewTriggerMode, log?: Han
   const authorIgnore = ignoredForAuthor(pull_request?.user?.login, "pull_request", prNumber, log);
   if (authorIgnore) {
     return authorIgnore;
+  }
+  // Draft gate (migration 0070): a PR its author is still drafting is not
+  // reviewed while the target says so. `ready_for_review` is the delivery that
+  // announces the draft became reviewable, so it bypasses THIS gate only —
+  // every other gate (signature, target resolution, author, pause,
+  // entitlement) still decides. Absent `reviewDrafts` means true (today's
+  // behaviour); the mode gate below still applies to a ready delivery.
+  if (pull_request?.draft === true && reviewDrafts === false && action !== "ready_for_review") {
+    return { kind: "ignore", reason: DRAFT_PULL_REQUEST_REASON };
   }
   // The install's own account wins: the payload states it, whereas the owner
   // is only the inference a delivery without `installation.account` allows.

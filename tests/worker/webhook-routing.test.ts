@@ -56,6 +56,8 @@ type TargetSeed = {
   mode?: "open" | "every_push" | "manual";
   /** OMITTED → the DDL DEFAULT 1 (the business pause off). */
   reviewEnabled?: 0 | 1;
+  /** OMITTED → the DDL DEFAULT 1 (drafts are reviewed). 0 holds them back. */
+  reviewDrafts?: 0 | 1;
 };
 
 /** The repository every delivery in this suite comes from. */
@@ -130,8 +132,8 @@ async function seedApp(
       .prepare(
         `INSERT INTO review_targets
            (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
-            review_enabled, review_trigger_mode, created_by, created_at, updated_at)
-         VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
+            review_enabled, review_drafts, review_trigger_mode, created_by, created_at, updated_at)
+         VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
       )
       .run(
         targetId,
@@ -141,6 +143,7 @@ async function seedApp(
         target.repoOwner ?? FIXTURE_REPO.owner,
         target.repoName ?? FIXTURE_REPO.name,
         target.reviewEnabled ?? 1,
+        target.reviewDrafts ?? 1,
         target.mode ?? "every_push",
       );
     return targetId;
@@ -994,6 +997,36 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       botRef: { appId: appRow.id },
       targetId: appRow.targetId,
     });
+  });
+
+  test("draft gate wiring: the resolver hands the target's review_drafts to the classifier", async () => {
+    // The switch lives on the target (D12). This is the one line that reads
+    // it, so a draft is held back while `ready_for_review` still enqueues.
+    const db = createMigratedTestD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewDrafts: 0 }] });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const draftPr = { ...PR_PAYLOAD, pull_request: { ...PR_PAYLOAD.pull_request, draft: true } };
+    const post = async (payload: unknown): Promise<Response> => {
+      const body = JSON.stringify(payload);
+      return postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+        env,
+      );
+    };
+
+    const draftRes = await post({ ...draftPr, action: "synchronize" });
+    expect(draftRes.status).toBe(200);
+    expect(await draftRes.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+
+    const readyRes = await post({ ...draftPr, action: "ready_for_review" });
+    expect(readyRes.status).toBe(200);
+    expect(await readyRes.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: "ready_for_review", pr_number: 42 });
   });
 
   test("an unsynced App (github_slug NULL) logs mention_unresolved for a mention, still enqueues nothing", async () => {
