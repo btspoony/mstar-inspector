@@ -426,6 +426,84 @@ describe("the data-upgrade runner", () => {
     expect((await getMaintenanceMode(db)).enabled).toBe(true);
   });
 
+  test("a lease taken over before the batch closes no window and writes no audit", async () => {
+    const db = fixture(1);
+    const stamp = "2026-11-17T03:00:00.000Z";
+    const nextStamp = "2026-11-17T03:01:00.000Z";
+    db.raw
+      .prepare(
+        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'completed', 1, ?)",
+      )
+      .run(ITEM_ID, stamp);
+    await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
+
+    // The lease is taken over BETWEEN the helper's read and its batch.
+    const racing: DashboardD1 = {
+      prepare: (sql) => db.prepare(sql),
+      async batch(statements) {
+        db.raw
+          .prepare("UPDATE operator_data_upgrades SET started_at = ? WHERE id = ?")
+          .run(nextStamp, ITEM_ID);
+        return db.batch(statements);
+      },
+    };
+    expect(await settleUpgradeMaintenance(racing, ITEM_ID, "completed", OPERATOR, stamp)).toBe("refused");
+
+    // The newer run's window stands, and its first statement moved no row.
+    const mode = await getMaintenanceMode(db);
+    expect(mode).toEqual({ enabled: true, reason: "data upgrade: fixture", since: stamp });
+    expect(
+      db.raw.prepare("SELECT maintenance_owned, started_at FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
+    ).toEqual({ maintenance_owned: 1, started_at: nextStamp });
+    expect(
+      db.raw
+        .prepare("SELECT COUNT(*) AS n FROM platform_audit_events WHERE action = 'platform.maintenance.set'")
+        .get(),
+    ).toEqual({ n: 1 });
+  });
+
+  test("a row that no longer owns the window is settled without touching it", async () => {
+    const db = fixture(1);
+    const stamp = "2026-11-17T03:00:00.000Z";
+    db.raw
+      .prepare(
+        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'completed', 0, ?)",
+      )
+      .run(ITEM_ID, stamp);
+    await setMaintenanceMode(db, { enabled: true, reason: "planned incident", actor: OPERATOR }, stamp);
+
+    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp)).toBe("ok");
+    // An operator's window is not the runner's to close.
+    expect(await getMaintenanceMode(db)).toEqual({ enabled: true, reason: "planned incident", since: stamp });
+  });
+
+  test("the owner closes the window and audits it once", async () => {
+    const db = fixture(1);
+    const stamp = "2026-11-17T03:00:00.000Z";
+    db.raw
+      .prepare(
+        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'completed', 1, ?)",
+      )
+      .run(ITEM_ID, stamp);
+    await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
+
+    expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp)).toBe("ok");
+    expect(await getMaintenanceMode(db)).toEqual({ enabled: false, reason: null, since: null });
+    expect(
+      db.raw.prepare("SELECT maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
+    ).toEqual({ maintenance_owned: 0 });
+    const audits = db.raw
+      .prepare(
+        "SELECT actor_login, detail_json FROM platform_audit_events WHERE action = 'platform.maintenance.set' ORDER BY rowid",
+      )
+      .all() as Array<{ actor_login: string; detail_json: string }>;
+    expect(audits.map((row) => row.actor_login)).toEqual([OPERATOR, OPERATOR]);
+    expect(JSON.parse(audits[1]?.detail_json ?? "null")).toEqual({
+      before: { enabled: true, reason: "data upgrade: fixture", since: stamp },
+      after: { enabled: false, reason: null, since: null },
+    });
+  });
+
   test("step, verify and reset each write one audit row", async () => {
     const db = fixture(1);
     register(fixtureItem());

@@ -16,9 +16,11 @@
  * row is started BEFORE the first batch runs, so a batch that throws still
  * leaves an honest `running` row with its ownership recorded.
  *
- * Maintenance is read and written through `getMaintenanceMode` /
- * `setMaintenanceMode` only — one writer path, the same one the operator
- * console uses.
+ * Maintenance is read through `getMaintenanceMode` and OPENED through
+ * `setMaintenanceMode` (the same writer the operator console uses). The runner
+ * CLOSES its own window in `settleUpgradeMaintenance`, whose guarded batch also
+ * clears ownership and audits the close — one statement set, so a lease taken
+ * over mid-close cannot touch the newer run's window.
  */
 import { getMaintenanceMode, setMaintenanceMode } from "../dashboard/runtime-config-store";
 import type { DashboardD1, DashboardD1Statement } from "../dashboard/users";
@@ -347,15 +349,61 @@ export async function settleVerifyState(
 }
 
 /**
- * Step 2: close the window this item owns, then drop its ownership flag — both
- * under our stamp, so a reset that claimed the row in between cannot have its
- * window closed by a phase that already finished. An operator-closed window is
- * left alone: re-stating "off" would append an audit row for a change nobody
- * made.
+ * Drop the ownership flag. Its `changes` is the batch's veto: every window
+ * statement below is guarded by the flag this one cleared, so a stamp taken
+ * over between the read and the batch leaves the newer run's window untouched.
+ */
+const MAINTENANCE_RELEASE_SQL = `
+  UPDATE operator_data_upgrades
+     SET maintenance_owned = 0
+   WHERE id = ?1 AND started_at = ?2 AND maintenance_owned = 1`;
+
+/** The window is this run's to close: the flag is down AND somebody opened it. */
+const MAINTENANCE_CLOSE_GUARD = `
+  EXISTS (SELECT 1 FROM operator_data_upgrades
+           WHERE id = ?1 AND started_at = ?2 AND maintenance_owned = 0)
+  AND EXISTS (SELECT 1 FROM review_runtime_settings
+               WHERE key = 'platform.maintenance.enabled' AND value = '1')`;
+
+/** One close, one audit row — `before` read while the window still stands. */
+const MAINTENANCE_CLOSE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?3, ?4, 'platform.maintenance.set', 'runtime', 'platform.maintenance',
+         json_object('before', json_object(
+                     'enabled', json(CASE WHEN (SELECT value FROM review_runtime_settings
+                                                 WHERE key = 'platform.maintenance.enabled') = '1'
+                                         THEN 'true' ELSE 'false' END),
+                     'reason', (SELECT value FROM review_runtime_settings
+                                 WHERE key = 'platform.maintenance.reason'),
+                     'since', (SELECT value FROM review_runtime_settings
+                                WHERE key = 'platform.maintenance.since')),
+                     'after', json_object('enabled', json('false'), 'reason', NULL, 'since', NULL)),
+         ?5
+   WHERE ${MAINTENANCE_CLOSE_GUARD}`;
+
+const MAINTENANCE_CLOSE_FLAG_SQL = `
+  UPDATE review_runtime_settings
+     SET value = '0', updated_at = ?3, updated_by = ?4
+   WHERE key = 'platform.maintenance.enabled' AND ${MAINTENANCE_CLOSE_GUARD}`;
+
+const MAINTENANCE_CLOSE_WINDOW_SQL = `
+  DELETE FROM review_runtime_settings
+   WHERE key = ?3 AND ${MAINTENANCE_CLOSE_GUARD}`;
+
+/**
+ * Step 2: close the window this item owns and drop its ownership flag in ONE
+ * batch, so a lease taken over between the read and the write cannot have its
+ * window closed by a phase that no longer holds the stamp. The flag write
+ * comes first and every window statement is guarded by it, so a takeover
+ * makes the whole close a no-op instead of a stale side effect. An
+ * operator-closed window is left alone: re-stating "off" would append an audit
+ * row for a change nobody made.
  *
- * The claim is read BEFORE the window write: a phase whose stamp was taken over
- * must not close the window the newer run now owns, so the mismatch is refused
- * with no side effect at all.
+ * A row we no longer carry the stamp for (or whose status moved) is `refused`
+ * with no side effect at all; a row that carries our stamp but no longer owns
+ * the window has nothing to close and is `ok`, so the caller still releases
+ * the claim.
  */
 export async function settleUpgradeMaintenance(
   db: DashboardD1,
@@ -368,21 +416,20 @@ export async function settleUpgradeMaintenance(
     .prepare("SELECT status, maintenance_owned, started_at FROM operator_data_upgrades WHERE id = ?1")
     .bind(id)
     .first<{ status: string; maintenance_owned: number; started_at: string | null }>();
-  if (row === null || row.started_at !== now || row.status !== status || row.maintenance_owned !== 1) {
+  if (row === null || row.started_at !== now || row.status !== status) {
     return "refused";
   }
-  if ((await getMaintenanceMode(db)).enabled) {
-    await setMaintenanceMode(db, { enabled: false, actor }, now);
+  if (row.maintenance_owned !== 1) {
+    return "ok";
   }
-  return guardedWrite(
-    db,
-    `UPDATE operator_data_upgrades
-        SET maintenance_owned = 0
-      WHERE id = ?1 AND status = ?2 AND maintenance_owned = 1 AND started_at = ?3`,
-    id,
-    status,
-    now,
-  );
+  const released = (await db.batch([
+    db.prepare(MAINTENANCE_RELEASE_SQL).bind(id, now),
+    db.prepare(MAINTENANCE_CLOSE_AUDIT_SQL).bind(id, now, crypto.randomUUID(), actor, now),
+    db.prepare(MAINTENANCE_CLOSE_WINDOW_SQL).bind(id, now, "platform.maintenance.since"),
+    db.prepare(MAINTENANCE_CLOSE_WINDOW_SQL).bind(id, now, "platform.maintenance.reason"),
+    db.prepare(MAINTENANCE_CLOSE_FLAG_SQL).bind(id, now, now, actor),
+  ]))[0];
+  return released === undefined || released.meta.changes === 0 ? "refused" : "ok";
 }
 
 /** Last step of every phase: clearing the stamp is what re-opens the row to another phase. */
