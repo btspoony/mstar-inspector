@@ -76,15 +76,18 @@ export type InsightsWindow = {
   /** Restrict every aggregation to one owner/repo pair. */
   repo?: { owner: string; repo: string };
   /**
-   * The review target whose reviews are aggregated — `review_targets.id`.
-   * REQUIRED: there is no unscoped tenant insights read. Rows with
+   * The review targets whose reviews are aggregated — `review_targets.id`
+   * values. REQUIRED: there is no unscoped tenant insights read. A single
+   * repository passes its own id; the workspace scope passes every live target
+   * id in the workspace. An EMPTY list reads nothing and resolves to the
+   * zero-filled shape (an empty workspace is not an error). Rows with
    * `target_id` NULL (legacy unattributed) stay excluded.
    */
-  targetId: string;
+  targetIds: readonly string[];
   /**
-   * The workspace that must own `targetId` — bound in the same statement as
-   * the target predicate, so a target id from another workspace aggregates
-   * to nothing instead of revealing that its reviews exist.
+   * The workspace that must own every id in `targetIds` — bound in the same
+   * statement as the target predicate, so a target id from another workspace
+   * aggregates to nothing instead of revealing that its reviews exist.
    */
   workspaceId: string;
   /**
@@ -185,10 +188,11 @@ const WEEK_BUCKET_SQL = "date(r.reviewed_at, '-' || ((strftime('%w', r.reviewed_
  *
  * @param db   a D1 handle (real D1Database or the bun:sqlite test double)
  * @param opts windowDays (default 30, >90 clamped to 90) + optional
- *             owner/repo filter + the REQUIRED tenant scope (`targetId` and
- *             the `workspaceId` that must own it), each applied to EVERY
+ *             owner/repo filter + the REQUIRED tenant scope (`targetIds` and
+ *             the `workspaceId` that must own them), each applied to EVERY
  *             aggregation; the scope also narrows the opt-in `repos` list and
- *             excludes legacy `target_id` NULL rows.
+ *             excludes legacy `target_id` NULL rows. An empty `targetIds`
+ *             resolves to the zero-filled shape.
  */
 export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow): Promise<Insights> {
   const windowDays = clampWindow(opts.windowDays);
@@ -213,13 +217,20 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
   // (QC F-003).
   const windowEraWhere = "r.reviewed_at >= datetime('now', '-' || ? || ' days') AND r.envelope IS NOT NULL";
 
-  // The tenant predicate every face carries: the target AND the workspace that
-  // owns it, bound in the SAME statement. `target_id = ?` alone would trust the
-  // caller to have scoped the target; the EXISTS is what makes a foreign
-  // target id aggregate to nothing instead of revealing its reviews.
+  // The tenant predicate every face carries: the target set AND the workspace
+  // that owns those ids, bound in the SAME statement. `target_id IN (…)` alone
+  // would trust the caller to have scoped the ids; the EXISTS is what makes a
+  // foreign target id aggregate to nothing instead of revealing its reviews.
+  // One id is the repository scope, many are the workspace scope. An EMPTY set
+  // (a workspace with no live target yet) is the literal `0` — a match-nothing
+  // predicate that binds no value: `IN ()` would be a syntax error, and the
+  // zero-filled payload is the honest answer, not an error.
+  const targetPlaceholders = opts.targetIds.map(() => "?").join(", ");
   const tenantWhere =
-    "r.target_id = ? AND EXISTS (SELECT 1 FROM review_targets t WHERE t.id = r.target_id AND t.workspace_id = ?)";
-  const tenantBinds = [opts.targetId, opts.workspaceId];
+    opts.targetIds.length === 0
+      ? "0"
+      : `r.target_id IN (${targetPlaceholders}) AND EXISTS (SELECT 1 FROM review_targets t WHERE t.id = r.target_id AND t.workspace_id = ?)`;
+  const tenantBinds = opts.targetIds.length === 0 ? [] : [...opts.targetIds, opts.workspaceId];
 
   const where: string[] = [];
   const binds: unknown[] = [];

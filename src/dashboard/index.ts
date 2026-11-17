@@ -5488,8 +5488,9 @@ const appInsightsRoute = async (c: DashboardContext) => {
     includeRepos: params.includeRepos,
     // The target the App resolves to IN this workspace, and the workspace
     // itself: the store binds both, so another tenant's reviews can never
-    // reach this payload.
-    targetId: gate.target.id,
+    // reach this payload. One id today; the workspace scope (plan 372 task 2)
+    // passes every live target id.
+    targetIds: [gate.target.id],
     workspaceId: gate.scope.workspaceId,
   });
   return c.json({
@@ -5662,13 +5663,16 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
   }
 };
 
-/** The ledger scope the PR faces bind: the resolved target, its workspace, its bot. */
+/**
+ * The ledger scope the PR faces bind: the resolved target as the one-id set,
+ * and the workspace that owns it. Route migration to the target/workspace
+ * routes (plan 372 task 2) widens the set; the store already binds a set.
+ */
 function ledgerScopeOf(gate: {
-  app: GithubAppRow;
   target: ReviewTargetRow;
   scope: WorkspaceScope;
 }): LedgerScope {
-  return { targetId: gate.target.id, workspaceId: gate.scope.workspaceId, botId: gate.app.id };
+  return { targetIds: [gate.target.id], workspaceId: gate.scope.workspaceId };
 }
 
 /**

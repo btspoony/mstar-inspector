@@ -73,7 +73,8 @@ type SeedFinding = {
 /** The workspace every fixture target lives in (0026 seeds it). */
 const WORKSPACE = "default";
 /** The tenant the plain fixtures belong to. */
-const FIXTURE_SCOPE = { targetId: "target-fixture", workspaceId: WORKSPACE };
+const FIXTURE_TARGET = "target-fixture";
+const FIXTURE_SCOPE = { targetIds: [FIXTURE_TARGET], workspaceId: WORKSPACE };
 
 /**
  * Idempotently seed one bot + its target. A review row carries `target_id`
@@ -122,7 +123,7 @@ function insertReview(
     targetId?: string | null;
   },
 ): void {
-  const targetId = opts.targetId === undefined ? FIXTURE_SCOPE.targetId : opts.targetId;
+  const targetId = opts.targetId === undefined ? FIXTURE_TARGET : opts.targetId;
   seedTenant(db, targetId ?? "target-legacy", `app-${targetId ?? "legacy"}`);
   db.raw
     .query(
@@ -753,7 +754,7 @@ describe("createInsightsStore", () => {
   }
 
   /** target-a's scope; target-b and the legacy NULL row must never reach it. */
-  const SCOPE_A = { targetId: "target-a", workspaceId: WORKSPACE };
+  const SCOPE_A = { targetIds: ["target-a"], workspaceId: WORKSPACE };
 
   test("the target filter excludes every other target's rows and the legacy NULL rows", async () => {
     const db = createMigratedTestD1();
@@ -796,7 +797,7 @@ describe("createInsightsStore", () => {
     seedAppFixture(db);
 
     const insights = await createInsightsStore(db, {
-      targetId: "target-a",
+      targetIds: ["target-a"],
       workspaceId: "another-workspace",
       includeRepos: true,
     });
@@ -806,5 +807,43 @@ describe("createInsightsStore", () => {
     expect(insights.verdictDistribution).toEqual([]);
     expect(insights.weeklyTrend).toEqual([]);
     expect(insights.repos).toEqual([]);
+  });
+
+  test("the workspace scope aggregates every listed target and nothing else", async () => {
+    const db = createMigratedTestD1();
+    seedAppFixture(db);
+
+    // The two-target workspace read: the same fixture target-a alone counts 1.
+    const insights = await createInsightsStore(db, {
+      targetIds: ["target-a", "target-b"],
+      workspaceId: WORKSPACE,
+      includeRepos: true,
+    });
+
+    expect(insights.reviewsTotal).toBe(2);
+    expect(insights.findingsBySeverity).toEqual([
+      { severity: "must-fix", count: 1 },
+      { severity: "nit", count: 1 },
+    ]);
+    expect(insights.verdictDistribution).toEqual([
+      { verdict: "approved", count: 1 },
+      { verdict: "needs fixes", count: 1 },
+    ]);
+    // The legacy NULL row is still excluded, and the repo set spans both
+    // targets.
+    expect(insights.repos).toEqual(["acme/portal", "acme/widgets"]);
+  });
+
+  test("an empty live target set reads nothing and answers like an empty database", async () => {
+    const empty = createMigratedTestD1();
+    const seeded = createMigratedTestD1();
+    seedAppFixture(seeded);
+
+    // A workspace with no live target: the caller passes []. The predicate must
+    // match nothing while staying valid SQL (`IN ()` is a syntax error), so the
+    // result is the zero-filled empty payload, not an error.
+    const insights = await createInsightsStore(seeded, { targetIds: [], workspaceId: WORKSPACE });
+
+    expect(insights).toEqual(await createInsightsStore(empty, FIXTURE_SCOPE));
   });
 });

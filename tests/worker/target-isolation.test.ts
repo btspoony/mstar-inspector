@@ -238,10 +238,10 @@ function isolationFixture() {
   return { db, targetA, targetB };
 }
 
-const SCOPE_A = { targetId: "target-a", workspaceId: WORKSPACE_A, botId: BOT_ID };
-const SCOPE_B = { targetId: "target-b", workspaceId: WORKSPACE_B, botId: BOT_ID };
+const SCOPE_A = { targetIds: ["target-a"], workspaceId: WORKSPACE_A };
+const SCOPE_B = { targetIds: ["target-b"], workspaceId: WORKSPACE_B };
 /** A foreign pair: target B's id presented under target A's workspace. */
-const SCOPE_CROSSED = { targetId: "target-b", workspaceId: WORKSPACE_A, botId: BOT_ID };
+const SCOPE_CROSSED = { targetIds: ["target-b"], workspaceId: WORKSPACE_A };
 
 describe("insights aggregation is tenant-scoped", () => {
   test("each target's workspace reads only its own reviews", async () => {

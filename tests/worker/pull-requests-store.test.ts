@@ -23,7 +23,7 @@ const WORKSPACE = "default";
 /** The one target the fixture bot owns; its rows belong to this scope. */
 const TARGET_ID = "target-app-pr-ledger";
 /** The tenant scope every ledger read binds. */
-const SCOPE: LedgerScope = { targetId: TARGET_ID, workspaceId: WORKSPACE, botId: APP_ID };
+const SCOPE: LedgerScope = { targetIds: [TARGET_ID], workspaceId: WORKSPACE };
 /** The same target id presented under a workspace that does not own it. */
 const SCOPE_FOREIGN: LedgerScope = { ...SCOPE, workspaceId: "another-workspace" };
 
@@ -301,6 +301,49 @@ describe("listPullRequests", () => {
     expect(list.rows).toEqual([]);
     expect(list.repos).toEqual([]);
     expect(await store.getPullRequestHead(SCOPE_FOREIGN, "acme", "widgets", 131)).toBeNull();
+  });
+
+  test("a workspace scope reads every listed target's rows, and only the owning workspace's", async () => {
+    // Two targets in ONE workspace — two repositories, one bot. The workspace
+    // scope is the set of both ids; a crossed set (one id from another
+    // workspace) is still narrowed by the workspace predicate.
+    const db = createMigratedTestD1();
+    seedApp(db);
+    const second = seedTarget(db, APP_ID, { id: "target-pr-ledger-second", repoName: "gadgets" });
+    const store = createReviewBotsStore(db);
+    await store.upsertPullRequest(PR);
+    await store.upsertPullRequest({ ...PR, targetId: second, repo: "gadgets", prNumber: 132 });
+
+    const both = await store.listPullRequests({ targetIds: [TARGET_ID, second], workspaceId: WORKSPACE });
+    expect(both.rows.map((row) => row.number).sort()).toEqual([131, 132]);
+    expect(both.repos).toEqual(["acme/gadgets", "acme/widgets"]);
+
+    const crossed = await store.listPullRequests({ targetIds: [TARGET_ID, second], workspaceId: "another-workspace" });
+    expect(crossed.rows).toEqual([]);
+    expect(crossed.repos).toEqual([]);
+    expect(await store.getPullRequestHead({ targetIds: [second], workspaceId: "another-workspace" }, "acme", "gadgets", 132)).toBeNull();
+  });
+
+  test("an empty target set reads nothing on every face, never throwing", async () => {
+    // A workspace with no live target: the caller passes []. `IN ()` would be a
+    // syntax error, so the predicate degrades to a match-nothing literal.
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
+    const store = createReviewBotsStore(db);
+    const empty = { targetIds: [], workspaceId: WORKSPACE };
+
+    expect(await store.listPullRequests(empty)).toEqual({ rows: [], repos: [] });
+    expect(await store.getPullRequestHead(empty, "acme", "widgets", 131)).toBeNull();
+    expect(await store.countPullRequestRecords(empty, "acme", "widgets", 131)).toEqual({
+      findings: 0,
+      reviews: 0,
+      failures: 0,
+      must_fix: 0,
+    });
+    expect(await store.listPullRequestFindings(empty, "acme", "widgets", 131, { offset: 0, limit: 10 })).toBeNull();
+    expect(await store.listPullRequestReviews(empty, "acme", "widgets", 131, { offset: 0, limit: 10 })).toBeNull();
+    expect(await store.listPullRequestFailures(empty, "acme", "widgets", 131, { offset: 0, limit: 10 })).toBeNull();
   });
 
   test("a delivery that names no target is refused, never written unattributed", async () => {
@@ -979,7 +1022,7 @@ describe("pull request detail reads", () => {
     expect(await store.listPullRequestFindings(SCOPE, "acme", "sprockets", 131, page)).toBeNull();
     expect(
       await store.listPullRequestReviews(
-        { ...SCOPE, targetId: "target-other-app", botId: "other-app" },
+        { ...SCOPE, targetIds: ["target-other-app"] },
         "acme",
         "widgets",
         131,
@@ -1267,7 +1310,7 @@ describe("reviewing-now projection (D11/D16)", () => {
       expect(warn).toHaveBeenCalledTimes(1);
       expect(JSON.parse(String(warn.mock.calls[0]![0]))).toEqual({
         event: "dashboard_live_lock_read_failed",
-        app_id: APP_ID,
+        workspace_id: WORKSPACE,
       });
     } finally {
       warn.mockRestore();
