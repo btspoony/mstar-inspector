@@ -249,6 +249,90 @@ describe("the data-upgrade runner", () => {
     expect(mode.reason).toBe("planned incident");
   });
 
+  test("a concurrent step is refused with upgrade_running, and plans nothing", async () => {
+    const db = fixture(3);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const inner = fixtureItem();
+    // Hold the first batch in flight so the second request provably overlaps it.
+    register({
+      ...inner,
+      async runBatch(dbApi, cursor) {
+        entered.resolve();
+        await release.promise;
+        return inner.runBatch(dbApi, cursor);
+      },
+    });
+
+    const first = api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    await entered.promise;
+    const second = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    expect(second.status).toBe(409);
+    const refusal = (await second.json()) as { error: string };
+    expect(refusal.error).toBe("upgrade_running");
+    // The refused caller ran no batch: only the claim holder's page moved.
+    expect(movedCount(db)).toBe(0);
+
+    release.resolve();
+    expect((await first).status).toBe(200);
+    expect(movedCount(db)).toBe(2);
+    expect(await state(db)).toEqual({ status: "running", processed: 2, cursor_json: '{"offset":2}' });
+
+    // The claim was released, so the walk continues immediately.
+    expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(200);
+    expect(movedCount(db)).toBe(3);
+  });
+
+  test("a batch that throws releases the claim, so the operator can retry", async () => {
+    const db = fixture(2);
+    const inner = fixtureItem();
+    let failing = true;
+    register({
+      ...inner,
+      async runBatch(dbApi, cursor) {
+        if (failing) throw new Error("batch exploded");
+        return inner.runBatch(dbApi, cursor);
+      },
+    });
+
+    expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(500);
+    // The claim is gone with the failed batch: the retry is not a 5-minute
+    // `upgrade_running` wait for a lease nobody holds.
+    failing = false;
+    expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(200);
+    expect(movedCount(db)).toBe(2);
+  });
+
+  test("step, verify and reset each write one audit row", async () => {
+    const db = fixture(1);
+    register(fixtureItem());
+
+    await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    const verified = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/verify`);
+    expect(verified.status).toBe(200);
+    await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/reset`);
+
+    const rows = db.raw
+      .prepare(
+        "SELECT actor_login, action, target_type, target_id, detail_json FROM platform_audit_events ORDER BY rowid",
+      )
+      .all() as Array<{
+      actor_login: string;
+      action: string;
+      target_type: string;
+      target_id: string;
+      detail_json: string;
+    }>;
+    expect(rows.map((row) => row.action)).toEqual(["upgrade.step", "upgrade.verify", "upgrade.reset"]);
+    expect(rows.map((row) => row.actor_login)).toEqual([OPERATOR, OPERATOR, OPERATOR]);
+    expect(rows.every((row) => row.target_type === "data_upgrade" && row.target_id === ITEM_ID)).toBe(true);
+    expect(rows.map((row) => JSON.parse(row.detail_json))).toEqual([
+      { phase: "step", outcome: "running" },
+      { phase: "verify", outcome: "completed" },
+      { phase: "reset", outcome: "pending" },
+    ]);
+  });
+
   test("a clean verify completes and closes only the window the runner opened", async () => {
     const db = fixture(1);
     register(fixtureItem({ requiresDowntime: true }));

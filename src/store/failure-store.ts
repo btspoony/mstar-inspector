@@ -42,6 +42,7 @@
 
 import {
   GITHUB_RATE_LIMIT_PREFIX,
+  MAINTENANCE_DEFERRED_STAGE,
   PAGING_EXCLUDED_STAGES,
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_STAGE,
@@ -62,7 +63,9 @@ import type { D1Like } from "./types";
  * said `failed` (the round continues with unverifiable rows; the row is the
  * attribution that survives a lost container stderr); `rate-limit` = the
  * degraded-comment sweep was throttled by a GitHub secondary rate limit while
- * the review itself stood (the continuation event, never a review failure).
+ * the review itself stood (the continuation event, never a review failure);
+ * `maintenance_deferred` = a delivery the platform's maintenance window could
+ * not hand back to the queue (see {@link MAINTENANCE_DEFERRED_STAGE}).
  */
 /**
  * Deliveries a message gets before the queue DLQs it: 1 initial delivery + the
@@ -85,6 +88,10 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   // not in PAGING_EXCLUDED_STAGES.
   SHARED_BOT_ENTITLEMENT_STAGE,
   QUOTA_STAGE,
+  // A delivery the maintenance window could not defer: no review ran, so the
+  // row stays paged — the sweep is what turns "closed platform" into an alert
+  // instead of a silent dead-letter.
+  MAINTENANCE_DEFERRED_STAGE,
   ...PAGING_EXCLUDED_STAGES,
 ]);
 
@@ -95,6 +102,7 @@ export type FailureStage =
   | "pipeline"
   | "entitlement"
   | "quota"
+  | typeof MAINTENANCE_DEFERRED_STAGE
   | "usage"
   | "recheck"
   | "rate-limit";

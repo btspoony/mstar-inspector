@@ -58,6 +58,17 @@ export const SHARED_BOT_ENTITLEMENT_SKIP_REASON =
 export const QUOTA_STAGE = "quota";
 
 /**
+ * The `review_failures.stage` a delivery the maintenance window could not defer
+ * is recorded under: the platform was closed and the queue had no redelivery
+ * left (a runtime without `message.retry`, or a message already on its last
+ * platform delivery). Like `entitlement` and `quota` it is NOT in
+ * `PAGING_EXCLUDED_STAGES` — no review ran, so the row stays counted and the
+ * 15-min failure sweep alerts on it instead of the delivery vanishing into the
+ * DLQ. Its `error` text carries the one reason token `maintenance_window`.
+ */
+export const MAINTENANCE_DEFERRED_STAGE = "maintenance_deferred";
+
+/**
  * The one sentence a quota refusal carries. Author-facing for the same reason
  * as its `entitlement` sibling — no plan id, no workspace name, no ceiling
  * figure: the PR author can act on none of them, and the Check is public.

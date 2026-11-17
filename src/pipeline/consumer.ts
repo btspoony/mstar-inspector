@@ -79,6 +79,7 @@ import {
   classifyGithubRateLimit,
   GITHUB_PRIMARY_RATE_LIMIT_PREFIX,
   GITHUB_RATE_LIMIT_PREFIX,
+  MAINTENANCE_DEFERRED_STAGE,
 } from "../contracts/failure-stages";
 import {
   idemKey,
@@ -4039,35 +4040,58 @@ export function createReviewConsumer(
     // The maintenance window (D20) defers the whole invocation: a mid-upgrade
     // pipeline write could land on a ledger row the backfill just repointed.
     // ONE read per invocation; nothing else in the batch runs. Every delivery
-    // is DEFERRED, never acked — acking would drop the review for good, while
-    // the window is temporary. ONE line per invocation (the queue and the
-    // batch size it deferred), not one per message: the batch is the unit the
-    // platform redelivers.
+    // is DEFERRED where the queue still allows it — acking would drop the
+    // review for good, while the window is temporary. ONE line per invocation
+    // (the queue and the batch size it deferred), not one per message: the batch
+    // is the unit the platform redelivers.
     //
-    // shortcut: cover is max_retries × 300s (wrangler.jsonc: 5 × 5 min); a
-    // window open longer drains the batch into review-dlq — upgrade to a
-    // re-enqueue-on-close drain then.
+    // `retry` is the FIRST choice because it is the only path that keeps the
+    // review. Two deliveries have no redelivery left — a runtime that offers no
+    // `message.retry`, and a message already on its LAST platform delivery
+    // (`wrangler.jsonc` max_retries 5 ⇒ QUEUE_MAX_ATTEMPTS 6 deliveries, and
+    // every `retry()` spends one). Those are dropped, so each one takes the
+    // failure carrier instead of vanishing: one `review_failures` row
+    // (stage `maintenance_deferred`) the 15-min sweep counts and alerts on, then
+    // an ack.
+    //
+    // shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
+    // longer spends every delivery, and each spent one is now alerted through
+    // `review_failures` — upgrade to a re-enqueue-on-close drain then.
     const maintenance = await getMaintenanceMode(env.DB);
     if (maintenance.enabled) {
       // An empty batch has nothing to defer (and no identity to name it with).
       if (batch.messages[0] === undefined) return;
-      log.warn(
-        {
-          ...payloadIdentityFields(batch.messages[0].body),
-          event: "maintenance_defer",
-          queue: batch.queue,
-          batch_size: batch.messages.length,
-        },
-        "delivery deferred — the platform is in its maintenance window",
-      );
-      // A runtime without `retry` has no delayed redelivery: throwing fails
-      // the batch so the queue's own retry policy re-runs it after the window.
-      if (!batch.messages.every((message) => typeof message.retry === "function")) {
-        throw new Error(
-          `${batch.queue}: maintenance window is open and this runtime offers no message.retry — failing the batch so the queue retries it`,
-        );
+      const deferral = {
+        ...payloadIdentityFields(batch.messages[0].body),
+        event: "maintenance_defer" as const,
+        queue: batch.queue,
+        batch_size: batch.messages.length,
+      };
+      log.warn(deferral, "delivery deferred — the platform is in its maintenance window");
+      for (const message of batch.messages) {
+        if (typeof message.retry === "function" && message.attempts < QUEUE_MAX_ATTEMPTS) {
+          message.retry({ delaySeconds: 300 });
+          continue;
+        }
+        // The delivery has no redelivery left: record what it lost, then ack.
+        const body = message.body;
+        await deps.failureStore
+          .record({
+            target_id: body.targetId,
+            installation_id: body.installation_id,
+            owner: body.owner,
+            repo: body.repo,
+            pr_number: body.pr_number,
+            head_sha: body.head_sha ?? "",
+            stage: MAINTENANCE_DEFERRED_STAGE,
+            error: `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${body.owner}/${body.repo}#${body.pr_number} was never reviewed`,
+          })
+          .catch((err: unknown) => {
+            const detail = err instanceof Error ? err.message : String(err);
+            log.warn(deferral, `review_failures insert failed (deferred delivery trace lost): ${detail}`);
+          });
+        message.ack();
       }
-      for (const message of batch.messages) message.retry({ delaySeconds: 300 });
       return;
     }
     for (const message of batch.messages) {

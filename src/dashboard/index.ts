@@ -856,6 +856,10 @@ export function maintenanceResponse(c: DashboardContext, mode: MaintenanceMode):
  * stay open (the member guard's own exempt pair): the console that reopens the
  * platform needs a session, so an expired cookie must be renewable during the
  * window. Both answer a page the window has nothing to add to.
+ * `/dashboard/locale` and `/dashboard/logout` join them
+ * ({@link WINDOW_OPEN_PATHS}): the login page this gate still serves carries the
+ * EN/中文 toggle, and a closed platform must never trap a cookie on the browser
+ * — neither route touches workspace data.
  *
  * The window is read ONCE per request and parked on the context; a read fault
  * is off (`getMaintenanceMode`), so a settings outage cannot close the platform.
@@ -865,7 +869,7 @@ export const dashboardMaintenanceGate: Handler<{
   Variables: DashboardVariables;
 }> = async (c, next) => {
   if (c.get("maintenance") !== undefined) return next();
-  if (GUARD_EXEMPT_PATHS.has(c.req.path)) return next();
+  if (WINDOW_OPEN_PATHS.has(c.req.path)) return next();
   const db = dashboardD1(c.env);
   const mode = db === null ? { enabled: false, reason: null, since: null } : await getMaintenanceMode(db);
   c.set("maintenance", mode);
@@ -924,6 +928,18 @@ dashboardApp.use("*", dashboardTenantGate);
 // full mount-pinned form: dashboardApp is mounted once at /dashboard
 // (src/worker/index.ts, L5 code-verified).
 const GUARD_EXEMPT_PATHS = new Set(["/dashboard/login", "/dashboard/oauth/callback"]);
+
+/**
+ * The paths the maintenance window leaves open: the guard's two pre-session
+ * routes plus the session-level pair the login page needs — its EN/中文 toggle
+ * (`POST /locale`) and logout. Neither touches workspace data, and a closed
+ * platform must still let a session be renewed and burned.
+ */
+const WINDOW_OPEN_PATHS = new Set([
+  ...GUARD_EXEMPT_PATHS,
+  "/dashboard/locale",
+  "/dashboard/logout",
+]);
 
 dashboardApp.use("*", async (c, next) => {
   if (GUARD_EXEMPT_PATHS.has(c.req.path)) return next();

@@ -118,6 +118,28 @@ describe("the maintenance gate", () => {
     expect((await get(db, "/dashboard/login", null, true)).status).toBe(200);
   });
 
+  test("the login page's locale toggle and logout still answer during the window", async () => {
+    const { db } = await fixture();
+    await close(db);
+    // The page this gate still serves carries the EN/中文 toggle: its POST must
+    // set the cookie rather than answer the maintenance page.
+    const locale = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ locale: "zh_CN" }),
+      }),
+      withSpaAssets(envFor(db)),
+    );
+    expect(locale.status).toBe(302);
+    expect(locale.headers.get("Set-Cookie")).toContain("mstar_locale");
+    // Logout burns the cookies and never reads workspace data — a closed
+    // platform must not trap a session on the browser.
+    const logout = await get(db, "/dashboard/logout", MEMBER);
+    expect(logout.status).toBe(302);
+    expect(logout.headers.get("location")).toBe("/dashboard/login");
+  });
+
   test("the absent-row default leaves every surface unchanged", async () => {
     const { db } = await fixture();
     // The page is the SPA shell, not the maintenance page.

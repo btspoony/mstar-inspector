@@ -21,7 +21,7 @@
  * console uses.
  */
 import { getMaintenanceMode, setMaintenanceMode } from "../dashboard/runtime-config-store";
-import type { DashboardD1 } from "../dashboard/users";
+import type { DashboardD1, DashboardD1Statement } from "../dashboard/users";
 import { repoBackfill } from "./data-upgrades/repo-backfill";
 
 /** Where an item resumes. Opaque to the runner; the item owns its shape. */
@@ -209,32 +209,83 @@ export async function listDataUpgrades(db: DashboardD1): Promise<DataUpgradeList
   );
 }
 
-/**
- * Record the item as STARTED before its first batch runs: `started_at` is the
- * honest start, and `maintenance_owned` survives a batch that throws (so a
- * window the runner opened is still closed after a later successful verify).
- */
-const STEP_BEGIN_SQL = `
-  INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at)
-  VALUES (?1, 'running', ?2, ?3)
-  ON CONFLICT (id) DO UPDATE SET
-    status = 'running',
-    maintenance_owned = ?2,
-    started_at = COALESCE(operator_data_upgrades.started_at, ?3)`;
+/** Clears the in-flight claim after a batch that threw (the item stays `running`). */
+const STEP_RELEASE_SQL = "UPDATE operator_data_upgrades SET started_at = NULL WHERE id = ?1";
 
 /**
- * The batch's outcome: cursor, counter and log entry commit together, after the
- * data move. The log is append-only JSON so the operator keeps the counts of
- * every batch a later reset would otherwise erase.
+ * A claim stamp older than this is presumed dead: the worker that took it never
+ * released it (a step batch is bounded — one worklist page, chunked binds). The
+ * stale window IS the lease expiry, so a crashed step never wedges the item.
+ */
+const STEP_LEASE_MS = 5 * 60_000;
+
+/**
+ * Claim the item for ONE batch — the step's compare-and-set (QC wave B, W1).
+ * `started_at` is the CLAIM STAMP: non-NULL only while a batch is in flight, so
+ * the row itself is the single-flight lock and no extra column is needed. A
+ * `pending` row (or an absent one) is claimable at once; a `running` row only
+ * when no claim is held or the held one went stale. `meta.changes === 0` means
+ * somebody else holds the lease — the caller refuses, and never plans a second
+ * copy of the same worklist (which is what minted duplicate live targets).
+ *
+ * The claim refreshes `started_at` on every step: a fresh stamp is the only
+ * evidence of an in-flight batch, and the lease's expiry is measured against it.
+ */
+const STEP_CLAIM_SQL = `
+  INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at)
+  VALUES (?1, 'running', ?3, ?2)
+  ON CONFLICT (id) DO UPDATE SET
+    status = 'running',
+    maintenance_owned = ?3,
+    started_at = ?2
+  WHERE operator_data_upgrades.status = 'pending'
+     OR (operator_data_upgrades.status = 'running'
+         AND (operator_data_upgrades.started_at IS NULL
+              OR operator_data_upgrades.started_at < ?4))`;
+
+/**
+ * The batch's outcome: cursor, counter, log entry AND the lease release commit
+ * together, after the data move. The log is append-only JSON so the operator
+ * keeps the counts of every batch a later reset would otherwise erase; clearing
+ * `started_at` is what lets the next step claim again.
  */
 const STEP_PROGRESS_SQL = `
   UPDATE operator_data_upgrades
      SET cursor_json = ?2,
          processed = processed + ?3,
+         started_at = NULL,
          log_json = CASE WHEN ?4 IS NULL THEN log_json
                          WHEN log_json IS NULL THEN json_array(json(?4))
                          ELSE json_insert(log_json, '$[#]', json(?4)) END
    WHERE id = ?1`;
+
+/** The phases the operator console can run, as the ledger names them. */
+type UpgradePhase = "step" | "verify" | "reset";
+
+/**
+ * One ledger row per phase that ACTED (a refusal writes none, the rule every
+ * console write follows). `platform_audit_events` is the platform-scope ledger:
+ * `audit_events` cannot hold this row because its `workspace_id` is NOT NULL and
+ * an upgrade is not workspace-scoped (migration 0033).
+ */
+const UPGRADE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, ?3, 'data_upgrade', ?4, json_object('phase', ?5, 'outcome', ?6), ?7)`;
+
+/** The audit statement for one phase, so it rides the same batch as its write. */
+function upgradeAudit(
+  db: DashboardD1,
+  phase: UpgradePhase,
+  actor: string,
+  itemId: string,
+  outcome: string,
+  now: string,
+): DashboardD1Statement {
+  return db
+    .prepare(UPGRADE_AUDIT_SQL)
+    .bind(crypto.randomUUID(), actor, `upgrade.${phase}`, itemId, phase, outcome, now);
+}
 
 export type UpgradeStepOutcome =
   | { kind: "ok"; state: DataUpgradeState; batch: UpgradeBatch }
@@ -247,6 +298,11 @@ export type UpgradeStepOutcome =
  * (`pending`), which opens the window itself and records ownership — unless
  * the window was already open, in which case it belongs to the operator and the
  * runner must not close it later.
+ *
+ * Every refusal is decided BEFORE the claim, so a refused step leaves the row
+ * untouched (and never opens a window it would not own); the claim then precedes
+ * all planning, so a second concurrent caller observes `upgrade_running`
+ * instead of planning the same worklist twice.
  */
 export async function stepDataUpgrade(
   db: DashboardD1,
@@ -258,7 +314,7 @@ export async function stepDataUpgrade(
   if (before.status !== "pending" && before.status !== "running") {
     return { kind: "refused", reason: `cannot step a ${before.status} upgrade; reset it first`, state: before };
   }
-  let claimed = false;
+  let opensWindow = false;
   if (item.requiresDowntime) {
     const maintenance = await getMaintenanceMode(db);
     if (!maintenance.enabled) {
@@ -269,22 +325,38 @@ export async function stepDataUpgrade(
           state: before,
         };
       }
-      await setMaintenanceMode(db, { enabled: true, reason: `data upgrade: ${item.title}`, actor }, now);
-      claimed = true;
+      opensWindow = true;
     }
   }
-  const owned = item.requiresDowntime && (claimed || before.maintenanceOwned);
-  await db.prepare(STEP_BEGIN_SQL).bind(item.id, owned ? 1 : 0, now).run();
-  const batch = await item.runBatch(db, before.cursor);
-  await db
-    .prepare(STEP_PROGRESS_SQL)
-    .bind(
-      item.id,
-      JSON.stringify(batch.cursor),
-      batch.processed,
-      batch.log === undefined ? null : JSON.stringify(batch.log),
-    )
+  const owned = item.requiresDowntime && (opensWindow || before.maintenanceOwned);
+  const claim = await db
+    .prepare(STEP_CLAIM_SQL)
+    .bind(item.id, now, owned ? 1 : 0, new Date(Date.parse(now) - STEP_LEASE_MS).toISOString())
     .run();
+  if (claim.meta.changes === 0) {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
+  }
+  if (opensWindow) {
+    await setMaintenanceMode(db, { enabled: true, reason: `data upgrade: ${item.title}`, actor }, now);
+  }
+  const batch = await item.runBatch(db, before.cursor).catch(async (err: unknown) => {
+    // The batch is ONE transaction, so a throw moved nothing: release the claim
+    // (a hard process death leaves it to expire instead) and surface the real
+    // error — a release that fails must not mask it, and the lease self-heals.
+    await db.prepare(STEP_RELEASE_SQL).bind(item.id).run().catch(() => {});
+    throw err;
+  });
+  await db.batch([
+    db
+      .prepare(STEP_PROGRESS_SQL)
+      .bind(
+        item.id,
+        JSON.stringify(batch.cursor),
+        batch.processed,
+        batch.log === undefined ? null : JSON.stringify(batch.log),
+      ),
+    upgradeAudit(db, "step", actor, item.id, "running", now),
+  ]);
   return { kind: "ok", state: await readDataUpgradeState(db, item.id), batch };
 }
 
@@ -321,18 +393,22 @@ export async function verifyDataUpgrade(
   const failing = Object.entries(checks).filter(([, count]) => count !== 0);
   if (failing.length > 0) {
     const lastError = `verify failed: ${failing.map(([name, count]) => `${name}=${count}`).join(", ")}`;
-    await db
-      .prepare("UPDATE operator_data_upgrades SET status = 'failed', last_error = ?2 WHERE id = ?1")
-      .bind(item.id, lastError)
-      .run();
+    await db.batch([
+      db
+        .prepare("UPDATE operator_data_upgrades SET status = 'failed', last_error = ?2 WHERE id = ?1")
+        .bind(item.id, lastError),
+      upgradeAudit(db, "verify", actor, item.id, "failed", now),
+    ]);
     return { kind: "ok", state: await readDataUpgradeState(db, item.id), checks };
   }
-  await db
-    .prepare(
-      "UPDATE operator_data_upgrades SET status = 'completed', finished_at = ?2, last_error = NULL WHERE id = ?1",
-    )
-    .bind(item.id, now)
-    .run();
+  await db.batch([
+    db
+      .prepare(
+        "UPDATE operator_data_upgrades SET status = 'completed', finished_at = ?2, last_error = NULL WHERE id = ?1",
+      )
+      .bind(item.id, now),
+    upgradeAudit(db, "verify", actor, item.id, "completed", now),
+  ]);
   if (before.maintenanceOwned) {
     // A window the operator already closed is left alone: re-stating "off"
     // would append an audit row for a change nobody made.
@@ -377,6 +453,9 @@ export async function resetDataUpgrade(
   if (before.maintenanceOwned && (await getMaintenanceMode(db)).enabled) {
     await setMaintenanceMode(db, { enabled: false, actor }, now);
   }
-  await db.prepare(RESET_SQL).bind(item.id).run();
+  await db.batch([
+    db.prepare(RESET_SQL).bind(item.id),
+    upgradeAudit(db, "reset", actor, item.id, "pending", now),
+  ]);
   return readDataUpgradeState(db, item.id);
 }
