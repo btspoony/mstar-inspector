@@ -123,13 +123,15 @@ async function api(
   );
 }
 
-/** Register `item` for this case and unregister it afterwards. */
+/** Register `item` for this case; `afterEach` restores the shipped registry. */
+const SHIPPED_UPGRADES = [...DATA_UPGRADES];
+
 function register(item: DataUpgradeItem): void {
   DATA_UPGRADES.push(item);
 }
 
 afterEach(() => {
-  DATA_UPGRADES.length = 0;
+  DATA_UPGRADES.splice(0, DATA_UPGRADES.length, ...SHIPPED_UPGRADES);
 });
 
 async function state(db: TestD1): Promise<{ status: string; processed: number; cursor_json: string | null }> {
@@ -274,10 +276,11 @@ describe("the data-upgrade routes", () => {
     const body = (await res.json()) as {
       upgrades: Array<{ id: string; state: { status: string }; preflight: Record<string, number> }>;
     };
-    expect(body.upgrades).toHaveLength(1);
-    expect(body.upgrades[0]!.id).toBe(ITEM_ID);
-    expect(body.upgrades[0]!.state.status).toBe("pending");
-    expect(body.upgrades[0]!.preflight).toEqual({ pending: 2 });
+    // The shipped registry renders beside the fixture item: `repo-backfill`.
+    expect(body.upgrades.map((item) => item.id).sort()).toEqual(["fixture-upgrade", "repo-backfill"]);
+    const listed = body.upgrades.find((item) => item.id === ITEM_ID)!;
+    expect(listed.state.status).toBe("pending");
+    expect(listed.preflight).toEqual({ pending: 2 });
   });
 
   test("an unknown id is a 404 and a non-operator sees the namespace 404", async () => {

@@ -22,6 +22,7 @@
  */
 import { getMaintenanceMode, setMaintenanceMode } from "../dashboard/runtime-config-store";
 import type { DashboardD1 } from "../dashboard/users";
+import { repoBackfill } from "./data-upgrades/repo-backfill";
 
 /** Where an item resumes. Opaque to the runner; the item owns its shape. */
 export type UpgradeCursor = Record<string, unknown>;
@@ -81,12 +82,12 @@ export type DataUpgradeState = {
 };
 
 /**
- * Every registered upgrade, in run order — the registry's single source. Empty
- * until the repository backfill item ships (plan 373 task 3): the runner, the
- * table and the routes are item-agnostic, so registering an item is the only
- * change a new upgrade needs.
+ * Every registered upgrade, in run order — the registry's single source.
+ * `repo-backfill` is the historical-identity item (plan 373 task 3); the
+ * runner, the table and the routes are item-agnostic, so registering an item
+ * is the only change a new upgrade needs.
  */
-export const DATA_UPGRADES: DataUpgradeItem[] = [];
+export const DATA_UPGRADES: DataUpgradeItem[] = [repoBackfill];
 
 /** Resolve a registered item; `null` is the route layer's 404. */
 export function findDataUpgrade(id: string): DataUpgradeItem | null {
