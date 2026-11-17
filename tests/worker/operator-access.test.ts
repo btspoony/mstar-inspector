@@ -30,7 +30,7 @@ import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { insertSupportGrant } from "../../src/dashboard/operator-store";
 import { createInvite } from "../../src/dashboard/invite-store";
 import { withSpaAssets } from "../helpers/spa";
@@ -48,6 +48,8 @@ const OTHER_OPERATOR = "Other-Bot";
 const DAY = 24 * 60 * 60 * 1000;
 /** The fixture App's GitHub App id — the App routes' only address form (D0). */
 const APP_ID = 4000;
+/** The fixture App's target in `ws-acme` — the target-addressed faces' key. */
+const TARGET_ID = "target-operator";
 
 function envFor(db: TestD1, operators = OPERATOR): Env {
   return {
@@ -169,6 +171,9 @@ function fixture() {
   seedMembership(db, "ws-acme", owner, "owner");
   seedMembership(db, "ws-other", other, "owner");
   seedApp(db, "app-acme", "acme-app", "ws-acme");
+  // The App's repository target: the ledger/insights routes are target-addressed
+  // (plan 372), so the ceiling sweep needs a real id to present.
+  seedTarget(db, "app-acme", { id: TARGET_ID, workspaceId: "ws-acme" });
   return { db, owner };
 }
 
@@ -323,11 +328,11 @@ describe("operator with a valid grant", () => {
       { path: "/dashboard/acme/api/apps" },
       { path: `/dashboard/acme/api/apps/${APP_ID}/settings` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/models` },
-      { path: `/dashboard/acme/api/apps/${APP_ID}/insights/summary` },
-      // The PR ledger pair (migration 0039): a support grant never widens to
-      // App data, so both the list and the detail face stay 403.
-      { path: `/dashboard/acme/api/apps/${APP_ID}/pull-requests` },
-      { path: `/dashboard/acme/api/apps/${APP_ID}/pull-requests/acme/widgets/131` },
+      // Target-addressed data faces (plan 372): a support grant never widens to
+      // tenant data, so insights and both ledger faces stay 403.
+      { path: `/dashboard/acme/api/targets/${TARGET_ID}/insights/summary` },
+      { path: `/dashboard/acme/api/targets/${TARGET_ID}/pull-requests` },
+      { path: `/dashboard/acme/api/targets/${TARGET_ID}/pull-requests/acme/widgets/131` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/keys/verify`, method: "POST", body: "provider=openai" },
     ];
     for (const item of cases) {

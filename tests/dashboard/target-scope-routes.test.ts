@@ -14,6 +14,8 @@ import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
+import { createInsightsStore } from "../../src/dashboard/insights-store";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
 
