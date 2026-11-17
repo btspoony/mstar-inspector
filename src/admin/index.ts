@@ -33,6 +33,7 @@ import {
   UnknownWorkspaceError,
   getCheckBudgets,
   getCommentClaimSettings,
+  getMaintenanceMode,
   getRecheckAssignmentMaxBytes,
   getSystemConcurrency,
   isConcurrencyValue,
@@ -41,6 +42,7 @@ import {
   setCheckBudgets,
   setCommentClaimSettings,
   setDefaultReviewLevel,
+  setMaintenanceMode,
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
@@ -56,6 +58,13 @@ import { RESERVED_WORKSPACE_SLUGS } from "../spa/routes";
 import { createFailureStore } from "../store/failure-store";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, listFlags } from "./flags";
+import {
+  findDataUpgrade,
+  listDataUpgrades,
+  resetDataUpgrade,
+  stepDataUpgrade,
+  verifyDataUpgrade,
+} from "./data-upgrades";
 import { operatorLogin, type AdminContext } from "./gate";
 import { createSupportGrant, revokeSupportGrant } from "./support-grants";
 import { listUsers } from "./users";
@@ -271,6 +280,9 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     // Live queue depth for the same page; `null` means the gauge is not
     // readable, never that the queue is empty.
     queue,
+    // The maintenance window as the gate reads it (D20), so the console states
+    // what `/dashboard/*` is answering rather than echoing its own last save.
+    maintenance: await getMaintenanceMode(db),
   });
 }
 
@@ -307,6 +319,15 @@ function checkBudgetsBody(value: unknown): CheckBudgetValues | null {
     : null;
 }
 
+/** The accepted `maintenance` body shape; the store owns the window. */
+function maintenanceBody(value: unknown): { enabled: boolean; reason?: string | null } | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { enabled, reason } = value as { enabled?: unknown; reason?: unknown };
+  if (typeof enabled !== "boolean") return null;
+  if (reason !== undefined && reason !== null && typeof reason !== "string") return null;
+  return { enabled, reason };
+}
+
 async function setRuntime(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -317,6 +338,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawClaim: unknown;
   let rawLevel: unknown;
   let rawRecheck: unknown;
+  let rawMaintenance: unknown;
   try {
     const body = (await c.req.json()) as {
       concurrency?: unknown;
@@ -324,28 +346,40 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       commentClaim?: unknown;
       reviewLevel?: unknown;
       recheckAssignment?: unknown;
+      maintenance?: unknown;
     };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
     rawClaim = body.commentClaim;
     rawLevel = body.reviewLevel;
     rawRecheck = body.recheckAssignment;
+    rawMaintenance = body.maintenance;
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
   // One save writes one parameter: a body carrying more than one is a shape
   // error, so a refused half can never leave another half written.
   if (
-    [concurrency, rawBudgets, rawClaim, rawLevel, rawRecheck].filter((value) => value !== undefined)
-      .length > 1
+    [concurrency, rawBudgets, rawClaim, rawLevel, rawRecheck, rawMaintenance].filter(
+      (value) => value !== undefined,
+    ).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | reviewLevel | recheckAssignment",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | reviewLevel | recheckAssignment | maintenance",
       },
       400,
     );
+  }
+  if (rawMaintenance !== undefined) {
+    const mode = maintenanceBody(rawMaintenance);
+    if (mode === null) {
+      return c.json({ error: "body must be { maintenance: { enabled, reason? } }" }, 400);
+    }
+    const now = new Date().toISOString();
+    await setMaintenanceMode(db, { ...mode, actor: login }, now);
+    return c.json({ maintenance: await getMaintenanceMode(db) });
   }
   if (rawClaim !== undefined) {
     const trio = commentClaimBody(rawClaim);
@@ -864,6 +898,60 @@ async function revokeGrant(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Every registered data upgrade with its state and preflight counts (spec
+ * operator-data-upgrade § Upgrade registry and state machine).
+ */
+async function readDataUpgrades(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  return c.json({ upgrades: await listDataUpgrades(db) });
+}
+
+/**
+ * One upgrade action: `preflight | step | verify | reset`.
+ *
+ * An unknown id is the caller's 404 — the registry, not the URL, decides what
+ * exists. A refused transition (409) states why: a downtime item will not step
+ * outside a window it may not be allowed to close later, and `completed` /
+ * `failed` items must be reset before they move again.
+ */
+async function dataUpgradeAction(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const id = c.req.param("id");
+  const action = c.req.param("action");
+  const item = id === undefined ? null : findDataUpgrade(id);
+  if (item === null) return c.json({ error: `no data upgrade with id ${JSON.stringify(id)}` }, 404);
+  const now = new Date().toISOString();
+  if (action === "preflight") {
+    return c.json({ id: item.id, preflight: await item.preflight(db) });
+  }
+  if (action === "step") {
+    const outcome = await stepDataUpgrade(db, item, login, now);
+    return outcome.kind === "refused"
+      ? c.json({ error: outcome.reason, state: outcome.state }, 409)
+      : c.json({ state: outcome.state, batch: outcome.batch });
+  }
+  if (action === "verify") {
+    const outcome = await verifyDataUpgrade(db, item, login, now);
+    return outcome.kind === "refused"
+      ? c.json({ error: outcome.reason, state: outcome.state }, 409)
+      : c.json({ state: outcome.state, checks: outcome.checks });
+  }
+  if (action === "reset") {
+    const outcome = await resetDataUpgrade(db, item, login, now);
+    return outcome.kind === "refused"
+      ? c.json({ error: outcome.reason, state: outcome.state }, 409)
+      : c.json({ state: outcome.state });
+  }
+  return c.notFound();
+}
+
+/**
  * The console document (`src/spa/admin.html`). `ASSETS` holds it and no other
  * route serves it: spa-dispatch matches only `/index.html` and `/app-assets/*`,
  * so this gated handler is the document's single entry point.
@@ -907,6 +995,8 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/support-grants", handler: readSupportGrants },
   { method: "post", path: "/api/support-grants", handler: createGrant },
   { method: "delete", path: "/api/support-grants/:id", handler: revokeGrant },
+  { method: "get", path: "/api/data-upgrades", handler: readDataUpgrades },
+  { method: "post", path: "/api/data-upgrades/:id/:action", handler: dataUpgradeAction },
   { method: "get", path: "/", handler: serveDocument },
   ...ADMIN_PAGES.map((page) => ({ method: "get" as const, path: `/${page.id}`, handler: serveDocument })),
 ];

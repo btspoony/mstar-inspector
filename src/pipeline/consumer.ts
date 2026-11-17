@@ -79,6 +79,7 @@ import {
   classifyGithubRateLimit,
   GITHUB_PRIMARY_RATE_LIMIT_PREFIX,
   GITHUB_RATE_LIMIT_PREFIX,
+  MAINTENANCE_DEFERRED_STAGE,
 } from "../contracts/failure-stages";
 import {
   idemKey,
@@ -222,7 +223,7 @@ import { createSecretbox } from "../dashboard/secretbox";
 // The operator default review depth (migration 0047 pairing): read ONLY when
 // the target row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
-import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel } from "../dashboard/runtime-config-store";
+import { getRecheckAssignmentMaxBytes, readDefaultReviewLevel, getMaintenanceMode } from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads bot_provider_keys / bot_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
@@ -466,8 +467,11 @@ export type ConsumerLogFields = {
    * the discussion, with no body and no catalog — overruns the operator's byte
    * budget, so nothing is sent. It names both figures and is NOT a seat skip:
    * no seat was started.
+   * `maintenance_defer` (same channel, additive): the invocation found the
+   * platform closed (D20) and deferred the whole batch instead of running it —
+   * one line per invocation, not per message.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
   action: string;
   installation_id: number;
   owner: string;
@@ -479,6 +483,13 @@ export type ConsumerLogFields = {
   app_id?: string;
   /** review_targets.id the job's configuration came from (per-bot jobs only). */
   target_id?: string;
+  /**
+   * The queue binding the deferred batch arrived on (`maintenance_defer` only —
+   * the window names the queue it deferred, not just the PR).
+   */
+  queue?: string;
+  /** Deliveries the deferred batch carried (`maintenance_defer` only). */
+  batch_size?: number;
   idempotency_key?: string;
   /**
    * review_checks.id — the Check attempt row a line is about, and the only
@@ -4026,6 +4037,63 @@ export function createReviewConsumer(
       },
     });
   return async (batch) => {
+    // The maintenance window (D20) defers the whole invocation: a mid-upgrade
+    // pipeline write could land on a ledger row the backfill just repointed.
+    // ONE read per invocation; nothing else in the batch runs. Every delivery
+    // is DEFERRED where the queue still allows it — acking would drop the
+    // review for good, while the window is temporary. ONE line per invocation
+    // (the queue and the batch size it deferred), not one per message: the batch
+    // is the unit the platform redelivers.
+    //
+    // `retry` is the FIRST choice because it is the only path that keeps the
+    // review. Two deliveries have no redelivery left — a runtime that offers no
+    // `message.retry`, and a message already on its LAST platform delivery
+    // (`wrangler.jsonc` max_retries 5 ⇒ QUEUE_MAX_ATTEMPTS 6 deliveries, and
+    // every `retry()` spends one). Those are dropped, so each one takes the
+    // failure carrier instead of vanishing: one `review_failures` row
+    // (stage `maintenance_deferred`) the 15-min sweep counts and alerts on, then
+    // an ack.
+    //
+    // shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
+    // longer spends every delivery, and each spent one is now alerted through
+    // `review_failures` — upgrade to a re-enqueue-on-close drain then.
+    const maintenance = await getMaintenanceMode(env.DB);
+    if (maintenance.enabled) {
+      // An empty batch has nothing to defer (and no identity to name it with).
+      if (batch.messages[0] === undefined) return;
+      const deferral = {
+        ...payloadIdentityFields(batch.messages[0].body),
+        event: "maintenance_defer" as const,
+        queue: batch.queue,
+        batch_size: batch.messages.length,
+      };
+      log.warn(deferral, "delivery deferred — the platform is in its maintenance window");
+      for (const message of batch.messages) {
+        if (typeof message.retry === "function" && message.attempts < QUEUE_MAX_ATTEMPTS) {
+          message.retry({ delaySeconds: 300 });
+          continue;
+        }
+        // The delivery has no redelivery left: record what it lost, then ack.
+        const body = message.body;
+        await deps.failureStore
+          .record({
+            target_id: body.targetId,
+            installation_id: body.installation_id,
+            owner: body.owner,
+            repo: body.repo,
+            pr_number: body.pr_number,
+            head_sha: body.head_sha ?? "",
+            stage: MAINTENANCE_DEFERRED_STAGE,
+            error: `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${body.owner}/${body.repo}#${body.pr_number} was never reviewed`,
+          })
+          .catch((err: unknown) => {
+            const detail = err instanceof Error ? err.message : String(err);
+            log.warn(deferral, `review_failures insert failed (deferred delivery trace lost): ${detail}`);
+          });
+        message.ack();
+      }
+      return;
+    }
     for (const message of batch.messages) {
       const outcome = await processMessage(message.body, deps, message.attempts);
       // BB-3: guard-held is a typed outcome — schedule the per-message

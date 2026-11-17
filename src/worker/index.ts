@@ -53,14 +53,14 @@ import {
   parseTargetReviewLevel,
   type ReviewTargetRow,
 } from "../dashboard/targets-store";
-import { readDefaultReviewLevel } from "../dashboard/runtime-config-store";
+import { getMaintenanceMode, readDefaultReviewLevel } from "../dashboard/runtime-config-store";
 import { checkEntitlement } from "../dashboard/entitlement";
 import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
 import { sumMonthlyRp } from "../store/usage-store";
 import { attachCheckAtAcceptance, createCheckLifecycle } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
-import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
+import { dashboardApp, dashboardMaintenanceGate, dashboardTenantGate } from "../dashboard/index";
 import { handleSetupGet, handleSetupPost } from "./install-setup";
 import { adminApp } from "../admin/index";
 import { isFlagEnabled } from "../admin/flags";
@@ -75,8 +75,16 @@ const app = new Hono<{ Bindings: Env }>();
 // `/dashboard/api/apps…`) must answer 404 even when the SPA shell could serve
 // it. Requests the gate passes are unchanged; the dashboard app re-mounts the
 // same (idempotent) gate ahead of its own routes so direct mounts keep working.
+//
+// The maintenance window (D20) mounts the same way and for the same
+// reason: `spaDispatch` answers `GET /dashboard` and every browser page load
+// before `app.route("/dashboard", dashboardApp)` is ever reached, so a gate
+// inside `dashboardApp` alone would close the API and leave the shell open.
+// `/healthz` and `/bot/setup` are `app` routes and `/_internal_admin/*` mounts
+// on the operator sub-app, so no ungated surface carries this prefix.
 app.use("*", trailingSlashRedirect());
 app.use("/dashboard/*", dashboardTenantGate);
+app.use("/dashboard/*", dashboardMaintenanceGate);
 app.use("*", spaDispatch());
 /**
  * Classifier outcome → delivery-record outcome (QC wave 1, S-2):
@@ -571,6 +579,22 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   if (row.status !== "active") {
     webhookWarn("app_disabled", webhookRef, "per-App webhook rejected with 404 — app is disabled");
     return c.text("unknown webhook path", 404);
+  }
+
+  // The maintenance window (D20) refuses the delivery HERE — after the bot
+  // lookup, before the secret decrypt and signature verification — so an
+  // unauthenticated caller learns nothing and a verified delivery is asked to
+  // come back later instead of landing a pipeline write on a ledger the
+  // running backfill may be repointing. 503 (not 200) is what makes GitHub
+  // retry the delivery once the window closes. Read ONCE per delivery.
+  const maintenance = await getMaintenanceMode(db);
+  if (maintenance.enabled) {
+    webhookWarn(
+      "maintenance_skip",
+      `${webhookRef} row_id=${row.id}`,
+      "per-App webhook answered 503 — the platform is in its maintenance window, so GitHub retries this delivery",
+    );
+    return c.text("maintenance in progress", 503);
   }
 
   // The review configuration a delivery reads lives on the bot's target, not
@@ -1141,6 +1165,20 @@ export default {
   // own per-invocation budget. All stages are awaited directly, so no
   // ctx.waitUntil is needed.
   async scheduled(controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
+    // The maintenance window (D20) short-circuits EVERY expression before any
+    // lane runs — the Check lane included, since its recovery writes the same
+    // ledger a running backfill may be repointing. ONE read per invocation;
+    // the window is read again on the next tick, so nothing is remembered.
+    if (env.DB) {
+      const maintenance = await getMaintenanceMode(env.DB);
+      if (maintenance.enabled) {
+        defaultSweepLog.warn(
+          { event: "maintenance_skip", detail: `cron=${controller.cron}` },
+          "cron invocation skipped — the platform is in its maintenance window",
+        );
+        return;
+      }
+    }
     if (controller.cron === CHECK_RECOVERY_CRON) {
       await runCheckReconcileStage(env);
       return;

@@ -158,6 +158,18 @@ export type RecheckAssignmentConfig = {
   degraded: boolean;
 };
 
+/**
+ * The maintenance window (D20): whether the platform is closed, the Operator's
+ * reason and when it closed. `reason` / `since` are `null` whenever the window
+ * is open — the store deletes both on disable, so a closed platform never
+ * carries a stale window.
+ */
+export type MaintenanceConfig = {
+  enabled: boolean;
+  reason: string | null;
+  since: string | null;
+};
+
 /** Admission drops in the trailing 24h, one count per refusal reason. */
 export type AdmissionDropCounts = {
   "pr-held": number;
@@ -200,6 +212,8 @@ export type RuntimeConfig = {
   reviewLevel: ReviewLevelConfig | null;
   /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
   recheckAssignment: RecheckAssignmentConfig | null;
+  /** The maintenance window; `null` under the same older-Worker rule. */
+  maintenance: MaintenanceConfig | null;
   /** The 24h admission-drop counts; `null` under the same older-Worker rule. */
   admissionDrops24h: AdmissionDropCounts | null;
   /**
@@ -269,6 +283,18 @@ function parseRecheckAssignment(row: Json): RecheckAssignmentConfig | null {
   };
 }
 
+/** The maintenance window; absent (older Worker) answers `null`. */
+function parseMaintenance(row: Json): MaintenanceConfig | null {
+  const raw = row.maintenance;
+  if (raw === undefined) return null;
+  const window = map(raw, "runtime maintenance");
+  return {
+    enabled: bool(window, "enabled"),
+    reason: maybeText(window, "reason"),
+    since: maybeText(window, "since"),
+  };
+}
+
 function parseAdmissionDrops(row: Json): AdmissionDropCounts | null {
   const raw = row.admissionDrops24h;
   if (raw === undefined) return null;
@@ -315,6 +341,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     commentClaim: parseCommentClaim(body),
     reviewLevel: parseReviewLevel(body),
     recheckAssignment: parseRecheckAssignment(body),
+    maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
     githubRateLimited24h: parseGithubRateLimited(body),
@@ -444,6 +471,33 @@ export async function setRecheckAssignmentMaxBytes(
     }
   }
   return { ...stored, maxBytes, degraded: false };
+}
+
+/**
+ * Open or close the maintenance window, answering the state the server stored.
+ * The server owns `since`, so an unreadable echo answers the REQUEST's flag —
+ * the write already landed — but keeps the loaded window's stamps: claiming a
+ * start time the console never read would be a guess.
+ */
+export async function setMaintenance(
+  value: { enabled: boolean; reason?: string },
+  stored: MaintenanceConfig,
+): Promise<MaintenanceConfig> {
+  const answer = await write("PATCH", "/runtime", { maintenance: value });
+  if (typeof answer === "object" && answer !== null && "maintenance" in answer) {
+    const saved = answer.maintenance;
+    if (typeof saved === "object" && saved !== null && "enabled" in saved) {
+      const { enabled, reason, since } = saved as Json;
+      if (typeof enabled === "boolean") {
+        return {
+          enabled,
+          reason: typeof reason === "string" ? reason : null,
+          since: typeof since === "string" ? since : null,
+        };
+      }
+    }
+  }
+  return { ...stored, enabled: value.enabled };
 }
 
 export async function readWorkspaces(): Promise<WorkspaceRow[]> {
@@ -709,6 +763,129 @@ export async function createQuotaVersion(
 ): Promise<number> {
   const answer = await write("POST", "/quota-versions", { ...candidate, notes, impact });
   return num(map(answer, "quota version response"), "version");
+}
+
+/**
+ * One registered data upgrade (spec operator-data-upgrade § Upgrade registry
+ * and state machine). The console states what the registry declared plus the
+ * state row: `pending` is the documented state of an upgrade never started.
+ */
+export type DataUpgradeStatus = "pending" | "running" | "verifying" | "completed" | "failed";
+
+export type DataUpgradeState = {
+  status: DataUpgradeStatus;
+  /** Rows the batches moved so far; a reset returns it to 0. */
+  processed: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  lastError: string | null;
+};
+
+/** The counts an item reports: preflight before, verify after. */
+export type DataUpgradeCounts = Record<string, number>;
+
+/** One `GET /api/data-upgrades` row. */
+export type DataUpgradeRow = {
+  id: string;
+  title: string;
+  /** The item refuses a second batch while the maintenance window is off. */
+  requiresDowntime: boolean;
+  state: DataUpgradeState;
+  preflight: DataUpgradeCounts;
+};
+
+const UPGRADE_STATUSES: readonly DataUpgradeStatus[] = [
+  "pending",
+  "running",
+  "verifying",
+  "completed",
+  "failed",
+];
+
+function upgradeStatus(value: unknown): DataUpgradeStatus {
+  const known = UPGRADE_STATUSES.find((status) => status === value);
+  if (known === undefined) {
+    throw new Error(`admin API: data upgrade status is not ${UPGRADE_STATUSES.join("|")}`);
+  }
+  return known;
+}
+
+/** A count map: a non-number entry is a broken read, never a zero. */
+function upgradeCounts(value: unknown, what: string): DataUpgradeCounts {
+  const counts: DataUpgradeCounts = {};
+  for (const [name, entry] of Object.entries(map(value, what))) {
+    if (typeof entry !== "number") throw new Error(`admin API: ${what}.${name} is not a number`);
+    counts[name] = entry;
+  }
+  return counts;
+}
+
+function upgradeState(value: unknown): DataUpgradeState {
+  const row = map(value, "data upgrade state");
+  return {
+    status: upgradeStatus(row.status),
+    processed: num(row, "processed"),
+    startedAt: maybeText(row, "startedAt"),
+    finishedAt: maybeText(row, "finishedAt"),
+    lastError: maybeText(row, "lastError"),
+  };
+}
+
+export async function readDataUpgrades(): Promise<DataUpgradeRow[]> {
+  const body = map(await fetchJson(`${BASE}/data-upgrades`), "data upgrades response");
+  return list(body.upgrades, "upgrades").map((row) => ({
+    id: text(row, "id"),
+    title: text(row, "title"),
+    requiresDowntime: bool(row, "requiresDowntime"),
+    state: upgradeState(row.state),
+    preflight: upgradeCounts(row.preflight, "preflight"),
+  }));
+}
+
+/** What one batch did: the rows it moved and whether anything is left. */
+export type UpgradeBatch = { processed: number; done: boolean };
+
+export type UpgradeStepAnswer = { state: DataUpgradeState; batch: UpgradeBatch };
+export type UpgradeVerifyAnswer = { state: DataUpgradeState; checks: DataUpgradeCounts };
+
+/** Read-only: recomputes the item's counts and writes no state. */
+export async function preflightDataUpgrade(id: string): Promise<DataUpgradeCounts> {
+  const body = map(
+    await write("POST", `/data-upgrades/${encodeURIComponent(id)}/preflight`),
+    "preflight response",
+  );
+  return upgradeCounts(body.preflight, "preflight");
+}
+
+/** ONE batch. `done` means the walk is finished — the item stays `running`. */
+export async function stepDataUpgrade(id: string): Promise<UpgradeStepAnswer> {
+  const body = map(
+    await write("POST", `/data-upgrades/${encodeURIComponent(id)}/step`),
+    "step response",
+  );
+  const batch = map(body.batch, "step batch");
+  return {
+    state: upgradeState(body.state),
+    batch: { processed: num(batch, "processed"), done: bool(batch, "done") },
+  };
+}
+
+/** Ends the item `completed` on all-zero checks, `failed` on any other. */
+export async function verifyDataUpgrade(id: string): Promise<UpgradeVerifyAnswer> {
+  const body = map(
+    await write("POST", `/data-upgrades/${encodeURIComponent(id)}/verify`),
+    "verify response",
+  );
+  return { state: upgradeState(body.state), checks: upgradeCounts(body.checks, "checks") };
+}
+
+/** Back to `pending` from any state; migrated rows are never undone. */
+export async function resetDataUpgrade(id: string): Promise<DataUpgradeState> {
+  const body = map(
+    await write("POST", `/data-upgrades/${encodeURIComponent(id)}/reset`),
+    "reset response",
+  );
+  return upgradeState(body.state);
 }
 
 /**

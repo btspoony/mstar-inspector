@@ -58,6 +58,13 @@ export const en = {
   },
   common: {
     pageTitle: "{page} — {brand}",
+    /** The maintenance window (product spec J7): no ETA promise. */
+    maintenance: {
+      title: "Under maintenance",
+      body: "A data upgrade is running; service resumes automatically when it finishes.",
+      reason: "Reason: {reason}",
+      since: "Started at: {since}",
+    },
     time: {
       justNow: "just now",
       minuteAgo: "{count} minute ago",
@@ -1309,6 +1316,7 @@ export const en = {
       quotaVersions: "Quota versions",
       users: "Users",
       supportGrants: "Support access",
+      dataUpgrades: "Data upgrades",
     },
     /**
      * A refused console write: the page's generic failure message stays
@@ -1434,6 +1442,20 @@ export const en = {
       admissionDropsSystemCap: "System cap",
       admissionDropsWorkspaceCap: "Workspace cap",
       admissionDropsError: "Storage error",
+      /** The maintenance window: the operator's one write surface for it. */
+      maintenanceTitle: "Maintenance mode",
+      maintenanceDescription:
+        "While on, the dashboard answers 503, the webhook returns 503 so GitHub retries, and queued reviews are dropped. Health checks and this console stay reachable.",
+      maintenanceStateOn: "On — the platform is closed",
+      maintenanceStateOff: "Off — the platform is serving",
+      maintenanceReasonLabel: "Reason (shown to users)",
+      maintenanceOn: "Close the platform",
+      maintenanceOff: "Reopen the platform",
+      maintenanceSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      maintenanceFailed: "Could not change the maintenance mode.",
+      /** The window's opening stamp, rendered as a relative time. */
+      maintenanceSinceLabel: "Closed since",
       /** The live queue gauge plus the 24 h GitHub secondary-rate-limit count. */
       queueTitle: "Queue backlog and GitHub rate limits",
       queueDescription:
@@ -1608,6 +1630,54 @@ export const en = {
       revokeAction: "Revoke",
       emptyTitle: "No open support windows",
       emptyDescription: "No operator holds cross-workspace access right now.",
+    },
+    /**
+     * Data upgrades page: the registry's items, their state and the batch run.
+     * The maintenance banner reuses the runtime page's window labels — one
+     * window, one wording.
+     */
+    dataUpgrades: {
+      description:
+        "Large data migrations, run as one transaction per batch. A batch is never interrupted; stopping waits for the one in flight.",
+      loadFailed: "Could not load the data upgrades.",
+      maintenanceTitle: "Maintenance window",
+      /** The banner's current item, progress and last error. */
+      currentLabel: "Current upgrade",
+      currentNone: "None",
+      progressLabel: "Progress",
+      errorLabel: "Last error",
+      /** {count} = the rows the batches have moved so far. */
+      progressProcessed: "{count} rows processed.",
+      /** {batch} = batches this run committed, {count} = rows processed. */
+      progressRunning: "Running — batch {batch}, {count} rows processed.",
+      progressDone: "Finished in {batch} batches — {count} rows processed.",
+      progressStopped: "Stopped after {batch} batches — {count} rows processed.",
+      /** The state pill's labels, one per state machine state. */
+      statusPending: "Pending",
+      statusRunning: "Running",
+      statusVerifying: "Verifying",
+      statusCompleted: "Completed",
+      statusFailed: "Failed",
+      /** The item refuses a second batch outside the maintenance window. */
+      downtimeBadge: "Needs downtime",
+      processedLabel: "Rows processed",
+      /** One column: the run's own finish, or the in-flight claim while it runs. */
+      lastRunLabel: "Last run",
+      preflightLabel: "Preflight counts",
+      preflightAction: "Preflight",
+      startAction: "Start upgrade",
+      continueAction: "Continue",
+      verifyAction: "Verify",
+      /** Only live during a run: it lands after the batch in flight. */
+      stopAction: "Stop",
+      resetAction: "Reset",
+      /** {title} = the item's title; the server's refusal rides as detail. */
+      preflightFailed: "Could not run the preflight for {title}.",
+      stepFailed: "The batch for {title} was refused.",
+      verifyFailed: "Could not verify {title}.",
+      resetFailed: "Could not reset {title}.",
+      emptyTitle: "No data upgrades",
+      emptyDescription: "This deployment registers no data migration.",
     },
   },
 };
