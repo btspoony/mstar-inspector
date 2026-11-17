@@ -56,12 +56,21 @@ import {
 import {
   parseInstallationRepositories,
   parseTargetCreate,
+  parseTargetDetailTab,
   parseTargets,
+  targetDetailTabQuery,
   type AppDetailSearch,
   type InstallationRepositoryOption,
+  type ReadScope,
   type RepositoryAppOption,
+  type TargetDetailTab,
   type TargetListRow,
 } from "./data";
+import {
+  parseWorkspaceDefaults,
+  WorkspaceDefaultsTab,
+  type WorkspaceDefaultsPayload,
+} from "./WorkspaceDefaultsTab";
 
 /**
  * The page wayfinding link back to the list, derived from the page's own API
@@ -630,29 +639,49 @@ export async function loadTargetDetail(base: string, targetId: string): Promise<
   return parseTargetPolicyPayload(await fetchJson(`${base}/api/targets/${encodeURIComponent(targetId)}`));
 }
 
-/** The detail's three tabs. A local vocabulary: `AppDetailSearch.tab` names the
- *  App detail's two faces, so the repository detail must not reuse its values. */
-type TargetDetailTab = "settings" | "insights" | "pull-requests";
+/** The 所有仓库 entry's read: the workspace defaults themselves plus the live count. */
+export async function loadWorkspaceDefaults(base: string): Promise<WorkspaceDefaultsPayload | null> {
+  return parseWorkspaceDefaults(await fetchJson(`${base}/api/targets/all`));
+}
+
+/** The two detail variants' payloads — one target, or the workspace itself. */
+type TargetDetailData =
+  | { kind: "target"; payload: TargetPolicyPayload }
+  | { kind: "all"; payload: WorkspaceDefaultsPayload };
+
+/** The fixed 所有仓库 entry's address segment (`routes.ts` names it). */
+const ALL_TARGETS = "all";
 
 /**
- * One repository's detail page — the address is the target UUID
- * (`/dashboard/<ref>/targets/<targetId>`), never an App id.
+ * The repository detail page, one component for BOTH variants:
+ * - `/dashboard/<ref>/targets/<uuid>` — one target's policy (its own plus the
+ *   inheritance toggle), read from `GET /api/targets/<uuid>`;
+ * - `/dashboard/<ref>/targets/all` — the fixed 所有仓库 row: the workspace
+ *   defaults (which every inheriting target runs with) and the live count,
+ *   read from `GET /api/targets/all`, with no inheritance switch or pause.
  *
- * Data plane: the page owns the policy read and the background reload. A
- * background failure rides the page notice so the loaded tab tree never
- * unmounts under a save, which would destroy the gate's typed draft.
+ * The tabs are the same three on both, and the active one lives in the address
+ * bar (`?tab=insights|pull-requests`; the bare path is 评审配置), so a reload
+ * keeps the operator where they were.
+ *
+ * Data plane: the page owns the read and the background reload. A background
+ * failure rides the page notice so the loaded tab tree never unmounts under a
+ * save, which would destroy the gate's typed draft.
  */
 export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: string }) {
   const locale = boot.locale;
   const base = apiBase();
-  const [payload, setPayload] = useState<TargetPolicyPayload | null>(null);
+  const all = targetId === ALL_TARGETS;
+  const [data, setData] = useState<TargetDetailData | null>(null);
   // `missing` is the 404 face: the address names no target of this workspace,
   // which no retry can fix — the way out is the list, not a reload.
   const [state, setState] = useState<"loading" | "ok" | "missing" | "error">("loading");
   const [notice, setNotice] = useState<OpNotice | null>(null);
-  const [tab, setTab] = useState<TargetDetailTab>("settings");
-  // The data tabs' filter state (window/repo/pr). In-page only this round: the
-  // repository detail does not carry them in the address bar yet.
+  const [tab, setTab] = useState<TargetDetailTab>(() =>
+    parseTargetDetailTab(window.location.search),
+  );
+  // The data tabs' filter state (window/repo/pr). In-page only: the repository
+  // detail does not carry them in the address bar yet — the tab does.
   const [search, setSearch] = useState<AppDetailSearch>({
     tab: "settings",
     window: "30",
@@ -667,35 +696,60 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
     async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
       if (!background) setState("loading");
       try {
-        const loaded = await loadTargetDetail(base, targetId);
+        const loaded: TargetDetailData | null = all
+          ? await loadWorkspaceDefaults(base).then((payload) =>
+              payload === null ? null : { kind: "all" as const, payload },
+            )
+          : await loadTargetDetail(base, targetId).then((payload) =>
+              payload === null ? null : { kind: "target" as const, payload },
+            );
         if (cancelledRef.current) return false;
         if (loaded === null) {
           if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
           else setState("error");
           return false;
         }
-        setPayload(loaded);
+        setData(loaded);
         setState("ok");
         setNotice(null);
         return true;
       } catch (error) {
         if (cancelledRef.current) return false;
-        if (!background && error instanceof ApiError && error.status === 404) setState("missing");
+        if (!background && !all && error instanceof ApiError && error.status === 404) setState("missing");
         else if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
         else setState("error");
         return false;
       }
     },
-    [base, targetId, locale],
+    [base, targetId, all, locale],
   );
 
   useEffect(() => {
     cancelledRef.current = false;
     void load();
+    // A targetId or workspace push re-derives the URL state too.
+    setTab(parseTargetDetailTab(window.location.search));
     return () => {
       cancelledRef.current = true;
     };
   }, [load]);
+
+  useEffect(() => {
+    const onPop = () => setTab(parseTargetDetailTab(window.location.search));
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  /** URL := state (replaceState — never fires popstate, loop-free). */
+  function commitTab(next: string): void {
+    const resolved = parseTargetDetailTab(`?tab=${next}`);
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${targetDetailTabQuery(resolved)}`,
+    );
+    setTab(resolved);
+  }
 
   if (state === "missing") {
     return (
@@ -713,7 +767,7 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
     );
   }
 
-  if (state === "loading" || payload === null) {
+  if (state === "loading" || data === null) {
     return (
       <TargetDetailShell locale={locale}>
         <PageSkeleton locale={locale} kind="forms" />
@@ -721,23 +775,33 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
     );
   }
 
-  const { target } = payload;
-  // A migrated row carries no repository identity yet (D15): the title states
-  // the 待安装 fact the list's row states rather than printing an empty heading.
-  const repoLabel =
-    target.repo_owner === null || target.repo_name === null
-      ? t(locale, "targets.status.uninstalled")
-      : `${target.repo_owner}/${target.repo_name}`;
+  let title: string;
+  let description: string | undefined;
+  if (data.kind === "all") {
+    title = t(locale, "targets.allRepositories");
+    description = repositoryCountLabel(locale, data.payload.target_count);
+  } else {
+    const { target } = data.payload;
+    // A migrated row carries no repository identity yet (D15): the title states
+    // the 待安装 fact the list's row states rather than printing an empty heading.
+    title =
+      target.repo_owner === null || target.repo_name === null
+        ? t(locale, "targets.status.uninstalled")
+        : `${target.repo_owner}/${target.repo_name}`;
+    description = target.app_name ?? undefined;
+  }
+  const scope: ReadScope =
+    data.kind === "all" ? { kind: "workspace" } : { kind: "target", targetId: data.payload.target.target_id };
 
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
-        title={repoLabel}
-        description={target.app_name ?? undefined}
+        title={title}
+        description={description}
         backLink={<TargetDetailBackLink locale={locale} />}
       />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-      <Tabs value={tab} onValueChange={(value) => setTab(value as TargetDetailTab)}>
+      <Tabs value={tab} onValueChange={commitTab}>
         {/* Page-level tab face (DESIGN.md ### Tabs, line-tab idiom), the same bar
             the App detail mounts: full width over a bottom hairline, 16px
             triggers, so the two detail pages read as one family. */}
@@ -756,23 +820,23 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
             `data-[state=inactive]:hidden` carries the one-visible-panel
             invariant. */}
         <TabsContent value="settings" forceMount>
-          <TargetSettingsTab locale={locale} payload={payload} onReload={load} onNotice={setNotice} />
+          {data.kind === "all" ? (
+            <WorkspaceDefaultsTab
+              locale={locale}
+              payload={data.payload}
+              canManage={canManageHere(boot)}
+              onReload={load}
+              onNotice={setNotice}
+            />
+          ) : (
+            <TargetSettingsTab locale={locale} payload={data.payload} onReload={load} onNotice={setNotice} />
+          )}
         </TabsContent>
         <TabsContent value="insights" forceMount>
-          <AppInsightsTab
-            locale={locale}
-            scope={{ kind: "target", targetId: target.target_id }}
-            search={search}
-            onSearch={setSearch}
-          />
+          <AppInsightsTab locale={locale} scope={scope} search={search} onSearch={setSearch} />
         </TabsContent>
         <TabsContent value="pull-requests" forceMount>
-          <AppPullRequestsTab
-            locale={locale}
-            scope={{ kind: "target", targetId: target.target_id }}
-            search={search}
-            onSearch={setSearch}
-          />
+          <AppPullRequestsTab locale={locale} scope={scope} search={search} onSearch={setSearch} />
         </TabsContent>
       </Tabs>
     </div>

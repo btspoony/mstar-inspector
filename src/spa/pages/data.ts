@@ -1749,6 +1749,30 @@ export function appDetailSearchQuery(search: AppDetailSearch): string {
   return query === "" ? "" : `?${query}`;
 }
 
+/**
+ * The repository detail's three tabs, one vocabulary for BOTH detail variants
+ * (`…/targets/<uuid>` and `…/targets/all`). Kept apart from
+ * {@link AppDetailTab}: the App detail's two faces are a different page.
+ * `settings` is the bare path, so it has no `tab` param of its own.
+ */
+export type TargetDetailTab = "settings" | "insights" | "pull-requests";
+
+/**
+ * The search string as the repository detail states it: a `tab` value outside
+ * the vocabulary (or its absence) is the 评审配置 default. The inverse is
+ * {@link targetDetailTabQuery}.
+ */
+export function parseTargetDetailTab(search: string): TargetDetailTab {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const tab = params.get("tab");
+  return tab === "insights" || tab === "pull-requests" ? tab : "settings";
+}
+
+/** The query string for a detail tab — the bare path IS 评审配置. */
+export function targetDetailTabQuery(tab: TargetDetailTab): string {
+  return tab === "settings" ? "" : `?tab=${tab}`;
+}
+
 /** The role vocabulary of `workspace_members.role` (migration 0026 CHECK). */
 function isWorkspaceRole(value: unknown): value is WorkspaceRole {
   return value === "owner" || value === "admin" || value === "member";

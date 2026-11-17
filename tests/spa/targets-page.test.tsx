@@ -30,7 +30,7 @@ import {
   targetStatusPill,
 } from "../../src/spa/pages/TargetsPage";
 import type { RepositoryOptionsState } from "../../src/spa/pages/TargetsPage";
-import { parseTargetCreate } from "../../src/spa/pages/data";
+import { parseTargetCreate, parseTargetDetailTab, targetDetailTabQuery } from "../../src/spa/pages/data";
 import { TargetSettingsTab } from "../../src/spa/pages/TargetSettingsTab";
 import type { InstallationRepositoryOption, RepositoryAppOption, TargetListRow } from "../../src/spa/pages/data";
 import { withLocation } from "./browser-stub";
@@ -610,11 +610,24 @@ describe("target settings tab (static SSR)", () => {
  * page loaded. Asserted on the page, not the tab component — the tab's own
  * faces are pinned above.
  */
-async function mountDetail(respond: (wire: Wire) => Response | Promise<Response>) {
-  const { win, cleanup } = installDom("http://localhost/dashboard/acme/targets/t-1");
+async function mountDetail(
+  respond: (wire: Wire) => Response | Promise<Response>,
+  options: { path?: string; targetId?: string } = {},
+) {
+  const targetId = options.targetId ?? "t-1";
+  const { win, cleanup } = installDom(
+    `http://localhost${options.path ?? `/dashboard/acme/targets/${targetId}`}`,
+  );
   const realFetch = globalThis.fetch;
+  const sent: Wire[] = [];
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-    return await respond({ url: String(input), method: init?.method ?? "GET", body: null });
+    const wire: Wire = {
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? init.body : null,
+    };
+    sent.push(wire);
+    return await respond(wire);
   }) as unknown as typeof fetch;
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
@@ -622,11 +635,13 @@ async function mountDetail(respond: (wire: Wire) => Response | Promise<Response>
   const settle = async () => {
     for (let flush = 0; flush < 6; flush += 1) await act(async () => {});
   };
-  await act(async () => root.render(createElement(TargetDetailPage, { boot: BOOT, targetId: "t-1" })));
+  await act(async () => root.render(createElement(TargetDetailPage, { boot: BOOT, targetId })));
   await settle();
   return {
     win,
+    sent,
     tabs: () => [...win.document.querySelectorAll('[role="tab"]')].map((node) => node.textContent),
+    activeTab: () => win.document.querySelector('[role="tab"][data-state="active"]')?.textContent,
     text: () => container.textContent ?? "",
     unmount: async () => {
       await act(async () => root.unmount());
@@ -668,5 +683,143 @@ describe("repository detail page (mounted)", () => {
     } finally {
       await view.unmount();
     }
+  });
+});
+
+/**
+ * The fixed 所有仓库 entry (`…/targets/all`, product spec J1/J4): the workspace
+ * defaults form — no inheritance switch, no pause — over the workspace-scoped
+ * 洞察 / 拉取请求 tabs, with the live count in the header.
+ */
+const workspaceDefaults = (overrides: Record<string, unknown> = {}) => ({
+  defaults: {
+    trigger_mode: "open" as const,
+    review_level: "default" as const,
+    check_min_score: 60,
+    check_pass_verdicts: ["ship it", "blocked"],
+    ...overrides,
+  },
+  target_count: 3,
+});
+
+describe("all-repositories detail (mounted)", () => {
+  test("renders the defaults form, the workspace tabs and the live count", async () => {
+    const view = await mountDetail(
+      (wire) => (wire.url.endsWith("/api/targets/all") ? wireJson(workspaceDefaults()) : wireJson({}, 500)),
+      { path: "/dashboard/acme/targets/all", targetId: "all" },
+    );
+    try {
+      expect(view.text()).toContain(t("en", "targets.allRepositories"));
+      expect(view.text()).toContain(t("en", "targets.repositoryCountMany", { count: 3 }));
+      expect(view.tabs()).toEqual([
+        "Review settings",
+        t("en", "appDetail.tabInsights"),
+        t("en", "appDetail.tabPullRequests"),
+      ]);
+      // The workspace defaults, editable — and the two per-target switches are
+      // absent, because neither inherits nor pauses anything at this level.
+      expect(view.text()).toContain(t("en", "settings.triggerModeOpen"));
+      expect(view.text()).not.toContain(t("en", "settings.pauseReviews"));
+      expect(view.text()).not.toContain("Follow workspace defaults");
+      const score = view.win.document.querySelector('input[type="number"]');
+      expect((score as unknown as { value: string } | null)?.value).toBe("60");
+      expect((score as unknown as { disabled: boolean } | null)?.disabled).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a non-manager gets the same defaults read-only", async () => {
+    const member = {
+      ...BOOT,
+      memberships: [{ id: "acme", slug: "acme", name: "Acme", role: "member" as const, plan: "Free" }],
+    };
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/targets/all");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => wireJson(workspaceDefaults())) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const settle = async () => {
+      for (let flush = 0; flush < 6; flush += 1) await act(async () => {});
+    };
+    await act(async () =>
+      root.render(createElement(TargetDetailPage, { boot: member, targetId: "all" })),
+    );
+    await settle();
+    try {
+      const score = win.document.querySelector('input[type="number"]');
+      expect((score as unknown as { disabled: boolean } | null)?.disabled).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("a policy pick posts exactly that one field to the defaults route", async () => {
+    const view = await mountDetail(
+      (wire) =>
+        wire.method === "POST"
+          ? wireJson({ defaults: workspaceDefaults().defaults })
+          : wire.url.endsWith("/api/targets/all")
+            ? wireJson(workspaceDefaults())
+            : wireJson({}, 500),
+      { path: "/dashboard/acme/targets/all", targetId: "all" },
+    );
+    try {
+      const manual = [...view.win.document.querySelectorAll("button")].find(
+        (node) => node.textContent === t("en", "settings.triggerModeManual"),
+      );
+      await act(async () => {
+        manual?.dispatchEvent(
+          new view.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+      const post = view.sent.find((wire) => wire.method === "POST");
+      expect(post?.url).toBe("/dashboard/acme/api/targets/defaults");
+      // No `follow` companion: nothing at this level inherits.
+      expect(JSON.parse(post?.body ?? "null")).toEqual({ trigger_mode: "manual" });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("?tab=insights opens the insights tab, and picking a tab writes it to the address", async () => {
+    const view = await mountDetail(
+      (wire) => (wire.url.endsWith("/api/targets/all") ? wireJson(workspaceDefaults()) : wireJson({}, 500)),
+      { path: "/dashboard/acme/targets/all?tab=insights", targetId: "all" },
+    );
+    try {
+      expect(view.activeTab()).toBe(t("en", "appDetail.tabInsights"));
+      const prs = [...view.win.document.querySelectorAll('[role="tab"]')].find(
+        (node) => node.textContent === t("en", "appDetail.tabPullRequests"),
+      );
+      await act(async () => {
+        prs?.dispatchEvent(
+          new view.win.MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }),
+        );
+        prs?.dispatchEvent(
+          new view.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      await act(async () => {});
+      expect(view.win.location.search).toBe("?tab=pull-requests");
+    } finally {
+      await view.unmount();
+    }
+  });
+});
+
+describe("repository detail tab URL state", () => {
+  test("parse and format round-trip, and the bare path is the settings tab", () => {
+    expect(parseTargetDetailTab("")).toBe("settings");
+    expect(parseTargetDetailTab("?tab=installations")).toBe("settings");
+    for (const tab of ["settings", "insights", "pull-requests"] as const) {
+      expect(parseTargetDetailTab(targetDetailTabQuery(tab))).toBe(tab);
+    }
+    expect(targetDetailTabQuery("settings")).toBe("");
+    expect(targetDetailTabQuery("insights")).toBe("?tab=insights");
   });
 });

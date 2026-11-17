@@ -153,6 +153,156 @@ const TRIGGER_LABEL_KEYS: Record<ReviewTriggerMode, DictionaryKey> = {
  *  keyboard and state handling the platform already gets right). */
 const SWITCH_CLASS = "size-4 accent-(--tone-accent-solid)";
 
+/**
+ * The four policy controls — trigger, depth, the gate score and its verdicts —
+ * as ONE unit, because the target tab and the workspace-defaults tab render
+ * exactly these four and differ only in what a save says. The gate is the one
+ * cluster with a draft (two fields, one button); every other control saves on
+ * selection and reads its value from `settings`, so a failed save simply leaves
+ * the stored value on screen.
+ */
+export function ReviewPolicyFields({
+  locale,
+  settings,
+  levelDefault,
+  readOnly,
+  onSave,
+}: {
+  locale: Locale;
+  settings: TargetPolicySettings;
+  /** The level the depth select's inherit face names as the current default. */
+  levelDefault: ReviewLevel | null;
+  readOnly: boolean;
+  /** The caller's save: the one changed field, and only that field. */
+  onSave: (fields: Record<string, unknown>) => Promise<void>;
+}) {
+  const [score, setScore] = useState(String(settings.check_min_score));
+  const [verdicts, setVerdicts] = useState<string[]>([...settings.check_pass_verdicts]);
+  const storedVerdicts = settings.check_pass_verdicts.join(",");
+  useEffect(() => {
+    setScore(String(settings.check_min_score));
+    setVerdicts([...settings.check_pass_verdicts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.check_min_score, storedVerdicts]);
+
+  const level: ReviewDepthChoice = settings.review_level ?? REVIEW_DEPTH_INHERIT;
+  const levelOptions = reviewDepthOptions(locale, levelDefault ?? "default");
+  const levelLabel = t(locale, "settings.reviewDepth");
+
+  function toggleVerdict(verdict: string): void {
+    setVerdicts((current) =>
+      current.includes(verdict)
+        ? current.filter((entry) => entry !== verdict)
+        : [...current, verdict],
+    );
+  }
+
+  return (
+    <>
+      <div className="flex flex-col gap-2">
+        <span className="text-sm font-medium">{t(locale, "settings.triggerMode")}</span>
+        <div className="w-fit">
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            value={settings.trigger_mode}
+            disabled={readOnly}
+            onValueChange={(value) => {
+              if (value !== "") void onSave({ trigger_mode: value });
+            }}
+            aria-label={t(locale, "settings.triggerMode")}
+          >
+            {(Object.keys(TRIGGER_LABEL_KEYS) as ReviewTriggerMode[]).map((mode) => (
+              <ToggleGroupItem key={mode} value={mode} title={mode}>
+                {t(locale, TRIGGER_LABEL_KEYS[mode])}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <span className="text-sm font-medium">{levelLabel}</span>
+        <div className="w-fit max-w-xs">
+          <Select
+            value={level}
+            disabled={readOnly}
+            onValueChange={(value) => {
+              void onSave({ review_level: value === REVIEW_DEPTH_INHERIT ? null : value });
+            }}
+          >
+            <SelectTrigger aria-label={levelLabel}>
+              <SelectValue>
+                {levelOptions.find((option) => option.value === level)?.label ?? levelLabel}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {levelOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <fieldset className="flex flex-col gap-3">
+        <legend className="text-sm font-medium">{t(locale, "settings.reviewGate")}</legend>
+        <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
+          {t(locale, "settings.reviewGateScore")}
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            className="w-28"
+            value={score}
+            disabled={readOnly}
+            onChange={(event) => setScore(event.target.value)}
+          />
+        </label>
+        <div className="flex flex-col gap-2">
+          <span className="text-sm font-medium">{t(locale, "settings.reviewGateVerdicts")}</span>
+          {PR_VERDICTS.map((verdict) => (
+            <label key={verdict} className="flex w-fit items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                className={SWITCH_CLASS}
+                checked={verdicts.includes(verdict)}
+                disabled={readOnly}
+                onChange={() => toggleVerdict(verdict)}
+              />
+              {verdict}
+            </label>
+          ))}
+        </div>
+        {verdicts.length === 0 ? (
+          <p role="status" className="text-sm text-(--tone-warn-fg)">
+            {t(locale, "settings.reviewGateFailClosed")}
+          </p>
+        ) : null}
+        <div>
+          <Button
+            type="button"
+            disabled={readOnly || score.trim() === "" || Number.isNaN(Number(score))}
+            onClick={() =>
+              void onSave({
+                check_min_score: Number(score),
+                // One entry per checked box, in the vocabulary's order.
+                check_pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
+              })
+            }
+          >
+            {t(locale, "settings.reviewGateSave")}
+          </Button>
+        </div>
+      </fieldset>
+    </>
+  );
+}
+
 export function TargetSettingsTab({
   locale,
   payload,
@@ -168,19 +318,6 @@ export function TargetSettingsTab({
   const copy = TARGET_SETTINGS_COPY[locale];
   const inheriting = target.follow_workspace_defaults === 1;
   const [busy, setBusy] = useState(false);
-
-  // The gate is the one cluster with a draft (two fields, one button); every
-  // other control saves on selection and reads its value from the payload, so a
-  // failed save simply leaves the stored value on screen.
-  const [score, setScore] = useState(String(effective.check_min_score));
-  const [verdicts, setVerdicts] = useState<string[]>([...effective.check_pass_verdicts]);
-  const storedVerdicts = effective.check_pass_verdicts.join(",");
-  useEffect(() => {
-    setScore(String(effective.check_min_score));
-    setVerdicts([...effective.check_pass_verdicts]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effective.check_min_score, storedVerdicts]);
-
   const path = `${apiBase()}/api/targets/${encodeURIComponent(target.target_id)}`;
 
   async function save(fields: Record<string, unknown>): Promise<void> {
@@ -204,125 +341,19 @@ export function TargetSettingsTab({
   const savePolicy = (fields: Record<string, unknown>): Promise<void> =>
     save({ ...fields, follow: 0 });
 
-  const level: ReviewDepthChoice = effective.review_level ?? REVIEW_DEPTH_INHERIT;
-  const levelOptions = reviewDepthOptions(locale, defaults.review_level ?? "default");
-  const levelLabel = t(locale, "settings.reviewDepth");
-  const readOnly = busy || inheriting;
-
-  function toggleVerdict(verdict: string): void {
-    setVerdicts((current) =>
-      current.includes(verdict)
-        ? current.filter((entry) => entry !== verdict)
-        : [...current, verdict],
-    );
-  }
-
   return (
     <SectionCard tier="secondary">
       <CardHeader>
         <SectionCardTitle>{copy.heading}</SectionCardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-5">
-        <div className="flex flex-col gap-2">
-          <span className="text-sm font-medium">{t(locale, "settings.triggerMode")}</span>
-          <div className="w-fit">
-            <ToggleGroup
-              type="single"
-              variant="outline"
-              size="sm"
-              value={effective.trigger_mode}
-              disabled={readOnly}
-              onValueChange={(value) => {
-                if (value !== "") void savePolicy({ trigger_mode: value });
-              }}
-              aria-label={t(locale, "settings.triggerMode")}
-            >
-              {(Object.keys(TRIGGER_LABEL_KEYS) as ReviewTriggerMode[]).map((mode) => (
-                <ToggleGroupItem key={mode} value={mode} title={mode}>
-                  {t(locale, TRIGGER_LABEL_KEYS[mode])}
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-2">
-          <span className="text-sm font-medium">{levelLabel}</span>
-          <div className="w-fit max-w-xs">
-            <Select
-              value={level}
-              disabled={readOnly}
-              onValueChange={(value) => {
-                void savePolicy({ review_level: value === REVIEW_DEPTH_INHERIT ? null : value });
-              }}
-            >
-              <SelectTrigger aria-label={levelLabel}>
-                <SelectValue>
-                  {levelOptions.find((option) => option.value === level)?.label ?? levelLabel}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {levelOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        <fieldset className="flex flex-col gap-3">
-          <legend className="text-sm font-medium">{t(locale, "settings.reviewGate")}</legend>
-          <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
-            {t(locale, "settings.reviewGateScore")}
-            <Input
-              type="number"
-              min={0}
-              max={100}
-              step={1}
-              className="w-28"
-              value={score}
-              disabled={readOnly}
-              onChange={(event) => setScore(event.target.value)}
-            />
-          </label>
-          <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium">{t(locale, "settings.reviewGateVerdicts")}</span>
-            {PR_VERDICTS.map((verdict) => (
-              <label key={verdict} className="flex w-fit items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  className={SWITCH_CLASS}
-                  checked={verdicts.includes(verdict)}
-                  disabled={readOnly}
-                  onChange={() => toggleVerdict(verdict)}
-                />
-                {verdict}
-              </label>
-            ))}
-          </div>
-          {verdicts.length === 0 ? (
-            <p role="status" className="text-sm text-(--tone-warn-fg)">
-              {t(locale, "settings.reviewGateFailClosed")}
-            </p>
-          ) : null}
-          <div>
-            <Button
-              type="button"
-              disabled={readOnly || score.trim() === "" || Number.isNaN(Number(score))}
-              onClick={() =>
-                void savePolicy({
-                  check_min_score: Number(score),
-                  // One entry per checked box, in the vocabulary's order.
-                  check_pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
-                })
-              }
-            >
-              {t(locale, "settings.reviewGateSave")}
-            </Button>
-          </div>
-        </fieldset>
+        <ReviewPolicyFields
+          locale={locale}
+          settings={effective}
+          levelDefault={defaults.review_level}
+          readOnly={busy || inheriting}
+          onSave={savePolicy}
+        />
 
         <label className="flex w-fit items-center gap-2 text-sm font-medium">
           <input
