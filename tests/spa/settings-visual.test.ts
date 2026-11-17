@@ -173,8 +173,7 @@ describe("settings section flow (r3 baseline § 5)", () => {
     };
     for (const [section, end, titleKey] of [
       ["export function AppInfoSection", "export function AppInstallSection", "settings.appInfo"],
-      ["export function AppInstallSection", "export function ReviewGateSection", "settings.install"],
-      ["export function ReviewTriggerSection", "export function RuntimeHarnessEditor", "settings.reviewTrigger"],
+      ["export function AppInstallSection", "export function RuntimeHarnessEditor", "settings.install"],
       ["export function ChainsSection", "export function SeatsSection", "settings.modelChains"],
       ["export function SeatsSection", "export function DraftChainPanel", "settings.seats"],
       ["function OpsSection", "export function WorkspaceNameCard", "settings.ops"],
@@ -190,20 +189,21 @@ describe("settings section flow (r3 baseline § 5)", () => {
     expect(providersSource).not.toContain("<SectionCard");
   });
 
-  test("the target settings tab's section order is identity, trigger, depth, gate, ops", () => {
-    // The bot-owned sections (sandbox image, providers, chains, seats,
-    // installations) live on the bot page; the target keeps its own policy.
-    let cursor = -1;
-    for (const marker of [
-      "<AppInfoSection",
-      "<ReviewTriggerSection",
-      "<ReviewDepthSection",
-      "<ReviewGateSection",
-      "<OpsSection",
-    ]) {
-      const at = settingsTabSource.indexOf(marker, cursor + 1);
-      expect(at, marker).toBeGreaterThan(cursor);
-      cursor = at;
+  test("the App settings body keeps the identity card only; the target policy lives on the repository surface", () => {
+    // Plan 371's owner split: the App page's settings body has no target-owned
+    // section at all, and the review-policy sections that used to be declared
+    // here are gone with the manager branch nothing could reach.
+    const view = settingsTabSource.slice(
+      settingsTabSource.indexOf("export function SettingsView"),
+      settingsTabSource.indexOf("export function pendingConfirmCopy"),
+    );
+    expect(view).toContain("<AppInfoSection");
+    // OpsSection survives (the App page's own danger zone), only the three
+    // target-owned policy sections are gone.
+    expect(settingsTabSource).toContain("export function OpsSection");
+    for (const marker of ["<ReviewTriggerSection", "<ReviewDepthSection", "<ReviewGateSection"]) {
+      expect(settingsTabSource, marker).not.toContain(`export function ${marker.slice(1)}`);
+      expect(view, marker).not.toContain(marker);
     }
     // The sections are direct siblings of one flow plane: the manage face
     // opens that plane once and never re-groups it into tiers.

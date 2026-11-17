@@ -3848,8 +3848,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // metadata), which belong to the owning workspace. The guard is the
       // Blocked state alone: the bot-owned sections below must never be
       // reached for a bot this workspace does not own, whatever arm resolved
-      // it. The target-owned fields are the conditional part — a bot reached
-      // with no live target has none of them to report.
+      // it. The target-owned fields are the conditional part — a bot this
+      // workspace holds several repositories under has no single policy to
+      // report, and says so with `target_id: null` plus `targets_many`.
       const effective = target === null ? null : await readEffectiveTargetSettings(gate.db, target);
       const checkGate = effective === null ? null : checkGateOf(effective);
       // The level a NULL target column resolves to (migration 0047) — the depth
@@ -3861,14 +3862,14 @@ const appSettingsRoute = async (c: DashboardContext) => {
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: gate.scope.workspaceId,
-        // The several-repository state: `target_id` is absent when this
-        // workspace holds more than one live target under the bot, so the page
-        // must be able to name that state instead of reading it as none.
+        // The several-repository state: `target_id` is an explicit `null` when
+        // this workspace holds more than one live target under the bot, so the
+        // page can name that state instead of reading it as none.
         targets_many: gate.targets_many,
+        target_id: target === null ? null : target.id,
         ...(target === null
           ? {}
           : {
-              target_id: target.id,
               check_gate:
                 checkGate === null
                   ? null

@@ -26,7 +26,6 @@ import {
   appStatusPill,
   parseAppDetailSearch,
   parseSettings,
-  PR_VERDICTS,
   pullRequestRefOf,
   scopedInsightsSummaryUrl,
   type AppDetailSearch,
@@ -167,17 +166,6 @@ function renderDetail(payload: SettingsPayload, tab: AppDetailTab = "settings") 
       onReload: noReload,
       onSearch: noSearch,
     }),
-  );
-}
-
-/**
- * The review-target surface's detail body — the target-owned policy the App
- * detail used to host as its settings tab. The page shell (load, back link,
- * identity header) is pinned by the targets-page suite.
- */
-function renderTargetBody(payload: SettingsPayload) {
-  return renderToStaticMarkup(
-    createElement(SettingsView, { locale: "en", payload, onReload: noReload }),
   );
 }
 
@@ -429,25 +417,20 @@ describe("tab shell rendering (static SSR)", () => {
     }
   });
 
-  test("the park action renders only while the owner claim overlaps", () => {
+  test("the App settings body renders no park action even when the owner claim overlaps", () => {
+    // Park is the repository surface's repair for an overlapping owner claim;
+    // the App settings body is the identity card alone, so no payload state
+    // can bring the action here. Its copy stays in the dictionary for the
+    // dialog the repository surface opens.
     const parked = renderToStaticMarkup(
       createElement(SettingsView, {
         locale: "en",
         payload: { ...managePayload, owner_overlap: true },
-        onReload: noReload,
       }),
     );
-    // The row names the overlap and offers the action; the confirm copy exists
-    // in the dictionary for the dialog it opens.
-    expect(parked).toContain(t("en", "settings.opsParkTitle"));
-    expect(parked).toContain(t("en", "settings.opsParkAction"));
+    expect(parked).not.toContain(t("en", "settings.opsParkTitle"));
     expect(t("en", "settings.confirmParkTitle", { name: "Demo" })).toContain("Demo");
     expect(t("zh_CN", "settings.opsParkTitle").length).toBeGreaterThan(0);
-    // No overlap → no park affordance (the route would refuse it anyway).
-    const quiet = renderToStaticMarkup(
-      createElement(SettingsView, { locale: "en", payload: managePayload, onReload: noReload }),
-    );
-    expect(quiet).not.toContain(t("en", "settings.opsParkTitle"));
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {
@@ -465,31 +448,6 @@ describe("tab shell rendering (static SSR)", () => {
       label: t("en", "apps.status.disabled"),
       tone: "warn",
     });
-  });
-
-  test("the target body renders its own (target-scoped) section titles", () => {
-    const manage = renderTargetBody(managePayload);
-    // The App-side SectionCard titles, resolved through the dictionary — the
-    // heading/stat migration may not drop or rename a section. The bot-scoped
-    // sections (providers, chains, seats, sandbox image) live on 应用设置.
-    for (const key of [
-      "settings.appInfo",
-      "settings.reviewTrigger",
-      "settings.reviewDepth",
-      "settings.reviewGate",
-      "settings.ops",
-    ] as const) {
-      expect(manage).toContain(t("en", key));
-    }
-    // The header's metric band still labels the installations / chains counts
-    // (the payload keeps those keys), so only the SECTION titles are asserted
-    // absent here.
-    for (const key of ["settings.providers.title", "settings.seats"] as const) {
-      expect(manage).not.toContain(t("en", key));
-    }
-    // The workspace settings live on /dashboard/<ref>/settings; the target
-    // surface must not keep a second entry point to them.
-    expect(manage).not.toContain(t("en", "workspace.settingsHeading"));
   });
 });
 
@@ -529,45 +487,6 @@ describe("installed tab configuration surface (static SSR)", () => {
     expect(noSlug).toContain(t("en", "settings.installNoSlug"));
     // The block itself stays rendered (title + the App name).
     expect(noSlug).toContain(t("en", "settings.install"));
-  });
-
-  test("the review gate renders a 0..100 score input and one checkbox per verdict", async () => {
-    const gate = await withMarkup(renderTargetBody(managePayload), (container) => {
-      // The gate's own section, by its resolved heading — the body mounts
-      // every section, so a page-wide input query would read other inputs.
-      const section = [...container.querySelectorAll('[data-slot="flow-section"]')].find(
-        (node) => node.querySelector("h2")?.textContent === t("en", "settings.reviewGate"),
-      );
-      const inputs = [...(section?.querySelectorAll("input") ?? [])];
-      const score = inputs.find((input) => input.getAttribute("type") === "number");
-      // Everything is read INSIDE the callback: the throwaway document is
-      // torn down when it returns, and a live element read afterwards is hollow.
-      return {
-        min: score?.getAttribute("min") ?? "",
-        max: score?.getAttribute("max") ?? "",
-        value: score?.getAttribute("value") ?? "",
-        verdicts: inputs
-          .filter((input) => input.getAttribute("type") === "checkbox")
-          .map((input) => ({
-            label: input.parentElement?.textContent ?? "",
-            checked: (input as HTMLInputElement).checked,
-          })),
-      };
-    });
-    expect(gate.min).toBe("0");
-    expect(gate.max).toBe("100");
-    expect(gate.value).toBe("80");
-    // The vocabulary is the whole engine set, and the payload's stored
-    // verdicts are the checked subset.
-    expect(gate.verdicts.map((box) => box.label)).toEqual([...PR_VERDICTS]);
-    expect(gate.verdicts.filter((box) => box.checked).map((box) => box.label)).toEqual(["ship it"]);
-  });
-
-  test("the review gate with no verdict checked states that no review can pass", () => {
-    const empty = renderTargetBody({ ...managePayload, check_gate: { min_score: 80, pass_verdicts: [] } });
-    expect(empty).toContain(t("en", "settings.reviewGateFailClosed"));
-    // The stored default passes on "ship it", so it carries no warning.
-    expect(renderTargetBody(managePayload)).not.toContain(t("en", "settings.reviewGateFailClosed"));
   });
 
   test("no release version string renders anywhere on the page", () => {
@@ -1021,8 +940,9 @@ describe("Blocked and pending installations (static SSR)", () => {
     // fabricated in their place.
     expect(manager).not.toContain(t("en", "settings.installations"));
     expect(manager).not.toContain(t("en", "settings.metricKeys"));
-    // The review settings are the target's, so the target body keeps them.
-    expect(renderTargetBody(blockedPayload())).toContain(t("en", "settings.reviewGate"));
+    // The target-owned review policy is not this page's: the repository
+    // surface owns it (targets-page.test.tsx pins that tab).
+    expect(manager).not.toContain(t("en", "settings.reviewGate"));
 
     const member = renderToStaticMarkup(
       createElement(AppDetailView, {
@@ -1050,11 +970,6 @@ describe("Blocked and pending installations (static SSR)", () => {
     expect(installed).not.toContain('href="https://github.com/apps/demo/installations/new"');
     // Nothing is pending for a bot this workspace may not use.
     expect(installed).not.toContain(t("en", "settings.installPendingBind"));
-
-    // The review configuration is still readable — Blocked hides an action,
-    // not the settings a manager can inspect.
-    const policy = renderTargetBody(blockedPayload());
-    expect(policy).toContain(t("en", "settings.reviewGate"));
 
     // The bot-shaped parts of the identity card are gone with the bot data:
     // the delivery URL and the refresh are bot-scope writes this workspace
@@ -1105,6 +1020,43 @@ describe("Blocked and pending installations (static SSR)", () => {
     // a settings read at all.
     const { target_id: _blockedTarget, ...blockedWithoutTarget } = blockedPayload();
     expect(parseSettings(blockedWithoutTarget)).toBeNull();
+    // The one exception is the several-repository Blocked face: it says
+    // `target_id: null` plus `targets_many`, so the page can name that state
+    // instead of reading it as the zero-repository App.
+    const blockedMany = {
+      ...blockedPayload(),
+      target_id: null,
+      targets_many: true,
+      app: {
+        github_app_id: blockedPayload().app.github_app_id,
+        id: blockedPayload().app.id,
+        status: "active",
+        created_by: "mallory",
+        scope: "owned",
+        github_name: null,
+        github_slug: "demo",
+        github_description: null,
+        github_html_url: null,
+        github_avatar_url: null,
+        github_visibility: "unknown",
+      },
+      installation: null,
+    };
+    expect(parseSettings(blockedMany)).not.toBeNull();
+    expect(parseSettings(blockedMany)?.target_id).toBeNull();
+    expect(parseSettings(blockedMany)?.targets_many).toBe(true);
+    for (const broken of [
+      // `null` without the several-repository flag is not a state.
+      { ...blockedMany, targets_many: false },
+      { ...blockedMany, targets_many: undefined },
+      // A target-less Blocked read reports no pause state: its presence would
+      // state configuration the payload has no target for.
+      { ...blockedMany, app: { ...blockedMany.app, review_enabled: true } },
+      // The fail-closed rule survives outside the Blocked face.
+      { ...managePayload, target_id: null, targets_many: true },
+    ]) {
+      expect(parseSettings(broken)).toBeNull();
+    }
     // The bot's metadata stamp is the OWNER's: a Blocked face omits it, and a
     // readable face must carry it.
     const { github_metadata_synced_at: _stamp, ...identityWithoutStamp } = identityPayload.app;

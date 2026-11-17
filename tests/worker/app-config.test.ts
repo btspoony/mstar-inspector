@@ -79,6 +79,7 @@ import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import type { D1StatementLike } from "../../src/store/types";
 import { htmlGet, withSpaAssets } from "../helpers/spa";
+import { parseSettings } from "../../src/spa/pages/data";
 import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -2728,6 +2729,49 @@ describe("API settings face — several repositories under one App (targets_many
     expect(body.targets_many).toBe(false);
     // The single target the fixture App's creation seeded.
     expect(body.target_id).toBeString();
+  });
+
+  test("a Blocked read with two repositories serves target_id null and targets_many, and parses", async () => {
+    // The Blocked manager face was the one arm that could not name its state:
+    // omitting `target_id` there made the SPA's parse read it as the
+    // zero-repository App. It now says `null` explicitly, so "several" and
+    // "none" stay distinguishable on the wire.
+    const { db, app } = await seededWorld();
+    const consumer = "ws-consumer";
+    rawRun(
+      db,
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+       VALUES (?, ?, ?, NULL, datetime('now'))`,
+      consumer,
+      consumer,
+      consumer,
+    );
+    rawRun(
+      db,
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       SELECT ?, id, 'owner', datetime('now') FROM users WHERE github_login = 'mallory'`,
+      consumer,
+    );
+    seedTarget(db, app.id, { workspaceId: consumer, name: "one", repoId: 880001, repoName: "one" });
+    seedTarget(db, app.id, { workspaceId: consumer, name: "two", repoId: 880002, repoName: "two" });
+
+    const res = await get(
+      `/dashboard/${consumer}/api/apps/${APP_ID}/settings`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { blocked: boolean; blocked_reason: string; targets_many: boolean; target_id: unknown };
+    expect(body.blocked).toBe(true);
+    expect(body.blocked_reason).toBe("bot_not_shared");
+    expect(body.targets_many).toBe(true);
+    expect(body.target_id).toBeNull();
+    // The SPA's parser accepts that shape and keeps the rule that a manager
+    // read naming a target must carry its policy.
+    const parsed = parseSettings({ ...body, can_manage: true, workspace_id: consumer });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.target_id).toBeNull();
+    expect(parsed?.targets_many).toBe(true);
   });
 });
 

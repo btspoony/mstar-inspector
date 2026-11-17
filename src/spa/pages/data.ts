@@ -533,27 +533,6 @@ export type CheckGateSettings = {
 };
 
 /**
- * The review gate's DDL default (migration 0045): a floor of 80 and
- * `["ship it"]`. The columns are written only by `saveCheckGate`, whose UPDATE
- * never reads the old value — so this is the value the unreadable-gate
- * recovery writes back over a row it cannot read.
- */
-export const DEFAULT_CHECK_GATE: CheckGateSettings = { min_score: 80, pass_verdicts: ["ship it"] };
-
-/**
- * The one `save-check-gate` submission body. The score rides as submitted —
- * the route owns its validation, so a blank field must reach it as a keyed 400
- * rather than becoming 0 — and each verdict is one repeated `pass_verdicts`
- * field, the shape the route aggregates. The gate editor and the
- * unreadable-gate recovery are its two callers; neither may invent a second op.
- */
-export function checkGateSaveFields(gate: { min_score: string; pass_verdicts: readonly string[] }): URLSearchParams {
-  const fields = new URLSearchParams({ op: "save-check-gate", min_score: gate.min_score });
-  for (const verdict of gate.pass_verdicts) fields.append("pass_verdicts", verdict);
-  return fields;
-}
-
-/**
  * The per-App owner allowlist (migration 0045): `enabled` off behaves exactly
  * as before this App configuration existed; on with an empty `owners` refuses
  * every owner (fail closed).
@@ -636,15 +615,11 @@ export type AppInstallApp = {
   scope: BotScope;
 };
 
-export type BlockedAppIdentity = {
+export type BlockedAppIdentityBase = {
   github_app_id: number;
   id: string;
   status: string;
   created_by: string;
-  review_enabled: boolean;
-  review_trigger_mode: ReviewTriggerMode;
-  review_level: ReviewLevel | null;
-  default_review_level: ReviewLevel;
   scope: BotScope;
   github_name: string | null;
   github_slug: string | null;
@@ -654,6 +629,13 @@ export type BlockedAppIdentity = {
   github_visibility: GithubVisibility | null;
   /** Absent on the wire: the bot's metadata stamp is the owner's. */
   github_metadata_synced_at?: string | null;
+};
+
+export type BlockedAppIdentity = BlockedAppIdentityBase & {
+  review_enabled: boolean;
+  review_trigger_mode: ReviewTriggerMode;
+  review_level: ReviewLevel | null;
+  default_review_level: ReviewLevel;
 };
 
 /**
@@ -917,27 +899,46 @@ export type SettingsBlockedPayload = {
   workspace_id: string;
   target_id: string;
   app: BlockedAppIdentity;
-  /** See {@link SettingsManageBase.targets_many} — this face is always a single target's. */
-  targets_many?: boolean;
+  /** False here: the single target's policy is the payload's subject. */
+  targets_many?: false;
   /** The target's own binding (`null` = unbound) — target-owned state. */
   installation: BoundInstallation | null;
 } & TargetOwnedSections;
+
+/**
+ * The Blocked manager face of a bot this workspace holds SEVERAL repositories
+ * under: no single one's policy is the App page's subject, so the
+ * target-owned slice is absent and `target_id` is an explicit `null` — the
+ * shape the SPA's `targets_many` notice reads.
+ */
+export type SettingsBlockedManyPayload = {
+  can_manage: true;
+  blocked: true;
+  blocked_reason: BlockedReason;
+  workspace_id: string;
+  target_id: null;
+  targets_many: true;
+  app: BlockedAppIdentityBase;
+  installation: BoundInstallation | null;
+};
 
 export type SettingsPayload =
   | SettingsReadOnlyPayload
   | SettingsManagePayload
   | SettingsUntargetedPayload
-  | SettingsBlockedPayload;
+  | SettingsBlockedPayload
+  | SettingsBlockedManyPayload;
 
 /**
  * The faces that carry the target-owned review policy — the ones whose
  * review controls a page may render. The server sends that slice
- * all-or-nothing, so `target_id` presence decides.
+ * all-or-nothing, so a STRING `target_id` decides: the several-repository
+ * Blocked face says `null` and carries no policy to render.
  */
 export type TargetSettingsPayload = SettingsManagePayload | SettingsBlockedPayload;
 
 export function hasTargetFacts(payload: SettingsPayload): payload is TargetSettingsPayload {
-  return payload.can_manage && payload.target_id !== undefined;
+  return payload.can_manage && typeof payload.target_id === "string";
 }
 
 export type ModelOptionSource = "verified" | "probe" | "custom";
@@ -2408,8 +2409,13 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // `review_level`, `default_review_level`) are validated in the manager
   // branch below, where they are the whole contract.
   const hasTarget = data.target_id !== undefined;
-  if (hasTarget && (typeof data.target_id !== "string" || data.target_id.length === 0)) return null;
-  if ((data.app.review_enabled !== undefined) !== hasTarget) return null;
+  // The one face that names NO target without omitting the key: a Blocked
+  // manager read with several repositories says `target_id: null`, so the SPA
+  // can tell "several" from "none" on the wire. Every other face keeps the
+  // presence-only rule, and a non-Blocked `null` still fails below.
+  const blockedMany = data.blocked && data.target_id === null;
+  if (hasTarget && !blockedMany && (typeof data.target_id !== "string" || data.target_id.length === 0)) return null;
+  if (!blockedMany && (data.app.review_enabled !== undefined) !== hasTarget) return null;
   if (!data.can_manage) {
     // Identity-only non-manager face (App detail IA): the D4
     // identity set — created_at joins the required keys; everything from
@@ -2437,7 +2443,9 @@ export function parseSettings(data: unknown): SettingsPayload | null {
     // identity the page needs. The bot-owned sections are ABSENT by contract,
     // so nothing here requires — or tolerates a guess for — them. A Blocked
     // read is a TARGET's (the resolver only reaches a foreign `owned` bot
-    // through a live target), so the policy slice must be there.
+    // through a live target), so the policy slice must be there. The exception
+    // is the several-repository read: it names no target, so it carries the
+    // identity alone and must say so (`targets_many: true`).
     if (!hasTarget) return null;
     if (
       !isNullableString(data.app.github_name) ||
@@ -2449,6 +2457,15 @@ export function parseSettings(data: unknown): SettingsPayload | null {
       return null;
     }
     if (!isBotScope(data.app.scope)) return null;
+    if (blockedMany !== (data.targets_many === true)) return null;
+    if (blockedMany) {
+      // No target, so no policy and no pause state: their presence would be a
+      // fabricated answer.
+      if (data.app.review_enabled !== undefined) return null;
+      if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
+      return data as SettingsPayload;
+    }
+    if (typeof data.app.review_enabled !== "boolean") return null;
     if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
     if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
     if (!isReviewLevel(data.app.default_review_level)) return null;

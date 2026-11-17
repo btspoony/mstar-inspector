@@ -489,7 +489,7 @@ export function AppDetailView({
       <div className="flex flex-col gap-6">
         <TargetHeader locale={locale} appId={appId} payload={payload} />
         {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-        <SettingsView locale={locale} payload={payload} onReload={onReload} />
+        <SettingsView locale={locale} payload={payload} />
       </div>
     );
   }

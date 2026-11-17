@@ -27,8 +27,8 @@ import {
 import {
   AppInfoSection,
   DraftChainPanel,
+  OpsSection,
   REVIEW_DEPTH_INHERIT,
-  ReviewGateSection,
   SettingsView,
   draftChainTabLabel,
   githubAppSettingsUrl,
@@ -123,38 +123,17 @@ const detailPayload = (): SettingsManagePayload => ({
   deliveries: [],
 });
 
-/** The identity-only face a plain member gets — no ops stores, so no depth control. */
-const memberPayload = (): SettingsReadOnlyPayload => ({
-  can_manage: false,
-  workspace_id: "ws_0123456789abcdefghijkl",
-  target_id: "rt-501",
-  blocked: false as const,
-  blocked_reason: null,
-  app: {
-    github_app_id: 1,
-    status: "active",
-    review_enabled: true,
-    created_by: "octocat",
-    created_at: "2026-01-01T00:00:00.000Z",
-    id: "app-acme",
-    github_name: "Acme",
-    github_slug: "acme-app",
-    github_description: null,
-    github_html_url: null,
-    github_avatar_url: null,
-    github_metadata_synced_at: null,
-  },
-});
-
 describe("settings layout", () => {
-  test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
+  test("the ops zone is one authorized section; providers and chains are shadcn", () => {
     const source = readSettingsSource();
+    // The ops zone is OpsSection, shared by the App page and the repository
+    // surface; each caller owns the dialog its confirmed actions open.
+    const appPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     expect(source).toContain("settings.ops");
-    expect(source).toContain("can_manage");
-    expect(source).toContain("${action.kind}");
     expect(source).toContain('kind: "pause"');
     expect(source).toContain('kind: "disable"');
     expect(source).toContain('kind: "delete"');
+    expect(appPage).toContain("${action.kind}");
     expect(source).toContain("settings.recentDeliveries");
     expect(source).toContain("settings.providers");
     expect(source).toContain("settings.customEntry");
@@ -1510,14 +1489,18 @@ describe("ops danger zone: one row per action", () => {
    */
   const opsSectionHtml = (locale: SpaBoot["locale"], app: Partial<SettingsAppMeta> = {}): string => {
     const payload = detailPayload();
-    // The ops zone is the review-target surface's body now (the moved
-    // settings tab); render it where it lives.
+    // The App page's own ops zone (disable / enable / delete) and the repository
+    // surface's target ops (pause / resume / park) are the same section; this
+    // suite reads the target-owned face, which renders the review row too.
     const html = withLocation("/dashboard/acme/targets/1", () =>
       renderToStaticMarkup(
-        createElement(SettingsView, {
+        createElement(OpsSection, {
           locale,
           payload: { ...payload, app: { ...payload.app, ...app } },
-          onReload: async () => true,
+          onPending: () => {},
+          notice: null,
+          botWritable: true,
+          targetOwned: true,
         }),
       ),
     );
@@ -1672,7 +1655,9 @@ describe("notice channel (reviewer handoffs)", () => {
   });
 
   test("a deleted App reports its own irreversible outcome, not the generic saved notice", () => {
-    const source = readSettingsSource();
+    // The App page's ops zone owns the delete dialog now; the App settings
+    // body has no manager branch left to open one.
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     // The delete branch pins the dedicated copy and skips the background
     // reload — the soft-deleted App's settings GET is a guaranteed 404, so
     // the generic path would overwrite the outcome with "Load failed."
@@ -1689,7 +1674,7 @@ describe("notice channel (reviewer handoffs)", () => {
     expect(t("en", "settings.deleteSuccess")).toContain("deleted");
     expect(t("zh_CN", "settings.deleteSuccess")).toContain("已删除");
     // Configuration saves keep the generic saved notice.
-    expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
+    expect(readSettingsSource()).toContain('successMessage ?? t(locale, "settings.changesSaved")');
   });
 });
 
@@ -1735,12 +1720,12 @@ describe("section-scoped op feedback", () => {
     // channels plus the identity card's refresh (whose fetch rejects with no
     // status to key a message from).
     expect(source).toContain('message: t(locale, "common.saveFailed")');
-    // Three transport catches per face, minus the key-verify one: the target
-    // detail's depth save, gate save and identity refresh; the bot page's
-    // settings save and key delete. A failed verify names its own face
+    // Two transport catches per face, minus the key-verify one: the identity
+    // card's refresh and the config store's own save; the bot page's settings
+    // save and key delete. A failed verify names its own face
     // (`settings.providers.submitFailed`), because that dialog is the surface
     // that must tell the operator nothing was stored.
-    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(5);
+    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(4);
     // Page-level reload failures keep the load-failed copy: load()'s two
     // background-failure paths and the draft create's reload-failure return.
     expect(source).toContain('message: t(locale, "common.loadFailed")');
@@ -1826,10 +1811,16 @@ describe("section-scoped op feedback", () => {
     );
     expect(botConfirm).toContain('setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }))');
     expect(botConfirm).toContain("setProvidersRemoveOutcome({");
-    const targetConfirm = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
-    expect(targetConfirm).toContain("setOpsNotice(");
+    // The App-scoped ops zone lives on the App detail page and reports into
+    // its own region there.
+    const detailSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
+    const targetConfirm = detailSource.slice(
+      detailSource.indexOf("async function onConfirm"),
+      detailSource.indexOf("const confirmCopy"),
+    );
+    expect(targetConfirm).toContain("setNotice(");
     expect(targetConfirm).not.toContain("setProvidersRemoveOutcome(");
-    expect(source).toContain("notice={opsNotice}");
+    expect(detailSource).toContain("notice={notice}");
     expect(source).toContain("notice={providersNotice}");
     expect(source).toContain("notice={chainsNotice}");
     // the removes no longer write the card-level providers state —
@@ -2380,8 +2371,12 @@ describe("GitHub App settings link wiring (AD-623)", () => {
     // `can_manage` and `workspace_id` (never a path-derived value).
     // `canManage` is the bot's writability, not the workspace role: a Blocked
     // target is a manager face whose bot-scope actions must not render.
+    // The App settings body is the identity-only face: it threads
+    // `canManage={false}` because the App is not writable from there whatever
+    // the payload says (the manager surfaces are the App page's own sections
+    // and the repository detail's policy tab).
     expect(source).toContain(
-      "<AppInfoSection\n          locale={locale}\n          app={app}\n          workspaceId={payload.workspace_id}\n          canManage={!blocked}\n          onReload={blocked ? undefined : () => onReload({ background: true })}\n        />",
+      "<AppInfoSection\n          locale={locale}\n          app={payload.app}\n          workspaceId={payload.workspace_id}\n          canManage={false}\n        />",
     );
     // The card body routes the manager target through the pure helper (the
     // forbidden derivations — github_name / the local slug — cannot reach the
@@ -2459,93 +2454,6 @@ describe("the tenant support notice renders nothing until the client read", () =
   });
 });
 
-describe("review gate section", () => {
-  test("an unreadable gate renders the read-only notice plus one reset that names the defaults", () => {
-    const unreadable = renderToStaticMarkup(
-      createElement(ReviewGateSection, {
-        locale: "en",
-        payload: { ...detailPayload(), check_gate: null },
-        onSettings: noopSave,
-      }),
-    );
-    // The copy's apostrophe is HTML-escaped in the markup, so the pin is the
-    // sentence fragment that carries no special characters.
-    expect(t("en", "settings.reviewGateUnreadable")).toContain("stored review gate could not be read");
-    expect(unreadable).toContain("stored review gate could not be read");
-    // The editor stays unreachable — there is no value to round-trip.
-    expect(unreadable).not.toContain(t("en", "settings.reviewGateScore"));
-    expect(unreadable).not.toContain(t("en", "settings.reviewGateSave"));
-    // The recovery control names the DDL defaults it writes back (migration 0045).
-    const resetLabel = t("en", "settings.reviewGateReset", { score: 80, verdicts: "ship it" });
-    expect(resetLabel).toContain("80");
-    expect(resetLabel).toContain("ship it");
-    expect(unreadable).toContain(resetLabel);
-
-    const readable = renderToStaticMarkup(
-      createElement(ReviewGateSection, {
-        locale: "en",
-        payload: detailPayload(),
-        onSettings: noopSave,
-      }),
-    );
-    expect(readable).toContain(t("en", "settings.reviewGateSave"));
-    expect(readable).not.toContain("stored review gate could not be read");
-    // A readable gate is edited, never reset — one recovery per face.
-    expect(readable).not.toContain(resetLabel);
-  });
-
-  test("the reset posts the default gate through the existing save-check-gate op", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1/settings");
-    try {
-      const calls: Array<Record<string, string> | URLSearchParams> = [];
-      const container = win.document.createElement("div");
-      win.document.body.appendChild(container);
-      const root = createRoot(container as unknown as Element);
-      await act(async () =>
-        root.render(
-          createElement(ReviewGateSection, {
-            locale: "en",
-            payload: { ...detailPayload(), check_gate: null },
-            onSettings: async (fields) => {
-              calls.push(fields);
-              return { kind: "success", message: "Saved the review gate for Acme." };
-            },
-          }),
-        ),
-      );
-
-      const resetLabel = t("en", "settings.reviewGateReset", { score: 80, verdicts: "ship it" });
-      const button = [...container.querySelectorAll("button")].find(
-        (candidate) => candidate.textContent === resetLabel,
-      );
-      expect(button).toBeDefined();
-      await act(async () => {
-        button?.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
-      });
-
-      expect(calls).toHaveLength(1);
-      const fields = calls[0]!;
-      const params =
-        fields instanceof URLSearchParams ? fields : new URLSearchParams(fields as Record<string, string>);
-      // The same op the editor posts — the same row, re-written without ever
-      // reading it; no second writer and no new route.
-      expect(params.get("op")).toBe("save-check-gate");
-      expect(params.get("min_score")).toBe("80");
-      expect(params.getAll("pass_verdicts")).toEqual(["ship it"]);
-      // The outcome lands in the section's own region.
-      expect(
-        [...container.querySelectorAll('[role="status"]')].some((node) =>
-          node.textContent?.includes("Saved the review gate for Acme."),
-        ),
-      ).toBe(true);
-
-      await act(async () => root.unmount());
-    } finally {
-      cleanup();
-    }
-  });
-});
-
 describe("review depth control", () => {
   test("the four faces carry the plan's vocabulary in both locales", () => {
     expect(reviewDepthOptions("en", "default").map((option) => [option.value, option.label])).toEqual([
@@ -2564,47 +2472,33 @@ describe("review depth control", () => {
     ]);
   });
 
-  test("managers get the depth control; the identity-only face renders none", () => {
-    const name = t("en", "settings.reviewDepth");
-    const manager = renderToStaticMarkup(
-      createElement(SettingsView, { locale: "en", payload: detailPayload(), onReload: async () => true }),
-    );
-    expect(manager).toContain(name);
-    const member = renderToStaticMarkup(
-      createElement(SettingsView, { locale: "en", payload: memberPayload(), onReload: async () => true }),
-    );
-    expect(member).not.toContain(name);
-  });
 });
 
 /**
  * The settings sections split by OWNER: the bot's credentials, providers,
  * chains, seats, sandbox image and installations are bot-scoped and live on
- * the bot page; the workspace's review policy (trigger, depth, gate,
- * allowlist, pause) is what the target detail keeps.
+ * the bot page; the review policy (trigger, depth, gate, allowlist, pause)
+ * belongs to the repository surface's target detail. The App page's settings
+ * body is the identity card alone — it has no manager branch left to render.
  */
 describe("bot-scoped sections left the target detail", () => {
-  test("the settings view renders no bot-scoped section, and keeps every target-scoped one", () => {
+  test("the App settings body renders the identity card and nothing else", () => {
     const markup = renderToStaticMarkup(
-      createElement(SettingsView, { locale: "en", payload: detailPayload(), onReload: async () => true }),
+      createElement(SettingsView, { locale: "en", payload: detailPayload() }),
     );
+    expect(markup).toContain(t("en", "settings.appInfo"));
     for (const key of [
       "settings.providers.title",
       "settings.modelChains",
       "settings.seats",
       "settings.runtimeHarness",
       "settings.installations",
-    ] as const) {
-      expect(markup, key).not.toContain(t("en", key));
-    }
-    for (const key of [
-      "settings.appInfo",
       "settings.reviewTrigger",
       "settings.reviewDepth",
       "settings.reviewGate",
       "settings.ops",
     ] as const) {
-      expect(markup, key).toContain(t("en", key));
+      expect(markup, key).not.toContain(t("en", key));
     }
   });
 

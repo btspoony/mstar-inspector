@@ -485,7 +485,6 @@ const SURFACES: readonly Surface[] = [
           createElement(SettingsView, {
             locale: "en",
             payload: SETTINGS_PAYLOAD,
-            onReload: () => Promise.resolve(true),
           }),
         ),
       ),
