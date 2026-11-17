@@ -84,8 +84,8 @@ describe("product nav containment (I-000253)", () => {
         (button) => button.textContent,
       );
       expect(labels).toEqual([
-        t("en", "nav.apps"),
         t("en", "nav.targets"),
+        t("en", "nav.apps"),
         t("en", "nav.members"),
         t("en", "nav.settings"),
       ]);

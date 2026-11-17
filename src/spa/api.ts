@@ -73,3 +73,24 @@ export async function putJson(url: string, body: unknown): Promise<{ status: num
   return { status: res.status, body: await res.text() };
 }
 
+/**
+ * POST a JSON body; the 4xx body comes back for the caller to parse (the
+ * add-repository refusal names the repositories that already existed). A 3xx
+ * is the session-expiry redirect and is followed exactly as the other verbs do.
+ */
+export async function postJson(url: string, body: unknown): Promise<{ status: number; body: string }> {
+  const res = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    redirect: "manual",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status >= 300 && res.status < 400) {
+    const location = res.headers.get("Location");
+    if (location) window.location.replace(location);
+    throw new ApiError(res.status, "");
+  }
+  return { status: res.status, body: await res.text() };
+}
+

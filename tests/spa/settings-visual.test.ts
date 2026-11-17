@@ -173,9 +173,7 @@ describe("settings section flow (r3 baseline § 5)", () => {
     };
     for (const [section, end, titleKey] of [
       ["export function AppInfoSection", "export function AppInstallSection", "settings.appInfo"],
-      ["export function AppInstallSection", "export function AllowlistSection", "settings.install"],
-      ["export function AllowlistSection", "export function ReviewGateSection", "settings.allowlist"],
-      ["export function ReviewTriggerSection", "export function RuntimeHarnessEditor", "settings.reviewTrigger"],
+      ["export function AppInstallSection", "export function RuntimeHarnessEditor", "settings.install"],
       ["export function ChainsSection", "export function SeatsSection", "settings.modelChains"],
       ["export function SeatsSection", "export function DraftChainPanel", "settings.seats"],
       ["function OpsSection", "export function WorkspaceNameCard", "settings.ops"],
@@ -191,20 +189,21 @@ describe("settings section flow (r3 baseline § 5)", () => {
     expect(providersSource).not.toContain("<SectionCard");
   });
 
-  test("the target settings tab's section order is identity, trigger, depth, gate, ops", () => {
-    // The bot-owned sections (sandbox image, providers, chains, seats,
-    // installations) live on the bot page; the target keeps its own policy.
-    let cursor = -1;
-    for (const marker of [
-      "<AppInfoSection",
-      "<ReviewTriggerSection",
-      "<ReviewDepthSection",
-      "<ReviewGateSection",
-      "<OpsSection",
-    ]) {
-      const at = settingsTabSource.indexOf(marker, cursor + 1);
-      expect(at, marker).toBeGreaterThan(cursor);
-      cursor = at;
+  test("the App settings body keeps the identity card only; the target policy lives on the repository surface", () => {
+    // Plan 371's owner split: the App page's settings body has no target-owned
+    // section at all, and the review-policy sections that used to be declared
+    // here are gone with the manager branch nothing could reach.
+    const view = settingsTabSource.slice(
+      settingsTabSource.indexOf("export function SettingsView"),
+      settingsTabSource.indexOf("export function pendingConfirmCopy"),
+    );
+    expect(view).toContain("<AppInfoSection");
+    // OpsSection survives (the App page's own danger zone), only the three
+    // target-owned policy sections are gone.
+    expect(settingsTabSource).toContain("export function OpsSection");
+    for (const marker of ["<ReviewTriggerSection", "<ReviewDepthSection", "<ReviewGateSection"]) {
+      expect(settingsTabSource, marker).not.toContain(`export function ${marker.slice(1)}`);
+      expect(view, marker).not.toContain(marker);
     }
     // The sections are direct siblings of one flow plane: the manage face
     // opens that plane once and never re-groups it into tiers.
@@ -244,8 +243,9 @@ describe("settings heading idiom (QC convergence)", () => {
           locale: "en",
           appId: "1",
           payload: detailPayload(),
+          groups: [],
           notice: null,
-          search: { tab: "insights", window: "30", repo: "", pr: "" },
+          search: { tab: "settings", window: "30", repo: "", pr: "" },
           onReload: async () => true,
           onSearch: () => {},
         }),
@@ -580,7 +580,7 @@ describe("the bot page carries the moved sections", () => {
     deliveries: [],
   });
 
-  test("a manager's bot page renders credentials health, providers, chains, seats, sandbox image and installations", () => {
+  test("a manager's bot sections render credentials health, providers, chains, seats and the sandbox image", () => {
     const markup = renderToStaticMarkup(
       createElement(BotSettingsView, {
         locale: "en",
@@ -602,8 +602,6 @@ describe("the bot page carries the moved sections", () => {
     expect(markup).toContain(t("en", "settings.seats"));
     // Sandbox image: the selector carries the stored id.
     expect(markup).toContain("omp");
-    // Installations: the bot's installation rows.
-    expect(markup).toContain("987654");
   });
 
   test("a shared bot's page renders the same sections read-only", () => {

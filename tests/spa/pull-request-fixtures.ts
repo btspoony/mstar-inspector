@@ -468,7 +468,7 @@ export async function mountTabWithGatedFetch(initialPr: string) {
   let setTarget: (next: string) => void = () => {};
   function Harness() {
     const [search, set] = useState<AppDetailSearch>({
-      tab: "pull-requests",
+      tab: "settings",
       window: "30",
       repo: "",
       pr: initialPr,
@@ -522,7 +522,7 @@ export async function mountTabAcrossTargets(
   let setTarget: (next: string) => void = () => {};
   function Harness() {
     const [search, setSearch] = useState<AppDetailSearch>({
-      tab: "pull-requests",
+      tab: "settings",
       window: "30",
       repo: "",
       pr: initialPr,

@@ -99,6 +99,26 @@ async function getJson(path: string, login: string, env: Env): Promise<Response>
   );
 }
 
+/** JSON-body POST helper for the target-addressed settings family. */
+async function postJson(
+  path: string,
+  login: string,
+  env: Env,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  return worker.fetch(
+    new Request(`https://worker.local${path}`, {
+      method: "POST",
+      headers: {
+        Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }),
+    env,
+  );
+}
+
 describe("settings 400 key transport", () => {
   test("add-key unknown provider → keyed JSON with the English face and params", async () => {
     const { db } = await seededWorld();
@@ -218,10 +238,10 @@ describe("settings 400 key transport", () => {
     });
   });
 
-  test("review-trigger-mode invalid value → keyed JSON naming the rejected mode", async () => {
+  test("an invalid trigger mode → keyed JSON naming the rejected mode", async () => {
     const { db } = await seededWorld();
-    const res = await postForm(`/dashboard/default/apps/${APP_ID}/review-trigger-mode`, "mallory", makeEnv(db), {
-      mode: "whenever",
+    const res = await postJson("/dashboard/default/api/targets/defaults", "mallory", makeEnv(db), {
+      trigger_mode: "whenever",
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
@@ -419,60 +439,6 @@ describe("review depth op (per-App review level)", () => {
       reads: () => reads,
     };
   };
-
-  /** The stored column — the zero-write / stored assertion. */
-  const storedLevel = (db: TestD1, appId: string): string | null => {
-    const row = db.raw
-      .query("SELECT review_level FROM review_targets WHERE bot_id = ?")
-      .get(appId) as {
-      review_level: string | null;
-    } | null;
-    return row?.review_level ?? null;
-  };
-
-  test("off-vocabulary level → keyed 400 naming the value, zero writes", async () => {
-    const { db, app } = await seededWorld();
-    const res = await postForm(SETTINGS, "mallory", makeEnv(db), { op: "save-review-level", level: "turbo" });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({
-      key: "settings.error.reviewLevelUnknown",
-      message:
-        "turbo is not a review depth — use quick, default, or deep (or inherit to follow the operator default). Nothing was stored.",
-      params: { level: "turbo" },
-    });
-    expect(storedLevel(db, app.id)).toBeNull();
-  });
-
-  test("a level stores; the inherit face writes the column back to NULL", async () => {
-    const { db, app } = await seededWorld();
-    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), { op: "save-review-level", level: "deep" });
-    expect(stored.status).toBe(200);
-    expect(storedLevel(db, app.id)).toBe("deep");
-    const inherit = await postForm(SETTINGS, "mallory", makeEnv(db), { op: "save-review-level", level: "inherit" });
-    expect(inherit.status).toBe(200);
-    expect(storedLevel(db, app.id)).toBeNull();
-  });
-
-  test("native form navigation keeps the 302 back to the target page", async () => {
-    const { db, app } = await seededWorld();
-    const res = await postForm(
-      SETTINGS,
-      "mallory",
-      makeEnv(db),
-      { op: "save-review-level", level: "quick" },
-      { Accept: "text/html" },
-    );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
-    expect(storedLevel(db, app.id)).toBe("quick");
-  });
-
-  test("a plain member's save answers 403 and stores nothing", async () => {
-    const { db, app } = await seededWorld("member");
-    const res = await postForm(SETTINGS, "mallory", makeEnv(db), { op: "save-review-level", level: "deep" });
-    expect(res.status).toBe(403);
-    expect(storedLevel(db, app.id)).toBeNull();
-  });
 
   test("the manager face carries review_level + the operator default; the member face carries neither", async () => {
     const { db } = await seededWorld("member");

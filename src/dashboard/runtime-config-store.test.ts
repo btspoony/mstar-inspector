@@ -75,7 +75,6 @@ import {
   setDefaultReviewLevel,
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
-  setWorkspaceCheckMinScore,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
@@ -950,40 +949,15 @@ describe("recheck assignment budget", () => {
 });
 
 describe("workspace check_min_score default", () => {
-  const ACTION = "workspace.check_min_score.set";
-
-  test("NULL reads the platform default; a stored value round-trips and is audited", async () => {
+  test("NULL reads the platform default; a stored value round-trips", async () => {
     const db = fixture();
     expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: 60, degraded: false });
-
-    expect(await setWorkspaceCheckMinScore(db, WS, 45, ACTOR)).toBe(45);
-    expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: 45, degraded: false });
-    expect(auditDetails(db, ACTION)).toEqual([{ before: null, after: 45 }]);
 
     // The ends of the accepted range are real values, not the default.
-    expect(await setWorkspaceCheckMinScore(db, WS, 0, ACTOR)).toBe(0);
-    expect(await setWorkspaceCheckMinScore(db, WS, 100, ACTOR)).toBe(100);
-    expect(auditDetails(db, ACTION)).toEqual([
-      { before: null, after: 45 },
-      { before: 45, after: 0 },
-      { before: 0, after: 100 },
-    ]);
-  });
-
-  test("out-of-range and fractional values are refused with no write and no audit row", async () => {
-    const db = fixture();
-    for (const bad of [-1, 101, 60.5, Number.NaN]) {
-      await expect(setWorkspaceCheckMinScore(db, WS, bad, ACTOR)).rejects.toThrow(/check_min_score/);
+    for (const value of [45, 0, 100]) {
+      db.raw.prepare("UPDATE workspaces SET check_min_score = ? WHERE id = ?").run(value, WS);
+      expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: value, degraded: false });
     }
-    expect(auditDetails(db, ACTION)).toEqual([]);
-    expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: 60, degraded: false });
-  });
-
-  test("an unknown workspace is refused", async () => {
-    const db = fixture();
-    await expect(setWorkspaceCheckMinScore(db, "ws_missing", 50, ACTOR)).rejects.toMatchObject({
-      reason: "unknown_workspace",
-    });
   });
 
   test("an untrusted stored value reads the platform default, flagged", async () => {
@@ -998,11 +972,6 @@ describe("workspace check_min_score default", () => {
       degraded: true,
       reason: "untrusted",
     });
-
-    // An untrusted stored value was never in effect, so the ledger records the
-    // absent state, not the platform default it degraded to.
-    await setWorkspaceCheckMinScore(db, WS, 75, ACTOR);
-    expect(auditDetails(db, ACTION)).toEqual([{ before: null, after: 75 }]);
   });
 
   test("a present row without the selected field degrades as malformed, not as absent", async () => {
@@ -1046,25 +1015,6 @@ describe("workspace check_min_score default", () => {
       degraded: true,
       reason: "read-failed",
     }));
-
-  test("an out-of-range integer stored by a foreign writer also records the absent state", async () => {
-    const db = fixture();
-    // Wrong TYPE (the case above) and wrong RANGE are separate trust failures:
-    // only the audit CASE's BETWEEN guard refuses 150, so dropping that guard
-    // must fail here.
-    db.raw.exec("PRAGMA ignore_check_constraints = ON");
-    db.raw.prepare("UPDATE workspaces SET check_min_score = 150 WHERE id = ?").run(WS);
-    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
-    // Prove the corruption landed: a silently refused write would leave the
-    // seeded 60 in place and make the audit assertion below pass for free.
-    const stored = db.raw
-      .prepare("SELECT check_min_score AS value FROM workspaces WHERE id = ?")
-      .get(WS) as { value: number | null };
-    expect(stored.value).toBe(150);
-
-    await setWorkspaceCheckMinScore(db, WS, 75, ACTOR);
-    expect(auditDetails(db, ACTION)).toEqual([{ before: null, after: 75 }]);
-  });
 
   test("a retired workspace is absent, and a read failure answers the default, flagged", async () => {
     const db = fixture();

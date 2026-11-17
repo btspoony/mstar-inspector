@@ -123,12 +123,13 @@ describe("AppsPage create eligibility — addressed workspace", () => {
 });
 
 /**
- * The creation chooser: two modes on one control. Official mode lists the
- * shared bots the list payload offered and posts one selection to the
- * workspace's create route; self-hosted mode is the manifest flow, untouched.
- * Mounted, because the chooser lives in a Radix dialog portal.
+ * The Create dialog: the Apps page creates Apps, never targets. Its two exits
+ * are the repository surface's add flow (the only target creator) and the
+ * self-hosted manifest flow. Shared bots are information here — the dialog
+ * names them and posts NOTHING to `/api/targets`.
+ * Mounted, because the dialog lives in a Radix portal.
  */
-describe("AppsPage create chooser", () => {
+describe("AppsPage create dialog", () => {
   const SHARED = { id: "bot-platform", github_slug: "platform-app", name: "Platform App", target_count: 1 };
 
   type Sent = { url: string; method: string; body: string };
@@ -180,17 +181,12 @@ describe("AppsPage create chooser", () => {
         node?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
     const dialog = (): DomElement | null => win.document.querySelector('[role="dialog"]');
-    const modeItem = (label: string): DomElement | null =>
-      [...win.document.querySelectorAll('[data-slot="toggle-group-item"]')].find(
-        (node) => node.textContent === label,
-      ) ?? null;
 
     return {
       win,
       sent,
       dialog,
-      modeItem,
-      /** Open the chooser from the page's Create control. */
+      /** Open the dialog from the page's Create control. */
       async open() {
         const trigger =
           [...win.document.querySelectorAll("button")].find(
@@ -198,37 +194,14 @@ describe("AppsPage create chooser", () => {
           ) ?? null;
         await click(trigger);
       },
-      /** The dialog's submit for the ACTIVE mode, found by its label. */
-      submitButton(label: string): DomElement | null {
+      /** The repository-surface link the dialog offers as its creation path. */
+      addLink(): DomElement | null {
+        const href = `${apiBase()}/targets`;
         return (
-          [...(dialog()?.querySelectorAll("button") ?? [])].find((node) => node.textContent === label) ?? null
+          [...(dialog()?.querySelectorAll("a") ?? [])].find(
+            (node) => node.getAttribute("href") === href && node.textContent === t("en", "targets.add"),
+          ) ?? null
         );
-      },
-      /** Open the shared-bot Select and choose the option whose text starts with `name`. */
-      async pickBot(name: string) {
-        const trigger = dialog()?.querySelector('[data-slot="select-trigger"]') ?? null;
-        await drain(() => {
-          trigger?.dispatchEvent(
-            new win.PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }),
-          );
-          trigger?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
-        });
-        const option =
-          [...win.document.querySelectorAll('[role="option"]')].find((node) =>
-            node.textContent?.startsWith(name),
-          ) ?? null;
-        await drain(() => {
-          option?.dispatchEvent(
-            new win.PointerEvent("pointerup", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }),
-          );
-          option?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
-        });
-      },
-      async submit() {
-        const form = dialog()?.querySelector('[data-slot="create-target-form"]') ?? null;
-        await drain(() => {
-          form?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
-        });
       },
       async cleanup() {
         globalThis.fetch = realFetch;
@@ -238,55 +211,32 @@ describe("AppsPage create chooser", () => {
     };
   }
 
-  test("official mode lists the shared bots and needs one selection before it posts", async () => {
+  test("the dialog links to the repository add flow and posts no target", async () => {
     const page = await mountPage("/dashboard/acme/apps", [SHARED]);
     try {
       await page.open();
       expect(page.dialog()).not.toBeNull();
-      // Two modes; official is the default because the platform shares a bot.
-      expect(page.modeItem(t("en", "apps.createDialog.modeOfficial"))).not.toBeNull();
-      expect(page.modeItem(t("en", "apps.createDialog.modeSelfHosted"))).not.toBeNull();
-
-      // Nothing is selected yet, so the submit stays disabled and a submit
-      // event posts nothing.
-      expect(page.submitButton(t("en", "apps.createDialog.submit"))?.hasAttribute("disabled")).toBe(true);
-      await page.submit();
+      // The one target-creation entry is the repository surface's add flow.
+      expect(page.addLink()?.getAttribute("href")).toBe("/dashboard/acme/targets");
+      // No target form, no Select, no submit-to-/api/targets path.
+      expect(page.dialog()?.querySelector('[data-slot="create-target-form"]')).toBeNull();
+      expect(page.dialog()?.querySelector("form[action$='/api/targets']")).toBeNull();
+      // Shared bots are information: the bot is named, nothing more.
+      expect(page.dialog()?.querySelector('[data-slot="shared-bots"]')?.textContent).toContain("Platform App");
       expect(page.sent.filter((request) => request.method === "POST")).toHaveLength(0);
-
-      await page.pickBot("Platform App");
-      expect(page.submitButton(t("en", "apps.createDialog.submit"))?.hasAttribute("disabled")).toBe(false);
-      await page.submit();
-
-      const posts = page.sent.filter((request) => request.method === "POST");
-      expect(posts).toHaveLength(1);
-      expect(posts[0]?.url).toBe("/dashboard/acme/api/targets");
-      expect(new URLSearchParams(posts[0]?.body).get("botId")).toBe(SHARED.id);
-      // The list is re-read once the write lands.
-      expect(page.sent.filter((request) => request.method === "GET")).toHaveLength(2);
     } finally {
       await page.cleanup();
     }
   });
 
-  test("a malformed shared-bot block disables official mode and leaves self-hosted usable", async () => {
+  test("the self-hosted manifest flow stays available beside it", async () => {
     const page = await mountPage("/dashboard/acme/apps", [{ id: 7, name: "Broken" }]);
     try {
       await page.open();
-      expect(page.modeItem(t("en", "apps.createDialog.modeOfficial"))?.hasAttribute("disabled")).toBe(true);
-      expect(page.modeItem(t("en", "apps.createDialog.modeSelfHosted"))?.hasAttribute("disabled")).toBe(false);
-      // The manifest flow is what this dialog offers instead, unchanged.
       expect(page.dialog()?.querySelector('form[action="/dashboard/acme/manifest/start"]')).not.toBeNull();
-    } finally {
-      await page.cleanup();
-    }
-  });
-
-  test("a payload with no shared_bots key at all keeps the manifest flow", async () => {
-    const page = await mountPage("/dashboard/acme/apps", undefined);
-    try {
-      await page.open();
-      expect(page.modeItem(t("en", "apps.createDialog.modeOfficial"))?.hasAttribute("disabled")).toBe(true);
-      expect(page.dialog()?.querySelector('form[action="/dashboard/acme/manifest/start"]')).not.toBeNull();
+      expect(page.addLink()).not.toBeNull();
+      // A malformed shared-bot block reads as none — the dialog says so.
+      expect(page.dialog()?.textContent).toContain(t("en", "apps.createDialog.noSharedBots"));
     } finally {
       await page.cleanup();
     }

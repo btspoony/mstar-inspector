@@ -30,7 +30,13 @@
  */
 import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
-import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
+import {
+  CHECK_MIN_SCORE_MAX,
+  CHECK_MIN_SCORE_MIN,
+  DEFAULT_CHECK_MIN_SCORE,
+  isCheckMinScoreValue,
+} from "../contracts/review-gate";
+import { UnknownWorkspaceError } from "./runtime-config-store";
 
 /**
  * The per-target auto-trigger vocabulary (exact enum spelling is wire-visible:
@@ -118,6 +124,16 @@ export type ReviewTargetRow = {
 };
 
 /**
+ * A row of the repository list (product spec J1): the target's own columns plus
+ * the bot's display name and the newest review stamp. `last_reviewed_at` is
+ * `null` for a repository no review has finished on yet.
+ */
+export type LiveTargetListRow = ReviewTargetRow & {
+  app_name: string;
+  last_reviewed_at: string | null;
+};
+
+/**
  * The workspace-level answers a following target inherits (`workspaces`
  * columns): the floor is the existing `check_min_score` (0049), the other three
  * are the `default_*` columns of 0067.
@@ -169,6 +185,14 @@ type TargetsStoreD1 = {
   prepare(query: string): TargetsStoreStatement;
 };
 
+/**
+ * The one write that must be atomic (a floor change plus its ledger row):
+ * `batch` runs the statements as ONE transaction, same as D1.
+ */
+type TargetsStoreBatchD1 = TargetsStoreD1 & {
+  batch(statements: TargetsStoreStatement[]): Promise<Array<{ meta: { changes: number } }>>;
+};
+
 /** Input for `create` — the caller owns the workspace, bot and repository facts. */
 export type CreateTargetInput = {
   workspaceId: string;
@@ -214,12 +238,15 @@ export type TargetReviewConfig = {
 const LIVE_TARGET = "id = ? AND workspace_id = ? AND deleted_at IS NULL";
 
 /**
- * The duplicate rule, shared by every create: a live row in this workspace
- * holding the same `repo_id`, OR the same owner/name while still unclaimed —
- * a migrated row IS the same repository (D15). This one predicate backs both
- * the add-repository refusal and the webhook claim's re-entry.
+ * The duplicate rule, shared by every create: a live row of this BOT holding
+ * the same `repo_id` (0068 — one repository belongs to one workspace per bot,
+ * so a sibling workspace's row is the same claim), OR the same owner/name
+ * while still unclaimed — a migrated row IS the same repository (D15). This
+ * one predicate backs both the add-repository refusal and the webhook claim's
+ * re-entry, and it mirrors `review_targets_bot_repo_unique` so the guarded
+ * insert refuses instead of tripping the index.
  */
-const DUPLICATE_REPO = `t.workspace_id = ?2 AND t.deleted_at IS NULL
+const DUPLICATE_REPO = `t.bot_id = ?3 AND t.deleted_at IS NULL
    AND (t.repo_id = ?4
         OR (t.repo_id IS NULL AND t.repo_owner = ?5 COLLATE NOCASE
             AND t.repo_name = ?6 COLLATE NOCASE))`;
@@ -284,6 +311,123 @@ export async function getWorkspaceReviewDefaults(
     checkPassVerdicts: [...(verdicts ?? [])],
     checkPassVerdictsReadable: verdicts !== null,
   };
+}
+
+/**
+ * `setWorkspaceReviewDefaults`'s input: the `workspaces` columns a caller
+ * names — the three `default_*` review answers plus the gate floor
+ * (`check_min_score`, 0049). An absent key is left untouched, like
+ * `setReviewConfig`; `level: null` is a real value.
+ */
+export type WorkspaceReviewDefaultPatch = {
+  triggerMode?: ReviewTriggerMode;
+  level?: ReviewLevel | null;
+  checkPassVerdicts?: readonly PrVerdict[];
+  checkMinScore?: number;
+};
+
+/**
+ * The ledger's `before` is the floor the workspace actually RAN with: a trusted
+ * integer records itself, while the absent state and every untrusted value
+ * record `null` — the platform default is a fallback, never a floor anything
+ * stored, so naming it would attribute a value that was never in effect.
+ */
+const CHECK_MIN_SCORE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'workspace.check_min_score.set', 'workspace', ?3,
+         json_object('before', (SELECT CASE
+                                        WHEN typeof(check_min_score) = 'integer'
+                                         AND check_min_score BETWEEN ${CHECK_MIN_SCORE_MIN} AND ${CHECK_MIN_SCORE_MAX}
+                                        THEN check_min_score
+                                        ELSE NULL END
+                                  FROM workspaces WHERE id = ?3),
+                     'after', ?4),
+         ?5
+   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
+
+/**
+ * THE writer of the workspace's review defaults (`/api/targets/defaults`) and
+ * of its gate floor — the floor is `workspaces.check_min_score`, and the
+ * legacy `PUT /api/settings/check-min-score` delegates here, so exactly one
+ * statement stores it.
+ *
+ * Every value is validated before the first write, so an off-vocabulary value
+ * leaves every column untouched. A named floor rides a `batch`: its audit row
+ * reads the OLD value, so it must run before the UPDATE, in one transaction.
+ * Throws `UnknownWorkspaceError` when named columns matched no live row;
+ * `false` means the caller named nothing.
+ */
+export async function setWorkspaceReviewDefaults(
+  db: TargetsStoreBatchD1,
+  workspaceId: string,
+  patch: WorkspaceReviewDefaultPatch,
+  actor: string,
+): Promise<boolean> {
+  const assignments: string[] = [];
+  const values: unknown[] = [];
+  if (patch.triggerMode !== undefined) {
+    if (!REVIEW_TRIGGER_MODES.includes(patch.triggerMode)) {
+      throw new Error(
+        `targets-store: default review trigger mode ${JSON.stringify(patch.triggerMode)} is not on the vocabulary (${REVIEW_TRIGGER_MODES.join(" | ")}) — zero rows written`,
+      );
+    }
+    assignments.push("default_review_trigger_mode = ?");
+    values.push(patch.triggerMode);
+  }
+  if (patch.level !== undefined) {
+    if (patch.level !== null && !isReviewLevel(patch.level)) {
+      throw new Error(
+        `targets-store: default review level ${JSON.stringify(patch.level)} is not on the vocabulary (${REVIEW_LEVELS.join(" | ")}) — zero rows written`,
+      );
+    }
+    assignments.push("default_review_level = ?");
+    values.push(patch.level);
+  }
+  if (patch.checkPassVerdicts !== undefined) {
+    for (const verdict of patch.checkPassVerdicts) {
+      if (!PR_VERDICTS.includes(verdict)) {
+        throw new Error(
+          `targets-store: default check gate verdict ${JSON.stringify(verdict)} is not on PR_VERDICTS (${PR_VERDICTS.join(" | ")}) — zero rows written`,
+        );
+      }
+    }
+    assignments.push("default_check_pass_verdicts = ?");
+    values.push(JSON.stringify(patch.checkPassVerdicts));
+  }
+  if (patch.checkMinScore !== undefined) {
+    if (!isCheckMinScoreValue(patch.checkMinScore)) {
+      throw new Error(
+        `targets-store: workspace check gate min score ${JSON.stringify(patch.checkMinScore)} is outside 0..100 — zero rows written`,
+      );
+    }
+    assignments.push("check_min_score = ?");
+    values.push(patch.checkMinScore);
+  }
+  if (assignments.length === 0) return false;
+  const update = db.prepare(
+    `UPDATE workspaces SET ${assignments.join(", ")}
+      WHERE id = ? AND deleted_at IS NULL`,
+  );
+  const changes =
+    patch.checkMinScore === undefined
+      ? (await update.bind(...values, workspaceId).run()).meta.changes
+      : (
+          await db.batch([
+            db
+              .prepare(CHECK_MIN_SCORE_AUDIT_SQL)
+              .bind(
+                crypto.randomUUID(),
+                actor,
+                workspaceId,
+                patch.checkMinScore,
+                new Date().toISOString(),
+              ),
+            update.bind(...values, workspaceId),
+          ])
+        )[1]?.meta.changes ?? 0;
+  if (changes === 0) throw new UnknownWorkspaceError(workspaceId);
+  return true;
 }
 
 /**
@@ -393,8 +537,9 @@ export function createTargetsStore(db: TargetsStoreD1) {
   return {
     /**
      * Insert one repository target for a bot and read it back. The duplicate
-     * rule refuses a live row of the same repository (an already-added one, or
-     * a migrated row still unclaimed) with nothing written.
+     * rule refuses a live row of the same BOT for that repository (an
+     * already-added one, here or in a sibling workspace, or a migrated row
+     * still unclaimed) with nothing written.
      */
     async create(input: CreateTargetInput): Promise<CreateTargetOutcome> {
       const repoOwner = input.repoOwner.trim();
@@ -431,6 +576,18 @@ export function createTargetsStore(db: TargetsStoreD1) {
         .first<ReviewTargetRow>();
     },
 
+    /** How many live targets this workspace holds — the list's count pill. */
+    async countLive(workspaceId: string): Promise<number> {
+      const row = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM review_targets
+            WHERE workspace_id = ? AND deleted_at IS NULL`,
+        )
+        .bind(workspaceId)
+        .first<{ n: number }>();
+      return row?.n ?? 0;
+    },
+
     /** The workspace's live targets, newest first (stable id tiebreak). */
     async listLive(workspaceId: string): Promise<ReviewTargetRow[]> {
       const res = await db
@@ -441,6 +598,29 @@ export function createTargetsStore(db: TargetsStoreD1) {
         )
         .bind(workspaceId)
         .all<ReviewTargetRow>();
+      return res.results;
+    },
+
+    /**
+     * The repository list's ONE read (product spec J1): each live target with
+     * the bot's display name and its newest review stamp. A join beats a
+     * per-row App read, and the stamp subquery rides
+     * `idx_reviews_target_reviewed_at` — never a scan of every workspace's
+     * reviews.
+     */
+    async listLiveWithApp(workspaceId: string): Promise<LiveTargetListRow[]> {
+      const res = await db
+        .prepare(
+          `SELECT t.*,
+                  COALESCE(b.github_name, b.github_slug, CAST(b.github_app_id AS TEXT)) AS app_name,
+                  (SELECT MAX(r.reviewed_at) FROM reviews r WHERE r.target_id = t.id) AS last_reviewed_at
+             FROM review_targets t
+             LEFT JOIN review_bots b ON b.id = t.bot_id
+            WHERE t.workspace_id = ? AND t.deleted_at IS NULL
+            ORDER BY t.created_at DESC, t.id`,
+        )
+        .bind(workspaceId)
+        .all<LiveTargetListRow>();
       return res.results;
     },
 
@@ -481,16 +661,16 @@ export function createTargetsStore(db: TargetsStoreD1) {
      * one, matching `idx_review_targets_bot_owner_name`.
      *
      * No hit → null and the delivery is ignored with 200. A claim refuses to
-     * take an id another live row of the same workspace already holds: one
-     * repository belongs to one workspace, and silently reviewing twice would
-     * be worse than ignoring the delivery.
+     * take an id another live row of the same BOT already holds (0068): one
+     * repository belongs to one workspace per App, and silently reviewing
+     * twice would be worse than ignoring the delivery.
      */
     async resolveByRepo(
       botId: string,
       repo: { id: number | null; owner: string; name: string },
     ): Promise<ReviewTargetRow | null> {
       if (repo.id !== null) {
-        // The workspace/repository unique index makes this at most one row.
+        // The bot/repository unique index (0068) makes this at most one row.
         const hit = await db
           .prepare(
             `SELECT * FROM review_targets
@@ -537,7 +717,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
                 SET repo_id = ?, repo_owner = ?, repo_name = ?, updated_at = datetime('now')
               WHERE id = ? AND repo_id IS NULL AND deleted_at IS NULL
                 AND NOT EXISTS (SELECT 1 FROM review_targets x
-                                 WHERE x.workspace_id = review_targets.workspace_id
+                                 WHERE x.bot_id = review_targets.bot_id
                                    AND x.repo_id = ? AND x.deleted_at IS NULL)`,
           )
           .bind(repo.id, repo.owner, repo.name, legacy.id, repo.id)
@@ -563,7 +743,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
                       AND x.repo_owner IS NULL AND x.repo_name IS NULL
                       AND x.deleted_at IS NULL) = 1
               AND NOT EXISTS (SELECT 1 FROM review_targets y
-                               WHERE y.workspace_id = review_targets.workspace_id
+                               WHERE y.bot_id = review_targets.bot_id
                                  AND y.repo_id = ? AND y.deleted_at IS NULL)`,
         )
         .bind(repo.id, repo.owner, repo.name, botId, botId, repo.id)

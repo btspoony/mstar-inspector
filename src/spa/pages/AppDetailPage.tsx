@@ -1,30 +1,47 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
-import { t } from "../../i18n";
+import { t, type DictionaryKey } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
 import { MetricBand, type Metric } from "@/components/MetricBand";
-import { AllowlistSection, AppInstallSection, SettingsView } from "./SettingsPage";
-import { AppInsightsTab } from "./AppInsightsTab";
-import { AppPullRequestsTab } from "./AppPullRequestsTab";
-import { StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Button,
+  StatusBadge,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@design-system";
+import { AppInstallSection, OpsSection, SettingsView, pendingConfirmCopy, postPinnedOutcome } from "./SettingsPage";
+import { BotSettingsView } from "./BotSettingsPage";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
 import { apiBase } from "../workspace-base";
-import { PageNotice, type NoticeKind } from "./PageNotice";
+import { PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import {
   appDetailSearchQuery,
   appDisplayName,
   appStatusPill,
+  hasTargetFacts,
   parseAppDetailSearch,
+  parseModels,
   parseSettings,
   type AppDetailSearch,
   type BlockedReason,
-  type ReadScope,
+  type ModelOptionGroup,
   type SettingsPayload,
+  type TargetSettingsPayload,
 } from "./data";
+import type { PendingAction } from "./SettingsPage";
 
 /**
  * Page wayfinding link back to the Apps list. The href is the page's own API
@@ -66,34 +83,49 @@ export function AppDetailShell({
 }
 
 /**
- * One App detail read: the settings payload (the manage face carries the
- * model options) under the page's own base. `base` is a parameter, not
- * `apiBase()` inside, so the caller decides which workspace is being read —
- * and a test can drive the same read under two pathnames.
- * `can_manage` gates the second request: a non-manager sees no model editor.
+ * One App detail read: the settings payload under the page's own base. `base`
+ * is a parameter, not `apiBase()` inside, so the caller decides which
+ * workspace is being read — and a test can drive the same read under two
+ * pathnames.
  */
 export async function loadAppDetail(base: string, appId: string): Promise<SettingsPayload | null> {
   return parseSettings(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/settings`));
 }
 
 /**
- * The App detail page: `/dashboard/apps/:appId` and its workspace twin. The
- * target-owned review policy no longer lives here — it is the review-target
- * surface's detail body ({@link SettingsView} there) — so this page renders
- * the App's own faces: 洞察 ({@link AppInsightsTab}, the default tab), 已安装
- * and Pull requests, each ONLY when the payload says `can_manage`. A
- * non-manager keeps the D4 identity card it has always been served.
+ * The App's model options, which the chain editors name. A manager's read only
+ * — a member never reaches those editors — and a failed read leaves the
+ * editors' selectors empty rather than failing the whole page.
+ */
+async function loadModelGroups(base: string, appId: string): Promise<ModelOptionGroup[]> {
+  try {
+    return (
+      parseModels(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/models`))?.groups ?? []
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The App detail page: `/dashboard/apps/:appId` and its workspace twin, with
+ * exactly two faces — 应用设置 (the App's own configuration, the default) and
+ * 已安装. The data faces (洞察, Pull requests) and the target-owned review
+ * policy belong to the repository surface's detail page, so this page neither
+ * renders them nor reads their payload sections.
+ *
+ * A non-manager keeps the D4 identity card it has always been served.
  *
  * Page wayfinding (the back link to the Apps list) is the shell's —
  * rendered as the first element on the error and ok faces.
  *
- * Data plane: the shell owns the settings fetch (both faces — the
- * identity-only `can_manage: false` shape parses through the D4 identity
- * set; the manager face keeps the full contract) and the background-reload
- * machinery (unchanged contract: background reloads keep the card tree
- * mounted, failures ride the page notice). Tab + insights-filter state is
- * URL-derived per the spa-url-state-resync contract: one []-mounted
- * popstate listener re-derives through the shared pure helper
+ * Data plane: the shell owns the settings read (both faces — the
+ * identity-only `can_manage: false` shape parses through the D4 identity set;
+ * the manager face keeps the full contract) plus the chain editors' model
+ * options, and the background-reload machinery (background reloads keep the
+ * card tree mounted, failures ride the page notice). The active tab is
+ * URL-derived per the spa-url-state-resync contract: one []-mounted popstate
+ * listener re-derives through the shared pure helper
  * (`parseAppDetailSearch`), and every in-page edit commits with
  * `replaceState` (`appDetailSearchQuery`) — never popstate, so no loop.
  */
@@ -106,36 +138,17 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   // would leave the previous workspace's settings and model chain on screen.
   const base = apiBase();
   const [payload, setPayload] = useState<SettingsPayload | null>(null);
+  const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
-  // The can_manage gate as the payload states it, mirrored into a ref so
-  // the (registered-once) popstate listener and the mount/appId
-  // re-derivations read the CURRENT gate instead of a stale `false`
-  // closure — a manager's `?tab=insights` deep link and history
-  // back/forward must activate the insights tab. The mirror is written
-  // when the payload lands (the re-derivation effect below); until then
-  // `false` is the honest gate (nothing but settings can render anyway).
-  const canManageRef = useRef(false);
-
   // Mount-time URL state, re-derived on every popstate. `navigate()`
   // pushStates then dispatches a synthetic popstate (router.tsx), and
-  // history traversal fires the native event, so push and history both
-  // land here. `canManage` gates the insights tab: a non-manager's
-  // `?tab=insights` deep link resolves to the settings tab (the listener
-  // below re-reads the canManageRef mirror at call time; registration is
-  // once).
+  // history traversal fires the native event, so push and history both land
+  // here.
   const [search, setSearch] = useState<AppDetailSearch>(() =>
-    parseAppDetailSearch(window.location.search, canManageRef.current),
+    parseAppDetailSearch(window.location.search),
   );
-  // Whether the URL-requested tab has been committed against a landed
-  // payload. Until the payload effect below re-derives (or rewrites) the
-  // location, `search` still carries the mount-time gate (`false`) — a
-  // manager's `?tab=insights` deep link would first-paint the settings
-  // tab. The shell withholds the tab face (renders the loading skeleton)
-  // until this flips true; the demotion rewrite and the re-derivation
-  // both commit it.
-  const [searchReady, setSearchReady] = useState(false);
 
   // Background reloads (op-triggered refreshes) keep the loaded card tree
   // mounted: they must not flip state back to "loading" — that unmount would
@@ -155,7 +168,10 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           else setState("error");
           return false;
         }
+        const modelGroups = loaded.can_manage ? await loadModelGroups(base, appId) : [];
+        if (cancelledRef.current) return false;
         setPayload(loaded);
+        setGroups(modelGroups);
         setState("ok");
         // A healthy page has no page-level failure: any successful load —
         // foreground or background — clears the banner a failed background
@@ -177,47 +193,17 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
     cancelledRef.current = false;
     void load();
     // An appId or workspace push re-derives the URL state too (the address bar
-    // moved); the gate comes from the ref mirror, never a stale payload
-    // closure.
-    setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
+    // moved).
+    setSearch(parseAppDetailSearch(window.location.search));
     return () => {
       cancelledRef.current = true;
     };
   }, [load]);
 
-  // When the payload lands (can_manage becomes known), mirror the gate and
-  // re-derive the URL state once: a manager's `?tab=insights` deep link —
-  // or a history entry carrying it — activates the insights tab only now
-  // that the payload confirms can_manage. Registered-once listeners keep
-  // reading the ref, so this re-derivation also covers every later
-  // popstate while the gate stays stable.
   useEffect(() => {
-    canManageRef.current = payload?.can_manage ?? false;
-    if (payload) {
-      // Mid-session demotion: a URL still carrying a manager tab
-      // (?tab=installations / ?tab=insights / ?tab=pull-requests) while the
-      // landed payload says non-manager is rewritten to the bare path
-      // (replaceState — loop-free), so the stale param cannot silently
-      // auto-reactivate a manager face on a later re-promotion.
-      if (
-        !canManageRef.current &&
-        parseAppDetailSearch(window.location.search, true).tab !== "insights"
-      ) {
-        commitSearch({ tab: "insights", window: "30", repo: "", pr: "" });
-        setSearchReady(true);
-        return;
-      }
-      setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
-      setSearchReady(true);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payload?.can_manage]);
-
-  useEffect(() => {
-    const onPop = () => setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
+    const onPop = () => setSearch(parseAppDetailSearch(window.location.search));
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** URL := state (replaceState — never fires popstate, loop-free). */
@@ -236,21 +222,6 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
     );
   }
 
-  // Deep-link withhold (bugbot fix): once the payload lands, `state` is
-  // "ok" but the URL-requested tab has not been committed yet (the
-  // payload-landing effect runs after this render) — `search` still
-  // carries the mount-time gate. Rendering the tab face now would flash
-  // 应用设置 before 洞察 on a manager's `?tab=insights` deep link, so the
-  // shell withholds it behind the loading skeleton for exactly that one
-  // paint. Background reloads are unaffected: searchReady stays true.
-  if (state === "ok" && payload && !searchReady) {
-    return (
-      <AppDetailShell locale={locale}>
-        <PageSkeleton locale={locale} kind="forms" />
-      </AppDetailShell>
-    );
-  }
-
   return (
     <AppDetailShell locale={locale}>
       {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
@@ -259,6 +230,7 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           locale={locale}
           appId={appId}
           payload={payload}
+          groups={groups}
           notice={notice}
           search={search}
           onReload={load}
@@ -270,9 +242,10 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
 }
 
 /**
- * The link from the target detail to the bot's own settings page. The href is
+ * The link from a target detail to the App's own settings face. The href is
  * derived from the page's own API base, so it is the real target on both the
- * legacy and the workspace-scoped path.
+ * legacy and the workspace-scoped path; `/bot` answers one redirect to the
+ * settings tab.
  */
 export function BotSettingsLink({ locale, appId }: { locale: SpaBoot["locale"]; appId: string }) {
   const href = `${apiBase()}/apps/${encodeURIComponent(appId)}/bot`;
@@ -320,7 +293,7 @@ export function TargetHeader({
       : null;
 
   // Header band metrics — only what the landed payload proves (compass
-  // D13): the four figures `SettingsManagePayload` carries — installations,
+  // D13): the four figures the manager payload carries — installations,
   // provider keys, model chains, and refused webhooks in the last 24h. The
   // refusal count is the one figure here that reports a failure, so it — and
   // only it — wears the alert face, and only when non-zero, exactly as the
@@ -347,10 +320,10 @@ export function TargetHeader({
         description={t(locale, "apps.by", { login: payload.app.created_by })}
         actions={
           <>
-            {/* The bot's own configuration has its own page: the target keeps
-                the workspace's review policy and links across for the rest. A
-                Blocked target's bot page is not readable from here (the bot
-                serves another workspace now), so the dead link is not offered. */}
+            {/* The settings face is this page's own now, but a target detail
+                still reaches it from here — and a Blocked target's bot page is
+                not readable (the bot serves another workspace now), so the dead
+                link is not offered. */}
             {blockedMessage ? null : <BotSettingsLink locale={locale} appId={appId} />}
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           </>
@@ -363,14 +336,137 @@ export function TargetHeader({
 }
 
 /**
+ * The App's repository-count states — no repository at all, or several — both
+ * state the fact and point at the repository surface, which is where the
+ * review policy and the repositories themselves are created.
+ */
+function TargetsNotice({
+  locale,
+  copy,
+  link,
+}: {
+  locale: SpaBoot["locale"];
+  copy: DictionaryKey;
+  link: DictionaryKey;
+}) {
+  const href = `${apiBase()}/targets`;
+  return (
+    <div className="flex flex-col gap-2 py-3">
+      <p className="text-sm text-muted-foreground">{t(locale, copy)}</p>
+      <a
+        className="w-fit text-sm text-primary underline-offset-4 hover:underline"
+        href={href}
+        onClick={(event) => spaClick(href, event)}
+      >
+        {t(locale, link)}
+      </a>
+    </div>
+  );
+}
+
+/**
+ * The ops zone (pause/resume, disable/enable, delete) with the confirm dialog
+ * that guards it: the section renders the rows and this wrapper owns the one
+ * pending action and its outcome. Bot-scoped lifecycle rows render only for
+ * the workspace that owns an `owned` bot — the server refuses them otherwise.
+ * The review pause is the repository's own (target policy): this App-scoped
+ * surface never renders it.
+ */
+function TargetOpsZone({
+  locale,
+  payload,
+  onReload,
+}: {
+  locale: SpaBoot["locale"];
+  payload: TargetSettingsPayload;
+  onReload: (options?: { background?: boolean }) => Promise<boolean>;
+}) {
+  const appPath = `${apiBase()}/apps/${payload.app.github_app_id}`;
+  const [pending, setPending] = useState<PendingAction | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function onConfirm(): Promise<void> {
+    if (!pending || busy) return;
+    const action = pending;
+    setBusy(true);
+    try {
+      setNotice(
+        action.kind === "delete"
+          // Irreversible outcome with its own copy: "Changes saved." reads
+          // wrong after a delete, and refetching the deleted App's settings GET
+          // is a guaranteed 404, so it would overwrite the outcome.
+          ? await postPinnedOutcome(`${appPath}/delete`, {}, locale, () => onReload({ background: true }), {
+              successMessage: t(locale, "settings.deleteSuccess"),
+              refetch: false,
+            })
+          : await postPinnedOutcome(`${appPath}/${action.kind}`, {}, locale, () =>
+              onReload({ background: true }),
+            ),
+      );
+    } finally {
+      setBusy(false);
+      setPending(null);
+    }
+  }
+
+  const confirmCopy = pendingConfirmCopy(locale, appDisplayName(payload.app), pending);
+
+  return (
+    <>
+      <OpsSection
+        locale={locale}
+        payload={payload}
+        onPending={setPending}
+        notice={notice}
+        botWritable={!payload.blocked && payload.app.scope === "owned"}
+        targetOwned={false}
+      />
+      <Dialog
+        open={pending !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) setPending(null);
+        }}
+      >
+        <DialogContent>
+          {pending && confirmCopy ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>{confirmCopy.title}</DialogTitle>
+                <DialogDescription>{confirmCopy.body}</DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <DialogClose asChild>
+                  <Button variant="outline" disabled={busy}>
+                    {t(locale, "common.cancel")}
+                  </Button>
+                </DialogClose>
+                <Button
+                  variant={confirmCopy.destructive ? "destructive" : "default"}
+                  disabled={busy}
+                  onClick={() => void onConfirm()}
+                >
+                  {confirmCopy.action}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+/**
  * The App detail face — pure `t()` + data rendering, no window/router access,
  * so tests can static-render it. A non-manager gets the D4 identity card; a
- * manager gets the App's own tabs, 洞察 first.
+ * manager gets 应用设置 (identity header, ops, the bot's sections) and 已安装.
  */
 export function AppDetailView({
   locale,
   appId,
   payload,
+  groups,
   notice,
   search,
   onReload,
@@ -379,44 +475,41 @@ export function AppDetailView({
   locale: SpaBoot["locale"];
   appId: string;
   payload: SettingsPayload;
+  /** The chain editors' model options — empty for a member. */
+  groups: ModelOptionGroup[];
   notice: { kind: NoticeKind; message: string } | null;
   search: AppDetailSearch;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
   onSearch: (next: AppDetailSearch) => void;
 }) {
-  const canManage = payload.can_manage;
-  // A stale manager-tab URL after a demotion resolves to the default tab —
-  // the view never renders a manager face for a non-manager.
-  const tab = canManage ? search.tab : "insights";
-  // The App's own read scope: its settings face names the ONE target this page
-  // is about, so its insights and ledger read that target — never the whole
-  // workspace and never another target's rows.
-  const scope: ReadScope = { kind: "target", targetId: payload.target_id };
-
-  function onTabChange(next: string): void {
-    if (next !== "installations" && next !== "insights" && next !== "pull-requests") {
-      return;
-    }
-    onSearch({ ...search, tab: next });
-  }
-
   // D4: a non-manager's whole face is the identity card — the review policy
   // is not theirs to read, and it lives on the review-target surface.
-  if (!canManage) {
+  if (!payload.can_manage) {
     return (
       <div className="flex flex-col gap-6">
         <TargetHeader locale={locale} appId={appId} payload={payload} />
         {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-        <SettingsView locale={locale} payload={payload} onReload={onReload} />
+        <SettingsView locale={locale} payload={payload} />
       </div>
     );
+  }
+
+  // A Blocked read carries no bot-owned section at all — those belong to the
+  // owning workspace — and a target-less one has no review policy: the ops
+  // zone and the bot's own configuration are each conditional on their facts.
+  const target = hasTargetFacts(payload) ? payload : null;
+  const bot = payload.blocked ? null : payload;
+
+  function onTabChange(next: string): void {
+    if (next !== "settings" && next !== "installations") return;
+    onSearch({ ...search, tab: next });
   }
 
   return (
     <div className="flex flex-col gap-6">
       <TargetHeader locale={locale} appId={appId} payload={payload} />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-      <Tabs value={tab} onValueChange={onTabChange}>
+      <Tabs value={search.tab} onValueChange={onTabChange}>
         {/* Page-level tab face (DESIGN.md ### Tabs, line-tab idiom): the
             shell's bar is full-width over a bottom hairline (border-border
             → gray-alpha-400) with left-aligned, sized-up triggers — 16px
@@ -429,29 +522,38 @@ export function AppDetailView({
           variant="line"
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
-          <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger>
+          <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
           <TabsTrigger value="installations">{t(locale, "appDetail.tabInstallations")}</TabsTrigger>
-          <TabsTrigger value="pull-requests">{t(locale, "appDetail.tabPullRequests")}</TabsTrigger>
         </TabsList>
-        {/* forceMount on EVERY panel (mount-once tab switching): the loaded
-            insights data and the install block's typed state survive
-            洞察 ↔ 已安装 ↔ Pull requests switches — no unmount, no refetch.
-            Radix does NOT hide forced-mounted inactive panels itself; the
-            wrapper's `data-[state=inactive]:hidden` carries the
-            one-visible-panel invariant (ui-bugs knowledge pin,
-            source-tested below). */}
-        <TabsContent value="insights" forceMount>
-          <AppInsightsTab locale={locale} scope={scope} search={search} onSearch={onSearch} />
+        {/* forceMount on both panels (mount-once tab switching): the settings
+            tab's typed input and the install block's state survive a switch —
+            no unmount, no refetch. Radix does NOT hide forced-mounted inactive
+            panels itself; the panel's `data-[state=inactive]:hidden` carries
+            the one-visible-panel invariant (ui-bugs knowledge pin). */}
+        <TabsContent value="settings" forceMount>
+          <div className="flex flex-col">
+            {target === null ? (
+              payload.targets_many ? (
+                <TargetsNotice locale={locale} copy="appDetail.targetsMany" link="targets.heading" />
+              ) : (
+                <TargetsNotice locale={locale} copy="appDetail.noRepository" link="targets.add" />
+              )
+            ) : null}
+            {target === null ? null : (
+              <TargetOpsZone locale={locale} payload={target} onReload={onReload} />
+            )}
+            {bot === null ? null : (
+              <BotSettingsView
+                locale={locale}
+                payload={{ ...bot, can_manage: bot.can_manage && bot.app.scope === "owned" }}
+                groups={groups}
+                notice={null}
+                onReload={onReload}
+              />
+            )}
+          </div>
         </TabsContent>
         <TabsContent value="installations" forceMount>
-          {/* Installed tab: the shareable install link leads, the owner
-              allowlist follows it (owners arrive through installations),
-              then the installation table and its delivery health. The
-              allowlist renders for EVERY visibility: admission enforces a
-              stored list whatever the App's visibility, so a hidden control
-              would leave a live filter unmanageable. A private App instead
-              carries a line saying the control stays visible for that
-              reason. */}
           <div className="flex flex-col">
             <AppInstallSection
               locale={locale}
@@ -462,18 +564,7 @@ export function AppDetailView({
               blocked={payload.blocked}
               onReload={onReload}
             />
-            <AllowlistSection
-              locale={locale}
-              appId={appId}
-              allowlist={payload.allowlist}
-              privateApp={payload.app.github_visibility === "private"}
-              installations={payload.blocked ? null : payload.installations}
-              onReload={onReload}
-            />
           </div>
-        </TabsContent>
-        <TabsContent value="pull-requests" forceMount>
-          <AppPullRequestsTab locale={locale} scope={scope} search={search} onSearch={onSearch} />
         </TabsContent>
       </Tabs>
     </div>

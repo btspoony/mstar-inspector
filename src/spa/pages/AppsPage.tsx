@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { t } from "../../i18n";
 import {
   Button,
@@ -9,19 +9,12 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
   StatusBadge,
-  ToggleGroup,
-  ToggleGroupItem,
 } from "@design-system";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { MetricBand, type Metric } from "@/components/MetricBand";
 import { PageHeader } from "@/components/PageHeader";
-import { fetchJson, postForm } from "../api";
+import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { AppAvatar } from "../components/AppAvatar";
 import { EmptyState } from "../components/state/EmptyState";
@@ -114,7 +107,6 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       canCreate={canCreate}
       unavailableReason={unavailableReason}
       onRetry={() => void load()}
-      onCreated={() => void load()}
     />
   );
 }
@@ -131,7 +123,6 @@ export function AppsView({
   canCreate,
   unavailableReason,
   onRetry,
-  onCreated,
 }: {
   locale: SpaBoot["locale"];
   state: "ok" | "error";
@@ -139,8 +130,6 @@ export function AppsView({
   canCreate: boolean;
   unavailableReason: string;
   onRetry: () => void;
-  /** Re-read the list after a write. Omitted by a static render, which cannot. */
-  onCreated?: () => void;
 }) {
   const appsEmpty = state === "ok" && payload !== null && payload.apps.length === 0;
   const createAction = (
@@ -149,7 +138,6 @@ export function AppsView({
       canCreate={canCreate}
       reason={unavailableReason}
       sharedBots={payload?.shared_bots ?? []}
-      onCreated={onCreated ?? (() => {})}
     />
   );
 
@@ -221,71 +209,31 @@ export function AppsView({
 }
 
 /**
- * The Create control: ONE action opening the two-mode chooser.
+ * The Create control: ONE action opening the two paths that still create
+ * something — the repository surface's add flow (the only target creator; the
+ * old official-mode form posted a bare `botId` the repository contract
+ * refuses) and the self-hosted GitHub App manifest flow.
  *
- * Official mode lists the `shared` bots the list payload offered — one
- * selection is required before the target is posted to the workspace's
- * `/api/targets`, and the write is followed by a list re-read. A payload with
- * no usable shared bot disables that mode, so self-hosted (the manifest flow,
- * unchanged) stays the whole answer for such a deployment.
+ * The shared bots the payload lists are INFORMATION here, never a creation
+ * form: which App a repository binds to is the add dialog's choice, not this
+ * page's.
  */
 function CreateAppChooser({
   locale,
   canCreate,
   reason,
   sharedBots,
-  onCreated,
 }: {
   locale: SpaBoot["locale"];
   canCreate: boolean;
   reason: string;
   sharedBots: ReadonlyArray<SharedBotRow>;
-  onCreated: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<"official" | "self-hosted">("official");
-  const [botId, setBotId] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  // Nothing to choose means nothing to post: the mode is unreachable rather
-  // than an empty list with a dead submit.
-  const official = sharedBots.length > 0;
-  const activeMode = official ? mode : "self-hosted";
-
-  async function onCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    if (botId === "") return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await postForm(`${apiBase()}/api/targets`, { botId });
-      if (res.status >= 400) {
-        setError(t(locale, "apps.createDialog.failed"));
-        return;
-      }
-      setOpen(false);
-      setBotId("");
-      onCreated();
-    } catch {
-      setError(t(locale, "apps.createDialog.failed"));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const addHref = `${apiBase()}/targets`;
 
   return (
     <div className="flex flex-wrap items-center gap-2" data-slot="create-app-chooser">
-      <Dialog
-        open={open}
-        onOpenChange={(next) => {
-          setOpen(next);
-          if (!next) {
-            setError(null);
-            setBotId("");
-          }
-        }}
-      >
+      <Dialog>
         <DialogTrigger asChild>
           <Button type="button" disabled={!canCreate}>
             {t(locale, "apps.create")}
@@ -296,72 +244,33 @@ function CreateAppChooser({
             <DialogTitle>{t(locale, "apps.createDialog.title")}</DialogTitle>
             <DialogDescription>{t(locale, "apps.createDialog.description")}</DialogDescription>
           </DialogHeader>
-          <ToggleGroup
-            type="single"
-            value={activeMode}
-            onValueChange={(next) => {
-              if (next === "official" || next === "self-hosted") setMode(next);
-            }}
-            className="w-full"
-          >
-            <ToggleGroupItem value="official" disabled={!official} className="flex-1">
-              {t(locale, "apps.createDialog.modeOfficial")}
-            </ToggleGroupItem>
-            <ToggleGroupItem value="self-hosted" className="flex-1">
-              {t(locale, "apps.createDialog.modeSelfHosted")}
-            </ToggleGroupItem>
-          </ToggleGroup>
-          {activeMode === "official" ? (
-            <form className="flex flex-col gap-3" data-slot="create-target-form" onSubmit={onCreate}>
-              <Select value={botId} onValueChange={setBotId}>
-                <SelectTrigger aria-label={t(locale, "apps.createDialog.botLabel")}>
-                  <SelectValue placeholder={t(locale, "apps.createDialog.botPlaceholder")} />
-                </SelectTrigger>
-                <SelectContent>
-                  {sharedBots.map((bot) => (
-                    <SelectItem key={bot.id} value={bot.id}>
-                      {t(
-                        locale,
-                        bot.target_count === 1
-                          ? "apps.createDialog.botTargetOne"
-                          : "apps.createDialog.botTargets",
-                        { name: bot.name === "" ? bot.id : bot.name, count: bot.target_count },
-                      )}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {error ? (
-                <p role="alert" className="text-sm text-(--tone-danger-fg)">
-                  {error}
-                </p>
-              ) : null}
-              <DialogFooter>
-                <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-                  {t(locale, "common.cancel")}
-                </Button>
-                <Button type="submit" disabled={busy || botId === ""}>
-                  {t(locale, "apps.createDialog.submit")}
-                </Button>
-              </DialogFooter>
-            </form>
+          <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.description")}</p>
+          {sharedBots.length > 0 ? (
+            <ul className="flex flex-col gap-1 text-sm text-muted-foreground" data-slot="shared-bots">
+              {sharedBots.map((bot) => (
+                <li key={bot.id}>
+                  {t(locale, "apps.createDialog.botTargets", {
+                    name: bot.name === "" ? bot.id : bot.name,
+                    count: bot.target_count,
+                  })}
+                </li>
+              ))}
+            </ul>
           ) : (
-            <>
-              {official ? null : (
-                <p className="text-sm text-muted-foreground">
-                  {t(locale, "apps.createDialog.noSharedBots")}
-                </p>
-              )}
-              <form method="post" action={`${apiBase()}/manifest/start`}>
-                <DialogFooter>
-                  <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-                    {t(locale, "common.cancel")}
-                  </Button>
-                  <Button type="submit">{t(locale, "apps.createDialog.selfHostedSubmit")}</Button>
-                </DialogFooter>
-              </form>
-            </>
+            <p className="text-sm text-muted-foreground">{t(locale, "apps.createDialog.noSharedBots")}</p>
           )}
+          <DialogFooter>
+            <form method="post" action={`${apiBase()}/manifest/start`}>
+              <Button type="submit" variant="outline">
+                {t(locale, "apps.createDialog.selfHostedSubmit")}
+              </Button>
+            </form>
+            <Button asChild>
+              <a href={addHref} onClick={(event) => spaClick(addHref, event)}>
+                {t(locale, "targets.add")}
+              </a>
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
       {canCreate ? null : <p className="text-sm text-muted-foreground">{reason}</p>}

@@ -6,13 +6,6 @@ import {
   CardContent,
   CardDescription,
   CardHeader,
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
   FlowSection,
   Input,
   Select,
@@ -22,13 +15,10 @@ import {
   SelectLabel,
   SelectTrigger,
   SelectValue,
-  StatusBadge,
   Tabs,
   TabsContent,
   TabsList,
   TabsTrigger,
-  ToggleGroup,
-  ToggleGroupItem,
 } from "@design-system";
 import { AppAvatar } from "../components/AppAvatar";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
@@ -43,13 +33,9 @@ import { useRenameMembership } from "../workspace-memberships";
 import {
   activeChainTabId,
   appDisplayName,
-  checkGateSaveFields,
   configuredKeySlot,
   DEFAULT_CHAIN_NAME,
-  DEFAULT_CHECK_GATE,
   isPaused,
-  isReviewLevel,
-  isReviewTriggerMode,
   concurrencySubmitBlocked,
   modelChainTabs,
   parseCheckMinScoreSettings,
@@ -57,22 +43,18 @@ import {
   parseInstallClaimResult,
   parseStoredCheckMinScore,
   parseStoredConcurrency,
-  PR_VERDICTS,
   removeChanged,
   REVIEW_LEVELS,
-  REVIEW_TRIGGER_MODES,
   seatRoleValues,
   seatSelectValue,
   splitModelChain,
   type ChainTab,
-  type AllowlistSettings,
   type BotConfigSections,
-  type CheckGateSettings,
   type ModelOptionGroup,
   type ReviewLevel,
-  type ReviewTriggerMode,
   type AppIdentityCardApp,
   type AppInstallApp,
+  type BotSettingsAppMeta,
   type SettingsAppMeta,
   type SettingsIdentityAppMeta,
   type SettingsManagePayload,
@@ -246,200 +228,29 @@ export function settingsOpOutcome(
 }
 
 /**
- * The target-owned body: the review policy (identity, trigger, depth, gate)
- * and the ops zone (pause/resume, park), rendered by the review-target
- * detail page (`/dashboard/<ref>/targets/:appId`). The bot-owned
- * configuration lives on the bot page; the App detail keeps the App's own
- * faces. Pure-ish: the data load, the page notice channel and the
- * loading/error faces live on the page shell, which threads the parsed
- * payload and the reload callback down here.
+ * The identity-only App settings face: the GitHub identity card and nothing
+ * else. Every manager face and every review-policy control lives on the pages
+ * that own them (the App page's bot sections, the repository surface's target
+ * policy), so this body has no manager branch to fall through to — the App the
+ * caller names is not writable from here whatever the payload says.
  */
 export function SettingsView({
   locale,
   payload,
-  onReload,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
-  onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
-  const { app } = payload;
-  // Every pinned path of this page hangs off the page's workspace prefix
-  // (`/dashboard` legacy, `/dashboard/<slug>` under strict) — the legacy App
-  // route family answers 404 on a workspace-scoped deployment.
-  const appPath = `${apiBase()}/apps/${app.github_app_id}`;
-  const base = `${appPath}/settings`;
-  const [pending, setPending] = useState<PendingAction | null>(null);
-  const [busy, setBusy] = useState(false);
-  // Dialog-confirmed ops report into the card that owns the
-  // action (one notice state per card region). The target-scoped ops
-  // (pause/resume/disable/enable/delete) are the only ones left here: the
-  // bot-scoped configuration moved to the bot page with its own regions.
-  const [opsNotice, setOpsNotice] = useState<OpNotice | null>(null);
-
-  async function runPinned(path: string, fields: Record<string, string> = {}): Promise<OpNotice> {
-    return postPinnedOutcome(path, fields, locale, () => onReload({ background: true }));
-  }
-
-  /**
-   * Resolve the op's outcome to the caller: the card/cluster that
-   * submitted the fields renders it in its own region. A network-level POST
-   * failure (postForm throws before an outcome exists) resolves the
-   * save-failed copy (a failed save must not claim the page
-   * couldn't load) so no op stays silent; a redirect hop navigates away
-   * before this resolves. The outcome also carries `reloaded` — whether the
-   * awaited background refresh actually landed — which only the draft create
-   * reads (POST success alone is not completion there); every other caller
-   * renders the plain OpNotice and ignores it.
-   */
-  async function submitSettings(
-    fields: Record<string, string> | URLSearchParams,
-  ): Promise<OpNotice & { reloaded: boolean }> {
-    let status: number;
-    let body: string;
-    // The catch guards only the POST — a background reload never rejects:
-    // load() catches its own failures into the page notice.
-    try {
-      ({ status, body } = await postForm(base, fields));
-    } catch {
-      return { kind: "error", message: t(locale, "common.saveFailed"), reloaded: false };
-    }
-    const outcome: OpNotice = settingsOpOutcome(locale, status, body);
-    const reloaded = await onReload({ background: true });
-    return { ...outcome, reloaded };
-  }
-
-  /**
-   * The review trigger mode save (spec review-trigger-policy §2): the
-   * same pinned-ops POST family as pause/resume — `submitTriggerMode`
-   * resolves the keyed 400 (`settings.error.triggerModeUnknown`) through
-   * the shared settingsErrorMessage resolver and lands the stored value
-   * via the awaited background reload.
-   */
-  async function runTriggerMode(mode: ReviewTriggerMode): Promise<OpNotice> {
-    return submitTriggerMode(String(app.github_app_id), mode, locale, () => onReload({ background: true }));
-  }
-
-  async function onConfirm(): Promise<void> {
-    if (!pending || busy) return;
-    const action = pending;
-    setBusy(true);
-    try {
-      if (action.kind === "delete") {
-        // Irreversible outcome with its own copy: "Changes saved." reads wrong
-        // after a delete, and the user stays on the deleted App's page.
-        // refetch: false — the deleted App's settings GET is a guaranteed 404,
-        // so refetching would overwrite the outcome with "Load failed."
-        setOpsNotice(
-          await postPinnedOutcome(`${appPath}/delete`, {}, locale, () => onReload({ background: true }), {
-            successMessage: t(locale, "settings.deleteSuccess"),
-            refetch: false,
-          }),
-        );
-      } else {
-        setOpsNotice(await runPinned(`${appPath}/${action.kind}`));
-      }
-    } finally {
-      setBusy(false);
-      setPending(null);
-    }
-  }
-
-  const confirmCopy = pendingConfirmCopy(locale, appDisplayName(app), pending);
-
-  // Identity-only non-manager face: the payload carries the D4 identity
-  // set ONLY (no ops stores, no `installations[]`), so the tab renders the
-  // GitHub identity section and nothing else — no slug row (the AppDetailPage
-  // shell owns the identity header), no ops/health/configuration surfaces.
-  // The installations count stays out for the same reason: `installations`
-  // is the manager face's array, and nowhere else may a count appear.
-  if (!payload.can_manage) {
-    return (
-      <div className="flex flex-col gap-6">
-        <div className="flex flex-col">
-          <AppInfoSection
-            locale={locale}
-            app={payload.app}
-            workspaceId={payload.workspace_id}
-            canManage={false}
-          />
-        </div>
-      </div>
-    );
-  }
-
-  // A Blocked target (its bot is `owned` by another workspace) keeps every
-  // TARGET-owned control and loses the bot's: the identity card drops the
-  // delivery URL and the refresh (both bot-scope writes this workspace cannot
-  // make), and the ops zone keeps the pause and the park. The bot's own
-  // sections never reached this tab — they live on the bot page, which answers
-  // 404 for a Blocked target.
-  const blocked = payload.blocked;
-
   return (
     <div className="flex flex-col gap-6">
-      {/* Detail-page section flow (r3 baseline § 5): one content plane divided
-          by hairlines instead of one framed card per section. Sections are
-          direct siblings so FlowSection's first/last edge trimming applies.
-          Order and membership are the owner split's: the target keeps its
-          identity, its review trigger, its depth, its gate and the
-          destructive ops zone — the bot-owned configuration (providers,
-          chains, seats, sandbox image, installations) lives on the bot page. */}
       <div className="flex flex-col">
         <AppInfoSection
           locale={locale}
-          app={app}
+          app={payload.app}
           workspaceId={payload.workspace_id}
-          canManage={!blocked}
-          onReload={blocked ? undefined : () => onReload({ background: true })}
-        />
-
-        <ReviewTriggerSection locale={locale} payload={payload} onTriggerMode={runTriggerMode} />
-
-        <ReviewDepthSection locale={locale} payload={payload} onSettings={submitSettings} />
-
-        <ReviewGateSection locale={locale} payload={payload} onSettings={submitSettings} />
-
-        <OpsSection
-          locale={locale}
-          payload={payload}
-          onPending={setPending}
-          notice={opsNotice}
-          botWritable={!blocked}
+          canManage={false}
         />
       </div>
-
-      <Dialog
-        open={pending !== null}
-        onOpenChange={(open) => {
-          if (!open && !busy) setPending(null);
-        }}
-      >
-        <DialogContent>
-          {pending && confirmCopy ? (
-            <>
-              <DialogHeader>
-                <DialogTitle>{confirmCopy.title}</DialogTitle>
-                <DialogDescription>{confirmCopy.body}</DialogDescription>
-              </DialogHeader>
-              <DialogFooter>
-                <DialogClose asChild>
-                  <Button variant="outline" disabled={busy}>
-                    {t(locale, "common.cancel")}
-                  </Button>
-                </DialogClose>
-                <Button
-                  variant={confirmCopy.destructive ? "destructive" : "default"}
-                  disabled={busy}
-                  onClick={() => void onConfirm()}
-                >
-                  {confirmCopy.action}
-                </Button>
-              </DialogFooter>
-            </>
-          ) : null}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
@@ -572,7 +383,7 @@ export function AppInfoSection({
 }: {
   locale: SpaBoot["locale"];
   /** Every face — the identity, manage and Blocked app shapes share every field the card reads. */
-  app: SettingsIdentityAppMeta | SettingsAppMeta | AppIdentityCardApp;
+  app: SettingsIdentityAppMeta | SettingsAppMeta | AppIdentityCardApp | BotSettingsAppMeta;
   /**
    * The App's stable workspace id from the payload — the delivery URL's first
    * segment. Deliberately NOT derived from the pathname: a route ref may be a
@@ -876,408 +687,6 @@ export function AppInstallSection({
 }
 
 /**
- * The Installed tab's second block: the owner allowlist (it sits above the
- * installation table and below the install link — owners arrive through
- * installations). The caller renders it for EVERY visibility: admission
- * enforces the stored list whatever the cached visibility, so hiding the
- * control for a private App would leave a live filter unmanageable — a
- * private App gets a line saying the control is shown for that reason
- * (`privateApp`). The switch and the logins save together: `enabled` rides as
- * exactly one `"1"` / `"0"` field and `owners` as one newline-separated text
- * field the server splits, trims and de-duplicates.
- */
-export function AllowlistSection({
-  locale,
-  appId,
-  allowlist,
-  privateApp,
-  installations,
-  onReload,
-}: {
-  locale: SpaBoot["locale"];
-  appId: string;
-  allowlist: AllowlistSettings;
-  /** The cached visibility is `private` — only the note below changes. */
-  privateApp: boolean;
-  /**
-   * The bot's installations — the rows this allowlist admits or refuses.
-   * `null` = not readable here (a Blocked target): the table is replaced by a
-   * line saying so instead of a false "no installations".
-   */
-  installations: SettingsManagePayload["installations"] | null;
-  onReload: (options?: { background?: boolean }) => Promise<boolean>;
-}) {
-  const [enabled, setEnabled] = useState(allowlist.enabled);
-  const [owners, setOwners] = useState(allowlist.owners.join("\n"));
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<OpNotice | null>(null);
-  // The save rides the button: the signal drives its face, the success copy
-  // survives as assistive text beside it — never as a notice box.
-  const signal = useSaveSignal();
-  const [savedCopy, setSavedCopy] = useState<string | null>(null);
-  // Server-state mirror: the deps compare by content, so an unrelated
-  // background reload (same stored values) never discards unsaved typing,
-  // while this save's reload — or a failed one — resyncs from the row.
-  const storedOwners = allowlist.owners.join("\n");
-  useEffect(() => {
-    setEnabled(allowlist.enabled);
-    setOwners(storedOwners);
-  }, [allowlist.enabled, storedOwners]);
-
-  const listed = owners
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
-
-  async function save(): Promise<void> {
-    setBusy(true);
-    signal.start();
-    setNotice(null); // the retry clears this cluster's own stale outcome first
-    try {
-      const outcome = await postPinnedOutcome(
-        `${apiBase()}/apps/${encodeURIComponent(appId)}/settings`,
-        { op: "save-allowlist", enabled: enabled ? "1" : "0", owners },
-        locale,
-        () => onReload({ background: true }),
-      );
-      if (outcome.kind === "success") {
-        setSavedCopy(outcome.message);
-        signal.succeed();
-      } else {
-        setNotice(outcome);
-        if (outcome.kind === "error") signal.fail();
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <FlowSection title={t(locale, "settings.allowlist")} subtitle={t(locale, "settings.allowlistCopy")}>
-      <form
-        className="flex flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void save();
-        }}
-      >
-        {privateApp ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "settings.allowlistPrivateStillApplies")}</p>
-        ) : null}
-        {/* The switch: a native binary control bound to its label — the house
-            primitives carry no switch, and a bespoke widget would duplicate
-            keyboard and state handling the platform already gets right. */}
-        <label className="flex w-fit items-center gap-2 text-sm font-medium">
-          <input
-            type="checkbox"
-            className="size-4 accent-(--tone-accent-solid)"
-            checked={enabled}
-            disabled={busy}
-            onChange={(event) => setEnabled(event.target.checked)}
-          />
-          {t(locale, "settings.allowlistEnable")}
-        </label>
-        {enabled ? (
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            {t(locale, "settings.allowlistOwners")}
-            <textarea
-              className="min-h-28 w-full rounded-sm border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring disabled:pointer-events-none disabled:opacity-50"
-              value={owners}
-              disabled={busy}
-              onChange={(event) => setOwners(event.target.value)}
-            />
-          </label>
-        ) : null}
-        {enabled && listed.length === 0 ? (
-          <p role="status" className="text-sm text-(--tone-warn-fg)">
-            {t(locale, "settings.allowlistFailClosed")}
-          </p>
-        ) : null}
-        {/* Admission, per installation: the allowlist is what decides it, so
-            the verdict renders HERE beside the owners it judges — the bot's
-            installation rows themselves live on the bot page. */}
-        <div className="flex flex-col gap-1">
-          <span className="text-sm font-medium">{t(locale, "settings.installationsAvailability")}</span>
-          {installations === null ? (
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.installationsNotVisible")}</p>
-          ) : installations.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.noInstallations")}</p>
-          ) : (
-            <ul className="flex flex-col gap-1">
-              {installations.map((inst) => {
-                // Admission mirrors the server rule (migration 0045): the
-                // switch off admits everyone; on, only a login on the owners
-                // list (GitHub logins are case-insensitive) is admitted.
-                const login = inst.account_login;
-                const valid =
-                  !enabled ||
-                  (login !== null &&
-                    listed.some((owner) => owner.toLowerCase() === login.toLowerCase()));
-                return (
-                  <li key={inst.installation_id} className="flex items-center gap-2 text-sm">
-                    <span>{login ?? t(locale, "common.time.unknown")}</span>
-                    <StatusBadge tone={valid ? "success" : "neutral"}>
-                      {t(locale, valid ? "settings.availabilityValid" : "settings.availabilityInvalid")}
-                    </StatusBadge>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-        <div>
-          <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
-            {t(locale, "settings.allowlistSave")}
-          </Button>
-          <SaveInFlight show={signal.status === "loading"} locale={locale} />
-          {signal.status === "success" && savedCopy !== null ? (
-            <span role="status" className="sr-only">
-              {savedCopy}
-            </span>
-          ) : null}
-        </div>
-        <NoticeRegion notice={notice} />
-      </form>
-    </FlowSection>
-  );
-}
-
-/**
- * The Settings tab's review gate (migration 0045): the score floor plus the
- * verdicts that satisfy it — the App's Check pass condition. `pass_verdicts`
- * rides as one repeated field per checked box (the shape the server
- * aggregates); an empty selection is legal and fails closed, so no review can
- * pass. Both bounds are re-validated server-side.
- */
-export function ReviewGateSection({
-  locale,
-  payload,
-  onSettings,
-}: {
-  locale: SpaBoot["locale"];
-  payload: TargetReviewSlice;
-  onSettings: (fields: Record<string, string> | URLSearchParams) => Promise<OpNotice>;
-}) {
-  const gate = payload.check_gate;
-  // An unreadable stored verdict list arrives as `null`: there is no value to
-  // render and nothing a save could round-trip, so the section keeps its
-  // heading, states the degradation, and offers the one recovery that works.
-  if (gate === null) return <ReviewGateRecovery locale={locale} onSettings={onSettings} />;
-  return <ReviewGateEditor locale={locale} gate={gate} onSettings={onSettings} />;
-}
-
-/**
- * The unreadable-gate face. There is no value to edit, so the only way back is
- * a re-write of the SAME row through the settings route's `save-check-gate`
- * op: `saveCheckGate`'s UPDATE never reads the columns it sets, so the
- * documented DDL defaults overwrite whatever the row holds and the readable
- * gate section returns on the reload. No second writer and no new route — the
- * control names the values it writes, and nothing is written until it is used.
- */
-function ReviewGateRecovery({
-  locale,
-  onSettings,
-}: {
-  locale: SpaBoot["locale"];
-  onSettings: (fields: Record<string, string> | URLSearchParams) => Promise<OpNotice>;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<OpNotice | null>(null);
-  // The reset rides the button: the signal drives its face, the success copy
-  // survives as assistive text beside it — never as a notice box.
-  const signal = useSaveSignal();
-  const [savedCopy, setSavedCopy] = useState<string | null>(null);
-
-  async function reset(): Promise<void> {
-    setBusy(true);
-    signal.start();
-    setNotice(null); // the retry clears this cluster's own stale outcome first
-    try {
-      const outcome = await onSettings(
-        checkGateSaveFields({
-          min_score: String(DEFAULT_CHECK_GATE.min_score),
-          pass_verdicts: DEFAULT_CHECK_GATE.pass_verdicts,
-        }),
-      );
-      if (outcome.kind === "success") {
-        setSavedCopy(outcome.message);
-        signal.succeed();
-      } else {
-        setNotice(outcome);
-        if (outcome.kind === "error") signal.fail();
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <FlowSection title={t(locale, "settings.reviewGate")} subtitle={t(locale, "settings.reviewGateCopy")}>
-      <p role="status" className="text-sm text-(--tone-warn-fg)">
-        {t(locale, "settings.reviewGateUnreadable")}
-      </p>
-      <div>
-        <Button type="button" disabled={busy} onClick={() => void reset()} status={signal.status === "idle" ? undefined : signal.status}>
-          {t(locale, "settings.reviewGateReset", {
-            score: DEFAULT_CHECK_GATE.min_score,
-            verdicts: DEFAULT_CHECK_GATE.pass_verdicts.join(", "),
-          })}
-        </Button>
-        <SaveInFlight show={signal.status === "loading"} locale={locale} />
-        {signal.status === "success" && savedCopy !== null ? (
-          <span role="status" className="sr-only">
-            {savedCopy}
-          </span>
-        ) : null}
-      </div>
-      <NoticeRegion notice={notice} />
-    </FlowSection>
-  );
-}
-
-function ReviewGateEditor({
-  locale,
-  gate,
-  onSettings,
-}: {
-  locale: SpaBoot["locale"];
-  gate: CheckGateSettings;
-  onSettings: (fields: Record<string, string> | URLSearchParams) => Promise<OpNotice>;
-}) {
-  const [score, setScore] = useState(String(gate.min_score));
-  const [verdicts, setVerdicts] = useState<string[]>([...gate.pass_verdicts]);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<OpNotice | null>(null);
-  // The save rides the button: the signal drives its face, the success copy
-  // survives as assistive text beside it — never as a notice box.
-  const signal = useSaveSignal();
-  const [savedCopy, setSavedCopy] = useState<string | null>(null);
-  // Content-compared mirror, same discipline as the allowlist's: unrelated
-  // reloads keep unsaved edits; a landed save resyncs from the stored row.
-  const storedVerdicts = gate.pass_verdicts.join(",");
-  useEffect(() => {
-    setScore(String(gate.min_score));
-    setVerdicts([...gate.pass_verdicts]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gate.min_score, storedVerdicts]);
-
-  function toggle(verdict: string): void {
-    setVerdicts((current) =>
-      current.includes(verdict) ? current.filter((entry) => entry !== verdict) : [...current, verdict],
-    );
-  }
-
-  async function save(): Promise<void> {
-    setBusy(true);
-    signal.start();
-    setNotice(null); // the retry clears this cluster's own stale outcome first
-    try {
-      const outcome = await onSettings(
-        checkGateSaveFields({
-          min_score: score.trim(),
-          // One field per checked box, in the canonical vocabulary order.
-          pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
-        }),
-      );
-      if (outcome.kind === "success") {
-        setSavedCopy(outcome.message);
-        signal.succeed();
-      } else {
-        setNotice(outcome);
-        if (outcome.kind === "error") signal.fail();
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <FlowSection title={t(locale, "settings.reviewGate")} subtitle={t(locale, "settings.reviewGateCopy")}>
-      <form
-        className="flex flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void save();
-        }}
-      >
-        <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
-          {t(locale, "settings.reviewGateScore")}
-          <Input
-            type="number"
-            min={0}
-            max={100}
-            step={1}
-            value={score}
-            disabled={busy}
-            onChange={(event) => setScore(event.target.value)}
-          />
-        </label>
-        <fieldset className="flex flex-col gap-2">
-          <legend className="text-sm font-medium">{t(locale, "settings.reviewGateVerdicts")}</legend>
-          {PR_VERDICTS.map((verdict) => (
-            <label key={verdict} className="flex w-fit items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="size-4 accent-(--tone-accent-solid)"
-                checked={verdicts.includes(verdict)}
-                disabled={busy}
-                onChange={() => toggle(verdict)}
-              />
-              {verdict}
-            </label>
-          ))}
-        </fieldset>
-        {verdicts.length === 0 ? (
-          <p role="status" className="text-sm text-(--tone-warn-fg)">
-            {t(locale, "settings.reviewGateFailClosed")}
-          </p>
-        ) : null}
-        <div>
-          <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
-            {t(locale, "settings.reviewGateSave")}
-          </Button>
-          <SaveInFlight show={signal.status === "loading"} locale={locale} />
-          {signal.status === "success" && savedCopy !== null ? (
-            <span role="status" className="sr-only">
-              {savedCopy}
-            </span>
-          ) : null}
-        </div>
-        <NoticeRegion notice={notice} />
-      </form>
-    </FlowSection>
-  );
-}
-
-/**
- * The review trigger: when a delivery starts a review (spec
- * review-trigger-policy §2). Target-scoped — the workspace decides it — so it
- * lives on the target detail; the bot's sandbox image sits beside the rest of
- * the bot's own configuration on the bot page.
- */
-export function ReviewTriggerSection({
-  locale,
-  payload,
-  onTriggerMode,
-}: {
-  locale: SpaBoot["locale"];
-  payload: TargetReviewSlice;
-  /** The review-trigger-mode save (the mode control's POST, resolved back to its own region). */
-  onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
-}) {
-  return (
-    <FlowSection title={t(locale, "settings.reviewTrigger")} subtitle={t(locale, "settings.reviewTriggerCopy")}>
-      <ReviewTriggerControl
-        locale={locale}
-        slug={payload.app.github_slug}
-        mode={payload.app.review_trigger_mode}
-        onTriggerMode={onTriggerMode}
-      />
-    </FlowSection>
-  );
-}
-
-/**
  * The runtime-harness selection (the harness mounted into the sandbox image),
  * rendered inside the bot page's sandbox section. The payload carries registry
  * ids only — never image-local configuration or secrets.
@@ -1369,11 +778,6 @@ export const REVIEW_DEPTH_INHERIT = "inherit";
 
 export type ReviewDepthChoice = ReviewLevel | typeof REVIEW_DEPTH_INHERIT;
 
-/** True exactly when `value` is one of the select's four faces. */
-function isReviewDepthChoice(value: string): value is ReviewDepthChoice {
-  return value === REVIEW_DEPTH_INHERIT || isReviewLevel(value);
-}
-
 const REVIEW_LEVEL_COPY: Record<ReviewLevel, { name: DictionaryKey; hint: DictionaryKey }> = {
   quick: { name: "settings.reviewDepthQuick", hint: "settings.reviewDepthQuickHint" },
   default: { name: "settings.reviewDepthStandard", hint: "settings.reviewDepthStandardHint" },
@@ -1400,77 +804,6 @@ export function reviewDepthOptions(
 }
 
 /**
- * Review depth: how thoroughly this App's reviews run. One select, four faces;
- * picking one saves immediately (the review-trigger control's discipline), and
- * the inherit face writes NULL. Manage face only — the identity-only payload
- * has no depth field and renders no control.
- */
-export function ReviewDepthSection({
-  locale,
-  payload,
-  onSettings,
-}: {
-  locale: SpaBoot["locale"];
-  payload: TargetReviewSlice;
-  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
-}) {
-  const stored: ReviewDepthChoice = payload.app.review_level ?? REVIEW_DEPTH_INHERIT;
-  const options = reviewDepthOptions(locale, payload.app.default_review_level);
-  const [selected, setSelected] = useState<ReviewDepthChoice>(stored);
-  const [notice, setNotice] = useState<OpNotice | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  // Server-state mirror: a background reload lands the stored depth; a failed
-  // save reverts instead of leaving the optimistic value.
-  useEffect(() => {
-    setSelected(stored);
-  }, [stored]);
-
-  async function save(next: ReviewDepthChoice): Promise<void> {
-    if (next === selected) return;
-    setBusy(true);
-    try {
-      const outcome = await onSettings({ op: "save-review-level", level: next });
-      setNotice(outcome);
-      // Success = stored, so the trigger label moves now; the reload just
-      // confirms it.
-      if (outcome.kind === "success") setSelected(next);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const label = t(locale, "settings.reviewDepth");
-  const selectedLabel = options.find((option) => option.value === selected)?.label ?? label;
-
-  return (
-    <FlowSection title={label} subtitle={t(locale, "settings.reviewDepthCopy")}>
-      <div className="w-fit max-w-xs">
-        <Select
-          value={selected}
-          disabled={busy}
-          onValueChange={(value) => {
-            if (isReviewDepthChoice(value)) void save(value);
-          }}
-        >
-          <SelectTrigger aria-label={label}>
-            <SelectValue>{selectedLabel}</SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            {options.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <NoticeRegion notice={notice} />
-    </FlowSection>
-  );
-}
-
-/**
  * One danger-zone row: the control's title and what it does to deliveries on
  * the left, the control itself on the right. The row explains the action; the
  * confirm dialog (owned by the page) explains what happens if you proceed.
@@ -1493,12 +826,13 @@ function OpsRow({ title, copy, children }: { title: string; copy: string; childr
  * page's dialog, each one keeping its existing POST target and semantics.
  * The confirmed outcome renders in this section's own region.
  */
-function OpsSection({
+export function OpsSection({
   locale,
   payload,
   onPending,
   notice,
   botWritable,
+  targetOwned,
 }: {
   locale: SpaBoot["locale"];
   payload: TargetReviewSlice;
@@ -1511,6 +845,12 @@ function OpsSection({
    * disable/enable/delete would be refused by the server, so they never render.
    */
   botWritable: boolean;
+  /**
+   * Whether this surface speaks for the review TARGET. The App page does not:
+   * its pause belongs to the repository's own page, so the row never renders
+   * there — a POST from the App address would edit policy the page does not own.
+   */
+  targetOwned: boolean;
 }) {
   const { app } = payload;
   const paused = isPaused(app);
@@ -1523,7 +863,7 @@ function OpsSection({
     >
       <div className="flex flex-col gap-3">
         <div className="flex flex-col divide-y divide-(--border-subtle)">
-          {app.status === "active" ? (
+          {targetOwned && app.status === "active" ? (
             <OpsRow title={t(locale, "settings.opsReviewsTitle")} copy={t(locale, "settings.opsReviewsCopy")}>
               {paused ? (
                 <Button type="button" onClick={() => onPending({ kind: "resume" })}>
@@ -1961,164 +1301,6 @@ export async function postPinnedOutcome(
   const outcome = settingsOpOutcome(locale, status, body, successMessage);
   if (refetch) await reload();
   return outcome;
-}
-
-/**
- * The review-trigger-mode save: the pinned path and the verbatim mode body,
- * both derived from the App's own page base. The one derivation the control
- * posts, so a test can execute the real save for the real page context
- * instead of supplying an App path of its own.
- */
-export function submitTriggerMode(
-  appId: string,
-  mode: ReviewTriggerMode,
-  locale: SpaBoot["locale"],
-  reload: () => Promise<unknown>,
-): Promise<OpNotice> {
-  return postPinnedOutcome(
-    `${apiBase()}/apps/${encodeURIComponent(appId)}/review-trigger-mode`,
-    { mode },
-    locale,
-    reload,
-  );
-}
-
-/**
- * The App's bot-mention string (spec review-trigger-policy §3): the bare
- * `@{slug}` form. The webhook matcher accepts an optional `[bot]` suffix but
- * never requires it, so the hint shows the shortest string that works.
- */
-export function botMention(slug: string): string {
-  return `@${slug}`;
-}
-
-/** Localized segment labels; the wire values stay verbatim (spec §2). */
-const REVIEW_TRIGGER_MODE_LABEL_KEYS: Record<ReviewTriggerMode, DictionaryKey> = {
-  open: "settings.triggerModeOpen",
-  every_push: "settings.triggerModeEveryPush",
-  manual: "settings.triggerModeManual",
-};
-
-/**
- * Review trigger mode (spec review-trigger-policy §2): the per-App
- * cadence segmented control beside the review toggle, plus the §3 operator
- * visibility — the exact mention string this App answers to. The control
- * saves on selection through the pinned-ops POST family (body `mode`), so a
- * keyed 400 (`settings.error.triggerModeUnknown`) resolves localized via the
- * shared resolver and the awaited background reload lands the stored value.
- * The selection mirrors the payload (the RuntimeHarnessEditor discipline): a
- * failed save reverts to the stored mode once the reload lands. Radix's
- * empty-string deselect (clicking the active segment) is not a mode and
- * never reaches the wire.
- */
-export function ReviewTriggerControl({
-  locale,
-  slug,
-  mode,
-  onTriggerMode,
-}: {
-  locale: SpaBoot["locale"];
-  /**
-   * The cached GitHub slug — the ONLY mention target (D2). Null before the
-   * first metadata sync: no real target exists, so no mention renders
-   * (fail-safe — an invented `@` target could never trigger a review).
-   */
-  slug: string | null;
-  mode: ReviewTriggerMode;
-  onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
-}) {
-  const [selected, setSelected] = useState<ReviewTriggerMode>(mode);
-  const [busy, setBusy] = useState(false);
-  // The control's own region: a failure renders here, next to the trigger —
-  // never through the card's dialog-ops region above. The trigger group has
-  // no button face, so a success confirms through the moved highlight plus
-  // the success copy as assistive text — never as a notice box.
-  const [notice, setNotice] = useState<OpNotice | null>(null);
-  const signal = useSaveSignal();
-  const [savedCopy, setSavedCopy] = useState<string | null>(null);
-
-  // Server-state mirror: after this save's (or any op's) background reload
-  // lands a fresh payload, the selection tracks the stored mode — a failed
-  // save reverts instead of leaving the optimistic value (the
-  // sandbox-image editor's identical effect). The save's own success path
-  // echoes first: save() updates the selection only after the POST resolves
-  // success (success = stored), so the highlight moves immediately and the
-  // reload just confirms it.
-  useEffect(() => {
-    setSelected(mode);
-  }, [mode]);
-
-  async function save(next: string): Promise<void> {
-    if (!isReviewTriggerMode(next) || next === selected) return;
-    setBusy(true);
-    signal.start();
-    setNotice(null); // the retry clears this cluster's own stale outcome first
-    try {
-      const outcome = await onTriggerMode(next);
-      // Success-path echo: success means stored, so the controlled
-      // ToggleGroup highlights the new mode now instead of waiting for the
-      // reload; a failure leaves the previous segment highlighted and the
-      // reload resyncs `selected` from the stored mode (the effect above).
-      if (outcome.kind === "success") {
-        setSelected(next);
-        setSavedCopy(outcome.message);
-        signal.succeed();
-      } else {
-        setNotice(outcome);
-        if (outcome.kind === "error") signal.fail();
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // The mention exists only when GitHub's slug cache does — the bare
-  // `@{slug}` form (spec §3), never a local value.
-  const mention = slug ? botMention(slug) : null;
-
-  return (
-    <div className="flex flex-col gap-2">
-      <span className="text-sm font-medium">{t(locale, "settings.triggerMode")}</span>
-      <div className="w-fit">
-        <ToggleGroup
-          type="single"
-          variant="outline"
-          size="sm"
-          value={selected}
-          disabled={busy}
-          onValueChange={(value) => void save(value)}
-          aria-label={t(locale, "settings.triggerMode")}
-        >
-          {REVIEW_TRIGGER_MODES.map((triggerMode) => (
-            <ToggleGroupItem key={triggerMode} value={triggerMode} title={triggerMode}>
-              {t(locale, REVIEW_TRIGGER_MODE_LABEL_KEYS[triggerMode])}
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
-      </div>
-      {mention ? (
-        <p className="text-xs text-muted-foreground">
-          {t(locale, "settings.triggerModeMention")}{" "}
-          {/* The mention renders as ONE text node, so a click-drag selects /
-              copies the exact string; the plain form rides the title and the
-              localized aria label (spec §3 operator visibility). */}
-          <code
-            className="rounded bg-muted px-1 py-0.5 font-mono text-foreground"
-            title={mention}
-            aria-label={t(locale, "settings.triggerModeMentionAria", { mention })}
-          >
-            {mention}
-          </code>
-        </p>
-      ) : null}
-      {signal.status === "success" && savedCopy !== null ? (
-        <span role="status" className="sr-only">
-          {savedCopy}
-        </span>
-      ) : null}
-      <NoticeRegion notice={notice} />
-    </div>
-  );
 }
 
 /**

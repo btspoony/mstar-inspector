@@ -19,16 +19,16 @@ const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory" };
 const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat" };
 
 describe("shell models", () => {
-  test("nav order is Apps → Review targets → Members → Settings (insights retired)", () => {
+  test("nav order is Repositories → Apps → Members → Settings (insights retired)", () => {
     expect(NAV_ITEMS.map((item) => item.href)).toEqual([
-      "/dashboard/apps",
       "/dashboard/targets",
+      "/dashboard/apps",
       "/dashboard/members",
       "/dashboard/settings",
     ]);
     expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual([
-      "nav.apps",
       "nav.targets",
+      "nav.apps",
       "nav.members",
       "nav.settings",
     ]);
@@ -39,15 +39,15 @@ describe("shell models", () => {
     // actions carry the role gate. Nav visibility must not hide the entry.
     const sidebar = buildSidebarModel(member, "/dashboard/apps");
     expect(sidebar.items.map((item) => item.label)).toEqual([
+      "Repositories",
       "Apps",
-      "Review targets",
       "Members",
       "Settings",
     ]);
     const scoped = buildSidebarModel(member, "/dashboard/acme/apps");
     expect(scoped.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/apps",
       "/dashboard/acme/targets",
+      "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -58,12 +58,12 @@ describe("shell models", () => {
   test("the admin sees the same entries", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/acme/members");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/apps",
       "/dashboard/acme/targets",
+      "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
-    expect(sidebar.items.map((item) => item.label)).toEqual(["应用", "审查目标", "成员", "设置"]);
+    expect(sidebar.items.map((item) => item.label)).toEqual(["仓库", "应用", "成员", "设置"]);
   });
 
   test("navbar is slim: theme + Lang + account + logout only", () => {
@@ -143,8 +143,8 @@ describe("shell models", () => {
   test("a workspace page keeps BOTH nav entries inside its workspace", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/apps",
       "/dashboard/acme/targets",
+      "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -161,8 +161,8 @@ describe("shell models", () => {
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/members");
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/apps",
       "/dashboard/acme/targets",
+      "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -172,8 +172,8 @@ describe("shell models", () => {
   test("the page's own workspace wins over the boot ref (one workspace identity per page)", () => {
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/apps",
       "/dashboard/acme/targets",
+      "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -187,8 +187,8 @@ describe("shell models", () => {
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "acme" }, "/dashboard/apps");
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/apps",
       "/dashboard/acme/targets",
+      "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
@@ -205,8 +205,8 @@ describe("shell models", () => {
       "/dashboard/apps",
     );
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/ws_acme/apps",
       "/dashboard/ws_acme/targets",
+      "/dashboard/ws_acme/apps",
       "/dashboard/ws_acme/members",
       "/dashboard/ws_acme/settings",
     ]);
@@ -216,8 +216,8 @@ describe("shell models", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/apps");
     expect(sidebar.brandHref).toBe("/dashboard");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/apps",
       "/dashboard/targets",
+      "/dashboard/apps",
       "/dashboard/members",
       "/dashboard/settings",
     ]);

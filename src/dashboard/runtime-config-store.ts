@@ -84,8 +84,6 @@
  */
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import {
-  CHECK_MIN_SCORE_MAX,
-  CHECK_MIN_SCORE_MIN,
   DEFAULT_CHECK_MIN_SCORE,
   isCheckMinScoreValue,
 } from "../contracts/review-gate";
@@ -551,62 +549,6 @@ export async function getWorkspaceCheckMinScore(
   }
 }
 
-/**
- * The ledger's `before` is the floor the workspace was actually RUNNING: a
- * trusted integer records itself, while the absent state and every untrusted
- * value record `null` — the concurrency audit's absent-state convention. The
- * reader answers an untrusted value with the platform default flagged
- * `degraded` and never seeds it, so naming that default would attribute a
- * floor nothing ran with.
- * `real` needs no branch: the column's INTEGER affinity plus the CAST CHECK
- * stores an integral REAL as an integer, so that state cannot occur.
- */
-const workspaceCheckMinScoreAuditSql = (value: string) => `CASE
-      WHEN typeof(${value}) = 'integer' AND ${value} BETWEEN ${CHECK_MIN_SCORE_MIN} AND ${CHECK_MIN_SCORE_MAX}
-        THEN ${value}
-      ELSE NULL END`;
-
-const WORKSPACE_CHECK_MIN_SCORE_AUDIT_SQL = `
-  INSERT INTO platform_audit_events
-    (id, actor_login, action, target_type, target_id, detail_json, created_at)
-  SELECT ?1, ?2, 'workspace.check_min_score.set', 'workspace', ?3,
-         json_object('before', (SELECT ${workspaceCheckMinScoreAuditSql("check_min_score")}
-                                  FROM workspaces WHERE id = ?3),
-                     'after', ?4),
-         ?5
-   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
-
-const WORKSPACE_CHECK_MIN_SCORE_UPDATE_SQL = `
-  UPDATE workspaces SET check_min_score = ?2
-   WHERE id = ?1 AND deleted_at IS NULL`;
-
-/**
- * Set the workspace's default floor for new Apps. Existing Apps keep their own
- * stored value — this is a default, not a backfill. Audited and refused for an
- * unknown workspace, the same shape as the concurrency write.
- */
-export async function setWorkspaceCheckMinScore(
-  db: DashboardD1,
-  workspaceId: string,
-  value: number,
-  actor: string,
-): Promise<number> {
-  if (!isCheckMinScoreValue(value)) {
-    throw new RuntimeConfigError(
-      "invalid_value",
-      `check_min_score must be an integer in ${CHECK_MIN_SCORE_MIN}..${CHECK_MIN_SCORE_MAX}`,
-    );
-  }
-  const now = new Date().toISOString();
-  const [, update] = await db.batch([
-    db
-      .prepare(WORKSPACE_CHECK_MIN_SCORE_AUDIT_SQL)
-      .bind(crypto.randomUUID(), actor, workspaceId, value, now),
-    db.prepare(WORKSPACE_CHECK_MIN_SCORE_UPDATE_SQL).bind(workspaceId, value),
-  ]);
-  if (update?.meta.changes === 1) return value;
-  throw new UnknownWorkspaceError(workspaceId);
-}
 
 /** A refused write against a workspace id that does not exist. */
 export class UnknownWorkspaceError extends RuntimeConfigError {
