@@ -5471,27 +5471,26 @@ function parseInsightsParams(query: { window?: string; repo?: string; include?: 
   return { ok: true, windowDays, repoFilter, rawRepo, includeRepos };
 }
 
-const appInsightsRoute = async (c: DashboardContext) => {
-  const gate = await requireAppManagerJson(c);
-  if (!gate.ok) return gate.response;
-
-  const params = parseInsightsParams({
-    window: c.req.query("window"),
-    repo: c.req.query("repo"),
-    include: c.req.query("include"),
-  });
-  if (!params.ok) return c.json({ error: params.reason }, 400);
-
-  const insights = await createInsightsStore(gate.db, {
+/**
+ * The insights JSON payload, built from an already-resolved tenant scope. TWO
+ * routes answer it — the repository scope (one target) and the workspace scope
+ * (every live target) — and both must carry the identical key set, so the
+ * builder exists once and the routes differ only in the ids they resolve.
+ */
+async function insightsSummaryJson(
+  c: DashboardContext,
+  params: Extract<InsightsParams, { ok: true }>,
+  scope: LedgerScope,
+  db: DashboardDb,
+): Promise<Response> {
+  const insights = await createInsightsStore(db, {
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
-    // The target the App resolves to IN this workspace, and the workspace
-    // itself: the store binds both, so another tenant's reviews can never
-    // reach this payload. One id today; the workspace scope (plan 372 task 2)
-    // passes every live target id.
-    targetIds: [gate.target.id],
-    workspaceId: gate.scope.workspaceId,
+    // The target set and the workspace that owns those ids: the store binds
+    // both, so another tenant's reviews can never reach this payload.
+    targetIds: scope.targetIds,
+    workspaceId: scope.workspaceId,
   });
   return c.json({
     window_days: clampWindow(params.windowDays),
@@ -5509,12 +5508,65 @@ const appInsightsRoute = async (c: DashboardContext) => {
     findings_distribution: insights.findingsDistribution,
     repos: insights.repos,
   });
+}
+
+/**
+ * `GET /api/apps/:appId/insights/summary` — the App's own review health. Its
+ * target is the App's target IN this workspace, so the payload is one id of
+ * the same store call the workspace face makes.
+ */
+const appInsightsRoute = async (c: DashboardContext) => {
+  const gate = await requireAppManagerJson(c);
+  if (!gate.ok) return gate.response;
+  const params = parseInsightsParams({
+    window: c.req.query("window"),
+    repo: c.req.query("repo"),
+    include: c.req.query("include"),
+  });
+  if (!params.ok) return c.json({ error: params.reason }, 400);
+  return insightsSummaryJson(c, params, ledgerScopeOf(gate), gate.db);
+};
+
+/**
+ * The workspace-scope JSON gate: membership, then the manage rule the App
+ * faces already carry. It also resolves the workspace's LIVE target set as the
+ * ledger scope both workspace faces bind — a workspace with no target yet
+ * resolves to an empty list, which the stores answer with the zero-filled
+ * payload rather than an error (nothing is wrong, there is just no data).
+ */
+async function requireWorkspaceManagerJson(
+  c: DashboardContext,
+): Promise<{ ok: true; scope: LedgerScope; db: DashboardDb } | { ok: false; response: Response }> {
+  const member = await requireMember(c);
+  if (!member.ok) return member;
+  if (!canManageApp(member.scope)) return { ok: false, response: c.json({ error: "forbidden" }, 403) };
+  const targetIds = (await createTargetsStore(member.db).listLive(member.scope.workspaceId)).map(
+    (target) => target.id,
+  );
+  return { ok: true, scope: { targetIds, workspaceId: member.scope.workspaceId }, db: member.db };
+}
+
+/**
+ * `GET /api/insights/summary` — the workspace's own review health, aggregated
+ * over every live target. Same params and payload keys as the App face; the
+ * scope is the whole workspace, so the numbers span its bots and repositories.
+ */
+const workspaceInsightsRoute = async (c: DashboardContext) => {
+  const gate = await requireWorkspaceManagerJson(c);
+  if (!gate.ok) return gate.response;
+  const params = parseInsightsParams({
+    window: c.req.query("window"),
+    repo: c.req.query("repo"),
+    include: c.req.query("include"),
+  });
+  if (!params.ok) return c.json({ error: params.reason }, 400);
+  return insightsSummaryJson(c, params, gate.scope, gate.db);
 };
 
 // The insights HTML panel and the cross-App global JSON endpoint are both
 // retired — /dashboard/insights is SPA-owned (spa-dispatch serves the shell;
-// the SPA reads the per-App JSON face above). The legacy GET handlers are
-// gone; the global URL answers 404.
+// the SPA reads the JSON faces above). The legacy global handler with no
+// workspace scope is gone; the global URL answers 404.
 
 /**
  * The App-scoped JSON read gate: membership, then the App-id resolution, then
@@ -5723,6 +5775,31 @@ function parseRepoFilter(c: DashboardContext): ParseRepoFilterResult {
   return { ok: true, filter: { owner, repo } };
 }
 
+/**
+ * The PR-ledger list payload. TWO routes answer it — the repository scope (one
+ * target) and the workspace scope (every live target) — and both carry the
+ * identical key set, so the builder exists once and the routes differ only in
+ * the scope they resolve.
+ */
+async function pullRequestsJson(
+  c: DashboardContext,
+  scope: LedgerScope,
+  db: DashboardDb,
+  filter: { owner: string; repo: string } | null,
+): Promise<Response> {
+  // The filter is applied by the STORE, inside its bounded window: filtering
+  // the returned rows here would only ever search the newest
+  // PULL_REQUEST_LIST_LIMIT rows, which is the defect this face exists to fix.
+  // The option set rides the same batch: the tenant's whole ledger, never a
+  // window over it and never narrowed by the current selection — that is the
+  // only way a repository behind the row cap can be picked at all.
+  const { rows, repos } = await createReviewBotsStore(db).listPullRequests(scope, filter ?? undefined);
+  return c.json({
+    pull_requests: rows.map((row) => ({ ...row, ...pullRequestWireColumns(row) })),
+    repos,
+  });
+}
+
 const appPullRequestsRoute = async (c: DashboardContext) => {
   // Set before the gate: a deny (403) and a 404 are answers about a specific
   // workspace's data too, so no intermediary may cache them either.
@@ -5731,17 +5808,21 @@ const appPullRequestsRoute = async (c: DashboardContext) => {
   if (!gate.ok) return gate.response;
   const parsed = parseRepoFilter(c);
   if (!parsed.ok) return c.json({ error: "invalid repo" }, 400);
-  // The filter is applied by the STORE, inside its bounded window: filtering
-  // the returned rows here would only ever search the newest
-  // PULL_REQUEST_LIST_LIMIT rows, which is the defect this face exists to fix.
-  // The option set rides the same batch: the App's whole ledger, never a
-  // window over it and never narrowed by the current selection — that is the
-  // only way a repository behind the row cap can be picked at all.
-  const { rows, repos } = await gate.store.listPullRequests(ledgerScopeOf(gate), parsed.filter ?? undefined);
-  return c.json({
-    pull_requests: rows.map((row) => ({ ...row, ...pullRequestWireColumns(row) })),
-    repos,
-  });
+  return pullRequestsJson(c, ledgerScopeOf(gate), gate.db, parsed.filter);
+};
+
+/**
+ * `GET /api/pull-requests` — the workspace's own ledger, listed over every live
+ * target. Same params and payload keys as the App face; the scope spans the
+ * workspace's bots, so one list covers every repository it reviews.
+ */
+const workspacePullRequestsRoute = async (c: DashboardContext) => {
+  c.header("Cache-Control", "private, no-store");
+  const gate = await requireWorkspaceManagerJson(c);
+  if (!gate.ok) return gate.response;
+  const parsed = parseRepoFilter(c);
+  if (!parsed.ok) return c.json({ error: "invalid repo" }, 400);
+  return pullRequestsJson(c, gate.scope, gate.db, parsed.filter);
 };
 
 /** The record-section paging bounds, enforced here (never a silent default on a bad value). */
@@ -5981,6 +6062,11 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/insights/summary", handler: appInsightsRoute, access: "write" },
+  // Workspace-scope reads (plan 372): the same payloads as the App faces, over
+  // every live target of the workspace. The repository-scope (target-addressed)
+  // family lands beside these and the App family retires with it.
+  { method: "get", path: "/api/insights/summary", handler: workspaceInsightsRoute, access: "write" },
+  { method: "get", path: "/api/pull-requests", handler: workspacePullRequestsRoute, access: "write" },
   // Per-App pull-request ledger (migration 0039): the list face, the one-PR
   // head face and its three paged record families. The detail address is the
   // ledger's own key — owner/repo/number — because one App serves several
