@@ -194,6 +194,9 @@ const DEFAULT_ADMISSION_DROPS = {
 /** The fixture queue's live gauge as `GET /api/runtime` reports it. */
 const DEFAULT_QUEUE = { backlogCount: 0, backlogBytes: 0, oldestMessageTimestamp: null };
 
+/** The documented absent-row maintenance window: the platform is open. */
+const DEFAULT_MAINTENANCE = { enabled: false, reason: null, since: null };
+
 /** The stored recheck ask-budget row, raw so a refused write is observable. */
 function storedRecheckBudget(db: TestD1): string | null {
   const row = db.raw
@@ -366,6 +369,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
+      maintenance: DEFAULT_MAINTENANCE,
     });
   });
 
@@ -463,6 +467,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
+      maintenance: DEFAULT_MAINTENANCE,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
@@ -478,6 +483,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
+      maintenance: DEFAULT_MAINTENANCE,
     });
   });
 
@@ -902,6 +908,17 @@ describe("PATCH /_internal_admin/api/runtime maintenance", () => {
     // Only the off flag survives: no stale window outlives the close.
     expect(storedBudgets(db)).toEqual({ "platform.maintenance.enabled": "0" });
     expect(auditRows(db)).toHaveLength(2);
+  });
+
+  test("GET reports the window it stored, so the console states what the gate does", async () => {
+    const { db } = fixture();
+    const patch = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ maintenance: { enabled: true, reason: "backfill" } }),
+    });
+    const saved = (await patch.json()) as { maintenance: { since: string } };
+    const body = (await (await runtimeApi(db, { method: "GET" })).json()) as Record<string, unknown>;
+    expect(body.maintenance).toEqual({ enabled: true, reason: "backfill", since: saved.maintenance.since });
   });
 
   test("a malformed body is a 400 that writes nothing", async () => {

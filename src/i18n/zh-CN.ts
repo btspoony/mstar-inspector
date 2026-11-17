@@ -41,6 +41,13 @@ export const zhCN: Dictionary = {
   },
   common: {
     pageTitle: "{page} — {brand}",
+    /** 维护窗口（产品规格 J7）：不承诺 ETA。 */
+    maintenance: {
+      title: "维护中",
+      body: "正在执行数据升级，完成后自动恢复服务。",
+      reason: "原因：{reason}",
+      since: "开始时间：{since}",
+    },
     time: {
       justNow: "刚刚",
       minuteAgo: "{count} 分钟前",

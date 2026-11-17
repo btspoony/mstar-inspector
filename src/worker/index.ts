@@ -60,7 +60,7 @@ import { sumMonthlyRp } from "../store/usage-store";
 import { attachCheckAtAcceptance, createCheckLifecycle } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
-import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
+import { dashboardApp, dashboardMaintenanceGate, dashboardTenantGate } from "../dashboard/index";
 import { handleSetupGet, handleSetupPost } from "./install-setup";
 import { adminApp } from "../admin/index";
 import { isFlagEnabled } from "../admin/flags";
@@ -75,8 +75,16 @@ const app = new Hono<{ Bindings: Env }>();
 // `/dashboard/api/apps…`) must answer 404 even when the SPA shell could serve
 // it. Requests the gate passes are unchanged; the dashboard app re-mounts the
 // same (idempotent) gate ahead of its own routes so direct mounts keep working.
+//
+// The maintenance window (D20) mounts the same way and for the same
+// reason: `spaDispatch` answers `GET /dashboard` and every browser page load
+// before `app.route("/dashboard", dashboardApp)` is ever reached, so a gate
+// inside `dashboardApp` alone would close the API and leave the shell open.
+// `/healthz` and `/bot/setup` are `app` routes and `/_internal_admin/*` mounts
+// on the operator sub-app, so no ungated surface carries this prefix.
 app.use("*", trailingSlashRedirect());
 app.use("/dashboard/*", dashboardTenantGate);
+app.use("/dashboard/*", dashboardMaintenanceGate);
 app.use("*", spaDispatch());
 /**
  * Classifier outcome → delivery-record outcome (QC wave 1, S-2):

@@ -205,6 +205,7 @@ import { isFlagEnabled } from "../admin/flags";
 import {
   errorPage,
   forbiddenPage,
+  maintenancePage,
   manifestConfirmPage,
   manifestErrorPage,
   manifestOnboardingPage,
@@ -218,12 +219,14 @@ import {
   RuntimeConfigError,
   UnknownWorkspaceError,
   WORKSPACE_CONCURRENCY_MAX,
+  getMaintenanceMode,
   getWorkspaceCheckMinScore,
   getWorkspaceConcurrency,
   isConcurrencyValue,
   readDefaultReviewLevel,
   setWorkspaceConcurrency,
   type DegradedReason,
+  type MaintenanceMode,
 } from "./runtime-config-store";
 import { isReviewLevel, type ReviewLevel } from "../../packages/shared/src/runtime";
 import {
@@ -280,6 +283,11 @@ export type DashboardVariables = {
    * `undefined` = not classified yet, `null` = the caller is not a member.
    */
   workspaceScope?: WorkspaceScope | null;
+  /**
+   * The maintenance window as this request read it (once per request, D20):
+   * set by {@link dashboardMaintenanceGate}, absent until it runs.
+   */
+  maintenance?: MaintenanceMode;
 };
 
 type DashboardContext = Context<{ Bindings: Env; Variables: DashboardVariables }>;
@@ -814,6 +822,57 @@ async function tenantNotFound(c: DashboardContext): Promise<Response> {
 }
 
 /**
+ * The maintenance window's answer, split by surface: every `/api/` path
+ * (`/dashboard/api/*` and `/dashboard/<ref>/api/*`) answers the documented JSON
+ * so the SPA parses a state, and every page answers the J7 HTML (operator
+ * reason + start time, no ETA promise).
+ */
+export function maintenanceResponse(c: DashboardContext, mode: MaintenanceMode): Response {
+  // Never cached (same header the API prefix sets): a cached 503 would keep
+  // people out after the window closed, and the reason can be operator-set.
+  c.header("Cache-Control", "private, no-store");
+  return /^\/dashboard\/(?:api\/|[^/]+\/api\/)/.test(c.req.path)
+    ? c.json({ maintenance: true, reason: mode.reason, since: mode.since }, 503)
+    : c.html(maintenancePage(mode.reason, mode.since, requestLocale(c)), 503);
+}
+
+/**
+ * The maintenance gate (D20) — the ONE middleware both dashboard mounts use.
+ * Every workspace route table `access` class is unchanged: this gate sits
+ * ahead of dispatch, so it closes the surface wholesale rather than widening
+ * or narrowing any route's declared access.
+ *
+ * Mounted twice, for the same reason `dashboardTenantGate` is: the SPA shell
+ * pages are answered by `spaDispatch` in `src/worker/index.ts` BEFORE
+ * `app.route("/dashboard", dashboardApp)`, so a gate mounted only inside
+ * `dashboardApp` would let `GET /dashboard` and every browser page load through
+ * while closing the API. The worker mount covers every page and API request;
+ * the `dashboardApp` mount (after the workspace/member gate) keeps a direct
+ * mount correct. The first run wins, so the read happens once per request.
+ *
+ * Ungated: `/healthz` and `/bot/setup` are `app` routes and `/_internal_admin/*`
+ * mounts on the operator sub-app, so none is under the `/dashboard/*` prefix
+ * this gate is mounted on. `/dashboard/login` and `/dashboard/oauth/callback`
+ * stay open (the member guard's own exempt pair): the console that reopens the
+ * platform needs a session, so an expired cookie must be renewable during the
+ * window. Both answer a page the window has nothing to add to.
+ *
+ * The window is read ONCE per request and parked on the context; a read fault
+ * is off (`getMaintenanceMode`), so a settings outage cannot close the platform.
+ */
+export const dashboardMaintenanceGate: Handler<{
+  Bindings: Env;
+  Variables: DashboardVariables;
+}> = async (c, next) => {
+  if (c.get("maintenance") !== undefined) return next();
+  if (GUARD_EXEMPT_PATHS.has(c.req.path)) return next();
+  const db = dashboardD1(c.env);
+  const mode = db === null ? { enabled: false, reason: null, since: null } : await getMaintenanceMode(db);
+  c.set("maintenance", mode);
+  return mode.enabled ? maintenanceResponse(c, mode) : next();
+};
+
+/**
  * The tenant route-family gate. Mounted twice: by `src/worker/index.ts` on
  * `/dashboard/*` BEFORE SPA dispatch (so a retired App HTML request cannot be
  * served by the SPA shell before the 404 decision) and by `dashboardApp` ahead
@@ -1057,6 +1116,11 @@ dashboardApp.use("*", async (c, next) => {
   c.set("workspaceScope", null);
   return next();
 });
+
+// The maintenance gate last: the workspace/member verdict above is unchanged,
+// and closing the platform now covers every route below without touching a
+// route's declared `access` class.
+dashboardApp.use("*", dashboardMaintenanceGate);
 
 /**
  * Platform-operator allowlist membership — NOCASE, same parser as every login

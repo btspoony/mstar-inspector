@@ -1140,18 +1140,26 @@ export type MaintenanceMode = {
  * The maintenance window in ONE statement. An ABSENT `enabled` row is the
  * documented default — off. `reason` / `since` describe a running window only,
  * and the writer deletes both on disable, so a closed platform carries neither.
+ *
+ * Like every reader in this store it never throws: a read fault answers the
+ * documented default (off, i.e. OPEN) — the window is a convenience over live
+ * services, and a broken settings read must not become a platform-wide outage.
  */
 export async function getMaintenanceMode(db: DashboardD1): Promise<MaintenanceMode> {
-  const rows = await db
-    .prepare("SELECT key, value FROM review_runtime_settings WHERE key IN (?1, ?2, ?3)")
-    .bind(MAINTENANCE_ENABLED_KEY, MAINTENANCE_REASON_KEY, MAINTENANCE_SINCE_KEY)
-    .all<{ key: string; value: string }>();
-  const stored = new Map(rows.results.map((row) => [row.key, row.value]));
-  return {
-    enabled: stored.get(MAINTENANCE_ENABLED_KEY) === "1",
-    reason: stored.get(MAINTENANCE_REASON_KEY) ?? null,
-    since: stored.get(MAINTENANCE_SINCE_KEY) ?? null,
-  };
+  try {
+    const rows = await db
+      .prepare("SELECT key, value FROM review_runtime_settings WHERE key IN (?1, ?2, ?3)")
+      .bind(MAINTENANCE_ENABLED_KEY, MAINTENANCE_REASON_KEY, MAINTENANCE_SINCE_KEY)
+      .all<{ key: string; value: string }>();
+    const stored = new Map(rows.results.map((row) => [row.key, row.value]));
+    return {
+      enabled: stored.get(MAINTENANCE_ENABLED_KEY) === "1",
+      reason: stored.get(MAINTENANCE_REASON_KEY) ?? null,
+      since: stored.get(MAINTENANCE_SINCE_KEY) ?? null,
+    };
+  } catch {
+    return { enabled: false, reason: null, since: null };
+  }
 }
 
 /**

@@ -58,6 +58,13 @@ export const en = {
   },
   common: {
     pageTitle: "{page} — {brand}",
+    /** The maintenance window (product spec J7): no ETA promise. */
+    maintenance: {
+      title: "Under maintenance",
+      body: "A data upgrade is running; service resumes automatically when it finishes.",
+      reason: "Reason: {reason}",
+      since: "Started at: {since}",
+    },
     time: {
       justNow: "just now",
       minuteAgo: "{count} minute ago",
