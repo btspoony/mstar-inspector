@@ -339,6 +339,11 @@ async function mountTargets(
   return {
     win,
     sent,
+    /** Re-render the page (a workspace switch re-derives its base from the URL). */
+    rerender: async (next: ReturnType<typeof createElement>) => {
+      await act(async () => root.render(next));
+      await settle();
+    },
     dialog: (): DomElement | null => win.document.querySelector('[role="dialog"]') as unknown as DomElement | null,
     text: () => container.textContent ?? "",
     click: async (node: DomElement | null | undefined) => {
@@ -506,6 +511,34 @@ describe("target create parser", () => {
 });
 
 describe("the list failure face", () => {
+  test("a workspace switch mid-read drops the answer for the workspace left behind", async () => {
+    // The first workspace's read is held open across the navigation, so it
+    // lands last — after the new workspace's rows are already on screen.
+    let releaseStale: () => void = () => {};
+    const staleRead = new Promise<Response>((resolve) => {
+      releaseStale = () => resolve(wireJson({ targets: [row()] }));
+    });
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.startsWith("/dashboard/acme/api/targets")) return staleRead;
+      if (wire.url.endsWith("/api/targets")) {
+        return wireJson({ targets: [row({ target_id: "t-2", repo_owner: "beta", repo_name: "site" })] });
+      }
+      return wireJson({});
+    });
+    try {
+      view.win.history.pushState(null, "", "/dashboard/beta/targets");
+      await view.rerender(createElement(TargetsPage, { boot: BOOT }));
+      expect(view.text()).toContain("beta/site");
+
+      releaseStale();
+      for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+      expect(view.text()).toContain("beta/site");
+      expect(view.text()).not.toContain("acme/api");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a failed list read offers no add dialog (an empty App list is not 'no apps')", async () => {
     const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), () =>
       wireJson({ error: "boom" }, 500),
@@ -670,6 +703,11 @@ async function mountDetail(
   return {
     win,
     sent,
+    /** Re-render the page on another address segment (the switcher's navigation). */
+    rerender: async (next: string) => {
+      await act(async () => root.render(createElement(TargetDetailPage, { boot: BOOT, targetId: next })));
+      await settle();
+    },
     tabs: () => [...win.document.querySelectorAll('[role="tab"]')].map((node) => node.textContent),
     activeTab: () => win.document.querySelector('[role="tab"][data-state="active"]')?.textContent,
     text: () => container.textContent ?? "",
@@ -697,6 +735,30 @@ describe("repository detail page (mounted)", () => {
       expect(view.text()).toContain("Every push");
       const score = view.win.document.querySelector('input[type="number"]');
       expect((score as unknown as { value: string } | null)?.value).toBe("45");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a read for the target the operator left cannot paint over the one now open", async () => {
+    // The first target's read is held open across the navigation; its answer
+    // lands last and must be dropped rather than shown under the new address.
+    let releaseStale: () => void = () => {};
+    const staleRead = new Promise<Response>((resolve) => {
+      releaseStale = () => resolve(wireJson(targetPayload(1)));
+    });
+    const view = await mountDetail((wire) =>
+      wire.url.endsWith("/api/targets/t-1") ? staleRead : wireJson(workspaceDefaults()),
+    );
+    try {
+      // Navigate to the fixed 所有仓库 entry while t-1 is still in flight.
+      await view.rerender("all");
+      expect(view.text()).toContain(t("en", "targets.allRepositories"));
+
+      releaseStale();
+      for (let flush = 0; flush < 6; flush += 1) await act(async () => {});
+      expect(view.text()).toContain(t("en", "targets.allRepositories"));
+      expect(view.text()).not.toContain("acme/api");
     } finally {
       await view.unmount();
     }

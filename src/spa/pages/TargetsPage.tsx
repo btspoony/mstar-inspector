@@ -570,22 +570,31 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [dialogOpen, setDialogOpen] = useState(false);
 
+  // Every read bumps the stamp; a read whose stamp is no longer current is
+  // stale (a newer read started) and must not write.
+  const requestRef = useRef(0);
+
   // The first load owns the skeleton; a reload (after an add) refreshes in the
   // background so the list and the add dialog stay mounted — a skeleton flash
   // would unmount the dialog's notice. A failed background read keeps the rows
   // the page last read successfully rather than blanking them.
   const load = useCallback(async ({ background = false }: { background?: boolean } = {}): Promise<void> => {
+    const stamp = ++requestRef.current;
     if (!background) setState("loading");
     try {
       const loaded = await loadTargets(base);
+      if (stamp !== requestRef.current) return;
       if (loaded === null) {
         if (!background) setState("error");
         return;
       }
+      const apps = (await loadRepositoryApps(base)) ?? [];
+      if (stamp !== requestRef.current) return;
       setTargets(loaded);
-      setApps((await loadRepositoryApps(base)) ?? []);
+      setApps(apps);
       setState("ok");
     } catch {
+      if (stamp !== requestRef.current) return;
       if (!background) setState("error");
     }
   }, [base]);
@@ -687,12 +696,15 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
     repo: "",
     pr: "",
   });
-  const cancelledRef = useRef(false);
+  // Every read bumps the stamp; a read whose stamp is no longer the current one
+  // is stale (the address moved, or a newer read started) and must not write.
+  const requestRef = useRef(0);
 
   /** A reload: resolves whether a payload landed, so a save can tell a
    *  completed refresh from a failed one. */
   const load = useCallback(
     async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
+      const stamp = ++requestRef.current;
       if (!background) setState("loading");
       try {
         const loaded: TargetDetailData | null = all
@@ -702,7 +714,7 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
           : await loadTargetDetail(base, targetId).then((payload) =>
               payload === null ? null : { kind: "target" as const, payload },
             );
-        if (cancelledRef.current) return false;
+        if (stamp !== requestRef.current) return false;
         if (loaded === null) {
           if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
           else setState("error");
@@ -713,7 +725,7 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
         setNotice(null);
         return true;
       } catch (error) {
-        if (cancelledRef.current) return false;
+        if (stamp !== requestRef.current) return false;
         if (!background && !all && error instanceof ApiError && error.status === 404) setState("missing");
         else if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
         else setState("error");
@@ -724,13 +736,12 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
   );
 
   useEffect(() => {
-    cancelledRef.current = false;
     void load();
     // A targetId or workspace push re-derives the URL state too.
     setTab(parseTargetDetailTab(window.location.search));
-    return () => {
-      cancelledRef.current = true;
-    };
+    // No cleanup: the next effect body's `load()` bumps the stamp, which is
+    // what invalidates this run's continuation. Unmount needs none — React
+    // drops a setState on an unmounted root.
   }, [load]);
 
   useEffect(() => {
