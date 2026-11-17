@@ -22,6 +22,7 @@ import {
   parseSettings,
   type AppDetailSearch,
   type BlockedReason,
+  type ReadScope,
   type SettingsPayload,
 } from "./data";
 
@@ -387,6 +388,10 @@ export function AppDetailView({
   // A stale manager-tab URL after a demotion resolves to the default tab —
   // the view never renders a manager face for a non-manager.
   const tab = canManage ? search.tab : "insights";
+  // The App's own read scope: its settings face names the ONE target this page
+  // is about, so its insights and ledger read that target — never the whole
+  // workspace and never another target's rows.
+  const scope: ReadScope = { kind: "target", targetId: payload.target_id };
 
   function onTabChange(next: string): void {
     if (next !== "installations" && next !== "insights" && next !== "pull-requests") {
@@ -436,7 +441,7 @@ export function AppDetailView({
             one-visible-panel invariant (ui-bugs knowledge pin,
             source-tested below). */}
         <TabsContent value="insights" forceMount>
-          <AppInsightsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />
+          <AppInsightsTab locale={locale} scope={scope} search={search} onSearch={onSearch} />
         </TabsContent>
         <TabsContent value="installations" forceMount>
           {/* Installed tab: the shareable install link leads, the owner
@@ -468,7 +473,7 @@ export function AppDetailView({
           </div>
         </TabsContent>
         <TabsContent value="pull-requests" forceMount>
-          <AppPullRequestsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />
+          <AppPullRequestsTab locale={locale} scope={scope} search={search} onSearch={onSearch} />
         </TabsContent>
       </Tabs>
     </div>

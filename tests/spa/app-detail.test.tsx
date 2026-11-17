@@ -22,12 +22,12 @@ import { type Element as DomElement, type HTMLElement as DomHTMLElement, type Wi
 import { t } from "../../src/i18n";
 import {
   appDetailSearchQuery,
-  appInsightsSummaryUrl,
   appStatusPill,
   parseAppDetailSearch,
   parseSettings,
   PR_VERDICTS,
   pullRequestRefOf,
+  scopedInsightsSummaryUrl,
   type AppDetailSearch,
   type AppDetailTab,
   type InsightsSummary,
@@ -238,14 +238,22 @@ describe("app detail URL state (shared pure helpers)", () => {
     ).toBe("?tab=pull-requests&pr=acme%2Fweb%2F42");
   });
 
-  test("the per-App summary URL is base-prefixed and encodes appId + filters; include=repos always rides", () => {
-    expect(appInsightsSummaryUrl("/dashboard", "1", "30", "")).toBe(
-      "/dashboard/api/apps/1/insights/summary?window=30&include=repos",
+  test("the summary URL is base-prefixed and addresses the scope; include=repos always rides", () => {
+    // One repository: the target-addressed family.
+    expect(scopedInsightsSummaryUrl("/dashboard", { kind: "target", targetId: "1" }, "30", "")).toBe(
+      "/dashboard/api/targets/1/insights/summary?window=30&include=repos",
     );
-    // A workspace-scoped page rides its own prefix (no legacy App family there).
-    expect(appInsightsSummaryUrl("/dashboard/acme", "12345", "7", "acme/web")).toBe(
-      "/dashboard/acme/api/apps/12345/insights/summary?window=7&include=repos&repo=acme%2Fweb",
+    // A workspace-scoped page rides its own prefix and the workspace face.
+    expect(
+      scopedInsightsSummaryUrl("/dashboard/acme", { kind: "target", targetId: "12345" }, "7", "acme/web"),
+    ).toBe("/dashboard/acme/api/targets/12345/insights/summary?window=7&include=repos&repo=acme%2Fweb");
+    expect(scopedInsightsSummaryUrl("/dashboard", { kind: "workspace" }, "90", "")).toBe(
+      "/dashboard/api/insights/summary?window=90&include=repos",
     );
+    // The removed App-addressed family is never emitted.
+    expect(
+      scopedInsightsSummaryUrl("/dashboard", { kind: "target", targetId: "1" }, "30", ""),
+    ).not.toContain("/api/apps/");
   });
 });
 
@@ -995,13 +1003,62 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     const html = renderToStaticMarkup(
       createElement(AppInsightsTab, {
         locale: "en",
-        appId: "1",
+        scope: { kind: "target", targetId: "1" },
         search: { tab: "insights", window: "30", repo: "", pr: "" },
         onSearch: () => {},
       }),
     );
     expect(html).toContain('role="status"');
     expect(html).toContain("Loading…");
+  });
+
+  test("the workspace scope reads the workspace summary, and an empty workspace is the empty state", async () => {
+    // Zero live targets → the server answers the zero-filled aggregate. That is
+    // the product's 暂无洞察数据 empty state (J3), never an error face and never
+    // a request naming a target that does not exist.
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      calls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          window_days: 30,
+          repo: "",
+          reviews_total: 0,
+          findings_by_severity: [],
+          verdict_distribution: [],
+          weekly_trend: [],
+          daily_trend: [],
+          findings_distribution: [],
+          repos: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    const { win, cleanup } = installDom("http://localhost/dashboard/insights");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () =>
+        root.render(
+          createElement(AppInsightsTab, {
+            locale: "en",
+            scope: { kind: "workspace" },
+            search: { tab: "insights", window: "30", repo: "", pr: "" },
+            onSearch: () => {},
+          }),
+        ),
+      );
+      await act(async () => {});
+      expect(calls).toEqual(["/dashboard/api/insights/summary?window=30&include=repos"]);
+      expect(container.textContent ?? "").toContain("No reviews yet");
+      expect(container.querySelector('[data-slot="error-state"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
   });
 
   test("a refetch over retained data keeps the records mounted, then reports the failure in place", async () => {
@@ -1024,7 +1081,12 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     function Harness() {
       const [search, setSearch] = useState<AppDetailSearch>({ tab: "insights", window: "30", repo: "", pr: "" });
       setWindow = (next) => setSearch((previous) => ({ ...previous, window: next }));
-      return createElement(AppInsightsTab, { locale: "en", appId: "1", search, onSearch: setSearch });
+      return createElement(AppInsightsTab, {
+        locale: "en",
+        scope: { kind: "target", targetId: "1" },
+        search,
+        onSearch: setSearch,
+      });
     }
 
     const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");

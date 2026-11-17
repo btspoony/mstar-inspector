@@ -24,16 +24,18 @@ import { MetricBand, type Metric } from "../components/MetricBand";
 import { ErrorState } from "../components/state/ErrorState";
 import { ReviewingBadge } from "./ReviewingBadge";
 import {
-  appPullRequestDetailUrl,
-  appPullRequestRecordsUrl,
   githubCommitUrl,
   githubPullRequestUrl,
   githubRepoUrl,
   parsePullRequestDetail,
   parseRecordPage,
   pullRequestStatePill,
+  readScopeKey,
+  scopedPullRequestDetailUrl,
+  scopedPullRequestRecordsUrl,
   type PullRequestDetail,
   type PullRequestRef,
+  type ReadScope,
   type RecordPage,
   type RecordPageItems,
   type RecordSection,
@@ -264,19 +266,19 @@ function SectionPager<K extends RecordSection>({
  * repaint of the previous visit's error. An effect cannot do that job — it
  * runs after paint, and the retained frame IS the frame the operator sees.
  *
- * The tab also keys this node on the App and the pr address, so switching
- * PRs or Apps is a remount rather than a stamp comparison and no retained
+ * The tab also keys this node on the scope and the pr address, so switching
+ * PRs or scopes is a remount rather than a stamp comparison and no retained
  * face — head or section page — survives a transition at all.
  */
 export function PullRequestDetail({
   locale,
-  appId,
+  scope,
   prKey,
   prRef,
   onBack,
 }: {
   locale: SpaBoot["locale"];
-  appId: string;
+  scope: ReadScope;
   /** The `pr` search value this node belongs to — its own read stamp. */
   prKey: string;
   prRef: PullRequestRef;
@@ -286,19 +288,20 @@ export function PullRequestDetail({
   // every parent render, so an object dependency would re-run the read and
   // flash the loading face for a PR that never changed.
   const { owner, repo, number } = prRef;
+  const scopeKey = readScopeKey(scope);
   const [read, setRead] = useState<DetailRead | null>(null);
   const [nonce, setNonce] = useState(0);
   const current = currentDetailRead(read, prKey);
   // One reader per family, each with its own ticket; the object below is the
   // view's whole page state.
   const [findings, loadFindings] = useRecordSection("findings", (page) =>
-    appPullRequestRecordsUrl(apiBase(), appId, prRef, "findings", page),
+    scopedPullRequestRecordsUrl(apiBase(), scope, prRef, "findings", page),
   );
   const [reviews, loadReviews] = useRecordSection("reviews", (page) =>
-    appPullRequestRecordsUrl(apiBase(), appId, prRef, "reviews", page),
+    scopedPullRequestRecordsUrl(apiBase(), scope, prRef, "reviews", page),
   );
   const [failures, loadFailures] = useRecordSection("failures", (page) =>
-    appPullRequestRecordsUrl(apiBase(), appId, prRef, "failures", page),
+    scopedPullRequestRecordsUrl(apiBase(), scope, prRef, "failures", page),
   );
   const records: RecordSections = { findings, reviews, failures };
 
@@ -324,7 +327,7 @@ export function PullRequestDetail({
   useEffect(() => {
     let cancelled = false;
     setRead({ pr: prKey, kind: "loading" });
-    fetchJson(appPullRequestDetailUrl(apiBase(), appId, { owner, repo, number }))
+    fetchJson(scopedPullRequestDetailUrl(apiBase(), scope, { owner, repo, number }))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parsePullRequestDetail(raw);
@@ -353,7 +356,7 @@ export function PullRequestDetail({
     // `ensureSection` closes over the sections only to skip loaded ones; it is
     // not a dependency, or the first landing would re-read on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appId, prKey, owner, repo, number, nonce]);
+  }, [scopeKey, prKey, owner, repo, number, nonce]);
 
   // Retry resets the read in the click itself, so the loading face paints
   // first; bumping the nonce alone would leave the failed face up until the

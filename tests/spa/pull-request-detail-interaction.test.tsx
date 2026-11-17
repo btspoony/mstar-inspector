@@ -1,5 +1,5 @@
 /**
- * Pull request detail face (App detail IA): the mounted faces.
+ * Pull request detail face: the mounted faces.
  *
  * happy-dom pins over what only real effects and events prove: the family
  * switch and its section read, paging and the severity filter, fold toggles,
@@ -19,7 +19,7 @@ import {
   detailFetch,
   jsonResponse,
   mountDetailView,
-  mountTabAcrossApps,
+  mountTabAcrossTargets,
   page,
   press,
   scene,
@@ -49,8 +49,8 @@ describe("pull requests detail read derivation (pure)", () => {
 describe("detail fetch stub (pure)", () => {
   test("an unhandled read fails the caller and names the URL", async () => {
     const stub = detailFetch(() => scene());
-    await expect(stub.fetch("/dashboard/api/apps/1/pull-requests")).rejects.toThrow(
-      "detailFetch: unhandled URL /dashboard/api/apps/1/pull-requests",
+    await expect(stub.fetch("/dashboard/api/targets/1/pull-requests")).rejects.toThrow(
+      "detailFetch: unhandled URL /dashboard/api/targets/1/pull-requests",
     );
   });
 });
@@ -822,10 +822,10 @@ describe("pull request detail (mounted)", () => {
     }
   });
 
-  test("an App switch in place discards the previous App's record pages", async () => {
-    // The shell keeps the open PR address while the route's App changes
-    // (`mountTabWithGatedFetch` § switchApp). Both Apps hold the same
-    // `owner/repo/number`; only App B's rows belong under App B's head.
+  test("a target switch in place discards the previous target's record pages", async () => {
+    // The page keeps the open PR address while the route's target changes
+    // (`mountTabWithGatedFetch` § switchTarget). Both targets hold the same
+    // `owner/repo/number`; only target B's rows belong under target B's head.
     const finding = (id: string, title: string): PullRequestFinding => ({
       finding_id: id,
       severity: "must-fix",
@@ -835,27 +835,27 @@ describe("pull request detail (mounted)", () => {
       body: "",
       review_round: null,
     });
-    const appA = scene({ findings: page([finding("a-1", "App A finding")]) }, { title: "App A pull request" });
-    const appB = scene({ findings: page([finding("b-1", "App B finding")]) }, { title: "App B pull request" });
-    const { text, fetches, switchApp, unmount } = await mountTabAcrossApps("acme/web/133", (appId) =>
-      appId === "1" ? appA : appB,
+    const targetA = scene({ findings: page([finding("a-1", "App A finding")]) }, { title: "App A pull request" });
+    const targetB = scene({ findings: page([finding("b-1", "App B finding")]) }, { title: "App B pull request" });
+    const { text, fetches, switchTarget, unmount } = await mountTabAcrossTargets("acme/web/133", (targetId) =>
+      targetId === "1" ? targetA : targetB,
     );
     try {
       expect(text()).toContain("App A pull request");
       expect(text()).toContain("App A finding");
 
-      await switchApp("2");
+      await switchTarget("2");
 
-      // App B's head and its own rows replace App A's...
+      // Target B's head and its own rows replace target A's...
       expect(text()).toContain("App B pull request");
       expect(text()).toContain("App B finding");
-      // ...because the switch drops App A's retained page and reads App B's
-      // own findings under App B's head; nothing of App A survives it.
+      // ...because the switch drops target A's retained page and reads target
+      // B's own findings under target B's head; nothing of A survives it.
       expect(text()).not.toContain("App A finding");
       expect(text()).not.toContain("App A pull request");
       const requested = (suffix: string) => fetches.some((url) => url.endsWith(suffix));
-      expect(requested("/api/apps/2/pull-requests/acme/web/133")).toBe(true);
-      expect(requested("/api/apps/2/pull-requests/acme/web/133/findings?offset=0&limit=10")).toBe(true);
+      expect(requested("/api/targets/2/pull-requests/acme/web/133")).toBe(true);
+      expect(requested("/api/targets/2/pull-requests/acme/web/133/findings?offset=0&limit=10")).toBe(true);
     } finally {
       await unmount();
     }

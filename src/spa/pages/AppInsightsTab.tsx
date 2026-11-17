@@ -18,16 +18,18 @@ import { ErrorState } from "../components/state/ErrorState";
 import {
   INSIGHTS_WINDOWS,
   INSIGHTS_REPO_ALL,
-  appInsightsSummaryUrl,
   insightsRepoFromSelect,
   insightsRepoOptions,
   insightsRepoSelectValue,
   insightsTrendPoints,
   parseInsights,
+  readScopeKey,
+  scopedInsightsSummaryUrl,
   verdictLine,
   type AppDetailSearch,
   type FindingsDistributionBucket,
   type InsightsSummary,
+  type ReadScope,
 } from "./data";
 import { StackedBarChart, type StackedSeries } from "@/components/charts/StackedBarChart";
 import type { ChartSlot } from "@/components/charts/chartSlots";
@@ -35,21 +37,23 @@ import type { FindingSeverity } from "../../contracts/finding-severity";
 import { TrendChart } from "@/components/charts/TrendChart";
 
 /**
- * The 洞察 tab of the App detail page (App detail IA) — the per-App
- * successor of the retired global insights page, rebuilt on the helpers
- * kept (`parseInsights`, `INSIGHTS_WINDOWS` segments, repo-select
- * helpers) and the shared charts. Closes the kept-helper consumer residual.
+ * The 洞察 tab of a repository detail page — one target's review health, or
+ * the whole workspace's ("所有仓库"). It rides the helpers kept
+ * (`parseInsights`, `INSIGHTS_WINDOWS` segments, repo-select helpers) and the
+ * shared charts.
  *
- * Data plane: `GET /dashboard/api/apps/:appId/insights/summary`
- * with `include=repos` for the repo Select (QC F-001 semantics unchanged).
- * Filter state is CONTROLLED by the AppDetailPage shell: the shell derives
+ * Data plane: the scope's summary face — `GET …/api/targets/:targetId/
+ * insights/summary` for one repository, `GET …/api/insights/summary` for the
+ * whole workspace — with `include=repos` for the repo Select (QC F-001
+ * semantics unchanged).
+ * Filter state is CONTROLLED by the hosting page shell: the shell derives
  * `{ tab, window, repo }` from the location via `parseAppDetailSearch`
  * (the one []-mounted popstate listener lives there), and every in-page
  * edit flows back through `onSearch` → the shell's `replaceState` commit —
  * loop-free by contract (knowledge spa-url-state-resync-popstate). This
  * component therefore owns only the fetch + presentation; the window/repo
- * segments reuse the 7/30/90 semantics and the repo filter is scoped to
- * this App's repos.
+ * segments reuse the 7/30/90 semantics and the repo filter is scoped to the
+ * scope's own repos.
  * Toolbar first, then the summary, the severity stacked bar time series
  * from `findings_distribution` (AD-652 face carried over verbatim) and the
  * trend card as the grouped bucket chart at the window's granularity
@@ -62,12 +66,12 @@ import { TrendChart } from "@/components/charts/TrendChart";
  */
 export function AppInsightsTab({
   locale,
-  appId,
+  scope,
   search,
   onSearch,
 }: {
   locale: SpaBoot["locale"];
-  appId: string;
+  scope: ReadScope;
   search: AppDetailSearch;
   /** Shell-owned commit: replaceState + state update (never popstate). */
   onSearch: (next: AppDetailSearch) => void;
@@ -77,13 +81,14 @@ export function AppInsightsTab({
   // ErrorState retry: bumping the nonce re-runs the load effect below
   // for the current filter — the fetch body is unchanged.
   const [reloadNonce, setReloadNonce] = useState(0);
+  const scopeKey = readScopeKey(scope);
 
   useEffect(() => {
     let cancelled = false;
     setState("loading");
     // include=repos: the records Select needs the window-scoped distinct
     // repo set (QC F-001); default summary reads stay cheap.
-    fetchJson(appInsightsSummaryUrl(apiBase(), appId, search.window, search.repo))
+    fetchJson(scopedInsightsSummaryUrl(apiBase(), scope, search.window, search.repo))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parseInsights(raw);
@@ -100,7 +105,10 @@ export function AppInsightsTab({
     return () => {
       cancelled = true;
     };
-  }, [appId, search.window, search.repo, reloadNonce]);
+    // The scope's KEY, not the object: a caller rebuilding `{kind, targetId}`
+    // on every render must not re-run the read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKey, search.window, search.repo, reloadNonce]);
 
   function onWindowChange(next: string): void {
     // Radix fires "" when the active segment is re-clicked — keep the window.

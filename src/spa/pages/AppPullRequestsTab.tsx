@@ -21,25 +21,28 @@ import { PullRequestDetail } from "./PullRequestDetail";
 import { ReviewingBadge } from "./ReviewingBadge";
 import {
   INSIGHTS_REPO_ALL,
-  appPullRequestsUrl,
   insightsRepoFromSelect,
   insightsRepoOptions,
   insightsRepoSelectValue,
   parsePullRequestList,
   pullRequestRefOf,
   pullRequestStatePill,
+  readScopeKey,
+  scopedPullRequestsUrl,
   type AppDetailSearch,
   type PullRequestRow,
+  type ReadScope,
 } from "./data";
 
 /**
- * One list read, stamped with the App it answers for. The tab instance survives
- * an App switch (`/dashboard/apps/:appId` keeps the same route family), so an
- * unstamped read would paint the previous App's rows or error under the new
- * one until the new read landed.
+ * One list read, stamped with the SCOPE it answers for. The tab instance
+ * survives a scope switch (the repository page re-renders it under the same
+ * route family), so an unstamped read would paint the previous scope's rows or
+ * error under the new one until the new read landed.
  */
 export type ListRead = {
-  app: string;
+  /** {@link readScopeKey} of the scope this read answers for. */
+  scope: string;
   rows: PullRequestRow[] | null;
   /** The payload's repository option set — kept across an in-flight re-read. */
   repos: string[] | null;
@@ -47,54 +50,57 @@ export type ListRead = {
 };
 
 /**
- * The read for the ACTIVE App — the loading face when the stamp names another
- * one. Deriving at render (not resetting in an effect) is what removes the
- * stale frame: an effect runs after paint, so the previous App's rows would
- * still be the frame the operator saw.
+ * The read for the ACTIVE scope — the loading face when the stamp names
+ * another one. Deriving at render (not resetting in an effect) is what removes
+ * the stale frame: an effect runs after paint, so the previous scope's rows
+ * would still be the frame the operator saw.
  */
-export function currentListRead(read: ListRead, appId: string): ListRead {
-  return read.app === appId ? read : { app: appId, rows: null, repos: null, kind: "loading" };
+export function currentListRead(read: ListRead, scope: string): ListRead {
+  return read.scope === scope ? read : { scope, rows: null, repos: null, kind: "loading" };
 }
 
 /**
- * The Pull requests tab of the App detail page — the per-App ledger of
- * every PR the App received. Two faces in one tab: the list (`pr` empty)
+ * The Pull requests tab of a repository detail page — the ledger of every PR
+ * the SCOPE received (one target, or the whole workspace). Two faces in one
+ * tab: the list (`pr` empty)
  * and the in-place detail (a valid `pr` search param). The detail address
  * rides the URL as `pr=owner/repo/number` through the SAME shell-owned
- * search state as the insights filters (replaceState commit + the one
- * popstate re-sync in AppDetailPage), so a deep link, a reload and
+ * search state as the insights filters (the shell's replaceState commit plus
+ * its one popstate re-sync), so a deep link, a reload and
  * history back/forward all restore the open PR; the browser Back button
  * stays page-level exactly like every other in-page state in this SPA. A
  * nested path route was rejected: `matchSpaRoute` is shared with the
  * Worker's HTML dispatcher, so a new path family would couple this track
  * to the backend's route gate.
  *
- * Data plane: `GET …/api/apps/:appId/pull-requests` (list) and
- * `GET …/api/apps/:appId/pull-requests/:owner/:repo/:number` (detail —
- * the row's owner/repo, never the number alone; one App can see the same
- * number on several repos). The tab owns the list read and the list face;
+ * Data plane: `GET …/api/targets/:targetId/pull-requests` (one repository) or
+ * `GET …/api/pull-requests` (the workspace), and the same family's
+ * `…/pull-requests/:owner/:repo/:number` for the detail — the row's owner/repo,
+ * never the number alone; one App can see the same number on several repos.
+ * The tab owns the list read and the list face;
  * the detail face and its read live in `PullRequestDetail.tsx`. No h1: the
  * tab rides the shell's identity header (the shell mounts this only for
  * managers — 403s cannot occur for an authorized viewer).
  */
 export function AppPullRequestsTab({
   locale,
-  appId,
+  scope,
   search,
   onSearch,
 }: {
   locale: SpaBoot["locale"];
-  appId: string;
+  scope: ReadScope;
   search: AppDetailSearch;
   /** Shell-owned commit: replaceState + state update (never popstate). */
   onSearch: (next: AppDetailSearch) => void;
 }) {
-  // One list read, stamped with the App it belongs to: switching Apps reuses
-  // this tab instance, so an unstamped ledger would paint the previous App's
-  // rows (or its error) until the new read landed. A read for another App
-  // derives to `loading` with no rows.
-  const [read, setRead] = useState<ListRead>({ app: appId, rows: null, repos: null, kind: "loading" });
-  const current = currentListRead(read, appId);
+  // One list read, stamped with the scope it belongs to: switching scopes
+  // reuses this tab instance, so an unstamped ledger would paint the previous
+  // scope's rows (or its error) until the new read landed. A read for another
+  // scope derives to `loading` with no rows.
+  const scopeKey = readScopeKey(scope);
+  const [read, setRead] = useState<ListRead>({ scope: scopeKey, rows: null, repos: null, kind: "loading" });
+  const current = currentListRead(read, scopeKey);
   // ErrorState retry: bumping the nonce re-runs the load effect below.
   const [reloadNonce, setReloadNonce] = useState(0);
   // Local state, not URL state: `search.repo` belongs to the insights tab,
@@ -103,16 +109,16 @@ export function AppPullRequestsTab({
   // through `?repo=owner/name`, so the server filters BEFORE its row cap
   // instead of the tab hiding rows it already holds.
   //
-  // The filter is scoped to one App: the tab instance survives an App switch,
-  // so the choice is stamped with the App it was made for — another App
-  // derives to "all" instead of inheriting a value that names none of its
-  // rows (a coincidental name match would silently filter the new ledger).
-  const [repoFilter, setRepoFilter] = useState<{ app: string; value: string }>({
-    app: appId,
+  // The filter is scoped to one read scope: the tab instance survives a scope
+  // switch, so the choice is stamped with the scope it was made for — another
+  // scope derives to "all" instead of inheriting a value that names none of
+  // its rows (a coincidental name match would silently filter the new ledger).
+  const [repoFilter, setRepoFilter] = useState<{ scope: string; value: string }>({
+    scope: scopeKey,
     value: "",
   });
-  const repoFilterValue = repoFilter.app === appId ? repoFilter.value : "";
-  // The option set is the payload's `repos` — the App's whole repository set,
+  const repoFilterValue = repoFilter.scope === scopeKey ? repoFilter.value : "";
+  // The option set is the payload's `repos` — the scope's whole repository set,
   // including repositories whose rows sit behind the server's row cap. It is
   // NOT derived from the loaded rows: a capped window would silently drop
   // repositories from the toolbar. The current filter rides along even when
@@ -132,31 +138,34 @@ export function AppPullRequestsTab({
     // re-runs on the emptied search value.
     if (detailOpen) return;
     let cancelled = false;
-    // Rows and the option list survive a re-read of the SAME App (a retry, a
+    // Rows and the option list survive a re-read of the SAME scope (a retry, a
     // filter switch), so the frame keeps its content while the new read is in
-    // flight; an App switch drops them with the stamp.
+    // flight; a scope switch drops them with the stamp.
     const carry = (previous: ListRead): Pick<ListRead, "rows" | "repos"> =>
-      previous.app === appId
+      previous.scope === scopeKey
         ? { rows: previous.rows, repos: previous.repos }
         : { rows: null, repos: null };
-    setRead((previous) => ({ app: appId, ...carry(previous), kind: "loading" }));
-    fetchJson(appPullRequestsUrl(apiBase(), appId, repoFilterValue === "" ? undefined : repoFilterValue))
+    setRead((previous) => ({ scope: scopeKey, ...carry(previous), kind: "loading" }));
+    fetchJson(scopedPullRequestsUrl(apiBase(), scope, repoFilterValue === "" ? undefined : repoFilterValue))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parsePullRequestList(raw);
         if (!parsed) {
-          setRead((previous) => ({ app: appId, ...carry(previous), kind: "error" }));
+          setRead((previous) => ({ scope: scopeKey, ...carry(previous), kind: "error" }));
           return;
         }
-        setRead({ app: appId, rows: parsed.rows, repos: parsed.repos, kind: "ok" });
+        setRead({ scope: scopeKey, rows: parsed.rows, repos: parsed.repos, kind: "ok" });
       })
       .catch(() => {
-        if (!cancelled) setRead((previous) => ({ app: appId, ...carry(previous), kind: "error" }));
+        if (!cancelled) setRead((previous) => ({ scope: scopeKey, ...carry(previous), kind: "error" }));
       });
     return () => {
       cancelled = true;
     };
-  }, [appId, detailOpen, reloadNonce, repoFilterValue]);
+    // The scope's KEY, not the object: a caller rebuilding `{kind, targetId}`
+    // on every render must not re-run the read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKey, detailOpen, reloadNonce, repoFilterValue]);
 
   function openPr(row: PullRequestRow): void {
     onSearch({ ...search, pr: `${row.owner}/${row.repo}/${row.number}` });
@@ -167,15 +176,15 @@ export function AppPullRequestsTab({
   }
 
   if (ref !== null) {
-    // The key is the App plus the pr address: switching PRs remounts instead of
-    // reusing a retained read, closing the PR unmounts so reopening starts
-    // clean, and an App switch in place discards the previous App's head and
+    // The key is the scope plus the pr address: switching PRs remounts instead
+    // of reusing a retained read, closing the PR unmounts so reopening starts
+    // clean, and a scope switch in place discards the previous scope's head and
     // its section pages before the next frame can paint them.
     return (
       <PullRequestDetail
-        key={`${appId}\u0000${search.pr}`}
+        key={`${scopeKey}\u0000${search.pr}`}
         locale={locale}
-        appId={appId}
+        scope={scope}
         prKey={search.pr}
         prRef={ref}
         onBack={closePr}
@@ -199,7 +208,7 @@ export function AppPullRequestsTab({
             choice reuses the shared insights sentinel (data.ts). */}
         <Select
           value={insightsRepoSelectValue(repoFilterValue)}
-          onValueChange={(next) => setRepoFilter({ app: appId, value: insightsRepoFromSelect(next) })}
+          onValueChange={(next) => setRepoFilter({ scope: scopeKey, value: insightsRepoFromSelect(next) })}
         >
           <SelectTrigger
             className="min-w-48"
