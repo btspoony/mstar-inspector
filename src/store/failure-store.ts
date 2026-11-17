@@ -90,9 +90,9 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   // A delivery refused at enqueue because the month's RP ceiling is spent: a
   // real failure on the dashboard, kept out of the global ops alert only.
   QUOTA_STAGE,
-  // A delivery the maintenance window could not defer: no review ran, so the
-  // row stays paged — the sweep is what turns "closed platform" into an alert
-  // instead of a silent dead-letter.
+  // A delivery the maintenance window could not defer: in neither exclusion
+  // list, and kept out of the sweep's infrastructure total by its own
+  // predicate — its separate existence signal has its own lane.
   MAINTENANCE_DEFERRED_STAGE,
   ...ATTRIBUTION_EXCLUDED_STAGES,
 ]);
@@ -117,6 +117,7 @@ export type FailureStage =
  */
 export {
   ATTRIBUTION_EXCLUDED_STAGES,
+  MAINTENANCE_DEFERRED_STAGE,
   PAGING_EXCLUDED_STAGES,
   sqlStageList,
 } from "../contracts/failure-stages";

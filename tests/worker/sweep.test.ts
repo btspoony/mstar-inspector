@@ -578,6 +578,19 @@ describe("runSweep", () => {
     expect(alert.stages).toEqual([{ stage: "sandbox", count: SWEEP_FAILURE_THRESHOLD + 1 }]);
   });
 
+  test("a maintenance_deferred row is a separate existence signal, never part of the infrastructure total", async () => {
+    const db = failureDb();
+    const store = createFailureStore(db);
+    await store.record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
+    await store.record({ ...BASE, stage: "sandbox", error: "container acquisition failed" });
+
+    const { log, calls } = captureLog();
+    const result = await runSweep(db, { log });
+    expect(result.failures24h).toBe(1);
+    expect(calls).toHaveLength(0);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
+  });
+
   test("threshold boundary: ONE fully-failed message's rows do not alert", async () => {
     const db = failureDb();
     // The threshold's own case: a single DLQ'd job leaves exactly this many rows

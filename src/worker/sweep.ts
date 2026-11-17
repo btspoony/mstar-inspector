@@ -56,7 +56,12 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
-import { PAGING_EXCLUDED_STAGES, QUEUE_MAX_ATTEMPTS, sqlStageList } from "../store/failure-store";
+import {
+  MAINTENANCE_DEFERRED_STAGE,
+  PAGING_EXCLUDED_STAGES,
+  QUEUE_MAX_ATTEMPTS,
+  sqlStageList,
+} from "../store/failure-store";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
@@ -413,13 +418,17 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // `stage NOT IN (<paging stages>)` is the paging exclusion: attribution rows
   // are reviews that continued, and `quota` is one tenant's spent month (see
   // the header). The list comes from the contract's written partition, never a
-  // local literal. ONE grouped read supplies both the total and its breakdown,
-  // so a payload can never describe a different instant than its own count.
+  // local literal. Maintenance is the platform's own existence signal, owned by
+  // its separate lane (377) and never part of the infrastructure total — so it
+  // is excluded here too, by its constant. ONE grouped read supplies both the
+  // total and its breakdown, so a payload can never describe a different
+  // instant than its own count.
   const { results: stageRows } = await db
     .prepare(
       `SELECT stage, COUNT(*) AS count FROM review_failures
        WHERE created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
          AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+         AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'
        GROUP BY stage ORDER BY stage`,
     )
     .all<{ stage: string; count: number }>();

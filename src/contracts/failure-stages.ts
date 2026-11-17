@@ -81,10 +81,11 @@ export const QUOTA_STAGE = "quota";
  * The `review_failures.stage` a delivery the maintenance window could not defer
  * is recorded under: the platform was closed and the queue had no redelivery
  * left (a runtime without `message.retry`, or a message already on its last
- * platform delivery). Like `entitlement` it is in NEITHER exclusion list — no
- * review ran, so the row stays counted and the 15-min failure sweep alerts on
- * it instead of the delivery vanishing into the DLQ. Its `error` text carries
- * the one reason token `maintenance_window`.
+ * platform delivery). It is in NEITHER exclusion list — the row stays a stored
+ * failure — but the sweep's infrastructure total filters it with its own
+ * predicate: "platform closed" is a separate existence signal with its own
+ * lane, never part of the incident count. Its `error` text carries the one
+ * reason token `maintenance_window`.
  */
 export const MAINTENANCE_DEFERRED_STAGE = "maintenance_deferred";
 
