@@ -1,41 +1,35 @@
 /**
- * Unit tests for `src/dashboard/targets-store.ts` — the workspace-owned review
- * configuration face.
+ * Unit tests for `src/dashboard/targets-store.ts` — the repository-keyed review
+ * target store.
  *
  * Pinned here:
- *   - a backfill-shaped insert leaves exactly ONE target per bot, carrying the
- *     configuration the old bot row held;
- *   - the partial UNIQUE index refuses a second non-NULL
- *     `(bot_id, installation_id)` claim while NULL bindings stay legal;
- *   - EVERY tenant read binds `workspace_id`: another workspace's target reads
- *     absent/empty and every write against it is a no-op with zero rows;
- *   - the policy setters write the target, and the bot row has no policy
- *     columns left to write;
- *   - the pause writes `review_targets.review_enabled` and leaves
- *     `review_bots.review_enabled` alone;
- *   - `resolve` is the webhook's two steps: the bound installation first, else
- *     the bot's single live target, else null — and it never writes
- *     `installation_id`;
- *   - the create path (manifest commit) writes one bot and one target in one
- *     batch, unbound and with the contract's defaults;
- *   - the owner allowlist is REPLACED as a set in one batch;
- *   - the user-facing delete stamps the bot and its target.
+ *   - every tenant read binds `workspace_id`: another workspace's target reads
+ *     absent and every write against it changes nothing;
+ *   - `create` refuses a duplicate by `repo_id` OR by an unclaimed
+ *     owner/name match, and creates with `follow_workspace_defaults = 1`;
+ *   - `resolveByRepo` resolves by id, refreshes renamed caches, claims a legacy
+ *     NULL-`repo_id` row on its first delivery, and answers null otherwise;
+ *   - effective settings answer from the workspace while inheriting and from
+ *     the row otherwise, and `setInheritance` snapshots on toggle-off;
+ *   - `setReviewConfig` writes only the columns named, vocabulary-checked.
  *
  * The fixture is the fully migrated schema (tests/store/helpers), so the
  * assertions run against the real DDL rather than a hand-built table.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createMigratedTestD1 } from "../store/helpers";
 import type { TestD1 } from "../store/helpers";
-import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import {
-  ALLOWLIST_MAX_OWNERS,
+  checkGateOf,
   createTargetsStore,
+  effectiveTargetSettings,
+  getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
-  REVIEW_TRIGGER_MODES,
+  readEffectiveTargetSettings,
+  setInheritance,
+  setWorkspaceReviewDefaults,
 } from "../../src/dashboard/targets-store";
+import { UnknownWorkspaceError } from "../../src/dashboard/runtime-config-store";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 
 const WS = "default";
@@ -50,85 +44,88 @@ function seedWorkspace(db: TestD1, id: string): void {
     .run(id, id, id);
 }
 
-type BotSeed = {
-  githubAppId: number;
-  workspaceId?: string;
-  installationId?: number | null;
-  reviewEnabled?: number;
-  deleted?: boolean;
-};
-
-/**
- * One bot plus the target the backfill writes for it: the five moved columns
- * copied from the old row, the installation bound only when the caller names
- * one, and `deleted_at` copied from the bot.
- */
-function seedBackfilledBot(
-  db: TestD1,
-  botId: string,
-  seed: BotSeed,
-): { botId: string; targetId: string } {
-  const workspaceId = seed.workspaceId ?? WS;
+/** One live bot mapped to a workspace, with no target. */
+function seedBot(db: TestD1, botId: string, workspaceId = WS): void {
   db.raw
     .prepare(
       `INSERT INTO review_bots
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
-          status, deleted_at, review_enabled, created_at, updated_at)
-       VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active', ?, ?, datetime('now'), datetime('now'))`,
+          status, created_at, updated_at)
+       VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active', datetime('now'), datetime('now'))`,
     )
-    .run(botId, seed.githubAppId, botId, seed.deleted ? "2026-01-01 00:00:00" : null, seed.reviewEnabled ?? 1);
-  db.raw
-    .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)`)
-    .run(botId, workspaceId);
-  const targetId = `${botId}-target`;
+    .run(botId, botId.replace(/\D/g, "") || 1, botId);
+  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(botId, workspaceId);
+}
+
+/**
+ * A target row in the current shape. `repoId` null is the migrated/awaiting-
+ * claim state; the caller owns every policy column so the inheritance cases
+ * can state their own overrides.
+ */
+function seedTarget(
+  db: TestD1,
+  input: {
+    id: string;
+    botId: string;
+    workspaceId?: string;
+    repoId?: number | null;
+    repoOwner?: string | null;
+    repoName?: string | null;
+    follow?: 0 | 1;
+    reviewEnabled?: number;
+    triggerMode?: string;
+    level?: string | null;
+    minScore?: number;
+    verdicts?: string;
+    deleted?: boolean;
+  },
+): string {
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, installation_id, account_login,
-          review_enabled, review_trigger_mode, review_level,
-          check_min_score, check_pass_verdicts, allowlist_enabled,
-          created_by, created_at, updated_at, deleted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'every_push', 'deep', 70, '["ship it","blocked"]', 1,
-               'acme', datetime('now'), datetime('now'), ?)`,
+         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+          follow_workspace_defaults, review_enabled, review_trigger_mode, review_level,
+          check_min_score, check_pass_verdicts, created_by, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'acme',
+               datetime('now'), datetime('now'), ?)`,
     )
     .run(
-      targetId,
-      workspaceId,
-      botId,
-      botId,
-      seed.installationId ?? null,
-      seed.installationId === undefined || seed.installationId === null ? null : "acme",
-      seed.reviewEnabled ?? 1,
-      seed.deleted ? "2026-01-01 00:00:00" : null,
+      input.id,
+      input.workspaceId ?? WS,
+      input.botId,
+      input.repoName ?? input.id,
+      input.repoId ?? null,
+      input.repoOwner ?? null,
+      input.repoName ?? null,
+      input.follow ?? 0,
+      input.reviewEnabled ?? 1,
+      input.triggerMode ?? "every_push",
+      input.level ?? null,
+      input.minScore ?? 70,
+      input.verdicts ?? '["ship it"]',
+      input.deleted ? "2026-01-01 00:00:00" : null,
     );
-  return { botId, targetId };
+  return input.id;
 }
 
-/** The bot row's column names — the moved policy columns must not be there. */
-function reviewBotColumns(db: TestD1): string[] {
-  return (db.raw.query("PRAGMA table_info(review_bots)").all() as Array<{ name: string }>).map(
-    (column) => column.name,
-  );
-}
-
-/** One target row straight from the table, for the write assertions. */
 type TargetRowSnapshot = {
+  repo_id: number | null;
+  repo_owner: string | null;
+  repo_name: string | null;
+  follow_workspace_defaults: number;
   review_enabled: number;
   review_trigger_mode: string;
   review_level: string | null;
   check_min_score: number;
   check_pass_verdicts: string;
-  allowlist_enabled: number;
-  installation_id: number | null;
   deleted_at: string | null;
 };
 
 function targetRow(db: TestD1, targetId: string): TargetRowSnapshot {
-  // bun:sqlite hands back a loose record; the SELECT list above fixes the shape.
   const row = db.raw
     .query(
-      `SELECT review_enabled, review_trigger_mode, review_level, check_min_score,
-              check_pass_verdicts, allowlist_enabled, installation_id, deleted_at
+      `SELECT repo_id, repo_owner, repo_name, follow_workspace_defaults, review_enabled,
+              review_trigger_mode, review_level, check_min_score, check_pass_verdicts, deleted_at
          FROM review_targets WHERE id = ?`,
     )
     .get(targetId) as TargetRowSnapshot | null;
@@ -136,795 +133,745 @@ function targetRow(db: TestD1, targetId: string): TargetRowSnapshot {
   return row;
 }
 
-describe("backfill shape (one target per bot)", () => {
-  test("a backfilled bot has exactly one target carrying the old configuration", async () => {
-    const db = createMigratedTestD1();
-    const { botId } = seedBackfilledBot(db, "bot-a", { githubAppId: 6001 });
-    const store = createTargetsStore(db);
-
-    const targets = await store.list(WS);
-    expect(targets).toHaveLength(1);
-    const [target] = targets;
-    expect(target!.bot_id).toBe(botId);
-    expect(target!.workspace_id).toBe(WS);
-    expect(target!.installation_id).toBeNull();
-    expect(target!.review_trigger_mode).toBe("every_push");
-    expect(target!.review_level).toBe("deep");
-    expect(target!.check_min_score).toBe(70);
-    expect(target!.check_pass_verdicts).toBe('["ship it","blocked"]');
-    expect(target!.allowlist_enabled).toBe(1);
-  });
-
-  test("a second non-NULL claim of (bot_id, installation_id) is rejected; NULL bindings stay legal", async () => {
-    const db = createMigratedTestD1();
-    const { botId, targetId } = seedBackfilledBot(db, "bot-bind", { githubAppId: 6002 });
-    // The backfill leaves every created target unbound, so a second unbound
-    // target is outside the partial index...
-    db.raw
-      .prepare(
-        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
-         VALUES ('bot-bind-target-2', ?, ?, 'second', 'acme', datetime('now'), datetime('now'))`,
-      )
-      .run(WS, botId);
-    db.raw
-      .prepare(`UPDATE review_targets SET installation_id = 41 WHERE id = ?`)
-      .run(targetId);
-
-    // ...but one installation cannot be claimed by two targets.
-    expect(() =>
-      db.raw
-        .prepare(`UPDATE review_targets SET installation_id = 41 WHERE id = 'bot-bind-target-2'`)
-        .run(),
-    ).toThrow();
-  });
-});
+function targetCount(db: TestD1): number {
+  return (db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get() as { n: number }).n;
+}
 
 describe("tenant reads bind workspace_id", () => {
-  test("another workspace's target reads absent everywhere and every write is a no-op", async () => {
+  test("another workspace's target reads absent", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, OTHER_WS);
-    const { targetId } = seedBackfilledBot(db, "bot-tenant", {
-      githubAppId: 6101,
-      installationId: 51,
-    });
+    seedBot(db, "bot-tenant");
+    const targetId = seedTarget(db, { id: "t-tenant", botId: "bot-tenant", repoId: 9001, repoOwner: "acme", repoName: "widgets" });
     const store = createTargetsStore(db);
 
-    expect(await store.getById(OTHER_WS, targetId)).toBeNull();
-    expect(await store.list(OTHER_WS)).toEqual([]);
-    expect(await store.getCheckGate(OTHER_WS, targetId)).toBeNull();
-    expect(await store.getAllowlist(OTHER_WS, targetId)).toBeNull();
-    expect(await store.setReviewEnabled(OTHER_WS, targetId, false)).toBe(false);
-    expect(await store.setReviewTriggerMode(OTHER_WS, targetId, "manual")).toBe(false);
-    expect(await store.setReviewLevel(OTHER_WS, targetId, "quick")).toBe(false);
-    expect(await store.saveCheckGate(OTHER_WS, targetId, { minScore: 10, passVerdicts: [] })).toBe(false);
-    expect(await store.saveAllowlist(OTHER_WS, targetId, { enabled: true, owners: ["acme"] })).toBe(false);
-    expect(await store.delete(OTHER_WS, targetId)).toBe(false);
-
-    // Nothing moved: the owning workspace still sees the backfilled values.
-    const row = targetRow(db, targetId);
-    expect(row.review_enabled).toBe(1);
-    expect(row.review_trigger_mode).toBe("every_push");
-    expect(row.review_level).toBe("deep");
-    expect(row.check_min_score).toBe(70);
-    expect(row.allowlist_enabled).toBe(1);
-    expect(row.deleted_at).toBeNull();
-    expect((await store.getById(WS, targetId))?.id).toBe(targetId);
+    expect(await store.getInWorkspace(OTHER_WS, targetId)).toBeNull();
+    expect(await store.listLive(OTHER_WS)).toEqual([]);
+    expect((await store.getInWorkspace(WS, targetId))?.repo_id).toBe(9001);
+    expect((await store.listLive(WS)).map((target) => target.id)).toEqual([targetId]);
   });
 
-  test("the tenant resolution answers only a target in the named workspace", async () => {
+  test("a soft-deleted target is no target for a tenant read", async () => {
     const db = createMigratedTestD1();
-    seedWorkspace(db, OTHER_WS);
-    const { botId, targetId } = seedBackfilledBot(db, "bot-tenant-resolve", { githubAppId: 6103 });
+    seedBot(db, "bot-deleted");
+    const targetId = seedTarget(db, { id: "t-del", botId: "bot-deleted", repoId: 9002, repoOwner: "acme", repoName: "gone", deleted: true });
     const store = createTargetsStore(db);
 
-    expect((await store.resolveInWorkspace(WS, botId))?.id).toBe(targetId);
-    expect(await store.resolveInWorkspace(OTHER_WS, botId)).toBeNull();
-    expect(await store.resolveInWorkspace(WS, "no-such-bot")).toBeNull();
-    // A soft-deleted target is no target for a tenant read either.
-    await store.delete(WS, targetId);
-    expect(await store.resolveInWorkspace(WS, botId)).toBeNull();
+    expect(await store.getInWorkspace(WS, targetId)).toBeNull();
+    expect(await store.listLive(WS)).toEqual([]);
+    expect(await store.getForExecution(targetId)).toBeNull();
   });
 
-  test("a target that belongs to another workspace is invisible to the resolve of its bot's workspace assumption", async () => {
+  test("writes against a foreign workspace target change nothing", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, OTHER_WS);
-    // The bot is owned by `default` while the target claims `ws-other`: a later
-    // shared-bot shape must still keep each workspace's reads separate.
-    const { botId, targetId } = seedBackfilledBot(db, "bot-split", {
-      githubAppId: 6102,
+    seedBot(db, "bot-foreign", OTHER_WS);
+    const targetId = seedTarget(db, {
+      id: "t-foreign",
+      botId: "bot-foreign",
       workspaceId: OTHER_WS,
+      repoId: 9003,
+      repoOwner: "acme",
+      repoName: "remote",
     });
     const store = createTargetsStore(db);
 
-    expect(await store.list(WS)).toEqual([]);
-    expect((await store.list(OTHER_WS)).map((target) => target.id)).toEqual([targetId]);
-    // `resolve` is the execution read: it names the bot, not a workspace.
-    expect((await store.resolve(botId, null))?.id).toBe(targetId);
-  });
-});
-
-describe("policy setters write the target", () => {
-  test("the setters round-trip on the target row and the bot has no policy columns left", async () => {
-    const db = createMigratedTestD1();
-    const { targetId } = seedBackfilledBot(db, "bot-policy", { githubAppId: 6201 });
-    const store = createTargetsStore(db);
-
-    expect(await store.setReviewTriggerMode(WS, targetId, "manual")).toBe(true);
-    expect((await store.getById(WS, targetId))?.review_trigger_mode).toBe("manual");
-    expect(await store.setReviewLevel(WS, targetId, "quick")).toBe(true);
-    expect((await store.getById(WS, targetId))?.review_level).toBe("quick");
-    expect(await store.saveCheckGate(WS, targetId, { minScore: 55, passVerdicts: ["ship it"] })).toBe(true);
-    expect(await store.getCheckGate(WS, targetId)).toEqual({ minScore: 55, passVerdicts: ["ship it"] });
-
-    // The pivot itself: the bot row carries none of the five moved columns, so
-    // no writer can keep writing them.
-    const columns = reviewBotColumns(db);
-    for (const column of [
-      "review_trigger_mode",
-      "review_level",
-      "check_min_score",
-      "check_pass_verdicts",
-      "allowlist_enabled",
-    ]) {
-      expect(columns).not.toContain(column);
-    }
-  });
-
-  test("every vocabulary mode round-trips on the target and bumps updated_at", async () => {
-    const db = createMigratedTestD1();
-    const { targetId } = seedBackfilledBot(db, "bot-modes", { githubAppId: 6204 });
-    const store = createTargetsStore(db);
-
-    for (const mode of REVIEW_TRIGGER_MODES) {
-      db.raw
-        .prepare(`UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE id = ?`)
-        .run(targetId);
-      expect(await store.setReviewTriggerMode(WS, targetId, mode)).toBe(true);
-      const row = await store.getById(WS, targetId);
-      expect(row?.review_trigger_mode).toBe(mode);
-      expect(row?.updated_at).not.toBe("2026-01-01 00:00:00"); // an operator mutation
-    }
-    // An unknown target id changed nothing (the bot store's setAppStatus rule).
-    expect(await store.setReviewTriggerMode(WS, "no-such-target", "manual")).toBe(false);
-  });
-
-  test("the DDL CHECK is the last-line backstop: a raw off-vocabulary mode is unrepresentable", () => {
-    const db = createMigratedTestD1();
-    const { targetId } = seedBackfilledBot(db, "bot-modes-check", { githubAppId: 6205 });
-    expect(() =>
-      db.raw
-        .prepare(`UPDATE review_targets SET review_trigger_mode = 'whenever' WHERE id = ?`)
-        .run(targetId),
-    ).toThrow(/CHECK constraint failed/);
-  });
-
-  test("off-vocabulary values throw BEFORE any write", async () => {
-    const db = createMigratedTestD1();
-    const { targetId } = seedBackfilledBot(db, "bot-invalid", { githubAppId: 6202 });
-    const store = createTargetsStore(db);
-
-    await expect(store.setReviewTriggerMode(WS, targetId, "sometimes" as never)).rejects.toThrow(
-      /trigger mode/,
-    );
-    await expect(store.setReviewLevel(WS, targetId, "turbo" as never)).rejects.toThrow(/review level/);
-    await expect(
-      store.saveCheckGate(WS, targetId, { minScore: 101, passVerdicts: ["ship it"] }),
-    ).rejects.toThrow(/outside 0..100/);
-    await expect(
-      store.saveCheckGate(WS, targetId, { minScore: 80, passVerdicts: ["lgtm" as never] }),
-    ).rejects.toThrow(/PR_VERDICTS/);
+    expect(await store.setReviewEnabled(WS, targetId, false)).toBe(false);
+    expect(await store.delete(WS, targetId)).toBe(false);
+    expect(await store.setReviewConfig(WS, targetId, { triggerMode: "manual" })).toBe(false);
+    await setInheritance(db, WS, targetId, 1);
+    expect(await store.getInWorkspace(WS, targetId)).toBeNull();
 
     const row = targetRow(db, targetId);
-    expect(row.review_trigger_mode).toBe("every_push");
-    expect(row.review_level).toBe("deep");
-    expect(row.check_min_score).toBe(70);
-  });
-
-  test("the on-vocabulary VALUES parse back, and an off-vocabulary stored value reads as absent", () => {
-    for (const level of REVIEW_LEVELS) expect(parseTargetReviewLevel(level)).toBe(level);
-    for (const value of [null, undefined, "turbo", "", "DEEP", 3, ["deep"]]) {
-      expect(parseTargetReviewLevel(value)).toBeNull();
-    }
-  });
-
-  test("the pause writes the target flag and leaves the bot's operational flag alone", async () => {
-    const db = createMigratedTestD1();
-    const { botId, targetId } = seedBackfilledBot(db, "bot-pause", { githubAppId: 6203 });
-    const store = createTargetsStore(db);
-
-    expect(await store.setReviewEnabled(WS, targetId, false)).toBe(true);
-    expect(targetRow(db, targetId).review_enabled).toBe(0);
-    // bun:sqlite hands back a loose record; the SELECT list fixes the shape.
-    const bot = db.raw
-      .query(`SELECT review_enabled FROM review_bots WHERE id = ?`)
-      .get(botId) as { review_enabled: number } | null;
-    expect(bot?.review_enabled).toBe(1);
-
-    expect(await store.setReviewEnabled(WS, targetId, true)).toBe(true);
-    expect(targetRow(db, targetId).review_enabled).toBe(1);
-  });
-});
-
-describe("resolve (webhook steps)", () => {
-  test("the bound installation wins over a second live target", async () => {
-    const db = createMigratedTestD1();
-    const { botId, targetId } = seedBackfilledBot(db, "bot-resolve-bound", {
-      githubAppId: 6301,
-      installationId: 61,
-    });
-    db.raw
-      .prepare(
-        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
-         VALUES ('bot-resolve-bound-second', ?, ?, 'second', 'acme', datetime('now'), datetime('now'))`,
-      )
-      .run(WS, botId);
-    const store = createTargetsStore(db);
-
-    expect((await store.resolve(botId, 61))?.id).toBe(targetId);
-    // A delivery from an installation no target bound falls through to the
-    // single-target step, which now has TWO candidates — undecidable, so null.
-    expect(await store.resolve(botId, 99)).toBeNull();
-  });
-
-  test("one unbound target answers every installation and the no-installation read", async () => {
-    const db = createMigratedTestD1();
-    const { botId, targetId } = seedBackfilledBot(db, "bot-resolve-single", { githubAppId: 6302 });
-    const store = createTargetsStore(db);
-
-    expect((await store.resolve(botId, 71))?.id).toBe(targetId);
-    expect((await store.resolve(botId, null))?.id).toBe(targetId);
-  });
-
-  test("two unbound targets are ambiguous, a soft-deleted one is not a candidate, and no target is null", async () => {
-    const db = createMigratedTestD1();
-    const { botId } = seedBackfilledBot(db, "bot-resolve-none", { githubAppId: 6303 });
-    const store = createTargetsStore(db);
-    expect(await store.resolve("bot-with-no-target", 81)).toBeNull();
-
-    db.raw
-      .prepare(
-        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
-         VALUES ('bot-resolve-none-second', ?, ?, 'second', 'acme', datetime('now'), datetime('now'))`,
-      )
-      .run(WS, botId);
-    expect(await store.resolve(botId, 81)).toBeNull();
-    expect(await store.resolve(botId, null)).toBeNull();
-
-    // Soft delete takes a target out of resolution entirely.
-    db.raw
-      .prepare(`UPDATE review_targets SET deleted_at = datetime('now') WHERE id = 'bot-resolve-none-second'`)
-      .run();
-    expect((await store.resolve(botId, 81))?.bot_id).toBe(botId);
-
-    const seeded = seedBackfilledBot(db, "bot-resolve-deleted-only", {
-      githubAppId: 6304,
-      deleted: true,
-    });
-    expect(await store.resolve(seeded.botId, 82)).toBeNull();
-  });
-
-  test("resolution never writes installation_id onto the target", async () => {
-    const db = createMigratedTestD1();
-    const { botId, targetId } = seedBackfilledBot(db, "bot-resolve-write-free", { githubAppId: 6305 });
-    const store = createTargetsStore(db);
-
-    await store.resolve(botId, 91);
-    await store.resolve(botId, null);
-    expect(targetRow(db, targetId).installation_id).toBeNull();
-  });
-
-  test("a removed installation resolves nothing and does not fall back to the single target", async () => {
-    const db = createMigratedTestD1();
-    const { botId, targetId } = seedBackfilledBot(db, "bot-resolve-removed", {
-      githubAppId: 6306,
-      installationId: 61,
-    });
-    const store = createTargetsStore(db);
-    // GitHub uninstalled it: the row is stamped, never deleted, and the target
-    // keeps its binding (§ 9.5).
-    db.raw
-      .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
-         VALUES ('install-removed', ?, 61, 'acme', datetime('now'), datetime('now'))`,
-      )
-      .run(botId);
-
-    // The binding survives; resolution does not — and it must NOT fall through
-    // to the single-target step, which would silently re-attribute a deletion.
-    expect(await store.resolve(botId, 61)).toBeNull();
-    expect(targetRow(db, targetId).installation_id).toBe(61);
-
-    // A different installation of an OWNED bot still reaches the single target:
-    // the removed guard is about the delivery's own binding.
-    expect((await store.resolve(botId, 62))?.id).toBe(targetId);
-  });
-
-  test("a shared bot loses the single-target fallback; an owned bot keeps it", async () => {
-    const db = createMigratedTestD1();
-    const owned = seedBackfilledBot(db, "bot-resolve-owned-fallback", { githubAppId: 6307 });
-    const shared = seedBackfilledBot(db, "bot-resolve-shared", { githubAppId: 6308 });
-    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(shared.botId);
-    const store = createTargetsStore(db);
-
-    // Unchanged path: one live target answers an unbound delivery.
-    expect((await store.resolve(owned.botId, 71))?.id).toBe(owned.targetId);
-    expect((await store.resolve(owned.botId, null))?.id).toBe(owned.targetId);
-
-    // A shared bot reviews nothing until a claim binds an installation.
-    expect(await store.resolve(shared.botId, 71)).toBeNull();
-    expect(await store.resolve(shared.botId, null)).toBeNull();
-
-    // ...and once bound, the binding is what resolves.
-    db.raw.prepare("UPDATE review_targets SET installation_id = 72 WHERE id = ?").run(shared.targetId);
-    expect((await store.resolve(shared.botId, 72))?.id).toBe(shared.targetId);
-  });
-});
-
-describe("create path (manifest commit)", () => {
-  test("createApp writes one bot, its workspace mapping and one unbound target in one batch", async () => {
-    const db = createMigratedTestD1();
-    db.raw.prepare("UPDATE workspaces SET check_min_score = 45 WHERE id = 'default'").run();
-    const botId = "bot-created";
-    await createReviewBotsStore(db).createApp({
-      id: botId,
-      githubAppId: 6401,
-      githubSlug: null,
-      name: "created-bot",
-      privateKeyEnc: "enc",
-      webhookSecretEnc: "enc",
-      createdBy: "acme",
-      workspaceId: WS,
-      defaultCheckMinScore: 45,
-    });
-
-    const targets = await createTargetsStore(db).list(WS);
-    expect(targets).toHaveLength(1);
-    const [target] = targets;
-    expect(target!.bot_id).toBe(botId);
-    expect(target!.installation_id).toBeNull();
-    expect(target!.review_enabled).toBe(1);
-    expect(target!.review_trigger_mode).toBe("every_push");
-    expect(target!.review_level).toBeNull();
-    expect(target!.check_min_score).toBe(45);
-    expect(target!.check_pass_verdicts).toBe('["ship it"]');
-    expect(target!.allowlist_enabled).toBe(0);
-  });
-
-  test("create seeds the DDL defaults and the product floor when the caller names none", async () => {
-    const db = createMigratedTestD1();
-    const { botId } = seedBackfilledBot(db, "bot-create-store", { githubAppId: 6402 });
-    const store = createTargetsStore(db);
-
-    const row = await store.create({
-      workspaceId: WS,
-      botId,
-      name: "store-created",
-      createdBy: "acme",
-    });
-    expect(row.installation_id).toBeNull();
     expect(row.review_enabled).toBe(1);
     expect(row.review_trigger_mode).toBe("every_push");
-    expect(row.review_level).toBeNull();
-    expect(row.check_min_score).toBe(60);
-    expect(row.allowlist_enabled).toBe(0);
-    expect((await store.getById(WS, row.id))?.name).toBe("store-created");
+    expect(row.deleted_at).toBeNull();
   });
 });
 
-describe("create on a shared bot", () => {
-  /**
-   * The shared-bot capability lives on the plan (migration 0061): `pro` and
-   * `unlimited` include it, the seeded `free` row does not. A workspace with
-   * no subscription resolves `free`, so these creation cases seed `pro`.
-   */
-  function seedProPlan(db: TestD1): void {
-    db.raw
-      .prepare(
-        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
-         VALUES (?, 'pro', 'active', datetime('now'), datetime('now'))`,
-      )
-      .run(WS);
-  }
-
-  /** One live bot shared platform-wide, with no target anywhere yet. */
-  function seedSharedBot(db: TestD1, botId: string, githubAppId: number, deleted = false): void {
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
-           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
-            status, scope, shared_at, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active', 'shared', datetime('now'),
-                 ${deleted ? "datetime('now')" : "NULL"}, datetime('now'), datetime('now'))`,
-      )
-      .run(botId, githubAppId, botId);
-    db.raw
-      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
-      .run(botId, OTHER_WS);
-  }
-
-  test("writes ONE unbound target, seeded from the workspace floor and the bot's own name", async () => {
+describe("listLiveByBot", () => {
+  test("a bot holding two live targets in one workspace answers both in creation order", async () => {
     const db = createMigratedTestD1();
-    seedWorkspace(db, OTHER_WS);
-    seedProPlan(db);
-    db.raw.prepare("UPDATE workspaces SET check_min_score = 45 WHERE id = ?").run(WS);
-    seedSharedBot(db, "bot-shared", 6403);
+    seedBot(db, "bot-two");
+    const older = seedTarget(db, { id: "t-older", botId: "bot-two", repoId: 9600, repoOwner: "acme", repoName: "widgets" });
+    const newer = seedTarget(db, { id: "t-newer", botId: "bot-two", repoId: 9601, repoOwner: "acme", repoName: "gadgets" });
+    // The insert stamps both rows in the same second; the columns are updated
+    // so creation order is the row's own fact, not the fixture's timing.
+    db.raw.prepare("UPDATE review_targets SET created_at = '2026-01-01 00:00:00' WHERE id = ?").run(older);
+    db.raw.prepare("UPDATE review_targets SET created_at = '2026-01-02 00:00:00' WHERE id = ?").run(newer);
+    const store = createTargetsStore(db);
 
-    const result = await createTargetsStore(db).createOnSharedBot({
+    expect((await store.listLiveByBot("bot-two")).map((target) => target.id)).toEqual([older, newer]);
+  });
+});
+
+describe("create (one repository, one workspace)", () => {
+  test("a created target binds the repository, inherits the workspace and carries the caches", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-create");
+    const store = createTargetsStore(db);
+
+    const result = await store.create({
       workspaceId: WS,
-      botId: "bot-shared",
-      createdBy: "acme",
-      mode: "saas",
-      checkMinScore: 45,
+      botId: "bot-create",
+      repoId: 9100,
+      repoOwner: "acme",
+      repoName: "widgets",
+      createdBy: "octocat",
     });
     expect(result.outcome).toBe("created");
     if (result.outcome !== "created") throw new Error("unreachable");
     expect(result.target).toMatchObject({
       workspace_id: WS,
-      bot_id: "bot-shared",
-      name: "bot-shared",
-      installation_id: null,
-      account_login: null,
+      bot_id: "bot-create",
+      repo_id: 9100,
+      repo_owner: "acme",
+      repo_name: "widgets",
+      follow_workspace_defaults: 1,
       review_enabled: 1,
-      review_trigger_mode: "every_push",
-      review_level: null,
-      check_min_score: 45,
-      check_pass_verdicts: '["ship it"]',
-      allowlist_enabled: 0,
       deleted_at: null,
     });
-    // The bot is untouched: still one row, still shared, no installation bound.
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_bots").get()).toEqual({ n: 1 });
-    expect(db.raw.query("SELECT scope FROM review_bots WHERE id = 'bot-shared'").get()).toEqual({
-      scope: "shared",
-    });
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get()).toEqual({ n: 0 });
   });
 
-  test("a second call for the same workspace and bot writes nothing", async () => {
+  test("the same repository twice in one workspace is one refusal and one row", async () => {
     const db = createMigratedTestD1();
-    seedWorkspace(db, OTHER_WS);
-    seedProPlan(db);
-    seedSharedBot(db, "bot-shared", 6404);
+    seedBot(db, "bot-dup");
     const store = createTargetsStore(db);
-
-    const first = await store.createOnSharedBot({
+    const input = {
       workspaceId: WS,
-      botId: "bot-shared",
-      createdBy: "acme",
-      mode: "saas",
-    });
-    expect(first.outcome).toBe("created");
-    expect(
-      await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme", mode: "saas" }),
-    ).toEqual({
-      outcome: "target_exists",
-    });
-    expect(await store.list(WS)).toHaveLength(1);
+      botId: "bot-dup",
+      repoId: 9200,
+      repoOwner: "acme",
+      repoName: "widgets",
+      createdBy: "octocat",
+    };
+
+    expect((await store.create(input)).outcome).toBe("created");
+    expect(await store.create(input)).toEqual({ outcome: "duplicate" });
+    expect(targetCount(db)).toBe(1);
   });
 
-  test("an owned, soft-deleted or unknown bot is one refusal and zero writes", async () => {
+  test("a migrated unclaimed row of the same repository is a duplicate", async () => {
     const db = createMigratedTestD1();
-    seedWorkspace(db, OTHER_WS);
-    seedProPlan(db);
-    seedSharedBot(db, "bot-gone", 6405, true);
-    seedBackfilledBot(db, "bot-owned", { githubAppId: 6406, workspaceId: OTHER_WS });
+    seedBot(db, "bot-legacy");
+    seedTarget(db, { id: "legacy-1", botId: "bot-legacy", repoOwner: "acme", repoName: "widgets" });
     const store = createTargetsStore(db);
-    const before = db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get();
 
-    for (const botId of ["bot-owned", "bot-gone", "bot-absent"]) {
-      expect(
-        await store.createOnSharedBot({ workspaceId: WS, botId, createdBy: "acme", mode: "saas" }),
-        botId,
-      ).toEqual({
-        outcome: "bot_not_shared",
-      });
-    }
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get()).toEqual(before);
-    expect(await store.list(WS)).toHaveLength(0);
-  });
-
-  test("a plan without the capability is refused before anything is written", async () => {
-    const db = createMigratedTestD1();
-    seedWorkspace(db, OTHER_WS);
-    seedSharedBot(db, "bot-shared", 6407);
-    const store = createTargetsStore(db);
-    // No subscription row → the seeded `free` plan, which excludes the shared
-    // bot. The refusal names the plan this reader can change.
     expect(
-      await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme", mode: "saas" }),
-    ).toEqual({ outcome: "plan_refused", planId: "free" });
-    // Zero writes: no target, and no audit row about one.
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get()).toEqual({ n: 0 });
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get()).toEqual({ n: 0 });
-
-    // The capability is the plan's and the plan is read per attempt: the same
-    // store creates once the workspace moves to a plan that includes the bot.
-    seedProPlan(db);
-    expect(
-      (await store.createOnSharedBot({ workspaceId: WS, botId: "bot-shared", createdBy: "acme", mode: "saas" }))
-        .outcome,
-    ).toBe("created");
-    db.raw.close();
-  });
-
-  test("self-hosted answers without reading the catalogue", async () => {
-    const db = createMigratedTestD1();
-    seedWorkspace(db, OTHER_WS);
-    seedSharedBot(db, "bot-shared", 6408);
-    // A catalogue read would throw here (`free` is missing); the mode resolves
-    // the unlimited constant before any read, so the create still succeeds.
-    // The profile's plan set references `plans`, so the ceilings go first.
-    db.raw.prepare("DELETE FROM quota_profile_plans").run();
-    db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
-    expect(
-      (await createTargetsStore(db).createOnSharedBot({
+      await store.create({
         workspaceId: WS,
-        botId: "bot-shared",
-        createdBy: "acme",
-        mode: "self-hosted",
+        botId: "bot-legacy",
+        repoId: 9300,
+        repoOwner: "acme",
+        repoName: "widgets",
+        createdBy: "octocat",
+      }),
+    ).toEqual({ outcome: "duplicate" });
+    expect(targetCount(db)).toBe(1);
+  });
+
+  test("a sibling workspace's row on the SAME bot is the same claim; a soft-deleted row releases it", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, OTHER_WS);
+    seedBot(db, "bot-scope");
+    seedTarget(db, {
+      id: "elsewhere",
+      botId: "bot-scope",
+      workspaceId: OTHER_WS,
+      repoId: 9400,
+      repoOwner: "acme",
+      repoName: "widgets",
+    });
+    seedTarget(db, {
+      id: "removed",
+      botId: "bot-scope",
+      repoId: 9401,
+      repoOwner: "acme",
+      repoName: "old",
+      deleted: true,
+    });
+    const store = createTargetsStore(db);
+
+    // 0068: one repository belongs to one workspace PER BOT, so a live row of
+    // a sibling workspace is the same claim — the guarded insert refuses.
+    expect(
+      await store.create({
+        workspaceId: WS,
+        botId: "bot-scope",
+        repoId: 9400,
+        repoOwner: "acme",
+        repoName: "widgets",
+        createdBy: "octocat",
+      }),
+    ).toEqual({ outcome: "duplicate" });
+    // A soft-deleted row releases its repository: the partial index admits a re-add.
+    expect(
+      (await store.create({
+        workspaceId: WS,
+        botId: "bot-scope",
+        repoId: 9401,
+        repoOwner: "acme",
+        repoName: "old",
+        createdBy: "octocat",
       })).outcome,
     ).toBe("created");
-    db.raw.close();
-  });
-});
-
-describe("owner allowlist", () => {
-  test("each save REPLACES the owner set, and the read is alphabetical", async () => {
-    const db = createMigratedTestD1();
-    const { targetId } = seedBackfilledBot(db, "bot-allow", { githubAppId: 6501 });
-    const store = createTargetsStore(db);
-
-    expect(await store.saveAllowlist(WS, targetId, { enabled: true, owners: ["beta", "acme"] })).toBe(true);
-    expect(await store.getAllowlist(WS, targetId)).toEqual({ enabled: true, owners: ["acme", "beta"] });
-
-    // A removal rides the same submission that keeps `beta`.
-    expect(await store.saveAllowlist(WS, targetId, { enabled: false, owners: ["beta"] })).toBe(true);
-    expect(await store.getAllowlist(WS, targetId)).toEqual({ enabled: false, owners: ["beta"] });
-
-    // Case variants are ONE owner (the first spelling wins); empty is legal.
-    expect(
-      await store.saveAllowlist(WS, targetId, { enabled: true, owners: ["Acme", "acme", "beta"] }),
-    ).toBe(true);
-    expect(await store.getAllowlist(WS, targetId)).toEqual({ enabled: true, owners: ["Acme", "beta"] });
-    expect(await store.saveAllowlist(WS, targetId, { enabled: true, owners: [] })).toBe(true);
-    expect(await store.getAllowlist(WS, targetId)).toEqual({ enabled: true, owners: [] });
   });
 
-  test("an unknown or soft-deleted target refuses with zero owner rows", async () => {
+  test("the same repository under ANOTHER bot is a separate claim", async () => {
     const db = createMigratedTestD1();
-    const { targetId } = seedBackfilledBot(db, "bot-allow-deleted", { githubAppId: 6502 });
+    seedBot(db, "bot-1");
+    seedBot(db, "bot-2");
     const store = createTargetsStore(db);
+    const input = { workspaceId: WS, repoId: 9410, repoOwner: "acme", repoName: "widgets", createdBy: "octocat" };
 
-    expect(await store.saveAllowlist(WS, "no-such-target", { enabled: true, owners: ["acme"] })).toBe(false);
-    db.raw.prepare(`UPDATE review_targets SET deleted_at = datetime('now') WHERE id = ?`).run(targetId);
-    expect(await store.saveAllowlist(WS, targetId, { enabled: true, owners: ["acme"] })).toBe(false);
-    expect(await store.getAllowlist(WS, targetId)).toBeNull();
+    expect((await store.create({ ...input, botId: "bot-1" })).outcome).toBe("created");
+    expect((await store.create({ ...input, botId: "bot-2" })).outcome).toBe("created");
+    expect(targetCount(db)).toBe(2);
   });
 
-  test("a collapsed set past ALLOWLIST_MAX_OWNERS throws before any read", async () => {
+  test("an identity the resolver could never find is refused before any write", async () => {
     const db = createMigratedTestD1();
-    const { targetId } = seedBackfilledBot(db, "bot-allow-cap", { githubAppId: 6503 });
+    seedBot(db, "bot-bad");
     const store = createTargetsStore(db);
-    const oversized = Array.from({ length: ALLOWLIST_MAX_OWNERS + 1 }, (_, index) => `owner-${index}`);
 
     await expect(
-      store.saveAllowlist(WS, targetId, { enabled: true, owners: oversized }),
-    ).rejects.toThrow(/ALLOWLIST_MAX_OWNERS/);
-    expect(await store.getAllowlist(WS, targetId)).toEqual({ enabled: true, owners: [] });
+      store.create({
+        workspaceId: WS,
+        botId: "bot-bad",
+        repoId: 0,
+        repoOwner: "acme",
+        repoName: "widgets",
+        createdBy: "octocat",
+      }),
+    ).rejects.toThrow(/repo id/);
+    await expect(
+      store.create({
+        workspaceId: WS,
+        botId: "bot-bad",
+        repoId: 9500,
+        repoOwner: " ",
+        repoName: "widgets",
+        createdBy: "octocat",
+      }),
+    ).rejects.toThrow(/owner and name/);
+    expect(targetCount(db)).toBe(0);
   });
 });
 
-describe("gate read", () => {
-  test("unreadable stored verdicts read as null, and a save repairs them", async () => {
+describe("resolveByRepo (webhook resolution)", () => {
+  test("a delivery resolves by repository id and answers null for an unknown one", async () => {
     const db = createMigratedTestD1();
-    const { targetId } = seedBackfilledBot(db, "bot-gate", { githubAppId: 6601 });
+    seedBot(db, "bot-resolve");
+    const targetId = seedTarget(db, { id: "t-resolve", botId: "bot-resolve", repoId: 9600, repoOwner: "acme", repoName: "widgets" });
     const store = createTargetsStore(db);
-    // The DDL CHECK only proves `json_valid`, so a readable JSON array of
-    // off-vocabulary verdicts can still land in the column.
-    db.raw.prepare(`UPDATE review_targets SET check_pass_verdicts = '["lgtm"]' WHERE id = ?`).run(targetId);
-    expect(await store.getCheckGate(WS, targetId)).toBeNull();
 
-    expect(await store.saveCheckGate(WS, targetId, { minScore: 80, passVerdicts: ["ship it"] })).toBe(true);
-    expect(await store.getCheckGate(WS, targetId)).toEqual({ minScore: 80, passVerdicts: ["ship it"] });
+    expect((await store.resolveByRepo("bot-resolve", { id: 9600, owner: "acme", name: "widgets" }))?.id).toBe(targetId);
+    expect(await store.resolveByRepo("bot-resolve", { id: 9999, owner: "acme", name: "widgets" })).toBeNull();
+    expect(await store.resolveByRepo("bot-absent", { id: 9600, owner: "acme", name: "widgets" })).toBeNull();
+  });
+
+  test("a rename refreshes the caches and keeps the identity", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-rename");
+    const targetId = seedTarget(db, { id: "t-rename", botId: "bot-rename", repoId: 9700, repoOwner: "acme", repoName: "widgets" });
+    const store = createTargetsStore(db);
+
+    const resolved = await store.resolveByRepo("bot-rename", { id: 9700, owner: "acme", name: "gadgets" });
+    expect(resolved?.id).toBe(targetId);
+    expect(targetRow(db, targetId)).toMatchObject({ repo_id: 9700, repo_owner: "acme", repo_name: "gadgets" });
+  });
+
+  test("a first delivery onto a legacy row claims repo_id and the names", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-claim");
+    const targetId = seedTarget(db, { id: "t-claim", botId: "bot-claim", repoOwner: "acme", repoName: "widgets" });
+    const store = createTargetsStore(db);
+
+    const resolved = await store.resolveByRepo("bot-claim", { id: 9800, owner: "acme", name: "widgets" });
+    expect(resolved?.id).toBe(targetId);
+    expect(resolved?.repo_id).toBe(9800);
+    expect(targetRow(db, targetId)).toMatchObject({ repo_id: 9800, repo_owner: "acme", repo_name: "widgets" });
+
+    // The claim is written once: the next delivery resolves by id.
+    expect((await store.resolveByRepo("bot-claim", { id: 9800, owner: "acme", name: "widgets" }))?.id).toBe(targetId);
+  });
+
+  test("a delivery without an id resolves the legacy row and claims nothing", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-noid");
+    const targetId = seedTarget(db, { id: "t-noid", botId: "bot-noid", repoOwner: "acme", repoName: "widgets" });
+    const store = createTargetsStore(db);
+
+    expect((await store.resolveByRepo("bot-noid", { id: null, owner: "acme", name: "widgets" }))?.id).toBe(targetId);
+    expect(targetRow(db, targetId).repo_id).toBeNull();
+  });
+
+  test("the bot's ONE all-NULL row is claimed on its first delivery (the migrated shape)", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-first");
+    // Exactly what 0067 leaves behind: no id, no owner, no name.
+    const targetId = seedTarget(db, { id: "t-first", botId: "bot-first" });
+    const store = createTargetsStore(db);
+
+    const resolved = await store.resolveByRepo("bot-first", { id: 9810, owner: "acme", name: "widgets" });
+    expect(resolved?.id).toBe(targetId);
+    expect(targetRow(db, targetId)).toMatchObject({
+      repo_id: 9810,
+      repo_owner: "acme",
+      repo_name: "widgets",
+    });
+    // The claim is written once: the next delivery resolves by id.
+    expect((await store.resolveByRepo("bot-first", { id: 9810, owner: "acme", name: "widgets" }))?.id).toBe(targetId);
+  });
+
+  test("two all-NULL rows name no repository, so neither is claimed", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-two-null");
+    seedTarget(db, { id: "t-null-a", botId: "bot-two-null" });
+    seedTarget(db, { id: "t-null-b", botId: "bot-two-null" });
+    const store = createTargetsStore(db);
+
+    expect(await store.resolveByRepo("bot-two-null", { id: 9820, owner: "acme", name: "widgets" })).toBeNull();
+    expect(targetRow(db, "t-null-a").repo_id).toBeNull();
+    expect(targetRow(db, "t-null-b").repo_id).toBeNull();
+  });
+
+  test("owner/name compare case-insensitively, like the index", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-case");
+    const targetId = seedTarget(db, { id: "t-case", botId: "bot-case", repoOwner: "Acme", repoName: "Widgets" });
+    const store = createTargetsStore(db);
+
+    // The delivery spells the same repository differently: the claim must not
+    // orphan the row.
+    const resolved = await store.resolveByRepo("bot-case", { id: 9830, owner: "acme", name: "widgets" });
+    expect(resolved?.id).toBe(targetId);
+    expect(targetRow(db, targetId)).toMatchObject({ repo_id: 9830, repo_owner: "acme", repo_name: "widgets" });
+
+    // An unclaimed row spelled `Acme/Widgets` IS the repository `ACME/WIDGETS`
+    // names, so `create` refuses it instead of adding a second target.
+    seedBot(db, "bot-case-2");
+    seedTarget(db, { id: "t-case-unclaimed", botId: "bot-case-2", repoOwner: "Acme", repoName: "Widgets" });
+    expect(
+      (
+        await store.create({
+          workspaceId: WS,
+          botId: "bot-case-2",
+          repoId: 9831,
+          repoOwner: "ACME",
+          repoName: "WIDGETS",
+          createdBy: "octocat",
+        })
+      ).outcome,
+    ).toBe("duplicate");
+  });
+
+  test("an id already held by a live row wins over a legacy name match", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-clash");
+    seedTarget(db, { id: "t-claimed", botId: "bot-clash", repoId: 9900, repoOwner: "acme", repoName: "widgets" });
+    seedTarget(db, { id: "t-legacy", botId: "bot-clash", repoOwner: "acme", repoName: "widgets-legacy" });
+    const store = createTargetsStore(db);
+
+    // Step 1 answers: the id is bound. The unclaimed legacy row is not touched.
+    expect((await store.resolveByRepo("bot-clash", { id: 9900, owner: "acme", name: "widgets" }))?.id).toBe(
+      "t-claimed",
+    );
+    expect(targetRow(db, "t-legacy").repo_id).toBeNull();
+  });
+
+  test("a soft-deleted target resolves to nothing; two unclaimed names are ambiguous", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-amb");
+    seedTarget(db, { id: "t-gone", botId: "bot-amb", repoId: 9950, repoOwner: "acme", repoName: "gone", deleted: true });
+    const store = createTargetsStore(db);
+    expect(await store.resolveByRepo("bot-amb", { id: 9950, owner: "acme", name: "gone" })).toBeNull();
+
+    // Two unclaimed rows on one owner/name: the fallback cannot choose, so the
+    // delivery is ignored rather than attributed to one of them.
+    seedTarget(db, { id: "t-dup-a", botId: "bot-amb", repoOwner: "acme", repoName: "two" });
+    seedTarget(db, { id: "t-dup-b", botId: "bot-amb", repoOwner: "acme", repoName: "two" });
+    expect(await store.resolveByRepo("bot-amb", { id: null, owner: "acme", name: "two" })).toBeNull();
+    expect(targetRow(db, "t-dup-a").repo_id).toBeNull();
+    expect(targetRow(db, "t-dup-b").repo_id).toBeNull();
   });
 });
 
-describe("delete", () => {
-  test("the target delete is a soft delete that stamps deleted_at once", async () => {
+describe("effective settings and inheritance", () => {
+  test("the workspace defaults answer while inheriting, the row's own columns otherwise", async () => {
     const db = createMigratedTestD1();
-    const { botId, targetId } = seedBackfilledBot(db, "bot-delete", { githubAppId: 6701 });
+    db.raw
+      .prepare(
+        `UPDATE workspaces SET check_min_score = 45, default_review_trigger_mode = 'open',
+                default_review_level = 'quick', default_check_pass_verdicts = '["ship it","blocked"]'
+          WHERE id = ?`,
+      )
+      .run(WS);
+    seedBot(db, "bot-inherit");
+    seedTarget(db, {
+      id: "t-follow",
+      botId: "bot-inherit",
+      repoId: 10001,
+      repoOwner: "acme",
+      repoName: "a",
+      follow: 1,
+      triggerMode: "manual",
+      level: "deep",
+      minScore: 90,
+      verdicts: '["ship it"]',
+    });
+    seedTarget(db, {
+      id: "t-own",
+      botId: "bot-inherit",
+      repoId: 10002,
+      repoOwner: "acme",
+      repoName: "b",
+      follow: 0,
+      triggerMode: "manual",
+      level: "deep",
+      minScore: 90,
+    });
+    const store = createTargetsStore(db);
+    const defaults = await getWorkspaceReviewDefaults(db, WS);
+    expect(defaults).toEqual({
+      triggerMode: "open",
+      level: "quick",
+      checkMinScore: 45,
+      checkPassVerdicts: ["ship it", "blocked"],
+      checkPassVerdictsReadable: true,
+    });
+
+    const following = (await store.getInWorkspace(WS, "t-follow"))!;
+    expect(effectiveTargetSettings(following, defaults)).toEqual({
+      triggerMode: "open",
+      level: "quick",
+      checkMinScore: 45,
+      checkPassVerdicts: ["ship it", "blocked"],
+      checkPassVerdictsReadable: true,
+    });
+    const own = (await store.getInWorkspace(WS, "t-own"))!;
+    expect(effectiveTargetSettings(own, defaults)).toEqual({
+      triggerMode: "manual",
+      level: "deep",
+      checkMinScore: 90,
+      checkPassVerdicts: ["ship it"],
+      checkPassVerdictsReadable: true,
+    });
+  });
+
+  test("inheriting never copies the defaults into the row, and toggling off snapshots them", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .prepare(
+        `UPDATE workspaces SET check_min_score = 45, default_review_trigger_mode = 'open',
+                default_review_level = 'quick'
+          WHERE id = ?`,
+      )
+      .run(WS);
+    seedBot(db, "bot-toggle");
+    const targetId = seedTarget(db, {
+      id: "t-toggle",
+      botId: "bot-toggle",
+      repoId: 10100,
+      repoOwner: "acme",
+      repoName: "widgets",
+      follow: 1,
+      triggerMode: "every_push",
+      level: "deep",
+      minScore: 90,
+    });
+    const store = createTargetsStore(db);
+
+    // A workspace default change reaches a following target with no write.
+    db.raw.prepare("UPDATE workspaces SET default_review_trigger_mode = 'manual' WHERE id = ?").run(WS);
+    expect((await getWorkspaceReviewDefaults(db, WS)).triggerMode).toBe("manual");
+    expect(targetRow(db, targetId).review_trigger_mode).toBe("every_push"); // inert placeholder, never copied
+
+    // Toggle off: the four effective values land in the row.
+    await setInheritance(db, WS, targetId, 0);
+    expect(targetRow(db, targetId)).toMatchObject({
+      follow_workspace_defaults: 0,
+      review_trigger_mode: "manual",
+      review_level: "quick",
+      check_min_score: 45,
+      check_pass_verdicts: '["ship it"]',
+    });
+
+    // Toggle on: the flag only — stored overrides become inert.
+    await setInheritance(db, WS, targetId, 1);
+    expect(targetRow(db, targetId)).toMatchObject({
+      follow_workspace_defaults: 1,
+      review_trigger_mode: "manual",
+      check_min_score: 45,
+    });
+  });
+
+  test("an unreadable stored verdict array fails closed instead of admitting nobody's gate", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-gate");
+    seedTarget(db, {
+      id: "t-gate",
+      botId: "bot-gate",
+      repoId: 10200,
+      repoOwner: "acme",
+      repoName: "widgets",
+      verdicts: '["lgtm"]',
+    });
+    const store = createTargetsStore(db);
+
+    const target = (await store.getInWorkspace(WS, "t-gate"))!;
+    expect(effectiveTargetSettings(target, await getWorkspaceReviewDefaults(db, WS)).checkPassVerdicts).toEqual([]);
+    // A save repairs it.
+    expect(await store.setReviewConfig(WS, "t-gate", { checkPassVerdicts: ["ship it"] })).toBe(true);
+    expect(targetRow(db, "t-gate").check_pass_verdicts).toBe('["ship it"]');
+  });
+
+  test("the on-vocabulary levels parse back and an off-vocabulary stored value reads as absent", () => {
+    for (const level of REVIEW_LEVELS) expect(parseTargetReviewLevel(level)).toBe(level);
+    for (const value of [null, undefined, "turbo", "", "DEEP", 3, ["deep"]]) {
+      expect(parseTargetReviewLevel(value)).toBeNull();
+    }
+  });
+});
+
+describe("setReviewConfig", () => {
+  test("writes only the columns the caller names", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-config");
+    const targetId = seedTarget(db, {
+      id: "t-config",
+      botId: "bot-config",
+      repoId: 10300,
+      repoOwner: "acme",
+      repoName: "widgets",
+      triggerMode: "every_push",
+      level: "deep",
+      minScore: 70,
+    });
+    const store = createTargetsStore(db);
+
+    expect(await store.setReviewConfig(WS, targetId, { triggerMode: "manual" })).toBe(true);
+    expect(targetRow(db, targetId)).toMatchObject({
+      review_trigger_mode: "manual",
+      review_level: "deep",
+      check_min_score: 70,
+    });
+
+    expect(
+      await store.setReviewConfig(WS, targetId, { checkMinScore: 55, checkPassVerdicts: ["ship it", "blocked"] }),
+    ).toBe(true);
+    expect(targetRow(db, targetId)).toMatchObject({
+      review_trigger_mode: "manual",
+      check_min_score: 55,
+      check_pass_verdicts: '["ship it","blocked"]',
+    });
+
+    // `null` is the "follow the operator default" choice, a real write.
+    expect(await store.setReviewConfig(WS, targetId, { level: null })).toBe(true);
+    expect(targetRow(db, targetId).review_level).toBeNull();
+  });
+
+  test("off-vocabulary values throw before any write", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-invalid");
+    const targetId = seedTarget(db, { id: "t-invalid", botId: "bot-invalid", repoId: 10400, repoOwner: "acme", repoName: "widgets" });
+    const store = createTargetsStore(db);
+
+    await expect(
+      store.setReviewConfig(WS, targetId, { triggerMode: "sometimes" as never }),
+    ).rejects.toThrow(/trigger mode/);
+    await expect(store.setReviewConfig(WS, targetId, { level: "turbo" as never })).rejects.toThrow(/review level/);
+    await expect(store.setReviewConfig(WS, targetId, { checkMinScore: 101 })).rejects.toThrow(/outside 0..100/);
+    await expect(
+      store.setReviewConfig(WS, targetId, { checkPassVerdicts: ["lgtm" as never] }),
+    ).rejects.toThrow(/PR_VERDICTS/);
+
+    expect(targetRow(db, targetId)).toMatchObject({
+      review_trigger_mode: "every_push",
+      review_level: null,
+      check_min_score: 70,
+    });
+  });
+
+  test("an explicit save flips the row off inheritance in the same statement", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .prepare(
+        `UPDATE workspaces SET check_min_score = 45 WHERE id = ?`,
+      )
+      .run(WS);
+    seedBot(db, "bot-explicit");
+    const targetId = seedTarget(db, {
+      id: "t-explicit",
+      botId: "bot-explicit",
+      repoId: 10700,
+      repoOwner: "acme",
+      repoName: "widgets",
+      follow: 1,
+      minScore: 90,
+    });
+    const store = createTargetsStore(db);
+
+    // Baseline: the placeholder floor is inert while inheriting.
+    expect(checkGateOf(await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, targetId))!))).toEqual({
+      minScore: 45,
+      passVerdicts: ["ship it"],
+    });
+
+    expect(await store.setReviewConfig(WS, targetId, { checkMinScore: 90, follow: 0 })).toBe(true);
+    expect(targetRow(db, targetId)).toMatchObject({ follow_workspace_defaults: 0, check_min_score: 90 });
+    // …and the saved floor is now the one the target runs with.
+    expect(checkGateOf(await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, targetId))!))).toEqual({
+      minScore: 90,
+      passVerdicts: ["ship it"],
+    });
+  });
+
+  test("the pause writes the target flag", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-pause");
+    const targetId = seedTarget(db, { id: "t-pause", botId: "bot-pause", repoId: 10500, repoOwner: "acme", repoName: "widgets" });
+    const store = createTargetsStore(db);
+
+    expect(await store.setReviewEnabled(WS, targetId, false)).toBe(true);
+    expect(targetRow(db, targetId).review_enabled).toBe(0);
+    expect(await store.setReviewEnabled(WS, targetId, true)).toBe(true);
+    expect(targetRow(db, targetId).review_enabled).toBe(1);
+  });
+
+  test("delete is a soft delete that stamps deleted_at once", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-delete");
+    const targetId = seedTarget(db, { id: "t-remove", botId: "bot-delete", repoId: 10600, repoOwner: "acme", repoName: "widgets" });
     const store = createTargetsStore(db);
 
     expect(await store.delete(WS, targetId)).toBe(true);
     expect(targetRow(db, targetId).deleted_at).not.toBeNull();
-    expect(await store.getById(WS, targetId)).toBeNull();
-    expect(await store.resolve(botId, null)).toBeNull();
+    expect(await store.getInWorkspace(WS, targetId)).toBeNull();
     expect(await store.delete(WS, targetId)).toBe(false);
   });
 });
 
 /**
- * Park: the audited repair for an owner overlap. It writes the business pause
- * and the retired account claim plus ONE `target.park` audit row in one batch,
- * deletes nothing, and refuses — with zero writes — a target that is not live
- * in the addressed workspace, a bot's only live target, or a claim no other
- * live target in the workspace duplicates.
+ * The workspace defaults face's ONE store function: it stores the three
+ * `default_*` columns AND the gate floor (`workspaces.check_min_score`), so the
+ * legacy `/api/settings/check-min-score` address cannot drift from it.
  */
-describe("park an overlapping target", () => {
-  const NOW = "2026-06-01T00:00:00.000Z";
-  /** The read-only audit the operator runs; parking must empty its row. */
-  const OVERLAP_SQL = readFileSync(join(import.meta.dir, "../../scripts/audit-owner-overlap.sql"), "utf8");
+describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
+  const ACTION = "workspace.check_min_score.set";
 
-  type TargetShape = {
-    review_enabled: number;
-    account_login: string | null;
-    installation_id: number | null;
-    deleted_at: string | null;
-  };
+  const floorAudits = (db: TestD1): Array<{ before: unknown; after: unknown }> =>
+    (
+      db.raw
+        .prepare("SELECT detail_json FROM platform_audit_events WHERE action = ?1 ORDER BY rowid")
+        .all(ACTION) as Array<{ detail_json: string }>
+    ).map((row) => JSON.parse(row.detail_json) as { before: unknown; after: unknown });
 
-  function targetOf(db: TestD1, targetId: string): TargetShape {
-    const row = db.raw
-      .query(
-        `SELECT review_enabled, account_login, installation_id, deleted_at
-           FROM review_targets WHERE id = ?`,
-      )
-      .get(targetId) as TargetShape | null;
-    if (row === null) throw new Error(`target ${targetId} is missing`);
-    return row;
-  }
-
-  function counts(db: TestD1): { targets: number; bots: number; audits: number } {
-    const one = (sql: string) => (db.raw.query(sql).get() as { n: number }).n;
-    return {
-      targets: one("SELECT COUNT(*) AS n FROM review_targets"),
-      bots: one("SELECT COUNT(*) AS n FROM review_bots"),
-      audits: one("SELECT COUNT(*) AS n FROM audit_events"),
-    };
-  }
-
-  /** A second live target on the same bot, carrying the account claim. */
-  function seedSiblingTarget(
-    db: TestD1,
-    input: { id: string; botId: string; workspaceId?: string; accountLogin: string | null; deleted?: boolean },
-  ): void {
+  const workspaceRow = (db: TestD1) =>
     db.raw
       .prepare(
-        `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, installation_id, account_login,
-            review_enabled, review_trigger_mode, review_level,
-            check_min_score, check_pass_verdicts, allowlist_enabled,
-            created_by, created_at, updated_at, deleted_at)
-         VALUES (?, ?, ?, ?, NULL, ?, 1, 'every_push', NULL, 70, '["ship it"]', 0,
-                 'acme', datetime('now'), datetime('now'), ?)`,
+        `SELECT default_review_trigger_mode, default_review_level,
+                default_check_pass_verdicts, check_min_score
+           FROM workspaces WHERE id = ?`,
       )
-      .run(
-        input.id,
-        input.workspaceId ?? WS,
-        input.botId,
-        input.id,
-        input.accountLogin,
-        input.deleted ? "2026-01-01 00:00:00" : null,
-      );
-  }
+      .get(WS) as Record<string, unknown>;
 
-  test("a park pauses the target, retires its claim and audits it in one batch", async () => {
+  test("writes the three defaults and the floor in one call, and ledgers the floor", async () => {
     const db = createMigratedTestD1();
-    // The overlap the audit reports: ONE owner, TWO different bots, each with
-    // its own target in this workspace.
-    const { targetId } = seedBackfilledBot(db, "bot-park", {
-      githubAppId: 6101,
-      installationId: 501,
+    // The migrated fixture already holds the `default` workspace.
+
+    expect(
+      await setWorkspaceReviewDefaults(
+        db,
+        WS,
+        {
+          triggerMode: "open",
+          level: "deep",
+          checkPassVerdicts: ["ship it", "blocked"],
+          checkMinScore: 45,
+        },
+        "operator",
+      ),
+    ).toBe(true);
+    expect(workspaceRow(db)).toEqual({
+      default_review_trigger_mode: "open",
+      default_review_level: "deep",
+      default_check_pass_verdicts: '["ship it","blocked"]',
+      check_min_score: 45,
     });
-    const rival = seedBackfilledBot(db, "bot-rival", { githubAppId: 6106, installationId: 506 });
-    expect(targetOf(db, targetId).account_login).toBe("acme");
-    expect(targetOf(db, rival.targetId).account_login).toBe("acme");
-    expect(OVERLAP_SQL).toContain("HAVING COUNT(*) > 1");
-    expect((db.raw.query(OVERLAP_SQL).all() as Array<{ account_login: string }>).map((row) => row.account_login)).toEqual([
-      "acme",
+    // NULL was never a floor in effect, so the ledger's `before` is the absent
+    // state rather than the platform default it degraded to.
+    expect(floorAudits(db)).toEqual([{ before: null, after: 45 }]);
+  });
+
+  test("each later floor save ledgers the value it replaced", async () => {
+    const db = createMigratedTestD1();
+    // The migrated fixture already holds the `default` workspace.
+
+    for (const value of [45, 0, 100]) {
+      await setWorkspaceReviewDefaults(db, WS, { checkMinScore: value }, "operator");
+    }
+
+    expect(workspaceRow(db).check_min_score).toBe(100);
+    expect(floorAudits(db)).toEqual([
+      { before: null, after: 45 },
+      { before: 45, after: 0 },
+      { before: 0, after: 100 },
     ]);
-    const before = counts(db);
-    const store = createTargetsStore(db);
-    expect(await store.hasOwnerOverlap(WS, targetId)).toBe(true);
-
-    expect(await store.park(WS, targetId, "octocat", NOW)).toEqual({ outcome: "parked" });
-
-    const parked = targetOf(db, targetId);
-    expect(parked.review_enabled).toBe(0);
-    expect(parked.account_login).toBeNull();
-    // Parking is not a delete and not an unbind: the target, its bot and its
-    // installation binding all stay.
-    expect(parked.deleted_at).toBeNull();
-    expect(parked.installation_id).toBe(501);
-    expect(counts(db).targets).toBe(before.targets);
-    expect(counts(db).bots).toBe(before.bots);
-
-    // Exactly one audit row, naming the target it parked.
-    expect(counts(db).audits).toBe(before.audits + 1);
-    const audits = db.raw
-      .query("SELECT workspace_id, actor_login, action, target_id, created_at FROM audit_events ORDER BY rowid")
-      .all() as Array<{
-      workspace_id: string;
-      actor_login: string;
-      action: string;
-      target_id: string | null;
-      created_at: string;
-    }>;
-    expect(audits).toEqual([
-      { workspace_id: WS, actor_login: "octocat", action: "target.park", target_id: targetId, created_at: NOW },
-    ]);
-    // The rival target — the claim the park left in place — is untouched.
-    expect(targetOf(db, rival.targetId)).toMatchObject({
-      review_enabled: 1,
-      account_login: "acme",
-    });
-    // The audit query's healthy state for this workspace/owner.
-    expect(db.raw.query(OVERLAP_SQL).all()).toEqual([]);
-    // Parking the second claimant is now refused: `acme` would be left with no
-    // live target at all.
-    expect(await store.park(WS, rival.targetId, "octocat", NOW)).toEqual({
-      outcome: "refused",
-      reason: "only-live-target",
-    });
-    expect(targetOf(db, rival.targetId)).toMatchObject({ review_enabled: 1, account_login: "acme" });
-    expect(counts(db).audits).toBe(before.audits + 1);
   });
 
-  test("a target that is the owner's only live claim is refused with zero writes", async () => {
+  test("an off-vocabulary value is refused before any write", async () => {
     const db = createMigratedTestD1();
-    const { targetId } = seedBackfilledBot(db, "bot-solo", { githubAppId: 6102, installationId: 502 });
-    // A second bot exists in the workspace, but its target claims a DIFFERENT
-    // owner: parking this one would retire the login instead of settling a
-    // duplicate, so it is refused.
-    const other = seedBackfilledBot(db, "bot-neighbour", { githubAppId: 6103, installationId: 503 });
-    db.raw.prepare(`UPDATE review_targets SET account_login = 'someone-else' WHERE id = ?`).run(other.targetId);
-    const before = counts(db);
-    const store = createTargetsStore(db);
+    // The migrated fixture already holds the `default` workspace.
 
-    expect(await store.park(WS, targetId, "octocat", NOW)).toEqual({
-      outcome: "refused",
-      reason: "only-live-target",
+    for (const bad of [-1, 101, 60.5, Number.NaN]) {
+      await expect(
+        setWorkspaceReviewDefaults(db, WS, { checkMinScore: bad }, "operator"),
+      ).rejects.toThrow(/min score/);
+    }
+    await expect(
+      setWorkspaceReviewDefaults(db, WS, { triggerMode: "sometimes" as never }, "operator"),
+    ).rejects.toThrow(/trigger mode/);
+    await expect(
+      setWorkspaceReviewDefaults(db, WS, { checkPassVerdicts: ["lgtm" as never] }, "operator"),
+    ).rejects.toThrow(/PR_VERDICTS/);
+
+    expect(workspaceRow(db)).toEqual({
+      default_review_trigger_mode: "every_push",
+      default_review_level: null,
+      default_check_pass_verdicts: '["ship it"]',
+      check_min_score: null,
     });
-    expect(await store.hasOwnerOverlap(WS, targetId)).toBe(false);
-    expect(targetOf(db, targetId)).toMatchObject({ review_enabled: 1, account_login: "acme" });
-    expect(counts(db)).toEqual(before);
+    expect(floorAudits(db)).toEqual([]);
   });
 
-  test("a target outside the caller's workspace is refused with zero writes", async () => {
+  test("a patch that names nothing writes nothing", async () => {
     const db = createMigratedTestD1();
-    seedWorkspace(db, OTHER_WS);
-    const foreign = seedBackfilledBot(db, "bot-foreign", {
-      githubAppId: 6104,
-      workspaceId: OTHER_WS,
-      installationId: 504,
-    });
-    seedSiblingTarget(db, { id: "foreign-sibling", botId: "bot-foreign", workspaceId: OTHER_WS, accountLogin: "acme" });
-    const before = counts(db);
-    const store = createTargetsStore(db);
+    // The migrated fixture already holds the `default` workspace.
 
-    expect(await store.park(WS, foreign.targetId, "octocat", NOW)).toEqual({
-      outcome: "refused",
-      reason: "unknown-target",
-    });
-    expect(await store.hasOwnerOverlap(WS, foreign.targetId)).toBe(false);
-    expect(targetOf(db, foreign.targetId)).toMatchObject({ review_enabled: 1, account_login: "acme" });
-    expect(counts(db)).toEqual(before);
+    expect(await setWorkspaceReviewDefaults(db, WS, {}, "operator")).toBe(false);
+    expect(floorAudits(db)).toEqual([]);
   });
 
-  test("a target whose claim nobody duplicates is refused with zero writes", async () => {
+  test("an unknown workspace is refused as such", async () => {
     const db = createMigratedTestD1();
-    // No installation → no account claim; a second live target makes the bot
-    // multi-target, so only the overlap guard can refuse this one.
-    const { botId, targetId } = seedBackfilledBot(db, "bot-no-claim", { githubAppId: 6105 });
-    seedSiblingTarget(db, { id: "no-claim-sibling", botId, accountLogin: "someone-else" });
-    const before = counts(db);
-    const store = createTargetsStore(db);
+    // The migrated fixture already holds the `default` workspace.
 
-    expect(await store.park(WS, targetId, "octocat", NOW)).toEqual({
-      outcome: "refused",
-      reason: "no-overlap",
-    });
-    expect(await store.hasOwnerOverlap(WS, targetId)).toBe(false);
-    expect(targetOf(db, targetId).review_enabled).toBe(1);
-    expect(counts(db)).toEqual(before);
+    await expect(
+      setWorkspaceReviewDefaults(db, "ws_missing", { checkMinScore: 50 }, "operator"),
+    ).rejects.toBeInstanceOf(UnknownWorkspaceError);
+  });
+
+  test("an untrusted stored floor is ledgered as absent, not as the default", async () => {
+    const db = createMigratedTestD1();
+    // The migrated fixture already holds the `default` workspace.
+    // Wrong RANGE, written by a foreign writer (the DDL CHECK refuses it).
+    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.prepare("UPDATE workspaces SET check_min_score = 150 WHERE id = ?").run(WS);
+    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+
+    await setWorkspaceReviewDefaults(db, WS, { checkMinScore: 75 }, "operator");
+
+    expect(floorAudits(db)).toEqual([{ before: null, after: 75 }]);
   });
 });

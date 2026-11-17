@@ -44,13 +44,22 @@ const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 /** One seeded review target — the review configuration a delivery reads. */
 type TargetSeed = {
-  /** The bound GitHub installation; omitted → unbound (NULL, the create path). */
-  installationId?: number;
+  /**
+   * GitHub's numeric `repository.id`. OMITTED → `null`, the historical shape
+   * resolved (and claimed) by owner/name; the id-path cases seed one.
+   */
+  repoId?: number | null;
+  /** Display caches; OMITTED → the fixture repository's names. */
+  repoOwner?: string;
+  repoName?: string;
   /** OMITTED → the DDL DEFAULT 'every_push'. */
   mode?: "open" | "every_push" | "manual";
   /** OMITTED → the DDL DEFAULT 1 (the business pause off). */
   reviewEnabled?: 0 | 1;
 };
+
+/** The repository every delivery in this suite comes from. */
+const FIXTURE_REPO = { owner: "test-owner", name: "test-repo" };
 
 type SeedOptions = {
   slug: string;
@@ -65,14 +74,13 @@ type SeedOptions = {
    */
   githubSlug?: string | null;
   /**
-   * The bot's scope (migration 0058). OMITTED → the DDL default `owned`; a
-   * `shared` bot resolves ONLY through a bound installation (`TargetSeed.installationId`),
-   * so the shared-bot cases seed one.
+   * The bot's scope (migration 0058). OMITTED → the DDL default `owned`.
    */
   scope?: "owned" | "shared";
   /**
-   * The bot's targets. OMITTED → ONE target with the DDL defaults (enabled,
-   * `every_push`, no installation binding) — the shape the create path writes.
+   * The bot's targets. OMITTED → ONE target for the fixture repository with
+   * the DDL defaults (enabled, `every_push`) — the shape the create path
+   * writes.
    */
   targets?: TargetSeed[];
 };
@@ -121,15 +129,17 @@ async function seedApp(
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, installation_id, review_enabled,
-            review_trigger_mode, created_by, created_at, updated_at)
-         VALUES (?, 'default', ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
+           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+            review_enabled, review_trigger_mode, created_by, created_at, updated_at)
+         VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
       )
       .run(
         targetId,
         id,
-        opts.slug,
-        target.installationId ?? null,
+        target.repoName ?? FIXTURE_REPO.name,
+        target.repoId ?? null,
+        target.repoOwner ?? FIXTURE_REPO.owner,
+        target.repoName ?? FIXTURE_REPO.name,
         target.reviewEnabled ?? 1,
         target.mode ?? "every_push",
       );
@@ -248,6 +258,7 @@ const PR_PAYLOAD = {
   // `state` is what the PR ledger (0039) requires of the payload: a
   // production `pull_request` delivery always carries it.
   pull_request: { number: 42, state: "open", head: { sha: "abc123" }, user: { login: "alice" } },
+  // The fixture repository every seeded target holds (`FIXTURE_REPO`).
   repository: { name: "test-repo", owner: { login: "test-owner" } },
 };
 
@@ -298,15 +309,9 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
 
   test("saas: a plan without the shared bot skips the delivery — 200, outcome skipped, no send, one entitlement failure", async () => {
     const db = createMigratedTestD1();
-    // A SHARED bot: that is the feature's subject. Resolution for a shared bot
-    // goes through the target's installation binding (no implicit
-    // attribution), so the delivery's installation id is bound here.
-    const appRow = await seedApp(db, {
-      slug: "app-x",
-      secret: "secret-x",
-      scope: "shared",
-      targets: [{ installationId: 123 }],
-    });
+    // A SHARED bot: that is the feature's subject. The target resolves by the
+    // delivery's repository (migration 0067), which the fixture target holds.
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared" });
     const { queue, sent } = makeQueue();
     // The production `saas` shape: the capability is read from the resolved
     // plan, and this workspace holds no subscription row → the seeded `free`
@@ -908,7 +913,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
 
   test("bot mention via the per-App route enqueues the issue_comment payload with both ids", async () => {
     const db = createMigratedTestD1();
-    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ repoOwner: "alice" }] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify({
@@ -945,7 +950,11 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
 
   test("mode threading: a manual-mode App ignores pull_request.opened but a bot mention still enqueues", async () => {
     const db = createMigratedTestD1();
-    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ mode: "manual" }] });
+    const appRow = await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      targets: [{ mode: "manual", repoOwner: "alice" }],
+    });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const prBody = JSON.stringify(PR_PAYLOAD);
@@ -998,7 +1007,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       slug: "app-x",
       secret: "secret-x",
       githubSlug: null,
-      targets: [{ mode: "manual" }],
+      targets: [{ mode: "manual", repoOwner: "alice" }],
     });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1402,7 +1411,9 @@ describe("installations upsert wiring", () => {
 
   test("a later delivery that omits the login preserves the stored one (COALESCE bare touch)", async () => {
     const db = createMigratedTestD1();
-    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // The target resolves by the delivery's repository, so it is seeded under
+    // the payload's owner/name.
+    await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ repoOwner: "alice" }] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
 
@@ -2196,7 +2207,7 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
 
 });
 
-describe("target resolution (webhook → review_targets)", () => {
+describe("target resolution (webhook → review_targets by repository)", () => {
   /** This bot's delivery rows, in insert order. */
   function deliveries(db: TestD1, botId: string): Array<{ event_name: string | null; outcome: string }> {
     return db.raw
@@ -2216,68 +2227,97 @@ describe("target resolution (webhook → review_targets)", () => {
     }).last_webhook_at;
   }
 
-  test("a matching installation selects its own target's trigger mode", async () => {
+  /** The delivery body for one repository under one installation. */
+  function bodyFor(repository: { id: number; owner: string; name: string }, action = "opened"): string {
+    return JSON.stringify({
+      ...PR_PAYLOAD,
+      action,
+      repository: { id: repository.id, name: repository.name, owner: { login: repository.owner } },
+    });
+  }
+
+  test("a delivery resolves the target of its own repository, not another one of the bot", async () => {
     const db = createMigratedTestD1();
-    // Two targets on one bot: the `open`-mode one is bound to installation 111,
-    // the `every_push` one to 222. The delivery's installation decides which
-    // row's mode gates the classification, so `synchronize` is refused by one
-    // and accepted by the other.
+    // Two repositories under ONE installation: the id decides the target, so
+    // the `open`-mode one refuses a push while the `every_push` one accepts it.
     const appRow = await seedApp(db, {
       slug: "app-x",
       secret: "secret-x",
       targets: [
-        { installationId: 111, mode: "open" },
-        { installationId: 222, mode: "every_push" },
+        { repoId: 111, repoOwner: "acme", repoName: "open-repo", mode: "open" },
+        { repoId: 222, repoOwner: "acme", repoName: "push-repo", mode: "every_push" },
       ],
     });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
 
-    const openBody = JSON.stringify({ ...PR_PAYLOAD, action: "synchronize", installation: { id: 111 } });
+    const openBody = bodyFor({ id: 111, owner: "acme", name: "open-repo" }, "synchronize");
     const ignored = await postWebhook("/webhook/default/app-x", openBody, await sigHeaders("secret-x", openBody), env);
     expect(ignored.status).toBe(200);
     expect(await ignored.text()).toBe("ignored");
     expect(sent).toHaveLength(0); // `open` mode never auto-reviews a push
 
-    const pushBody = JSON.stringify({ ...PR_PAYLOAD, action: "synchronize", installation: { id: 222 } });
+    const pushBody = bodyFor({ id: 222, owner: "acme", name: "push-repo" }, "synchronize");
     const accepted = await postWebhook("/webhook/default/app-x", pushBody, await sigHeaders("secret-x", pushBody), env);
     expect(accepted.status).toBe(200);
     expect(await accepted.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.targetId).toBe(appRow.targetIds[1]!); // the 222-bound row
+    expect(sent[0]!.targetId).toBe(appRow.targetIds[1]!);
   });
 
-  test("a bot with ONE target resolves it for a different installation", async () => {
-    const db = createMigratedTestD1();
-    // The contract's fallback: until a second target exists, one bot reviews
-    // every installation it receives — the delivery copies no binding onto it.
-    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ installationId: 111 }] });
-    const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 999 } });
-
-    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
-
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.targetId).toBe(appRow.targetId);
-    const stored = db.raw.query("SELECT installation_id FROM review_targets WHERE id = ?").get(appRow.targetId) as {
-      installation_id: number | null;
-    };
-    expect(stored.installation_id).toBe(111); // the delivery never rewrites the binding
-  });
-
-  test("two targets and no installation match → 200 ignored, `no_target_for_repo`, zero enqueue, no ledger row", async () => {
+  test("two repositories under one installation both review", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, {
       slug: "app-x",
       secret: "secret-x",
-      targets: [{ installationId: 111 }, { installationId: 222 }],
+      targets: [
+        { repoId: 111, repoOwner: "acme", repoName: "first" },
+        { repoId: 222, repoOwner: "acme", repoName: "second" },
+      ],
     });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 999 } });
+
+    for (const repo of [
+      { id: 111, owner: "acme", name: "first" },
+      { id: 222, owner: "acme", name: "second" },
+    ]) {
+      const body = bodyFor(repo);
+      const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+      expect(await res.text()).toBe("accepted");
+    }
+
+    expect(sent.map((message) => message.targetId)).toEqual(appRow.targetIds);
+  });
+
+  test("a renamed repository keeps its ONE target and refreshes the display caches", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      targets: [{ repoId: 111, repoOwner: "acme", repoName: "old-name" }],
+    });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = bodyFor({ id: 111, owner: "acme-org", name: "new-name" });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(await res.text()).toBe("accepted");
+    expect(sent[0]!.targetId).toBe(appRow.targetId);
+    // One target, and the caches follow the payload's new spelling.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets WHERE bot_id = ?").get(appRow.id)).toEqual({ n: 1 });
+    expect(
+      db.raw.query("SELECT repo_owner, repo_name FROM review_targets WHERE id = ?").get(appRow.targetId),
+    ).toEqual({ repo_owner: "acme-org", repo_name: "new-name" });
+  });
+
+  test("a repository with no target is ignored with 200 — zero enqueue, no ledger row", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = bodyFor({ id: 9999, owner: "other", name: "unknown-repo" });
 
     const { warn, stop } = captureWarn();
     let res: Response;
@@ -2295,9 +2335,7 @@ describe("target resolution (webhook → review_targets)", () => {
     expect(lastWebhookAt(db, appRow.id)).not.toBeNull();
     const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("no_target_for_repo"));
     expect(line).toBeDefined();
-    const fields = JSON.parse(line!) as { event: string; detail: string };
-    expect(fields.event).toBe("no_target_for_repo");
-    expect(fields.detail).toContain("installation_id=999");
+    expect(JSON.parse(line!).detail).toContain("installation_id=123");
   });
 
   test("a bot with NO target ignores the delivery the same way", async () => {
@@ -2321,6 +2359,52 @@ describe("target resolution (webhook → review_targets)", () => {
     expect(deliveries(db, appRow.id)).toEqual([{ event_name: "pull_request", outcome: "ignored" }]);
     expect(ledgerCount(db, appRow.id)).toBe(0);
     expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).toContain("no_target_for_repo");
+  });
+
+  test("a first delivery onto a historical (NULL repo_id) row CLAIMS the id", async () => {
+    const db = createMigratedTestD1();
+    // The migrated shape (D15): owner/name known, `repo_id` NULL. The first
+    // delivery that states an id fills it — the only runtime claim site.
+    const appRow = await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      targets: [{ repoId: null, repoOwner: "acme", repoName: "widgets" }],
+    });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = bodyFor({ id: 777, owner: "acme", name: "widgets" });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(await res.text()).toBe("accepted");
+    expect(sent[0]!.targetId).toBe(appRow.targetId);
+    expect(
+      db.raw.query("SELECT repo_id, repo_owner, repo_name FROM review_targets WHERE id = ?").get(appRow.targetId),
+    ).toEqual({ repo_id: 777, repo_owner: "acme", repo_name: "widgets" });
+  });
+
+  test("a payload without repository.id resolves by owner/name and claims nothing", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      targets: [{ repoId: null, repoOwner: "acme", repoName: "widgets" }],
+    });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    // The same repository the target names, stated WITHOUT the numeric id.
+    const body = JSON.stringify({
+      ...PR_PAYLOAD,
+      repository: { name: "widgets", owner: { login: "acme" } },
+    });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(await res.text()).toBe("accepted");
+    expect(sent[0]!.targetId).toBe(appRow.targetId);
+    expect(db.raw.query("SELECT repo_id FROM review_targets WHERE id = ?").get(appRow.targetId)).toEqual({
+      repo_id: null,
+    });
   });
 
   test("the target's business pause suppresses the enqueue without reading the global flag", async () => {
@@ -2357,20 +2441,12 @@ describe("target resolution (webhook → review_targets)", () => {
 });
 
 /**
- * A delivery never writes a binding, and a shared bot's target is only ever
- * reached through its binding.
- *
- * `review_targets.installation_id` has exactly one production writer — the
- * claim batch. Every webhook path here therefore has to leave it alone: the
- * installation a delivery names is bookkeeping in `bot_installations` until a
- * signed-in user claims it for a target.
+ * Install bookkeeping is the BOT's (migration 0067 / D19): an installation
+ * belongs to the App, and a delivery writes `bot_installations` only. No
+ * webhook path can bind a target, and no target holds an installation.
  */
-describe("webhook install bookkeeping vs. the target binding", () => {
-  /** The bot's scope decides whether the single-target fallback exists at all. */
-  async function seedSharedBot(
-    db: TestD1,
-    slug: string,
-  ): Promise<{ id: string; targetId: string }> {
+describe("webhook install bookkeeping", () => {
+  async function seedSharedBot(db: TestD1, slug: string): Promise<{ id: string; targetId: string }> {
     const row = await seedApp(db, { slug, secret: "secret-x" });
     db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(row.id);
     return { id: row.id, targetId: row.targetId };
@@ -2389,17 +2465,7 @@ describe("webhook install bookkeeping vs. the target binding", () => {
     }>;
   }
 
-  /** What the claim batch would have written — the webhook must leave it as is. */
-  function binding(db: TestD1, targetId: string): { installation_id: number | null; account_login: string | null } {
-    const row = db.raw.query("SELECT installation_id, account_login FROM review_targets WHERE id = ?").get(targetId) as {
-      installation_id: number | null;
-      account_login: string | null;
-    } | null;
-    if (row === null) throw new Error(`review target ${targetId} is missing`);
-    return row;
-  }
-
-  test("installation.created for an unbound shared bot records the install and writes no binding", async () => {
+  test("installation.created records the install for the bot and touches no target", async () => {
     const db = createMigratedTestD1();
     const app = await seedSharedBot(db, "app-x");
     const { queue, sent } = makeQueue();
@@ -2415,51 +2481,21 @@ describe("webhook install bookkeeping vs. the target binding", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
-    // Bookkeeping lands: the installation row exists with the account the
-    // delivery stated. This is the ONLY table an installation delivery writes.
+    // This is the ONLY table an installation delivery writes.
     expect(installationRows(db)).toEqual([
       { bot_id: app.id, installation_id: 4242, account_login: "acme", removed_at: null },
     ]);
-    // An unclaimed installation is referenced by no target.
-    expect(binding(db, app.targetId)).toEqual({ installation_id: null, account_login: null });
   });
 
-  test("a bound shared bot resolves nothing for a different installation", async () => {
+  test("a delivery under an installation with no matching repository is ignored", async () => {
     const db = createMigratedTestD1();
-    const app = await seedSharedBot(db, "app-x");
-    // The claim batch bound this installation to the target.
-    db.raw.prepare("UPDATE review_targets SET installation_id = 4242 WHERE id = ?").run(app.targetId);
+    await seedSharedBot(db, "app-x");
     const { queue, sent } = makeQueue();
-    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 9999 } });
-
-    const res = await postWebhook(
-      "/webhook/default/app-x",
-      body,
-      await sigHeaders("secret-x", body),
-      makeEnv(db, { REVIEW_QUEUE: queue as never }),
-    );
-
-    // The existing no-target path: 200 ignored, zero enqueue, no ledger row.
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ignored");
-    expect(sent).toHaveLength(0);
-    // Without the shared-scope guard this delivery would review as the bound
-    // target — the single-target fallback is suppressed for a shared bot.
-    expect(binding(db, app.targetId)).toEqual({ installation_id: 4242, account_login: null });
-  });
-
-  test("a removed installation stops reviewing through its binding, which survives", async () => {
-    const db = createMigratedTestD1();
-    const app = await seedSharedBot(db, "app-x");
-    db.raw.prepare("UPDATE review_targets SET installation_id = 4242 WHERE id = ?").run(app.targetId);
-    db.raw
-      .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
-         VALUES ('install-removed', ?, 4242, 'acme', datetime('now'), datetime('now'))`,
-      )
-      .run(app.id);
-    const { queue, sent } = makeQueue();
-    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 4242 } });
+    const body = JSON.stringify({
+      ...PR_PAYLOAD,
+      installation: { id: 9999 },
+      repository: { id: 9999, name: "elsewhere", owner: { login: "stranger" } },
+    });
 
     const res = await postWebhook(
       "/webhook/default/app-x",
@@ -2471,9 +2507,6 @@ describe("webhook install bookkeeping vs. the target binding", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
-    // The binding is kept (a reinstall resumes it) and is not re-attributed.
-    expect(binding(db, app.targetId)).toEqual({ installation_id: 4242, account_login: null });
-    expect(installationRows(db)[0]!.removed_at).not.toBeNull();
   });
 });
 
@@ -2705,7 +2738,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     setCeiling(db, null); // the free plan keeps its seeded ceiling
     db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = 1 WHERE profile_id = 'quota-v1' AND plan_id = 'free'").run();
     seedUsage(db, "prior", 1000);
-    await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared", targets: [{ installationId: 123 }] });
+    await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
     const body = JSON.stringify(PR_PAYLOAD);

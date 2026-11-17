@@ -13,7 +13,8 @@ export const zhCN: Dictionary = {
     brand: "Morning Star Inspector",
     primary: "主导航",
     apps: "应用",
-    targets: "审查目标",
+    /** 仓库页（`/dashboard/<ref>/targets`）。 */
+    targets: "仓库",
     members: "成员",
     settings: "设置",
     /** 侧栏底部的平台运营入口（仅 saas 上的 operator 可见）。 */
@@ -40,6 +41,13 @@ export const zhCN: Dictionary = {
   },
   common: {
     pageTitle: "{page} — {brand}",
+    /** 维护窗口（产品规格 J7）：不承诺 ETA。 */
+    maintenance: {
+      title: "维护中",
+      body: "正在执行数据升级，完成后自动恢复服务。",
+      reason: "原因：{reason}",
+      since: "开始时间：{since}",
+    },
     time: {
       justNow: "刚刚",
       minuteAgo: "{count} 分钟前",
@@ -113,34 +121,77 @@ export const zhCN: Dictionary = {
       revokeFailed: "无法撤销给 {login} 的邀请 — 请重试。",
     },
   },
-  /** App 详情页：标签页外壳。原先的“应用设置”标签内容已移到审查目标页（`targets.*`），这里的标签只保留 App 自身的面。 */
+  /** App 详情页：标签页外壳。评审策略属于仓库页（`targets.*`），这里的标签只保留 App 自身的面。 */
   appDetail: {
     /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
     documentPage: "应用",
     backToApps: "返回应用",
-    /** 从 App 详情与目标详情指向机器人设置页的链接。 */
+    /** 从 App 详情与目标详情指向机器人自身设置的链接。 */
     botSettingsLink: "机器人设置",
+    /** App 详情页的两个面：应用自身的配置，然后安装块。 */
+    tabSettings: "应用设置",
     tabInstallations: "已安装",
-    tabInsights: "洞察",
-    tabPullRequests: "拉取请求",
+    /** App 尚无仓库：没有任何评审，入口在仓库页面（`targets.add` 即该链接）。 */
+    noRepository: "该应用还没有对应仓库，因此不会进行任何评审。",
+    /** App 有多个仓库：没有单独的评审策略可供本页编辑（`targets.heading` 指向仓库页）。 */
+    targetsMany: "该应用审查多个仓库，各仓库的评审配置在仓库页中编辑。",
     blockedBotNotShared:
       "该机器人已不再共享给本工作区，因此此目标不会进行任何评审。请联系平台运营者重新共享。",
   },
-  /** 审查目标页（`/dashboard/<ref>/targets`）：工作区对某个机器人的认领，独立成页。详情页沿用被移出的“应用设置”标签的 `settings.*` 文案。 */
+  /** 仓库页（`/dashboard/<ref>/targets`）：工作区对一个仓库的认领，独立成页。详情页沿用被移出的“应用设置”标签的 `settings.*` 文案。 */
   targets: {
-    heading: "审查目标",
-    backToList: "返回审查目标",
+    heading: "仓库",
+    backToList: "返回仓库",
+    /** 详情页的三个标签。 */
+    tabInsights: "洞察",
+    tabPullRequests: "拉取请求",
+    /** 评审配置标签自身的文案；`heading` 同时作为标签名。 */
+    settings: {
+      heading: "评审配置",
+      follow: "继承工作区默认",
+      following: "跟随工作区默认；关闭继承后可单独覆盖。",
+    },
     /** 组合空状态（EmptyState 的标题 + 描述）。 */
-    emptyTitle: "还没有审查目标",
-    emptyDescription:
-      "审查目标来自 GitHub App——创建一个，或在你的方案包含时接入共享机器人。",
+    emptyTitle: "还没有仓库",
+    emptyDescription: "添加一个你的应用已安装的仓库。",
+    /** 固定首行（J1）：工作区默认配置。 */
+    allRepositories: "所有仓库",
+    allRepositoriesMeta: "工作区默认评审配置 · 全工作区洞察与拉取请求",
+    /** 固定行的计数 pill；数字是工作区的活跃 target 数。 */
+    repositoryCount: "0 个仓库",
+    repositoryCountOne: "1 个仓库",
+    repositoryCountMany: "{count} 个仓库",
+    /** 仓库行的状态 pill（J1）。 */
+    status: {
+      reviewing: "审查中",
+      uninstalled: "待安装",
+      paused: "已暂停",
+    },
+    meta: "{app} · 最近审查 {time}",
+    metaNever: "{app} · 尚未审查",
+    /** 待安装行的 meta。 */
+    metaUninstalled: "未绑定安装 · 等待接收投递",
+    add: "添加仓库",
+    addDialog: {
+      title: "添加仓库",
+      description: "选择应用，以及它要审查的仓库。",
+      appLabel: "应用",
+      noApps: "本工作区还没有应用",
+      goToApps: "跳转到应用页面",
+      binding: "将绑定到 {app}",
+      repoLabel: "仓库",
+      noInstallationRepos: "该应用尚未安装到任何仓库",
+      goToInstalled: "打开该应用的已安装标签页",
+      loadingRepos: "正在加载仓库…",
+      loadReposFailed: "无法加载该应用的仓库。",
+      alreadyAdded: "已添加",
+      degraded: "部分安装无法读取 — 此列表可能不完整。",
+      duplicates: "以下仓库已存在：{names}",
+      confirm: "添加",
+    },
   },
-  /** 机器人设置页：机器人自身拥有的配置（凭据健康、提供方、模型链、沙箱镜像、安装）。使用该机器人的工作区可读，但不能配置。 */
+  /** 机器人自身拥有的配置，由 App 详情页的“应用设置”标签组合在身份头下。target 级文案沿用 `settings.*`。 */
   botSettings: {
-    /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
-    botPage: "机器人设置",
-    backToDetail: "返回目标",
-    subtitle: "此机器人自身拥有的配置——工作区的评审策略保留在目标上。",
     scopeOwned: "自有",
     scopeShared: "共享",
     /** `can_manage` 为 false 时显示（共享机器人，或非管理员）。 */
@@ -347,16 +398,9 @@ export const zhCN: Dictionary = {
     createDialog: {
       title: "创建审查目标",
       description: "使用平台已共享的 App，或连接你自己的 GitHub App。",
-      modeOfficial: "官方 App",
-      modeSelfHosted: "我的 GitHub App",
-      botLabel: "App",
-      botPlaceholder: "选择 App",
-      botTargetOne: "{name} · {count} 个目标",
       botTargets: "{name} · {count} 个目标",
       noSharedBots: "平台尚未共享任何 App — 请改为连接你自己的 GitHub App。",
-      submit: "创建目标",
       selfHostedSubmit: "前往 GitHub",
-      failed: "未能创建目标 — 请重试。",
     },
   },
   members: {
@@ -579,15 +623,10 @@ export const zhCN: Dictionary = {
     installationsCount: "{count} 个安装",
     installationsCountOne: "{count} 个安装",
     installationsAccount: "账号",
-    installationsAvailability: "可用性",
-    availabilityValid: "有效",
-    availabilityInvalid: "无效",
     installationsId: "安装 ID",
     installationsLastSync: "最近同步",
     /** App 详情页指标带中 provider 密钥数的标签。 */
     metricKeys: "密钥",
-    noInstallations: "还没有安装。",
-    installationsNotVisible: "该机器人的安装属于其所属工作区，因此不在此处列出。",
     recentDeliveries: "最近投递",
     recentDeliveriesCopy: "最多 10 次 webhook 投递 — 带结论的（正常 / 已暂停 / 已拒绝）排在前，其余按时间从新到旧。",
     noDeliveries: "还没有投递。",
@@ -940,15 +979,6 @@ export const zhCN: Dictionary = {
     installPendingUnknownAccount: "安装 {id}（GitHub 尚未报告其账号）",
     installPendingBind: "绑定到本目标",
     installBindFailed: "安装绑定失败。请刷新本页后重试。",
-    // 已安装标签页：仓库所有者允许名单（迁移 0045）。
-    allowlist: "所有者允许名单",
-    allowlistCopy: "开关打开时，仅审查这些仓库所有者发起的交付。",
-    allowlistEnable: "仅审查允许名单中的所有者",
-    allowlistOwners: "允许的所有者（每行一个 GitHub 登录名）",
-    allowlistFailClosed: "开关已打开但名单为空：所有交付都会被拒绝，不会有任何审查运行。",
-    allowlistPrivateStillApplies:
-      "此 App 为私有，但已存储的名单仍会作用于其交付 — 控件保持显示，以便你管理名单。",
-    allowlistSave: "保存允许名单",
     // 设置标签页：Check 所报告的审查门禁（迁移 0045）。
     reviewGate: "审查门禁",
     reviewGateCopy: "仅当结论属于以下之一且分数达到下限时，Check 才通过。",
@@ -1050,6 +1080,7 @@ export const zhCN: Dictionary = {
       quotaVersions: "额度版本",
       users: "用户",
       supportGrants: "支持访问",
+      dataUpgrades: "数据升级",
     },
     /**
      * 控制台写入被服务器拒绝：页面的通用失败文案为主，服务器自身的
@@ -1169,6 +1200,21 @@ export const zhCN: Dictionary = {
       admissionDropsSystemCap: "系统上限",
       admissionDropsWorkspaceCap: "工作区上限",
       admissionDropsError: "存储错误",
+      /** 维护窗口：运维对它的唯一写入面。 */
+      maintenanceTitle: "维护模式",
+      maintenanceDescription:
+        "开启后，控制台返回 503，Webhook 返回 503 以便 GitHub 重试，队列中的审查会被丢弃。健康检查与本控制台保持可用。",
+      maintenanceStateOn: "已开启 — 平台已关闭",
+      maintenanceStateOff: "已关闭 — 平台正常服务",
+      maintenanceStateUnreadable: "不可读 — 各闸门按关闭处理",
+      maintenanceReasonLabel: "原因（展示给用户）",
+      maintenanceOn: "关闭平台",
+      maintenanceOff: "恢复平台",
+      maintenanceSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      maintenanceFailed: "修改维护模式失败。",
+      /** 窗口开启时间，渲染为相对时间。 */
+      maintenanceSinceLabel: "关闭于",
       /** 实时队列积压，以及最近 24 小时的 GitHub 次级限流次数。 */
       queueTitle: "队列积压与 GitHub 限流",
       queueDescription:
@@ -1327,6 +1373,43 @@ export const zhCN: Dictionary = {
       revokeAction: "撤销",
       emptyTitle: "没有开放的支持窗口",
       emptyDescription: "当前没有任何运营持有跨工作区访问。",
+    },
+    /** 数据升级页：注册项、状态与分批执行。维护横幅复用运行时页的窗口文案。 */
+    dataUpgrades: {
+      description:
+        "大规模数据迁移，每批一个事务。进行中的批次不会被中断，停止操作在其完成后生效。",
+      loadFailed: "无法加载数据升级。",
+      maintenanceTitle: "维护窗口",
+      currentLabel: "当前升级",
+      currentNone: "无",
+      progressLabel: "进度",
+      errorLabel: "最近一次错误",
+      progressProcessed: "已处理 {count} 行。",
+      progressRunning: "正在执行 — 第 {batch} 批，已处理 {count} 行。",
+      progressDone: "已完成 {batch} 批 — 共处理 {count} 行。",
+      progressStopped: "已在 {batch} 批后停止 — 共处理 {count} 行。",
+      statusPending: "待开始",
+      statusRunning: "进行中",
+      statusVerifying: "校验中",
+      statusCompleted: "已完成",
+      statusFailed: "已失败",
+      downtimeBadge: "需要停机",
+      processedLabel: "已处理行数",
+      /** 一列：最近一次运行自己的完成时间；运行中退回进行中的声明时间。 */
+      lastRunLabel: "最近运行",
+      preflightLabel: "预检计数",
+      preflightAction: "预检",
+      startAction: "开始升级",
+      continueAction: "继续",
+      verifyAction: "校验",
+      stopAction: "停止",
+      resetAction: "重置",
+      preflightFailed: "无法为 {title} 执行预检。",
+      stepFailed: "{title} 的批次被拒绝。",
+      verifyFailed: "无法校验 {title}。",
+      resetFailed: "无法重置 {title}。",
+      emptyTitle: "没有数据升级",
+      emptyDescription: "此部署没有注册任何数据迁移。",
     },
   },
 };

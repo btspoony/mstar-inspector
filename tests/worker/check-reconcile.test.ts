@@ -1374,8 +1374,13 @@ describe("scheduled composition (spec §7.11)", () => {
     db.raw.prepare(`DELETE FROM bot_installations WHERE bot_id = ?`).run(APP);
     // A broken DB makes the sweep's own D1 read throw and both reconcilers'
     // internal catch fire — one stage's failure never becomes another's.
+    // The maintenance window read is the ONE exception: answered OPEN so the
+    // expression reaches its lanes at all (an unreadable window fails closed).
     const broken = {
-      prepare(): never {
+      prepare(sql: string): never | { bind: () => { all: () => Promise<{ results: never[] }> } } {
+        if (sql.includes("review_runtime_settings WHERE key IN")) {
+          return { bind: () => ({ all: async () => ({ results: [] }) }) };
+        }
         throw new Error("d1 down");
       },
       batch: async () => [],

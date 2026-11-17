@@ -23,7 +23,8 @@ export const en = {
     brand: "Morning Star Inspector",
     primary: "Primary navigation",
     apps: "Apps",
-    targets: "Review targets",
+    /** The repository surface (`/dashboard/<ref>/targets`). */
+    targets: "Repositories",
     members: "Members",
     settings: "Settings",
     /** Sidebar-footer entry to the platform console (operators on `saas`). */
@@ -57,6 +58,13 @@ export const en = {
   },
   common: {
     pageTitle: "{page} — {brand}",
+    /** The maintenance window (product spec J7): no ETA promise. */
+    maintenance: {
+      title: "Under maintenance",
+      body: "A data upgrade is running; service resumes automatically when it finishes.",
+      reason: "Reason: {reason}",
+      since: "Started at: {since}",
+    },
     time: {
       justNow: "just now",
       minuteAgo: "{count} minute ago",
@@ -144,9 +152,21 @@ export const en = {
     backToApps: "Back to Apps",
     /** The link from the App detail and the target detail to the bot's own settings page. */
     botSettingsLink: "Bot settings",
+    /** The App detail's two faces: its own configuration, then the install block. */
+    tabSettings: "App settings",
     tabInstallations: "Installed",
-    tabInsights: "Insights",
-    tabPullRequests: "Pull requests",
+    /**
+     * The App's zero-repository state: nothing under the App is reviewed yet,
+     * and the way there is the repository surface (`targets.add` is its link).
+     */
+    noRepository: "This App has no repository yet, so it reviews nothing.",
+    /**
+     * The App's several-repository state: it reviews more than one, so no
+     * single review policy is this page's to edit (`targets.heading` links
+     * to the repository surface).
+     */
+    targetsMany:
+      "This App reviews several repositories, so its review settings live on the Repositories page.",
     // The derived Blocked banner: the server reads the bot's scope and the
     // target's workspace on every read, so the copy names the one cause.
     blockedBotNotShared:
@@ -158,23 +178,62 @@ export const en = {
    * the `settings.*` labels of the tab it was moved from.
    */
   targets: {
-    heading: "Review targets",
-    backToList: "Back to review targets",
+    heading: "Repositories",
+    backToList: "Back to repositories",
+    /** The three detail tabs. */
+    tabInsights: "Insights",
+    tabPullRequests: "Pull requests",
+    /** The 评审配置 tab's own copy; `heading` doubles as the tab label. */
+    settings: {
+      heading: "Review settings",
+      follow: "Follow workspace defaults",
+      following:
+        "Following the workspace defaults; turn inheritance off to override them individually.",
+    },
     /** Composed empty state (EmptyState title + description). */
-    emptyTitle: "No review targets yet",
-    emptyDescription:
-      "Review targets come from GitHub Apps — create one, or attach the shared bot if your plan includes it.",
+    emptyTitle: "No repositories yet",
+    emptyDescription: "Add one of the repositories your App is installed on.",
+    /** The fixed first row (J1): the workspace default configuration. */
+    allRepositories: "All repositories",
+    allRepositoriesMeta: "Workspace defaults · workspace-wide insights and pull requests",
+    /** Count pill on the fixed row; the count is the workspace's live targets. */
+    repositoryCount: "0 repositories",
+    repositoryCountOne: "1 repository",
+    repositoryCountMany: "{count} repositories",
+    /** Status pills of a repository row (J1). */
+    status: {
+      reviewing: "Reviewing",
+      uninstalled: "Awaiting install",
+      paused: "Paused",
+    },
+    meta: "{app} · reviewed {time}",
+    metaNever: "{app} · never reviewed",
+    /** The 待安装 meta line: a target with no repository identity yet. */
+    metaUninstalled: "No installation bound · waiting for a delivery",
+    add: "Add repository",
+    addDialog: {
+      title: "Add repository",
+      description: "Pick the App and the repositories it should review.",
+      appLabel: "Application",
+      noApps: "This workspace has no application yet.",
+      goToApps: "Go to the applications page",
+      binding: "Will bind to {app}",
+      repoLabel: "Repositories",
+      noInstallationRepos: "This App is not installed on any repository.",
+      goToInstalled: "Open the App's installed tab",
+      loadingRepos: "Loading repositories…",
+      loadReposFailed: "Could not load this App's repositories.",
+      alreadyAdded: "Added",
+      degraded: "Some installations could not be read — this list may be incomplete.",
+      duplicates: "Already added: {names}",
+      confirm: "Add",
+    },
   },
   /**
-   * The bot settings page: the bot-owned configuration (credentials health,
-   * providers, chains, sandbox image, installations) that a target's workspace
-   * may use but not configure. The target-scoped labels stay under `settings.*`.
+   * The bot-owned configuration the App detail's 应用设置 tab composes under
+   * the App's identity header. The target-scoped labels stay under `settings.*`.
    */
   botSettings: {
-    /** The page's name in the document title (`common.pageTitle` slot). */
-    botPage: "Bot settings",
-    backToDetail: "Back to the target",
-    subtitle: "Configuration this bot owns — the workspace's review policy lives on the target.",
     scopeOwned: "Owned",
     scopeShared: "Shared",
     /** Shown whenever `can_manage` is false — a shared bot, or a non-manager. */
@@ -412,16 +471,9 @@ export const en = {
     createDialog: {
       title: "Create a review target",
       description: "Use an App this platform already shares, or connect your own GitHub App.",
-      modeOfficial: "Official App",
-      modeSelfHosted: "My own GitHub App",
-      botLabel: "App",
-      botPlaceholder: "Select an App",
-      botTargetOne: "{name} · {count} target",
       botTargets: "{name} · {count} targets",
       noSharedBots: "This platform shares no App yet — connect your own GitHub App instead.",
-      submit: "Create target",
       selfHostedSubmit: "Continue to GitHub",
-      failed: "The target was not created — try again.",
     },
   },
   members: {
@@ -662,28 +714,18 @@ export const en = {
     lastWebhook: "Last webhook: {time}",
     /**
      * The installations section of the settings flow: heading, count subtitle
-     * and the table's four columns (the availability badge is derived from
-     * the stored owner allowlist, migration 0045). `installations.length`
-     * is the only installation figure the product carries (compass D13); the
-     * settings payload has no per-installation repository count, so there is
-     * no repository column.
+     * and the table's columns. `installations.length` is the only installation
+     * figure the product carries (compass D13); the settings payload has no
+     * per-installation repository count, so there is no repository column.
      */
     installations: "Installations",
     installationsCount: "{count} installations",
     installationsCountOne: "{count} installation",
     installationsAccount: "Account",
-    installationsAvailability: "Availability",
-    availabilityValid: "Valid",
-    availabilityInvalid: "Invalid",
     installationsId: "Installation ID",
     installationsLastSync: "Last sync",
     /** Metric-band label for the provider-key count on the App detail face. */
     metricKeys: "Keys",
-    noInstallations: "No installations yet.",
-    // A Blocked target: the bot's installation rows belong to its owning
-    // workspace, so the table states the absence instead of a false "none".
-    installationsNotVisible:
-      "This bot's installations belong to its owning workspace, so they are not listed here.",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy:
       "Up to 10 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",
@@ -1148,16 +1190,6 @@ export const en = {
     installPendingUnknownAccount: "Installation {id} (account not reported yet)",
     installPendingBind: "Bind to this target",
     installBindFailed: "The installation could not be bound. Reload this page and try again.",
-    // Installed tab: the owner allowlist (migration 0045).
-    allowlist: "Owner allowlist",
-    allowlistCopy: "With the switch on, only these repository owners are reviewed.",
-    allowlistEnable: "Restrict reviews to allowlisted owners",
-    allowlistOwners: "Allowed owners (one GitHub login per line)",
-    allowlistFailClosed:
-      "The switch is on and the list is empty: every delivery is refused, so no review will run.",
-    allowlistPrivateStillApplies:
-      "This App is private, but the stored list still applies to its deliveries — the control stays visible so you can manage it.",
-    allowlistSave: "Save allowlist",
     // Settings tab: the review gate the Check reports (migration 0045).
     reviewGate: "Review gate",
     reviewGateCopy: "The Check passes only when the verdict is one of these and the score meets the floor.",
@@ -1284,6 +1316,7 @@ export const en = {
       quotaVersions: "Quota versions",
       users: "Users",
       supportGrants: "Support access",
+      dataUpgrades: "Data upgrades",
     },
     /**
      * A refused console write: the page's generic failure message stays
@@ -1409,6 +1442,21 @@ export const en = {
       admissionDropsSystemCap: "System cap",
       admissionDropsWorkspaceCap: "Workspace cap",
       admissionDropsError: "Storage error",
+      /** The maintenance window: the operator's one write surface for it. */
+      maintenanceTitle: "Maintenance mode",
+      maintenanceDescription:
+        "While on, the dashboard answers 503, the webhook returns 503 so GitHub retries, and queued reviews are dropped. Health checks and this console stay reachable.",
+      maintenanceStateOn: "On — the platform is closed",
+      maintenanceStateOff: "Off — the platform is serving",
+      maintenanceStateUnreadable: "Unreadable — the gates answer as closed",
+      maintenanceReasonLabel: "Reason (shown to users)",
+      maintenanceOn: "Close the platform",
+      maintenanceOff: "Reopen the platform",
+      maintenanceSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      maintenanceFailed: "Could not change the maintenance mode.",
+      /** The window's opening stamp, rendered as a relative time. */
+      maintenanceSinceLabel: "Closed since",
       /** The live queue gauge plus the 24 h GitHub secondary-rate-limit count. */
       queueTitle: "Queue backlog and GitHub rate limits",
       queueDescription:
@@ -1583,6 +1631,54 @@ export const en = {
       revokeAction: "Revoke",
       emptyTitle: "No open support windows",
       emptyDescription: "No operator holds cross-workspace access right now.",
+    },
+    /**
+     * Data upgrades page: the registry's items, their state and the batch run.
+     * The maintenance banner reuses the runtime page's window labels — one
+     * window, one wording.
+     */
+    dataUpgrades: {
+      description:
+        "Large data migrations, run as one transaction per batch. A batch is never interrupted; stopping waits for the one in flight.",
+      loadFailed: "Could not load the data upgrades.",
+      maintenanceTitle: "Maintenance window",
+      /** The banner's current item, progress and last error. */
+      currentLabel: "Current upgrade",
+      currentNone: "None",
+      progressLabel: "Progress",
+      errorLabel: "Last error",
+      /** {count} = the rows the batches have moved so far. */
+      progressProcessed: "{count} rows processed.",
+      /** {batch} = batches this run committed, {count} = rows processed. */
+      progressRunning: "Running — batch {batch}, {count} rows processed.",
+      progressDone: "Finished in {batch} batches — {count} rows processed.",
+      progressStopped: "Stopped after {batch} batches — {count} rows processed.",
+      /** The state pill's labels, one per state machine state. */
+      statusPending: "Pending",
+      statusRunning: "Running",
+      statusVerifying: "Verifying",
+      statusCompleted: "Completed",
+      statusFailed: "Failed",
+      /** The item refuses a second batch outside the maintenance window. */
+      downtimeBadge: "Needs downtime",
+      processedLabel: "Rows processed",
+      /** One column: the run's own finish, or the in-flight claim while it runs. */
+      lastRunLabel: "Last run",
+      preflightLabel: "Preflight counts",
+      preflightAction: "Preflight",
+      startAction: "Start upgrade",
+      continueAction: "Continue",
+      verifyAction: "Verify",
+      /** Only live during a run: it lands after the batch in flight. */
+      stopAction: "Stop",
+      resetAction: "Reset",
+      /** {title} = the item's title; the server's refusal rides as detail. */
+      preflightFailed: "Could not run the preflight for {title}.",
+      stepFailed: "The batch for {title} was refused.",
+      verifyFailed: "Could not verify {title}.",
+      resetFailed: "Could not reset {title}.",
+      emptyTitle: "No data upgrades",
+      emptyDescription: "This deployment registers no data migration.",
     },
   },
 };

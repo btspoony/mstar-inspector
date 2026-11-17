@@ -226,26 +226,40 @@ describe("document title + login copy", () => {
 });
 
 describe("App detail IA copy", () => {
-  test("the App detail tab labels exist atomically in both locales — 洞察 / 已安装 / Pull requests", () => {
-    expect(t("en", "appDetail.tabInsights")).toBe("Insights");
-    expect(t("zh_CN", "appDetail.tabInsights")).toBe("洞察");
+  test("the App detail's two tab labels exist atomically in both locales — 应用设置 / 已安装", () => {
+    expect(t("en", "appDetail.tabSettings")).toBe("App settings");
+    expect(t("zh_CN", "appDetail.tabSettings")).toBe("应用设置");
     expect(t("en", "appDetail.tabInstallations")).toBe("Installed");
     expect(t("zh_CN", "appDetail.tabInstallations")).toBe("已安装");
-    // The settings tab moved to the review-target surface: its label is gone,
-    // not aliased.
-    expect(isDictionaryKey("appDetail.tabSettings")).toBe(false);
+    // The zero-repository state is copy, not an error, so it must exist too.
+    expect(t("en", "appDetail.noRepository").length).toBeGreaterThan(0);
+    expect(t("zh_CN", "appDetail.noRepository").length).toBeGreaterThan(0);
   });
 
-  test("the review-target surface copy exists atomically in both locales", () => {
-    expect(t("en", "nav.targets")).toBe("Review targets");
-    expect(t("zh_CN", "nav.targets")).toBe("审查目标");
-    expect(t("en", "targets.emptyTitle")).toBe("No review targets yet");
-    expect(t("en", "targets.emptyDescription")).toBe(
-      "Review targets come from GitHub Apps — create one, or attach the shared bot if your plan includes it.",
+  test("the repository surface copy exists atomically in both locales", () => {
+    // The nav label and every repository surface string — list, add dialog,
+    // detail tabs — live under `targets.*`; nothing is inline.
+    expect(t("en", "nav.targets")).toBe("Repositories");
+    expect(t("zh_CN", "nav.targets")).toBe("仓库");
+    expect(t("en", "targets.heading")).toBe("Repositories");
+    expect(t("zh_CN", "targets.heading")).toBe("仓库");
+    expect(t("en", "targets.emptyTitle")).toBe("No repositories yet");
+    expect(t("en", "targets.allRepositories")).toBe("All repositories");
+    expect(t("zh_CN", "targets.allRepositories")).toBe("所有仓库");
+    expect(t("en", "targets.addDialog.noInstallationRepos")).toBe(
+      "This App is not installed on any repository.",
     );
-    expect(t("zh_CN", "targets.heading")).toBe("审查目标");
-    expect(t("zh_CN", "targets.emptyTitle").length).toBeGreaterThan(0);
-    expect(t("zh_CN", "targets.emptyDescription").length).toBeGreaterThan(0);
+    expect(t("zh_CN", "targets.addDialog.duplicates").length).toBeGreaterThan(0);
+    // The three detail tabs and the 评审配置 tab's own copy.
+    expect(t("en", "targets.tabInsights")).toBe("Insights");
+    expect(t("zh_CN", "targets.tabPullRequests")).toBe("拉取请求");
+    expect(t("en", "targets.settings.heading")).toBe("Review settings");
+    expect(t("zh_CN", "targets.settings.heading")).toBe("评审配置");
+    expect(t("en", "targets.settings.follow")).toBe("Follow workspace defaults");
+    expect(t("zh_CN", "targets.settings.following").length).toBeGreaterThan(0);
+    // The App detail's data tabs left this page with the surfaces themselves.
+    expect(isDictionaryKey("appDetail.tabInsights")).toBe(false);
+    expect(isDictionaryKey("appDetail.tabPullRequests")).toBe(false);
   });
 
   test("the back-to-apps wayfinding key lives under appDetail atomically; the old settings key is removed, not aliased", () => {
@@ -277,12 +291,25 @@ describe("App detail IA copy", () => {
     }
     // The settings tab is a section flow now: the two tier-group eyebrow keys
     // and the per-row installation sentence (replaced by the table's account /
-    // installation / last-sync columns) leave with it.
+    // installation / last-sync columns) leave with it. The availability badge
+    // and the allowlist copy leave with the allowlist surface.
     for (const key of [
       "settings.group.appInfo",
       "settings.group.configuration",
       "settings.installation",
       "settings.lastSeen",
+      "settings.installationsAvailability",
+      "settings.availabilityValid",
+      "settings.availabilityInvalid",
+      "settings.installationsNotVisible",
+      "settings.noInstallations",
+      "settings.allowlist",
+      "settings.allowlistCopy",
+      "settings.allowlistEnable",
+      "settings.allowlistOwners",
+      "settings.allowlistFailClosed",
+      "settings.allowlistPrivateStillApplies",
+      "settings.allowlistSave",
     ] as const) {
       expect(isDictionaryKey(key), key).toBe(false);
     }
@@ -299,20 +326,13 @@ describe("App detail IA copy", () => {
 });
 
 describe("creation chooser copy", () => {
-  /** Every key the two-mode chooser renders, both locales. */
+  /** Every key the chooser renders, both locales. */
   const KEYS = [
     "apps.createDialog.title",
     "apps.createDialog.description",
-    "apps.createDialog.modeOfficial",
-    "apps.createDialog.modeSelfHosted",
-    "apps.createDialog.botLabel",
-    "apps.createDialog.botPlaceholder",
-    "apps.createDialog.botTargetOne",
     "apps.createDialog.botTargets",
     "apps.createDialog.noSharedBots",
-    "apps.createDialog.submit",
     "apps.createDialog.selfHostedSubmit",
-    "apps.createDialog.failed",
   ] as const;
 
   test("every chooser key exists in both locales", () => {
@@ -323,9 +343,22 @@ describe("creation chooser copy", () => {
     }
   });
 
+  test("the official-mode form's keys are removed, not aliased", () => {
+    // They left with their only consumer — the deleted target-creating form.
+    for (const key of [
+      "apps.createDialog.modeOfficial",
+      "apps.createDialog.modeSelfHosted",
+      "apps.createDialog.botLabel",
+      "apps.createDialog.botPlaceholder",
+      "apps.createDialog.botTargetOne",
+      "apps.createDialog.submit",
+      "apps.createDialog.failed",
+    ] as const) {
+      expect(isDictionaryKey(key), key).toBe(false);
+    }
+  });
+
   test("the bot option carries its name and this workspace's target count", () => {
-    expect(t("en", "apps.createDialog.botTargetOne", { name: "Platform", count: 1 })).toContain("Platform");
-    expect(t("en", "apps.createDialog.botTargetOne", { name: "Platform", count: 1 })).toContain("1");
     expect(t("en", "apps.createDialog.botTargets", { name: "Platform", count: 3 })).toContain("3");
     expect(t("zh_CN", "apps.createDialog.botTargets", { name: "Platform", count: 3 })).toContain("3");
   });

@@ -194,6 +194,9 @@ const DEFAULT_ADMISSION_DROPS = {
 /** The fixture queue's live gauge as `GET /api/runtime` reports it. */
 const DEFAULT_QUEUE = { backlogCount: 0, backlogBytes: 0, oldestMessageTimestamp: null };
 
+/** The documented absent-row maintenance window: the platform is open. */
+const DEFAULT_MAINTENANCE = { enabled: false, reason: null, since: null, unreadable: false };
+
 /** The stored recheck ask-budget row, raw so a refused write is observable. */
 function storedRecheckBudget(db: TestD1): string | null {
   const row = db.raw
@@ -366,6 +369,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
+      maintenance: DEFAULT_MAINTENANCE,
     });
   });
 
@@ -463,6 +467,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
+      maintenance: DEFAULT_MAINTENANCE,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
@@ -478,6 +483,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
+      maintenance: DEFAULT_MAINTENANCE,
     });
   });
 
@@ -844,6 +850,98 @@ describe("PATCH /_internal_admin/api/runtime recheckAssignment", () => {
       expect(await res.json()).toHaveProperty("error");
     }
     expect(storedRecheckBudget(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("PATCH /_internal_admin/api/runtime maintenance", () => {
+  test("enabling writes the three rows, reports the new state and audits once", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ maintenance: { enabled: true, reason: "repository backfill" } }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      maintenance: { enabled: boolean; reason: string | null; since: string };
+    };
+    expect(body.maintenance.enabled).toBe(true);
+    expect(body.maintenance.reason).toBe("repository backfill");
+    expect(body.maintenance.since).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+
+    expect(storedBudgets(db)).toEqual({
+      "platform.maintenance.enabled": "1",
+      "platform.maintenance.reason": "repository backfill",
+      "platform.maintenance.since": body.maintenance.since,
+    });
+    expect(auditRows(db)).toEqual([
+      {
+        action: "platform.maintenance.set",
+        actor_login: OPERATOR,
+        target_type: "runtime",
+        target_id: "platform.maintenance",
+      },
+    ]);
+    const audit = db.raw
+      .prepare("SELECT detail_json FROM platform_audit_events")
+      .get() as { detail_json: string };
+    expect(JSON.parse(audit.detail_json)).toEqual({
+      before: { enabled: false, reason: null, since: null },
+      after: { enabled: true, reason: "repository backfill", since: body.maintenance.since },
+    });
+  });
+
+  test("disabling clears the reason and the start time", async () => {
+    const { db } = fixture();
+    await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ maintenance: { enabled: true, reason: "backfill" } }),
+    });
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ maintenance: { enabled: false } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      maintenance: { enabled: false, reason: null, since: null, unreadable: false },
+    });
+    // Only the off flag survives: no stale window outlives the close.
+    expect(storedBudgets(db)).toEqual({ "platform.maintenance.enabled": "0" });
+    expect(auditRows(db)).toHaveLength(2);
+  });
+
+  test("GET reports the window it stored, so the console states what the gate does", async () => {
+    const { db } = fixture();
+    const patch = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ maintenance: { enabled: true, reason: "backfill" } }),
+    });
+    const saved = (await patch.json()) as { maintenance: { since: string } };
+    const body = (await (await runtimeApi(db, { method: "GET" })).json()) as Record<string, unknown>;
+    expect(body.maintenance).toEqual({
+      enabled: true,
+      reason: "backfill",
+      since: saved.maintenance.since,
+      unreadable: false,
+    });
+  });
+
+  test("a malformed body is a 400 that writes nothing", async () => {
+    const { db } = fixture();
+    for (const body of [
+      JSON.stringify({ maintenance: {} }),
+      JSON.stringify({ maintenance: null }),
+      JSON.stringify({ maintenance: "on" }),
+      JSON.stringify({ maintenance: { enabled: "true" } }),
+      JSON.stringify({ maintenance: { enabled: 1 } }),
+      JSON.stringify({ maintenance: { enabled: true, reason: 5 } }),
+      JSON.stringify({ concurrency: 8, maintenance: { enabled: true } }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+      expect(await res.json()).toHaveProperty("error");
+    }
+    expect(storedBudgets(db)).toEqual({});
     expect(auditRows(db)).toEqual([]);
   });
 });

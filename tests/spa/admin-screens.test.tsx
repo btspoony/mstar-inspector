@@ -771,6 +771,85 @@ describe("Runtime screen", () => {
     expect(queueCells(surface).oldest).toBe("Empty");
     await surface.close();
   });
+
+  /** The maintenance card's read cells, keyed by their `data-maintenance` field. */
+  function maintenanceCells(surface: Surface): Record<string, string | null> {
+    return Object.fromEntries(
+      [...surface.container.querySelectorAll("[data-maintenance]")].map((node) => [
+        node.getAttribute("data-maintenance"),
+        node.textContent,
+      ]),
+    );
+  }
+
+  test("the maintenance card renders an open window from /api/runtime", async () => {
+    const surface = await runtimeScreen(() =>
+      json({ ...RUNTIME, maintenance: { enabled: false, reason: null, since: null } }),
+    );
+    expect(surface.text()).toContain("Maintenance mode");
+    expect(maintenanceCells(surface)).toEqual({ state: "Off — the platform is serving" });
+    // The toggle is the operator's write surface, and the reason field is inert
+    // while the platform is open (a reopen writes no reason).
+    expect(surface.container.querySelector("#maintenance-reason")).not.toBeNull();
+    expect(
+      (surface.container.querySelector("#maintenance-reason") as unknown as HTMLInputElement).disabled,
+    ).toBe(true);
+    await surface.close();
+  });
+
+  test("a closed window shows its state, the operator's reason and the start time", async () => {
+    const since = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const surface = await runtimeScreen(() =>
+      json({ ...RUNTIME, maintenance: { enabled: true, reason: "repository backfill", since } }),
+    );
+    expect(maintenanceCells(surface)).toEqual({
+      state: "On — the platform is closed",
+      since: "3 hours ago",
+      reason: "repository backfill",
+    });
+    await surface.close();
+  });
+
+  test("closing the platform fires exactly one PATCH with the typed reason", async () => {
+    const since = "2026-11-17T09:00:00.000Z";
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ maintenance: { enabled: true, reason: "repository backfill", since } })
+        : json({ ...RUNTIME, maintenance: { enabled: false, reason: null, since: null } }),
+    );
+    // The toggle opens the reason field, then the save writes the window.
+    await surface.click(surface.container.querySelector('button[aria-label="Maintenance mode Off — the platform is serving"]'));
+    await surface.type("#maintenance-reason", "repository backfill");
+    await surface.click(
+      [...surface.container.querySelectorAll("form")]
+        .find((form) => form.querySelector("#maintenance-reason"))
+        ?.querySelector('button[type="submit"]') ?? null,
+    );
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { maintenance: { enabled: true, reason: "repository backfill" } },
+      },
+    ]);
+    // The accepted echo replaces the stored window without a second read.
+    const cells = maintenanceCells(surface);
+    expect(cells.state).toBe("On — the platform is closed");
+    expect(cells.reason).toBe("repository backfill");
+    // The server stamps `since`; the card renders it, never the request value.
+    expect(cells.since).not.toBeNull();
+    expect(surface.sent.filter((request) => request.method === "GET")).toHaveLength(1);
+    expect(surface.text()).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("an older server without a maintenance field hides only that card", async () => {
+    const surface = await runtimeScreen(() => json(RUNTIME));
+    expect(surface.container.querySelector("#maintenance-reason")).toBeNull();
+    expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
+    await surface.close();
+  });
 });
 
 describe("Workspaces screen", () => {

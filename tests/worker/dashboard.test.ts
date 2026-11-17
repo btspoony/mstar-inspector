@@ -1678,6 +1678,10 @@ describe("/dashboard manifest routes", () => {
     // under test stays the missing-table write, not an unreadable setting.
     const db = seededDashboardD1(3);
     applyMigrationFile(db.raw, "0026_workspaces.sql");
+    // 0040 puts the maintenance window's table in place: every dashboard
+    // request reads it through the gate, so a missing table would 503 before
+    // the commit path this test exercises is reached.
+    applyMigrationFile(db.raw, "0040_runtime_config.sql");
     applyMigrationFile(db.raw, "0049_workspace_check_min_score.sql");
     db.raw
       .prepare(
@@ -2063,11 +2067,25 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
 
   test("migrations not applied (no review_bots table) → 500 fail-closed, hold KEPT", async () => {
     const rec = stubFetchRecording();
-    // through=3: a pre-apps DB (users only — no review_bots table).
+    // through=3: a pre-apps DB (no review_bots table). 0026 + 0040 only put
+    // the workspace plane and the maintenance window's table in place, which
+    // every dashboard request's gate reads; the commit still fails on the
+    // missing App table.
+    const preApps = seededDashboardD1(3);
+    applyMigrationFile(preApps.raw, "0026_workspaces.sql");
+    applyMigrationFile(preApps.raw, "0040_runtime_config.sql");
+    // The seeded users predate 0026, so attribute them to the sole workspace:
+    // the creation gate denies a non-member before the commit path runs.
+    preApps.raw
+      .prepare(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+         SELECT 'default', id, 'owner', '2026-01-01T00:00:00.000Z' FROM users`,
+      )
+      .run();
     const res = await doCommit({
       env: {
         ...baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }),
-        DB: seededDashboardD1(3),
+        DB: preApps,
       } as unknown as Env,
       holdValue: await freshHold(),
     });
@@ -2219,10 +2237,12 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const refused = await doCommit({ env, holdValue: await freshHold() });
 
     expect(refused.status).toBe(409);
-    // Zero writes: the guard runs before `createApp`, so neither the bot row,
-    // its mapping nor its target can exist.
+    // Zero writes: the guard runs before `createApp`, so neither the bot row
+    // nor its workspace mapping can exist (creation writes those two, no
+    // target).
     expect(appRowCount(env)).toBe(1);
-    expect((dbOf(env).raw.query("SELECT COUNT(*) AS n FROM review_targets").get() as { n: number }).n).toBe(1);
+    expect(relatedRowCount(env, "bot_workspaces")).toBe(1);
+    expect(relatedRowCount(env, "review_targets")).toBe(0);
     expect(await refused.text()).toContain(appCapCopy(1));
     // Non-retryable: a resubmit cannot free a slot, so the hold is burned.
     expectHoldExpired(refused);
@@ -2278,7 +2298,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(appRowCount(env)).toBe(2);
   });
 
-  test("an unreadable workspace default fails the commit closed, then retries at the stored floor", async () => {
+  test("an unreadable workspace default fails the commit closed, then retries once the stored floor is repaired", async () => {
     const env = commitEnv();
     const db = dbOf(env);
     // A stored value no reader trusts: the column's CHECK refuses it through
@@ -2306,20 +2326,15 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       refused.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
     expect(holdCookie).not.toContain("Max-Age=0");
 
-    // Repair the stored floor: a retry seeds the TENANT's value, never the
-    // platform default this read fell back to.
+    // Repair the stored floor: a retry lands the App. Creation writes no
+    // target (D13), so the floor a new App inherits is a WORKSPACE answer read
+    // when a repository target is first added — the commit only proves the
+    // degraded read stopped refusing.
     db.raw.prepare("UPDATE workspaces SET check_min_score = 90 WHERE id = 'default'").run();
     const committed = await doCommit({ env, holdValue });
     expect(committed.status).toBe(302);
     expect(appRowCount(env)).toBe(1);
-    const seeded = db.raw
-      .query(
-        `SELECT t.check_min_score FROM review_targets t
-           JOIN review_bots b ON b.id = t.bot_id
-          WHERE b.github_app_id = ?`,
-      )
-      .get(CONVERSION.id) as { check_min_score: number };
-    expect(seeded.check_min_score).toBe(90);
+    expect(relatedRowCount(env, "review_targets")).toBe(0);
   });
 
   test("an unreadable workspace default fails the callback auto-commit closed on the same floor page", async () => {
@@ -2843,6 +2858,10 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0023_removed_logins.sql",
   // 0026: createApp also writes the App's workspace mapping.
   "0026_workspaces.sql",
+  // 0040: every /dashboard request reads the maintenance window through the
+  // gate, so the settings table it lives in must exist (an unreadable window
+  // now fails closed and would 503 every route).
+  "0040_runtime_config.sql",
   // 0028: the SPA boot's pending-invite discovery read.
   "0028_workspace_invites.sql",
   // 0031: workspace creation writes its `free` subscription row.
@@ -3052,6 +3071,15 @@ function dbOf(env: Env): DashboardTestDb {
 
 function appRowCount(env: Env): number {
   return (dbOf(env).raw.query("SELECT COUNT(*) AS n FROM review_bots").get() as { n: number }).n;
+}
+
+/**
+ * Sibling row counts a "zero writes" assertion needs: creation writes a bot
+ * plus its workspace mapping only (D13 — no target), so the guard's position is
+ * observable on all three tables.
+ */
+function relatedRowCount(env: Env, table: "bot_workspaces" | "review_targets"): number {
+  return (dbOf(env).raw.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 }
 
 /** Apps store over the env's DB (seeding colliding rows before a commit). */

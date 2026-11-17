@@ -20,6 +20,7 @@ import {
   payloadMentionsALogin,
   PULL_REQUEST_ACTIONS,
   verifySignature,
+  type DeliveryIdentity,
   type ReviewTriggerContext,
 } from "../../src/worker/webhooks";
 
@@ -138,10 +139,10 @@ describe("classifyWebhook — signature verification (fail-closed)", () => {
 });
 
 describe("classifyWebhook — target resolution seam", () => {
-  test("the resolver is consulted AFTER the signature verifies, with the delivery's installation id", async () => {
+  test("the resolver is consulted AFTER the signature verifies, with the delivery's identity", async () => {
     const body = pullRequestBody("opened");
     const signature = await makeWebhooks(SECRET).sign(body);
-    const seen: Array<number | null> = [];
+    const seen: DeliveryIdentity[] = [];
     const outcome = await classifyWebhook(
       SECRET,
       body,
@@ -149,13 +150,15 @@ describe("classifyWebhook — target resolution seam", () => {
       "pull_request",
       undefined,
       undefined,
-      async (installationId) => {
-        seen.push(installationId);
+      async (delivery) => {
+        seen.push(delivery);
         return EVERY_PUSH;
       },
     );
 
-    expect(seen).toEqual([123]);
+    expect(seen).toEqual([
+      { installationId: 123, repository: { id: null, owner: "test-owner", name: "test-repo" } },
+    ]);
     expect(outcome.kind).toBe("job");
   });
 

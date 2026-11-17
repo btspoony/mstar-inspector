@@ -3,7 +3,7 @@
  * dropdown source, and save-chain/save-roles membership (spec §6.3).
  */
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { createMigratedTestD1, seedDefaultMemberships } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, seedTarget } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
@@ -73,6 +73,7 @@ async function seededWorld() {
     createdBy: "mallory",
     workspaceId: "default",
   });
+  seedTarget(db, id, { name: "mallorys-app" });
   return { db, app };
 }
 

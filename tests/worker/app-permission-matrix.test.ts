@@ -5,7 +5,7 @@
  * add-key / save-chain / save-roles / add-custom-provider /
  * add-template-provider / remove-custom-provider / key/delete / keys/verify /
  * keys/usage, plus the chain ops add-chain / remove-chain) and ops
- * (pause / resume / disable / enable / delete) — funnels through the SAME
+ * (disable / enable / delete) — funnels through the SAME
  * server-side workspace owner/admin gate (`canManageApp` in
  * src/dashboard/index.ts,
  * `canManageRole` = workspace owner/admin). This file locks that matrix as
@@ -21,7 +21,7 @@
  */
 import { describe, expect, spyOn, test } from "bun:test";
 import worker from "../../src/worker/index";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -47,6 +47,8 @@ const PLAIN_KEY_ID = await keyIdOf(PLAIN_KEY);
 
 /** The App's immutable GitHub App id — the only App address form (D0). */
 const APP_ID = 1001;
+/** The App's repository target in `default` — the ledger/insights address. */
+const TARGET_ID = "target-matrix";
 /** The bot the platform shares: the create-target route's subject. */
 const SHARED_BOT_ID = "bot-shared-matrix";
 /** The shared bot's immutable GitHub App id — its App-addressed routes. */
@@ -96,14 +98,13 @@ async function seededWorld(): Promise<TestD1> {
     workspaceId: "default",
   });
   // One ledger row: the detail face's 200 side needs a real tuple, and every
-  // deny path must still answer before the lookup. `createApp` wrote the bot's
-  // one target in the same batch, so its id is what the row is attributed to.
-  const target = db.raw.prepare("SELECT id FROM review_targets WHERE bot_id = ?").get(id) as {
-    id: string;
-  };
+  // deny path must still answer before the lookup. Creation writes no target
+  // (D13), so the fixture seeds the App's repository target and attributes the
+  // row to it.
+  const targetId = seedTarget(db, id, { id: TARGET_ID, name: "mallorys-app" });
   await createReviewBotsStore(db).upsertPullRequest({
     appId: id,
-    targetId: target.id,
+    targetId,
     owner: "acme",
     repo: "widgets",
     prNumber: 131,
@@ -300,21 +301,15 @@ const MATRIX_ROUTES: MatrixRoute[] = [
   // side additionally calls api.github.com (GET /app + the bot avatar leg), so
   // the sweep's stub answers those URLs too.
   { name: "refresh-metadata", path: `/dashboard/default/api/apps/${APP_ID}/refresh-metadata` },
-  // --- workspace-scoped target creation (the shared bot's chooser) ---
-  // Not App-addressed: the body names the bot, and the route's own gates
-  // decide. A manager's 200 side writes one target on a SHARED bot, which is
-  // why the seeded world carries one.
-  { name: "create target on a shared bot", path: "/dashboard/default/api/targets", fields: { botId: CREATE_BOT_ID } },
+  // --- workspace-scoped installation binding ---
   // The target page's bind entry: the world's shared bot carries one pending
-  // installation, and the create above gave this workspace its target.
+  // installation.
   {
     name: "bind-installation",
     path: `/dashboard/default/api/apps/${SHARED_BOT_APP_ID}/bind-installation`,
     fields: { installationId: String(SHARED_INSTALLATION_ID) },
   },
   // --- ops family: pinned action paths ---
-  { name: "pause", path: `/dashboard/default/apps/${APP_ID}/pause` },
-  { name: "resume", path: `/dashboard/default/apps/${APP_ID}/resume` },
   { name: "disable", path: `/dashboard/default/apps/${APP_ID}/disable` },
   { name: "enable", path: `/dashboard/default/apps/${APP_ID}/enable` },
   { name: "delete", path: `/dashboard/default/apps/${APP_ID}/delete` },
@@ -593,11 +588,11 @@ describe("Bot settings read-face permission matrix", () => {
 });
 
 // --- PR-ledger read faces: the list and one-PR detail (migration 0039) ---
-// Same canManageApp rule as every other App read: the workspace role decides,
-// and App authorship grants nothing. The detail address is the ledger's own
-// key (owner/repo/number).
-describe("App pull-request ledger read-face permission matrix", () => {
-  const LIST = `/dashboard/default/api/apps/${APP_ID}/pull-requests`;
+// Same canManageApp rule as every other target read: the workspace role decides,
+// and target authorship grants nothing. The address is the target plus the
+// ledger's own key (owner/repo/number).
+describe("Target pull-request ledger read-face permission matrix", () => {
+  const LIST = `/dashboard/default/api/targets/${TARGET_ID}/pull-requests`;
   const DETAIL = `${LIST}/acme/widgets/131`;
 
   async function getFace(path: string, login: string, env: Env): Promise<Response> {
@@ -641,13 +636,13 @@ describe("App pull-request ledger read-face permission matrix", () => {
   });
 });
 
-// --- Read-face matrix: GET /dashboard/default/api/apps/:appId/insights/summary ---
-// The per-App insights data face rides the SAME workspace owner/admin rule
-// (canManageApp) as every write route above, plus the App-id lookup
-// (non-numeric/unknown/soft-deleted → 404). Read-only, so no zero-mutation sweep is
-// needed — the assertions are the status matrix itself.
-describe("App insights read-face permission matrix", () => {
-  const FACE = `/dashboard/default/api/apps/${APP_ID}/insights/summary`;
+// --- Read-face matrix: GET /dashboard/default/api/targets/:targetId/insights/summary ---
+// The target insights data face rides the SAME workspace owner/admin rule
+// (canManageApp) as every write route above, plus the target-in-workspace
+// lookup (unknown/soft-deleted/foreign → 404). Read-only, so no zero-mutation
+// sweep is needed — the assertions are the status matrix itself.
+describe("Target insights read-face permission matrix", () => {
+  const FACE = `/dashboard/default/api/targets/${TARGET_ID}/insights/summary`;
 
   async function getFace(login: string, env: Env): Promise<Response> {
     return worker.fetch(
@@ -678,10 +673,10 @@ describe("App insights read-face permission matrix", () => {
     });
   }
 
-  test("read face: unknown App id → 404 for a manager", async () => {
+  test("read face: unknown target id → 404 for a manager", async () => {
     const db = await seededWorld();
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/default/api/apps/9999/insights/summary", {
+      new Request("https://worker.local/dashboard/default/api/targets/no-such-target/insights/summary", {
         headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}` },
       }),
       makeEnv(db),

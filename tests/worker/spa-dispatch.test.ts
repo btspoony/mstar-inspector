@@ -478,14 +478,9 @@ describe("SPA dispatch", () => {
 
 describe("the retired settings-tab addresses redirect once", () => {
   const redirects: Array<[string, string]> = [
-    [
-      "/dashboard/acme/apps/12345/settings",
-      "/dashboard/acme/targets/12345",
-    ],
-    [
-      "/dashboard/acme/apps/12345?tab=settings",
-      "/dashboard/acme/targets/12345",
-    ],
+    ["/dashboard/acme/apps/12345/settings", "/dashboard/acme/apps/12345?tab=settings"],
+    // The retired bot page: same 302 to the settings tab, never a page.
+    ["/dashboard/acme/apps/12345/bot", "/dashboard/acme/apps/12345?tab=settings"],
   ];
 
   for (const [from, to] of redirects) {
@@ -507,15 +502,15 @@ describe("the retired settings-tab addresses redirect once", () => {
     const { env, calls } = makeEnv();
     const res = await worker.fetch(htmlGetRequest("/dashboard/acme/apps/12345/settings"), env);
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/acme/targets/12345");
+    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps/12345?tab=settings");
     expect(calls).toEqual([]);
   });
 
   test("every other app-scoped address keeps serving its own page", async () => {
     for (const path of [
       "/dashboard/acme/apps/12345",
+      "/dashboard/acme/apps/12345?tab=settings",
       "/dashboard/acme/apps/12345?tab=insights",
-      "/dashboard/acme/apps/12345/bot",
       "/dashboard/acme/targets/12345",
     ]) {
       const { env, calls } = makeEnv({ DB: memberDbStub() });

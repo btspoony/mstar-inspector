@@ -180,8 +180,14 @@ const MAINTENANCE_SITES: Record<string, number> = {
   "worker/check-reconcile.ts": 3,
   "pipeline/review-threads.ts": 1,
   "store/review-checks.ts": 1,
-  // The execution path's shared-bot fallback suppressions: a delivery resolves
-  // a bot before any workspace is known, so `scope` is read without one.
+};
+
+/**
+ * A direct read that is NOT a maintenance bypass: the statement carries the
+ * workspace predicate itself, so it is a tenant read and may select the
+ * tenant-facing columns a maintenance read may not.
+ */
+const TENANT_DIRECT_SITES: Record<string, number> = {
   "dashboard/targets-store.ts": 1,
 };
 
@@ -194,19 +200,35 @@ describe("tenant read face allowlist", () => {
   });
 
   test("only apps-store plus the declared maintenance files read review_bots", () => {
-    expect(directReadFiles()).toEqual([
-      "dashboard/apps-store.ts",
-      ...Object.keys(MAINTENANCE_SITES).sort(),
-    ]);
+    expect(directReadFiles()).toEqual(
+      ["dashboard/apps-store.ts", ...Object.keys(MAINTENANCE_SITES), ...Object.keys(TENANT_DIRECT_SITES)].sort(),
+    );
   });
 
-  test("maintenance files hold exactly their pinned number of direct reads", () => {
+  test("direct-read files hold exactly their pinned number of reads", () => {
     const counts = Object.fromEntries(
-      Object.keys(MAINTENANCE_SITES)
+      [...Object.keys(MAINTENANCE_SITES), ...Object.keys(TENANT_DIRECT_SITES)]
         .sort()
         .map((rel) => [rel, readSites(readFileSync(join(SRC_DIR, rel), "utf8")).length]),
     );
-    expect(counts).toEqual(MAINTENANCE_SITES);
+    expect(counts).toEqual({ ...MAINTENANCE_SITES, ...TENANT_DIRECT_SITES });
+  });
+
+  /**
+   * The workspace predicate is what makes a direct read tenant-scoped, so the
+   * tenant classification is checked rather than assumed: a read that loses its
+   * predicate would be a maintenance bypass in disguise.
+   */
+  test("a tenant direct read carries the workspace predicate", () => {
+    for (const rel of Object.keys(TENANT_DIRECT_SITES)) {
+      for (const site of readSites(readFileSync(join(SRC_DIR, rel), "utf8"))) {
+        expect({ file: rel, line: site.line + 1, scoped: /\bworkspace_id\b/i.test(site.sql) }).toEqual({
+          file: rel,
+          line: site.line + 1,
+          scoped: true,
+        });
+      }
+    }
   });
 
   test("every maintenance direct read carries its tenant-bypass annotation", () => {

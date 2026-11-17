@@ -8,6 +8,7 @@ import {
   canInviteMembers,
   configuredKeySlot,
   DEFAULT_CHAIN_NAME,
+  hasTargetFacts,
   insightsRepoFromSelect,
   insightsRepoOptions,
   insightsRepoSelectValue,
@@ -67,6 +68,29 @@ describe("insights search wiring", () => {
   test("the global summary URL builder is retired with the page", async () => {
     expect("insightsSummaryUrl" in (await import("../../src/spa/pages/data"))).toBe(false);
     expect("searchHref" in (await import("../../src/spa/pages/data"))).toBe(false);
+  });
+
+  test("the App-addressed read builders are retired with their routes", async () => {
+    // Both read faces moved to target and workspace scopes; only the
+    // scoped builders remain, so no module can emit a removed path.
+    const data = await import("../../src/spa/pages/data");
+    for (const retired of [
+      "appInsightsSummaryUrl",
+      "appPullRequestsUrl",
+      "appPullRequestDetailUrl",
+      "appPullRequestRecordsUrl",
+    ]) {
+      expect(retired in data).toBe(false);
+    }
+    for (const kept of [
+      "scopedInsightsSummaryUrl",
+      "scopedPullRequestsUrl",
+      "scopedPullRequestDetailUrl",
+      "scopedPullRequestRecordsUrl",
+      "readScopeKey",
+    ]) {
+      expect(kept in data).toBe(true);
+    }
   });
 
   test("repo Select maps 全部 ↔ empty filter and keeps out-of-set current values", () => {
@@ -453,7 +477,7 @@ describe("members/apps/settings parsers", () => {
     // today's required-field contract.
     for (const mode of REVIEW_TRIGGER_MODES) {
       const manage = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
-      expect(manage && manage.can_manage && !manage.blocked && manage.app.review_trigger_mode).toBe(mode);
+      expect(manage !== null && hasTargetFacts(manage) && manage.app.review_trigger_mode).toBe(mode);
     }
     // The review depth and the operator default it inherits (migration 0047)
     // are the same class of required manager fields; `null` is the inherit
@@ -465,10 +489,10 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({ ...base, app: { ...base.app, default_review_level: undefined } })).toBeNull();
     for (const level of REVIEW_LEVELS) {
       const manage = parseSettings({ ...base, app: { ...base.app, review_level: level } });
-      expect(manage && manage.can_manage && !manage.blocked && manage.app.review_level).toBe(level);
+      expect(manage !== null && hasTargetFacts(manage) && manage.app.review_level).toBe(level);
     }
     const inherit = parseSettings(base);
-    expect(inherit && inherit.can_manage && !inherit.blocked && inherit.app.review_level).toBeNull();
+    expect(inherit !== null && hasTargetFacts(inherit) && inherit.app.review_level).toBeNull();
   });
 
   test("parseSettings requires the review gate, allowlist and visibility on the manage face; malformed values fail the parse", () => {

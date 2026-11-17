@@ -3,18 +3,19 @@
  * Static-SSR over the pure views plus happy-dom mounts for the stateful
  * shell, the repo's standard duo (charts-recharts precedent for SSR).
  *
- * 1. Tab shell: the manager face's tabs are the App's own (洞察 default,
- *    已安装, Pull requests); a non-manager sees the identity card with no tab
- *    bar at all (absence pinned). The target-owned policy lives on the
- *    review-target surface and is pinned through `SettingsView`.
- * 2. Mount-once tab switching: a manager tab switch leaves the Installed panel
- *    mounted (and hidden), so typed form state survives (mounted assertion).
- * 3. Mid-session demotion: a stale manager-tab URL is rewritten once the
- *    non-manager payload lands (mounted against the real page).
+ * 1. Tab shell: the manager face's tabs are the App's own — 应用设置 (the
+ *    default) and 已安装. A non-manager sees the identity card with no tab bar
+ *    at all (absence pinned).
+ * 2. 应用设置 composes the App's identity header, its ops zone and the bot's
+ *    own sections; an App the workspace has added no repository under yet has
+ *    no ops zone and no review policy — it states that and points at the
+ *    repository surface.
+ * 3. Mount-once tab switching keeps the inactive panel mounted (typed state and
+ *    every editor survive a switch).
+ * 4. The target-owned review policy lives on the review-target surface and is
+ *    pinned through `SettingsView` here.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -22,27 +23,23 @@ import { type Element as DomElement, type HTMLElement as DomHTMLElement, type Wi
 import { t } from "../../src/i18n";
 import {
   appDetailSearchQuery,
-  appInsightsSummaryUrl,
   appStatusPill,
   parseAppDetailSearch,
   parseSettings,
-  PR_VERDICTS,
   pullRequestRefOf,
+  scopedInsightsSummaryUrl,
   type AppDetailSearch,
   type AppDetailTab,
-  type InsightsSummary,
   type SettingsBlockedPayload,
   type SettingsManagePayload,
   type SettingsPayload,
+  type SettingsUntargetedPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailPage, AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
 import { SettingsView } from "../../src/spa/pages/SettingsPage";
 import { apiBase } from "../../src/spa/workspace-base";
-import { AppInsightsTab, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/spa/pages/AppInsightsTab";
 import { APP_VERSION } from "../../src/version";
 import { installDom, withMarkup } from "./dom";
-
-const spaRoot = join(import.meta.dir, "../../src/spa");
 
 const IDENTITY_APP = {
   github_slug: "demo",
@@ -70,7 +67,7 @@ const identityPayload = {
   app: IDENTITY_APP,
 };
 
-/** Minimal boot for mounting the stateful shell (the DOM demotion test). */
+/** Minimal boot for mounting the stateful shell (the URL-state test). */
 const BOOT = { locale: "en" as const, login: "mallory", name: null };
 
 const managePayload = {
@@ -109,16 +106,61 @@ const managePayload = {
   deliveries: [],
 };
 
-const search = { tab: "insights" as const, window: "30" as const, repo: "", pr: "" };
+/**
+ * The manager face of an App the workspace has added no repository under yet:
+ * the bot's sections are the whole payload, and every target-owned fact —
+ * `target_id`, the pause state, the review policy, the gate, the allowlist —
+ * is ABSENT rather than defaulted.
+ */
+const untargetedPayload: SettingsUntargetedPayload = {
+  can_manage: true,
+  installation: null,
+  pending_installations: [],
+  blocked: false,
+  blocked_reason: null,
+  workspace_id: managePayload.workspace_id,
+  app: {
+    github_app_id: managePayload.app.github_app_id,
+    id: managePayload.app.id,
+    status: managePayload.app.status,
+    created_by: managePayload.app.created_by,
+    last_webhook_at: null,
+    sandbox_image_id: "omp",
+    scope: "owned",
+    github_name: managePayload.app.github_name,
+    github_slug: managePayload.app.github_slug,
+    github_description: managePayload.app.github_description,
+    github_html_url: managePayload.app.github_html_url,
+    github_avatar_url: managePayload.app.github_avatar_url,
+    github_metadata_synced_at: managePayload.app.github_metadata_synced_at,
+    github_visibility: "unknown",
+  },
+  keys: [],
+  model_chain: null,
+  model_limits_snapshot: "2026-01-01",
+  model_roles: {},
+  model_chains: [],
+  custom_providers: [],
+  configured_providers: [],
+  provider_catalog: [],
+  model_role_ids: [],
+  custom_provider_api_ids: [],
+  sandbox_images: [{ id: "omp", enabled: true }],
+  installations: [],
+  deliveries: [],
+};
+
+const search = { tab: "settings" as const, window: "30" as const, repo: "", pr: "" };
 const noReload = async () => true;
 const noSearch = () => {};
 
-function renderDetail(payload: SettingsPayload, canManage: boolean, tab: AppDetailTab = "insights") {
+function renderDetail(payload: SettingsPayload, tab: AppDetailTab = "settings") {
   return renderToStaticMarkup(
     createElement(AppDetailView, {
       locale: "en",
       appId: "1",
       payload,
+      groups: [],
       notice: null,
       search: { ...search, tab },
       onReload: noReload,
@@ -127,29 +169,21 @@ function renderDetail(payload: SettingsPayload, canManage: boolean, tab: AppDeta
   );
 }
 
-/**
- * The review-target surface's detail body — the target-owned policy the App
- * detail used to host as its settings tab. The page shell (load, back link,
- * identity header) is pinned by the targets-page suite.
- */
-function renderTargetBody(payload: SettingsPayload) {
-  return renderToStaticMarkup(
-    createElement(SettingsView, { locale: "en", payload, onReload: noReload }),
-  );
-}
-
-describe("settings payload parser — the top-level target id (fail closed)", () => {
-  test("both faces accept the additive target_id and reject a payload that omits or mistypes it", () => {
-    // The identity-only non-manager face and the manager face both carry the
-    // review configuration's id beside workspace_id; the parsed discriminant
-    // is unchanged.
+describe("settings payload parser — the target-owned slice is all-or-nothing", () => {
+  test("a face naming a target carries its pause state; a target-less face carries neither, and a half slice is refused", () => {
+    // Both faces carry the review configuration's id beside workspace_id when
+    // the workspace has a repository under this App.
     expect(parseSettings(identityPayload)?.can_manage).toBe(false);
     expect(parseSettings(identityPayload)?.target_id).toBe("rt-1");
     expect(parseSettings(managePayload)?.can_manage).toBe(true);
     expect(parseSettings(managePayload)?.target_id).toBe("rt-1");
+    // No target: nothing that belongs to one — a real state, not a breach.
+    expect(parseSettings(untargetedPayload)).not.toBeNull();
+    expect(parseSettings(untargetedPayload)?.target_id).toBeUndefined();
+    // Half a slice is a breach on both faces: a payload that cannot name its
+    // target cannot report its pause state either.
     const { target_id: _identityTarget, ...identityWithoutTarget } = identityPayload;
     const { target_id: _manageTarget, ...manageWithoutTarget } = managePayload;
-    // A payload that cannot name its target is not a settings read.
     expect(parseSettings(identityWithoutTarget)).toBeNull();
     expect(parseSettings(manageWithoutTarget)).toBeNull();
     expect(parseSettings({ ...identityPayload, target_id: null })).toBeNull();
@@ -159,32 +193,27 @@ describe("settings payload parser — the top-level target id (fail closed)", ()
 });
 
 describe("app detail URL state (shared pure helpers)", () => {
-  test("the bare path is the insights tab; manager tabs resolve only for a manager", () => {
-    expect(parseAppDetailSearch("", true)).toEqual({ tab: "insights", window: "30", repo: "", pr: "" });
-    expect(parseAppDetailSearch("?tab=installations", true).tab).toBe("installations");
-    expect(parseAppDetailSearch("?tab=insights", true).tab).toBe("insights");
-    expect(parseAppDetailSearch("?tab=pull-requests", true).tab).toBe("pull-requests");
-    // A non-manager never resolves to a manager tab — the URL cannot
-    // grant the tab the payload denies.
-    expect(parseAppDetailSearch("?tab=installations", false).tab).toBe("insights");
-    expect(parseAppDetailSearch("?tab=insights", false).tab).toBe("insights");
-    expect(parseAppDetailSearch("?tab=pull-requests", false).tab).toBe("insights");
-    // Unknown tab values (including the retired settings one) fall back.
-    expect(parseAppDetailSearch("?tab=bogus", true).tab).toBe("insights");
-    expect(parseAppDetailSearch("?tab=settings", true).tab).toBe("insights");
+  test("the bare path is the settings tab; only 已安装 is another address", () => {
+    expect(parseAppDetailSearch("")).toEqual({ tab: "settings", window: "30", repo: "", pr: "" });
+    expect(parseAppDetailSearch("?tab=installations").tab).toBe("installations");
+    expect(parseAppDetailSearch("?tab=settings").tab).toBe("settings");
+    // Unknown tab values — including the retired data-tab spellings — fall back
+    // to the default; a URL cannot open a face this page does not own.
+    for (const bogus of ["bogus", "insights", "pull-requests"]) {
+      expect(parseAppDetailSearch(`?tab=${bogus}`).tab).toBe("settings");
+    }
   });
 
   test("the open PR detail rides the pr param (owner/repo/number), malformed values fall back to the list", () => {
-    expect(parseAppDetailSearch("?tab=pull-requests&pr=acme%2Fweb%2F42", true)).toEqual({
-      tab: "pull-requests",
+    expect(parseAppDetailSearch("?pr=acme%2Fweb%2F42")).toEqual({
+      tab: "settings",
       window: "30",
       repo: "",
       pr: "acme/web/42",
     });
-    expect(parseAppDetailSearch("?pr=acme/web/42", true).pr).toBe("acme/web/42");
-    expect(parseAppDetailSearch("?pr=42", true).pr).toBe("");
-    expect(parseAppDetailSearch("?pr=acme/web/abc", true).pr).toBe("");
-    expect(parseAppDetailSearch("?pr=a/b/1/2", true).pr).toBe("");
+    expect(parseAppDetailSearch("?pr=42").pr).toBe("");
+    expect(parseAppDetailSearch("?pr=acme/web/abc").pr).toBe("");
+    expect(parseAppDetailSearch("?pr=a/b/1/2").pr).toBe("");
   });
 
   test("the pr param and the detail resolver accept exactly the same grammar", () => {
@@ -195,7 +224,7 @@ describe("app detail URL state (shared pure helpers)", () => {
     const accepted = ["acme/web/42", "acme/web/0042", "a/b/1"];
     for (const pr of accepted) {
       expect(pullRequestRefOf(pr)).not.toBeNull();
-      expect(parseAppDetailSearch(`?pr=${encodeURIComponent(pr)}`, true).pr).toBe(pr);
+      expect(parseAppDetailSearch(`?pr=${encodeURIComponent(pr)}`).pr).toBe(pr);
     }
     const rejected = [
       "42",
@@ -210,42 +239,50 @@ describe("app detail URL state (shared pure helpers)", () => {
     ];
     for (const pr of rejected) {
       expect(pullRequestRefOf(pr)).toBeNull();
-      expect(parseAppDetailSearch(`?pr=${encodeURIComponent(pr)}`, true).pr).toBe("");
+      expect(parseAppDetailSearch(`?pr=${encodeURIComponent(pr)}`).pr).toBe("");
     }
   });
 
   test("insights filter params ride the same query (window segments + repo)", () => {
-    expect(parseAppDetailSearch("?tab=insights&window=7&repo=acme%2Fweb", true)).toEqual({
-      tab: "insights",
+    expect(parseAppDetailSearch("?window=7&repo=acme%2Fweb")).toEqual({
+      tab: "settings",
       window: "7",
       repo: "acme/web",
       pr: "",
     });
     // Off-set windows resolve to the default segment (pinned helper).
-    expect(parseAppDetailSearch("?window=60", true).window).toBe("30");
+    expect(parseAppDetailSearch("?window=60").window).toBe("30");
   });
 
   test("appDetailSearchQuery is the inverse — defaults omitted (loop-free replaceState writes)", () => {
-    expect(appDetailSearchQuery({ tab: "insights", window: "30", repo: "", pr: "" })).toBe("");
+    expect(appDetailSearchQuery({ tab: "settings", window: "30", repo: "", pr: "" })).toBe("");
     expect(appDetailSearchQuery({ tab: "installations", window: "30", repo: "", pr: "" })).toBe(
       "?tab=installations",
     );
-    expect(appDetailSearchQuery({ tab: "insights", window: "7", repo: "acme/web", pr: "" })).toBe(
+    expect(appDetailSearchQuery({ tab: "settings", window: "7", repo: "acme/web", pr: "" })).toBe(
       "?window=7&repo=acme%2Fweb",
     );
     expect(
-      appDetailSearchQuery({ tab: "pull-requests", window: "30", repo: "", pr: "acme/web/42" }),
-    ).toBe("?tab=pull-requests&pr=acme%2Fweb%2F42");
+      appDetailSearchQuery({ tab: "installations", window: "30", repo: "", pr: "acme/web/42" }),
+    ).toBe("?tab=installations&pr=acme%2Fweb%2F42");
   });
 
-  test("the per-App summary URL is base-prefixed and encodes appId + filters; include=repos always rides", () => {
-    expect(appInsightsSummaryUrl("/dashboard", "1", "30", "")).toBe(
-      "/dashboard/api/apps/1/insights/summary?window=30&include=repos",
+  test("the summary URL is base-prefixed and addresses the scope; include=repos always rides", () => {
+    // One repository: the target-addressed family.
+    expect(scopedInsightsSummaryUrl("/dashboard", { kind: "target", targetId: "1" }, "30", "")).toBe(
+      "/dashboard/api/targets/1/insights/summary?window=30&include=repos",
     );
-    // A workspace-scoped page rides its own prefix (no legacy App family there).
-    expect(appInsightsSummaryUrl("/dashboard/acme", "12345", "7", "acme/web")).toBe(
-      "/dashboard/acme/api/apps/12345/insights/summary?window=7&include=repos&repo=acme%2Fweb",
+    // A workspace-scoped page rides its own prefix and the workspace face.
+    expect(
+      scopedInsightsSummaryUrl("/dashboard/acme", { kind: "target", targetId: "12345" }, "7", "acme/web"),
+    ).toBe("/dashboard/acme/api/targets/12345/insights/summary?window=7&include=repos&repo=acme%2Fweb");
+    expect(scopedInsightsSummaryUrl("/dashboard", { kind: "workspace" }, "90", "")).toBe(
+      "/dashboard/api/insights/summary?window=90&include=repos",
     );
+    // The removed App-addressed family is never emitted.
+    expect(
+      scopedInsightsSummaryUrl("/dashboard", { kind: "target", targetId: "1" }, "30", ""),
+    ).not.toContain("/api/apps/");
   });
 });
 
@@ -260,14 +297,13 @@ describe("tab shell rendering (static SSR)", () => {
       (tab) => tab.textContent ?? "",
     );
 
-  test("the manager's tab bar is the App's own faces, insights first", async () => {
-    const manage = renderDetail(managePayload, true);
+  test("the manager's tab bar is the App's own two faces, settings first", async () => {
+    const manage = renderDetail(managePayload);
     // The triggers read by role and name, the way an assistive technology
     // finds them — never by serialized tag adjacency.
     expect(await withMarkup(manage, pageTabs)).toEqual([
-      t("en", "appDetail.tabInsights"),
+      t("en", "appDetail.tabSettings"),
       t("en", "appDetail.tabInstallations"),
-      t("en", "appDetail.tabPullRequests"),
     ]);
     // The identity header serves every tab — the GitHub display name (D6).
     expect(manage).toContain(">Demo</h1>");
@@ -275,46 +311,43 @@ describe("tab shell rendering (static SSR)", () => {
   });
 
   test("a non-manager sees identity-only with no tab bar at all — absence pinned", async () => {
-    const identity = renderDetail(identityPayload, false);
+    const identity = renderDetail(identityPayload);
     expect(await withMarkup(identity, pageTabs)).toEqual([]);
     // The D4 identity card is the whole face.
     expect(identity).toContain(t("en", "settings.appInfo"));
-    // No insights panel markup anywhere on the face.
-    expect(identity).not.toContain("Review health");
+    // No bot section markup anywhere on the face.
+    expect(identity).not.toContain(t("en", "settings.providers.title"));
   });
 
-  test("the target body no longer carries the installations table or the delivery list — both live on the Installed tab", () => {
-    const settingsOnly = renderToStaticMarkup(
-      createElement(SettingsView, {
-        locale: "en",
-        payload: {
-          ...managePayload,
-          installations: [{ installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" }],
-          deliveries: [
-            {
-              event_name: "pull_request",
-              outcome: "ok",
-              status_code: null,
-              repository_full_name: "acme/web",
-              created_at: "2026-01-01 00:00:00",
-            },
-          ],
-        },
-        onReload: noReload,
-      }),
-    );
-    expect(settingsOnly).not.toContain(t("en", "settings.installationsAccount"));
-    expect(settingsOnly).not.toContain(t("en", "settings.recentDeliveries"));
-    expect(settingsOnly).not.toContain("acme/web");
+  test("应用设置 composes the identity header, the ops zone and the bot's own sections", () => {
+    const settings = renderDetail(managePayload);
+    // The ops zone is the App's own (disable / delete); the review pause is
+    // the repository's, so no control here may POST it.
+    expect(settings).toContain(t("en", "settings.ops"));
+    expect(settings).not.toContain(t("en", "settings.pauseReviews"));
+    expect(settings).not.toContain(t("en", "settings.resumeReviews"));
+    // The bot-owned configuration the plan moves onto this tab.
+    for (const key of [
+      "settings.providers.title",
+      "settings.modelChains",
+      "settings.seats",
+      "botSettings.health",
+    ] as const) {
+      expect(settings).toContain(t("en", key));
+    }
+    // The data faces and the target-owned policy are not this page's any more.
+    for (const key of ["settings.reviewTrigger", "settings.reviewDepth", "settings.reviewGate"] as const) {
+      expect(settings).not.toContain(t("en", key));
+    }
+    expect(settings).not.toContain("Review health");
   });
 
-  test("the Installed tab keeps the install block and the allowlist; the installations table moved to the bot page", () => {
+  test("已安装 keeps the install block; the allowlist and the installations table are gone", () => {
     const installed = renderDetail(
       {
         ...managePayload,
         installations: [
           { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
-          { installation_id: 456, account_login: null, seen_at: "2026-01-01 00:00:00" },
         ],
         deliveries: [
           {
@@ -326,67 +359,85 @@ describe("tab shell rendering (static SSR)", () => {
           },
         ],
       },
-      true,
       "installations",
     );
     expect(installed).toContain(">Installed</button>");
-    // The target keeps what it owns: the install entry point and the owner
-    // allowlist. The bot's installation table and its delivery list are
-    // bot-scoped and live on the bot page.
     expect(installed).toContain(t("en", "settings.install"));
-    expect(installed).toContain(t("en", "settings.allowlist"));
+    // The owner allowlist surface and the bot's installations table both moved
+    // off this page entirely (bot health reports deliveries, not rows).
     expect(installed).not.toContain(t("en", "settings.installationsAccount"));
-    expect(installed).not.toContain(t("en", "settings.recentDeliveries"));
-    expect(installed).not.toContain("acme/web");
+  });
+
+  test("an App with no repository yet states it and points at the repository surface", () => {
+    // The read is accepted: a manager payload with no `target_id` and no
+    // `review_*` fact is the zero-repository contract, not a malformed read.
+    expect(parseSettings(untargetedPayload)).not.toBeNull();
+    expect(parseSettings(untargetedPayload)?.target_id).toBeUndefined();
+
+    const markup = renderDetail(untargetedPayload);
+    // The App is visible; the zero-repository state is a notice, not an error.
+    expect(markup).toContain(t("en", "appDetail.noRepository"));
+    expect(markup).toContain(`href="${apiBase()}/targets"`);
+    expect(markup).toContain(t("en", "targets.add"));
+    // No target-owned control renders: there is no target to write to.
+    expect(markup).not.toContain(t("en", "settings.ops"));
+    for (const key of ["settings.reviewTrigger", "settings.reviewDepth", "settings.reviewGate"] as const) {
+      expect(markup).not.toContain(t("en", key));
+    }
+    // The bot's own sections are the whole settings face.
+    expect(markup).toContain(t("en", "settings.providers.title"));
+    expect(markup).toContain(t("en", "botSettings.health"));
+  });
+
+  test("an App with several repositories says so and links to them, not to the zero-repository state", () => {
+    const many = { ...untargetedPayload, targets_many: true };
+    // The flag is a plain optional boolean on the parsed face.
+    expect(parseSettings(many)?.targets_many).toBe(true);
+    const markup = renderDetail(many);
+    expect(markup).toContain(t("en", "appDetail.targetsMany"));
+    expect(markup).toContain(`href="${apiBase()}/targets"`);
+    expect(markup).toContain(t("en", "targets.heading"));
+    // The zero-repository copy would be a lie here: at least two exist.
+    expect(markup).not.toContain(t("en", "appDetail.noRepository"));
+    // No single repository's policy is this page's to edit.
+    expect(markup).not.toContain(t("en", "settings.ops"));
+    expect(markup).toContain(t("en", "settings.providers.title"));
+    // A non-boolean flag is a malformed read, not a silent "not many".
+    expect(parseSettings({ ...untargetedPayload, targets_many: "yes" })).toBeNull();
   });
 
   test("the detail links to the bot's own settings page", () => {
-    for (const [payload, canManage] of [
-      [managePayload, true],
-      [identityPayload, false],
+    for (const [payload, label] of [
+      [managePayload, "manager"],
+      [identityPayload, "member"],
     ] as const) {
-      const markup = renderToStaticMarkup(
-        createElement(AppDetailView, {
-          locale: "en",
-          appId: "1",
-          payload,
-          notice: null,
-          search,
-          onReload: noReload,
-          onSearch: noSearch,
-        }),
-      );
-      expect(markup, `can_manage=${canManage}`).toContain(`href="${apiBase()}/apps/1/bot"`);
-      expect(markup, `can_manage=${canManage}`).toContain(t("en", "appDetail.botSettingsLink"));
+      const markup = renderDetail(payload);
+      expect(markup, label).toContain(`href="${apiBase()}/apps/1/bot"`);
+      expect(markup, label).toContain(t("en", "appDetail.botSettingsLink"));
     }
   });
 
-  test("the park action renders only while the owner claim overlaps", () => {
+  test("the App settings body renders no park action even when the owner claim overlaps", () => {
+    // Park is the repository surface's repair for an overlapping owner claim;
+    // the App settings body is the identity card alone, so no payload state
+    // can bring the action here. Its copy stays in the dictionary for the
+    // dialog the repository surface opens.
     const parked = renderToStaticMarkup(
       createElement(SettingsView, {
         locale: "en",
         payload: { ...managePayload, owner_overlap: true },
-        onReload: noReload,
       }),
     );
-    // The row names the overlap and offers the action; the confirm copy exists
-    // in the dictionary for the dialog it opens.
-    expect(parked).toContain(t("en", "settings.opsParkTitle"));
-    expect(parked).toContain(t("en", "settings.opsParkAction"));
+    expect(parked).not.toContain(t("en", "settings.opsParkTitle"));
     expect(t("en", "settings.confirmParkTitle", { name: "Demo" })).toContain("Demo");
     expect(t("zh_CN", "settings.opsParkTitle").length).toBeGreaterThan(0);
-    // No overlap → no park affordance (the route would refuse it anyway).
-    const quiet = renderToStaticMarkup(
-      createElement(SettingsView, { locale: "en", payload: managePayload, onReload: noReload }),
-    );
-    expect(quiet).not.toContain(t("en", "settings.opsParkTitle"));
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {
     // The adapter that used to live in AppsPage is gone; the page and the
     // list both read this one derivation, and the pill face is the shared
     // component's token-backed tone.
-    const manage = renderDetail(managePayload, true);
+    const manage = renderDetail(managePayload);
     expect(manage).toContain(t("en", "apps.status.active"));
     expect(manage).toContain('data-tone="success"');
     expect(appStatusPill("en", { status: "active", review_enabled: 0 })).toEqual({
@@ -398,36 +449,11 @@ describe("tab shell rendering (static SSR)", () => {
       tone: "warn",
     });
   });
-
-  test("the target body renders its own (target-scoped) section titles", () => {
-    const manage = renderTargetBody(managePayload);
-    // The App-side SectionCard titles, resolved through the dictionary — the
-    // heading/stat migration may not drop or rename a section. The bot-scoped
-    // sections (providers, chains, seats, sandbox image) live on the bot page.
-    for (const key of [
-      "settings.appInfo",
-      "settings.reviewTrigger",
-      "settings.reviewDepth",
-      "settings.reviewGate",
-      "settings.ops",
-    ] as const) {
-      expect(manage).toContain(t("en", key));
-    }
-    // The header's metric band still labels the installations / chains counts
-    // (the payload keeps those keys), so only the SECTION titles are asserted
-    // absent here.
-    for (const key of ["settings.providers.title", "settings.seats"] as const) {
-      expect(manage).not.toContain(t("en", key));
-    }
-    // The workspace settings live on /dashboard/<ref>/settings; the target
-    // surface must not keep a second entry point to them.
-    expect(manage).not.toContain(t("en", "workspace.settingsHeading"));
-  });
 });
 
 describe("installed tab configuration surface (static SSR)", () => {
   test("the install block links to the App's GitHub installation page", () => {
-    const manage = renderDetail(managePayload, true);
+    const manage = renderDetail(managePayload);
     expect(manage).toContain('href="https://github.com/apps/demo/installations/new"');
     expect(manage).toContain('target="_blank"');
     expect(manage).toContain('rel="noopener noreferrer"');
@@ -442,73 +468,20 @@ describe("installed tab configuration surface (static SSR)", () => {
         ...managePayload,
         app: { ...managePayload.app, github_avatar_url: "https://avatars.example/demo.png" },
       },
-      true,
+      "installations",
     );
-    // The install block's copy line is unique to this section; slice to the
-    // allowlist heading so the App info card's own avatar cannot satisfy
-    // these assertions.
-    const start = manage.indexOf(t("en", "settings.installCopy"));
-    const block = manage.slice(start, manage.indexOf(t("en", "settings.allowlist"), start));
-    expect(block).toContain('<img src="https://avatars.example/demo.png"');
+    // The install block's copy line is unique to this section; the avatar it
+    // renders is the h-10 box, where the identity card's is h-12.
+    expect(manage).toContain(t("en", "settings.installCopy"));
+    const avatar = manage.slice(manage.indexOf(t("en", "settings.installCopy")));
+    expect(avatar).toContain('<img src="https://avatars.example/demo.png"');
     // The null-avatar fallback is the mounted test below, not this HTML slice.
-  });
-
-  test("the installations table carries a per-row availability badge (allowlist enabled)", () => {
-    const installed = renderDetail(
-      {
-        ...managePayload,
-        allowlist: { enabled: true, owners: ["acme"] },
-        owner_overlap: false,
-        installations: [
-          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
-          { installation_id: 456, account_login: "intruder", seen_at: "2026-01-01 00:00:00" },
-        ],
-      },
-      true,
-      "installations",
-    );
-    expect(installed).toContain(t("en", "settings.installationsAvailability"));
-    expect(installed).toContain(t("en", "settings.availabilityValid"));
-    expect(installed).toContain(t("en", "settings.availabilityInvalid"));
-    // Case-insensitive admission: the login matches the owner regardless of case.
-    const mixed = renderDetail(
-      {
-        ...managePayload,
-        allowlist: { enabled: true, owners: ["ACME"] },
-        owner_overlap: false,
-        installations: [
-          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
-        ],
-      },
-      true,
-      "installations",
-    );
-    expect(mixed).toContain('data-tone="success"');
-  });
-
-  test("allowlist disabled marks every installation available", () => {
-    const installed = renderDetail(
-      {
-        ...managePayload,
-        allowlist: { enabled: false, owners: ["someone-else"] },
-        owner_overlap: false,
-        installations: [
-          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
-          { installation_id: 456, account_login: null, seen_at: "2026-01-01 00:00:00" },
-        ],
-      },
-      true,
-      "installations",
-    );
-    expect(installed).not.toContain(t("en", "settings.availabilityInvalid"));
-    // Both rows wear the success tone (the identity pill adds one more).
-    expect(installed.split('data-tone="success"').length - 1).toBeGreaterThanOrEqual(2);
   });
 
   test("a null slug keeps the block with explanations and offers no dead link", () => {
     const noSlug = renderDetail(
       { ...managePayload, app: { ...managePayload.app, github_slug: null } },
-      true,
+      "installations",
     );
     expect(noSlug).not.toContain("installations/new");
     expect(noSlug).toContain(t("en", "settings.installNoSlug"));
@@ -516,92 +489,16 @@ describe("installed tab configuration surface (static SSR)", () => {
     expect(noSlug).toContain(t("en", "settings.install"));
   });
 
-  test("a private App still renders the allowlist control, with a line saying why", () => {
-    const priv = renderDetail(
-      { ...managePayload, app: { ...managePayload.app, github_visibility: "private" } },
-      true,
-    );
-    // Admission enforces the stored list for every visibility, so the control
-    // is never hidden — a hidden control would leave a live filter
-    // unmanageable. The private case carries the one-line explanation.
-    expect(priv).toContain(t("en", "settings.allowlist"));
-    expect(priv).toContain(t("en", "settings.allowlistEnable"));
-    expect(priv).toContain(t("en", "settings.allowlistPrivateStillApplies"));
-    // Any other visibility renders the same control without that line.
-    expect(renderDetail(managePayload, true)).toContain(t("en", "settings.allowlist"));
-    expect(renderDetail(managePayload, true)).not.toContain(
-      t("en", "settings.allowlistPrivateStillApplies"),
-    );
-  });
-
-  test("the switch on with an empty list states the fail-closed consequence", () => {
-    const on = renderDetail(
-      { ...managePayload, allowlist: { enabled: true, owners: [] } },
-      true,
-    );
-    expect(on).toContain(t("en", "settings.allowlistFailClosed"));
-    // The logins field exists once the switch is on.
-    expect(on).toContain(t("en", "settings.allowlistOwners"));
-    // Off with the same empty list carries no warning.
-    expect(renderDetail(managePayload, true)).not.toContain(t("en", "settings.allowlistFailClosed"));
-    // On with an owner stored has nothing to warn about.
-    expect(
-      renderDetail({ ...managePayload, allowlist: { enabled: true, owners: ["acme"] } }, true),
-    ).not.toContain(t("en", "settings.allowlistFailClosed"));
-  });
-
-  test("the review gate renders a 0..100 score input and one checkbox per verdict", async () => {
-    const gate = await withMarkup(renderTargetBody(managePayload), (container) => {
-      // The gate's own section, by its resolved heading — the body mounts
-      // every section, so a page-wide input query would read other inputs.
-      const section = [...container.querySelectorAll('[data-slot="flow-section"]')].find(
-        (node) => node.querySelector("h2")?.textContent === t("en", "settings.reviewGate"),
-      );
-      const inputs = [...(section?.querySelectorAll("input") ?? [])];
-      const score = inputs.find((input) => input.getAttribute("type") === "number");
-      // Everything is read INSIDE the callback: the throwaway document is
-      // torn down when it returns, and a live element read afterwards is hollow.
-      return {
-        min: score?.getAttribute("min") ?? "",
-        max: score?.getAttribute("max") ?? "",
-        value: score?.getAttribute("value") ?? "",
-        verdicts: inputs
-          .filter((input) => input.getAttribute("type") === "checkbox")
-          .map((input) => ({
-            label: input.parentElement?.textContent ?? "",
-            checked: (input as HTMLInputElement).checked,
-          })),
-      };
-    });
-    expect(gate.min).toBe("0");
-    expect(gate.max).toBe("100");
-    expect(gate.value).toBe("80");
-    // The vocabulary is the whole engine set, and the payload's stored
-    // verdicts are the checked subset.
-    expect(gate.verdicts.map((box) => box.label)).toEqual([...PR_VERDICTS]);
-    expect(gate.verdicts.filter((box) => box.checked).map((box) => box.label)).toEqual(["ship it"]);
-  });
-
-  test("the review gate with no verdict checked states that no review can pass", () => {
-    const empty = renderTargetBody({ ...managePayload, check_gate: { min_score: 80, pass_verdicts: [] } });
-    expect(empty).toContain(t("en", "settings.reviewGateFailClosed"));
-    // The stored default passes on "ship it", so it carries no warning.
-    expect(renderDetail(managePayload, true)).not.toContain(t("en", "settings.reviewGateFailClosed"));
-  });
-
   test("no release version string renders anywhere on the page", () => {
-    for (const markup of [renderDetail(managePayload, true), renderDetail(identityPayload, false)]) {
+    for (const markup of [renderDetail(managePayload), renderDetail(identityPayload)]) {
       expect(markup).not.toContain(`v${APP_VERSION}`);
     }
   });
 });
 
 describe("tab shell mounted behaviour (forceMount)", () => {
-  /** A manager payload whose Installed panel holds typed state (the allowlist). */
-  const mountedPayload: SettingsPayload = {
-    ...managePayload,
-    allowlist: { enabled: true, owners: ["acme"] },
-  };
+  /** A manager payload whose 应用设置 panel mounts the chain editors. */
+  const mountedPayload: SettingsPayload = managePayload;
 
   /** The page's stateful wrapper: the shell owns `search` in production. */
   function ShellHarness() {
@@ -610,6 +507,7 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       locale: "en",
       appId: "1",
       payload: mountedPayload,
+      groups: [],
       notice: null,
       search: tabSearch,
       onReload: noReload,
@@ -657,76 +555,49 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       (panel) => panelOf(container, panel) === panel,
     );
 
-  /** The label of the tab whose panel is active — empty when no panel is. */
-  const activeTabLabel = (win: Window, container: DomElement) => {
-    const active = shellPanels(container).filter((panel) => panel.getAttribute("data-state") === "active");
-    if (active.length !== 1) return active.length === 0 ? "" : "multiple";
-    const labelledBy = active[0]?.getAttribute("aria-labelledby") ?? "";
-    return win.document.getElementById(labelledBy)?.textContent ?? "";
-  };
-
-  test("an inactive panel stays mounted but hidden, and the Installed form keeps its typed value across a tab switch", async () => {
+  test("an inactive panel stays mounted but hidden across a full tab round trip", async () => {
     // Radix unmounts inactive panels by default, which would destroy the
-    // settings forms and refetch a manager tab on every switch. The shell
-    // forceMounts every panel; the wrapper's data-[state=inactive]:hidden keeps
-    // the one-visible-panel invariant. Typed state surviving the switch is the
-    // behaviour, asserted on the live tree rather than in page source.
+    // settings forms (typed input, open dialogs, chain drafts) on every
+    // switch. The shell forceMounts every panel; the wrapper's
+    // data-[state=inactive]:hidden keeps the one-visible-panel invariant.
     const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
     const container = win.document.createElement("div");
     win.document.body.appendChild(container);
     const root = createRoot(container as unknown as Element);
     try {
       await act(async () => root.render(createElement(ShellHarness)));
-      // The allowlist's owners field is the Installed panel's typed control.
-      const input = () => container.querySelector("textarea");
-      const setValue = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, "value")?.set;
-      await act(async () => {
-        setValue?.call(input(), "acme\nweb");
-        input()?.dispatchEvent(new win.Event("input", { bubbles: true }));
-      });
-      expect((input() as HTMLTextAreaElement | null)?.value).toBe("acme\nweb");
-      const installPanel = panelOf(container, input());
-      expect(installPanel?.getAttribute("data-state")).toBe("inactive");
-
-      // Switch to Installed: the panel is now visible, still mounted.
-      await click(win, tabTrigger(container, t("en", "appDetail.tabInstallations")));
-      expect(panelOf(container, input())).toBe(installPanel);
-      expect(installPanel?.getAttribute("data-state")).toBe("active");
-      // One visible panel: every other shell panel reads inactive.
+      // Two faces, settings active: the other one is mounted and hidden.
       expect(shellPanels(container).map((panel) => panel.getAttribute("data-state"))).toEqual([
-        "inactive",
         "active",
         "inactive",
       ]);
-      expect((input() as HTMLTextAreaElement | null)?.value).toBe("acme\nweb");
+      const settingsPanel = shellPanels(container)[0]!;
 
-      // …and back: the value survived a full round trip.
-      await click(win, tabTrigger(container, t("en", "appDetail.tabInsights")));
-      expect(installPanel?.getAttribute("data-state")).toBe("inactive");
-      expect((input() as HTMLTextAreaElement | null)?.value).toBe("acme\nweb");
+      // Switch to 已安装: the settings panel stays mounted (same node) and hides.
+      await click(win, tabTrigger(container, t("en", "appDetail.tabInstallations")));
+      expect(shellPanels(container)[0]).toBe(settingsPanel);
+      expect(shellPanels(container).map((panel) => panel.getAttribute("data-state"))).toEqual([
+        "inactive",
+        "active",
+      ]);
+
+      // …and back: the same node, active again — nothing was remounted.
+      await click(win, tabTrigger(container, t("en", "appDetail.tabSettings")));
+      expect(shellPanels(container)[0]).toBe(settingsPanel);
+      expect(shellPanels(container).map((panel) => panel.getAttribute("data-state"))).toEqual([
+        "active",
+        "inactive",
+      ]);
     } finally {
       await act(async () => root.unmount());
       cleanup();
     }
   });
 
-  /** A parseable insights summary, so the insights face renders its own body. */
-  const INSIGHTS_SUMMARY = {
-    window_days: 30,
-    repo: "",
-    reviews_total: 0,
-    findings_by_severity: [],
-    verdict_distribution: [],
-    weekly_trend: [],
-    daily_trend: [],
-    findings_distribution: [],
-    repos: [],
-  };
-
   /**
    * Mount the stateful page on `url` with the settings read held until the test
    * releases it, so the frame the payload lands in can be observed rather than
-   * raced. The insights summary answers empty, like the demotion test.
+   * raced.
    */
   async function mountPageWithHeldPayload(url: string, body: unknown) {
     const { win, cleanup } = installDom(url);
@@ -740,8 +611,6 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     globalThis.fetch = (async (input: unknown) => {
       const target = String(input);
       if (target.endsWith("/models")) return json({ groups: [] });
-      if (target.includes("/insights/summary")) return json(INSIGHTS_SUMMARY);
-      if (target.includes("/pull-requests")) return json({ pull_requests: [] });
       await held;
       return json(body);
     }) as unknown as typeof fetch;
@@ -764,6 +633,14 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     };
   }
 
+  /** The label of the tab whose panel is active — empty when no panel is. */
+  const activeTabLabel = (win: Window, container: DomElement) => {
+    const active = shellPanels(container).filter((panel) => panel.getAttribute("data-state") === "active");
+    if (active.length !== 1) return active.length === 0 ? "" : "multiple";
+    const labelledBy = active[0]?.getAttribute("aria-labelledby") ?? "";
+    return win.document.getElementById(labelledBy)?.textContent ?? "";
+  };
+
   test("history traversal re-derives the tab from the URL, through the gate mirror", async () => {
     // The popstate listener is registered once, so it reads the payload's
     // can_manage through the ref mirror rather than a stale mount-time closure.
@@ -773,7 +650,7 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     const page = await mountPageWithHeldPayload("http://localhost/dashboard/apps/1", managePayload);
     try {
       await page.release();
-      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabInsights"));
+      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabSettings"));
 
       // A forward move: the address changes, then the router's popstate lands.
       page.win.history.pushState(null, "", "/dashboard/apps/1?tab=installations");
@@ -781,93 +658,13 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       await act(async () => {});
       expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabInstallations"));
 
-      // …and back to the bare path returns to the default 洞察 tab.
+      // …and back to the bare path returns to the default 应用设置 tab.
       page.win.history.pushState(null, "", "/dashboard/apps/1");
       await act(async () => page.win.dispatchEvent(new page.win.Event("popstate")));
       await act(async () => {});
-      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabInsights"));
+      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabSettings"));
     } finally {
       await page.unmount();
-    }
-  });
-
-  test("a manager's ?tab=installations deep link never activates another panel in any commit", async () => {
-    // Mounting with the gate still unknown would resolve a manager tab to the
-    // default, so the shell withholds the tab face until the payload's gate
-    // is committed. Proving "no other frame was ever painted" needs a
-    // FRAME-accurate sample: a MutationObserver is delivered as a coalesced
-    // batch and reads the DOM at callback time, so a default paint immediately
-    // replaced by installations inside one batch is invisible to it. React
-    // writes `data-state` synchronously during each commit, so patching the
-    // setter records every panel activation the tree ever had — one entry per
-    // commit, never coalesced.
-    const page = await mountPageWithHeldPayload(
-      "http://localhost/dashboard/apps/1?tab=installations",
-      managePayload,
-    );
-    const everActive = new Set<DomElement>();
-    const setAttribute = page.win.Element.prototype.setAttribute;
-    page.win.Element.prototype.setAttribute = function (name: string, value: string) {
-      if (name === "data-state" && value === "active") everActive.add(this);
-      return setAttribute.call(this, name, value);
-    };
-    try {
-      // While the settings read is held the tab face does not exist at all —
-      // the skeleton is the only committed face.
-      expect(page.container.querySelector('[data-slot="page-skeleton"]')).not.toBeNull();
-      expect(shellPanels(page.container)).toEqual([]);
-
-      await page.release();
-      // The shell panels live across commits (forceMount), so every activation
-      // the probe recorded can still be labelled from the settled tree.
-      const activated = [...everActive].filter(
-        (element) =>
-          element.getAttribute("data-slot") === "tabs-content" &&
-          shellPanels(page.container).includes(element as DomHTMLElement),
-      );
-      expect(
-        activated.map(
-          (element) =>
-            page.win.document.getElementById(element.getAttribute("aria-labelledby") ?? "")?.textContent,
-        ),
-      ).toEqual([t("en", "appDetail.tabInstallations")]);
-      // The gate confirmed the deep link instead of demoting it: the address
-      // still names the installations tab, so no later popstate re-reads the
-      // default.
-      expect(page.win.location.search).toContain("tab=installations");
-    } finally {
-      page.win.Element.prototype.setAttribute = setAttribute;
-      await page.unmount();
-    }
-  });
-
-  test("mid-session demotion: a stale manager-tab URL is rewritten once the non-manager payload lands", async () => {
-    // ?tab=pull-requests in the address bar + a payload that says non-manager
-    // → the landing effect rewrites the URL to the bare path (replaceState),
-    // so the stale param cannot sit there and no manager face renders.
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1?tab=pull-requests");
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify(identityPayload), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })) as unknown as typeof fetch;
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
-    try {
-      await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
-      await act(async () => {});
-      expect(win.location.search).not.toContain("tab=pull-requests");
-      // A non-manager's face has no tab bar at all: the identity card is it.
-      expect(container.querySelector('[role="tablist"]')).toBeNull();
-      const text = container.textContent ?? "";
-      expect(text).not.toContain(t("en", "appDetail.tabPullRequests"));
-      expect(text).toContain(t("en", "settings.appInfo"));
-    } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
     }
   });
 
@@ -892,6 +689,7 @@ describe("tab shell mounted behaviour (forceMount)", () => {
             locale: "en",
             appId: "1",
             payload,
+            groups: [],
             notice: null,
             search: { ...search, tab: "installations" },
             onReload: noReload,
@@ -914,145 +712,6 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       expect(container.querySelector('img[class*="h-10 w-10"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
-      cleanup();
-    }
-  });
-});
-
-describe("insights tab face (static SSR over the kept charts)", () => {
-  const data: InsightsSummary = {
-    window_days: 7,
-    repo: "",
-    reviews_total: 3,
-    findings_by_severity: [{ severity: "must-fix", count: 2 }],
-    verdict_distribution: [{ verdict: "approve", count: 3 }],
-    weekly_trend: [{ week_start: "2026-09-07", reviews: 3, findings: 2 }],
-    // (window-bucketing contract 2026-09-20): the 7-day window's trend
-    // card reads the zero-filled day grid, not weekly_trend.
-    daily_trend: [{ day_start: "2026-09-10", reviews: 3, findings: 2 }],
-    findings_distribution: [
-      {
-        bucket_start: "2026-09-10",
-        granularity: "day",
-        by_severity: { "must-fix": 2, "should-fix": 0, nit: 0 },
-      },
-    ],
-    repos: ["acme/web"],
-  };
-
-  test("the records face renders the three sections over the shared charts (recharts 2.x static face)", () => {
-    const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data }));
-    expect(html).toContain("Review health");
-    expect(html).toContain("Findings by severity");
-    // Window-neutral trend card title (window-bucketing contract
-    // 2026-09-20) — day windows no longer claim "Weekly".
-    expect(html).toContain("Trend");
-    expect(html).toContain("recharts-surface");
-  });
-
-  test("the records face is one section flow of summary + severity + trend", () => {
-    const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data }));
-    // One content plane divided by hairlines — health, the severity chart
-    // and the trend.
-    expect(html.match(/data-slot="flow-section"/g) ?? []).toHaveLength(3);
-    for (const title of ["Review health", "Findings by severity", "Trend"]) {
-      expect(html, title).toContain(`>${title}</h2>`);
-    }
-  });
-
-  test("chart series fill from --chart-{n} and legend swatches from --chart-{n}-mark (D14 split)", () => {
-    const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data }));
-    const fills = [...new Set([...html.matchAll(/chart-fill-(\d)/g)].map((match) => match[1]!))];
-    const swatches = [...new Set([...html.matchAll(/chart-legend-swatch chart-swatch-(\d)/g)].map((match) => match[1]!))];
-    expect(fills.length).toBeGreaterThan(0);
-    expect(swatches.length).toBeGreaterThan(0);
-    // The surface maps semantics onto the page's slots only: the severity
-    // chart paints its declared merge-class slot, and the trend's two
-    // series keep the pair the chart fixes.
-    for (const slot of [SEVERITY_SLOTS["must-fix"], 5, 3]) {
-      expect(fills, `fill ${slot}`).toContain(String(slot));
-      expect(swatches, `swatch ${slot}`).toContain(String(slot));
-    }
-    // Each slot the surface paints has both faces in the stylesheet: the
-    // large fill on the quiet `--chart-{n}`, the small mark on `-mark`.
-    const css = readFileSync(join(spaRoot, "components/charts/charts.css"), "utf8");
-    for (const slot of [...fills, ...swatches]) {
-      expect(css, slot).toContain(`.chart-fill-${slot} { fill: var(--chart-${slot}); }`);
-      expect(css, slot).toContain(`.chart-swatch-${slot} { background-color: var(--chart-${slot}-mark); }`);
-    }
-  });
-
-  test("the zero-review window renders the composed empty state, never a bare axis", () => {
-    const empty: InsightsSummary = { ...data, reviews_total: 0, findings_by_severity: [] };
-    const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data: empty }));
-    expect(html).toContain("No reviews yet");
-  });
-
-  test("initial load renders a polite loading face before the first fetch lands (qc4)", () => {
-    // SSR render = the pre-effect mount: data is null and state is
-    // "loading", exactly the first-paint face of a deep link or an
-    // in-flight first request. The tab must not be a bare toolbar.
-    const html = renderToStaticMarkup(
-      createElement(AppInsightsTab, {
-        locale: "en",
-        appId: "1",
-        search: { tab: "insights", window: "30", repo: "", pr: "" },
-        onSearch: () => {},
-      }),
-    );
-    expect(html).toContain('role="status"');
-    expect(html).toContain("Loading…");
-  });
-
-  test("a refetch over retained data keeps the records mounted, then reports the failure in place", async () => {
-    // The no-flash contract, driven through the tab's own effect: the
-    // filter change starts a load, and the previous sections stay on screen
-    // under the polite busy hint; a failed refetch reports in a slim alert
-    // line instead of unmounting the face or falling to the initial-load
-    // ErrorState. Both states are read off the live tree, not the source.
-    const pending: Array<(error: Error) => void> = [];
-    let release = false;
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async () => {
-      if (!release) return new Response(JSON.stringify(data), { status: 200 });
-      return new Promise<Response>((_resolve, reject) => {
-        pending.push(reject);
-      });
-    }) as unknown as typeof fetch;
-
-    let setWindow: (next: AppDetailSearch["window"]) => void = () => {};
-    function Harness() {
-      const [search, setSearch] = useState<AppDetailSearch>({ tab: "insights", window: "30", repo: "", pr: "" });
-      setWindow = (next) => setSearch((previous) => ({ ...previous, window: next }));
-      return createElement(AppInsightsTab, { locale: "en", appId: "1", search, onSearch: setSearch });
-    }
-
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
-    const heading = () => container.querySelector("h2")?.textContent ?? "";
-    try {
-      await act(async () => root.render(createElement(Harness)));
-      await act(async () => {});
-      expect(heading()).toContain("Review health");
-
-      // In-flight refetch: the previous sections stay, the busy state is on.
-      release = true;
-      await act(async () => setWindow("90"));
-      expect(heading()).toContain("Review health");
-      expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
-
-      // The refetch fails: the records are still there, the failure is a line
-      // in place, and the initial-load face is not.
-      await act(async () => pending.at(-1)?.(new Error("offline")));
-      await act(async () => {});
-      expect(heading()).toContain("Review health");
-      expect(container.textContent ?? "").toContain(t("en", "common.loadFailed"));
-      expect(container.querySelector('[data-slot="error-state"]')).toBeNull();
-    } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
       cleanup();
     }
   });
@@ -1089,7 +748,7 @@ describe("workspace switch on the App detail page (SF-1)", () => {
     ]);
   });
 
-  test("the manage face reads the settings payload only — the model options belong to the bot page", async () => {
+  test("the manage face reads the settings payload only — the model options belong to the same read", async () => {
     const calls: string[] = [];
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown) => {
@@ -1118,7 +777,7 @@ describe("header metric band on the manage face (static SSR)", () => {
   // Key/value pairs in band order, with the value cell's resolved class —
   // the danger tone is the only tone channel the band has.
   const band = (payload: SettingsManagePayload) =>
-    [...renderDetail(payload, true).matchAll(/data-slot="metric-key"[^>]*>([^<]+)<\/span><span data-slot="metric-value"[^>]*class="([^"]*)"[^>]*>(\d+)<\/span>/g)]
+    [...renderDetail(payload).matchAll(/data-slot="metric-key"[^>]*>([^<]+)<\/span><span data-slot="metric-value"[^>]*class="([^"]*)"[^>]*>(\d+)<\/span>/g)]
       .map((m) => ({ key: m[1]!, value: m[3]!, danger: m[2]!.includes("tone-danger") }));
 
   const payloadWith = (counts: { keys: number; chains: number; installations: number; rejected: number | null }): SettingsManagePayload => ({
@@ -1162,7 +821,7 @@ describe("install claim entry (static SSR)", () => {
   });
 
   test("the claim action renders for a shared bot only, and an owned bot keeps the plain link", () => {
-    const shared = renderDetail(sharedPayload(), true);
+    const shared = renderDetail(sharedPayload(), "installations");
     expect(shared).toContain(t("en", "settings.installClaim"));
     expect(shared).toContain(t("en", "settings.installClaimCopy"));
     // The claim is the entry point: the raw install link would skip the claim
@@ -1171,7 +830,7 @@ describe("install claim entry (static SSR)", () => {
 
     const owned = renderDetail(
       { ...sharedPayload(), app: { ...sharedPayload().app, scope: "owned" } },
-      true,
+      "installations",
     );
     expect(owned).not.toContain(t("en", "settings.installClaim"));
     expect(owned).toContain('href="https://github.com/apps/demo/installations/new"');
@@ -1183,7 +842,7 @@ describe("install claim entry (static SSR)", () => {
   test("the claim block renders the bound installation's account", () => {
     const bound = renderDetail(
       { ...sharedPayload(), installation: { id: 4242, account_login: "acme", removed: false } },
-      true,
+      "installations",
     );
     expect(bound).toContain(t("en", "settings.installBoundAccount", { account: "acme" }));
     expect(bound).not.toContain(t("en", "settings.installRemoved"));
@@ -1195,13 +854,13 @@ describe("install claim entry (static SSR)", () => {
   test("the claim block separates an unknown account from a removed installation", () => {
     const unknownAccount = renderDetail(
       { ...sharedPayload(), installation: { id: 4242, account_login: null, removed: false } },
-      true,
+      "installations",
     );
     expect(unknownAccount).toContain(t("en", "settings.installBoundNoAccount", { id: "4242" }));
 
     const removed = renderDetail(
       { ...sharedPayload(), installation: { id: 4242, account_login: "acme", removed: true } },
-      true,
+      "installations",
     );
     // The binding survives the uninstall; the line says reviews stopped.
     expect(removed).toContain(t("en", "settings.installRemoved"));
@@ -1272,7 +931,7 @@ describe("Blocked and pending installations (static SSR)", () => {
   });
 
   test("the Blocked banner names the reason on both faces", () => {
-    const manager = renderDetail(blockedPayload(), true);
+    const manager = renderDetail(blockedPayload());
     expect(manager).toContain(t("en", "appDetail.blockedBotNotShared"));
     // The bot page is not readable from a blocked workspace (its bot serves
     // another one now), so the header does not offer a link that 404s.
@@ -1281,8 +940,9 @@ describe("Blocked and pending installations (static SSR)", () => {
     // fabricated in their place.
     expect(manager).not.toContain(t("en", "settings.installations"));
     expect(manager).not.toContain(t("en", "settings.metricKeys"));
-    // The review settings are the target's, so the target body keeps them.
-    expect(renderTargetBody(blockedPayload())).toContain(t("en", "settings.reviewGate"));
+    // The target-owned review policy is not this page's: the repository
+    // surface owns it (targets-page.test.tsx pins that tab).
+    expect(manager).not.toContain(t("en", "settings.reviewGate"));
 
     const member = renderToStaticMarkup(
       createElement(AppDetailView, {
@@ -1293,6 +953,7 @@ describe("Blocked and pending installations (static SSR)", () => {
           blocked: true,
           blocked_reason: "bot_not_shared",
         },
+        groups: [],
         notice: null,
         search,
         onReload: noReload,
@@ -1303,30 +964,18 @@ describe("Blocked and pending installations (static SSR)", () => {
   });
 
   test("a Blocked target hides the install and claim actions, and keeps its review settings", async () => {
-    const installed = renderDetail(blockedPayload(), true, "installations");
+    const installed = renderDetail(blockedPayload(), "installations");
     expect(installed).not.toContain(t("en", "settings.installClaim"));
     expect(installed).not.toContain(t("en", "settings.installLink"));
     expect(installed).not.toContain('href="https://github.com/apps/demo/installations/new"');
     // Nothing is pending for a bot this workspace may not use.
     expect(installed).not.toContain(t("en", "settings.installPendingBind"));
 
-    // The review configuration is still readable — Blocked hides an action,
-    // not the settings a manager can inspect.
-    const policy = renderTargetBody(blockedPayload());
-    expect(policy).toContain(t("en", "settings.reviewGate"));
-
     // The bot-shaped parts of the identity card are gone with the bot data:
     // the delivery URL and the refresh are bot-scope writes this workspace
-    // cannot make, and the installation table states WHY it is empty instead
-    // of claiming the bot has none.
+    // cannot make.
     expect(installed).not.toContain(t("en", "settings.appInfoDeliveryUrl"));
     expect(installed).not.toContain(t("en", "settings.appInfoRefresh"));
-    // Copy carries an apostrophe (SSR escapes it), so read the rendered text.
-    const installedText = await withMarkup(installed, (container) => container.textContent ?? "");
-    expect(installedText).toContain(t("en", "settings.installationsNotVisible"));
-    expect(installedText).not.toContain(t("en", "settings.noInstallations"));
-    // The allowlist itself stays editable (target-owned).
-    expect(installed).toContain(t("en", "settings.allowlistSave"));
   });
 
   test("an unbound shared target renders one bind action per pending installation", () => {
@@ -1337,7 +986,7 @@ describe("Blocked and pending installations (static SSR)", () => {
         { installation_id: 501, account_login: null, seen_at: "2026-01-01 00:00:00" },
       ],
     };
-    const markup = renderDetail(pending, true, "installations");
+    const markup = renderDetail(pending, "installations");
     expect(markup.match(new RegExp(t("en", "settings.installPendingBind"), "g"))).toHaveLength(2);
     expect(markup).toContain("acme");
     expect(markup).toContain(t("en", "settings.installPendingUnknownAccount", { id: "501" }));
@@ -1345,7 +994,6 @@ describe("Blocked and pending installations (static SSR)", () => {
     // A bound target binds nothing more: the operator's unbind is the repair.
     const bound = renderDetail(
       { ...pending, installation: { id: 4242, account_login: "acme", removed: false } },
-      true,
       "installations",
     );
     expect(bound).not.toContain(t("en", "settings.installPendingBind"));
@@ -1365,6 +1013,47 @@ describe("Blocked and pending installations (static SSR)", () => {
       { ...blockedPayload(), owner_overlap: "no" },
       { ...blockedPayload(), app: { ...blockedPayload().app, review_trigger_mode: "sometimes" } },
       { ...blockedPayload(), installation: { id: "1", account_login: null, removed: false } },
+    ]) {
+      expect(parseSettings(broken)).toBeNull();
+    }
+    // A Blocked read is a target's: without the target-owned slice it is not
+    // a settings read at all.
+    const { target_id: _blockedTarget, ...blockedWithoutTarget } = blockedPayload();
+    expect(parseSettings(blockedWithoutTarget)).toBeNull();
+    // The one exception is the several-repository Blocked face: it says
+    // `target_id: null` plus `targets_many`, so the page can name that state
+    // instead of reading it as the zero-repository App.
+    const blockedMany = {
+      ...blockedPayload(),
+      target_id: null,
+      targets_many: true,
+      app: {
+        github_app_id: blockedPayload().app.github_app_id,
+        id: blockedPayload().app.id,
+        status: "active",
+        created_by: "mallory",
+        scope: "owned",
+        github_name: null,
+        github_slug: "demo",
+        github_description: null,
+        github_html_url: null,
+        github_avatar_url: null,
+        github_visibility: "unknown",
+      },
+      installation: null,
+    };
+    expect(parseSettings(blockedMany)).not.toBeNull();
+    expect(parseSettings(blockedMany)?.target_id).toBeNull();
+    expect(parseSettings(blockedMany)?.targets_many).toBe(true);
+    for (const broken of [
+      // `null` without the several-repository flag is not a state.
+      { ...blockedMany, targets_many: false },
+      { ...blockedMany, targets_many: undefined },
+      // A target-less Blocked read reports no pause state: its presence would
+      // state configuration the payload has no target for.
+      { ...blockedMany, app: { ...blockedMany.app, review_enabled: true } },
+      // The fail-closed rule survives outside the Blocked face.
+      { ...managePayload, target_id: null, targets_many: true },
     ]) {
       expect(parseSettings(broken)).toBeNull();
     }

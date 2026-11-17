@@ -152,8 +152,14 @@ describe("worker entry scheduled wiring", () => {
   });
 
   test("scheduled never throws when the sweep itself fails", async () => {
+    // The maintenance window read is answered OPEN so this expression reaches
+    // its lanes at all: every other statement breaks, which is the failure the
+    // test pins. (An unreadable window now fails closed and skips the sweep.)
     const brokenDb = {
-      prepare(): never {
+      prepare(sql: string): never | { bind: () => { all: () => Promise<{ results: never[] }> } } {
+        if (sql.includes("review_runtime_settings WHERE key IN")) {
+          return { bind: () => ({ all: async () => ({ results: [] }) }) };
+        }
         throw new Error("d1 down");
       },
       batch: async () => [],

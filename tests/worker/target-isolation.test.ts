@@ -183,8 +183,23 @@ function isolationFixture() {
 
   // Target A is the workspace's live configuration; target B is PAUSED, so a
   // settings read that served B's row would answer review_enabled: false.
-  const targetA = seedTarget(db, BOT_ID, { id: "target-a", workspaceId: WORKSPACE_A });
-  const targetB = seedTarget(db, BOT_ID, { id: "target-b", workspaceId: WORKSPACE_B });
+  // Each carries the repository its own PR belongs to (0067): `repo_id` is the
+  // identity, distinct per repository, and the owner/name pair is the display
+  // cache the review and Check lanes resolve by.
+  const targetA = seedTarget(db, BOT_ID, {
+    id: "target-a",
+    workspaceId: WORKSPACE_A,
+    repoId: 700001,
+    repoOwner: "acme",
+    repoName: "widgets",
+  });
+  const targetB = seedTarget(db, BOT_ID, {
+    id: "target-b",
+    workspaceId: WORKSPACE_B,
+    repoId: 700002,
+    repoOwner: "other",
+    repoName: "lib",
+  });
   seed(db, "UPDATE review_targets SET review_enabled = 0 WHERE id = ?", targetB);
   seed(db, "UPDATE review_targets SET review_trigger_mode = 'manual' WHERE id = ?", targetA);
 
@@ -223,10 +238,10 @@ function isolationFixture() {
   return { db, targetA, targetB };
 }
 
-const SCOPE_A = { targetId: "target-a", workspaceId: WORKSPACE_A, botId: BOT_ID };
-const SCOPE_B = { targetId: "target-b", workspaceId: WORKSPACE_B, botId: BOT_ID };
+const SCOPE_A = { kind: "target", targetId: "target-a", workspaceId: WORKSPACE_A } as const;
+const SCOPE_B = { kind: "target", targetId: "target-b", workspaceId: WORKSPACE_B } as const;
 /** A foreign pair: target B's id presented under target A's workspace. */
-const SCOPE_CROSSED = { targetId: "target-b", workspaceId: WORKSPACE_A, botId: BOT_ID };
+const SCOPE_CROSSED = { kind: "target", targetId: "target-b", workspaceId: WORKSPACE_A } as const;
 
 describe("insights aggregation is tenant-scoped", () => {
   test("each target's workspace reads only its own reviews", async () => {
@@ -362,8 +377,10 @@ describe("the execution ledgers are tenant-scoped by their own target", () => {
 });
 
 describe("the dashboard routes resolve the target inside the session workspace", () => {
-  const INSIGHTS = `/dashboard/${WORKSPACE_A}/api/apps/${GITHUB_APP_ID}/insights/summary?include=repos`;
-  const LEDGER = `/dashboard/${WORKSPACE_A}/api/apps/${GITHUB_APP_ID}/pull-requests`;
+  // Insights and the ledger are target-addressed; settings stays
+  // App-addressed (a bot is still the configuration subject).
+  const INSIGHTS = `/dashboard/${WORKSPACE_A}/api/targets/target-a/insights/summary?include=repos`;
+  const LEDGER = `/dashboard/${WORKSPACE_A}/api/targets/target-a/pull-requests`;
   const SETTINGS = `/dashboard/${WORKSPACE_A}/api/apps/${GITHUB_APP_ID}/settings`;
 
   test("insights and the ledger serve this workspace's target only, with no GitHub call", async () => {
@@ -404,7 +421,7 @@ describe("the dashboard routes resolve the target inside the session workspace",
     expect(body.app.review_trigger_mode).toBe("manual");
   });
 
-  test("the bot is invisible from a workspace with no target on it: 404 on every face", async () => {
+  test("a target is invisible from a workspace that does not own it: 404 on both faces", async () => {
     const { db } = isolationFixture();
     // A third workspace, no target on this bot: the resolution's own verdict,
     // not a membership failure — octocat owns this workspace too.
@@ -419,9 +436,11 @@ describe("the dashboard routes resolve the target inside the session workspace",
        VALUES ('ws-c', 'user-octocat', 'owner', datetime('now'))`,
     );
     const env = envFor(db);
+    // Target A belongs to ws-a: presenting it under ws-c is a foreign id, and
+    // the App-addressed settings face has no target there to resolve.
     for (const path of [
-      `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/insights/summary`,
-      `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/pull-requests`,
+      `/dashboard/ws-c/api/targets/target-a/insights/summary`,
+      `/dashboard/ws-c/api/targets/target-a/pull-requests`,
       `/dashboard/ws-c/api/apps/${GITHUB_APP_ID}/settings`,
     ]) {
       const response = await worker.fetch(await request(path, "octocat"), env);
@@ -429,15 +448,15 @@ describe("the dashboard routes resolve the target inside the session workspace",
     }
   });
 
-  test("a workspace holding a target on the bot reads it, even when the bot is owned elsewhere", async () => {
+  test("a workspace holding a target on the bot reads that target, even when the bot is owned elsewhere", async () => {
     const { db } = isolationFixture();
     const env = envFor(db);
-    // `ws-b` holds target-b on the bot owned by `ws-a`: its own target's
-    // settings are readable (the revoked-share state — Blocked — must name
-    // itself instead of silently reviewing nothing).
+    // `ws-b` holds target-b on the bot owned by `ws-a`: its own target is
+    // readable (the revoked-share state — Blocked — must name itself instead
+    // of silently reviewing nothing), and its numbers are target-b's.
     for (const path of [
-      `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/insights/summary`,
-      `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/pull-requests`,
+      `/dashboard/${WORKSPACE_B}/api/targets/target-b/insights/summary`,
+      `/dashboard/${WORKSPACE_B}/api/targets/target-b/pull-requests`,
       `/dashboard/${WORKSPACE_B}/api/apps/${GITHUB_APP_ID}/settings`,
     ]) {
       const response = await worker.fetch(await request(path, "octocat"), env);
@@ -492,191 +511,3 @@ describe("a target whose bot is no longer shared reads Blocked", () => {
   });
 });
 
-/**
- * The create route's second-target case: a `shared` bot carries one live
- * target per workspace, written by that workspace's manager. The fixture
- * supplies workspace A's target and the route writes B's, so the two-target
- * bot the isolation faces above guard is now also the state this route mints.
- */
-describe("POST /api/targets — a target on a shared bot", () => {
-  const BOT = "app-platform";
-  const APP_ID = 7002;
-  const CREATE = `/dashboard/${WORKSPACE_B}/api/targets`;
-
-  async function postTarget(
-    db: TestD1,
-    path: string,
-    login: string | null,
-    fields: Record<string, string>,
-    mode: "saas" | "self-hosted" = "self-hosted",
-  ): Promise<Response> {
-    const headers: Record<string, string> = { "Content-Type": "application/x-www-form-urlencoded" };
-    if (login !== null) {
-      headers.Cookie = `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}`;
-    }
-    return worker.fetch(
-      new Request(`https://worker.local${path}`, {
-        method: "POST",
-        headers,
-        body: new URLSearchParams(fields),
-      }),
-      envFor(db, mode),
-    );
-  }
-
-  /** One live bot shared platform-wide, owned by workspace A. */
-  function seedPlatformBot(db: TestD1, scope = "shared"): void {
-    seed(
-      db,
-      `INSERT INTO review_bots
-         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-          created_by, status, scope, shared_at, created_at, updated_at)
-       VALUES (?, 'platform-app', ?, 'platform-app', 'enc', 'enc', 'octocat', 'active', ?,
-               datetime('now'), datetime('now'), datetime('now'))`,
-      BOT,
-      APP_ID,
-      scope,
-    );
-    seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", BOT, WORKSPACE_A);
-  }
-
-  function liveTargets(db: TestD1): Array<{ workspace_id: string; installation_id: number | null }> {
-    return db.raw
-      .query("SELECT workspace_id, installation_id FROM review_targets WHERE bot_id = ? ORDER BY workspace_id")
-      .all(BOT) as Array<{ workspace_id: string; installation_id: number | null }>;
-  }
-
-  test("one workspace writes the bot's second live target, unbound, in one batch", async () => {
-    const { db } = isolationFixture();
-    seedPlatformBot(db);
-    seedTarget(db, BOT, { id: "target-platform-a", workspaceId: WORKSPACE_A });
-    const fetchSpy = spyOn(globalThis, "fetch");
-    try {
-      const res = await postTarget(db, CREATE, "octocat", { botId: BOT });
-      expect(res.status).toBe(200);
-      expect(fetchSpy).not.toHaveBeenCalled();
-
-      // Two live targets on one bot, each in its own workspace, neither bound
-      // to an installation: this path installs nothing.
-      expect(liveTargets(db)).toEqual([
-        { workspace_id: WORKSPACE_A, installation_id: null },
-        { workspace_id: WORKSPACE_B, installation_id: null },
-      ]);
-      // The row the route wrote carries the workspace and the bot, no account
-      // claim, and the workspace's own floor (the seeded `default` value).
-      const written = db.raw
-        .query(
-          `SELECT workspace_id, bot_id, account_login, review_enabled, review_trigger_mode,
-                  check_min_score, check_pass_verdicts, allowlist_enabled
-             FROM review_targets WHERE bot_id = ? AND workspace_id = ?`,
-        )
-        .get(BOT, WORKSPACE_B);
-      expect(written).toEqual({
-        workspace_id: WORKSPACE_B,
-        bot_id: BOT,
-        account_login: null,
-        review_enabled: 1,
-        review_trigger_mode: "every_push",
-        check_min_score: 60,
-        check_pass_verdicts: '["ship it"]',
-        allowlist_enabled: 0,
-      });
-      // No bot write and no manifest row: the bot is still the platform share
-      // the seed created, and no second App exists.
-      expect(
-        db.raw.query("SELECT COUNT(*) AS n FROM review_bots WHERE id = ?").get(BOT),
-      ).toEqual({ n: 1 });
-      expect(db.raw.query("SELECT scope FROM review_bots WHERE id = ?").get(BOT)).toEqual({
-        scope: "shared",
-      });
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      fetchSpy.mockRestore();
-    }
-  });
-
-  test("the workspace's own count for that bot reflects the new target", async () => {
-    const { db } = isolationFixture();
-    seedPlatformBot(db);
-    seedTarget(db, BOT, { id: "target-platform-a", workspaceId: WORKSPACE_A });
-
-    const before = await createReviewBotsStore(db).listSharedBots(WORKSPACE_B);
-    expect(before).toEqual([
-      { id: BOT, github_slug: "platform-app", name: "platform-app", target_count: 0 },
-    ]);
-    expect((await postTarget(db, CREATE, "octocat", { botId: BOT })).status).toBe(200);
-    const after = await createReviewBotsStore(db).listSharedBots(WORKSPACE_B);
-    expect(after.map((bot) => bot.target_count)).toEqual([1]);
-  });
-
-  test("a second call for the same workspace and bot is refused and writes nothing", async () => {
-    const { db } = isolationFixture();
-
-    seedPlatformBot(db);
-    seedTarget(db, BOT, { id: "target-platform-a", workspaceId: WORKSPACE_A });
-
-    expect((await postTarget(db, CREATE, "octocat", { botId: BOT })).status).toBe(200);
-    const second = await postTarget(db, CREATE, "octocat", { botId: BOT });
-    expect(second.status).toBe(409);
-    expect(liveTargets(db)).toHaveLength(2);
-  });
-
-  test("a workspace on the free plan answers the plan-named 400 and writes no target", async () => {
-    const { db } = isolationFixture();
-    seedPlatformBot(db);
-    seedTarget(db, BOT, { id: "target-platform-a", workspaceId: WORKSPACE_A });
-    // No subscription row for B → the seeded `free` plan, which does not
-    // include the shared bot (migration 0061).
-    expect(
-      db.raw.query("SELECT COUNT(*) AS n FROM workspace_subscriptions WHERE workspace_id = ?").get(WORKSPACE_B),
-    ).toEqual({ n: 0 });
-    const before = liveTargets(db);
-
-    const res = await postTarget(db, CREATE, "octocat", { botId: BOT }, "saas");
-
-    // The form-POST channel carries no error-code field, so this text IS the
-    // refusal: it names the plan this reader can change.
-    expect(res.status).toBe(400);
-    expect(await res.text()).toBe(SHARED_BOT_REFUSAL("free"));
-    // Nothing written: the bot holds only the fixture's target.
-    expect(liveTargets(db)).toEqual(before);
-
-    // The capability is the plan's, read per attempt: the same request creates
-    // once an operator moves the workspace to a plan that includes the bot.
-    seed(
-      db,
-      `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
-       VALUES (?, 'pro', 'active', datetime('now'), datetime('now'))`,
-      WORKSPACE_B,
-    );
-    expect((await postTarget(db, CREATE, "octocat", { botId: BOT }, "saas")).status).toBe(200);
-    expect(liveTargets(db)).toHaveLength(before.length + 1);
-  });
-
-  test("an owned or unknown bot is the unknown-app 404, and a plain member is refused before any write", async () => {
-    const { db } = isolationFixture();
-    seedPlatformBot(db, "owned");
-
-    // No workspace may create a target on a bot it does not own.
-    expect((await postTarget(db, CREATE, "octocat", { botId: BOT })).status).toBe(404);
-    expect((await postTarget(db, CREATE, "octocat", { botId: "no-such-bot" })).status).toBe(404);
-    // A malformed body names the missing field, not a bot.
-    expect((await postTarget(db, CREATE, "octocat", {})).status).toBe(400);
-    expect(liveTargets(db)).toHaveLength(0);
-
-    // Sharing is not enough: creation is the workspace manager's write, so a
-    // plain member is refused by the role gate before the bot is even read.
-    seed(db, "UPDATE review_bots SET scope = 'shared' WHERE id = ?", BOT);
-    seed(
-      db,
-      "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES ('user-plain', 'plain', 'member', datetime('now'), NULL)",
-    );
-    seed(
-      db,
-      "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, 'user-plain', 'member', datetime('now'))",
-      WORKSPACE_B,
-    );
-    expect((await postTarget(db, CREATE, "plain", { botId: BOT })).status).toBe(403);
-    expect(liveTargets(db)).toHaveLength(0);
-  });
-});

@@ -2,7 +2,7 @@
 
 ## Scope
 
-A review bot's visibility (`owned` / `shared`), the platform's official workspace, the installation-claim loop that attaches a shared bot installation to a review target, and the resolution guards that decide whether a delivery reviews at all.
+A review bot's visibility (`owned` / `shared`), the platform's official workspace, the installation-claim loop that attaches a shared bot installation to the application, and the guards that decide whether a delivery reviews at all.
 
 ## Current state
 
@@ -32,11 +32,11 @@ The store is not renamed: `review_runtime_settings` is the platform parameter st
 GitHub's setup redirect carries `installation_id` and `setup_action` but **not** `state`, so attribution is session-based.
 
 ```
-install_claims(id, user_id, workspace_id, target_id, created_at, expires_at, consumed_at, consumed_token)
+install_claims(id, user_id, workspace_id, bot_id, created_at, expires_at, consumed_at, consumed_token)
 ```
 
-- A claim is created (or refreshed in place) by a manager on the target page; TTL 15 minutes, enforced by the writer, no sweeper.
-- The live predicate is one string everywhere: `consumed_at IS NULL AND expires_at > now`. A partial unique index keeps at most one live claim per `(user_id, target_id)`.
+- A claim is created (or refreshed in place) by a manager on the application's 已安装 face; TTL 15 minutes, enforced by the writer, no sweeper.
+- The live predicate is one string everywhere: `consumed_at IS NULL AND expires_at > now`. A partial unique index keeps at most one live claim per `(user_id, bot_id)`; a bot-level claim names no target.
 - A claim belongs to its creator: another session sees none, and the two states are indistinguishable.
 
 ### Setup callback
@@ -49,32 +49,20 @@ and one form per claim.
 
 | Request | Behaviour |
 |---|---|
-| `GET /bot/setup?installation_id=…&setup_action=install` | Requires a signed session (401 HTML otherwise). 0 live claims → a page that says `no_live_claim` and links back to the dashboard. 1 or N claims → a `confirm_required` page showing the installation id it was given, the claims (target, workspace, claimed instant) and one `POST` form per claim, carrying the claim's server-side id. **Writes nothing.** |
+| `GET /bot/setup?installation_id=…&setup_action=install` | Requires a signed session (401 HTML otherwise). 0 live claims → a page that says `no_live_claim` and links back to the dashboard. 1 or N claims → a `confirm_required` page showing the installation id it was given, the claims (application, workspace, claimed instant) and one `POST` form per claim, carrying the claim's server-side id. **Writes nothing.** |
 | `POST /bot/setup` | The only bind. Body: `installation_id`, `claim_id`. Refusals are JSON envelopes (`404 {"error":"claim not found"}`); the bind refusals keep their text bodies and the `GET` pages stay HTML/text. The session cookie is `SameSite=Lax`, so a cross-site `POST` cannot reach it — the confirm page is also the CSRF boundary. |
 
-Binding is **one** batch of three statements: consume the claim, upsert `bot_installations` (copying `account_login` from the row, never inventing it), then bind the target. Ownership inside the batch is a per-call `consumed_token`, never the timestamp — two callbacks in the same millisecond must not let the loser mutate anything. A second **target** claiming an installation a target already holds is refused by `review_targets`' `UNIQUE (bot_id, installation_id) WHERE installation_id IS NOT NULL`; the batch rolls back with the claim left live and the answer is `409 installation already bound`. The `bot_installations` upsert cannot raise it at all: it is deliberately conflict-tolerant (`ON CONFLICT (bot_id, installation_id) DO UPDATE`).
+Binding is one batch: consume the claim, then upsert `bot_installations` (copying `account_login` from the row, never inventing it). It writes no target column. Ownership inside the batch is a per-call `consumed_token`, never the timestamp — two callbacks in the same millisecond must not let the loser mutate anything. The upsert is deliberately conflict-tolerant (`ON CONFLICT (bot_id, installation_id) DO UPDATE`).
 
-A target that already holds a binding cannot start a new claim (`409 target already bound`): the batch would refuse a different installation and a same-installation claim has nothing to do. Repair is the operator's:
-
-| Request | Behaviour |
-|---|---|
-| `POST /_internal_admin/api/targets/:targetId/unbind` | Operator only (`404` for anyone else), saas only. Clears `review_targets.installation_id` **and** the `account_login` copied from it, leaving the `bot_installations` row (the bot still has that installation), and appends one `bot.target_unbind` audit row in the same batch carrying the cleared before-state. `200 {"targetId","unbound":true}`; a target that holds no binding answers `200 … "unbound":false` and writes nothing; an unknown or soft-deleted target is `404 {"error":"target not found"}` and writes nothing. After it, the target is claimable again.
-
-The webhook **never** writes a binding. An installation no target references is invisible to review.
+The webhook never writes an installation binding. It refreshes a target's repository caches and, when the target's `repo_id` is still null, claims it inside that delivery.
 
 ### Resolution guards
 
-`targets-store.resolve(botId, installationId)`:
+`targets-store.resolveByRepo(botId, repository)`:
 
-| Bound? | Installation state | Bot scope | Result |
-|---|---|---|---|
-| yes | live | any | that target |
-| yes | `removed_at` set | any | `null` — no fallback; a removed installation is not re-attributed |
-| no | — | `owned` | the bot's single live target, else `null` |
-| no | — | `shared` | `null` — no implicit attribution |
-| ambiguous (two live targets) | — | any | `null` |
+After signature verification and classification, the delivery resolves its target by repository: `(bot_id, repo_id)` first; otherwise a live unclaimed owner/name row is claimed in that request; otherwise the bot's single live row with no repository columns is claimed. Two unclaimed candidates or no hit resolve to nothing. No hit answers `200` with `no_target_for_repo`, enqueues nothing and writes no ledger row.
 
-Dependency: `shared` stops reviewing until an installation is claimed. Operators must share, then claim.
+A shared bot reviews once the consuming workspace holds a target for that repository.
 
 `shared` is also a plan capability, not only a bot scope:
 `checkEntitlement({kind: "shared-bot", …})`
@@ -101,17 +89,17 @@ verdict per delivery, recorded once.
 - `shared` is platform-authorized and batch-verified against the current designation.
 - The bind's ownership proof is the request token; a losing consume mutates nothing.
 - A `GET` never writes: the bind needs the explicit confirm `POST`, so a mailed or prefetched `installation_id` cannot attach anything.
-- A wrong bind is repairable: an operator clears the binding without touching the installation row.
-- The webhook writes installations and deliveries, never target bindings.
-- A removed installation or a shared bot without a binding resolves to nothing; silently falling back would re-attribute a review.
+- A wrong installation is repaired at the installation level; no per-target binding column exists to clear.
+- The webhook writes installations and deliveries; it claims a null repository identity on its target and writes no installation binding.
+- A delivery whose repository matches no live target, and one matching two unclaimed rows, resolves to nothing; silently falling back would re-attribute a review.
 
 ## Where it lives
 
-- `migrations/0058_review_bot_scope.sql`, `migrations/0059_install_claims.sql`
+- `migrations/0058_review_bot_scope.sql`, `migrations/0067_repo_target_identity.sql` (bot-level claims)
 - `migrations/0062_review_usage_indexes.sql` (the usage read's composite indexes)
 - `src/dashboard/runtime-config-store.ts` (key + domain registry), `src/dashboard/apps-store.ts` (`setBotScope`, `listBotScopes`, `getInstallation`)
 - `src/dashboard/install-claims-store.ts`, `src/worker/install-setup.ts`
-- `src/dashboard/targets-store.ts` (`resolve` guards), `src/admin/index.ts` (`POST /api/targets/:targetId/unbind`, `GET /api/usage`)
+- `src/dashboard/targets-store.ts` (`resolveByRepo`), `src/admin/index.ts` (`GET /api/usage`)
 - `src/dashboard/review-usage-store.ts` (`readReviewUsage`, `reviewUsageMonth`), `src/dashboard/index.ts` (`GET /dashboard/<ref>/api/settings/review-usage`)
 - `src/spa/pages/ReviewUsageCard.tsx`, `src/spa/admin/UsagePage.tsx`
 - `src/spa/pages/SettingsPage.tsx`, `src/spa/pages/data.ts`, `src/i18n/*`
@@ -122,17 +110,17 @@ Any change to scope authority, the claim lifecycle, the bind batch or the resolu
 
 ### Resolving a target for a workspace
 
-A workspace may read a target when it holds a live target on that bot, **or** the bot is `shared`. The bot the workspace owns is always reachable through its own mapping. A foreign `owned` bot with no target here is a 404, and the list keeps the narrower rule (own, or shared with a live target here) so a revoked-share target is reachable by URL but not listed.
+A workspace may read a target when it holds that live target: the repository claim makes a target reachable inside its own workspace only. Application visibility keeps its rule (owned apps plus shared bots already holding a live target here). A foreign `owned` bot with no target here is a 404, and the list keeps the narrower rule (own, or shared with a live target here) so a revoked-share target is reachable by URL but not listed.
 
 ### Pending installations and binding
 
 `GET`-side payload field `pending_installations` lists live `bot_installations` of the target's bot that no live target references (`removed_at` excluded), and is empty unless the bot is `shared` or mapped to the addressed workspace.
 
-`POST /api/apps/:appId/bind-installation` (manager, `access: write`) creates-or-refreshes a claim and then runs the same guarded batch as the setup confirm. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared` (no claim written); no target → 404; malformed id → 400; id absent from the pending read → 404 `unknown installation`; target already bound → 409 `target already bound`; lost race → 409 `installation already bound`. The batch remains the only writer of `review_targets.installation_id`.
+`POST /api/apps/:appId/bind-installation` (manager, `access: write`) creates-or-refreshes a claim and then runs the same guarded batch as the setup confirm. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared` (no claim written); malformed id → 400; id absent from the pending read → 404 `unknown installation`.
 
 ### Derived Blocked state
 
-Both detail payload faces carry `blocked` and, when true, `blocked_reason = "bot_not_shared"`. It is derived per request from the bot row and the target's workspace — true exactly when the bot is `owned` and the target's workspace is not the bot's workspace. There is no column and no projection. The page names the reason, hides the install/claim action and the bot-settings link, and still renders trigger, depth, gate and pause.
+Both detail payload faces carry `blocked` and, when true, `blocked_reason = "bot_not_shared"`. It is derived per request from the bot row and the target's workspace — true exactly when the bot is `owned` and the target's workspace is not the bot's workspace. There is no column and no projection. The page names the reason and hides the install/claim action, pointing it at the application's 已安装 face; the repository detail keeps rendering trigger, depth, gate and pause.
 
 ### Shared bots are read-only for their consumers
 
@@ -140,16 +128,16 @@ Every bot-scoped write route — settings operations, key deletion, provider-key
 
 Two surfaces carry the two halves of a bot's configuration, and only one of them is refused here:
 
-- The bot page `/dashboard/<workspaceRef>/apps/:appId/bot` (`BotSettingsPage.tsx`) is bot-owned configuration only — credentials health, provider keys, model chains, seats, sandbox image and installations.
-- The target's review policy — trigger mode, depth, Check gate, owner allowlist, pause and park — is **target** data, written on the target surface, `/dashboard/<workspaceRef>/targets/:appId` (`TargetDetailPage` in `src/spa/pages/TargetsPage.tsx`, which renders `SettingsView` from `src/spa/pages/SettingsPage.tsx`). The app detail's former settings tab is gone: `…/apps/:appId/settings` and its `?tab=settings` spelling both redirect there (`settingsTabRedirect`, `src/spa/routes.ts`). It is governed by the target's workspace role, not by `canWriteBotScope`.
+- The application detail's 应用设置 tab body (`BotSettingsPage.tsx`) is bot-owned configuration only — credentials health, provider keys, model chains, seats, sandbox image and installations.
+- The target's review policy — trigger mode, depth, Check gate and pause — is **target** data, written on the repository detail, `/dashboard/<workspaceRef>/targets/<targetId>` (`TargetDetailPage` in `src/spa/pages/TargetsPage.tsx`, whose 评审配置 tab is `TargetSettingsTab` in `src/spa/pages/TargetSettingsTab.tsx`). `…/apps/:appId/settings` and `…/apps/:appId/bot` both redirect to `…/apps/:appId?tab=settings` (`settingsTabRedirect`, `src/spa/routes.ts`). It is governed by the target's workspace role, not by `canWriteBotScope`.
 
 A consumer workspace may therefore still change its own target policy; only the bot-scoped writes above are refused for a `shared` bot.
 
 ### Execution ledgers
 
-`review_findings` and `review_failures` carry `target_id`, backfilled from their pull-request row and guarded three ways: a row with no resolvable target aborts the migration, a row with several candidate targets aborts it, and only an exactly-one candidate is attributed. Tenant reads bind `target_id` directly; the bot-keyed pull-request join is no longer load-bearing. `audit_events.target_id` is nullable so a park audit can name its target.
+`review_findings` and `review_failures` carry `target_id`, backfilled from their pull-request row and guarded three ways: a row with no resolvable target aborts the migration, a row with several candidate targets aborts it, and only an exactly-one candidate is attributed. Tenant reads bind `target_id` directly; the bot-keyed pull-request join is no longer load-bearing. `audit_events.target_id` is nullable so a target-scoped audit row can name its target.
 
-A row's `target_id` is set when it is first recorded and never rewritten; rebinding an installation moves future publications, not history.
+A row's `target_id` is set when it is first recorded and never rewritten; retiring and re-adding a repository moves future publications, not history.
 
 ### Review usage
 
@@ -167,7 +155,7 @@ by workspace.
 | Attribution | A review belongs to the workspace of its **target**: `reviews.target_id` → `review_targets.workspace_id`. `reviews.installation_id` is not a substitute — it names the credential the run used and says nothing about which workspace consumed the review. |
 | Split | `review_bots.scope` decides the column, never which workspace owns the bot: `shared` counts as a shared-bot review **even in the shared bot's own workspace**, every other scope counts as own-bot. The scope is read at query time, so a month's split reflects the bot's scope *now*; it is not a snapshot of the scope at review time. |
 | No target | A review with no `target_id` has no bot either (migration `0057_review_targets.sql` attributes history only where `bot_id` is NOT NULL), so it names no workspace and is **excluded from both counts**. This sentence is the rule; the row is not dropped silently. |
-| Soft deletion | `workspaces.deleted_at` filters the row (a retired tenant has no face). `review_targets.deleted_at` and `review_bots.deleted_at` do **not**: the count is what happened, and a parked target keeps its month. |
+| Soft deletion | `workspaces.deleted_at` filters the row (a retired tenant has no face). `review_targets.deleted_at` and `review_bots.deleted_at` do **not**: the count is what happened, and a soft-deleted target keeps its month. |
 | Visibility | `?3` is the caller's workspace id on the settings card and `NULL` (every live workspace) on the operator face — one shape, two bindings. The workspace face cannot read another tenant's row, and the operator face lists live workspaces with zero reviews as well. |
 | Order | Shared-bot reviews descending, then own-bot reviews descending, then the workspace name ascending, then the workspace id ascending — `workspaces.name` is not unique, so the id closes the last key and two same-named workspaces cannot swap places between reloads. |
 | Paging | None, by design. The operator face answers **every** live workspace with both counts in one statement — the bound is the deployment's live workspace count (three numbers per row, a few hundred at the scale this platform runs) — and the page filters the loaded rows client-side. If a measured read ever exceeds that bound, server paging is a new stated contract — never a silent cap that hides rows the counter still counts. |
@@ -252,9 +240,5 @@ preview is a tightness check, not a per-review oracle. It can and will also
 differ a month later, because usage moves. A publish echoes the preview it was shown and is
 refused without one, or when the numbers moved since — a stale count is worse
 than none.
-
-### Parking an overlapping target
-
-`POST /dashboard/<workspaceRef>/apps/:appId/park` (`appParkRoute`, the `APP_ROUTES` entry `{ method: "post", path: "/apps/:appId/park" }` mounted under `/:workspaceRef`; owner or admin of the target's workspace) writes in one batch: one `target.park` audit row, `review_enabled = 0`, and `account_login = NULL`. It refuses `no-overlap` (no other live target in the workspace carries the same `account_login`), `only-live-target` (parking would leave that owner in this workspace with no live target), and a target outside the caller's workspace, all with zero writes. It never sets `deleted_at`, so the rows stay visible. Park is a form action, never a page: the path carries no `/api` segment.
 
 Decision history: [shared bot scope and claiming](../../../.agents/adr/implemented/feature/2026-11-15-shared-bot-scope-and-claiming.md), [derived Blocked and park](../../../.agents/adr/implemented/feature/2026-11-15-derived-blocked-and-park.md).

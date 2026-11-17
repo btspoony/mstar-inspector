@@ -40,10 +40,11 @@ async function seedApp(db: TestD1, mode: "open" | "every_push" | "manual"): Prom
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, review_trigger_mode, created_by, created_at, updated_at)
-       VALUES (?, 'default', ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
+         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+          review_trigger_mode, created_by, created_at, updated_at)
+       VALUES (?, 'default', ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
     )
-    .run(`target-${id}`, id, id, mode);
+    .run(`target-${id}`, id, id, 5000, "btspoony", "mstar-inspector", mode);
   return id;
 }
 
@@ -71,7 +72,8 @@ const PR_PAYLOAD = {
     head: { sha: "abc123" },
     user: { login: "btspoony" },
   },
-  repository: { name: "mstar-inspector", owner: { login: "btspoony" } },
+  // The fixture target's repository identity (migration 0067).
+  repository: { id: 5000, name: "mstar-inspector", owner: { login: "btspoony" } },
 };
 
 async function deliver(appId: string, payload: unknown, env: Env, event = "pull_request"): Promise<Response> {
@@ -214,7 +216,7 @@ describe("pull_request delivery → PR ledger", () => {
     expect(ledger(db, appId).length).toBe(0);
   });
 
-  test("a payload with no owner/repo/number is skipped VISIBLY, not silently", async () => {
+  test("a payload naming no repository records no ledger row (no target, no configuration)", async () => {
     const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     const warns: string[] = [];
@@ -223,20 +225,20 @@ describe("pull_request delivery → PR ledger", () => {
       warns.push(typeof line === "string" ? line : JSON.stringify(line));
     };
     try {
-      // A non-whitelisted action with NO repository: the classifier ignores it
-      // (so the route reaches the ledger branch) while `pullRequestRecord`
-      // cannot form the tuple, which is exactly the skipped case.
+      // A delivery with NO repository cannot name a target (migration 0067: a
+      // target IS a repository), so nothing can be attributed: the delivery is
+      // ignored and the ledger stays empty for it.
       const res = await deliver(
         appId,
         { action: "assigned", installation: { id: 123 }, pull_request: { number: 131, state: "open" } },
         makeEnv(db),
       );
       expect(res.status).toBe(200);
+      expect(await res.text()).toBe("ignored");
     } finally {
       console.warn = originalWarn;
     }
     expect(ledger(db, appId).length).toBe(0);
-    expect(warns.some((line) => line.includes("pull_request_record_skipped"))).toBe(true);
   });
 
   test("a store failure logs a warn and leaves the HTTP status untouched", async () => {

@@ -608,6 +608,27 @@ export function notFoundPage(locale: Locale = "en"): string {
   return authFace(t(locale, "common.error.notFoundTitle"), body, locale);
 }
 
+/**
+ * The maintenance window's face (product spec J7): the operator's reason and
+ * the start time, and the one statement about recovery — no ETA, because the
+ * upgrade runner cannot promise one. `reason` is absent when the operator gave
+ * none, so that line is omitted rather than rendered empty.
+ */
+export function maintenancePage(
+  reason: string | null,
+  since: string | null,
+  locale: Locale = "en",
+): string {
+  const lines = [escapeHtml(t(locale, "common.maintenance.body"))];
+  if (reason !== null) lines.push(escapeHtml(t(locale, "common.maintenance.reason", { reason })));
+  if (since !== null) lines.push(escapeHtml(t(locale, "common.maintenance.since", { since })));
+  return authFace(
+    t(locale, "common.maintenance.title"),
+    `<strong>${escapeHtml(t(locale, "common.maintenance.title"))}</strong><br>${lines.join("<br>")}`,
+    locale,
+  );
+}
+
 /** OAuth failure surface: red-700 banner + what-to-do-next (DESIGN.md § State legibility). */
 export function errorPage(message: string, locale: Locale = "en"): string {
   const body = t(locale, "common.error.signInErrorBody", { message: escapeHtml(message) }).replace(

@@ -30,7 +30,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
-import { createTestD1, type TestD1 } from "../store/helpers";
+import { createTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import {
   APP_CONFIG_BASE_MIGRATIONS,
   APP_CONFIG_MIGRATIONS,
@@ -72,8 +72,6 @@ import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../../src/contracts/provider-mode
 import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { t } from "../../src/i18n";
-import { CHECK_MIN_SCORE_MAX, CHECK_MIN_SCORE_MIN } from "../../src/contracts/review-gate";
-import { ALLOWLIST_MAX_OWNERS } from "../../src/dashboard/targets-store";
 import { PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../packages/runner/src/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -81,6 +79,7 @@ import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import type { D1StatementLike } from "../../src/store/types";
 import { htmlGet, withSpaAssets } from "../helpers/spa";
+import { parseSettings } from "../../src/spa/pages/data";
 import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -274,12 +273,12 @@ function createPoolReadRaceD1(inner: AppConfigD1, race: () => Promise<void>): Ap
 
 /** Seed a review_bots row with genuinely decryptable encrypted columns. */
 async function seedApp(
-  db: DashboardD1,
+  db: TestD1,
   opts: { slug: string; createdBy: string; githubAppId?: number },
 ): Promise<GithubAppRow> {
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
-  return createReviewBotsStore(db).createApp({
+  const row = await createReviewBotsStore(db).createApp({
     id,
     githubSlug: opts.slug,
     githubAppId: opts.githubAppId ?? 1001,
@@ -289,6 +288,10 @@ async function seedApp(
     createdBy: opts.createdBy,
     workspaceId: "default",
   });
+  // Creation writes no target (D13): the App pages read its repository target,
+  // so the fixture seeds the one a real add-repository would.
+  seedTarget(db, id, { name: opts.slug, repoName: opts.slug });
+  return row;
 }
 
 /**
@@ -2585,11 +2588,11 @@ describe("duplication locks", () => {
 // --- routes ---
 
 describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => {
-  test("HTML navigation GET answers one 302 to the review-target page (no shell read)", async () => {
+  test("HTML navigation GET answers one 302 to the app's settings tab (no shell read)", async () => {
     const { db } = await seededWorld();
     const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}?tab=settings`);
     expect(await res.text()).not.toContain("window.__BOOT__");
   });
 
@@ -2597,7 +2600,7 @@ describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => 
     const { db } = await seededWorld();
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}?tab=settings`);
   });
 });
 
@@ -2705,82 +2708,95 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
   });
 });
 
-describe("review gate + owner allowlist (payload and ops)", () => {
+describe("API settings face — several repositories under one App (targets_many)", () => {
   const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
-  // Switching the allowlist ON probes the App's visibility (the admission
-  // cache), so this suite owns the network: 200 = a public App.
-  let fetchSpy: ReturnType<typeof spyOn>;
-  beforeEach(() => {
-    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-      (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch,
+  test("two live targets: 200, targets_many true and no target_id (no single policy to name)", async () => {
+    const { db, app } = await seededWorld();
+    seedTarget(db, app.id, { name: "second-repo", repoName: "second-repo" });
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { targets_many?: boolean; target_id?: string };
+    expect(body.targets_many).toBe(true);
+    expect(body.target_id).toBeUndefined();
+  });
+
+  test("one live target: the payload names its target and targets_many is false", async () => {
+    const { db } = await seededWorld();
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { targets_many?: boolean; target_id?: string };
+    expect(body.targets_many).toBe(false);
+    // The single target the fixture App's creation seeded.
+    expect(body.target_id).toBeString();
+  });
+
+  test("a Blocked read with two repositories serves target_id null and targets_many, and parses", async () => {
+    // The Blocked manager face was the one arm that could not name its state:
+    // omitting `target_id` there made the SPA's parse read it as the
+    // zero-repository App. It now says `null` explicitly, so "several" and
+    // "none" stay distinguishable on the wire.
+    const { db, app } = await seededWorld();
+    const consumer = "ws-consumer";
+    rawRun(
+      db,
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+       VALUES (?, ?, ?, NULL, datetime('now'))`,
+      consumer,
+      consumer,
+      consumer,
     );
+    rawRun(
+      db,
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       SELECT ?, id, 'owner', datetime('now') FROM users WHERE github_login = 'mallory'`,
+      consumer,
+    );
+    seedTarget(db, app.id, { workspaceId: consumer, name: "one", repoId: 880001, repoName: "one" });
+    seedTarget(db, app.id, { workspaceId: consumer, name: "two", repoId: 880002, repoName: "two" });
+
+    const res = await get(
+      `/dashboard/${consumer}/api/apps/${APP_ID}/settings`,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { blocked: boolean; blocked_reason: string; targets_many: boolean; target_id: unknown };
+    expect(body.blocked).toBe(true);
+    expect(body.blocked_reason).toBe("bot_not_shared");
+    expect(body.targets_many).toBe(true);
+    expect(body.target_id).toBeNull();
+    // The SPA's parser accepts that shape and keeps the rule that a manager
+    // read naming a target must carry its policy.
+    const parsed = parseSettings({ ...body, can_manage: true, workspace_id: consumer });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.target_id).toBeNull();
+    expect(parsed?.targets_many).toBe(true);
   });
-  afterEach(() => {
-    fetchSpy.mockRestore();
-  });
+});
 
-  /** The gate/allowlist columns as one snapshot, so a zero-write case compares exactly. */
-  const gateRow = (db: TestD1, appId: string) =>
-    db.raw
-      .query(
-        `SELECT t.check_min_score, t.check_pass_verdicts, t.allowlist_enabled, t.updated_at
-           FROM review_targets t WHERE t.bot_id = ?`,
-      )
-      .get(appId) as {
-      check_min_score: number;
-      check_pass_verdicts: string;
-      allowlist_enabled: number;
-      updated_at: string;
-    };
+describe("review gate (payload and ops)", () => {
+  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
-  const ownerLogins = (db: TestD1, appId: string): string[] =>
-    (
-      db.raw
-        .query(
-          `SELECT a.owner_login FROM target_owner_allowlist a
-             JOIN review_targets t ON t.id = a.target_id
-            WHERE t.bot_id = ? ORDER BY a.owner_login`,
-        )
-        .all(appId) as Array<{
-        owner_login: string;
-      }>
-    ).map((row) => row.owner_login);
-
-  /** The cached visibility column — the settings notice's wording input, never admission. */
-  const visibilityRow = (db: TestD1, appId: string): string | null => {
-    const row = db.raw
-      .query("SELECT github_visibility FROM review_bots WHERE id = ?")
-      .get(appId) as { github_visibility: string | null };
-    return row.github_visibility;
-  };
-
-  test("manager face: gate, allowlist and visibility defaults; the member face carries none of them", async () => {
+  test("manager face: gate and visibility defaults; the member face carries neither", async () => {
     const { db } = await seededWorld();
     const manage = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
     expect(manage.status).toBe(200);
     const body = (await manage.json()) as {
       can_manage: boolean;
       check_gate: { min_score: number; pass_verdicts: string[] };
-      allowlist: { enabled: boolean; owners: string[] };
-      owner_overlap: boolean;
       app: { github_visibility: string | null };
     };
     expect(body.can_manage).toBe(true);
-    // The create-path default floor (no workspace default set): 60 points and
-    // "ship it"; the allowlist is off and empty; a never-probed App reads as
-    // 'unknown'.
+    // The inherited default floor (no workspace default set): 60 points and
+    // "ship it"; a never-probed App reads as 'unknown'.
     expect(body.check_gate).toEqual({ min_score: 60, pass_verdicts: ["ship it"] });
-    expect(body.allowlist).toEqual({ enabled: false, owners: [] });
-    // A lone target claims no account yet, so nothing overlaps.
-    expect(body.owner_overlap).toBe(false);
     expect(body.app.github_visibility).toBe("unknown");
 
     const member = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
     const memberBody = (await member.json()) as Record<string, unknown> & { app: Record<string, unknown> };
     expect(memberBody.can_manage).toBe(false);
     expect(memberBody.check_gate).toBeUndefined();
-    expect(memberBody.allowlist).toBeUndefined();
     expect("github_visibility" in memberBody.app).toBe(false);
   });
 
@@ -2796,349 +2812,13 @@ describe("review gate + owner allowlist (payload and ops)", () => {
     const body = (await res.json()) as {
       can_manage: boolean;
       check_gate: unknown;
-      allowlist: { enabled: boolean; owners: string[] };
-      owner_overlap: boolean;
       app: { id: string };
     };
     expect(body.can_manage).toBe(true);
     expect(body.check_gate).toBeNull();
     expect(body.app.id).toBe(app.id);
-    expect(body.allowlist).toEqual({ enabled: false, owners: [] });
-    expect(body.owner_overlap).toBe(false);
   });
 
-  test("save-check-gate: two distinct pass_verdicts persist in submission order, and the next read serves them", async () => {
-    const { db } = await seededWorld();
-    const res = await worker.fetch(
-      new Request(`https://worker.local${SETTINGS}`, {
-        method: "POST",
-        headers: {
-          Cookie: `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: "op=save-check-gate&min_score=90&pass_verdicts=ship+it&pass_verdicts=needs+fixes",
-      }),
-      makeEnv(db),
-    );
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Saved the review gate for mallorys-app");
-    const read = (await (
-      await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db))
-    ).json()) as { check_gate: { min_score: number; pass_verdicts: string[] } };
-    expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it", "needs fixes"] });
-  });
-
-  test("save-check-gate: the same verdict submitted twice is stored once", async () => {
-    const { db, app } = await seededWorld();
-    const res = await worker.fetch(
-      new Request(`https://worker.local${SETTINGS}`, {
-        method: "POST",
-        headers: {
-          Cookie: `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: "op=save-check-gate&min_score=90&pass_verdicts=ship+it&pass_verdicts=ship+it",
-      }),
-      makeEnv(db),
-    );
-    expect(res.status).toBe(200);
-    // The gate is a SET: a duplicated checkbox cannot inflate the stored row.
-    expect(JSON.parse(gateRow(db, app.id).check_pass_verdicts)).toEqual(["ship it"]);
-    const read = (await (
-      await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db))
-    ).json()) as { check_gate: { min_score: number; pass_verdicts: string[] } };
-    expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it"] });
-  });
-
-  test("save-check-gate: an empty pass_verdicts saves as [] — not a 400 — and reads back readable", async () => {
-    const { db, app } = await seededWorld();
-    // The SPA posts no `pass_verdicts` when every box is unchecked. An empty
-    // gate is legal and fails closed (no review can pass it), and it is
-    // READABLE configuration — not the null an unparseable array reads as — so
-    // the settings face plays an empty set back instead of a read-only notice.
-    const res = await worker.fetch(
-      new Request(`https://worker.local${SETTINGS}`, {
-        method: "POST",
-        headers: {
-          Cookie: `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: "op=save-check-gate&min_score=90",
-      }),
-      makeEnv(db),
-    );
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain("no verdicts");
-    expect(gateRow(db, app.id)).toMatchObject({ check_min_score: 90, check_pass_verdicts: "[]" });
-    const read = (await (
-      await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db))
-    ).json()) as { check_gate: { min_score: number; pass_verdicts: string[] } | null };
-    expect(read.check_gate).toEqual({ min_score: 90, pass_verdicts: [] });
-  });
-
-  test("save-check-gate: out-of-range or non-integer score → keyed 400, zero writes", async () => {
-    const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
-    const before = gateRow(db, app.id);
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    for (const minScore of ["101", "-1", "80.5", "eighty", ""]) {
-      const res = await postForm(SETTINGS, cookie, makeEnv(db), {
-        op: "save-check-gate",
-        min_score: minScore,
-        pass_verdicts: "ship it",
-      });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { key: string; message: string };
-      expect(body.key).toBe("settings.error.checkScoreInvalid");
-      // The accepted range comes from the contract constants, so the message
-      // cannot drift from the values the route actually validates against.
-      expect(body.message).toBe(
-        t("en", "settings.error.checkScoreInvalid", {
-          min: CHECK_MIN_SCORE_MIN,
-          max: CHECK_MIN_SCORE_MAX,
-        }),
-      );
-    }
-    expect(gateRow(db, app.id)).toEqual(before);
-  });
-
-  test("save-check-gate: an off-vocabulary verdict → keyed 400, zero writes", async () => {
-    const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
-    const before = gateRow(db, app.id);
-    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
-      op: "save-check-gate",
-      min_score: "80",
-      pass_verdicts: "banana",
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { key: string; message: string };
-    expect(body.key).toBe("settings.error.checkVerdictUnknown");
-    expect(body.message).toContain("banana");
-    expect(gateRow(db, app.id)).toEqual(before);
-  });
-
-  test("save-check-gate: non-owner member → 403, zero mutation", async () => {
-    const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
-    const before = gateRow(db, app.id);
-    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
-      op: "save-check-gate",
-      min_score: "90",
-      pass_verdicts: "ship it",
-    });
-    expect(res.status).toBe(403);
-    expect(gateRow(db, app.id)).toEqual(before);
-  });
-
-  test("save-allowlist: REPLACE semantics — an owner dropped from the textarea is removed", async () => {
-    const { db, app } = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const first = await postForm(SETTINGS, cookie, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "1",
-      owners: "ada\nalice",
-    });
-    expect(first.status).toBe(200);
-    expect(await first.text()).toContain("Saved the owner allowlist for mallorys-app");
-    expect(ownerLogins(db, app.id)).toEqual(["ada", "alice"]);
-    expect(gateRow(db, app.id).allowlist_enabled).toBe(1);
-
-    const second = await postForm(SETTINGS, cookie, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "0",
-      owners: "ada",
-    });
-    expect(second.status).toBe(200);
-    // alice is GONE: the owner set is replaced, never merged.
-    expect(ownerLogins(db, app.id)).toEqual(["ada"]);
-    expect(gateRow(db, app.id).allowlist_enabled).toBe(0);
-  });
-
-  test("save-allowlist: duplicate and blank lines collapse to one row per login", async () => {
-    const { db, app } = await seededWorld();
-    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "1",
-      owners: "ada\n ada \n\nAcme\nacme\n",
-    });
-    expect(res.status).toBe(200);
-    // GitHub logins are case-insensitive: `Acme` and `acme` are ONE owner,
-    // stored once under the first submitted spelling.
-    expect(ownerLogins(db, app.id)).toEqual(["Acme", "ada"]);
-    const acmeRows = db.raw
-      .query(
-        `SELECT COUNT(*) AS n FROM target_owner_allowlist a
-           JOIN review_targets t ON t.id = a.target_id
-          WHERE t.bot_id = ? AND lower(a.owner_login) = 'acme'`,
-      )
-      .get(app.id) as { n: number };
-    expect(acmeRows.n).toBe(1);
-  });
-
-  test("save-allowlist: non-owner member → 403, zero mutation (switch, owners and probe cache)", async () => {
-    const { db, app } = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    // A stored list and a stale operator timestamp, so a write of ANY kind —
-    // the owners, the switch, the probe's visibility cache — shows up below.
-    await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "0", owners: "ada" });
-    rawRun(db, "UPDATE review_targets SET updated_at = '2026-01-01 00:00:00' WHERE bot_id = ?", app.id);
-    const before = gateRow(db, app.id);
-    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "1",
-      owners: "acme",
-    });
-    expect(res.status).toBe(403);
-    expect(gateRow(db, app.id)).toEqual(before);
-    expect(ownerLogins(db, app.id)).toEqual(["ada"]);
-    // Turning the switch on would have probed; the denied request never got
-    // that far, so the cache is still unprobed.
-    expect(visibilityRow(db, app.id)).toBeNull();
-  });
-
-  test("save-allowlist: an invalid switch value → keyed 400, zero writes", async () => {
-    const { db, app } = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "1", owners: "ada" });
-    const before = gateRow(db, app.id);
-    const res = await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "on", owners: "mallory" });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { key: string };
-    expect(body.key).toBe("settings.error.allowlistToggleInvalid");
-    expect(gateRow(db, app.id)).toEqual(before);
-    expect(ownerLogins(db, app.id)).toEqual(["ada"]);
-  });
-
-  test("save-allowlist: the owner set is capped — oversized is a keyed 400 with zero writes", async () => {
-    const { db, app } = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "1", owners: "ada" });
-    const before = gateRow(db, app.id);
-    const owners = (count: number) => Array.from({ length: count }, (_, index) => `owner-${index}`).join("\n");
-
-    const over = await postForm(SETTINGS, cookie, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "1",
-      owners: owners(ALLOWLIST_MAX_OWNERS + 1),
-    });
-    expect(over.status).toBe(400);
-    const overBody = (await over.json()) as { key: string };
-    expect(overBody.key).toBe("settings.error.allowlistTooManyOwners");
-    expect(gateRow(db, app.id)).toEqual(before);
-    expect(ownerLogins(db, app.id)).toEqual(["ada"]);
-
-    // Exactly the cap is still accepted: the bound is the batch size, not a
-    // rounding-down of the operator's list.
-    const atCap = await postForm(SETTINGS, cookie, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "1",
-      owners: owners(ALLOWLIST_MAX_OWNERS),
-    });
-    expect(atCap.status).toBe(200);
-    expect(ownerLogins(db, app.id)).toHaveLength(ALLOWLIST_MAX_OWNERS);
-  });
-
-  test("save-allowlist: an entry that is not a GitHub login → keyed 400 naming it, zero writes", async () => {
-    const { db, app } = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "1", owners: "ada" });
-    const before = gateRow(db, app.id);
-    // A leading @, a comma-joined pair, a login past GitHub's 39-char limit and
-    // the hyphen placements GitHub forbids (leading, trailing, doubled) can
-    // never match a real owner: each is refused by name.
-    for (const bad of ["@acme", "acme, otherco", "a".repeat(40), "-acme", "acme-", "a--b"]) {
-      const res = await postForm(SETTINGS, cookie, makeEnv(db), {
-        op: "save-allowlist",
-        enabled: "1",
-        owners: bad,
-      });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { key: string; params: { owner: string } };
-      expect(body.key).toBe("settings.error.allowlistInvalidOwner");
-      expect(body.params.owner).toBe(bad);
-      expect(gateRow(db, app.id)).toEqual(before);
-      expect(ownerLogins(db, app.id)).toEqual(["ada"]);
-    }
-  });
-
-  test("save-allowlist ON probes visibility first, so a stale cached private cannot leave the gate inert", async () => {
-    const { db, app } = await seededWorld();
-    rawRun(db, "UPDATE review_bots SET github_visibility = 'private' WHERE id = ?", app.id);
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-allowlist", enabled: "1", owners: "ada" });
-    expect(res.status).toBe(200);
-    // The 200 stub answer replaced the stale 'private': admission now applies.
-    expect(visibilityRow(db, app.id)).toBe("public");
-
-    // An inconclusive probe (503) is a no-answer: the stored value stands,
-    // exactly like the metadata-refresh path — admission never reads it, so
-    // there is nothing to invalidate.
-    fetchSpy.mockImplementation((async () => new Response("{}", { status: 503 })) as unknown as typeof fetch);
-    const inconclusive = await postForm(SETTINGS, cookie, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "1",
-      owners: "ada",
-    });
-    expect(inconclusive.status).toBe(200);
-    expect(visibilityRow(db, app.id)).toBe("public");
-
-    // An App with no slug has nothing to probe and nothing to invalidate: the
-    // save skips both the probe and the cache write, so the stored value
-    // stands instead of being overwritten.
-    rawRun(db, "UPDATE review_bots SET github_slug = NULL, github_visibility = 'public' WHERE id = ?", app.id);
-    fetchSpy.mockClear();
-    const slugless = await postForm(SETTINGS, cookie, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "1",
-      owners: "ada",
-    });
-    expect(slugless.status).toBe(200);
-    expect(visibilityRow(db, app.id)).toBe("public");
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  test("save-allowlist ON: the notice states enforcement, and says a private App keeps the control", async () => {
-    const { db, app } = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const publicSave = await postForm(SETTINGS, cookie, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "1",
-      owners: "ada\nalice",
-    });
-    expect(publicSave.status).toBe(200);
-    // Admission applies whatever the cached visibility, so a public App gets
-    // the plain enforcement sentence and no hidden-control caveat.
-    expect(await publicSave.text()).toBe(
-      "Saved the owner allowlist for mallorys-app — 2 owners accepted; every other owner is refused.",
-    );
-
-    // The probe proves this App private: the stored list still applies, and
-    // the Settings control stays visible for exactly that reason.
-    fetchSpy.mockImplementation((async () => new Response("{}", { status: 404 })) as unknown as typeof fetch);
-    const privateSave = await postForm(SETTINGS, cookie, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "1",
-      owners: "ada",
-    });
-    expect(privateSave.status).toBe(200);
-    expect(visibilityRow(db, app.id)).toBe("private");
-    expect(await privateSave.text()).toBe(
-      "Saved the owner allowlist for mallorys-app — 1 owner accepted; every other owner is refused. " +
-        "This App is private, but the stored list still applies to its deliveries — the control stays visible so you can manage it.",
-    );
-
-    // Switched off: neither caveat applies.
-    const off = await postForm(SETTINGS, cookie, makeEnv(db), {
-      op: "save-allowlist",
-      enabled: "0",
-      owners: "ada",
-    });
-    expect(off.status).toBe(200);
-    expect(await off.text()).toBe(
-      "Saved the owner allowlist for mallorys-app — switched off; every owner is reviewed as before.",
-    );
-  });
 });
 
 describe("POST /dashboard/default/apps/:appId/settings — add-key (op=add-key)", () => {

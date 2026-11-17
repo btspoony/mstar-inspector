@@ -9,7 +9,6 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
-import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../../src/spa/post-form-headers";
 import type { Env } from "../../src/worker/env";
 import { createTestD1, execMigrationScript } from "../store/helpers";
 
@@ -31,6 +30,9 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0023_removed_logins.sql",
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
+    // 0040: every /dashboard request reads the maintenance window through the
+    // gate, so the settings table must exist (an unreadable window fails closed).
+    "0040_runtime_config.sql",
     // 0028: the SPA boot reads pending invites.
     "0028_workspace_invites.sql",
     // 0036: github_apps.slug → webhook_path plus the cached github_slug.
@@ -58,10 +60,9 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0017_app_model_chains.sql",
     "0024_provider_multi_key.sql",
     "0025_provider_model_evidence.sql",
-    // The review configuration moves onto `review_targets`: the pause/resume
-    // routes write the target, so the fixture needs the installation stamp
-    // (0055), the review depth column (0047) and the claim table (0048) that
-    // 0057 rewrites.
+    // The review configuration lives on `review_targets`, so the fixture needs
+    // the installation stamp (0055), the review depth column (0047) and the
+    // claim table (0048) that 0057 rewrites.
     "0055_app_installations_removed_at.sql",
     "0047_review_level_per_app.sql",
     "0048_comment_trigger_claims.sql",
@@ -137,90 +138,6 @@ async function postMutation(
 }
 
 describe("POST mutation Accept routing (QC W-2)", () => {
-  test("default Accept keeps plain-text ok for SPA fetch-style POST", async () => {
-    const db = createD1();
-    await seed(db);
-    const env = makeEnv(db);
-    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-  });
-
-  test("Accept: text/html redirects to /dashboard for apps actions", async () => {
-    const db = createD1();
-    await seed(db);
-    const env = makeEnv(db);
-    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
-      Accept: "text/html",
-    });
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard");
-  });
-
-  test("SPA postForm marker keeps plain-text even with Accept: text/html", async () => {
-    const db = createD1();
-    await seed(db);
-    const env = makeEnv(db);
-    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
-      Accept: "text/html",
-      [SPA_POST_FORM_HEADER]: SPA_POST_FORM_VALUE,
-    });
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-  });
-
-  test("HTML-nav pause from a target Referer redirects to the target URL", async () => {
-    const db = createD1();
-    await seed(db);
-    const env = makeEnv(db);
-    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
-      Accept: "text/html",
-      Referer: `https://worker.local/dashboard/default/targets/${DEMO_APP_ID}`,
-    });
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${DEMO_APP_ID}`);
-  });
-
-  test("HTML-nav resume from a target Referer redirects to the target URL", async () => {
-    const db = createD1();
-    await seed(db);
-    const env = makeEnv(db);
-    const cookieHeader = await cookie("octocat");
-    const paused = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, cookieHeader);
-    expect(paused.status).toBe(200);
-    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/resume`, env, cookieHeader, {
-      Accept: "text/html",
-      Referer: `https://worker.local/dashboard/default/targets/${DEMO_APP_ID}`,
-    });
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${DEMO_APP_ID}`);
-  });
-
-  test("HTML-nav pause with apps-list Referer redirects to the workspace Apps list", async () => {
-    const db = createD1();
-    await seed(db);
-    const env = makeEnv(db);
-    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
-      Accept: "text/html",
-      Referer: "https://worker.local/dashboard/default/apps",
-    });
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
-  });
-
-  test("SPA fetch pause with settings Referer keeps plain-text", async () => {
-    const db = createD1();
-    await seed(db);
-    const env = makeEnv(db);
-    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
-      Accept: "text/html",
-      Referer: `https://worker.local/dashboard/default/apps/${DEMO_APP_ID}/settings`,
-      [SPA_POST_FORM_HEADER]: SPA_POST_FORM_VALUE,
-    });
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-  });
-
   test("settings POST with Accept: text/html redirects to the target URL", async () => {
     const db = createD1();
     await seed(db);

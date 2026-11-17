@@ -31,7 +31,10 @@
  * `{ concurrency, degraded }` for the same reason: a settings face that renders
  * the conservative fallback as a normal value invites a save of a number
  * nobody stored. The structured warn belongs
- * to the consumer that has a logger (the pipeline reader), not here.
+ * to the consumer that has a logger (the pipeline reader), not here — with one
+ * exception: the maintenance reader logs its own `maintenance_read_failed`
+ * line, because a gate cannot tell a read fault from an open window and would
+ * otherwise fail open.
  *
  * Check budgets (spec §7.10) are the same table, global rather than
  * per-workspace: `review.check.terminalize_timeout_ms` (the consumer's wait on
@@ -60,12 +63,16 @@
  * value off the vocabulary is untrusted — the default with `degraded: true`,
  * never a throw, because a review must still run.
  *
- * The official workspace is the one non-`review.` key: `platform.*` is a domain
- * of the same table because the designation is a global platform parameter, not
- * a switch and not a tenant column. `RUNTIME_SETTING_DOMAINS` is the registry
+ * The official workspace and maintenance mode are the non-`review.` keys:
+ * `platform.*` is a domain of the same table because both are global platform
+ * parameters, not per-tenant columns. `RUNTIME_SETTING_DOMAINS` is the registry
  * that keeps that honest — the table is the platform's parameter store whose
  * keys group by domain prefix, and a future rename is a mechanical migration,
- * not a behaviour change.
+ * not a behaviour change. Maintenance mode is three rows
+ * (`platform.maintenance.enabled|reason|since`) read in ONE statement: an
+ * absent `enabled` row is off, and the toggle DELETEs reason/since rather than
+ * blanking them, so an absent companion is the one "no reason" / "not running"
+ * shape there is.
  *
  * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
  * (the platform-wide quota; Cloudflare Queues delivers at most 250 of it at
@@ -84,8 +91,6 @@
  */
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import {
-  CHECK_MIN_SCORE_MAX,
-  CHECK_MIN_SCORE_MIN,
   DEFAULT_CHECK_MIN_SCORE,
   isCheckMinScoreValue,
 } from "../contracts/review-gate";
@@ -551,62 +556,6 @@ export async function getWorkspaceCheckMinScore(
   }
 }
 
-/**
- * The ledger's `before` is the floor the workspace was actually RUNNING: a
- * trusted integer records itself, while the absent state and every untrusted
- * value record `null` — the concurrency audit's absent-state convention. The
- * reader answers an untrusted value with the platform default flagged
- * `degraded` and never seeds it, so naming that default would attribute a
- * floor nothing ran with.
- * `real` needs no branch: the column's INTEGER affinity plus the CAST CHECK
- * stores an integral REAL as an integer, so that state cannot occur.
- */
-const workspaceCheckMinScoreAuditSql = (value: string) => `CASE
-      WHEN typeof(${value}) = 'integer' AND ${value} BETWEEN ${CHECK_MIN_SCORE_MIN} AND ${CHECK_MIN_SCORE_MAX}
-        THEN ${value}
-      ELSE NULL END`;
-
-const WORKSPACE_CHECK_MIN_SCORE_AUDIT_SQL = `
-  INSERT INTO platform_audit_events
-    (id, actor_login, action, target_type, target_id, detail_json, created_at)
-  SELECT ?1, ?2, 'workspace.check_min_score.set', 'workspace', ?3,
-         json_object('before', (SELECT ${workspaceCheckMinScoreAuditSql("check_min_score")}
-                                  FROM workspaces WHERE id = ?3),
-                     'after', ?4),
-         ?5
-   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
-
-const WORKSPACE_CHECK_MIN_SCORE_UPDATE_SQL = `
-  UPDATE workspaces SET check_min_score = ?2
-   WHERE id = ?1 AND deleted_at IS NULL`;
-
-/**
- * Set the workspace's default floor for new Apps. Existing Apps keep their own
- * stored value — this is a default, not a backfill. Audited and refused for an
- * unknown workspace, the same shape as the concurrency write.
- */
-export async function setWorkspaceCheckMinScore(
-  db: DashboardD1,
-  workspaceId: string,
-  value: number,
-  actor: string,
-): Promise<number> {
-  if (!isCheckMinScoreValue(value)) {
-    throw new RuntimeConfigError(
-      "invalid_value",
-      `check_min_score must be an integer in ${CHECK_MIN_SCORE_MIN}..${CHECK_MIN_SCORE_MAX}`,
-    );
-  }
-  const now = new Date().toISOString();
-  const [, update] = await db.batch([
-    db
-      .prepare(WORKSPACE_CHECK_MIN_SCORE_AUDIT_SQL)
-      .bind(crypto.randomUUID(), actor, workspaceId, value, now),
-    db.prepare(WORKSPACE_CHECK_MIN_SCORE_UPDATE_SQL).bind(workspaceId, value),
-  ]);
-  if (update?.meta.changes === 1) return value;
-  throw new UnknownWorkspaceError(workspaceId);
-}
 
 /** A refused write against a workspace id that does not exist. */
 export class UnknownWorkspaceError extends RuntimeConfigError {
@@ -1172,4 +1121,129 @@ export async function setOfficialWorkspace(
   ]);
   if ((upsert?.meta.changes ?? 0) === 0) throw new UnknownWorkspaceError(workspaceId);
   return id;
+}
+
+/** The maintenance toggle: `'1'` while the platform is closed, `'0'` otherwise. */
+export const MAINTENANCE_ENABLED_KEY = "platform.maintenance.enabled";
+/** Why it is closed, as the Operator typed it. Absent = no reason given. */
+export const MAINTENANCE_REASON_KEY = "platform.maintenance.reason";
+/** When it closed, ISO-8601 UTC. Absent = never closed. */
+export const MAINTENANCE_SINCE_KEY = "platform.maintenance.since";
+/** The audit ledger's target id for the trio (one operator save, one row). */
+const MAINTENANCE_TARGET = "platform.maintenance";
+
+/**
+ * Whether the platform is closed, and the window it was closed in.
+ *
+ * `unreadable` is the third state: the read failed, so nobody knows whether the
+ * window is open. `enabled` stays `false` (nothing stated a close), but every
+ * gate treats this as CLOSED — the window is the only fence around the
+ * destructive backfill, and an unknowable fence is not an open one.
+ */
+export type MaintenanceMode = {
+  enabled: boolean;
+  reason: string | null;
+  since: string | null;
+  unreadable: boolean;
+};
+
+/**
+ * The one predicate every traffic gate asks: is the platform closed? An
+ * unreadable window counts as closed, so the backfill's only fence never
+ * disappears because a settings read broke.
+ */
+export function maintenanceClosed(mode: MaintenanceMode): boolean {
+  return mode.enabled || mode.unreadable;
+}
+
+/**
+ * The maintenance window in ONE statement. Only an ABSENT `enabled` row is the
+ * documented default — off. `reason` / `since` describe a running window only,
+ * and the writer deletes both on disable, so a closed platform carries neither.
+ *
+ * It never throws, and it does not answer OPEN on a fault either: a read error
+ * answers `unreadable: true` (with `enabled: false`) and logs one
+ * `maintenance_read_failed` line, leaving the fail-closed decision to the gate.
+ * Answering "open" here would let a settings outage unlock traffic mid-backfill
+ * — the one thing the window exists to prevent.
+ */
+export async function getMaintenanceMode(db: DashboardD1): Promise<MaintenanceMode> {
+  try {
+    const rows = await db
+      .prepare("SELECT key, value FROM review_runtime_settings WHERE key IN (?1, ?2, ?3)")
+      .bind(MAINTENANCE_ENABLED_KEY, MAINTENANCE_REASON_KEY, MAINTENANCE_SINCE_KEY)
+      .all<{ key: string; value: string }>();
+    const stored = new Map(rows.results.map((row) => [row.key, row.value]));
+    return {
+      enabled: stored.get(MAINTENANCE_ENABLED_KEY) === "1",
+      reason: stored.get(MAINTENANCE_REASON_KEY) ?? null,
+      since: stored.get(MAINTENANCE_SINCE_KEY) ?? null,
+      unreadable: false,
+    };
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "maintenance_read_failed",
+        detail: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return { enabled: false, reason: null, since: null, unreadable: true };
+  }
+}
+
+/**
+ * One operator save, one audit row, in ONE batch. `before` reads the three
+ * rows as the getter would state them, `after` is the accepted window.
+ */
+const MAINTENANCE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'platform.maintenance.set', 'runtime', '${MAINTENANCE_TARGET}',
+          json_object('before', json_object(
+                      'enabled', json(CASE WHEN (SELECT value FROM review_runtime_settings
+                                                  WHERE key = '${MAINTENANCE_ENABLED_KEY}') = '1'
+                                          THEN 'true' ELSE 'false' END),
+                      'reason', (SELECT value FROM review_runtime_settings
+                                  WHERE key = '${MAINTENANCE_REASON_KEY}'),
+                      'since', (SELECT value FROM review_runtime_settings
+                                 WHERE key = '${MAINTENANCE_SINCE_KEY}')),
+                      'after', json_object('enabled', json(?3), 'reason', ?4, 'since', ?5)),
+          ?6)`;
+
+const MAINTENANCE_CLEAR_SQL = "DELETE FROM review_runtime_settings WHERE key = ?1";
+
+/**
+ * Open or close the maintenance window. Enabling stamps `since` with `now` and
+ * keeps `reason` when one was given; disabling DELETEs both, so a closed
+ * platform never carries a stale window into the next one. A blank reason is
+ * no reason. The flag, its two companions and the audit row share one batch:
+ * the caller's actor names the save, and a write error appends nothing.
+ */
+export async function setMaintenanceMode(
+  db: DashboardD1,
+  input: { enabled: boolean; reason?: string | null; actor: string },
+  now: string,
+): Promise<void> {
+  const { enabled, actor } = input;
+  const reason = enabled ? (input.reason?.trim() || null) : null;
+  /** Upsert a value, or DELETE the row when there is none to state. */
+  const put = (key: string, value: string | null) =>
+    value === null
+      ? db.prepare(MAINTENANCE_CLEAR_SQL).bind(key)
+      : db.prepare(SYSTEM_UPSERT_SQL).bind(key, value, now, actor);
+  await db.batch([
+    db
+      .prepare(MAINTENANCE_AUDIT_SQL)
+      .bind(
+        crypto.randomUUID(),
+        actor,
+        enabled ? "true" : "false",
+        reason,
+        enabled ? now : null,
+        now,
+      ),
+    put(MAINTENANCE_ENABLED_KEY, enabled ? "1" : "0"),
+    put(MAINTENANCE_SINCE_KEY, enabled ? now : null),
+    put(MAINTENANCE_REASON_KEY, reason),
+  ]);
 }

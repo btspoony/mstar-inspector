@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft } from "lucide-react";
+import { useState } from "react";
 import { t } from "../../i18n";
 import {
   Button,
@@ -13,13 +12,9 @@ import {
   FlowSection,
   StatusBadge,
 } from "@design-system";
-import { PageHeader } from "@/components/PageHeader";
-import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
-import { ErrorState } from "../components/state/ErrorState";
-import { PageSkeleton } from "../components/state/PageSkeleton";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
-import { fetchJson, postForm } from "../api";
+import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
 import { formatRelativeTime } from "../relative-time";
@@ -27,8 +22,6 @@ import {
   appDisplayName,
   configuredKeySlot,
   modelChainTabs,
-  parseBotSettings,
-  parseModels,
   splitModelChain,
   type BotConfigSections,
   type BotSettingsPayload,
@@ -47,125 +40,16 @@ import {
 import { ProvidersSection } from "./settings-providers";
 
 /**
- * The bot settings page (`/dashboard/apps/:appId/bot`): the bot-owned
- * configuration — credentials health, provider keys, model chains, seats,
- * sandbox image, installations. The workspace-owned review policy (identity,
- * trigger, depth, gate, allowlist, pause) stays on the target detail, which
- * links here.
+ * The bot-owned configuration: credentials health, provider keys, model
+ * chains, seats, sandbox image. The App detail's 应用设置 tab composes it under
+ * the App's identity header and its ops zone, so this module holds the
+ * sections and their write pipeline and owns no page of its own (the retired
+ * `/bot` page is a redirect to that tab).
  *
- * `can_manage` is the page's ONLY permission bit, and the server computes it
- * for BOT-scoped writes: a `shared` bot reads as `false` whatever the caller's
- * workspace role is, so the sections render non-editable and the bot-scoped
- * POST family refuses the write the page would otherwise offer. Every write
- * below rides that existing family — this page adds no route of its own.
- */
-export function BotSettingsPage({ boot, appId }: { boot: SpaBoot; appId: string }) {
-  const locale = boot.locale;
-  const base = apiBase();
-  const [payload, setPayload] = useState<BotSettingsPayload | null>(null);
-  const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
-  const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
-  const cancelledRef = useRef(false);
-
-  const load = useCallback(
-    async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
-      if (!background) setState("loading");
-      try {
-        const parsed = parseBotSettings(
-          await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/bot`),
-        );
-        if (!parsed) {
-          if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
-          else setState("error");
-          return false;
-        }
-        let modelGroups: ModelOptionGroup[] = [];
-        if (parsed.can_manage) {
-          try {
-            modelGroups =
-              parseModels(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/models`))?.groups ?? [];
-          } catch {
-            modelGroups = [];
-          }
-        }
-        if (cancelledRef.current) return false;
-        setPayload(parsed);
-        setGroups(modelGroups);
-        setState("ok");
-        setNotice(null);
-        return true;
-      } catch {
-        if (!cancelledRef.current) {
-          if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
-          else setState("error");
-        }
-        return false;
-      }
-    },
-    [base, appId, locale],
-  );
-
-  useEffect(() => {
-    cancelledRef.current = false;
-    void load();
-    return () => {
-      cancelledRef.current = true;
-    };
-  }, [load]);
-
-  // Wayfinding returns to the target detail the bot page was opened from —
-  // that page owns everything this page does not configure.
-  const detailHref = `${base}/targets/${encodeURIComponent(appId)}`;
-  return (
-    <BotSettingsShell locale={locale} detailHref={detailHref}>
-      {state === "loading" ? <PageSkeleton locale={locale} kind="forms" /> : null}
-      {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
-      {state === "ok" && payload ? (
-        <BotSettingsView
-          locale={locale}
-          payload={payload}
-          groups={groups}
-          notice={notice}
-          onReload={load}
-        />
-      ) : null}
-    </BotSettingsShell>
-  );
-}
-
-/**
- * Wayfinding back to the target detail plus the page face. A separate
- * component so the rendered shell — link target included — is assertable
- * without a DOM runner.
- */
-export function BotSettingsShell({
-  locale,
-  detailHref,
-  children,
-}: {
-  locale: SpaBoot["locale"];
-  detailHref: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-6">
-      <a
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-        href={detailHref}
-      >
-        <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
-        {t(locale, "botSettings.backToDetail")}
-      </a>
-      {children}
-    </div>
-  );
-}
-
-/**
- * The page face — pure `t()` + data rendering, no window/router access, so the
- * tests can static-render it. A manager gets the editable sections; every other
- * caller (and every caller of a shared bot) gets the same values read-only.
+ * `payload.can_manage` is the BOT-scoped permission bit: a `shared` bot reads
+ * as `false` whatever the caller's workspace role is, so the sections render
+ * non-editable and the bot-scoped POST family refuses the write the face would
+ * otherwise offer. Every write below rides that existing family.
  */
 export function BotSettingsView({
   locale,
@@ -292,17 +176,15 @@ export function BotSettingsView({
 
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader
-        title={appDisplayName(app)}
-        description={t(locale, "botSettings.subtitle")}
-        actions={
+      {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
+      {payload.can_manage ? null : (
+        <div className="flex flex-col gap-2">
+          <PageNotice kind="warn" message={t(locale, "botSettings.readOnly")} />
           <StatusBadge tone={app.scope === "shared" ? "neutral" : "success"}>
             {t(locale, app.scope === "shared" ? "botSettings.scopeShared" : "botSettings.scopeOwned")}
           </StatusBadge>
-        }
-      />
-      {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-      {payload.can_manage ? null : <PageNotice kind="warn" message={t(locale, "botSettings.readOnly")} />}
+        </div>
+      )}
       <div className="flex flex-col">
         <BotHealthSection locale={locale} payload={payload} />
         <SandboxSection locale={locale} payload={payload} onSettings={submitSettings} />
@@ -337,7 +219,6 @@ export function BotSettingsView({
             <BotSeatsSummary locale={locale} payload={payload} />
           </>
         )}
-        <BotInstallationsSection locale={locale} payload={payload} />
       </div>
       <Dialog
         open={pending !== null}
@@ -533,51 +414,3 @@ export function BotSeatsSummary({ locale, payload }: { locale: SpaBoot["locale"]
   );
 }
 
-/**
- * The bot's GitHub installations. The availability judgement against an owner
- * allowlist belongs to the target, whose allowlist section renders it.
- */
-export function BotInstallationsSection({
-  locale,
-  payload,
-}: {
-  locale: SpaBoot["locale"];
-  payload: BotConfigSections;
-}) {
-  const columns: DataTableColumn<BotConfigSections["installations"][number]>[] = [
-    {
-      header: t(locale, "settings.installationsAccount"),
-      cell: (inst) => inst.account_login ?? t(locale, "common.time.unknown"),
-    },
-    {
-      header: t(locale, "settings.installationsId"),
-      cell: (inst) => <span className="font-mono tabular-nums">{inst.installation_id}</span>,
-    },
-    {
-      header: t(locale, "settings.installationsLastSync"),
-      cell: (inst) => (
-        <span className="text-muted-foreground tabular-nums">
-          {formatRelativeTime(inst.seen_at, locale)}
-        </span>
-      ),
-    },
-  ];
-
-  return (
-    <FlowSection
-      title={t(locale, "settings.installations")}
-      subtitle={t(
-        locale,
-        payload.installations.length === 1 ? "settings.installationsCountOne" : "settings.installationsCount",
-        { count: payload.installations.length },
-      )}
-    >
-      <DataTable
-        columns={columns}
-        rows={payload.installations}
-        rowKey={(inst) => String(inst.installation_id)}
-        empty={<p className="text-sm text-muted-foreground">{t(locale, "settings.noInstallations")}</p>}
-      />
-    </FlowSection>
-  );
-}

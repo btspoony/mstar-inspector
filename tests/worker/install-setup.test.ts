@@ -13,8 +13,9 @@
  *   - 0 live claims bind nothing, 1 binds and consumes exactly that claim,
  *     N bind nothing and list every claim with a confirming form;
  *   - the confirming `POST` binds the named claim and leaves the other live;
- *   - refusals name their reason: a second target of an already bound
- *     installation, and a bot that was unshared between claim and callback.
+ *   - a claim names the APP (migration 0067 / D19): the bind writes
+ *     `bot_installations` and never `review_targets`;
+ *   - the refusal names its reason: a bot unshared between claim and callback.
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -47,13 +48,11 @@ function makeEnv(db: TestD1, overrides: Partial<Env> = {}): Env {
 type World = {
   db: TestD1;
   botId: string;
-  /** The bot's first target — the one a single claim names. */
-  targetId: string;
   userId: string;
   store: ReturnType<typeof createInstallClaimsStore>;
 };
 
-/** One shared bot with one unbound target, its slug, and a signed-in user. */
+/** One shared bot, its slug, and a signed-in user. */
 async function seededWorld(): Promise<World> {
   const db = createMigratedTestD1();
   const botId = "bot-setup";
@@ -68,34 +67,34 @@ async function seededWorld(): Promise<World> {
     workspaceId: WS,
   });
   db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(botId);
-  const targetRow = db.raw.query("SELECT id FROM review_targets WHERE bot_id = ?").get(botId);
-  if (targetRow === null || typeof targetRow !== "object" || !("id" in targetRow) || typeof targetRow.id !== "string") {
-    throw new Error(`createApp wrote no target for ${botId}`);
-  }
-  const targetId = targetRow.id;
+  // No target is minted at setup (0067/D19): a claim names the App, and the
+  // repositories a manager adds are the targets.
   const userId = (await createUser(db, { login: LOGIN, role: "member" })).id;
-  return { db, botId, targetId, userId, store: createInstallClaimsStore(db) };
+  return { db, botId, userId, store: createInstallClaimsStore(db) };
 }
 
-/** A second live target of the same bot (the "same installation, two targets" fixture). */
-function addTarget(db: TestD1, botId: string, installationId: number | null = null): string {
-  const id = `second-${crypto.randomUUID()}`;
-  db.raw
-    .prepare(
-      `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, installation_id, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'acme', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
-    )
-    .run(id, WS, botId, id, installationId);
+/** A second shared bot — the fixture for "N live claims" (one per bot). */
+async function addBot(world: World, id: string): Promise<string> {
+  await createReviewBotsStore(world.db).createApp({
+    id,
+    githubAppId: 8102,
+    githubSlug: id,
+    name: id,
+    privateKeyEnc: "enc",
+    webhookSecretEnc: "enc",
+    createdBy: "acme",
+    workspaceId: WS,
+  });
+  world.db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(id);
   return id;
 }
 
-/** A live claim on `targetId` for the seeded user, through the shipped store. */
-async function claimFor(world: World, targetId: string): Promise<{ id: string; expiresAt: string }> {
+/** A live claim on `botId` for the seeded user, through the shipped store. */
+async function claimFor(world: World, botId: string): Promise<{ id: string; expiresAt: string }> {
   return world.store.createOrRefreshClaim({
     userId: world.userId,
     workspaceId: WS,
-    targetId,
+    botId,
     now: new Date().toISOString(),
   });
 }
@@ -143,12 +142,13 @@ function installationCount(db: TestD1): number {
   return row.n;
 }
 
-function targetBinding(db: TestD1, targetId: string): { installation_id: number | null } {
-  const row = db.raw.query("SELECT installation_id FROM review_targets WHERE id = ?").get(targetId) as {
-    installation_id: number | null;
-  } | null;
-  if (row === null) throw new Error(`review target ${targetId} is missing`);
-  return row;
+/** The bot's live installation ids — the only thing the bind writes. */
+function installedIds(db: TestD1, botId: string): number[] {
+  return (
+    db.raw
+      .query("SELECT installation_id FROM bot_installations WHERE bot_id = ? AND removed_at IS NULL")
+      .all(botId) as Array<{ installation_id: number }>
+  ).map((row) => row.installation_id);
 }
 
 describe("GET /bot/setup validation", () => {
@@ -189,11 +189,11 @@ describe("GET /bot/setup validation", () => {
   });
 
   test("no session cookie answers 401 unauthenticated and writes nothing", async () => {
-    const { db, targetId, store, userId } = await seededWorld();
+    const { db, botId, store, userId } = await seededWorld();
     const claim = await store.createOrRefreshClaim({
       userId,
       workspaceId: WS,
-      targetId,
+      botId,
       now: new Date().toISOString(),
     });
     const res = await setupGet(makeEnv(db), `installation_id=${INSTALLATION}&setup_action=install`, null);
@@ -205,7 +205,6 @@ describe("GET /bot/setup validation", () => {
     // The claim survives, so signing in and pressing install again converges.
     expect(claimRow(db, claim.id)?.consumed_at).toBeNull();
     expect(installationCount(db)).toBe(0);
-    expect(targetBinding(db, targetId).installation_id).toBeNull();
   });
 
   test("a valid session whose login has no users row answers 401 and writes nothing", async () => {
@@ -235,11 +234,11 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
   });
 
   test("one live claim renders the confirm page and binds nothing", async () => {
-    const { db, targetId, store, userId } = await seededWorld();
+    const { db, botId, store, userId } = await seededWorld();
     const claim = await store.createOrRefreshClaim({
       userId,
       workspaceId: WS,
-      targetId,
+      botId,
       now: new Date().toISOString(),
     });
     const res = await setupGet(makeEnv(db), `installation_id=${INSTALLATION}&setup_action=install`);
@@ -247,13 +246,12 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     // The GET never binds: it shows the installation it was told about, the
-    // target the claim names, and one form the user has to submit.
+    // APP the claim names, and one form the user has to submit.
     expect(body).toContain("confirm_required");
     expect(body).toContain(String(INSTALLATION));
-    expect(body).toContain(targetId);
+    expect(body).toContain(botId);
     expect(body).toContain(`value="${claim.id}"`);
     expect(claimRow(db, claim.id)?.consumed_at).toBeNull();
-    expect(targetBinding(db, targetId).installation_id).toBeNull();
     expect(installationCount(db)).toBe(0);
   });
 
@@ -261,11 +259,11 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
     // The reviewer's scenario: a signed-in manager holding ONE live claim opens
     // a crafted link. The installation id is caller-supplied and unverified, so
     // the page must not act on it — it only shows it back.
-    const { db, targetId, store, userId } = await seededWorld();
+    const { db, botId, store, userId } = await seededWorld();
     const claim = await store.createOrRefreshClaim({
       userId,
       workspaceId: WS,
-      targetId,
+      botId,
       now: new Date().toISOString(),
     });
     const res = await setupGet(makeEnv(db), "installation_id=666&setup_action=install");
@@ -277,13 +275,12 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
     // Nothing was consumed, recorded or bound.
     expect(claimRow(db, claim.id)?.consumed_at).toBeNull();
     expect(installationCount(db)).toBe(0);
-    expect(targetBinding(db, targetId).installation_id).toBeNull();
   });
 
   test("two live claims bind nothing and list both for confirmation", async () => {
     const world = await seededWorld();
-    const second = addTarget(world.db, world.botId);
-    const firstClaim = await claimFor(world, world.targetId);
+    const second = await addBot(world, "bot-setup-second");
+    const firstClaim = await claimFor(world, world.botId);
     const secondClaim = await claimFor(world, second);
     const res = await setupGet(makeEnv(world.db), `installation_id=${INSTALLATION}&setup_action=install`);
 
@@ -306,12 +303,12 @@ describe("GET /bot/setup — zero, one and N live claims", () => {
 });
 
 describe("POST /bot/setup — the confirming action", () => {
-  test("confirming the single claim binds exactly that target and consumes it", async () => {
-    const { db, targetId, store, userId } = await seededWorld();
+  test("confirming the single claim records the installation on the app and consumes it", async () => {
+    const { db, botId, store, userId } = await seededWorld();
     const claim = await store.createOrRefreshClaim({
       userId,
       workspaceId: WS,
-      targetId,
+      botId,
       now: new Date().toISOString(),
     });
 
@@ -323,16 +320,17 @@ describe("POST /bot/setup — the confirming action", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("bound");
-    expect(body).toContain(targetId);
+    expect(body).toContain(botId);
     expect(claimRow(db, claim.id)?.consumed_at).not.toBeNull();
-    expect(targetBinding(db, targetId).installation_id).toBe(INSTALLATION);
-    expect(installationCount(db)).toBe(1);
+    expect(installedIds(db, botId)).toEqual([INSTALLATION]);
+    // The App's installation, never a target: setup mints no target row.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets").get()).toEqual({ n: 0 });
   });
 
   test("naming one of two claims binds it and leaves the other live", async () => {
     const world = await seededWorld();
-    const second = addTarget(world.db, world.botId);
-    const firstClaim = await claimFor(world, world.targetId);
+    const second = await addBot(world, "bot-setup-second");
+    const firstClaim = await claimFor(world, world.botId);
     const secondClaim = await claimFor(world, second);
 
     const res = await setupPost(makeEnv(world.db), {
@@ -342,16 +340,16 @@ describe("POST /bot/setup — the confirming action", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("bound");
-    expect(targetBinding(world.db, world.targetId).installation_id).toBe(INSTALLATION);
+    expect(installedIds(world.db, world.botId)).toEqual([INSTALLATION]);
+    expect(installedIds(world.db, second)).toEqual([]);
     expect(claimRow(world.db, firstClaim.id)?.consumed_at).not.toBeNull();
     expect(claimRow(world.db, secondClaim.id)?.consumed_at).toBeNull();
-    expect(targetBinding(world.db, second).installation_id).toBeNull();
   });
 
   test("a cross-user or unknown claim answers 404 claim not found and writes nothing", async () => {
     const world = await seededWorld();
     await createUser(world.db, { login: "trudy", role: "member" });
-    const claim = await claimFor(world, world.targetId);
+    const claim = await claimFor(world, world.botId);
 
     const unknown = await setupPost(makeEnv(world.db), {
       installation_id: String(INSTALLATION),
@@ -372,31 +370,37 @@ describe("POST /bot/setup — the confirming action", () => {
     expect(installationCount(world.db)).toBe(0);
   });
 
-  test("a second claim of an already bound installation answers 409 installation already bound", async () => {
+  test("claiming the app again for a known installation is a converging reinstall", async () => {
     const world = await seededWorld();
-    // The first target already holds this installation; the new claim names a
-    // second target, so the bind would collide on the target partial index.
+    // The webhook recorded the installation first; a second claim of the same
+    // app for the same installation must converge instead of stacking rows.
     world.db.raw
-      .prepare("UPDATE review_targets SET installation_id = ? WHERE id = ?")
-      .run(INSTALLATION, world.targetId);
-    const second = addTarget(world.db, world.botId);
-    const claim = await claimFor(world, second);
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+         VALUES ('install-known', ?, ?, 'acme', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')`,
+      )
+      .run(world.botId, INSTALLATION);
+    const claim = await claimFor(world, world.botId);
 
     const res = await setupPost(makeEnv(world.db), {
       installation_id: String(INSTALLATION),
       claim_id: claim.id,
     });
 
-    expect(res.status).toBe(409);
-    expect(await res.text()).toBe("installation already bound");
-    // The batch rolled back: the claim is still live for another attempt.
-    expect(claimRow(world.db, claim.id)?.consumed_at).toBeNull();
-    expect(targetBinding(world.db, second).installation_id).toBeNull();
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("bound");
+    expect(installedIds(world.db, world.botId)).toEqual([INSTALLATION]);
+    // The login the webhook recorded survives; the reinstall clears `removed_at`.
+    expect(
+      world.db.raw
+        .query("SELECT account_login, removed_at FROM bot_installations WHERE bot_id = ?")
+        .get(world.botId),
+    ).toEqual({ account_login: "acme", removed_at: null });
   });
 
   test("a bot unshared between claim and callback answers 409 bot is not shared and binds nothing", async () => {
     const world = await seededWorld();
-    const claim = await claimFor(world, world.targetId);
+    const claim = await claimFor(world, world.botId);
     world.db.raw.prepare("UPDATE review_bots SET scope = 'owned' WHERE id = ?").run(world.botId);
 
     const res = await setupPost(makeEnv(world.db), {

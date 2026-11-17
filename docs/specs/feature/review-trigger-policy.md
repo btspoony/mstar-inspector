@@ -2,16 +2,16 @@
 
 ## Scope
 
-Per-App automatic modes, the bare bot-mention trigger, durable per-comment claims, webhook body limits and membership revocation.
+Per-repository automatic modes with a workspace default, the bare bot-mention trigger, durable per-comment claims, webhook body limits and membership revocation.
 
 ## Current state
 ### 1. Product contract
 
-Each App chooses when reviews start:
+Each repository target runs with the trigger mode its effective settings answer — the workspace default unless the target overrides it:
 
 1. **`open`** — review a PR the first time it opens (the `opened` event only). New pushes and reopens never auto-trigger; a reviewer mentions the bot when they want another pass.
-2. **`every_push`** (default) — review on `opened`, `synchronize`, and `reopened`. This is the automatic behavior; the default preserves it exactly for human-authored PRs.
-3. **`manual`** — the App never auto-reviews. Only a bot mention starts a review.
+2. **`every_push`** (the workspace default) — review on `opened`, `synchronize`, and `reopened`. This is the automatic behavior, and the default preserves it exactly for human-authored PRs.
+3. **`manual`** — the target never auto-reviews. Only a bot mention starts a review.
 
 In every mode, a comment that @mentions the App's bot can (re-)start a review — on-demand re-run for auto modes, the only trigger for `manual`. This excludes PRs opened by a bot account (§2.1), which are never reviewed on either face.
 
@@ -21,11 +21,11 @@ The comment trigger is a **bare mention**: no slash command, no magic wording. `
 
 | Field | Contract |
 |---|---|
-| Storage | `review_targets.review_trigger_mode TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual'))` — moved there by `0057_review_targets.sql`; the bot row no longer holds it |
-| Scope | Per review target. No deployment-level override — the target's `review_enabled` (business pause) or the bot's (operational pause) governs every enqueue path alongside the platform `review_global` flag |
-| Default | `every_push` — new Apps inherit it via the column default; no old-App compatibility or migration UX |
-| Write path | Dashboard App settings (same API surface as the `review_enabled` toggle); an unknown/invalid mode value fails closed with the structured-400 pattern and the stored row is left unchanged — no silent coercion to the default |
-| Read path | The webhook face resolves the App row by workspace id and internal App id before classification and passes the mode (plus the row's cached `github_slug`) into classification — no second lookup, no TOCTOU window beyond the existing row read |
+| Storage | `review_targets.review_trigger_mode TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual'))` — moved there by `0057_review_targets.sql`; the bot row does not hold it, and the workspace default is `workspaces.default_review_trigger_mode` (`0067`) |
+| Scope | Per review target, which may inherit the workspace default (`follow_workspace_defaults`). No deployment-level override; the target's business pause or the bot's operational pause governs every enqueue path alongside the platform flag |
+| Default | the workspace default is `every_push` (`default_review_trigger_mode`); a new target is created inheriting it |
+| Write path | the repository detail's 评审配置 tab (`POST …/api/targets/:targetId`) and its 所有仓库 twin (`POST …/api/targets/defaults`), one validated body parser each; an off-vocabulary mode is a keyed 400 with nothing stored |
+| Read path | The webhook resolves the delivery's target by repository identity and passes that target's effective trigger mode (plus the bot row's cached `github_slug`) into classification — one defaults read per delivery, no second lookup |
 
 ### 2.1 Auto-trigger classification matrix
 
@@ -57,9 +57,9 @@ by a bot therefore reports the action reason, while an `opened` by a bot in
 - **Bare mention:** any position in the body; no required wording. Presence of the mention is the entire grammar — no natural-language interpretation (RL-7 discipline of [review lifecycle](review-lifecycle.md) is preserved).
 - **Authorization gate (extended by the bot-author exclusion):** `issue_comment.created` only; the comment must be on a PR thread; `sender.type === "Bot"` is ignored (self-comment loop guard); a PR whose author login ends in `[bot]` is ignored regardless of commenter; only the PR author or the repository owner may trigger; disallowed actors produce the existing structured warn.
 - **Guard order:** malformed payloads reject (400) before any author policy on both faces; the PR-thread gate and the bot/missing-author check then run before the mention grammar and the sender guard, so a bot-authored PR never surfaces the unsynced-App `mention_unresolved` diagnose (its reason is the author one, never the mention miss) — with or without a cached slug the outcome is the same ignore. A comment on a plain issue reports the not-a-PR reason rather than the mention miss, so it never emits that diagnose either.
-- **Enqueue semantics:** `head_sha = null`, per-App pause checked before enqueue, and a **durable per-comment claim**. The worker inserts one `comment_trigger_claims` row (`state='queued'`, the full payload, `attempts=0`) into D1 **before** the queue send, keyed by the primary key `(installation_id, owner, repo, pr_number, comment_id)`; a second delivery of the same comment — concurrent, or after the KV claim's 24h TTL lapsed — finds the row already present and is skipped (`duplicate comment trigger`). The KV key `idemc:{installation_id}:{owner}/{repo}:{pr_number}:{comment_id}` remains a 24h fast path only, never the proof. The pipeline consumes the row atomically before any expensive step (`UPDATE … SET state='consumed', consumed_ms=?, payload_json=NULL … WHERE … AND state='queued'`); `changes === 0` acks without running, which turns at-least-once queue delivery into at-most-once execution. A send failure deletes the row so GitHub's retry can claim again; a crash between insert and send is recovered by the cron sweep, which re-sends `queued` rows older than the retry window (bounded batch; the attempt cap flips a row to `expired`, clearing its payload too; the retry window, attempt cap and batch size are global runtime-config settings — `review.comment_claim.*`, absent-row defaults 300000 ms / 3 / 20 — written only through the operator `/runtime` surface, never source constants). A `consumed` row is never re-executed, even when the run failed: a comment-triggered review is re-run by posting a new comment (a new id). A terminal row is a permanent tombstone — payload cleared, scope keys + `state` + timestamps retained, never deleted, because deleting it would let a late redelivery of the same comment re-insert and execute. A payload whose `comment.id` is absent omits `ReviewJobPayload.comment_id` and enqueues unclaimed (fail-safe: a duplicate costs a review, never a lost one); a present-but-invalid id fails the existing malformed-payload gate with 400. The enqueued payload's `triggered_by` is `"issue_comment"`: the `ReviewJobPayload.triggered_by` wire union is `"pull_request" | "issue_comment"` and the `"review_command"` member is removed together with the command; the pipeline-side `review_failures` event label retires `"review_command"` with it.
+- **Enqueue semantics:** `head_sha = null`, the target's business pause and the bot's operational pause checked before enqueue, and a **durable per-comment claim**. The worker inserts one `comment_trigger_claims` row (`state='queued'`, the full payload, `attempts=0`) into D1 **before** the queue send, keyed by the primary key `(installation_id, owner, repo, pr_number, comment_id)`; a second delivery of the same comment — concurrent, or after the KV claim's 24h TTL lapsed — finds the row already present and is skipped (`duplicate comment trigger`). The KV key `idemc:{installation_id}:{owner}/{repo}:{pr_number}:{comment_id}` remains a 24h fast path only, never the proof. The pipeline consumes the row atomically before any expensive step (`UPDATE … SET state='consumed', consumed_ms=?, payload_json=NULL … WHERE … AND state='queued'`); `changes === 0` acks without running, which turns at-least-once queue delivery into at-most-once execution. A send failure deletes the row so GitHub's retry can claim again; a crash between insert and send is recovered by the cron sweep, which re-sends `queued` rows older than the retry window (bounded batch; the attempt cap flips a row to `expired`, clearing its payload too; the retry window, attempt cap and batch size are global runtime-config settings — `review.comment_claim.*`, absent-row defaults 300000 ms / 3 / 20 — written only through the operator `/runtime` surface, never source constants). A `consumed` row is never re-executed, even when the run failed: a comment-triggered review is re-run by posting a new comment (a new id). A terminal row is a permanent tombstone — payload cleared, scope keys + `state` + timestamps retained, never deleted, because deleting it would let a late redelivery of the same comment re-insert and execute. A payload whose `comment.id` is absent omits `ReviewJobPayload.comment_id` and enqueues unclaimed (fail-safe: a duplicate costs a review, never a lost one); a present-but-invalid id fails the existing malformed-payload gate with 400. The enqueued payload's `triggered_by` is `"issue_comment"`: the `ReviewJobPayload.triggered_by` wire union is `"pull_request" | "issue_comment"` and the `"review_command"` member is removed together with the command; the pipeline-side `review_failures` event label retires `"review_command"` with it.
 - **Retirement:** the `/review` prefix constant, its grammar, its tests, and any documentation of it are removed. No compatibility alias, no deprecation window (development-stage clean new-App contract).
-- **Operator visibility:** the App settings page displays the exact mention string built from the cached `github_slug` (the bare `@{github_slug}` form; a trailing `[bot]` is accepted by the matcher but never required), so operators know what to type; while the cache is NULL the page renders no mention at all rather than a placeholder. The authorization and grammar clauses above are unchanged by this cache — only the source of the slug name is.
+- **Operator visibility:** the application detail's 应用设置 tab displays the exact mention string built from the cached `github_slug` (the bare `@{github_slug}` form; a trailing `[bot]` is accepted by the matcher but never required), so operators know what to type; while the cache is NULL the page renders no mention at all rather than a placeholder. The authorization and grammar clauses above are unchanged by this cache — only the source of the slug name is.
 
 ### 4. Webhook and membership hardening
 
@@ -73,22 +73,22 @@ by a bot therefore reports the action reason, while an `opened` by a bot in
 - Check rerequested trigger, Check annotations, check-suite triggers (still deferred in [review lifecycle](review-lifecycle.md)).
 - Natural-language comment interpretation, `/review`-family parsing, per-comment sub-commands.
 - Old-App migration/compatibility UX for the mode column; implicit database resets.
-- Per-repo or per-installation trigger overrides (per-App only, this contract).
+- Per-installation trigger overrides (none exist); per-repository overrides are the contract above, with the workspace default as their fallback.
 - Changes to `mstar.review/v1`, publication faces, or harness skill bodies.
 
 ## Invariants
 
 - `/review` has no alias or compatibility window; mention presence is the entire grammar.
 - Bot-authored and authorless PRs never trigger; malformed-payload rejection precedes policy gates after action whitelisting.
-- Per-App pause and platform review flag gate enqueue. Terminal comment claims retain permanent tombstones.
+- The target's business pause, the bot's operational pause and the platform review flag gate enqueue. Terminal comment claims retain permanent tombstones.
 
 ## Where it lives
 
 - `src/worker/webhooks.ts`: `classifyWebhook`, `classifyEvent`, `classifyPullRequest`, `classifyIssueComment`.
-- `src/worker/index.ts`: streamed-body cap, resolved App routing, pause gates and durable comment claim/enqueue.
+- `src/worker/index.ts`: streamed-body cap, target resolution by repository, pause gates and durable comment claim/enqueue.
 - `src/contracts/review-job.ts`: `ReviewJobPayload`.
-- `src/dashboard/index.ts`: App mode settings, OAuth bootstrap and removal.
-- `migrations/0022_app_trigger_mode.sql`, `migrations/0023_removed_logins.sql`, `migrations/0048_comment_trigger_claims.sql`: storage contracts.
+- `src/dashboard/index.ts`: the target and defaults settings routes, OAuth bootstrap and removal; `src/dashboard/targets-store.ts`: `readEffectiveTargetSettings`.
+- `migrations/0022_app_trigger_mode.sql`, `migrations/0023_removed_logins.sql`, `migrations/0048_comment_trigger_claims.sql`, `migrations/0067_repo_target_identity.sql` (target columns and workspace defaults): storage contracts.
 - `src/admin/index.ts`: operator runtime settings for `review.comment_claim.*`.
 
 ## Change obligations

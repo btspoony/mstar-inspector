@@ -1,12 +1,12 @@
 /**
  * Shared navigation contract (the sidebar IA).
  *
- * Order is LOCKED (spec § IA, dashboard nav): Apps → Review targets →
- * Members → Settings (the global insights entry is retired). `labelKey` is a
- * dictionary key (type-checked against en.ts). Every entry is visible to every
- * workspace member; what a page OFFERS is gated inside the page (the
+ * Order is LOCKED (spec § IA, dashboard nav): Repositories → Apps → Members →
+ * Settings (the global insights entry is retired). `labelKey` is a dictionary
+ * key (type-checked against en.ts). Every entry is visible to every workspace
+ * member; what a page OFFERS is gated inside the page (the
  * workspace-membership decision, 2026-10). Every href is workspace-scoped
- * (`/dashboard/apps`, `/dashboard/targets`, …) and the shell prefixes the
+ * (`/dashboard/targets`, `/dashboard/apps`, …) and the shell prefixes the
  * current ref. The language toggle is NOT a nav item — it renders from
  * `t(locale, "nav.language")` (the label of the OTHER locale: en shows 中文,
  * zh_CN shows EN) and POSTs to /dashboard/locale.
@@ -16,8 +16,8 @@ import type { DictionaryKey } from "./t";
 export type NavItem = { labelKey: DictionaryKey; href: string };
 
 export const NAV_ITEMS: NavItem[] = [
-  { labelKey: "nav.apps", href: "/dashboard/apps" },
   { labelKey: "nav.targets", href: "/dashboard/targets" },
+  { labelKey: "nav.apps", href: "/dashboard/apps" },
   { labelKey: "nav.members", href: "/dashboard/members" },
   { labelKey: "nav.settings", href: "/dashboard/settings" },
 ];

@@ -224,7 +224,7 @@ function appSnapshot(db: TestD1, appId = "app-acme") {
     // moved them must show here.
     target: db.raw
       .query(
-        `SELECT review_enabled, review_trigger_mode, review_level, check_min_score, allowlist_enabled
+        `SELECT review_enabled, review_trigger_mode, review_level, check_min_score
            FROM review_targets WHERE bot_id = ?`,
       )
       .get(appId),
@@ -249,9 +249,6 @@ function appSnapshot(db: TestD1, appId = "app-acme") {
 const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string; ownerStatus?: number }> = [
   { route: `/apps/${ACME_APP_ID}/disable`, ownerStatus: 200 },
   { route: `/apps/${ACME_APP_ID}/enable`, ownerStatus: 200 },
-  { route: `/apps/${ACME_APP_ID}/pause`, ownerStatus: 200 },
-  { route: `/apps/${ACME_APP_ID}/resume`, ownerStatus: 200 },
-  { route: `/apps/${ACME_APP_ID}/review-trigger-mode`, body: "mode=open", ownerStatus: 200 },
   { route: `/apps/${ACME_APP_ID}/settings`, body: "op=save-chain&model_chain=", ownerStatus: 200 },
   {
     route: `/apps/${ACME_APP_ID}/settings`,

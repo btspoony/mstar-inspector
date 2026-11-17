@@ -26,6 +26,7 @@ import { Database, type Statement } from "bun:sqlite";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
+import { DEFAULT_CHECK_MIN_SCORE } from "../../src/contracts/review-gate";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** Earliest review-store schema (production before the github_apps work). */
@@ -351,20 +352,50 @@ export function seedBot(db: TestD1, id: string, githubAppId: number): void {
  * together with `review_targets.workspace_id`, so a fixture that seeds those
  * rows itself needs the target that owns them. Defaults mirror the create
  * path (the DDL defaults, no installation binding).
+ *
+ * A target IS a repository (migration 0067), so the row is repository-keyed:
+ * the owner/name/`repo_id` defaults are derived from the ids this helper is
+ * given, and a caller that asserts on a specific repository passes them.
  */
 export function seedTarget(
   db: TestD1,
   botId: string,
-  opts: { id?: string; workspaceId?: string; name?: string } = {},
+  opts: {
+    id?: string;
+    workspaceId?: string;
+    name?: string;
+    repoId?: number;
+    repoOwner?: string;
+    repoName?: string;
+  } = {},
 ): string {
   const id = opts.id ?? crypto.randomUUID();
   const now = "2026-01-01T00:00:00.000Z";
+  // A stable 31-bit id from the row id: the workspace/repository UNIQUE index
+  // needs a distinct integer per live row, and fixtures never care which.
+  let hash = 0x811c9dc5;
+  for (const char of id) hash = Math.imul(hash ^ char.codePointAt(0)!, 0x01000193) >>> 0;
   db.raw
     .prepare(
-      `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'fixture', ?, ?)`,
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+          check_min_score, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'fixture', ?, ?)`,
     )
-    .run(id, opts.workspaceId ?? "default", botId, opts.name ?? botId, now, now);
+    .run(
+      id,
+      opts.workspaceId ?? "default",
+      botId,
+      opts.name ?? botId,
+      opts.repoId ?? (hash % 2_000_000_000) + 1,
+      opts.repoOwner ?? "acme",
+      opts.repoName ?? (opts.name ?? botId),
+      // The retired create path's resolved floor: a fixture row carries its own
+      // configuration rather than inheriting, so a route read is deterministic.
+      DEFAULT_CHECK_MIN_SCORE,
+      now,
+      now,
+    );
   return id;
 }
 

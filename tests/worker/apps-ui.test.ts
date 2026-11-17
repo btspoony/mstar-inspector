@@ -74,7 +74,7 @@ async function seedApp(
   // route assertions below can name the App without re-reading the row.
   const id = `app-${opts.slug}`;
   const enc = await encryptedColumns(id);
-  return createReviewBotsStore(db).createApp({
+  const row = await createReviewBotsStore(db).createApp({
     id,
     githubSlug: opts.slug,
     githubAppId: opts.githubAppId,
@@ -84,6 +84,20 @@ async function seedApp(
     createdBy: opts.createdBy,
     workspaceId: "default",
   });
+  // A target IS a repository (migration 0067) and creation no longer writes
+  // one, so the fixture gives each App its single reviewing target: the App
+  // pages' target-owned configuration (pause, trigger mode, gate, depth) reads
+  // that row.
+  const created = await createTargetsStore(db).create({
+    workspaceId: "default",
+    botId: id,
+    repoId: 900000 + opts.githubAppId,
+    repoOwner: "acme",
+    repoName: opts.slug,
+    createdBy: opts.createdBy,
+  });
+  if (created.outcome !== "created") throw new Error(`seed: target for ${id} was refused`);
+  return row;
 }
 
 /**
@@ -161,39 +175,28 @@ async function postForm(
   );
 }
 
+/** JSON-body POST for the target-addressed settings family. */
+async function postTargetJson(
+  path: string,
+  cookie: string,
+  env: Env,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  return await worker.fetch(
+    new Request(`https://worker.local${path}`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    env,
+  );
+}
+
 function appStatus(db: ReturnType<typeof createAppsUiD1>, appId: number): string | null {
   const row = db.raw.query("SELECT status FROM review_bots WHERE github_app_id = ?").get(appId) as {
     status: string;
   } | null;
   return row?.status ?? null;
-}
-
-/** The per-App pause switch (the target's business pause) straight from the row. */
-function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, appId: number): number | null {
-  const row = db.raw
-    .query(
-      `SELECT t.review_enabled FROM review_targets t
-         JOIN review_bots b ON b.id = t.bot_id
-        WHERE b.github_app_id = ? AND t.deleted_at IS NULL`,
-    )
-    .get(appId) as {
-    review_enabled: number;
-  } | null;
-  return row?.review_enabled ?? null;
-}
-
-/** The per-App trigger-mode column (the target's) straight from the row. */
-function reviewTriggerMode(db: ReturnType<typeof createAppsUiD1>, appId: number): string | null {
-  const row = db.raw
-    .query(
-      `SELECT t.review_trigger_mode FROM review_targets t
-         JOIN review_bots b ON b.id = t.bot_id
-        WHERE b.github_app_id = ? AND t.deleted_at IS NULL`,
-    )
-    .get(appId) as {
-    review_trigger_mode: string;
-  } | null;
-  return row?.review_trigger_mode ?? null;
 }
 
 describe("the Apps page shell (workspace-scoped SPA route)", () => {
@@ -325,113 +328,8 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
   });
 });
 
-describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause)", () => {
-  test("guard covers the pinned routes: no session → 302 to login, zero mutation", async () => {
-    const db = await seededWorld();
-    for (const path of ["pause", "resume"]) {
-      const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/${path}`, "", makeEnv(db));
-      expect(res.status).toBe(302);
-      expect(res.headers.get("Location")).toBe("/dashboard/login");
-    }
-    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
-  });
-
-  test("creator pauses → 200, review_enabled=0 (the SPA refetches the JSON face for the paused badge)", async () => {
-    const db = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/pause`, cookie, makeEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(0);
-  });
-
-  test("pausing leaves the webhook CONNECTED (pause ≠ disable): the route still resolves and verifies — 401 on a bad signature, not 404", async () => {
-    const db = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    await post(`/dashboard/default/apps/${MALLORY_APP_ID}/pause`, cookie, makeEnv(db));
-    const webhook = await post("/webhook/default/app-mstar-inspector-mallory", "", makeEnv(db));
-    expect(webhook.status).toBe(401);
-    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(0);
-  });
-
-  test("creator resumes → 200, review_enabled=1", async () => {
-    const db = await seededWorld();
-    const apps = createReviewBotsStore(db);
-    const bot = (await apps.listApps()).find((a) => a.github_app_id === MALLORY_APP_ID)!;
-    const targets = createTargetsStore(db);
-    const target = (await targets.resolve(bot.id, null))!;
-    await targets.setReviewEnabled(target.workspace_id, target.id, false);
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/resume`, cookie, makeEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
-  });
-
-  test("pausing an already-paused app is an idempotent no-op — 200, zero mutation", async () => {
-    const db = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    await post(`/dashboard/default/apps/${MALLORY_APP_ID}/pause`, cookie, makeEnv(db));
-    const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/pause`, cookie, makeEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(0);
-  });
-
-  test("resuming an active app is an idempotent no-op — 200, zero mutation", async () => {
-    const db = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/resume`, cookie, makeEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
-  });
-
-  test("authz matrix: another member → 403 zero mutation; the creator of a DIFFERENT app → 403 (scope is per-App)", async () => {
-    const db = await seededWorld();
-    for (const login of ["hubot", "ada"]) {
-      const res = await post(
-        `/dashboard/default/apps/${MALLORY_APP_ID}/pause`,
-        `${SESSION_COOKIE}=${await sessionCookie(login)}`,
-        makeEnv(db),
-      );
-      expect(res.status).toBe(403);
-      expect(await res.text()).toContain("restricted to dashboard admins");
-      expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
-    }
-  });
-
-  test("admin (non-creator) may pause and resume another creator's app", async () => {
-    const db = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
-    const pause = await post(`/dashboard/default/apps/${ADA_APP_ID}/pause`, cookie, makeEnv(db));
-    expect(pause.status).toBe(200);
-    expect(await pause.text()).toBe("ok");
-    expect(reviewEnabled(db, ADA_APP_ID)).toBe(0);
-    const resume = await post(`/dashboard/default/apps/${ADA_APP_ID}/resume`, cookie, makeEnv(db));
-    expect(resume.status).toBe(200);
-    expect(reviewEnabled(db, ADA_APP_ID)).toBe(1);
-  });
-
-  test("unknown App id → 404; soft-deleted app → 404, zero side effects", async () => {
-    const db = await seededWorld();
-    const apps = createReviewBotsStore(db);
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
-    for (const path of ["/dashboard/default/apps/9999/pause", "/dashboard/default/apps/9999/resume"]) {
-      const res = await post(path, cookie, makeEnv(db));
-      expect(res.status).toBe(404);
-    }
-    await apps.softDeleteApp((await apps.listApps()).find((a) => a.github_app_id === MALLORY_APP_ID)!.id);
-    for (const path of [
-      `/dashboard/default/apps/${MALLORY_APP_ID}/pause`,
-      `/dashboard/default/apps/${MALLORY_APP_ID}/resume`,
-    ]) {
-      const res = await post(path, cookie, makeEnv(db));
-      expect(res.status).toBe(404);
-    }
-  });
-
-  test("a target in another workspace is invisible: the detail face 404s and the action refuses with zero writes", async () => {
+describe("the Apps list's per-App pause state (target-owned)", () => {
+  test("a target in another workspace is invisible: the App still opens with no target facts", async () => {
     const db = await seededWorld();
     db.raw
       .prepare(
@@ -448,12 +346,15 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
       .run(MALLORY_APP_ID);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
+    // Visibility is the APP's: this workspace owns the bot, so the
+    // App opens even though it holds no repository here. The foreign target is
+    // invisible as target-owned FACT — no id, no pause, no policy.
     const detail = await get(`/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`, cookie, makeEnv(db));
-    expect(detail.status).toBe(404);
-    const pause = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/pause`, cookie, makeEnv(db));
-    expect(pause.status).toBe(404);
-    // The refusal wrote nothing: the foreign target still reads reviewing.
-    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
+    expect(detail.status).toBe(200);
+    const body = (await detail.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+    for (const key of ["target_id", "check_gate"]) expect(body).not.toHaveProperty(key);
+    expect(body.app).not.toHaveProperty("review_enabled");
+    expect(body.app).not.toHaveProperty("review_trigger_mode");
   });
 
   test("the list omits review_enabled for a bot with no live target (no fabricated pause state)", async () => {
@@ -479,135 +380,79 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
 
 });
 
-describe("POST /dashboard/default/apps/:appId/review-trigger-mode (per-App review trigger mode)", () => {
-  test("guard covers the pinned route: no session → 302 to login, zero mutation", async () => {
-    const db = await seededWorld();
-    const res = await postForm(
-      `/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`,
-      "",
-      makeEnv(db),
-      { mode: "manual" },
-    );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
-    expect(reviewTriggerMode(db, MALLORY_APP_ID)).toBe("every_push");
-  });
+describe("an App with no repository yet", () => {
+  const SETTINGS_API = `/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`;
 
-  test("creator sets each vocabulary mode → 200 ok, exact wire spelling stored (spec §2 enum)", async () => {
+  test("a manager opens it: 200 with the App's own facts and no target-owned ones", async () => {
     const db = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    for (const mode of ["open", "every_push", "manual"]) {
-      const res = await postForm(`/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`, cookie, makeEnv(db), {
-        mode,
-      });
-      expect(res.status).toBe(200);
-      expect(await res.text()).toBe("ok");
-      expect(reviewTriggerMode(db, MALLORY_APP_ID)).toBe(mode);
+    // The repository surface owns target creation now, so an App the
+    // workspace owns routinely has none. Visibility is the APP's.
+    db.raw
+      .prepare("DELETE FROM review_targets WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)")
+      .run(MALLORY_APP_ID);
+
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+    expect(body.can_manage).toBe(true);
+    expect(body.blocked).toBe(false);
+    // Target-owned facts are ABSENT, not defaulted: there is no row to name.
+    for (const key of ["target_id", "check_gate"]) expect(body).not.toHaveProperty(key);
+    for (const key of ["review_enabled", "review_trigger_mode", "review_level", "default_review_level"]) {
+      expect(body.app).not.toHaveProperty(key);
     }
+    // The bot's own sections still render: they never needed a target.
+    expect(body.app.sandbox_image_id).toBe("omp");
+    expect(body).toHaveProperty("keys");
+    expect(body).toHaveProperty("installations");
   });
 
-  test("invalid mode → keyed 400, stored row left unchanged — no silent coercion to the default (spec §2)", async () => {
+  test("a member reads the same App: 200, identity set only", async () => {
     const db = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    for (const mode of ["bogus", "EVERY_PUSH", ""]) {
-      const res = await postForm(`/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`, cookie, makeEnv(db), {
-        mode,
-      });
-      expect(res.status).toBe(400);
-      expect(await res.json()).toEqual({
-        key: "settings.error.triggerModeUnknown",
-        message: `${mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.`,
-        params: { mode },
-      });
-      expect(reviewTriggerMode(db, MALLORY_APP_ID)).toBe("every_push");
-    }
-    // A missing mode field fails closed the same way.
-    const missing = await postForm(`/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`, cookie, makeEnv(db), {});
-    expect(missing.status).toBe(400);
-    expect(reviewTriggerMode(db, MALLORY_APP_ID)).toBe("every_push");
+    db.raw
+      .prepare("DELETE FROM review_targets WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)")
+      .run(MALLORY_APP_ID);
+
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+    expect(body.can_manage).toBe(false);
+    expect(body).not.toHaveProperty("target_id");
+    expect(body.app).not.toHaveProperty("review_enabled");
+    expect(body.app.created_at).toBeDefined();
   });
 
-  test("selecting the already-stored mode is an idempotent no-op — 200, zero mutation (updated_at untouched)", async () => {
+  /**
+   * The add flow routinely gives one App several repositories. The App page
+   * owns no target policy any more, so its own configuration must stay
+   * reachable: the gate answers `target: null` instead of refusing the App.
+   */
+  test("an App with SEVERAL repositories still opens, with the target slice absent", async () => {
     const db = await seededWorld();
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     db.raw
       .prepare(
-        `UPDATE review_targets SET updated_at = '2026-01-01 00:00:00'
-          WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)`,
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+            created_by, created_at, updated_at)
+         SELECT 'target-second', 'default', b.id, 'acme/second', 901003, 'acme', 'second',
+                'mallory', datetime('now'), datetime('now')
+           FROM review_bots b WHERE b.github_app_id = ?`,
       )
       .run(MALLORY_APP_ID);
-    const res = await postForm(`/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`, cookie, makeEnv(db), {
-      mode: "every_push",
-    });
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect(reviewTriggerMode(db, MALLORY_APP_ID)).toBe("every_push");
-    // A same-value selection never touches the row (an operator mutation).
-    const row = db.raw
-      .query(
-        `SELECT t.updated_at FROM review_targets t
-           JOIN review_bots b ON b.id = t.bot_id
-          WHERE b.github_app_id = ?`,
-      )
-      .get(MALLORY_APP_ID) as { updated_at: string };
-    expect(row.updated_at).toBe("2026-01-01 00:00:00");
-  });
 
-  test("authz matrix: another member → 403 zero mutation; the creator of a DIFFERENT app → 403 (scope is per-App)", async () => {
-    const db = await seededWorld();
-    for (const login of ["hubot", "ada"]) {
-      const res = await postForm(
-        `/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`,
-        `${SESSION_COOKIE}=${await sessionCookie(login)}`,
-        makeEnv(db),
-        { mode: "manual" },
-      );
-      expect(res.status).toBe(403);
-      expect(await res.text()).toContain("restricted to dashboard admins");
-      expect(reviewTriggerMode(db, MALLORY_APP_ID)).toBe("every_push");
+    const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
+    expect(body.can_manage).toBe(true);
+    // Target-owned facts are ABSENT: two rows name no single configuration.
+    for (const key of ["target_id", "check_gate"]) expect(body).not.toHaveProperty(key);
+    for (const key of ["review_enabled", "review_trigger_mode", "review_level"]) {
+      expect(body.app).not.toHaveProperty(key);
     }
-  });
-
-  test("admin (non-creator) may set another creator's app", async () => {
-    const db = await seededWorld();
-    const res = await postForm(
-      `/dashboard/default/apps/${ADA_APP_ID}/review-trigger-mode`,
-      `${SESSION_COOKIE}=${await sessionCookie("octocat")}`,
-      makeEnv(db),
-      { mode: "open" },
-    );
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect(reviewTriggerMode(db, ADA_APP_ID)).toBe("open");
-  });
-
-  test("unknown App id → 404; soft-deleted app → 404, zero side effects", async () => {
-    const db = await seededWorld();
-    const apps = createReviewBotsStore(db);
-    const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
-    const unknown = await postForm("/dashboard/default/apps/9999/review-trigger-mode", cookie, makeEnv(db), {
-      mode: "manual",
-    });
-    expect(unknown.status).toBe(404);
-    await apps.softDeleteApp((await apps.listApps()).find((a) => a.github_app_id === MALLORY_APP_ID)!.id);
-    const deleted = await postForm(`/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`, cookie, makeEnv(db), {
-      mode: "manual",
-    });
-    expect(deleted.status).toBe(404);
-  });
-
-  test("native HTML form post keeps the pinned 302 to the review-target page", async () => {
-    const db = await seededWorld();
-    const res = await postForm(
-      `/dashboard/default/apps/${MALLORY_APP_ID}/review-trigger-mode`,
-      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-      makeEnv(db),
-      { mode: "manual" },
-      { Accept: "text/html" },
-    );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${MALLORY_APP_ID}`);
-    expect(reviewTriggerMode(db, MALLORY_APP_ID)).toBe("manual");
+    // The App's own sections still render.
+    expect(body).toHaveProperty("keys");
+    expect(body).toHaveProperty("installations");
   });
 });
 
@@ -615,11 +460,11 @@ describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => 
   const SETTINGS = `/dashboard/default/apps/${MALLORY_APP_ID}/settings`;
   const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
-  test("HTML navigation GET answers one 302 to the review-target page (no shell read)", async () => {
+  test("HTML navigation GET answers one 302 to the app's settings tab (no shell read)", async () => {
     const db = await seededWorld();
     const res = await htmlGet(SETTINGS, await ownerCookie(), withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${MALLORY_APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${MALLORY_APP_ID}?tab=settings`);
     expect(await res.text()).not.toContain("window.__BOOT__");
   });
 
@@ -627,7 +472,7 @@ describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => 
     const db = await seededWorld();
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${MALLORY_APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${MALLORY_APP_ID}?tab=settings`);
   });
 });
 
@@ -804,21 +649,24 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     expect(refused.status).toBe(403);
     const body = (await refused.json()) as { key: unknown };
     expect(body.key).toBe("settings.error.botReadOnly");
-    // The target-scoped ops stay available: the target is what this workspace
-    // owns, whatever the bot's scope.
-    const saved = await postForm(
-      `/dashboard/default/apps/${MALLORY_APP_ID}/settings`,
+    // The target-scoped save stays available — at its OWN address: the target
+    // is what this workspace owns, whatever the bot's scope.
+    const targetRow = db.raw
+      .query(
+        `SELECT t.id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
+          WHERE b.github_app_id = ? AND t.deleted_at IS NULL`,
+      )
+      .get(MALLORY_APP_ID) as { id: string };
+    const saved = await postTargetJson(
+      `/dashboard/default/api/targets/${targetRow.id}`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
-      { op: "save-review-level", level: "quick" },
+      { review_level: "quick" },
     );
     expect(saved.status).toBe(200);
     const target = db.raw
-      .prepare(
-        `SELECT t.review_level FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
-          WHERE b.github_app_id = ?`,
-      )
-      .get(MALLORY_APP_ID) as { review_level: string };
+      .prepare("SELECT review_level FROM review_targets WHERE id = ?")
+      .get(targetRow.id) as { review_level: string };
     expect(target.review_level).toBe("quick");
   });
 
@@ -865,92 +713,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     const res = await get(botFace("default", MALLORY_APP_ID), "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
-  });
-});
-
-/**
- * `POST /dashboard/:ref/apps/:appId/park` — the manager's repair for an owner
- * overlap. The route is a thin shell over the store's batch; the store's own
- * guards are pinned in tests/dashboard/targets-store.test.ts.
- */
-describe("POST /dashboard/:ref/apps/:appId/park", () => {
-  /**
-   * The overlap the park repairs: this App's target claims `acme` in `default`
-   * and ANOTHER bot's target claims it too — the shape the audit reports. Both
-   * bots keep their single target; the duplicate claim is what park settles.
-   */
-  function seedOverlap(db: ReturnType<typeof createAppsUiD1>, githubAppId: number): string {
-    const target = db.raw
-      .prepare(
-        `SELECT t.id, t.bot_id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
-          WHERE b.github_app_id = ?`,
-      )
-      .get(githubAppId) as { id: string; bot_id: string };
-    db.raw.prepare(`UPDATE review_targets SET account_login = 'acme' WHERE id = ?`).run(target.id);
-    const insert = db.raw.prepare(
-      `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, installation_id, account_login, review_enabled,
-          review_trigger_mode, review_level, check_min_score, check_pass_verdicts,
-          allowlist_enabled, created_by, created_at, updated_at, deleted_at)
-       VALUES (?, ?, ?, ?, NULL, 'acme', 1, 'every_push', NULL, 70, '["ship it"]', 0,
-               'mallory', datetime('now'), datetime('now'), NULL)`,
-    );
-    // Another bot's target in THIS workspace: the claim it duplicates.
-    insert.run("park-rival", "default", "app-mstar-inspector-ada", "park-rival");
-    return target.id;
-  }
-
-  test("an overlap is parked: paused, claim cleared, one audit row, zero GitHub calls", async () => {
-    const db = await seededWorld();
-    const targetId = seedOverlap(db, MALLORY_APP_ID);
-    const fetchSpy = spyOn(globalThis, "fetch");
-    try {
-      const res = await post(
-        `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
-        `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-        makeEnv(db),
-      );
-      expect(res.status).toBe(200);
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      fetchSpy.mockRestore();
-    }
-    const row = db.raw
-      .query("SELECT review_enabled, account_login FROM review_targets WHERE id = ?")
-      .get(targetId) as { review_enabled: number; account_login: string | null };
-    expect(row).toEqual({ review_enabled: 0, account_login: null });
-    expect(
-      db.raw.query("SELECT action, target_id, actor_login FROM audit_events").all(),
-    ).toEqual([{ action: "target.park", target_id: targetId, actor_login: "mallory" }]);
-  });
-
-  test("a target with no overlapping claim is refused with 409 and zero writes", async () => {
-    const db = await seededWorld();
-    const auditBefore = db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number };
-    const res = await post(
-      `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
-      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-      makeEnv(db),
-    );
-    expect(res.status).toBe(409);
-    // No account claim at all on this target: nothing to settle.
-    expect(await res.text()).toBe("no-overlap");
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n).toBe(auditBefore.n);
-    expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(1);
-  });
-
-  test("a plain member is refused by the manage gate before any write", async () => {
-    const db = await seededWorld();
-    seedOverlap(db, MALLORY_APP_ID);
-    const res = await post(
-      `/dashboard/default/apps/${MALLORY_APP_ID}/park`,
-      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
-      makeEnv(db),
-    );
-    expect(res.status).toBe(403);
-    expect(
-      (db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n,
-    ).toBe(0);
   });
 });
 
@@ -1203,26 +965,19 @@ describe("the settings payload's pending installations", () => {
     return (await res.json()) as Record<string, unknown>;
   }
 
-  test("lists the bot's unbound live installations and keeps every existing key", async () => {
+  test("lists the bot's live installations and keeps every existing key", async () => {
     const db = await seededWorld();
     seedWorldWithBot(db);
     seedInstallation(db, "app-platform", 500);
     seedInstallation(db, "app-platform", 600, true);
-    // Bound by another workspace's target: not this target's to bind, and
-    // never listed cross-workspace.
+    // Installations are app-level (migration 0067): another workspace's target
+    // binds nothing, so this one is listed like any other live installation.
     seedInstallation(db, "app-platform", 700);
-    db.raw
-      .prepare(
-        `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, installation_id, created_by, created_at, updated_at)
-         VALUES ('target-other', 'ws-other', 'app-platform', 'Other', 700, 'hubot',
-                 datetime('now'), datetime('now'))`,
-      )
-      .run();
 
     const body = await settingsOf(db);
     expect(body.pending_installations).toEqual([
       { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+      { installation_id: 700, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
     ]);
     // Additive: the keys the payload already carried are unchanged.
     expect(body.installation).toBeNull();
@@ -1288,12 +1043,16 @@ describe("a retained target on another workspace's bot grants no bot-scope write
       )
       .run(CONSUMER_WS);
     // The target C created while the bot was shared. Nothing about the bot
-    // changed except its scope: it was never C's.
+    // changed except its scope: it was never C's. It carries its OWN
+    // repository identity (0068: one repository belongs to one workspace per
+    // bot, so C's row cannot name the repository A's target already holds).
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
-         SELECT 'target-consumer', ?, b.id, 'consumer', 'mallory', datetime('now'), datetime('now')
+           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+            created_by, created_at, updated_at)
+         SELECT 'target-consumer', ?, b.id, 'consumer', 901002, 'acme', 'consumer-only',
+                'mallory', datetime('now'), datetime('now')
            FROM review_bots b WHERE b.github_app_id = ?`,
       )
       .run(CONSUMER_WS, FOREIGN_APP_ID);
@@ -1423,8 +1182,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect(typeof body.target_id).toBe("string");
     expect(body.workspace_id).toBe(CONSUMER_WS);
     expect(body.check_gate).toEqual({ min_score: 80, pass_verdicts: ["ship it"] });
-    expect(body.allowlist).toEqual({ enabled: false, owners: [] });
-    expect(typeof body.owner_overlap).toBe("boolean");
     expect(body.app.review_trigger_mode).toBe("every_push");
     expect(body.app.review_level).toBeNull();
     expect(body.app.default_review_level).toBe("default");
@@ -1485,12 +1242,13 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     const db = await crossWorkspaceWorld();
     const env = makeEnv(db);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    // Target-scoped: the review depth is this workspace's own target.
-    const saved = await postForm(
-      `/dashboard/${CONSUMER_WS}/apps/${FOREIGN_APP_ID}/settings`,
+    // Target-scoped: the review depth is this workspace's own target, saved at
+    // the target's own address.
+    const saved = await postTargetJson(
+      `/dashboard/${CONSUMER_WS}/api/targets/target-consumer`,
       cookie,
       env,
-      { op: "save-review-level", level: "quick" },
+      { review_level: "quick" },
     );
     expect(saved.status).toBe(200);
     expect(

@@ -26,14 +26,19 @@ import {
   COMMENT_CLAIM_ATTEMPTS_KEY,
   COMMENT_CLAIM_OUTBOX_KEY,
   COMMENT_CLAIM_RETRY_KEY,
+  MAINTENANCE_ENABLED_KEY,
+  MAINTENANCE_REASON_KEY,
+  MAINTENANCE_SINCE_KEY,
   OFFICIAL_WORKSPACE_KEY,
   RECHECK_ASSIGNMENT_KEY,
   REVIEW_LEVEL_KEY,
   RUNTIME_SETTING_DOMAINS,
   SYSTEM_CONCURRENCY_KEY,
   UnknownWorkspaceError,
+  getMaintenanceMode,
   isRuntimeSettingKey,
   readOfficialWorkspaceId,
+  setMaintenanceMode,
   setOfficialWorkspace,
 } from "../../src/dashboard/runtime-config-store";
 
@@ -200,6 +205,135 @@ describe("official workspace write (contract § 7.2.2)", () => {
   });
 });
 
+describe("maintenance mode (delivery-compass D20)", () => {
+  /** Every `platform.maintenance.*` row, raw, keyed by PK. */
+  function storedMaintenance(db: TestD1): Record<string, string> {
+    const rows = db.raw
+      .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
+      .all() as Array<{ key: string; value: string }>;
+    return Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  }
+
+  test("an absent trio means the platform is open", async () => {
+    const db = createMigratedTestD1();
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: false,
+      reason: null,
+      since: null,
+      unreadable: false,
+    });
+  });
+
+  test("an unreadable window is flagged, never answered as open", async () => {
+    const db = createMigratedTestD1();
+    // A settings read that throws cannot tell "no window" from "unknown": the
+    // reader states the third value and one structured line names the fault,
+    // so a gate can fail closed instead of unlocking traffic.
+    const broken = {
+      prepare() {
+        throw new Error("settings unavailable");
+      },
+    } as unknown as TestD1;
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (line: string) => void warns.push(line);
+    try {
+      expect(await getMaintenanceMode(broken)).toEqual({
+        enabled: false,
+        reason: null,
+        since: null,
+        unreadable: true,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warns).toHaveLength(1);
+    expect(JSON.parse(warns[0]!)).toMatchObject({ event: "maintenance_read_failed" });
+    // The fixture's own row is untouched: nothing was written to recover.
+    expect(storedMaintenance(db)).toEqual({});
+  });
+
+  test("enabling writes the flag, the reason, the start time and one audit row", async () => {
+    const db = createMigratedTestD1();
+    await setMaintenanceMode(db, { enabled: true, reason: "repository backfill", actor: "operator" }, NOW);
+
+    expect(storedMaintenance(db)).toEqual({
+      [MAINTENANCE_ENABLED_KEY]: "1",
+      [MAINTENANCE_REASON_KEY]: "repository backfill",
+      [MAINTENANCE_SINCE_KEY]: NOW,
+    });
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: true,
+      reason: "repository backfill",
+      since: NOW,
+      unreadable: false,
+    });
+    expect(audits(db)).toEqual([
+      {
+        action: "platform.maintenance.set",
+        target_type: "runtime",
+        target_id: "platform.maintenance",
+        detail: {
+          before: { enabled: false, reason: null, since: null },
+          after: { enabled: true, reason: "repository backfill", since: NOW },
+        },
+      },
+    ]);
+  });
+
+  test("a blank or omitted reason is stored as none", async () => {
+    const db = createMigratedTestD1();
+    for (const reason of [undefined, null, "", "   "]) {
+      await setMaintenanceMode(db, { enabled: true, reason, actor: "operator" }, NOW);
+      expect(await getMaintenanceMode(db), `reason ${JSON.stringify(reason)}`).toEqual({
+        enabled: true,
+        reason: null,
+        since: NOW,
+        unreadable: false,
+      });
+    }
+  });
+
+  test("disabling deletes the reason and the start time", async () => {
+    const db = createMigratedTestD1();
+    await setMaintenanceMode(db, { enabled: true, reason: "backfill", actor: "operator" }, NOW);
+    await setMaintenanceMode(db, { enabled: false, reason: "ignored on disable", actor: "operator" }, LATER);
+
+    // The disable leaves the documented off-shape: no stale window survives.
+    expect(storedMaintenance(db)).toEqual({ [MAINTENANCE_ENABLED_KEY]: "0" });
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: false,
+      reason: null,
+      since: null,
+      unreadable: false,
+    });
+    expect(audits(db).at(-1)).toEqual({
+      action: "platform.maintenance.set",
+      target_type: "runtime",
+      target_id: "platform.maintenance",
+      detail: {
+        before: { enabled: true, reason: "backfill", since: NOW },
+        after: { enabled: false, reason: null, since: null },
+      },
+    });
+  });
+
+  test("re-enabling restarts the window at the new start time", async () => {
+    const db = createMigratedTestD1();
+    await setMaintenanceMode(db, { enabled: true, reason: "first", actor: "operator" }, NOW);
+    await setMaintenanceMode(db, { enabled: false, actor: "operator" }, NOW);
+    await setMaintenanceMode(db, { enabled: true, actor: "operator" }, LATER);
+
+    expect(await getMaintenanceMode(db)).toEqual({
+      enabled: true,
+      reason: null,
+      since: LATER,
+      unreadable: false,
+    });
+    expect(audits(db)).toHaveLength(3);
+  });
+});
+
 describe("key domain registry (contract § 7.2.5)", () => {
   /** Every key an existing writer stores — read from the constants, not a copy. */
   const EXISTING_KEYS = [
@@ -212,6 +346,9 @@ describe("key domain registry (contract § 7.2.5)", () => {
     REVIEW_LEVEL_KEY,
     RECHECK_ASSIGNMENT_KEY,
     OFFICIAL_WORKSPACE_KEY,
+    MAINTENANCE_ENABLED_KEY,
+    MAINTENANCE_REASON_KEY,
+    MAINTENANCE_SINCE_KEY,
   ];
 
   test("every registered domain is a prefix of at least one accepted key", () => {
@@ -228,8 +365,13 @@ describe("key domain registry (contract § 7.2.5)", () => {
     for (const key of EXISTING_KEYS) {
       expect(isRuntimeSettingKey(key), key).toBe(true);
     }
-    // The one non-`review.` key is the platform parameter this plan adds.
-    expect(EXISTING_KEYS.filter((key) => !key.startsWith("review."))).toEqual([OFFICIAL_WORKSPACE_KEY]);
+    // The `platform.` keys are the global parameters, never a tenant column.
+    expect(EXISTING_KEYS.filter((key) => !key.startsWith("review."))).toEqual([
+      OFFICIAL_WORKSPACE_KEY,
+      MAINTENANCE_ENABLED_KEY,
+      MAINTENANCE_REASON_KEY,
+      MAINTENANCE_SINCE_KEY,
+    ]);
     expect(isRuntimeSettingKey(OFFICIAL_WORKSPACE_KEY)).toBe(true);
   });
 

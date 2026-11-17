@@ -1,37 +1,42 @@
 /**
- * D1 store for `review_targets` / `target_owner_allowlist` — the
- * workspace-owned review configuration.
+ * D1 store for `review_targets` — the workspace-owned review configuration.
  *
  * A bot (`review_bots`) is the execution identity: credentials, model chain,
- * sandbox image, installations, the operational pause. A target is what a
- * workspace configures: trigger mode, review depth, Check gate, owner
- * allowlist and the business pause. This module is the ONE write authority for
- * those columns and for the owner allowlist rows.
+ * sandbox image, installations, the operational pause. A target is ONE
+ * repository under ONE workspace: its identity is GitHub's numeric
+ * `repository.id` (D7), with `repo_owner` / `repo_name` as mutable display
+ * caches a delivery refreshes. `repo_id IS NULL` is the historical state a
+ * migrated row waits in (D15): only the webhook resolver and the 373 backfill
+ * ever write an id onto an existing row, and every target created through a
+ * runtime path binds one.
  *
  * Two read shapes, deliberately not interchangeable:
- *   - TENANT reads — `getById`, `list`, `getCheckGate`, `getAllowlist` and
- *     every setter — carry `workspace_id` in their own SQL. A route check is
- *     not the contract: an id from another workspace must read absent here.
- *   - `resolve` is the EXECUTION read a webhook delivery makes: it names a bot
- *     and the delivery's installation, never a workspace, so it carries no
- *     workspace predicate. It is also what an execution lane uses to find the
- *     one target of a bot it already resolved a bot row for.
+ *   - TENANT reads — `listLive`, `getInWorkspace` and the setters a route
+ *     drives — carry `workspace_id` in their own SQL. An id from another
+ *     workspace must read absent here.
+ *   - `resolveByRepo` is the EXECUTION read a webhook delivery makes: it names
+ *     a bot and the delivery's repository, never a workspace, so it carries no
+ *     workspace predicate. `getForExecution` names just the target the
+ *     delivery already resolved.
  *
- * `installation_id` is never written here. Backfill binds it when it creates
- * the target; a delivery must not copy one on, and releasing a slot is not
- * this store's job.
+ * Effective settings (D16) are computed, never copied while inheriting: a
+ * following row reads the workspace's defaults at read time, and toggling
+ * inheritance off snapshots them into the row once.
  *
  * The `db` parameter is a locally-declared narrow D1 face (types only, zero
  * imports), the convention `apps-store` follows: a real `D1Database`, the
  * bun:sqlite test double and the store layer's `D1Like` all satisfy it
  * structurally, and dashboard leaf modules import no store/pipeline code.
- * `batch()` exists because the owner-allowlist replace must commit as a set.
  */
 import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
-import { DEFAULT_CHECK_MIN_SCORE, isCheckMinScoreValue } from "../contracts/review-gate";
-import type { DeploymentMode } from "../worker/env";
-import { checkEntitlement } from "./entitlement";
+import {
+  CHECK_MIN_SCORE_MAX,
+  CHECK_MIN_SCORE_MIN,
+  DEFAULT_CHECK_MIN_SCORE,
+  isCheckMinScoreValue,
+} from "../contracts/review-gate";
+import { UnknownWorkspaceError } from "./runtime-config-store";
 
 /**
  * The per-target auto-trigger vocabulary (exact enum spelling is wire-visible:
@@ -61,7 +66,7 @@ export function parseTargetReviewLevel(value: unknown): ReviewLevel | null {
 /**
  * The review gate: a published review concludes the Check `success` only when
  * its verdict is on `passVerdicts` AND its tally score is at least `minScore`.
- * `passVerdicts` is engine `PR_VERDICTS` vocabulary — `saveCheckGate` refuses
+ * `passVerdicts` is engine `PR_VERDICTS` vocabulary — `setReviewConfig` refuses
  * anything else before writing.
  */
 export type CheckGate = {
@@ -74,8 +79,8 @@ export type CheckGate = {
 /**
  * The stored verdict array, or `null` when the stored value is unreadable
  * (bad JSON, not an array, or off-vocabulary). `null` is unreadable
- * CONFIGURATION, never "the default": the Check lanes read the gate on every
- * terminalization and must fail closed on a row they cannot read.
+ * CONFIGURATION, never "the default": the effective-settings reader fails
+ * closed on a row it cannot read instead of admitting verdicts nobody stored.
  */
 function storedPassVerdicts(raw: string): readonly PrVerdict[] | null {
   try {
@@ -90,103 +95,139 @@ function storedPassVerdicts(raw: string): readonly PrVerdict[] | null {
 }
 
 /**
- * One target row as the columns are stored (D1 snake_case). `deleted_at` is
- * the only removal path; `installation_id` is the backfill's binding.
+ * One target row as the columns are stored (D1 snake_case). `deleted_at` is the
+ * only removal path.
  */
 export type ReviewTargetRow = {
   id: string;
   workspace_id: string;
   bot_id: string;
+  /** Legacy display column; a created target carries the repository name. */
   name: string;
-  installation_id: number | null;
-  account_login: string | null;
+  /** GitHub `repository.id` — the identity. NULL only on a migrated row awaiting a claim. */
+  repo_id: number | null;
+  /** Mutable display caches, refreshed by a delivery that sees a new spelling. */
+  repo_owner: string | null;
+  repo_name: string | null;
+  /** 1 = the workspace defaults answer every setting; 0 = this row's own columns. */
+  follow_workspace_defaults: number;
   /** Business pause: 1 = the workspace lets this target review, 0 = paused. */
   review_enabled: number;
   review_trigger_mode: ReviewTriggerMode;
   review_level: string | null;
   check_min_score: number;
   check_pass_verdicts: string;
-  allowlist_enabled: number;
   created_by: string;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
 };
 
-/** The owner allowlist: `enabled` is the switch, `owners` the accepted logins. */
-export type OwnerAllowlist = {
-  enabled: boolean;
-  owners: readonly string[];
+/**
+ * A row of the repository list (product spec J1): the target's own columns plus
+ * the bot's display name and the newest review stamp. `last_reviewed_at` is
+ * `null` for a repository no review has finished on yet.
+ */
+export type LiveTargetListRow = ReviewTargetRow & {
+  app_name: string;
+  last_reviewed_at: string | null;
 };
 
 /**
- * The owner allowlist's accepted size: the whole set is replaced inside ONE D1
- * batch, so an unbounded paste would build an arbitrarily large batch. 100
- * covers every realistic shared install. Enforced by `saveAllowlist` (the
- * layer that states the batch-size invariant) and, for the operator-facing
- * 400, by the settings route.
+ * The workspace-level answers a following target inherits (`workspaces`
+ * columns): the floor is the existing `check_min_score` (0049), the other three
+ * are the `default_*` columns of 0067.
  */
-export const ALLOWLIST_MAX_OWNERS = 100;
-
-/**
- * Collapse the allowlist owner set: GitHub logins are case-insensitive, so
- * `Ada` and `ada` are ONE owner and the first submitted spelling is the one
- * kept. Order is NOT preserved: the table has no sequence column and
- * `getAllowlist` reads `ORDER BY owner_login`, so the settings form lists the
- * owners alphabetically however they were submitted.
- */
-export function dedupeOwnerLogins(logins: readonly string[]): string[] {
-  const seen = new Set<string>();
-  return logins.filter((login) => {
-    const folded = login.toLowerCase();
-    if (seen.has(folded)) return false;
-    seen.add(folded);
-    return true;
-  });
-}
-
-/**
- * The gate a stored row carries, or `null` when its verdict array is
- * unreadable. The execution lanes read the gate straight off a resolved row
- * (`resolve`), so this is the ONE parser both the tenant read and they use.
- */
-export function targetCheckGate(row: {
-  check_min_score: number;
-  check_pass_verdicts: string;
-}): CheckGate | null {
-  const passVerdicts = storedPassVerdicts(row.check_pass_verdicts);
-  if (passVerdicts === null) return null;
-  return { minScore: row.check_min_score, passVerdicts };
-}
-
-/** Input for `create` — the caller owns the workspace and bot facts. */
-export type CreateTargetInput = {
-  workspaceId: string;
-  botId: string;
-  name: string;
-  createdBy: string;
+export type WorkspaceReviewDefaults = {
+  triggerMode: ReviewTriggerMode;
+  level: ReviewLevel | null;
+  checkMinScore: number;
+  /** Empty when the stored array is unreadable — see `checkPassVerdictsReadable`. */
+  checkPassVerdicts: readonly PrVerdict[];
   /**
-   * The score floor the target starts at. Omitted → the product default; the
-   * manifest commit passes the workspace's own default so a new target
-   * inherits the tenant's floor instead of the column's historical value.
+   * False = the stored array is unreadable CONFIGURATION, not the legal empty
+   * gate: the settings surface renders its read-only recovery notice instead
+   * of an editable gate nobody stored.
    */
-  checkMinScore?: number;
+  checkPassVerdictsReadable: boolean;
 };
+
+/** What a target runs with, whichever side of the inheritance switch answers. */
+export type EffectiveTargetSettings = {
+  triggerMode: ReviewTriggerMode;
+  level: ReviewLevel | null;
+  checkMinScore: number;
+  checkPassVerdicts: readonly PrVerdict[];
+  checkPassVerdictsReadable: boolean;
+};
+
+/**
+ * The Check gate these settings authorise, or `null` when the verdict array
+ * that answered them is unreadable. The execution lanes and the settings face
+ * read the gate through this ONE derivation, so neither can invent a gate the
+ * stored configuration does not state.
+ */
+export function checkGateOf(settings: EffectiveTargetSettings): CheckGate | null {
+  return settings.checkPassVerdictsReadable
+    ? { minScore: settings.checkMinScore, passVerdicts: settings.checkPassVerdicts }
+    : null;
+}
 
 /** Narrow D1 face, declared locally so this leaf module imports nothing. */
 type TargetsStoreStatement = {
   bind(...values: unknown[]): TargetsStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
   all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
-  // Generic like `WorkspaceStoreD1`'s statement, so this face stays
-  // structurally assignable to it (the shared-bot capability reads the plan
-  // through `checkEntitlement`).
-  run<T = Record<string, unknown>>(): Promise<{ results: T[]; meta: { changes: number; last_row_id: number } }>;
+  run(): Promise<{ meta: { changes: number } }>;
 };
 
 type TargetsStoreD1 = {
   prepare(query: string): TargetsStoreStatement;
+};
+
+/**
+ * The one write that must be atomic (a floor change plus its ledger row):
+ * `batch` runs the statements as ONE transaction, same as D1.
+ */
+type TargetsStoreBatchD1 = TargetsStoreD1 & {
   batch(statements: TargetsStoreStatement[]): Promise<Array<{ meta: { changes: number } }>>;
+};
+
+/** Input for `create` — the caller owns the workspace, bot and repository facts. */
+export type CreateTargetInput = {
+  workspaceId: string;
+  botId: string;
+  /** GitHub numeric `repository.id`: the identity every runtime path binds. */
+  repoId: number;
+  repoOwner: string;
+  repoName: string;
+  createdBy: string;
+};
+
+/**
+ * `create`'s outcome. A refusal is a VALUE, like every other store refusal
+ * here, so the add-repository route maps it onto its `duplicates` list.
+ */
+export type CreateTargetOutcome =
+  | { outcome: "created"; target: ReviewTargetRow }
+  | { outcome: "duplicate" };
+
+/**
+ * `setReviewConfig`'s input: the columns to write. An absent key is left
+ * untouched, so a route that changes one control writes one column.
+ * `level: null` is a real value — "follow the operator default".
+ */
+export type TargetReviewConfig = {
+  triggerMode?: ReviewTriggerMode;
+  level?: ReviewLevel | null;
+  checkMinScore?: number;
+  checkPassVerdicts?: readonly PrVerdict[];
+  /**
+   * `0` = this row answers with these columns, not the workspace defaults. An
+   * explicit save must say so in the SAME statement: a settings control that
+   * wrote a column while `follow_workspace_defaults = 1` would be inert.
+   */
+  follow?: 0 | 1;
 };
 
 /**
@@ -197,175 +238,358 @@ type TargetsStoreD1 = {
 const LIVE_TARGET = "id = ? AND workspace_id = ? AND deleted_at IS NULL";
 
 /**
- * The park predicate: a live target IN the addressed workspace whose account
- * claim another live target in that workspace ALSO carries. That duplicate is
- * the whole invariant — the two claims normally belong to different bots, so
- * refusing on a per-bot target count would block the repair this exists for.
- * Leaving the login with at least one live claimant is what keeps the review
- * surface; every statement of the park batch repeats the predicate, so a
- * concurrent delete, a workspace mix-up or a claim that stopped overlapping
- * fails the whole park instead of writing half of it.
+ * The duplicate rule, shared by every create: a live row of this BOT holding
+ * the same `repo_id` (0068 — one repository belongs to one workspace per bot,
+ * so a sibling workspace's row is the same claim), OR the same owner/name
+ * while still unclaimed — a migrated row IS the same repository (D15). This
+ * one predicate backs both the add-repository refusal and the webhook claim's
+ * re-entry, and it mirrors `review_targets_bot_repo_unique` so the guarded
+ * insert refuses instead of tripping the index.
  */
-const PARKABLE_TARGET = `id = ? AND workspace_id = ? AND deleted_at IS NULL
-   AND account_login IS NOT NULL
-   AND EXISTS (SELECT 1 FROM review_targets o
-                WHERE o.workspace_id = review_targets.workspace_id
-                  AND o.id <> review_targets.id
-                  AND o.deleted_at IS NULL
-                  AND o.account_login = review_targets.account_login)`;
+const DUPLICATE_REPO = `t.bot_id = ?3 AND t.deleted_at IS NULL
+   AND (t.repo_id = ?4
+        OR (t.repo_id IS NULL AND t.repo_owner = ?5 COLLATE NOCASE
+            AND t.repo_name = ?6 COLLATE NOCASE))`;
 
 /**
- * The park's audit row. It runs FIRST in the batch: its predicate reads the
- * pre-park `account_login`, which the UPDATE clears.
+ * The guarded insert behind `create`: ONE statement decides and writes, so a
+ * concurrent add of the same repository writes nothing instead of racing the
+ * read-then-insert. `follow_workspace_defaults = 1` is the UI-create rule (J4):
+ * a new repository inherits the workspace's answers, and the row's own policy
+ * columns keep the DDL defaults as inert placeholders.
  */
-const PARK_AUDIT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_login, action, target_id, created_at)
-  SELECT ?, ?, ?, 'target.park', id, ? FROM review_targets WHERE ${PARKABLE_TARGET}`;
-
-const PARK_TARGET_SQL = `UPDATE review_targets
-   SET review_enabled = 0, account_login = NULL, updated_at = datetime('now')
-   WHERE ${PARKABLE_TARGET}`;
-
-/** Why a park refused — the reasons the route maps onto its own vocabulary. */
-export type ParkRefusal = "unknown-target" | "only-live-target" | "no-overlap";
-
-/**
- * The shared-bot create's outcome. Refusals are VALUES, like every other store
- * refusal here, so the route maps each onto its status/body pair instead of
- * parsing a message.
- */
-export type CreateSharedTargetOutcome =
-  | { outcome: "created"; target: ReviewTargetRow }
-  | { outcome: "bot_not_shared" }
-  | { outcome: "target_exists" }
-  /** The workspace's plan does not include the shared bot; nothing was written. */
-  | { outcome: "plan_refused"; planId: string };
-
-/**
- * The guarded insert behind `createOnSharedBot`: ONE statement decides and
- * writes, so a bot unshared between the page load and the submit — or a
- * workspace that already holds a live target on it — writes nothing. The name
- * is the bot's own, as the manifest path names its target; `installation_id`
- * and `account_login` keep their NULL defaults because this path binds no
- * installation. Policy columns keep the DDL defaults; only the score floor is
- * caller-supplied.
- */
-const CREATE_SHARED_TARGET_SQL = `
+const CREATE_TARGET_SQL = `
   INSERT INTO review_targets
-    (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
-  SELECT ?1, ?2, b.id, b.name, ?3, ?4, datetime('now'), datetime('now')
-    FROM review_bots b
-   WHERE b.id = ?5
-     AND b.deleted_at IS NULL
-     AND b.scope = 'shared'
-     AND NOT EXISTS (SELECT 1 FROM review_targets t
-                      WHERE t.bot_id = b.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)`;
+    (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+     follow_workspace_defaults, created_by, created_at, updated_at)
+  SELECT ?1, ?2, ?3, ?6, ?4, ?5, ?6, 1, ?7, datetime('now'), datetime('now')
+   WHERE NOT EXISTS (SELECT 1 FROM review_targets t WHERE ${DUPLICATE_REPO})`;
 
-/** The refusal's cause: the bot's own row, read only after the guard refused. */
-const CREATE_SHARED_TARGET_CAUSE_SQL = `
-  SELECT b.deleted_at, b.scope,
-         EXISTS (SELECT 1 FROM review_targets t
-                  WHERE t.bot_id = b.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL) AS has_target
-    FROM review_bots b WHERE b.id = ?1`;
+/**
+ * The workspace's review defaults, read once per decision (`effectiveTargetSettings`
+ * callers batch them — a delivery reads one row). A missing or retired
+ * workspace reads the column defaults, and an untrusted stored value degrades
+ * to the conservative answer instead of throwing on a webhook path.
+ */
+export async function getWorkspaceReviewDefaults(
+  db: TargetsStoreD1,
+  workspaceId: string,
+): Promise<WorkspaceReviewDefaults> {
+  const row = await db
+    .prepare(
+      `SELECT check_min_score, default_review_trigger_mode, default_review_level,
+              default_check_pass_verdicts
+         FROM workspaces WHERE id = ? AND deleted_at IS NULL`,
+    )
+    .bind(workspaceId)
+    .first<{
+      check_min_score: number | null;
+      default_review_trigger_mode: string;
+      default_review_level: string | null;
+      default_check_pass_verdicts: string;
+    }>();
+  if (row === null) {
+    return {
+      triggerMode: "every_push",
+      level: null,
+      checkMinScore: DEFAULT_CHECK_MIN_SCORE,
+      checkPassVerdicts: ["ship it"],
+      checkPassVerdictsReadable: true,
+    };
+  }
+  // Unreadable stored verdicts admit nothing: an empty set fails closed,
+  // where a permissive fallback would let a review through nobody configured.
+  const verdicts = storedPassVerdicts(row.default_check_pass_verdicts);
+  return {
+    triggerMode: (REVIEW_TRIGGER_MODES as readonly string[]).includes(row.default_review_trigger_mode)
+      ? (row.default_review_trigger_mode as ReviewTriggerMode)
+      : "every_push",
+    level: parseTargetReviewLevel(row.default_review_level),
+    checkMinScore: isCheckMinScoreValue(row.check_min_score)
+      ? row.check_min_score
+      : DEFAULT_CHECK_MIN_SCORE,
+    checkPassVerdicts: [...(verdicts ?? [])],
+    checkPassVerdictsReadable: verdicts !== null,
+  };
+}
 
-/** Create the review_targets / target_owner_allowlist store over one D1 handle. */
+/**
+ * `setWorkspaceReviewDefaults`'s input: the `workspaces` columns a caller
+ * names — the three `default_*` review answers plus the gate floor
+ * (`check_min_score`, 0049). An absent key is left untouched, like
+ * `setReviewConfig`; `level: null` is a real value.
+ */
+export type WorkspaceReviewDefaultPatch = {
+  triggerMode?: ReviewTriggerMode;
+  level?: ReviewLevel | null;
+  checkPassVerdicts?: readonly PrVerdict[];
+  checkMinScore?: number;
+};
+
+/**
+ * The ledger's `before` is the floor the workspace actually RAN with: a trusted
+ * integer records itself, while the absent state and every untrusted value
+ * record `null` — the platform default is a fallback, never a floor anything
+ * stored, so naming it would attribute a value that was never in effect.
+ */
+const CHECK_MIN_SCORE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'workspace.check_min_score.set', 'workspace', ?3,
+         json_object('before', (SELECT CASE
+                                        WHEN typeof(check_min_score) = 'integer'
+                                         AND check_min_score BETWEEN ${CHECK_MIN_SCORE_MIN} AND ${CHECK_MIN_SCORE_MAX}
+                                        THEN check_min_score
+                                        ELSE NULL END
+                                  FROM workspaces WHERE id = ?3),
+                     'after', ?4),
+         ?5
+   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
+
+/**
+ * THE writer of the workspace's review defaults (`/api/targets/defaults`) and
+ * of its gate floor — the floor is `workspaces.check_min_score`, and the
+ * legacy `PUT /api/settings/check-min-score` delegates here, so exactly one
+ * statement stores it.
+ *
+ * Every value is validated before the first write, so an off-vocabulary value
+ * leaves every column untouched. A named floor rides a `batch`: its audit row
+ * reads the OLD value, so it must run before the UPDATE, in one transaction.
+ * Throws `UnknownWorkspaceError` when named columns matched no live row;
+ * `false` means the caller named nothing.
+ */
+export async function setWorkspaceReviewDefaults(
+  db: TargetsStoreBatchD1,
+  workspaceId: string,
+  patch: WorkspaceReviewDefaultPatch,
+  actor: string,
+): Promise<boolean> {
+  const assignments: string[] = [];
+  const values: unknown[] = [];
+  if (patch.triggerMode !== undefined) {
+    if (!REVIEW_TRIGGER_MODES.includes(patch.triggerMode)) {
+      throw new Error(
+        `targets-store: default review trigger mode ${JSON.stringify(patch.triggerMode)} is not on the vocabulary (${REVIEW_TRIGGER_MODES.join(" | ")}) — zero rows written`,
+      );
+    }
+    assignments.push("default_review_trigger_mode = ?");
+    values.push(patch.triggerMode);
+  }
+  if (patch.level !== undefined) {
+    if (patch.level !== null && !isReviewLevel(patch.level)) {
+      throw new Error(
+        `targets-store: default review level ${JSON.stringify(patch.level)} is not on the vocabulary (${REVIEW_LEVELS.join(" | ")}) — zero rows written`,
+      );
+    }
+    assignments.push("default_review_level = ?");
+    values.push(patch.level);
+  }
+  if (patch.checkPassVerdicts !== undefined) {
+    for (const verdict of patch.checkPassVerdicts) {
+      if (!PR_VERDICTS.includes(verdict)) {
+        throw new Error(
+          `targets-store: default check gate verdict ${JSON.stringify(verdict)} is not on PR_VERDICTS (${PR_VERDICTS.join(" | ")}) — zero rows written`,
+        );
+      }
+    }
+    assignments.push("default_check_pass_verdicts = ?");
+    values.push(JSON.stringify(patch.checkPassVerdicts));
+  }
+  if (patch.checkMinScore !== undefined) {
+    if (!isCheckMinScoreValue(patch.checkMinScore)) {
+      throw new Error(
+        `targets-store: workspace check gate min score ${JSON.stringify(patch.checkMinScore)} is outside 0..100 — zero rows written`,
+      );
+    }
+    assignments.push("check_min_score = ?");
+    values.push(patch.checkMinScore);
+  }
+  if (assignments.length === 0) return false;
+  const update = db.prepare(
+    `UPDATE workspaces SET ${assignments.join(", ")}
+      WHERE id = ? AND deleted_at IS NULL`,
+  );
+  const changes =
+    patch.checkMinScore === undefined
+      ? (await update.bind(...values, workspaceId).run()).meta.changes
+      : (
+          await db.batch([
+            db
+              .prepare(CHECK_MIN_SCORE_AUDIT_SQL)
+              .bind(
+                crypto.randomUUID(),
+                actor,
+                workspaceId,
+                patch.checkMinScore,
+                new Date().toISOString(),
+              ),
+            update.bind(...values, workspaceId),
+          ])
+        )[1]?.meta.changes ?? 0;
+  if (changes === 0) throw new UnknownWorkspaceError(workspaceId);
+  return true;
+}
+
+/**
+ * The four policy columns a non-inheriting row answers with. Split out because
+ * `readEffectiveTargetSettings` decides the inheritance branch BEFORE the
+ * defaults read, and must not need a defaults object to say so.
+ */
+function ownTargetSettings(target: ReviewTargetRow): EffectiveTargetSettings {
+  const verdicts = storedPassVerdicts(target.check_pass_verdicts);
+  return {
+    triggerMode: target.review_trigger_mode,
+    level: parseTargetReviewLevel(target.review_level),
+    checkMinScore: isCheckMinScoreValue(target.check_min_score)
+      ? target.check_min_score
+      : DEFAULT_CHECK_MIN_SCORE,
+    // An unreadable stored verdict array fails closed (empty), like the
+    // workspace side; `checkPassVerdictsReadable` keeps the two apart.
+    checkPassVerdicts: [...(verdicts ?? [])],
+    checkPassVerdictsReadable: verdicts !== null,
+  };
+}
+
+/**
+ * What the target runs with (D16). `follow_workspace_defaults = 1` answers the
+ * workspace defaults — computed here, every read, never copied into the row
+ * while inheriting. `= 0` answers the row's own four columns.
+ */
+export function effectiveTargetSettings(
+  target: ReviewTargetRow,
+  defaults: WorkspaceReviewDefaults,
+): EffectiveTargetSettings {
+  if (target.follow_workspace_defaults !== 1) return ownTargetSettings(target);
+  return {
+    triggerMode: defaults.triggerMode,
+    level: defaults.level,
+    checkMinScore: defaults.checkMinScore,
+    checkPassVerdicts: [...defaults.checkPassVerdicts],
+    checkPassVerdictsReadable: defaults.checkPassVerdictsReadable,
+  };
+}
+
+/**
+ * THE effective-settings read every lane uses (webhook trigger, review
+ * execution, Check gate, settings face): the workspace defaults are read only
+ * for a target that actually inherits, so an own-columns target pays no second
+ * D1 round trip for a value its row already answers.
+ */
+export async function readEffectiveTargetSettings(
+  db: TargetsStoreD1,
+  target: ReviewTargetRow,
+): Promise<EffectiveTargetSettings> {
+  return target.follow_workspace_defaults === 1
+    ? effectiveTargetSettings(target, await getWorkspaceReviewDefaults(db, target.workspace_id))
+    : ownTargetSettings(target);
+}
+
+/**
+ * Flip the inheritance switch (D16). `1` sets the flag only: the row's own
+ * policy columns become inert, never read again. `0` snapshots the values the
+ * target is running with right now into the row — reading the defaults when it
+ * was inheriting, its own columns otherwise — so the toggle itself changes no
+ * live behaviour. A later toggle-off re-snapshots from the then-current
+ * defaults. An unknown or deleted target writes nothing.
+ */
+export async function setInheritance(
+  db: TargetsStoreD1,
+  workspaceId: string,
+  targetId: string,
+  follow: 0 | 1,
+): Promise<void> {
+  if (follow === 1) {
+    await db
+      .prepare(
+        `UPDATE review_targets SET follow_workspace_defaults = 1, updated_at = datetime('now')
+         WHERE ${LIVE_TARGET}`,
+      )
+      .bind(targetId, workspaceId)
+      .run();
+    return;
+  }
+  const target = await db
+    .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
+    .bind(targetId, workspaceId)
+    .first<ReviewTargetRow>();
+  if (!target) return;
+  const effective = effectiveTargetSettings(target, await getWorkspaceReviewDefaults(db, workspaceId));
+  await db
+    .prepare(
+      `UPDATE review_targets
+          SET follow_workspace_defaults = 0, review_trigger_mode = ?, review_level = ?,
+              check_min_score = ?, check_pass_verdicts = ?, updated_at = datetime('now')
+        WHERE ${LIVE_TARGET}`,
+    )
+    .bind(
+      effective.triggerMode,
+      effective.level,
+      effective.checkMinScore,
+      JSON.stringify(effective.checkPassVerdicts),
+      targetId,
+      workspaceId,
+    )
+    .run();
+}
+
+/** Create the `review_targets` store over one D1 handle. */
 export function createTargetsStore(db: TargetsStoreD1) {
   return {
     /**
-     * Insert one target for a bot and read it back. The policy columns keep
-     * the DDL defaults — `review_enabled` 1, `review_trigger_mode`
-     * `every_push`, `review_level` NULL, `["ship it"]` verdicts, allowlist off
-     * — because those ARE the contract's create-path defaults; only the score
-     * floor is caller-supplied. `installation_id` stays NULL: the create path
-     * binds no installation.
-     *
-     * The manifest commit writes this same shape inline, inside ITS batch (bot
-     * + workspace mapping + target), because a bot must not exist without its
-     * target and a second statement outside that batch could not be atomic.
+     * Insert one repository target for a bot and read it back. The duplicate
+     * rule refuses a live row of the same BOT for that repository (an
+     * already-added one, here or in a sibling workspace, or a migrated row
+     * still unclaimed) with nothing written.
      */
-    async create(input: CreateTargetInput): Promise<ReviewTargetRow> {
+    async create(input: CreateTargetInput): Promise<CreateTargetOutcome> {
+      const repoOwner = input.repoOwner.trim();
+      const repoName = input.repoName.trim();
+      // Identity at the trust boundary: a target that cannot be resolved by
+      // `repo_id` or by the owner/name fallback would be unreachable.
+      if (!Number.isInteger(input.repoId) || input.repoId <= 0) {
+        throw new Error(
+          `targets-store: create needs a positive integer repo id (got ${JSON.stringify(input.repoId)}) — zero rows written`,
+        );
+      }
+      if (repoOwner === "" || repoName === "") {
+        throw new Error("targets-store: create needs a repository owner and name — zero rows written");
+      }
       const id = crypto.randomUUID();
-      const minScore = isCheckMinScoreValue(input.checkMinScore)
-        ? input.checkMinScore
-        : DEFAULT_CHECK_MIN_SCORE;
-      await db
-        .prepare(
-          `INSERT INTO review_targets
-             (id, workspace_id, bot_id, name, check_min_score, created_by, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-        )
-        .bind(id, input.workspaceId, input.botId, input.name, minScore, input.createdBy)
+      const res = await db
+        .prepare(CREATE_TARGET_SQL)
+        .bind(id, input.workspaceId, input.botId, input.repoId, repoOwner, repoName, input.createdBy)
         .run();
+      if (res.meta.changes === 0) return { outcome: "duplicate" };
       const row = await db
-        .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
-        .bind(id, input.workspaceId)
+        .prepare(`SELECT * FROM review_targets WHERE id = ? AND deleted_at IS NULL`)
+        .bind(id)
         .first<ReviewTargetRow>();
       if (!row) throw new Error("targets-store: create target row vanished on read-back");
-      return row;
-    },
-
-    /**
-     * Create one target on a `shared` bot — the workspace's own target on a
-     * bot the platform shares. The shared-bot capability is decided BEFORE
-     * anything is written, through the one decision function; ONE guarded
-     * statement then decides and writes (see the SQL), and the row it wrote is
-     * read back. Refusals are values so the route owns their statuses.
-     */
-    async createOnSharedBot(input: {
-      workspaceId: string;
-      botId: string;
-      createdBy: string;
-      /** The deployment mode the capability resolves under (`self-hosted` skips the read). */
-      mode: DeploymentMode;
-      /** The workspace's floor, read by the route; omitted → the product default. */
-      checkMinScore?: number;
-    }): Promise<CreateSharedTargetOutcome> {
-      const verdict = await checkEntitlement({
-        db,
-        mode: input.mode,
-        workspaceId: input.workspaceId,
-        kind: "shared-bot",
-        botScope: "shared",
-      });
-      if (!verdict.ok && verdict.refusal.kind === "shared-bot") {
-        return { outcome: "plan_refused", planId: verdict.refusal.planId };
-      }
-      const id = crypto.randomUUID();
-      const minScore = isCheckMinScoreValue(input.checkMinScore)
-        ? input.checkMinScore
-        : DEFAULT_CHECK_MIN_SCORE;
-      const res = await db
-        .prepare(CREATE_SHARED_TARGET_SQL)
-        .bind(id, input.workspaceId, minScore, input.createdBy, input.botId)
-        .run();
-      if (res.meta.changes === 0) {
-        // The guard refused, so the cause is read only now: a bot that is
-        // still shared means the workspace's own target is what blocked it.
-        const cause = await db
-          .prepare(CREATE_SHARED_TARGET_CAUSE_SQL)
-          .bind(input.botId, input.workspaceId)
-          .first<{ deleted_at: string | null; scope: string; has_target: number }>();
-        return cause !== null && cause.deleted_at === null && cause.scope === "shared"
-          ? { outcome: "target_exists" }
-          : { outcome: "bot_not_shared" };
-      }
-      const row = await db
-        .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
-        .bind(id, input.workspaceId)
-        .first<ReviewTargetRow>();
-      if (!row) throw new Error("targets-store: shared target row vanished on read-back");
       return { outcome: "created", target: row };
     },
 
     /** One live target of this workspace; another workspace's id reads null. */
-    async getById(workspaceId: string, targetId: string): Promise<ReviewTargetRow | null> {
+    async getInWorkspace(workspaceId: string, targetId: string): Promise<ReviewTargetRow | null> {
       return db
         .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
         .bind(targetId, workspaceId)
         .first<ReviewTargetRow>();
     },
 
+    /** How many live targets this workspace holds — the list's count pill. */
+    async countLive(workspaceId: string): Promise<number> {
+      const row = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM review_targets
+            WHERE workspace_id = ? AND deleted_at IS NULL`,
+        )
+        .bind(workspaceId)
+        .first<{ n: number }>();
+      return row?.n ?? 0;
+    },
+
     /** The workspace's live targets, newest first (stable id tiebreak). */
-    async list(workspaceId: string): Promise<ReviewTargetRow[]> {
+    async listLive(workspaceId: string): Promise<ReviewTargetRow[]> {
       const res = await db
         .prepare(
           `SELECT * FROM review_targets
@@ -378,83 +602,161 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * The bot's single live target IN this workspace — the TENANT read the
-     * dashboard faces use. Same liveness predicate as every setter, so a
-     * target that belongs to another workspace resolves null here instead of
-     * handing a foreign row to a route that already checked membership. Two
-     * live targets in one workspace are ambiguous → null, the same rule
-     * `resolve` applies.
+     * The repository list's ONE read (product spec J1): each live target with
+     * the bot's display name and its newest review stamp. A join beats a
+     * per-row App read, and the stamp subquery rides
+     * `idx_reviews_target_reviewed_at` — never a scan of every workspace's
+     * reviews.
      */
-    async resolveInWorkspace(
-      workspaceId: string,
-      botId: string,
-    ): Promise<ReviewTargetRow | null> {
-      const rows = await db
+    async listLiveWithApp(workspaceId: string): Promise<LiveTargetListRow[]> {
+      const res = await db
         .prepare(
-          `SELECT * FROM review_targets
-           WHERE bot_id = ? AND workspace_id = ? AND deleted_at IS NULL
-           LIMIT 2`,
+          `SELECT t.*,
+                  COALESCE(b.github_name, b.github_slug, CAST(b.github_app_id AS TEXT)) AS app_name,
+                  (SELECT MAX(r.reviewed_at) FROM reviews r WHERE r.target_id = t.id) AS last_reviewed_at
+             FROM review_targets t
+             LEFT JOIN review_bots b ON b.id = t.bot_id
+            WHERE t.workspace_id = ? AND t.deleted_at IS NULL
+            ORDER BY t.created_at DESC, t.id`,
         )
-        .bind(botId, workspaceId)
-        .all<ReviewTargetRow>();
-      return rows.results.length === 1 ? rows.results[0]! : null;
+        .bind(workspaceId)
+        .all<LiveTargetListRow>();
+      return res.results;
     },
 
     /**
-     * The target a delivery or an execution lane acts on, by the contract's
-     * two steps: the non-deleted row bound to the delivery's installation
-     * when one exists, else the bot's ONLY non-deleted target, else null.
-     *
-     * Two guards sit on those steps and are `resolve`-local on purpose, so the
-     * webhook, the Check reconciler and every dashboard lane agree:
-     *
-     *   - A binding whose `bot_installations` row carries `removed_at` resolves
-     *     NOTHING and does not fall through to the single-target step: falling
-     *     through would silently re-attribute a deletion to another target.
-     *     The target keeps the binding, so a reinstall resumes reviewing
-     *     without a new claim.
-     *   - A `shared` bot loses the single-target fallback entirely. Any
-     *     installation of a shared bot would otherwise review as the official
-     *     workspace's target with no claim, which is exactly the attribution
-     *     the platform forbids: an unclaimed installation is referenced by no
-     *     target. An `owned` bot's fallback is untouched.
-     *
-     * `installationId` null means "no delivery installation" (a dashboard or
-     * lane read): only the single-target step can answer.
+     * The bot's live targets in creation order (`idx_review_targets_bot_id`).
+     * The caller filters by workspace: the index answers `bot_id` alone, and a
+     * bot can hold one target per workspace.
      */
-    async resolve(botId: string, installationId: number | null): Promise<ReviewTargetRow | null> {
-      if (installationId !== null) {
-        // One read for the binding and its installation's removal stamp, so
-        // the guard costs no round trip on the hot path.
-        const bound = await db
-          .prepare(
-            `SELECT t.*, EXISTS (
-                      SELECT 1 FROM bot_installations i
-                       WHERE i.bot_id = t.bot_id AND i.installation_id = t.installation_id
-                         AND i.removed_at IS NOT NULL) AS installation_removed
-               FROM review_targets t
-              WHERE t.bot_id = ? AND t.installation_id = ? AND t.deleted_at IS NULL`,
-          )
-          .bind(botId, installationId)
-          .first<ReviewTargetRow & { installation_removed: number }>();
-        if (bound) {
-          const { installation_removed: removed, ...target } = bound;
-          if (removed !== 0) return null;
-          return target;
-        }
-      }
-      const rows = await db
-        // shortcut: tenant-bypass — the execution path's single-target fallback
-        // reads the bot's scope instead of binding a workspace; the webhook and
-        // the Check lanes resolve before any workspace is known.
+    async listLiveByBot(botId: string): Promise<ReviewTargetRow[]> {
+      const res = await db
         .prepare(
-          `SELECT t.* FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
-            WHERE t.bot_id = ? AND t.deleted_at IS NULL AND b.scope <> 'shared'
-            LIMIT 2`,
+          `SELECT * FROM review_targets
+           WHERE bot_id = ? AND deleted_at IS NULL
+           ORDER BY created_at, id`,
         )
         .bind(botId)
         .all<ReviewTargetRow>();
-      return rows.results.length === 1 ? rows.results[0]! : null;
+      return res.results;
+    },
+
+    /**
+     * The target a delivery acts on, by the contract's three steps:
+     *
+     *   1. `repo.id` known → the live row holding it for this bot; a changed
+     *      owner/name refreshes the caches (a rename must not orphan a row).
+     *   2. Otherwise (no id, or no row carries it yet) → the live row matching
+     *      owner/name that is still unclaimed; a hit CLAIMS `repo_id` and the
+     *      names inside this request. A migrated row therefore starts
+     *      reviewing on its first delivery (D15).
+     *   3. Otherwise, when the bot has EXACTLY ONE live target whose three
+     *      repository columns are all NULL — the shape a 0067 migration leaves
+     *      behind, since it backfills nothing — that row is the delivery's:
+     *      claim it. Two or more such rows name no repository, so no guess is
+     *      made and the delivery is ignored.
+     *
+     * Owner/name compare `COLLATE NOCASE`: a GitHub repository is
+     * case-insensitive and the payload's spelling may differ from the stored
+     * one, matching `idx_review_targets_bot_owner_name`.
+     *
+     * No hit → null and the delivery is ignored with 200. A claim refuses to
+     * take an id another live row of the same BOT already holds (0068): one
+     * repository belongs to one workspace per App, and silently reviewing
+     * twice would be worse than ignoring the delivery.
+     */
+    async resolveByRepo(
+      botId: string,
+      repo: { id: number | null; owner: string; name: string },
+    ): Promise<ReviewTargetRow | null> {
+      if (repo.id !== null) {
+        // The bot/repository unique index (0068) makes this at most one row.
+        const hit = await db
+          .prepare(
+            `SELECT * FROM review_targets
+             WHERE bot_id = ? AND repo_id = ? AND deleted_at IS NULL
+             ORDER BY created_at, id LIMIT 1`,
+          )
+          .bind(botId, repo.id)
+          .first<ReviewTargetRow>();
+        if (hit) {
+          // The stored spelling is only a cache: a delivery that spells the
+          // repository differently (a rename, or other case) refreshes it.
+          if (hit.repo_owner === repo.owner && hit.repo_name === repo.name) return hit;
+          await db
+            .prepare(
+              `UPDATE review_targets SET repo_owner = ?, repo_name = ?, updated_at = datetime('now')
+               WHERE id = ? AND deleted_at IS NULL`,
+            )
+            .bind(repo.owner, repo.name, hit.id)
+            .run();
+          return { ...hit, repo_owner: repo.owner, repo_name: repo.name };
+        }
+      }
+      // LIMIT 2, not 1: an owner/name pair two unclaimed rows both answer is
+      // ambiguous, and the delivery is refused instead of attributed by
+      // created_at. The ORDER BY still makes a single hit deterministic.
+      const unclaimed = await db
+        .prepare(
+          `SELECT * FROM review_targets
+            WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
+              AND repo_id IS NULL AND deleted_at IS NULL
+            ORDER BY created_at, id
+            LIMIT 2`,
+        )
+        .bind(botId, repo.owner, repo.name)
+        .all<ReviewTargetRow>();
+      if (unclaimed.results.length > 1) return null;
+      const legacy = unclaimed.results[0];
+      if (legacy) {
+        // A payload without an id has nothing to claim; the row still reviews.
+        if (repo.id === null) return legacy;
+        const claimed = await db
+          .prepare(
+            `UPDATE review_targets
+                SET repo_id = ?, repo_owner = ?, repo_name = ?, updated_at = datetime('now')
+              WHERE id = ? AND repo_id IS NULL AND deleted_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM review_targets x
+                                 WHERE x.bot_id = review_targets.bot_id
+                                   AND x.repo_id = ? AND x.deleted_at IS NULL)`,
+          )
+          .bind(repo.id, repo.owner, repo.name, legacy.id, repo.id)
+          .run();
+        if (claimed.meta.changes === 0) return null;
+        return db
+          .prepare(`SELECT * FROM review_targets WHERE id = ? AND deleted_at IS NULL`)
+          .bind(legacy.id)
+          .first<ReviewTargetRow>();
+      }
+      if (repo.id === null) return null;
+      // Step 3: ONE guarded UPDATE claims the bot's lone all-NULL row. The
+      // count guard is what keeps two placeholders from being guessed between.
+      const firstDelivery = await db
+        .prepare(
+          `UPDATE review_targets
+              SET repo_id = ?, repo_owner = ?, repo_name = ?, updated_at = datetime('now')
+            WHERE bot_id = ?
+              AND repo_id IS NULL AND repo_owner IS NULL AND repo_name IS NULL
+              AND deleted_at IS NULL
+              AND (SELECT COUNT(*) FROM review_targets x
+                    WHERE x.bot_id = ? AND x.repo_id IS NULL
+                      AND x.repo_owner IS NULL AND x.repo_name IS NULL
+                      AND x.deleted_at IS NULL) = 1
+              AND NOT EXISTS (SELECT 1 FROM review_targets y
+                               WHERE y.bot_id = review_targets.bot_id
+                                 AND y.repo_id = ? AND y.deleted_at IS NULL)`,
+        )
+        .bind(repo.id, repo.owner, repo.name, botId, botId, repo.id)
+        .run();
+      if (firstDelivery.meta.changes === 0) return null;
+      return db
+        .prepare(
+          `SELECT * FROM review_targets
+            WHERE bot_id = ? AND repo_id = ? AND deleted_at IS NULL
+            ORDER BY created_at, id LIMIT 1`,
+        )
+        .bind(botId, repo.id)
+        .first<ReviewTargetRow>();
     },
 
     /**
@@ -491,255 +793,73 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * Park an overlapping target: pause it and retire its account claim, with
-     * ONE `audit_events` row naming the target — all in one batch. Parking is
-     * the repair `scripts/audit-owner-overlap.sql` names for a workspace where
-     * one account owns more than one live target; it deletes nothing, so the
-     * bot keeps its target and the pause stays reversible through the resume
-     * route.
-     *
-     * Refusals write nothing and name their reason: a target that is not live
-     * in this workspace, a login this target is the workspace's only live
-     * claimant of (parking it would retire the claim rather than resolve a
-     * duplicate), and a target that carries no claim at all.
-     */
-    async park(
-      workspaceId: string,
-      targetId: string,
-      actorLogin: string,
-      now: string,
-    ): Promise<{ outcome: "parked" } | { outcome: "refused"; reason: ParkRefusal }> {
-      const state = await db
-        .prepare(
-          `SELECT t.account_login,
-                  EXISTS (SELECT 1 FROM review_targets o
-                           WHERE o.workspace_id = t.workspace_id
-                             AND o.id <> t.id
-                             AND o.deleted_at IS NULL
-                             AND o.account_login = t.account_login) AS overlapped
-             FROM review_targets t
-            WHERE ${LIVE_TARGET}`,
-        )
-        .bind(targetId, workspaceId)
-        .first<{ account_login: string | null; overlapped: number }>();
-      if (!state) return { outcome: "refused", reason: "unknown-target" };
-      if (state.account_login === null) return { outcome: "refused", reason: "no-overlap" };
-      // The login must keep a live claimant: the other target is what parks'
-      // repair leaves in place.
-      if (state.overlapped === 0) return { outcome: "refused", reason: "only-live-target" };
-      const [, update] = await db.batch([
-        db.prepare(PARK_AUDIT_SQL).bind(crypto.randomUUID(), workspaceId, actorLogin, now, targetId, workspaceId),
-        db.prepare(PARK_TARGET_SQL).bind(targetId, workspaceId),
-      ]);
-      // Both statements share the predicate, so the UPDATE's change count is
-      // the park's only success signal: zero means a concurrent delete or an
-      // already-cleared claim, and the audit insert matched nothing either.
-      return update!.meta.changes === 1
-        ? { outcome: "parked" }
-        : { outcome: "refused", reason: "no-overlap" };
-    },
-
-    /** Whether `park` would accept this target — the target face's affordance. */
-    async hasOwnerOverlap(workspaceId: string, targetId: string): Promise<boolean> {
-      const row = await db
-        .prepare(`SELECT 1 AS parkable FROM review_targets WHERE ${PARKABLE_TARGET}`)
-        .bind(targetId, workspaceId)
-        .first<{ parkable: number }>();
-      return row !== null;
-    },
-
-    /**
-     * Select the auto-trigger mode. The mode must be on the
-     * REVIEW_TRIGGER_MODES vocabulary — anything else throws BEFORE any write
-     * (the settings route answers 400 first; the DDL CHECK is the last line).
+     * Write the review configuration columns a caller names. Every value is
+     * validated BEFORE any write — an off-vocabulary mode/level or an
+     * out-of-domain score/verdict throws and leaves the row untouched (the
+     * settings route answers 400 first; the DDL CHECK is the last line).
      * Returns whether a row changed (false also covers an unknown, deleted or
-     * foreign target).
+     * another workspace's target, and an input naming no column).
      */
-    async setReviewTriggerMode(
+    async setReviewConfig(
       workspaceId: string,
       targetId: string,
-      mode: ReviewTriggerMode,
+      config: TargetReviewConfig,
     ): Promise<boolean> {
-      if (!REVIEW_TRIGGER_MODES.includes(mode)) {
-        throw new Error(
-          `targets-store: review trigger mode ${JSON.stringify(mode)} is not on the vocabulary (${REVIEW_TRIGGER_MODES.join(" | ")}) — zero rows written`,
-        );
-      }
-      const res = await db
-        .prepare(
-          `UPDATE review_targets SET review_trigger_mode = ?, updated_at = datetime('now')
-           WHERE ${LIVE_TARGET}`,
-        )
-        .bind(mode, targetId, workspaceId)
-        .run();
-      return res.meta.changes > 0;
-    },
-
-    /**
-     * Select the review depth. `null` is the "follow the operator default"
-     * choice and writes the column back to NULL, so it is a successful write,
-     * not a no-op. A non-null level must be on the shared `REVIEW_LEVELS`
-     * vocabulary — anything else throws BEFORE any write. Returns whether a
-     * row changed.
-     */
-    async setReviewLevel(
-      workspaceId: string,
-      targetId: string,
-      level: ReviewLevel | null,
-    ): Promise<boolean> {
-      if (level !== null && !isReviewLevel(level)) {
-        throw new Error(
-          `targets-store: review level ${JSON.stringify(level)} is not on the vocabulary (${REVIEW_LEVELS.join(" | ")}) — zero rows written`,
-        );
-      }
-      const res = await db
-        .prepare(
-          `UPDATE review_targets SET review_level = ?, updated_at = datetime('now')
-           WHERE ${LIVE_TARGET}`,
-        )
-        .bind(level, targetId, workspaceId)
-        .run();
-      return res.meta.changes > 0;
-    },
-
-    /**
-     * Save the Check gate. The score must be an integer in 0..100 and every
-     * verdict must be on the engine `PR_VERDICTS` vocabulary — anything else
-     * throws BEFORE any write (the settings route answers 400 first; the DDL
-     * CHECK is the last line for the score). The verdict array is stored as
-     * JSON, the form the DDL default uses. Returns whether a row changed.
-     */
-    async saveCheckGate(
-      workspaceId: string,
-      targetId: string,
-      gate: CheckGate,
-    ): Promise<boolean> {
-      if (!Number.isInteger(gate.minScore) || gate.minScore < 0 || gate.minScore > 100) {
-        throw new Error(
-          `targets-store: check gate min score ${JSON.stringify(gate.minScore)} is outside 0..100 — zero rows written`,
-        );
-      }
-      for (const verdict of gate.passVerdicts) {
-        if (!PR_VERDICTS.includes(verdict)) {
+      const assignments: string[] = [];
+      const values: unknown[] = [];
+      if (config.triggerMode !== undefined) {
+        if (!REVIEW_TRIGGER_MODES.includes(config.triggerMode)) {
           throw new Error(
-            `targets-store: check gate verdict ${JSON.stringify(verdict)} is not on PR_VERDICTS (${PR_VERDICTS.join(" | ")}) — zero rows written`,
+            `targets-store: review trigger mode ${JSON.stringify(config.triggerMode)} is not on the vocabulary (${REVIEW_TRIGGER_MODES.join(" | ")}) — zero rows written`,
           );
         }
+        assignments.push("review_trigger_mode = ?");
+        values.push(config.triggerMode);
       }
+      if (config.level !== undefined) {
+        if (config.level !== null && !isReviewLevel(config.level)) {
+          throw new Error(
+            `targets-store: review level ${JSON.stringify(config.level)} is not on the vocabulary (${REVIEW_LEVELS.join(" | ")}) — zero rows written`,
+          );
+        }
+        assignments.push("review_level = ?");
+        values.push(config.level);
+      }
+      if (config.checkMinScore !== undefined) {
+        if (!isCheckMinScoreValue(config.checkMinScore)) {
+          throw new Error(
+            `targets-store: check gate min score ${JSON.stringify(config.checkMinScore)} is outside 0..100 — zero rows written`,
+          );
+        }
+        assignments.push("check_min_score = ?");
+        values.push(config.checkMinScore);
+      }
+      if (config.checkPassVerdicts !== undefined) {
+        for (const verdict of config.checkPassVerdicts) {
+          if (!PR_VERDICTS.includes(verdict)) {
+            throw new Error(
+              `targets-store: check gate verdict ${JSON.stringify(verdict)} is not on PR_VERDICTS (${PR_VERDICTS.join(" | ")}) — zero rows written`,
+            );
+          }
+        }
+        assignments.push("check_pass_verdicts = ?");
+        values.push(JSON.stringify(config.checkPassVerdicts));
+      }
+      // First, so the row's own columns are the ones the caller just wrote —
+      // one statement, no second write and no window where the save is inert.
+      if (config.follow !== undefined) {
+        assignments.unshift("follow_workspace_defaults = ?");
+        values.unshift(config.follow);
+      }
+      if (assignments.length === 0) return false;
       const res = await db
         .prepare(
-          `UPDATE review_targets
-           SET check_min_score = ?, check_pass_verdicts = ?, updated_at = datetime('now')
+          `UPDATE review_targets SET ${assignments.join(", ")}, updated_at = datetime('now')
            WHERE ${LIVE_TARGET}`,
         )
-        .bind(gate.minScore, JSON.stringify(gate.passVerdicts), targetId, workspaceId)
+        .bind(...values, targetId, workspaceId)
         .run();
       return res.meta.changes > 0;
-    },
-
-    /**
-     * Save the owner allowlist: the switch plus the owner set, which is
-     * REPLACED — delete-then-insert in ONE batch, so a removal is written by
-     * the same operation that adds. Duplicate logins collapse
-     * case-insensitively; an empty set is legal and, with the switch on,
-     * refuses every owner (fail closed).
-     *
-     * Refuses a collapsed set larger than ALLOWLIST_MAX_OWNERS before any
-     * read, and refuses an unknown, deleted or foreign target with no rows
-     * written. Every statement repeats the liveness/tenant predicate, so a
-     * delete or a workspace mix-up landing between the pre-read and the batch
-     * writes NO owner rows and the UPDATE's change count reports `false`
-     * instead of a save that never took effect.
-     */
-    async saveAllowlist(
-      workspaceId: string,
-      targetId: string,
-      allowlist: OwnerAllowlist,
-    ): Promise<boolean> {
-      // Collapse first: the INSERT count is the deduped set, so duplicates
-      // must not consume the budget.
-      const owners = dedupeOwnerLogins(allowlist.owners);
-      if (owners.length > ALLOWLIST_MAX_OWNERS) {
-        throw new Error(
-          `targets-store: owner allowlist holds ${owners.length} logins, above ALLOWLIST_MAX_OWNERS (${ALLOWLIST_MAX_OWNERS}) — zero rows written`,
-        );
-      }
-      const live = await db
-        .prepare(`SELECT id FROM review_targets WHERE ${LIVE_TARGET}`)
-        .bind(targetId, workspaceId)
-        .first<{ id: string }>();
-      if (!live) return false;
-      const liveTarget = `EXISTS (SELECT 1 FROM review_targets t
-        WHERE t.id = ? AND t.workspace_id = ? AND t.deleted_at IS NULL)`;
-      // ONE batch on purpose: chunking a replace is not atomic — a failed
-      // later chunk would leave a partial owner set. The statement count
-      // (ALLOWLIST_MAX_OWNERS + 2) stays below any observed D1 batch limit.
-      const results = await db.batch([
-        db
-          .prepare(`DELETE FROM target_owner_allowlist WHERE target_id = ? AND ${liveTarget}`)
-          .bind(targetId, targetId, workspaceId),
-        ...owners.map((owner) =>
-          db
-            .prepare(
-              `INSERT INTO target_owner_allowlist (target_id, owner_login, created_at)
-               SELECT ?, ?, datetime('now') WHERE ${liveTarget}`,
-            )
-            .bind(targetId, owner, targetId, workspaceId),
-        ),
-        db
-          .prepare(
-            `UPDATE review_targets SET allowlist_enabled = ?, updated_at = datetime('now')
-             WHERE ${LIVE_TARGET}`,
-          )
-          .bind(allowlist.enabled ? 1 : 0, targetId, workspaceId),
-      ]);
-      return (results.at(-1)?.meta.changes ?? 0) > 0;
-    },
-
-    /**
-     * The target's gate, or `null` for an unknown, deleted or foreign target
-     * as well as for a readable row whose stored verdicts are unreadable —
-     * every consumer fails closed instead of inventing a permissive default.
-     */
-    async getCheckGate(workspaceId: string, targetId: string): Promise<CheckGate | null> {
-      const row = await db
-        .prepare(
-          `SELECT check_min_score, check_pass_verdicts FROM review_targets
-           WHERE ${LIVE_TARGET}`,
-        )
-        .bind(targetId, workspaceId)
-        .first<{ check_min_score: number; check_pass_verdicts: string }>();
-      return row === null ? null : targetCheckGate(row);
-    },
-
-    /**
-     * The target's owner allowlist: the switch plus the owner logins sorted by
-     * `owner_login` (SQLite's BINARY collation). ONE statement, so the switch
-     * and the owner set come from the same snapshot — a save landing between
-     * two reads could otherwise admit against a switch that no longer applies
-     * to the list it was read with. An unknown, deleted or foreign target
-     * reads null.
-     */
-    async getAllowlist(
-      workspaceId: string,
-      targetId: string,
-    ): Promise<OwnerAllowlist | null> {
-      const rows = await db
-        .prepare(
-          `SELECT t.allowlist_enabled AS enabled, a.owner_login
-             FROM review_targets t
-             LEFT JOIN target_owner_allowlist a ON a.target_id = t.id
-            WHERE t.id = ? AND t.workspace_id = ? AND t.deleted_at IS NULL
-            ORDER BY a.owner_login`,
-        )
-        .bind(targetId, workspaceId)
-        .all<{ enabled: number; owner_login: string | null }>();
-      const [first] = rows.results;
-      if (first === undefined) return null;
-      return {
-        enabled: first.enabled !== 0,
-        owners: rows.results.flatMap((row) => (row.owner_login === null ? [] : [row.owner_login])),
-      };
     },
 
     /**

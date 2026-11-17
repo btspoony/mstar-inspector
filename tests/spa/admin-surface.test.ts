@@ -217,7 +217,6 @@ describe("the release version lives on the console only", () => {
       createElement(SettingsView, {
         locale: "en",
         payload: TENANT_PAYLOAD,
-        onReload: async () => true,
       }),
     );
     expect(markup).not.toContain(`v${APP_VERSION}`);

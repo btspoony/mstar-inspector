@@ -199,8 +199,8 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
     now,
   );
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
-  // Every bot owns exactly one target: the review configuration the settings
-  // and pause routes read and write lives there.
+  // Every bot owns exactly one target: the review configuration the App
+  // settings face reads lives there.
   seed(
     db,
     `INSERT INTO review_targets
@@ -569,20 +569,6 @@ describe("success redirects stay in the workspace route family", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe(`/dashboard/acme/targets/${ACME_APP_ID}`);
-  });
-
-  test("a native pause form post redirects to the workspace apps list (Referer-derived)", async () => {
-    const { db } = tenancyFixture();
-    const env = envFor(db);
-    const res = await worker.fetch(
-      await authedRequest(`/dashboard/acme/apps/${ACME_APP_ID}/pause`, "carol", {
-        method: "POST",
-        accept: "text/html",
-      }),
-      env,
-    );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard");
   });
 
   test("the SPA fetch form post keeps its plain 2xx body (no redirect)", async () => {

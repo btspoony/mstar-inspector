@@ -97,7 +97,7 @@ import {
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { reconcileReviewChecks } from "../../src/worker/check-reconcile";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
-import { createTargetsStore, targetCheckGate } from "../../src/dashboard/targets-store";
+import { checkGateOf, readEffectiveTargetSettings, type ReviewTargetRow } from "../../src/dashboard/targets-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { GITHUB_PRIMARY_RATE_LIMIT_PREFIX, GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
@@ -3711,8 +3711,12 @@ describe("createReviewConsumer", () => {
   test("a degraded caps read warns once and admits at the conservative cap (never unlimited)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // The fault names the CAPS statement, not the table: the maintenance read
+    // shares `review_runtime_settings`, and an unreadable window now defers the
+    // batch (fail closed) before admission is ever asked — so a table-wide fault
+    // would pin the deferral instead of the degraded cap.
     const consumer = createReviewConsumer(
-      await h.makeEnv({ DB: dbFailingOn(db, "review_runtime_settings") as never }),
+      await h.makeEnv({ DB: dbFailingOn(db, "AS system_value") as never }),
       h.testLog,
       h.overrides,
     );
@@ -6093,11 +6097,16 @@ function publicationRow(db: TestD1): { id: string; kind: string; phase: string; 
 
 /**
  * The Check gate of the bot's target — the read the production Check lane
- * makes (the scope names the bot, not the target).
+ * makes (the scope names the bot, not the target). These fixtures give a bot
+ * exactly one live target, so the bot's single row is the gate.
  */
 async function targetGate(db: TestD1, appId: string) {
-  const target = await createTargetsStore(db).resolve(appId, null);
-  return target === null ? null : targetCheckGate(target);
+  const rows = await db
+    .prepare(`SELECT * FROM review_targets WHERE bot_id = ? AND deleted_at IS NULL LIMIT 2`)
+    .bind(appId)
+    .all<ReviewTargetRow>();
+  const target = rows.results.length === 1 ? rows.results[0]! : null;
+  return target === null ? null : checkGateOf(await readEffectiveTargetSettings(db, target));
 }
 
 /** One production lifecycle over the registry double with the scripted transport. */
@@ -6194,6 +6203,32 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.recovery_state).toBe("done");
     expect(row.terminal_ms).not.toBeNull();
     expect(row.publication_id).toBe(pub.id);
+  });
+
+  test("check lifecycle: an inheriting target's gate is the workspace floor, not its inert row placeholder", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    // The row answers nothing while it inherits (migration 0067): its floor is
+    // a 95 placeholder the workspace default (unset → 60) never reads. Judging
+    // the 85-point review against the placeholder would fail a Check the target
+    // actually passes.
+    db.raw
+      .prepare(
+        `UPDATE review_targets SET follow_workspace_defaults = 1, check_min_score = 95 WHERE bot_id = ?`,
+      )
+      .run(TEST_APP_ID);
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const update = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(update.conclusion).toBe("success");
+    expect(update.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+    expect(checkRowFor(db, SHA).desired).toBe("success");
   });
 
   test("check lifecycle: the review's begin promotes the queued run exactly once, before the container starts", async () => {
