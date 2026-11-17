@@ -240,7 +240,7 @@ export function DataUpgradeView({
                 </div>
               </CardHeader>
               <CardContent className="flex flex-col gap-4">
-                <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
+                <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
                   <div className="flex flex-col gap-1">
                     <dt className="text-muted-foreground">
                       {t(locale, "admin.dataUpgrades.processedLabel")}
@@ -248,12 +248,13 @@ export function DataUpgradeView({
                     <dd className="font-medium">{state.processed}</dd>
                   </div>
                   <div className="flex flex-col gap-1">
-                    <dt className="text-muted-foreground">{t(locale, "admin.dataUpgrades.startedLabel")}</dt>
-                    <dd className="font-medium">{formatRelativeTime(state.startedAt, locale)}</dd>
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <dt className="text-muted-foreground">{t(locale, "admin.dataUpgrades.finishedLabel")}</dt>
-                    <dd className="font-medium">{formatRelativeTime(state.finishedAt, locale)}</dd>
+                    <dt className="text-muted-foreground">{t(locale, "admin.dataUpgrades.lastRunLabel")}</dt>
+                    {/* `started_at` is only the in-flight claim, so a run that
+                        finished states its own stamp; the claim stands in while
+                        one is running. */}
+                    <dd className="font-medium">
+                      {formatRelativeTime(state.finishedAt ?? state.startedAt, locale)}
+                    </dd>
                   </div>
                 </dl>
                 <div className="flex flex-col gap-1.5">

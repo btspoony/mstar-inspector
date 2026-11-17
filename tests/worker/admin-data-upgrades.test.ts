@@ -303,6 +303,66 @@ describe("the data-upgrade runner", () => {
     expect(movedCount(db)).toBe(2);
   });
 
+  test("a verify during a running step is refused with upgrade_running", async () => {
+    const db = fixture(3);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const inner = fixtureItem();
+    register({
+      ...inner,
+      async runBatch(dbApi, cursor) {
+        entered.resolve();
+        await release.promise;
+        return inner.runBatch(dbApi, cursor);
+      },
+    });
+
+    const step = api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
+    await entered.promise;
+    const refused = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/verify`);
+    expect(refused.status).toBe(409);
+    const refusal = (await refused.json()) as { error: string };
+    expect(refusal.error).toBe("upgrade_running");
+    // The verify ran no check: the step still owns the row.
+    expect(await state(db)).toMatchObject({ status: "running" });
+
+    release.resolve();
+    expect((await step).status).toBe(200);
+    expect(await state(db)).toMatchObject({ status: "running", processed: 2 });
+  });
+
+  test("a reset during a verify is refused with upgrade_running", async () => {
+    const db = fixture(1);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const inner = fixtureItem();
+    register({
+      ...inner,
+      async verify(dbApi) {
+        entered.resolve();
+        await release.promise;
+        return inner.verify(dbApi);
+      },
+    });
+
+    expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(200);
+    const verifying = api(db, "POST", `/api/data-upgrades/${ITEM_ID}/verify`);
+    await entered.promise;
+
+    const refused = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/reset`);
+    expect(refused.status).toBe(409);
+    const body = (await refused.json()) as { error: string; state: { status: string } };
+    expect(body.error).toBe("upgrade_running");
+    expect(body.state.status).toBe("verifying");
+    // Nothing was cleared: the cursor and the moved rows survive the refusal.
+    expect(await state(db)).toEqual({ status: "verifying", processed: 1, cursor_json: "null" });
+    expect(movedCount(db)).toBe(1);
+
+    release.resolve();
+    expect((await verifying).status).toBe(200);
+    expect(await state(db)).toMatchObject({ status: "completed" });
+  });
+
   test("step, verify and reset each write one audit row", async () => {
     const db = fixture(1);
     register(fixtureItem());

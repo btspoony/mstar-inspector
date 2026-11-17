@@ -943,7 +943,10 @@ async function dataUpgradeAction(c: AdminContext): Promise<Response> {
       : c.json({ state: outcome.state, checks: outcome.checks });
   }
   if (action === "reset") {
-    return c.json({ state: await resetDataUpgrade(db, item, login, now) });
+    const outcome = await resetDataUpgrade(db, item, login, now);
+    return outcome.kind === "refused"
+      ? c.json({ error: outcome.reason, state: outcome.state }, 409)
+      : c.json({ state: outcome.state });
   }
   return c.notFound();
 }

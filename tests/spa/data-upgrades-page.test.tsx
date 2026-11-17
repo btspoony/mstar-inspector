@@ -19,6 +19,7 @@ import { type Element as DomElement, type Window } from "happy-dom";
 import { t } from "../../src/i18n";
 import { DataUpgradePage, DataUpgradeView } from "../../src/spa/admin/DataUpgradePage";
 import type { DataUpgradeRow, DataUpgradeState } from "../../src/spa/admin/api";
+import { formatRelativeTime } from "../../src/spa/relative-time";
 import { installDom } from "./dom";
 
 const realFetch = globalThis.fetch;
@@ -100,6 +101,36 @@ const viewOf = (index: number, over: Partial<Parameters<typeof DataUpgradeView>[
   view({ data: { upgrades: [UPGRADES[index]!], maintenance: RUNTIME.maintenance }, ...over });
 
 describe("data upgrade screen — static faces", () => {
+  test("the time column is Last run: the finish stamp, or the claim while it runs", () => {
+    // A finished run states its OWN finish, never the claim that started it.
+    const done = view({
+      data: {
+        upgrades: [
+          {
+            ...UPGRADES[1]!,
+            state: state({
+              status: "completed",
+              processed: 40,
+              startedAt: "2026-11-09T08:00:00.000Z",
+              finishedAt: "2026-11-16T09:00:00.000Z",
+            }),
+          },
+        ],
+        maintenance: RUNTIME.maintenance,
+      },
+    });
+    expect(done).toContain(t("en", "admin.dataUpgrades.lastRunLabel"));
+    expect(done).toContain(formatRelativeTime("2026-11-16T09:00:00.000Z", "en"));
+    expect(done).not.toContain(formatRelativeTime("2026-11-09T08:00:00.000Z", "en"));
+    // The two single-stamp columns are gone: one run time, not a start and a finish.
+    expect(done).not.toContain("Started");
+    expect(done).not.toContain("Finished");
+
+    // No finish yet: the in-flight claim is the closest thing to a run time.
+    const running = viewOf(1);
+    expect(running).toContain(formatRelativeTime("2026-11-16T08:00:00.000Z", "en"));
+  });
+
   test("a pending item states its preflight counts and offers start", () => {
     const markup = viewOf(0);
     expect(markup).toContain(t("en", "admin.nav.dataUpgrades"));

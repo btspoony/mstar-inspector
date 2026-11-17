@@ -1661,8 +1661,8 @@ export const en = {
       /** The item refuses a second batch outside the maintenance window. */
       downtimeBadge: "Needs downtime",
       processedLabel: "Rows processed",
-      startedLabel: "Started",
-      finishedLabel: "Finished",
+      /** One column: the run's own finish, or the in-flight claim while it runs. */
+      lastRunLabel: "Last run",
       preflightLabel: "Preflight counts",
       preflightAction: "Preflight",
       startAction: "Start upgrade",

@@ -1394,8 +1394,8 @@ export const zhCN: Dictionary = {
       statusFailed: "已失败",
       downtimeBadge: "需要停机",
       processedLabel: "已处理行数",
-      startedLabel: "开始时间",
-      finishedLabel: "完成时间",
+      /** 一列：最近一次运行自己的完成时间；运行中退回进行中的声明时间。 */
+      lastRunLabel: "最近运行",
       preflightLabel: "预检计数",
       preflightAction: "预检",
       startAction: "开始升级",

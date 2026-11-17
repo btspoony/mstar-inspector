@@ -209,39 +209,73 @@ export async function listDataUpgrades(db: DashboardD1): Promise<DataUpgradeList
   );
 }
 
-/** Clears the in-flight claim after a batch that threw (the item stays `running`). */
-const STEP_RELEASE_SQL = "UPDATE operator_data_upgrades SET started_at = NULL WHERE id = ?1";
+/** Clears the in-flight claim after a phase that threw (the stored status stays). */
+const CLAIM_RELEASE_SQL = "UPDATE operator_data_upgrades SET started_at = NULL WHERE id = ?1";
+
+/** Drop the claim a phase took, keeping the error that is about to surface. */
+async function releaseClaim(db: DashboardD1, id: string): Promise<void> {
+  // A release that fails must not mask the real error: the lease self-heals.
+  await db.prepare(CLAIM_RELEASE_SQL).bind(id).run().catch(() => {});
+}
 
 /**
  * A claim stamp older than this is presumed dead: the worker that took it never
- * released it (a step batch is bounded — one worklist page, chunked binds). The
- * stale window IS the lease expiry, so a crashed step never wedges the item.
+ * released it (a phase is bounded — one worklist page, chunked binds). The stale
+ * window IS the lease expiry, so a crashed phase never wedges the item.
  */
-const STEP_LEASE_MS = 5 * 60_000;
+const CLAIM_LEASE_MS = 5 * 60_000;
 
 /**
- * Claim the item for ONE batch — the step's compare-and-set (QC wave B, W1).
- * `started_at` is the CLAIM STAMP: non-NULL only while a batch is in flight, so
- * the row itself is the single-flight lock and no extra column is needed. A
- * `pending` row (or an absent one) is claimable at once; a `running` row only
- * when no claim is held or the held one went stale. `meta.changes === 0` means
- * somebody else holds the lease — the caller refuses, and never plans a second
- * copy of the same worklist (which is what minted duplicate live targets).
+ * Claim the item for ONE phase — the compare-and-set `step`, `verify` and
+ * `reset` all take, so two phases never interleave on one item.
  *
- * The claim refreshes `started_at` on every step: a fresh stamp is the only
- * evidence of an in-flight batch, and the lease's expiry is measured against it.
+ * `started_at` is the CLAIM STAMP: non-NULL only while a phase is in flight, so
+ * the row itself is the single-flight lock and no extra column is needed. A row
+ * with no claim held (or one absent, which the INSERT creates) is claimable at
+ * once; a held claim only once it went stale. `meta.changes === 0` means
+ * somebody else holds the lease — the caller refuses with `upgrade_running`
+ * instead of acting on a row another phase is about to rewrite.
+ *
+ * `allowed` is the status set the phase may take the item from, so a phase that
+ * lost a read-then-claim race against a DIFFERENT phase also refuses instead of
+ * resurrecting a state that phase already wrote.
  */
-const STEP_CLAIM_SQL = `
+function claimSql(allowed: readonly DataUpgradeStatus[]): string {
+  const list = allowed.map((status) => `'${status}'`).join(", ");
+  return `
   INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at)
-  VALUES (?1, 'running', ?3, ?2)
+  VALUES (?1, ?2, ?3, ?4)
   ON CONFLICT (id) DO UPDATE SET
-    status = 'running',
+    status = ?2,
     maintenance_owned = ?3,
-    started_at = ?2
-  WHERE operator_data_upgrades.status = 'pending'
-     OR (operator_data_upgrades.status = 'running'
-         AND (operator_data_upgrades.started_at IS NULL
-              OR operator_data_upgrades.started_at < ?4))`;
+    started_at = ?4
+  WHERE operator_data_upgrades.status IN (${list})
+    AND (operator_data_upgrades.started_at IS NULL
+         OR operator_data_upgrades.started_at < ?5)`;
+}
+
+/** `verifying` is included so a verify interrupted mid-flight can be retried. */
+const VERIFIABLE_STATUSES: readonly DataUpgradeStatus[] = ["running", "verifying", "failed"];
+
+const STEP_CLAIM_SQL = claimSql(["pending", "running"]);
+const VERIFY_CLAIM_SQL = claimSql(VERIFIABLE_STATUSES);
+const RESET_CLAIM_SQL = claimSql(["pending", "running", "verifying", "completed", "failed"]);
+
+/** Take the phase's claim; `false` means another phase holds the item. */
+async function claimUpgrade(
+  db: DashboardD1,
+  sql: string,
+  id: string,
+  status: DataUpgradeStatus,
+  maintenanceOwned: 0 | 1,
+  now: string,
+): Promise<boolean> {
+  const claim = await db
+    .prepare(sql)
+    .bind(id, status, maintenanceOwned, now, new Date(Date.parse(now) - CLAIM_LEASE_MS).toISOString())
+    .run();
+  return claim.meta.changes !== 0;
+}
 
 /**
  * The batch's outcome: cursor, counter, log entry AND the lease release commit
@@ -329,11 +363,8 @@ export async function stepDataUpgrade(
     }
   }
   const owned = item.requiresDowntime && (opensWindow || before.maintenanceOwned);
-  const claim = await db
-    .prepare(STEP_CLAIM_SQL)
-    .bind(item.id, now, owned ? 1 : 0, new Date(Date.parse(now) - STEP_LEASE_MS).toISOString())
-    .run();
-  if (claim.meta.changes === 0) {
+  const claim = await claimUpgrade(db, STEP_CLAIM_SQL, item.id, "running", owned ? 1 : 0, now);
+  if (!claim) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
   if (opensWindow) {
@@ -341,9 +372,8 @@ export async function stepDataUpgrade(
   }
   const batch = await item.runBatch(db, before.cursor).catch(async (err: unknown) => {
     // The batch is ONE transaction, so a throw moved nothing: release the claim
-    // (a hard process death leaves it to expire instead) and surface the real
-    // error — a release that fails must not mask it, and the lease self-heals.
-    await db.prepare(STEP_RELEASE_SQL).bind(item.id).run().catch(() => {});
+    // (a hard process death leaves it to expire instead) and surface the real error.
+    await releaseClaim(db, item.id);
     throw err;
   });
   await db.batch([
@@ -360,9 +390,6 @@ export async function stepDataUpgrade(
   return { kind: "ok", state: await readDataUpgradeState(db, item.id), batch };
 }
 
-/** `verifying` is included so a verify interrupted mid-flight can be retried. */
-const VERIFIABLE: readonly DataUpgradeStatus[] = ["running", "verifying", "failed"];
-
 export type UpgradeVerifyOutcome =
   | { kind: "ok"; state: DataUpgradeState; checks: UpgradeCounts }
   | { kind: "refused"; reason: string; state: DataUpgradeState };
@@ -374,6 +401,9 @@ export type UpgradeVerifyOutcome =
  * were not zero; all zero completes it. A window the runner opened is closed
  * only now AND only when it owns one — an operator-enabled window stays open
  * until the operator clears it (spec § Invariants).
+ *
+ * The claim makes verify refuse while another phase is in flight: a verify that
+ * interleaved with a step would read data the step is still moving.
  */
 export async function verifyDataUpgrade(
   db: DashboardD1,
@@ -382,20 +412,32 @@ export async function verifyDataUpgrade(
   now: string,
 ): Promise<UpgradeVerifyOutcome> {
   const before = await readDataUpgradeState(db, item.id);
-  if (!VERIFIABLE.includes(before.status)) {
+  if (!VERIFIABLE_STATUSES.includes(before.status)) {
     return { kind: "refused", reason: `cannot verify a ${before.status} upgrade`, state: before };
   }
-  await db
-    .prepare("UPDATE operator_data_upgrades SET status = 'verifying' WHERE id = ?1")
-    .bind(item.id)
-    .run();
-  const checks = await item.verify(db);
+  const claimed = await claimUpgrade(
+    db,
+    VERIFY_CLAIM_SQL,
+    item.id,
+    "verifying",
+    before.maintenanceOwned ? 1 : 0,
+    now,
+  );
+  if (!claimed) {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
+  }
+  const checks = await item.verify(db).catch(async (err: unknown) => {
+    await releaseClaim(db, item.id);
+    throw err;
+  });
   const failing = Object.entries(checks).filter(([, count]) => count !== 0);
   if (failing.length > 0) {
     const lastError = `verify failed: ${failing.map(([name, count]) => `${name}=${count}`).join(", ")}`;
     await db.batch([
       db
-        .prepare("UPDATE operator_data_upgrades SET status = 'failed', last_error = ?2 WHERE id = ?1")
+        .prepare(
+          "UPDATE operator_data_upgrades SET status = 'failed', last_error = ?2, started_at = NULL WHERE id = ?1",
+        )
         .bind(item.id, lastError),
       upgradeAudit(db, "verify", actor, item.id, "failed", now),
     ]);
@@ -404,7 +446,7 @@ export async function verifyDataUpgrade(
   await db.batch([
     db
       .prepare(
-        "UPDATE operator_data_upgrades SET status = 'completed', finished_at = ?2, last_error = NULL WHERE id = ?1",
+        "UPDATE operator_data_upgrades SET status = 'completed', finished_at = ?2, last_error = NULL, started_at = NULL WHERE id = ?1",
       )
       .bind(item.id, now),
     upgradeAudit(db, "verify", actor, item.id, "completed", now),
@@ -443,19 +485,43 @@ const RESET_SQL = `
          last_error = NULL
    WHERE id = ?1`;
 
+export type UpgradeResetOutcome =
+  | { kind: "ok"; state: DataUpgradeState }
+  | { kind: "refused"; reason: string; state: DataUpgradeState };
+
 export async function resetDataUpgrade(
   db: DashboardD1,
   item: DataUpgradeItem,
   actor: string,
   now: string,
-): Promise<DataUpgradeState> {
+): Promise<UpgradeResetOutcome> {
   const before = await readDataUpgradeState(db, item.id);
-  if (before.maintenanceOwned && (await getMaintenanceMode(db)).enabled) {
-    await setMaintenanceMode(db, { enabled: false, actor }, now);
+  // The claim keeps a reset from clearing the row a step or verify is writing.
+  // The bind states the row as it already is, so a refused or failed reset
+  // leaves the status where it was.
+  const claimed = await claimUpgrade(
+    db,
+    RESET_CLAIM_SQL,
+    item.id,
+    before.status,
+    before.maintenanceOwned ? 1 : 0,
+    now,
+  );
+  if (!claimed) {
+    return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
-  await db.batch([
-    db.prepare(RESET_SQL).bind(item.id),
-    upgradeAudit(db, "reset", actor, item.id, "pending", now),
-  ]);
-  return readDataUpgradeState(db, item.id);
+  try {
+    if (before.maintenanceOwned && (await getMaintenanceMode(db)).enabled) {
+      await setMaintenanceMode(db, { enabled: false, actor }, now);
+    }
+    // RESET_SQL clears `started_at` itself: the release lands with the state.
+    await db.batch([
+      db.prepare(RESET_SQL).bind(item.id),
+      upgradeAudit(db, "reset", actor, item.id, "pending", now),
+    ]);
+  } catch (err: unknown) {
+    await releaseClaim(db, item.id);
+    throw err;
+  }
+  return { kind: "ok", state: await readDataUpgradeState(db, item.id) };
 }
