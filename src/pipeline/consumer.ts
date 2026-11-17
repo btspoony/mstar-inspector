@@ -466,11 +466,11 @@ export type ConsumerLogFields = {
    * the discussion, with no body and no catalog — overruns the operator's byte
    * budget, so nothing is sent. It names both figures and is NOT a seat skip:
    * no seat was started.
-   * `maintenance_skip` (same channel, additive): the invocation found the
-   * platform closed (D20) and acked the delivery without starting a round — the
-   * only record of a review the maintenance window dropped.
+   * `maintenance_defer` (same channel, additive): the invocation found the
+   * platform closed (D20) and deferred the whole batch instead of running it —
+   * one line per invocation, not per message.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_skip";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
   action: string;
   installation_id: number;
   owner: string;
@@ -483,10 +483,12 @@ export type ConsumerLogFields = {
   /** review_targets.id the job's configuration came from (per-bot jobs only). */
   target_id?: string;
   /**
-   * The queue binding the deferred delivery arrived on (`maintenance_skip`
-   * only — the window names the queue it drained, not just the PR).
+   * The queue binding the deferred batch arrived on (`maintenance_defer` only —
+   * the window names the queue it deferred, not just the PR).
    */
   queue?: string;
+  /** Deliveries the deferred batch carried (`maintenance_defer` only). */
+  batch_size?: number;
   idempotency_key?: string;
   /**
    * review_checks.id — the Check attempt row a line is about, and the only
@@ -4036,23 +4038,36 @@ export function createReviewConsumer(
   return async (batch) => {
     // The maintenance window (D20) defers the whole invocation: a mid-upgrade
     // pipeline write could land on a ledger row the backfill just repointed.
-    // ONE read per invocation; nothing else in the batch runs. Each deferred
-    // delivery is acked (GitHub is already 503ing, so the window drains the
-    // backlog rather than replaying it) and leaves one line naming its PR —
-    // those lines are the only record of a review this window dropped.
+    // ONE read per invocation; nothing else in the batch runs. Every delivery
+    // is DEFERRED, never acked — acking would drop the review for good, while
+    // the window is temporary. ONE line per invocation (the queue and the
+    // batch size it deferred), not one per message: the batch is the unit the
+    // platform redelivers.
+    //
+    // shortcut: cover is max_retries × 300s (wrangler.jsonc: 5 × 5 min); a
+    // window open longer drains the batch into review-dlq — upgrade to a
+    // re-enqueue-on-close drain then.
     const maintenance = await getMaintenanceMode(env.DB);
     if (maintenance.enabled) {
-      for (const message of batch.messages) {
-        log.warn(
-          {
-            ...payloadIdentityFields(message.body),
-            event: "maintenance_skip",
-            queue: batch.queue,
-          },
-          "delivery skipped — the platform is in its maintenance window",
+      // An empty batch has nothing to defer (and no identity to name it with).
+      if (batch.messages[0] === undefined) return;
+      log.warn(
+        {
+          ...payloadIdentityFields(batch.messages[0].body),
+          event: "maintenance_defer",
+          queue: batch.queue,
+          batch_size: batch.messages.length,
+        },
+        "delivery deferred — the platform is in its maintenance window",
+      );
+      // A runtime without `retry` has no delayed redelivery: throwing fails
+      // the batch so the queue's own retry policy re-runs it after the window.
+      if (!batch.messages.every((message) => typeof message.retry === "function")) {
+        throw new Error(
+          `${batch.queue}: maintenance window is open and this runtime offers no message.retry — failing the batch so the queue retries it`,
         );
-        message.ack();
       }
+      for (const message of batch.messages) message.retry({ delaySeconds: 300 });
       return;
     }
     for (const message of batch.messages) {
