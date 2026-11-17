@@ -326,20 +326,13 @@ describe("App detail IA copy", () => {
 });
 
 describe("creation chooser copy", () => {
-  /** Every key the two-mode chooser renders, both locales. */
+  /** Every key the chooser renders, both locales. */
   const KEYS = [
     "apps.createDialog.title",
     "apps.createDialog.description",
-    "apps.createDialog.modeOfficial",
-    "apps.createDialog.modeSelfHosted",
-    "apps.createDialog.botLabel",
-    "apps.createDialog.botPlaceholder",
-    "apps.createDialog.botTargetOne",
     "apps.createDialog.botTargets",
     "apps.createDialog.noSharedBots",
-    "apps.createDialog.submit",
     "apps.createDialog.selfHostedSubmit",
-    "apps.createDialog.failed",
   ] as const;
 
   test("every chooser key exists in both locales", () => {
@@ -350,9 +343,22 @@ describe("creation chooser copy", () => {
     }
   });
 
+  test("the official-mode form's keys are removed, not aliased", () => {
+    // They left with their only consumer — the deleted target-creating form.
+    for (const key of [
+      "apps.createDialog.modeOfficial",
+      "apps.createDialog.modeSelfHosted",
+      "apps.createDialog.botLabel",
+      "apps.createDialog.botPlaceholder",
+      "apps.createDialog.botTargetOne",
+      "apps.createDialog.submit",
+      "apps.createDialog.failed",
+    ] as const) {
+      expect(isDictionaryKey(key), key).toBe(false);
+    }
+  });
+
   test("the bot option carries its name and this workspace's target count", () => {
-    expect(t("en", "apps.createDialog.botTargetOne", { name: "Platform", count: 1 })).toContain("Platform");
-    expect(t("en", "apps.createDialog.botTargetOne", { name: "Platform", count: 1 })).toContain("1");
     expect(t("en", "apps.createDialog.botTargets", { name: "Platform", count: 3 })).toContain("3");
     expect(t("zh_CN", "apps.createDialog.botTargets", { name: "Platform", count: 3 })).toContain("3");
   });

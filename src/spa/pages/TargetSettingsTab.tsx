@@ -54,6 +54,13 @@ export type TargetPolicySettings = {
   review_level: ReviewLevel | null;
   check_min_score: number;
   check_pass_verdicts: string[];
+  /**
+   * False = the stored verdict array is unreadable, so `check_pass_verdicts`
+   * above is the server's fail-closed placeholder rather than a gate anyone
+   * saved. The gate then renders its read-only recovery copy and nothing on
+   * this face may save a policy (a snapshot would persist the placeholder).
+   */
+  check_pass_verdicts_readable: boolean;
 };
 
 /**
@@ -82,7 +89,8 @@ function isPolicySettings(value: unknown): value is TargetPolicySettings {
     (row.review_level === null || isReviewLevel(row.review_level)) &&
     typeof row.check_min_score === "number" &&
     Array.isArray(row.check_pass_verdicts) &&
-    row.check_pass_verdicts.every((verdict) => typeof verdict === "string")
+    row.check_pass_verdicts.every((verdict) => typeof verdict === "string") &&
+    typeof row.check_pass_verdicts_readable === "boolean"
   );
 }
 
@@ -228,54 +236,65 @@ export function ReviewPolicyFields({
 
       <fieldset className="flex flex-col gap-3">
         <legend className="text-sm font-medium">{t(locale, "settings.reviewGate")}</legend>
-        <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
-          {t(locale, "settings.reviewGateScore")}
-          <Input
-            type="number"
-            min={0}
-            max={100}
-            step={1}
-            className="w-28"
-            value={score}
-            disabled={readOnly}
-            onChange={(event) => setScore(event.target.value)}
-          />
-        </label>
-        <div className="flex flex-col gap-2">
-          <span className="text-sm font-medium">{t(locale, "settings.reviewGateVerdicts")}</span>
-          {PR_VERDICTS.map((verdict) => (
-            <label key={verdict} className="flex w-fit items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className={SWITCH_CLASS}
-                checked={verdicts.includes(verdict)}
+        {settings.check_pass_verdicts_readable ? (
+          <>
+            <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
+              {t(locale, "settings.reviewGateScore")}
+              <Input
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                className="w-28"
+                value={score}
                 disabled={readOnly}
-                onChange={() => toggleVerdict(verdict)}
+                onChange={(event) => setScore(event.target.value)}
               />
-              {verdict}
             </label>
-          ))}
-        </div>
-        {verdicts.length === 0 ? (
+            <div className="flex flex-col gap-2">
+              <span className="text-sm font-medium">{t(locale, "settings.reviewGateVerdicts")}</span>
+              {PR_VERDICTS.map((verdict) => (
+                <label key={verdict} className="flex w-fit items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className={SWITCH_CLASS}
+                    checked={verdicts.includes(verdict)}
+                    disabled={readOnly}
+                    onChange={() => toggleVerdict(verdict)}
+                  />
+                  {verdict}
+                </label>
+              ))}
+            </div>
+            {verdicts.length === 0 ? (
+              <p role="status" className="text-sm text-(--tone-warn-fg)">
+                {t(locale, "settings.reviewGateFailClosed")}
+              </p>
+            ) : null}
+            <div>
+              <Button
+                type="button"
+                disabled={readOnly || score.trim() === "" || Number.isNaN(Number(score))}
+                onClick={() =>
+                  void onSave({
+                    check_min_score: Number(score),
+                    // One entry per checked box, in the vocabulary's order.
+                    check_pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
+                  })
+                }
+              >
+                {t(locale, "settings.reviewGateSave")}
+              </Button>
+            </div>
+          </>
+        ) : (
+          // The stored list is unreadable, so there is no value to edit and no
+          // save that could round-trip it: the same recovery copy the
+          // App-settings face states stands in for the whole gate.
           <p role="status" className="text-sm text-(--tone-warn-fg)">
-            {t(locale, "settings.reviewGateFailClosed")}
+            {t(locale, "settings.reviewGateUnreadable")}
           </p>
-        ) : null}
-        <div>
-          <Button
-            type="button"
-            disabled={readOnly || score.trim() === "" || Number.isNaN(Number(score))}
-            onClick={() =>
-              void onSave({
-                check_min_score: Number(score),
-                // One entry per checked box, in the vocabulary's order.
-                check_pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
-              })
-            }
-          >
-            {t(locale, "settings.reviewGateSave")}
-          </Button>
-        </div>
+        )}
       </fieldset>
     </>
   );
@@ -294,6 +313,15 @@ export function TargetSettingsTab({
 }) {
   const { target, effective, defaults } = payload;
   const inheriting = target.follow_workspace_defaults === 1;
+  /**
+   * The stored verdict list is unreadable: `effective.check_pass_verdicts` is
+   * the server's fail-closed placeholder, and EVERY policy save here snapshots
+   * the columns it omits (the server's snapshot rule) — a trigger, depth or
+   * inheritance toggle would write that placeholder over the stored list. The
+   * policy cluster and the inheritance switch are therefore read-only; pause
+   * writes no policy column and stays available.
+   */
+  const gateUnreadable = !effective.check_pass_verdicts_readable;
   const [busy, setBusy] = useState(false);
   const path = `${apiBase()}/api/targets/${encodeURIComponent(target.target_id)}`;
 
@@ -328,7 +356,7 @@ export function TargetSettingsTab({
           locale={locale}
           settings={effective}
           levelDefault={defaults.review_level}
-          readOnly={busy || inheriting}
+          readOnly={busy || inheriting || gateUnreadable}
           onSave={savePolicy}
         />
 
@@ -337,7 +365,9 @@ export function TargetSettingsTab({
             type="checkbox"
             className={SWITCH_CLASS}
             checked={inheriting}
-            disabled={busy}
+            // Toggling off snapshots the effective policy into the row, which
+            // would persist the unreadable gate's placeholder.
+            disabled={busy || gateUnreadable}
             onChange={(event) => void save({ follow: event.target.checked ? 1 : 0 })}
           />
           {t(locale, "targets.settings.follow")}

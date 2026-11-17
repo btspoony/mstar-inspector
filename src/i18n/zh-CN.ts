@@ -389,16 +389,9 @@ export const zhCN: Dictionary = {
     createDialog: {
       title: "创建审查目标",
       description: "使用平台已共享的 App，或连接你自己的 GitHub App。",
-      modeOfficial: "官方 App",
-      modeSelfHosted: "我的 GitHub App",
-      botLabel: "App",
-      botPlaceholder: "选择 App",
-      botTargetOne: "{name} · {count} 个目标",
       botTargets: "{name} · {count} 个目标",
       noSharedBots: "平台尚未共享任何 App — 请改为连接你自己的 GitHub App。",
-      submit: "创建目标",
       selfHostedSubmit: "前往 GitHub",
-      failed: "未能创建目标 — 请重试。",
     },
   },
   members: {

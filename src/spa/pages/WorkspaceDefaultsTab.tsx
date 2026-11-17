@@ -43,6 +43,7 @@ export function parseWorkspaceDefaults(data: unknown): WorkspaceDefaultsPayload 
     typeof row.check_min_score !== "number" ||
     !Array.isArray(row.check_pass_verdicts) ||
     !row.check_pass_verdicts.every((verdict) => typeof verdict === "string") ||
+    typeof row.check_pass_verdicts_readable !== "boolean" ||
     typeof target_count !== "number"
   ) {
     return null;
@@ -53,6 +54,7 @@ export function parseWorkspaceDefaults(data: unknown): WorkspaceDefaultsPayload 
       review_level: row.review_level as ReviewLevel | null,
       check_min_score: row.check_min_score,
       check_pass_verdicts: row.check_pass_verdicts as string[],
+      check_pass_verdicts_readable: row.check_pass_verdicts_readable,
     },
     target_count,
   };

@@ -478,10 +478,9 @@ describe("SPA dispatch", () => {
 
 describe("the retired settings-tab addresses redirect once", () => {
   const redirects: Array<[string, string]> = [
-    [
-      "/dashboard/acme/apps/12345/settings",
-      "/dashboard/acme/apps/12345?tab=settings",
-    ],
+    ["/dashboard/acme/apps/12345/settings", "/dashboard/acme/apps/12345?tab=settings"],
+    // The retired bot page: same 302 to the settings tab, never a page.
+    ["/dashboard/acme/apps/12345/bot", "/dashboard/acme/apps/12345?tab=settings"],
   ];
 
   for (const [from, to] of redirects) {
@@ -512,7 +511,6 @@ describe("the retired settings-tab addresses redirect once", () => {
       "/dashboard/acme/apps/12345",
       "/dashboard/acme/apps/12345?tab=settings",
       "/dashboard/acme/apps/12345?tab=insights",
-      "/dashboard/acme/apps/12345/bot",
       "/dashboard/acme/targets/12345",
     ]) {
       const { env, calls } = makeEnv({ DB: memberDbStub() });

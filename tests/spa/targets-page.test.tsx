@@ -529,7 +529,11 @@ describe("the list failure face", () => {
  * only DOM facts asserted are the ones a reader would check — read-only
  * controls, the follow line, the two switches.
  */
-function targetPayload(follow: 0 | 1, overrides: { review_enabled?: 0 | 1 } = {}) {
+function targetPayload(
+  follow: 0 | 1,
+  overrides: { review_enabled?: 0 | 1; verdictsReadable?: boolean } = {},
+) {
+  const readable = overrides.verdictsReadable ?? true;
   return {
     target: {
       target_id: "t-1",
@@ -543,23 +547,33 @@ function targetPayload(follow: 0 | 1, overrides: { review_enabled?: 0 | 1 } = {}
       trigger_mode: "every_push" as const,
       review_level: "deep" as const,
       check_min_score: 45,
-      check_pass_verdicts: ["ship it"],
+      // An unreadable stored list arrives as the server's empty placeholder.
+      check_pass_verdicts: readable ? ["ship it"] : [],
+      check_pass_verdicts_readable: readable,
     },
     defaults: {
       trigger_mode: "open" as const,
       review_level: "default" as const,
       check_min_score: 60,
       check_pass_verdicts: ["ship it", "blocked"],
+      check_pass_verdicts_readable: true,
     },
   };
 }
 
-function renderSettingsTab(follow: 0 | 1, reviewEnabled: 0 | 1 = 1): string {
+function renderSettingsTab(
+  follow: 0 | 1,
+  reviewEnabled: 0 | 1 = 1,
+  verdictsReadable = true,
+): string {
   return withLocation("/dashboard/acme/targets/t-1", () =>
     renderToStaticMarkup(
       createElement(TargetSettingsTab, {
         locale: "en",
-        payload: targetPayload(follow, { review_enabled: reviewEnabled }),
+        payload: targetPayload(follow, {
+          review_enabled: reviewEnabled,
+          verdictsReadable,
+        }),
         onReload: async () => true,
         onNotice: () => {},
       }),
@@ -601,6 +615,22 @@ describe("target settings tab (static SSR)", () => {
     expect(paused).toContain(t("en", "settings.resumeReviews"));
     const running = renderSettingsTab(0, 1);
     expect(running).toContain(t("en", "settings.pauseReviews"));
+  });
+
+  test("an unreadable stored gate states the recovery copy and offers no save", () => {
+    // The server sent the fail-closed placeholder, so the gate has no value to
+    // edit — and no policy save may round-trip (a snapshot would persist it).
+    const markup = renderSettingsTab(0, 1, false);
+    // The copy's apostrophe is HTML-escaped in the markup.
+    expect(markup).toContain("stored review gate could not be read");
+    expect(markup).not.toContain(t("en", "settings.reviewGateSave"));
+    expect(markup).not.toContain('type="number"');
+    // Only the two switches survive, and inheritance is locked: turning it off
+    // snapshots the placeholder into the row.
+    const inputs = [...markup.matchAll(/<input[^>]*>/g)];
+    expect(inputs.length).toBe(2);
+    expect(disabledInputs(markup)).toBe(1);
+    expect(markup).toContain(t("en", "settings.pauseReviews"));
   });
 });
 
@@ -697,6 +727,7 @@ const workspaceDefaults = (overrides: Record<string, unknown> = {}) => ({
     review_level: "default" as const,
     check_min_score: 60,
     check_pass_verdicts: ["ship it", "blocked"],
+    check_pass_verdicts_readable: true,
     ...overrides,
   },
   target_count: 3,
