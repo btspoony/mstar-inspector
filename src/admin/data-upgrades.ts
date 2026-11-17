@@ -352,6 +352,10 @@ export async function settleVerifyState(
  * window closed by a phase that already finished. An operator-closed window is
  * left alone: re-stating "off" would append an audit row for a change nobody
  * made.
+ *
+ * The claim is read BEFORE the window write: a phase whose stamp was taken over
+ * must not close the window the newer run now owns, so the mismatch is refused
+ * with no side effect at all.
  */
 export async function settleUpgradeMaintenance(
   db: DashboardD1,
@@ -360,6 +364,13 @@ export async function settleUpgradeMaintenance(
   actor: string,
   now: string,
 ): Promise<ClaimStep> {
+  const row = await db
+    .prepare("SELECT status, maintenance_owned, started_at FROM operator_data_upgrades WHERE id = ?1")
+    .bind(id)
+    .first<{ status: string; maintenance_owned: number; started_at: string | null }>();
+  if (row === null || row.started_at !== now || row.status !== status || row.maintenance_owned !== 1) {
+    return "refused";
+  }
   if ((await getMaintenanceMode(db)).enabled) {
     await setMaintenanceMode(db, { enabled: false, actor }, now);
   }
@@ -570,18 +581,19 @@ export async function verifyDataUpgrade(
 }
 
 /**
- * The reset's state write: `pending` with no cursor, counter, finish or run
- * start — but `started_at` stays, because the window close and ownership clear
- * below run under the same stamp, and only the last step re-opens the row.
- * Clearing `run_started_at` is what makes the next run's retirements its own:
- * with no run start, every deleted target is history.
+ * The reset's state write: `pending` with no cursor, counter or finish — but
+ * `started_at` stays, because the window close and ownership clear below run
+ * under the same stamp, and only the last step re-opens the row.
+ *
+ * `run_started_at` ALSO stays: it is the item's lifetime boundary, not a
+ * per-attempt value. A row an earlier attempt of this item retired still blocks
+ * verify; only deletions that predate the item's first step are history.
  */
 const RESET_SQL = `
   UPDATE operator_data_upgrades
      SET status = 'pending',
          cursor_json = NULL,
          processed = 0,
-         run_started_at = NULL,
          finished_at = NULL,
          last_error = NULL
    WHERE id = ?1 AND started_at = ?2 AND maintenance_owned = ?3`;

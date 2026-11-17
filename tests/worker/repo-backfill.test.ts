@@ -22,9 +22,11 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, seedBot, type TestD1 } from "../store/helpers";
 import { repoBackfill } from "../../src/admin/data-upgrades/repo-backfill";
-import { DATA_UPGRADES, type UpgradeCursor } from "../../src/admin/data-upgrades";
+import { DATA_UPGRADES, resetDataUpgrade, stepDataUpgrade, verifyDataUpgrade, type UpgradeCursor } from "../../src/admin/data-upgrades";
 
 const BOT = "bot-1";
+const OPERATOR = "Support-Bot";
+const RUN_1_START = "2026-06-01T00:00:00.000Z";
 
 /** One old-shape target: no `repo_id`, no owner, no name — the 0067 leftover. */
 function seedLeftoverTarget(
@@ -471,5 +473,29 @@ describe("repo-backfill verify: this run's retirements vs history", () => {
 
     const checks = await repoBackfill.verify(db, { runStartedAt: null });
     expect(checks).toMatchObject({ unrepointed_ledger_rows: 0, historical_rows: 1 });
+  });
+
+  test("a row retired during run 1 still blocks after a reset and re-run", async () => {
+    // Retired BETWEEN run 1's start and the resumed attempt: only the kept
+    // run-start boundary makes it this item's retirement rather than history.
+    const db = withRetiredTarget("2026-06-01 00:05:00");
+
+    // Run 1: its first step stamps the boundary, and the row is this run's.
+    expect((await stepDataUpgrade(db, repoBackfill, OPERATOR, RUN_1_START)).kind).toBe("ok");
+    const first = await verifyDataUpgrade(db, repoBackfill, OPERATOR, "2026-06-01T00:10:00.000Z");
+    expect(first.kind === "ok" && first.checks).toMatchObject({
+      unrepointed_ledger_rows: 1,
+      historical_rows: 0,
+    });
+
+    // Reset returns the item to `pending` but keeps the item's run-start
+    // boundary, so the resumed attempt judges the same retirements.
+    expect((await resetDataUpgrade(db, repoBackfill, OPERATOR, "2026-06-01T00:20:00.000Z")).kind).toBe("ok");
+    expect((await stepDataUpgrade(db, repoBackfill, OPERATOR, "2026-06-01T00:30:00.000Z")).kind).toBe("ok");
+    const second = await verifyDataUpgrade(db, repoBackfill, OPERATOR, "2026-06-01T00:40:00.000Z");
+    expect(second.kind === "ok" && second.checks).toMatchObject({
+      unrepointed_ledger_rows: 1,
+      historical_rows: 0,
+    });
   });
 });

@@ -406,9 +406,14 @@ describe("the data-upgrade runner", () => {
     const db = fixture(1);
     db.raw
       .prepare(
-        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'verifying', 1, ?)",
+        "INSERT INTO operator_data_upgrades (id, status, maintenance_owned, started_at) VALUES (?, 'completed', 1, ?)",
       )
       .run(ITEM_ID, "2026-11-17T03:00:00.000Z");
+    await setMaintenanceMode(
+      db,
+      { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR },
+      "2026-11-17T03:00:00.000Z",
+    );
 
     // Another phase's stamp: the guard matches nothing, so nothing is released.
     expect(
@@ -416,7 +421,9 @@ describe("the data-upgrade runner", () => {
     ).toBe("refused");
     expect(
       db.raw.prepare("SELECT status, maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
-    ).toEqual({ status: "verifying", maintenance_owned: 1 });
+    ).toEqual({ status: "completed", maintenance_owned: 1 });
+    // The stale stamp closed no window: that window now belongs to the newer run.
+    expect((await getMaintenanceMode(db)).enabled).toBe(true);
   });
 
   test("step, verify and reset each write one audit row", async () => {
@@ -587,14 +594,16 @@ describe("the runner's run-start stamp", () => {
     expect(body.checks.historical_rows).toBe(7);
   });
 
-  test("reset clears the run start, so the next run's boundary is its own", async () => {
+  test("reset keeps the run start: the item's boundary outlives the attempt", async () => {
     const db = fixture(3);
     register(fixtureItem());
     await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
-    expect(runStart(db)).not.toBeNull();
+    const stamped = runStart(db);
+    expect(stamped).not.toBeNull();
 
     expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/reset`)).status).toBe(200);
-    expect(runStart(db)).toBeNull();
+    // The run start is the item's lifetime boundary, not a per-attempt value.
+    expect(runStart(db)).toBe(stamped);
     expect(await state(db)).toEqual({ status: "pending", processed: 0, cursor_json: null });
   });
 });
