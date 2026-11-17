@@ -371,6 +371,11 @@ describe("tab shell rendering (static SSR)", () => {
   });
 
   test("an App with no repository yet states it and points at the repository surface", () => {
+    // The read is accepted: a manager payload with no `target_id` and no
+    // `review_*` fact is the zero-repository contract, not a malformed read.
+    expect(parseSettings(untargetedPayload)).not.toBeNull();
+    expect(parseSettings(untargetedPayload)?.target_id).toBeUndefined();
+
     const markup = renderDetail(untargetedPayload);
     // The App is visible; the zero-repository state is a notice, not an error.
     expect(markup).toContain(t("en", "appDetail.noRepository"));
@@ -378,6 +383,9 @@ describe("tab shell rendering (static SSR)", () => {
     expect(markup).toContain(t("en", "targets.add"));
     // No target-owned control renders: there is no target to write to.
     expect(markup).not.toContain(t("en", "settings.ops"));
+    for (const key of ["settings.reviewTrigger", "settings.reviewDepth", "settings.reviewGate"] as const) {
+      expect(markup).not.toContain(t("en", key));
+    }
     // The bot's own sections are the whole settings face.
     expect(markup).toContain(t("en", "settings.providers.title"));
     expect(markup).toContain(t("en", "botSettings.health"));
