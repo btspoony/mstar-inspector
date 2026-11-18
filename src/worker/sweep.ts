@@ -67,8 +67,10 @@ import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
 import {
   clearFailurePagingState,
+  FAILURE_PAGING_ACTOR,
+  FAILURE_PAGING_STATE_KEY,
+  FAILURE_PAGING_TRIPPED,
   getFailurePagingState,
-  setFailurePagingTripped,
 } from "../dashboard/runtime-config-store";
 import {
   MAINTENANCE_DEFERRED_STAGE,
@@ -148,6 +150,7 @@ export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
     // post the sweep still owes.
     | "ops_sweep_alert_state_degraded"
     | "ops_sweep_alert_state_set_failed"
+    | "ops_sweep_alert_state_cas_lost"
     | "ops_sweep_alert_state_clear_failed"
     | "ops_sweep_failed"
     | "ops_sweep_db_unbound"
@@ -237,6 +240,67 @@ function warnDetail(error: unknown, alertUrl?: string): string {
 export const defaultSweepLog: SweepLog = {
   warn: (fields, msg) => console.warn(JSON.stringify({ ...fields, msg: msg ?? "" })),
 };
+
+/**
+ * The trailing-window predicate identifying the infrastructure failures that
+ * page. The window modifier comes from SWEEP_WINDOW_HOURS (the constant is the
+ * single source) so the SQL cannot drift from the pinned threshold table, and
+ * the composed text stays byte-identical to the pre-constant form
+ * (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
+ * `stage NOT IN (<paging stages>)` is the paging exclusion: attribution rows
+ * are reviews that continued, and `quota` is one tenant's spent month (see the
+ * header). The list comes from the contract's written partition, never a local
+ * literal. Maintenance is the platform's own existence signal, owned by its
+ * separate lane (377) and never part of the infrastructure total — so it is
+ * excluded here too, by its constant. ONE predicate, so the grouped read and
+ * the guarded latch below can never disagree about what a breach is.
+ */
+const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
+         AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+         AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'`;
+
+/**
+ * The breach TRANSITION write — why it lives here beside the predicate that
+ * defines a breach rather than in the generic settings store. It lands only
+ * when BOTH still hold at write time, in ONE statement:
+ *
+ * - the breach: the same trailing-window total is still above the threshold.
+ *   A recovery that landed while this sweep waited in its POST then cannot be
+ *   re-latched into a stale `tripped` row that swallows the next breach. A
+ *   value compare alone cannot see that race: a recovery's DELETE and an
+ *   already-clear sweep both leave the key absent.
+ * - the state this sweep read (`?6`, `null` = key absent): a newer latch or a
+ *   concurrent rearm leaves that newer state standing.
+ *
+ * Answers whether it wrote. Binds: key, `tripped`, now, actor, threshold,
+ * observed value.
+ */
+const FAILURE_PAGING_LATCH_SQL = `
+  INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+  SELECT ?1, ?2, ?3, ?4
+   WHERE (SELECT COUNT(*) FROM review_failures WHERE ${FAILURE_PAGING_WHERE_SQL}) > ?5
+     AND ((?6 IS NULL AND NOT EXISTS (SELECT 1 FROM review_runtime_settings WHERE key = ?1))
+       OR (?6 IS NOT NULL AND EXISTS (SELECT 1 FROM review_runtime_settings WHERE key = ?1 AND value IS ?6)))
+  ON CONFLICT (key) DO UPDATE SET
+    value = excluded.value,
+    updated_at = excluded.updated_at,
+    updated_by = excluded.updated_by
+   WHERE review_runtime_settings.value IS ?6`;
+
+function latchFailurePagingBreach(db: D1Like, observed: string | null): Promise<boolean> {
+  return db
+    .prepare(FAILURE_PAGING_LATCH_SQL)
+    .bind(
+      FAILURE_PAGING_STATE_KEY,
+      FAILURE_PAGING_TRIPPED,
+      new Date().toISOString(),
+      FAILURE_PAGING_ACTOR,
+      SWEEP_FAILURE_THRESHOLD,
+      observed,
+    )
+    .run()
+    .then((result) => result.meta.changes > 0);
+}
 
 export type SweepDeps = {
   /** Alert webhook URL (env `ALERT_WEBHOOK_URL`); absent/empty = log-only. */
@@ -417,24 +481,12 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       );
     }
   }
-  // The window modifier is built from SWEEP_WINDOW_HOURS (the constant is
-  // the single source) so the SQL cannot drift from the pinned threshold
-  // table. The composed text is byte-identical to the pre-constant form
-  // (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
-  // `stage NOT IN (<paging stages>)` is the paging exclusion: attribution rows
-  // are reviews that continued, and `quota` is one tenant's spent month (see
-  // the header). The list comes from the contract's written partition, never a
-  // local literal. Maintenance is the platform's own existence signal, owned by
-  // its separate lane (377) and never part of the infrastructure total — so it
-  // is excluded here too, by its constant. ONE grouped read supplies both the
-  // total and its breakdown, so a payload can never describe a different
-  // instant than its own count.
+  // ONE grouped read supplies both the total and its breakdown, so a payload
+  // can never describe a different instant than its own count.
   const { results: stageRows } = await db
     .prepare(
       `SELECT stage, COUNT(*) AS count FROM review_failures
-       WHERE created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
-         AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
-         AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'
+       WHERE ${FAILURE_PAGING_WHERE_SQL}
        GROUP BY stage ORDER BY stage`,
     )
     .all<{ stage: string; count: number }>();
@@ -444,12 +496,14 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // The breach-transition latch: the alert is posted on the EDGE, not on every
   // sweep that still sees the same breach. A healthy sweep always rearms, even
   // when its own read failed — a stale latch would otherwise swallow the next
-  // breach, and only a successful DELETE actually rearms.
+  // breach, and only a successful DELETE actually rearms. An untrusted read is
+  // also treated as CLEAR, so the row it could not verify must not survive to
+  // suppress the retry this sweep owes: the DELETE below covers both cases.
   const state = await getFailurePagingState(db);
   if (state.degraded !== null) {
-    // An untrusted state is CLEAR: a value no writer produced is not evidence
-    // the alert was posted, and the post it might suppress is the one that
-    // matters. The line is the operator's only cue that state is broken.
+    // A value no writer produced is not evidence the alert was posted, and the
+    // post it might suppress is the one that matters. The line is the
+    // operator's only cue that state is broken.
     log.warn(
       { event: "ops_sweep_alert_state_degraded", detail: state.degraded },
       "failure paging state unreadable — treating the alert as unannounced",
@@ -458,21 +512,23 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // The infrastructure decision only SETS the disposition and, when it owes a
   // page, composes the alert body; delivery and the single exit are below.
   let webhook: SweepResult["webhook"] = "not_attempted";
-  if (!thresholdBreached) {
-    // Always attempted, even when the read above failed: a stale latch would
-    // swallow the next breach, and only a successful DELETE actually rearms.
-    // Idempotent — an absent row changes nothing and logs nothing.
+  // The CAS token the latch write compares against: the value this sweep read,
+  // or `null` once a successful DELETE has left the key absent.
+  let observed = state.observed;
+  /** Best-effort rearm; a failed DELETE warns and is retried next sweep. */
+  const rearm = async () => {
     try {
       await clearFailurePagingState(db);
+      observed = null;
     } catch (error) {
-      // Retried on every healthy sweep; until it lands the latch survives and
-      // a later breach stays silent, so the line has to say so.
       log.warn(
         { event: "ops_sweep_alert_state_clear_failed", detail: warnDetail(error, deps.alertUrl) },
         "failure paging state clear failed — the latch may suppress the next breach",
       );
     }
-  }
+  };
+  // Idempotent — an absent row changes nothing and logs nothing.
+  if (!thresholdBreached || state.degraded !== null) await rearm();
   // Sustained breach already announced (state.tripped): no body, no POST, no
   // state write. A breach on a clear state owes this one. `let` because the
   // maintenance lane below may merge its key into the same body.
@@ -512,13 +568,22 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           // below emits the warn and the "failed" disposition.
           throw new Error(`alert webhook POST returned HTTP ${response.status}`);
         }
-        // Latch ONLY after the sink accepted the alert: an absent sink, a timeout,
-        // a throw or a non-2xx must stay retryable on the next sweep, so a failed
-        // post never rearms the edge. A successful post whose latch write fails
-        // logs and may post again next sweep — that bounded duplicate is the price
-        // of never losing the alert.
+        // Latch ONLY after the sink accepted the alert: an absent sink, a
+        // timeout, a throw or a non-2xx must stay retryable on the next sweep,
+        // so a failed post never rearms the edge. A successful post whose latch
+        // write fails logs and may post again next sweep — that bounded
+        // duplicate is the price of never losing the alert. The write is
+        // guarded: it re-checks the breach and the value this sweep read
+        // (`observed`), so a recovery that landed while the POST was in flight
+        // is not re-latched into a stale `tripped` row that would swallow the
+        // next breach.
         try {
-          await setFailurePagingTripped(db, new Date().toISOString());
+          if (!(await latchFailurePagingBreach(db, observed))) {
+            log.warn(
+              { event: "ops_sweep_alert_state_cas_lost", detail: "state moved during the alert POST" },
+              "failure paging latch did not land — kept the newer state",
+            );
+          }
         } catch (error) {
           log.warn(
             { event: "ops_sweep_alert_state_set_failed", detail: warnDetail(error, deps.alertUrl) },

@@ -922,6 +922,75 @@ describe("runSweep — failure paging latch", () => {
     expect(again.webhook).toBe("posted");
     expect(calls()).toBe(2);
   });
+
+  test("a recovery that lands during an older breach's POST is not re-latched", async () => {
+    const db = failureDb();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // The breaching sweep's POST pauses after its read and before its latch
+    // write; a healthy sweep runs to completion meanwhile and rearms the latch.
+    // The older breach then resumes and must not write `tripped` back: that
+    // stale row would swallow the NEXT breach's alert.
+    let resumed: () => void = () => {};
+    let enteredPost: () => void = () => {};
+    const paused = new Promise<void>((resolve) => (resumed = resolve));
+    const posting = new Promise<void>((resolve) => (enteredPost = resolve));
+    const pausedFetch = (async () => {
+      enteredPost();
+      await paused;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    const breaching = runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl: pausedFetch, log });
+
+    // Only now is the older sweep past its own count read and inside its POST.
+    await posting;
+    clearFailures(db);
+    const recovery = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl: okSink().fetchImpl, log });
+    expect(recovery).toMatchObject({ thresholdBreached: false, webhook: "not_attempted" });
+    expect(pagingRow(db)).toBeNull();
+
+    resumed();
+    expect((await breaching).webhook).toBe("posted");
+    expect(pagingRow(db)).toBeNull();
+
+    // A real new breach still pages: the recovery was not overwritten.
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const next = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(next.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+  });
+
+  test("a failed POST after an unreadable state stays retryable past a stale latch", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // A latch from an earlier breach that the sweep can no longer read.
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES (?, 'tripped', '2026-11-05T00:00:00.000Z', 'sweep')`,
+      )
+      .run(FAILURE_PAGING_STATE_KEY);
+    const unreadable: D1Like = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("SELECT value FROM review_runtime_settings")) throw new Error("settings locked");
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const rejecting = (async () => new Response("sink degraded", { status: 503 })) as unknown as typeof fetch;
+
+    const failed = await runSweep(unreadable, { alertUrl: "https://ops.example/hook", fetchImpl: rejecting });
+    expect(failed.webhook).toBe("failed");
+    // The stale row the unreadable read could not trust must be neutralized.
+    expect(pagingRow(db)).toBeNull();
+
+    // Reads recover: the still-breaching sweep POSTs instead of staying silent.
+    const { fetchImpl, calls } = okSink();
+    const retried = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    expect(retried.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+  });
 });
 
 /**

@@ -1260,7 +1260,7 @@ export const FAILURE_PAGING_STATE_KEY = "platform.alert.failure_paging";
 /** The one latched value. Anything else stored under the key is malformed. */
 export const FAILURE_PAGING_TRIPPED = "tripped";
 /** The system actor on the latch's writes — the sweep, never a human. */
-const FAILURE_PAGING_ACTOR = "sweep";
+export const FAILURE_PAGING_ACTOR = "sweep";
 
 /**
  * Whether the last breach has already been announced. `degraded` names why a
@@ -1269,7 +1269,17 @@ const FAILURE_PAGING_ACTOR = "sweep";
  * alert was posted, and the alert it might suppress is the one that matters.
  * Never throws; the caller logs the degrade.
  */
-export type FailurePagingRead = { tripped: boolean; degraded: DegradedReason | null };
+export type FailurePagingRead = {
+  tripped: boolean;
+  degraded: DegradedReason | null;
+  /**
+   * The raw stored value this read saw, `null` for an absent key: the token the
+   * sweep's guarded latch write compares against. A write whose token no
+   * longer matches lost a race — a healthy sweep's rearm, or a newer latch —
+   * and leaves that newer state standing.
+   */
+  observed: string | null;
+};
 
 const FAILURE_PAGING_READ_SQL = "SELECT value FROM review_runtime_settings WHERE key = ?1";
 const FAILURE_PAGING_CLEAR_SQL = "DELETE FROM review_runtime_settings WHERE key = ?1";
@@ -1277,20 +1287,13 @@ const FAILURE_PAGING_CLEAR_SQL = "DELETE FROM review_runtime_settings WHERE key 
 export async function getFailurePagingState(db: DashboardD1): Promise<FailurePagingRead> {
   try {
     const row = await db.prepare(FAILURE_PAGING_READ_SQL).bind(FAILURE_PAGING_STATE_KEY).first<RuntimeSettingRow>();
-    if (row === null) return { tripped: false, degraded: null };
-    if (row.value === FAILURE_PAGING_TRIPPED) return { tripped: true, degraded: null };
-    return { tripped: false, degraded: "malformed" };
+    if (row === null) return { tripped: false, degraded: null, observed: null };
+    const observed = row.value == null ? null : String(row.value);
+    if (observed === FAILURE_PAGING_TRIPPED) return { tripped: true, degraded: null, observed };
+    return { tripped: false, degraded: "malformed", observed };
   } catch {
-    return { tripped: false, degraded: "read-failed" };
+    return { tripped: false, degraded: "read-failed", observed: null };
   }
-}
-
-/** Latch the breach. The sweep calls this ONLY after a 2xx POST. Throws on a write failure. */
-export async function setFailurePagingTripped(db: DashboardD1, now: string): Promise<void> {
-  await db
-    .prepare(SYSTEM_UPSERT_SQL)
-    .bind(FAILURE_PAGING_STATE_KEY, FAILURE_PAGING_TRIPPED, now, FAILURE_PAGING_ACTOR)
-    .run();
 }
 
 /** Rearm the alert. Idempotent (a DELETE of an absent key changes nothing); throws on failure. */
