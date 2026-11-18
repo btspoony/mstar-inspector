@@ -74,12 +74,14 @@
  * blanking them, so an absent companion is the one "no reason" / "not running"
  * shape there is.
  *
- * `platform.alert.failure_paging` is the sweep's own breach-transition latch
- * and the one key here that is MACHINE state, not an operator tunable: absent
- * means the alert is armed, the exact value `"tripped"` means a breach is
- * already announced. It therefore has narrow read/set/clear functions, no
- * generic key-write API, no admin control and no audit row — a human actor on
- * it would be a fiction, and the sweep is the only writer.
+ * `platform.alert.failure_paging` is the sweep's own breach-transition
+ * generation and the one key here that is MACHINE state, not an operator
+ * tunable: absent means the alert is armed, `clear:<ISO>` means the window was
+ * healthy and `tripped:<ISO>` that a breach on that observation was already
+ * announced. It therefore has one narrow read and one compare-and-set write
+ * function, no delete, no generic key-write API, no admin control and no audit
+ * row — a human actor on it would be a fiction, and the sweep is the only
+ * writer.
  *
  * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
  * (the platform-wide quota; Cloudflare Queues delivers at most 250 of it at
@@ -1255,48 +1257,96 @@ export async function setMaintenanceMode(
   ]);
 }
 
-/** PK of the sweep's breach-transition latch; see the module header. */
+/** PK of the sweep's breach-transition generation; see the module header. */
 export const FAILURE_PAGING_STATE_KEY = "platform.alert.failure_paging";
-/** The one latched value. Anything else stored under the key is malformed. */
-export const FAILURE_PAGING_TRIPPED = "tripped";
-/** The system actor on the latch's writes — the sweep, never a human. */
-export const FAILURE_PAGING_ACTOR = "sweep";
+/** The system actor on the generation's writes — the sweep, never a human. */
+const FAILURE_PAGING_ACTOR = "sweep";
+
+/**
+ * The two states the stored value encodes: `<state>:<ISO stamp>`. The stamp is
+ * the instant the writing sweep observed the failure window, so the row is a
+ * GENERATION, never a boolean.
+ */
+export type FailurePagingStatus = "clear" | "tripped";
 
 /**
  * Whether the last breach has already been announced. `degraded` names why a
  * value could not be trusted: an unreadable row or a present value that is not
- * exactly `"tripped"` is CLEAR — a state no writer produced is not evidence the
+ * `<state>:<ISO>` is CLEAR — a state no writer produced is not evidence the
  * alert was posted, and the alert it might suppress is the one that matters.
  * Never throws; the caller logs the degrade.
  */
 export type FailurePagingRead = {
   tripped: boolean;
   degraded: DegradedReason | null;
-  /**
-   * The raw stored value this read saw, `null` for an absent key: the token the
-   * sweep's guarded latch write compares against. A write whose token no
-   * longer matches lost a race — a healthy sweep's rearm, or a newer latch —
-   * and leaves that newer state standing.
-   */
-  observed: string | null;
 };
 
 const FAILURE_PAGING_READ_SQL = "SELECT value FROM review_runtime_settings WHERE key = ?1";
-const FAILURE_PAGING_CLEAR_SQL = "DELETE FROM review_runtime_settings WHERE key = ?1";
 
-export async function getFailurePagingState(db: DashboardD1): Promise<FailurePagingRead> {
+/** The stored generation's ISO stamp, as SQL. `NULL` when the value has none. */
+const FAILURE_PAGING_STAMP_SQL =
+  "julianday(substr(review_runtime_settings.value, instr(review_runtime_settings.value, ':') + 1))";
+
+/**
+ * The ONE write path: a compare-and-set on the stored stamp.
+ *
+ * Newer stamp wins, always: an older sweep that resumes after a recovery can
+ * never close the edge a newer observation opened, and a corrupt (unparseable)
+ * stamp ranks below every real one, so the next write replaces it instead of
+ * being blocked. At an EQUAL stamp `clear` wins and `tripped` loses: the two
+ * sweeps observed the same instant and disagree about the window, so the armed
+ * answer is the safe one — it costs a duplicate alert, where keeping `tripped`
+ * could swallow the next breach.
+ *
+ * The row is never deleted: a clear IS a generation, which is what lets a
+ * healthy sweep advance the stamp and defeat a stale claim.
+ *
+ * Binds: key, state, ISO stamp (also the `updated_at`), actor.
+ */
+const FAILURE_PAGING_CAS_SQL = `
+  INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+  VALUES (?1, ?2 || ':' || ?3, ?3, ?4)
+  ON CONFLICT (key) DO UPDATE SET
+    value = excluded.value,
+    updated_at = excluded.updated_at,
+    updated_by = excluded.updated_by
+   WHERE julianday(?3) > COALESCE(${FAILURE_PAGING_STAMP_SQL}, 0)
+      OR (julianday(?3) = ${FAILURE_PAGING_STAMP_SQL} AND ?2 IS 'clear')`;
+
+export async function readFailurePagingState(db: DashboardD1): Promise<FailurePagingRead> {
   try {
     const row = await db.prepare(FAILURE_PAGING_READ_SQL).bind(FAILURE_PAGING_STATE_KEY).first<RuntimeSettingRow>();
-    if (row === null) return { tripped: false, degraded: null, observed: null };
-    const observed = row.value == null ? null : String(row.value);
-    if (observed === FAILURE_PAGING_TRIPPED) return { tripped: true, degraded: null, observed };
-    return { tripped: false, degraded: "malformed", observed };
+    if (row === null) return { tripped: false, degraded: null };
+    // A present NULL is not a value any writer produced, so it is malformed
+    // rather than absent: no writer ever stores a bare state.
+    if (row.value == null) return { tripped: false, degraded: "malformed" };
+    const observed = String(row.value);
+    const separator = observed.indexOf(":");
+    const state = separator < 0 ? observed : observed.slice(0, separator);
+    const stamp = separator < 0 ? "" : observed.slice(separator + 1);
+    if ((state === "clear" || state === "tripped") && stamp !== "" && !Number.isNaN(Date.parse(stamp))) {
+      return { tripped: state === "tripped", degraded: null };
+    }
+    return { tripped: false, degraded: "malformed" };
   } catch {
-    return { tripped: false, degraded: "read-failed", observed: null };
+    return { tripped: false, degraded: "read-failed" };
   }
 }
 
-/** Rearm the alert. Idempotent (a DELETE of an absent key changes nothing); throws on failure. */
-export async function clearFailurePagingState(db: DashboardD1): Promise<void> {
-  await db.prepare(FAILURE_PAGING_CLEAR_SQL).bind(FAILURE_PAGING_STATE_KEY).run();
+/**
+ * Advance the generation. Answers whether the write landed: `false` means a
+ * newer generation already owns the row, which is never a reason to skip a
+ * POST — the POST happens first, and losing the write only costs a duplicate.
+ * Throws when the statement itself fails.
+ */
+export async function compareAndSetFailurePagingState(
+  db: DashboardD1,
+  status: FailurePagingStatus,
+  at: string,
+): Promise<boolean> {
+  const result = await db
+    .prepare(FAILURE_PAGING_CAS_SQL)
+    .bind(FAILURE_PAGING_STATE_KEY, status, at, FAILURE_PAGING_ACTOR)
+    .run();
+  return result.meta.changes > 0;
 }

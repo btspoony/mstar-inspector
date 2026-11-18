@@ -154,9 +154,11 @@ describe("runSweep", () => {
     // per-stage breakdown, so neither can describe a different instant.
     expect(captured[countAt]).toContain("SELECT stage, COUNT(*) AS count");
     expect(captured[countAt]).toContain("GROUP BY stage ORDER BY stage");
-    // The paging latch is read once and, on a healthy window, cleared once.
+    // The paging generation is read once and, on a healthy window, advanced once.
     expect(captured[countAt + 1]).toContain("SELECT value FROM review_runtime_settings");
-    expect(captured[countAt + 2]).toContain("DELETE FROM review_runtime_settings");
+    expect(captured[countAt + 2]).toContain("INSERT INTO review_runtime_settings");
+    expect(captured[countAt + 2]).toContain("ON CONFLICT (key) DO UPDATE");
+    expect(captured[countAt + 2]).toContain("julianday(?3) >");
     expect(captured).toHaveLength(countAt + 3);
     expect(result).toEqual({
       failures24h: 0,
@@ -402,12 +404,17 @@ describe("runSweep", () => {
     // The retention DELETE is parameter-free — no `?` placeholders to bind.
     expect(captured[0]).not.toContain("?");
     // The only TWO-placeholder statement in the run is the invite-lapse flip:
-    // its ISO clock plus the per-run row cap. Every other bound statement (the
-    // paging latch's read and clear) binds the single state key.
+    // its ISO clock plus the per-run row cap. Every other bound statement is a
+    // single key (the paging read), or the paging generation's four binds
+    // (key, state, ISO stamp, actor).
     const inviteBound = binds.find((values) => values.length === 2);
     expect(inviteBound).toBeDefined();
     expect(inviteBound![1]).toBe(SWEEP_INVITE_LAPSE_CAP);
-    expect(binds.filter((values) => values.length !== 2).every((values) => values.length === 1)).toBe(true);
+    expect(binds.filter((values) => values.length !== 2).every((values) => values.length === 1 || values.length === 4)).toBe(true);
+    const pagingWrite = binds.find((values) => values.length === 4)!;
+    expect(pagingWrite[0]).toBe(FAILURE_PAGING_STATE_KEY);
+    expect(pagingWrite[1]).toBe("clear");
+    expect(pagingWrite[3]).toBe("sweep");
     // The fake reports changes: 3 for EVERY statement, so both janitors log;
     // the delivery sweep's line comes first.
     expect(calls).toHaveLength(2);

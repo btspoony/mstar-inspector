@@ -23,15 +23,17 @@
  *
  * The alert posts on the breach TRANSITION, not on every breach: the one
  * machine-state row `platform.alert.failure_paging` in
- * `review_runtime_settings` latches BEFORE the post and is DELETEd on the
- * first healthy sweep, so a sustained breach is one alert and a recovery
- * rearms the next one. Latching first is what keeps an older breach's slow
- * post from closing the edge a newer breach already owns — a guarded write
- * refuses a value another sweep changed. The price is duplication: a failed
- * post clears the latch again and the next breaching sweep may page twice.
- * Duplicate alerts are acceptable, a missed alert is not. A state read that
- * cannot be trusted counts as unannounced (the post it might suppress is the
- * one that matters), and storage failure is never sold as exactly-once.
+ * `review_runtime_settings` holds a GENERATION — `clear:<ISO>` or
+ * `tripped:<ISO>`, stamped with the instant its writer observed the window —
+ * and is never deleted. The POST comes FIRST and only a 2xx advances the row
+ * to `tripped`; a healthy sweep advances it to `clear`. Both writes are
+ * compare-and-set on the stamp: newer stamp wins, so an older sweep that
+ * resumes after a recovery cannot close the edge a newer breach owns, and a
+ * lost CAS costs at most a duplicate alert. The row is never a flag that can
+ * be set without a delivered alert, which is the whole point: duplicate
+ * alerts are acceptable, a missed alert is not. A state read that cannot be
+ * trusted counts as unannounced (the post it might suppress is the one that
+ * matters), and storage failure is never sold as exactly-once.
  *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
  * - DLQ depth is NOT read: there is no CF API token surface,
@@ -69,11 +71,9 @@ import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
 import {
-  clearFailurePagingState,
-  FAILURE_PAGING_ACTOR,
-  FAILURE_PAGING_STATE_KEY,
-  FAILURE_PAGING_TRIPPED,
+  compareAndSetFailurePagingState,
   getFailurePagingState,
+  type FailurePagingStatus,
 } from "../dashboard/runtime-config-store";
 import {
   MAINTENANCE_DEFERRED_STAGE,
@@ -147,10 +147,10 @@ export type SweepAlertFields = {
 export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
   event:
     | "ops_sweep_alert_webhook_failed"
-    // The breach-transition latch (`platform.alert.failure_paging`): a state
-    // read that could not be trusted, and the two writes either side of a
-    // transition. Each one degrades to a warn — none of them may suppress the
-    // post the sweep still owes.
+    // The breach-transition generation (`platform.alert.failure_paging`): a
+    // state read that could not be trusted, the write that closes a delivered
+    // edge, and the healthy clear (plus its CAS loss, which is a no-op). Each
+    // degrades to a warn — none of them may suppress the post the sweep owes.
     | "ops_sweep_alert_state_degraded"
     | "ops_sweep_alert_state_set_failed"
     | "ops_sweep_alert_state_cas_lost"
@@ -263,50 +263,12 @@ const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_
          AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'`;
 
 /**
- * The breach TRANSITION write — why it lives here beside the predicate that
- * defines a breach rather than in the generic settings store. It runs BEFORE
- * the alert POST and lands only when BOTH still hold at write time, in ONE
- * statement:
- *
- * - the breach: the same trailing-window total is still above the threshold.
- *   A recovery that landed between this sweep's count read and this write
- *   cannot be re-latched into a stale `tripped` row that swallows the next
- *   breach. A value compare alone cannot see that race: a recovery's DELETE
- *   and an already-clear sweep both leave the key absent.
- * - the state this sweep read (`?6`, `null` = key absent): a newer latch or a
- *   concurrent rearm leaves that newer state standing. Losing this compare
- *   means another sweep owns the generation and posts its own alert.
- *
- * Answers whether it wrote. Binds: key, `tripped`, now, actor, threshold,
- * observed value.
+ * The breach TRANSITION is a generation, not a flag: `platform.alert.failure_paging`
+ * holds `<state>:<ISO stamp>` where the stamp is the instant this sweep read the
+ * window, and every write is a compare-and-set on that stamp (see
+ * `compareAndSetFailurePagingState`). The write lives in the settings store beside
+ * the row it owns; only the observation instant is the sweep's.
  */
-const FAILURE_PAGING_LATCH_SQL = `
-  INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
-  SELECT ?1, ?2, ?3, ?4
-   WHERE (SELECT COUNT(*) FROM review_failures WHERE ${FAILURE_PAGING_WHERE_SQL}) > ?5
-     AND ((?6 IS NULL AND NOT EXISTS (SELECT 1 FROM review_runtime_settings WHERE key = ?1))
-       OR (?6 IS NOT NULL AND EXISTS (SELECT 1 FROM review_runtime_settings WHERE key = ?1 AND value IS ?6)))
-  ON CONFLICT (key) DO UPDATE SET
-    value = excluded.value,
-    updated_at = excluded.updated_at,
-    updated_by = excluded.updated_by
-   WHERE review_runtime_settings.value IS ?6`;
-
-function latchFailurePagingBreach(db: D1Like, observed: string | null): Promise<boolean> {
-  return db
-    .prepare(FAILURE_PAGING_LATCH_SQL)
-    .bind(
-      FAILURE_PAGING_STATE_KEY,
-      FAILURE_PAGING_TRIPPED,
-      new Date().toISOString(),
-      FAILURE_PAGING_ACTOR,
-      SWEEP_FAILURE_THRESHOLD,
-      observed,
-    )
-    .run()
-    .then((result) => result.meta.changes > 0);
-}
-
 export type SweepDeps = {
   /** Alert webhook URL (env `ALERT_WEBHOOK_URL`); absent/empty = log-only. */
   alertUrl?: string;
@@ -498,12 +460,14 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   const stages = stageRows.map((row) => ({ stage: row.stage, count: row.count }));
   const failures24h = stages.reduce((sum, row) => sum + row.count, 0);
   const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
-  // The breach-transition latch: the alert is posted on the EDGE, not on every
-  // sweep that still sees the same breach. A healthy sweep always rearms, even
-  // when its own read failed — a stale latch would otherwise swallow the next
-  // breach, and only a successful DELETE actually rearms. An untrusted read is
-  // also treated as CLEAR, so the row it could not verify must not survive to
-  // suppress the retry this sweep owes: the DELETE below covers both cases.
+  // The breach-transition GENERATION: the alert is posted on the EDGE, not on
+  // every sweep that still sees the same breach. The stored value is
+  // `<state>:<ISO>` and this sweep's observation instant is the stamp it
+  // writes, so a newer observation always outranks an older one. An untrusted
+  // read is CLEAR (the post it might suppress is the one that matters); a
+  // healthy window still advances the generation, which is what defeats a
+  // stale post that resolves after a recovery.
+  const observedAt = new Date().toISOString();
   const state = await getFailurePagingState(db);
   if (state.degraded !== null) {
     // A value no writer produced is not evidence the alert was posted, and the
@@ -517,23 +481,33 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // The infrastructure decision only SETS the disposition and, when it owes a
   // page, composes the alert body; delivery and the single exit are below.
   let webhook: SweepResult["webhook"] = "not_attempted";
-  // The CAS token the latch write compares against: the value this sweep read,
-  // or `null` once a successful DELETE has left the key absent.
-  let observed = state.observed;
-  /** Best-effort rearm; a failed DELETE warns and is retried next sweep. */
-  const rearm = async () => {
+  /** Advance the generation, logging only the outcomes an operator must see. */
+  const advance = async (status: FailurePagingStatus): Promise<void> => {
     try {
-      await clearFailurePagingState(db);
-      observed = null;
+      if (await compareAndSetFailurePagingState(db, status, observedAt)) return;
+      // The alert was delivered either way; this only means a newer
+      // observation already owns the row and will not be overwritten.
+      if (status === "tripped") {
+        log.warn(
+          { event: "ops_sweep_alert_state_cas_lost", detail: `state moved past ${observedAt}` },
+          "failure paging generation did not advance — a newer observation stands",
+        );
+      }
     } catch (error) {
       log.warn(
-        { event: "ops_sweep_alert_state_clear_failed", detail: warnDetail(error, deps.alertUrl) },
-        "failure paging state clear failed — the latch may suppress the next breach",
+        {
+          event: status === "clear" ? "ops_sweep_alert_state_clear_failed" : "ops_sweep_alert_state_set_failed",
+          detail: warnDetail(error, deps.alertUrl),
+        },
+        status === "clear"
+          ? "failure paging state clear failed — the next healthy sweep retries it"
+          : "failure paging state write failed — this alert may post again",
       );
     }
   };
-  // Idempotent — an absent row changes nothing and logs nothing.
-  if (!thresholdBreached || state.degraded !== null) await rearm();
+  // A healthy window advances the generation so the next breach is a new edge.
+  // A lost CAS here is the documented no-op: a newer breach owns the row.
+  if (!thresholdBreached) await advance("clear");
   // Sustained breach already announced (state.tripped): no body, no POST, no
   // state write. A breach on a clear state owes this one. `let` because the
   // maintenance lane below may merge its key into the same body.
@@ -556,66 +530,46 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     if (!deps.alertUrl) {
       webhook = "absent";
     } else {
-      // Latch BEFORE the POST. The write that marks this breach announced
-      // happens while this sweep still owns the state it observed, so a slower
-      // sweep from an older breach cannot latch over a newer breach's alert.
-      // The trade-off is deliberate: a failed POST clears the latch again and
-      // the next breaching sweep may page a second time — duplicate alerts are
-      // acceptable, a missed alert is not.
-      let claimed = true;
+      // POST FIRST, advance the generation only for a delivered alert. A
+      // generation written before the POST would let a terminated invocation
+      // suppress the only alert this breach ever sends; one written after a 2xx
+      // can at worst repeat an alert, which is the trade the contract makes. A
+      // stale sweep that resumes after a recovery loses its CAS instead of
+      // closing the edge.
+      // An arrow over a globalThis property call, never the bare `fetch` reference:
+      // calling a stored reference loses the global receiver and workerd's native
+      // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
+      const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
       try {
-        claimed = await latchFailurePagingBreach(db, observed);
-        if (!claimed) {
-          log.warn(
-            { event: "ops_sweep_alert_state_cas_lost", detail: "state moved before the alert POST" },
-            "failure paging latch did not land — another sweep owns this breach",
-          );
+        const response = await fetchImpl(deps.alertUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(alert),
+          signal: AbortSignal.timeout(SWEEP_WEBHOOK_TIMEOUT_MS),
+        });
+        if (!response.ok) {
+          // Non-2xx = NOT posted: the sink rejected the alert. Throw a synthetic
+          // status-only error (never the URL or body) so the shared catch path
+          // below emits the warn and the "failed" disposition.
+          throw new Error(`alert webhook POST returned HTTP ${response.status}`);
         }
+        webhook = "posted";
+        // The alert IS delivered; only now does the edge close. A failed or
+        // losing write costs a duplicate on the next sweep, never a missed one.
+        await advance("tripped");
       } catch (error) {
-        // The write may or may not have landed, so posting anyway can only
-        // duplicate — the same bounded cost the whole ordering accepts.
+        // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
+        // request URL into the error message; `warnDetail` redacts and caps it.
         log.warn(
-          { event: "ops_sweep_alert_state_set_failed", detail: warnDetail(error, deps.alertUrl) },
-          "failure paging state write failed — this alert may post again",
+          {
+            event: "ops_sweep_alert_webhook_failed",
+            detail: warnDetail(error, deps.alertUrl),
+          },
+          "alert webhook POST failed — log-only alert stands",
         );
-      }
-      if (!claimed) {
-        webhook = "not_attempted";
-      } else {
-        // An arrow over a globalThis property call, never the bare `fetch` reference:
-        // calling a stored reference loses the global receiver and workerd's native
-        // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
-        const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
-        try {
-          const response = await fetchImpl(deps.alertUrl, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(alert),
-            signal: AbortSignal.timeout(SWEEP_WEBHOOK_TIMEOUT_MS),
-          });
-          if (!response.ok) {
-            // Non-2xx = NOT posted: the sink rejected the alert. Throw a synthetic
-            // status-only error (never the URL or body) so the shared catch path
-            // below emits the warn and the "failed" disposition.
-            throw new Error(`alert webhook POST returned HTTP ${response.status}`);
-          }
-          webhook = "posted";
-        } catch (error) {
-          // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
-          // request URL into the error message; `warnDetail` redacts and caps it.
-          log.warn(
-            {
-              event: "ops_sweep_alert_webhook_failed",
-              detail: warnDetail(error, deps.alertUrl),
-            },
-            "alert webhook POST failed — log-only alert stands",
-          );
-          // Reopen the edge this sweep just closed so the next breaching sweep
-          // retries. A failed clear keeps the latch and stays retried each
-          // healthy sweep, which is the same bound the clear path always had.
-          await rearm();
-          webhook = "failed";
-        }
+        // No generation write: an undelivered alert leaves the edge open, so
+        // the next breaching sweep retries without a compensating clear.
+        webhook = "failed";
       }
     }
   }
