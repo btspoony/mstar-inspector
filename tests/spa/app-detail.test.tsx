@@ -464,11 +464,6 @@ describe("installed tab configuration surface (static SSR)", () => {
 });
 
 describe("installation roster on the installed tab (static SSR)", () => {
-  const installations = [
-    { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
-    { installation_id: 456, account_login: null, seen_at: "2026-01-02 00:00:00" },
-  ];
-
   /** The roster table's cells, read the way a person scans them: per row. */
   const rosterRows = (container: HTMLElement): string[][] => {
     const table = [...container.querySelectorAll("table")].find((node) =>
@@ -480,16 +475,53 @@ describe("installation roster on the installed tab (static SSR)", () => {
     );
   };
 
-  test("one row per installation carries its account, id and state", async () => {
-    const markup = renderDetail({ ...managePayload, installations }, "installations");
+  test("one row per installation carries its account, id, last sync and state", async () => {
+    const markup = renderDetail(
+      {
+        ...managePayload,
+        installations: [
+          { installation_id: 123, account_login: "acme", seen_at: new Date().toISOString() },
+          { installation_id: 456, account_login: null, seen_at: new Date().toISOString() },
+        ],
+      },
+      "installations",
+    );
     const rows = await withMarkup(markup, rosterRows);
 
-    expect(rows).toHaveLength(installations.length);
+    expect(rows).toHaveLength(2);
     expect(rows.map((cells) => cells[0])).toEqual(["acme", t("en", "common.time.unknown")]);
     expect(rows.map((cells) => cells[1])).toEqual(["123", "456"]);
+    // The last-sync cell is the relative formatter's output for `seen_at`, not
+    // a blank: a stamp seconds old can only read as the sub-minute bucket.
+    expect(rows.map((cells) => cells[2])).toEqual([
+      t("en", "common.time.justNow"),
+      t("en", "common.time.justNow"),
+    ]);
     // The state is stated on every row: the read carries live rows only, so a
     // row that rendered no state would read as an unqualified install.
     for (const cells of rows) expect(cells[3]).toBe(t("en", "settings.installationsLive"));
+  });
+
+  test("the last-sync cell follows the stamp it is given, not a constant", async () => {
+    // A fixed stamp two days back: the formatter's day bucket, which no clock
+    // can drift across in a test run. A rendering that ignored `seen_at` (a
+    // literal, the account column repeated, "just now" for everything) fails.
+    const stamp = new Date(Date.now() - 2 * 86_400_000 - 3_600_000).toISOString();
+    const markup = renderDetail(
+      {
+        ...managePayload,
+        installations: [{ installation_id: 123, account_login: "acme", seen_at: stamp }],
+      },
+      "installations",
+    );
+    const rows = await withMarkup(markup, rosterRows);
+    expect(rows[0]?.[2]).toBe(t("en", "common.time.daysAgo", { count: 2 }));
+    // The raw stamp stays reachable as the native tooltip, the way every other
+    // relative-time cell in the product carries it.
+    expect(await withMarkup(markup, (container) => {
+      const cell = container.querySelector(`td span[title]`);
+      return cell?.getAttribute("title") ?? null;
+    })).toBe(stamp);
   });
 
   test("the roster's rows and the header band's figure are the same count", async () => {
@@ -1000,6 +1032,17 @@ describe("Blocked and pending installations (static SSR)", () => {
     // cannot make.
     expect(installed).not.toContain(t("en", "settings.appInfoDeliveryUrl"));
     expect(installed).not.toContain(t("en", "settings.appInfoRefresh"));
+
+    // The parity invariant holds in its degenerate form here: the roster is
+    // dropped with the bot's data (`bot === null`), and the band's installation
+    // figure is dropped by the same face — neither half can be left reporting
+    // a number the other no longer backs.
+    expect(installed).not.toContain(t("en", "settings.installations"));
+    expect(installed).not.toContain(t("en", "settings.installationsAccount"));
+    expect(installed).not.toContain(t("en", "settings.noInstallations"));
+    expect(await withMarkup(installed, (container) => container.querySelectorAll("tbody tr"))).toHaveLength(
+      0,
+    );
   });
 
   test("an unbound shared target renders one bind action per pending installation", () => {
