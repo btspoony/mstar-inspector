@@ -359,21 +359,6 @@ export function AppsList({
       header: t(locale, "apps.tableCreator"),
       cell: (app) => <span className="text-muted-foreground">{app.created_by}</span>,
     },
-    {
-      header: t(locale, "apps.detail"),
-      align: "right",
-      // Visible destination: the row (and this link) open the App's detail
-      // page — one workflow from list to detail.
-      cell: (app) => (
-        <a
-          className="text-primary underline-offset-4 hover:underline"
-          href={hrefOf(app.github_app_id)}
-          onClick={(event) => spaClick(hrefOf(app.github_app_id), event)}
-        >
-          {t(locale, "apps.detail")}
-        </a>
-      ),
-    },
   ];
 
   return (

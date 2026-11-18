@@ -133,6 +133,10 @@ export type ReviewTargetRow = {
 export type LiveTargetListRow = ReviewTargetRow & {
   app_name: string;
   last_reviewed_at: string | null;
+  /** Every review this target ever ran. */
+  reviews_total: number;
+  /** The reviews of the last 7 days — the band's planning figure. */
+  reviews_7d: number;
 };
 
 /**
@@ -629,21 +633,29 @@ export function createTargetsStore(db: TargetsStoreD1) {
 
     /**
      * The repository list's ONE read (product spec J1): each live target with
-     * the bot's display name and its newest review stamp. A join beats a
-     * per-row App read, and the stamp subquery rides
+     * the bot's display name, its newest review stamp and its review volume.
+     * A join beats a per-row App read, and all three review subqueries ride
      * `idx_reviews_target_reviewed_at` — never a scan of every workspace's
      * reviews.
+     *
+     * The order is the review recency the owner plans by: a repository that
+     * was reviewed most recently first, never-reviewed rows LAST (never first
+     * merely because they were created last) and `id` as the stable tiebreak.
      */
     async listLiveWithApp(workspaceId: string): Promise<LiveTargetListRow[]> {
       const res = await db
         .prepare(
           `SELECT t.*,
                   COALESCE(b.github_name, b.github_slug, CAST(b.github_app_id AS TEXT)) AS app_name,
-                  (SELECT MAX(r.reviewed_at) FROM reviews r WHERE r.target_id = t.id) AS last_reviewed_at
+                  (SELECT MAX(r.reviewed_at) FROM reviews r WHERE r.target_id = t.id) AS last_reviewed_at,
+                  (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id) AS reviews_total,
+                  (SELECT COUNT(*) FROM reviews r
+                    WHERE r.target_id = t.id
+                      AND r.reviewed_at >= datetime('now', '-7 days')) AS reviews_7d
              FROM review_targets t
              LEFT JOIN review_bots b ON b.id = t.bot_id
             WHERE t.workspace_id = ? AND t.deleted_at IS NULL
-            ORDER BY t.created_at DESC, t.id`,
+            ORDER BY (last_reviewed_at IS NULL), last_reviewed_at DESC, t.id`,
         )
         .bind(workspaceId)
         .all<LiveTargetListRow>();

@@ -398,6 +398,15 @@ export function TargetSettingsTab({
         <SectionCardTitle>{t(locale, "targets.settings.heading")}</SectionCardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-5">
+        {/* Which bot this repository reviews under. Read-only: rebinding a
+            repository to another App is planned, not supported yet. */}
+        <div className="flex flex-col gap-1">
+          <span className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">
+            {t(locale, "targets.settings.boundApp")}
+          </span>
+          <span className="text-sm text-foreground">{target.app_name ?? "—"}</span>
+          <span className="text-sm text-muted-foreground">{t(locale, "targets.settings.boundAppPlanned")}</span>
+        </div>
         <ReviewPolicyFields
           locale={locale}
           settings={effective}

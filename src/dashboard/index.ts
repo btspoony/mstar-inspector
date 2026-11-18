@@ -6268,6 +6268,10 @@ type TargetListRow = {
   review_enabled: number;
   follow_workspace_defaults: number;
   last_reviewed_at: string | null;
+  /** Every review this target ran — the row's total column. */
+  reviews_total: number;
+  /** The reviews of the last 7 days. */
+  reviews_7d: number;
 };
 
 /**
@@ -6290,6 +6294,8 @@ const targetListRoute = async (c: DashboardContext): Promise<Response> => {
     review_enabled: target.review_enabled,
     follow_workspace_defaults: target.follow_workspace_defaults,
     last_reviewed_at: target.last_reviewed_at,
+    reviews_total: target.reviews_total,
+    reviews_7d: target.reviews_7d,
   }));
   return c.json({ targets: rows });
 };
@@ -6368,8 +6374,29 @@ const appInstallationRepositoriesRoute = async (c: DashboardContext): Promise<Re
   if (walked === null || (walked.installations > 0 && walked.failures === walked.installations)) {
     return c.json({ error: "installation_repositories_unavailable" }, 502);
   }
+  // The duplicate rule is the BOT's, not this workspace's (the store's
+  // DUPLICATE_REPO): a sibling workspace's live row on the same bot already
+  // holds the repository, so offering it as selectable would invite a POST
+  // whose only possible answer is `duplicates`. Marking the walk's rows against
+  // every live target of the bot is therefore exactly the predicate the insert
+  // will apply — a repo id match, or a still-unclaimed row naming the same
+  // owner/name.
+  const liveTargets = await createTargetsStore(member.db).listLiveByBot(app.id);
+  const claimedRepoIds = new Set<number>();
+  const claimedNames = new Set<string>();
+  for (const target of liveTargets) {
+    if (target.repo_id !== null) claimedRepoIds.add(target.repo_id);
+    else if (target.repo_owner !== null && target.repo_name !== null) {
+      claimedNames.add(`${target.repo_owner}/${target.repo_name}`.toLowerCase());
+    }
+  }
   return c.json({
-    repositories: [...walked.byRepoId.values()],
+    repositories: [...walked.byRepoId.values()].map((repository) => ({
+      ...repository,
+      claimed:
+        claimedRepoIds.has(repository.repo_id) ||
+        claimedNames.has(`${repository.owner}/${repository.name}`.toLowerCase()),
+    })),
     degraded: walked.failures > 0,
   });
 };

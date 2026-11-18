@@ -207,20 +207,36 @@ export const en = {
     /** The overview's one explanatory block (the app-overview layout). */
     headingDescription:
       "Each row is one repository this workspace reviews. Review settings live on the repository itself; insights and pull requests are shared across the workspace.",
-    /** The overview band — three figures the loaded list already proves. */
+    /** The overview band — review volume, summed from the rows' aggregates. */
     metricRepositories: "Repositories",
-    metricUninstalled: "Awaiting install",
-    metricLastReview: "Last review",
+    metricReviews: "Reviews",
+    metricReviews7d: "Reviews · last 7 days",
+    /** The list's columns (the Apps list's vocabulary). */
+    columnRepository: "Repository",
+    columnState: "State",
+    columnReviews: "Reviews",
+    columnReviews7d: "Last 7 days",
+    columnLastReview: "Last review",
+    /** The 待安装 filter: a segment with the count of rows awaiting install. */
+    filterLabel: "Filter repositories",
+    filterAll: "All",
+    filterUninstalled: "Awaiting install ({count})",
     backToList: "Back to repositories",
     /** The three detail tabs. */
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
-    /** The 评审配置 tab's own copy; `heading` doubles as the tab label. */
+    /**
+     * The 评审配置 tab's own copy; `heading` doubles as the tab label.
+     * `boundApp` names the bot the repository reviews under — read-only, since
+     * rebinding is not supported yet.
+     */
     settings: {
       heading: "Review settings",
       follow: "Follow workspace defaults",
       following:
         "Following the workspace defaults; turn inheritance off to override them individually.",
+      boundApp: "Bound App",
+      boundAppPlanned: "Changing the App a repository is bound to is planned, not supported yet.",
     },
     /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No repositories yet",
@@ -238,34 +254,49 @@ export const en = {
       uninstalled: "Awaiting install",
       paused: "Paused",
     },
-    meta: "{app} · reviewed {time}",
-    metaNever: "{app} · never reviewed",
-    /** The 待安装 meta line: a target naming no repository at all. */
-    metaUninstalled: "No repository bound · waiting for a delivery",
     add: "Add repository",
     addDialog: {
       title: "Add repository",
-      description: "Pick the App and the repositories it should review.",
+      description: "Choose the App, check its installation, then find the repositories to review.",
+      /** The three steps, in render order. */
+      stepApp: "1 · App (bot)",
+      stepInstall: "2 · Installation",
+      stepRepos: "3 · Repositories",
       appLabel: "Application",
+      sharedScopeComing:
+        "A repository scope shared across several Apps is planned; today each App names its own repositories.",
       noApps: "This workspace has no application yet.",
       goToApps: "Go to the applications page",
-      binding: "Will bind to {app}",
+      loadingInstallations: "Checking installations…",
+      loadInstallationsFailed: "Could not read this App's installations.",
+      noInstallations: "This App is not installed on any account yet.",
+      /** The GitHub install page, from the App's own slug. */
+      installNow: "Install this App on GitHub",
+      recheck: "Re-check",
+      /** One installation row: account, id and the last time it was seen. */
+      installationRow: "{account} · installation {id} · seen {time}",
+      installationNoAccount: "unknown account",
       repoLabel: "Repositories",
-      noInstallationRepos: "This App is not installed on any repository.",
+      searchLabel: "Find repositories",
+      searchHint: "Type an owner or repository name to search the App's installations.",
+      resultsCount: "{count} matching · keep typing to narrow",
+      resultsTruncated: "Showing the first {cap} of {count} matching — keep typing to narrow.",
+      noMatch: 'No repository matches "{query}".',
+      noInstallationRepos: "This App is installed, but grants no repository.",
       goToInstalled: "Open the App's installed tab",
-      loadingRepos: "Loading repositories…",
+      loadingRepos: "Searching repositories…",
       loadReposFailed: "Could not load this App's repositories.",
       alreadyAdded: "Added",
+      /** A repository another workspace already reviews under this App. */
+      claimedElsewhere: "Taken by another workspace",
       degraded: "Some installations could not be read — this list may be incomplete.",
       duplicates: "Already added: {names}",
-      searchLabel: "Filter repositories",
-      /** Empty query with more rows than the dialog mounts. {total} = all, {cap} = rows shown. */
-      capped: "{total} repositories — showing the first {cap}.",
-      /** A query's answer size. {count} = matches, {total} = all repositories. */
-      matchCount: "{count} of {total} repositories match.",
-      noMatch: 'No repository matches "{query}".',
       confirm: "Add",
     },
+    /** The 待安装 filter's own empty face (rows exist, none are awaiting install). */
+    filterEmpty: "No repository is awaiting its install.",
+    /** The App list (the add dialog's source) failed while the list itself read. */
+    appsReadFailed: "Could not read this workspace's applications — adding a repository is unavailable for now.",
   },
   /**
    * The bot-owned configuration the App detail's 应用设置 tab composes under
@@ -468,7 +499,6 @@ export const en = {
     /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No Apps yet",
     emptyDescription: "Create GitHub App connects your first one.",
-    detail: "Detail",
     appId: "App id {id}",
     by: "by {login}",
     status: {

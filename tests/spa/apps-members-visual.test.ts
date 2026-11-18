@@ -170,7 +170,6 @@ function expectFullPageRegions(name: string, html: string): void {
       t("en", "apps.heading"), // PageHeader title
       t("en", "apps.create"), // header Create control
       t("en", "apps.tableName"), // DataTable header band
-      t("en", "apps.detail"), // row action cell
     ]) {
       expect(html, `${name} ${marker}`).toContain(marker);
     }
@@ -221,28 +220,31 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(byId).toContain(">1</a>");
   });
 
-  test("whole-row click and the visible detail anchor keep their channels", () => {
+  test("the row is the whole destination, and there is no separate detail column", () => {
     // Rendered from the real row component under the two ACTUAL pathnames: the
     // emitted links are the page's own base, so a wrong base, a legacy target
     // under a workspace page, or a /settings deep link fails here.
-    // `<img src>` is not an href — only real anchors are collected.
     const hrefs = (pathname: string) =>
       [...renderList([appRow()], pathname).matchAll(/<a [^>]*href="([^"]+)"/g)].map((match) => match[1]);
-    // Legacy Apps page: the historical detail path, identity link + anchor.
-    expect(hrefs("/dashboard/apps")).toEqual(["/dashboard/apps/1", "/dashboard/apps/1"]);
-    // Workspace Apps page: the workspace copy of the same route — the legacy
-    // App family answers 404 under strict.
-    expect(hrefs("/dashboard/acme/apps")).toEqual([
-      "/dashboard/acme/apps/1",
-      "/dashboard/acme/apps/1",
-    ]);
+    // ONE anchor per row — the identity link. The trailing 详情 column is gone
+    // (I-000641): the row itself is clickable and carries `cursor-pointer`.
+    expect(hrefs("/dashboard/apps")).toEqual(["/dashboard/apps/1"]);
+    expect(hrefs("/dashboard/acme/apps")).toEqual(["/dashboard/acme/apps/1"]);
     const scoped = renderList([appRow()], "/dashboard/acme/apps");
-    expect(scoped).toMatch(/<a [^>]*href="\/dashboard\/acme\/apps\/1"[^>]*>Detail<\/a>/);
     expect(scoped).not.toContain("/settings");
-    // Row action copy is detail semantics in both locales.
-    expect(scoped).toContain(">Detail<");
-    expect(t("en", "apps.detail")).toBe("Detail");
-    expect(t("zh_CN", "apps.detail")).toBe("详情");
+    // The row still navigates: the click handler rides the row.
+    expect(scoped).toContain("cursor-pointer");
+    // The column set is exactly the four payload-proved facts — asserted as
+    // equality, so a reappearing trailing column fails whatever it is labelled.
+    const headers = [...scoped.matchAll(/<th [^>]*>([\s\S]*?)<\/th>/g)].map((cell) =>
+      (cell[1] ?? "").trim(),
+    );
+    expect(headers).toEqual([
+      t("en", "apps.tableName"),
+      t("en", "apps.tableStatus"),
+      t("en", "apps.tableHealth"),
+      t("en", "apps.tableCreator"),
+    ]);
   });
 
   test("the status pill carries the semantic tone through its data-tone attribute", () => {
@@ -619,23 +621,15 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
     // What the link emits must resolve as an app-detail route, not a 404 stub.
     // The legacy mount keeps the historical path; the workspace page rides its
     // workspace prefix.
-    expect(destinations("/dashboard/apps")).toEqual([
-      ["/dashboard/apps/1", "app-detail"],
-      ["/dashboard/apps/1", "app-detail"],
-    ]);
-    expect(destinations("/dashboard/acme/apps")).toEqual([
-      ["/dashboard/acme/apps/1", "app-detail"],
-      ["/dashboard/acme/apps/1", "app-detail"],
-    ]);
+    expect(destinations("/dashboard/apps")).toEqual([["/dashboard/apps/1", "app-detail"]]);
+    expect(destinations("/dashboard/acme/apps")).toEqual([["/dashboard/acme/apps/1", "app-detail"]]);
   });
 
-  test("the row anchor names its destination for assistive tech and says Detail, never Settings", () => {
+  test("the row anchor names its destination for assistive tech, never Settings", () => {
     const html = renderList("/dashboard/acme/apps");
     expect(html).toContain(`aria-label="${t("en", "apps.openAria", { name: "demo" })}"`);
     expect(t("en", "apps.openAria", { name: "demo" })).toBe("Open demo detail");
     expect(t("zh_CN", "apps.openAria", { name: "demo" })).toBe("打开 demo 详情");
-    expect(html).toContain(`>${t("en", "apps.detail")}<`);
-    expect(t("zh_CN", "apps.detail")).toBe("详情");
   });
 
   test("the empty Apps face keeps one Create control — creation is the only path", () => {
@@ -792,7 +786,6 @@ describe("Apps list metric band (payload-proved facts only)", () => {
       t("en", "apps.tableStatus"),
       t("en", "apps.tableHealth"),
       t("en", "apps.tableCreator"),
-      t("en", "apps.detail"),
     ]);
   });
 

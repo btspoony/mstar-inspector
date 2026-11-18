@@ -2030,6 +2030,10 @@ export type TargetListRow = {
   review_enabled: number;
   follow_workspace_defaults: number;
   last_reviewed_at: string | null;
+  /** Every review this repository ran. */
+  reviews_total: number;
+  /** The reviews of the last 7 days — the band's planning figure. */
+  reviews_7d: number;
 };
 
 /** The add-repository dialog's application option (one row of `GET /api/apps`). */
@@ -2039,10 +2043,20 @@ export type RepositoryAppOption = {
   /** The local bot UID the create POST names as `bot_id`. */
   bot_id: string;
   name: string;
+  /** The GitHub slug, for the install-page link; null = never synced. */
+  slug: string | null;
 };
 
 /** One repository an installation grants — the dialog's multi-select option. */
 export type InstallationRepositoryOption = { repo_id: number; owner: string; name: string };
+
+/**
+ * One option of the installation-repositories walk: the repository plus
+ * whether a live target of this BOT already holds it. The claim is bot-wide
+ * (a sibling workspace's row on the same bot refuses the insert), so a claimed
+ * row is never selectable.
+ */
+export type InstallationRepository = InstallationRepositoryOption & { claimed: boolean };
 
 function parseTargetListRow(value: unknown): TargetListRow | null {
   if (!isRecord(value)) return null;
@@ -2058,6 +2072,9 @@ function parseTargetListRow(value: unknown): TargetListRow | null {
   if (reviewed !== null && typeof reviewed !== "string") return null;
   if (typeof value.review_enabled !== "number") return null;
   if (typeof value.follow_workspace_defaults !== "number") return null;
+  // The two review aggregates: the band sums them, so a row without them is
+  // no row (the all-or-nothing rule the rest of this file follows).
+  if (typeof value.reviews_total !== "number" || typeof value.reviews_7d !== "number") return null;
   return {
     target_id,
     repo_id: repoId,
@@ -2068,6 +2085,8 @@ function parseTargetListRow(value: unknown): TargetListRow | null {
     review_enabled: value.review_enabled,
     follow_workspace_defaults: value.follow_workspace_defaults,
     last_reviewed_at: reviewed,
+    reviews_total: value.reviews_total,
+    reviews_7d: value.reviews_7d,
   };
 }
 
@@ -2088,19 +2107,34 @@ export function parseTargets(data: unknown): TargetListRow[] | null {
 }
 
 /**
+ * The chosen App's live installations, read off the settings payload the add
+ * dialog already asks for (`installations[]` — the `bot_installations` rows).
+ * Its own lean parser, because the dialog needs this ONE section: the full
+ * settings parse is the settings page's contract and needs a manager face.
+ */
+export function parseAppInstallations(data: unknown): PendingInstallation[] | null {
+  if (!isRecord(data)) return null;
+  if (!isPendingInstallationList(data.installations)) return null;
+  return data.installations;
+}
+
+/**
  * The installation-repositories face. `degraded` says some installation failed
  * while the rest answered, so the dialog can offer what it has and say so.
+ * `claimed` is the bot-wide duplicate predicate the insert will apply: a row
+ * without it would be offered as selectable and could only fail.
  */
 export function parseInstallationRepositories(
   data: unknown,
-): { repositories: InstallationRepositoryOption[]; degraded: boolean } | null {
+): { repositories: InstallationRepository[]; degraded: boolean } | null {
   if (!isRecord(data) || !Array.isArray(data.repositories)) return null;
-  const repositories: InstallationRepositoryOption[] = [];
+  const repositories: InstallationRepository[] = [];
   for (const value of data.repositories) {
     if (!isRecord(value)) return null;
-    const { repo_id, owner, name } = value;
+    const { repo_id, owner, name, claimed } = value;
     if (typeof repo_id !== "number" || typeof owner !== "string" || typeof name !== "string") return null;
-    repositories.push({ repo_id, owner, name });
+    if (typeof claimed !== "boolean") return null;
+    repositories.push({ repo_id, owner, name, claimed });
   }
   return { repositories, degraded: data.degraded === true };
 }

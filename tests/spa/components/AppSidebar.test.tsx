@@ -15,6 +15,7 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarProvider } from "@design-system";
 import { AppSidebar } from "../../../src/spa/components/AppSidebar";
+import { NAV_ITEMS } from "../../../src/i18n/nav";
 import { buildSidebarModel, type SidebarModel } from "../../../src/spa/shell";
 import { t } from "../../../src/i18n";
 import { installDom } from "../dom";
@@ -91,6 +92,24 @@ describe("product nav containment (I-000253)", () => {
       ]);
       // No group heading, whichever slot a future one would take.
       expect(container.querySelectorAll('[data-slot="sidebar-group-label"]')).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("every nav item renders a glyph — no family ships an icon-less entry", async () => {
+    // I-000639: the map is keyed by the href's last segment, so a renamed nav
+    // family silently dropped its glyph. Asserted per rendered item, not by
+    // icon name: any svg in the item's own link satisfies it.
+    const { container, cleanup } = await mountSidebar(operatorModel);
+    try {
+      const links = [
+        ...container.querySelectorAll('[data-slot="sidebar-content"] [data-slot="sidebar-menu-button"]'),
+      ];
+      expect(links).toHaveLength(NAV_ITEMS.length);
+      for (const link of links) {
+        expect(link.querySelector("svg"), `${link.textContent} has no icon`).not.toBeNull();
+      }
     } finally {
       await cleanup();
     }
