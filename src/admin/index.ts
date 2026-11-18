@@ -66,6 +66,7 @@ import {
   verifyDataUpgrade,
 } from "./data-upgrades";
 import { operatorLogin, type AdminContext } from "./gate";
+import { requestMaintenanceReplay, type MaintenanceReplayOutcome } from "./maintenance-replay";
 import { createSupportGrant, revokeSupportGrant } from "./support-grants";
 import { listUsers } from "./users";
 import { readReviewUsage, reviewUsageMonth } from "../dashboard/review-usage-store";
@@ -952,6 +953,40 @@ async function dataUpgradeAction(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Replay one maintenance-deferred delivery (`POST
+ * /api/maintenance-deferred/:failureId/replay`).
+ *
+ * The state machine and the one queue send live in `./maintenance-replay`; this
+ * handler only gates (the same admin gate every row here uses) and maps each
+ * outcome to its frozen status/body pair. A 202 means the recovery is under
+ * way (`sent`) or durably requested (`requested` — the sweep retries it); a 200
+ * is a repeated request answered from the row's own stamps, with no new send.
+ */
+async function replayMaintenanceDeferred(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const failureId = c.req.param("failureId");
+  if (failureId === undefined) return c.notFound();
+  let outcome: MaintenanceReplayOutcome;
+  try {
+    outcome = await requestMaintenanceReplay(db, c.env.REVIEW_QUEUE, {
+      failureId,
+      actor: login,
+      now: new Date().toISOString(),
+    });
+  } catch {
+    // The request batch itself did not commit: nothing durable was written, so
+    // the operator may simply press replay again.
+    return c.json({ error: "replay_request_failed" }, 500);
+  }
+  if (outcome.kind === "refused") return c.json({ error: outcome.error }, outcome.status);
+  if (outcome.kind === "repeat") return c.json({ failureId, state: outcome.state }, 200);
+  return c.json({ failureId, state: outcome.state }, 202);
+}
+
+/**
  * The console document (`src/spa/admin.html`). `ASSETS` holds it and no other
  * route serves it: spa-dispatch matches only `/index.html` and `/app-assets/*`,
  * so this gated handler is the document's single entry point.
@@ -997,6 +1032,7 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "delete", path: "/api/support-grants/:id", handler: revokeGrant },
   { method: "get", path: "/api/data-upgrades", handler: readDataUpgrades },
   { method: "post", path: "/api/data-upgrades/:id/:action", handler: dataUpgradeAction },
+  { method: "post", path: "/api/maintenance-deferred/:failureId/replay", handler: replayMaintenanceDeferred },
   { method: "get", path: "/", handler: serveDocument },
   ...ADMIN_PAGES.map((page) => ({ method: "get" as const, path: `/${page.id}`, handler: serveDocument })),
 ];

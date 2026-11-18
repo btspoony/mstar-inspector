@@ -28,7 +28,7 @@ import {
 import { GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
 import { selectAssessmentTargets } from "../../src/store/finding-lifecycle";
 import { createFailureStore } from "../../src/store/failure-store";
-import { COMMENT_CLAIM_OUTBOX_SQL } from "../../src/worker/sweep";
+import { COMMENT_CLAIM_OUTBOX_SQL, MAINTENANCE_REPLAY_OUTBOX_SQL } from "../../src/worker/sweep";
 import type { TestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
 
@@ -2816,6 +2816,8 @@ describe("migrations/0057_review_targets.sql", () => {
     "repo_owner",
     "repo_name",
     "follow_workspace_defaults",
+    // 0070 appends the draft-review gate after the split's columns.
+    "review_drafts",
   ];
 
   /** The bot columns the target inherits, projected the same on both sides. */
@@ -3889,5 +3891,22 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
         index,
       ).toEqual(["target_id", "owner", "repo", "pr_number"]);
     }
+  });
+});
+
+describe("migrations/0073_maintenance_replay_rotation_index.sql", () => {
+  test("the replay drain is index-ordered, so a retained dead backlog is not sorted per selection", () => {
+    const db = createMigratedTestD1();
+    // The drain's own statement, not a copy: a change to its predicate or
+    // ORDER BY must keep seeking the rotation index or fail here.
+    const plan = db.raw
+      .query(`EXPLAIN QUERY PLAN ${MAINTENANCE_REPLAY_OUTBOX_SQL}`)
+      .all(JSON.stringify([]), 1) as Array<{ detail: string }>;
+    const details = plan.map((row) => row.detail).join("\n");
+    expect(details).toContain("USING INDEX idx_review_failures_maintenance_replay_rotation");
+    // The whole point: LIMIT stops the scan. A temp B-tree means the pending
+    // set was read and sorted in full, which is the backlog-proportional work
+    // the finding named.
+    expect(details).not.toContain("TEMP B-TREE");
   });
 });

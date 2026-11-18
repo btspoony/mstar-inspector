@@ -16,6 +16,7 @@ import type { Database } from "bun:sqlite";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
+  ALERT_MAINTENANCE_AUDIT_ACTION,
   ALERT_PAGING_AUDIT_ACTION,
   runSweep,
   SWEEP_FAILURE_THRESHOLD,
@@ -30,6 +31,7 @@ import {
   type SweepDeps,
   type SweepInviteLapseFields,
   type SweepLog,
+  type SweepMaintenanceReplayFields,
   type SweepRetentionFields,
   type SweepLedgerRetentionFields,
   type SweepWarnFields,
@@ -70,6 +72,7 @@ type WarnCall = {
     | SweepLedgerRetentionFields
     | SweepInviteLapseFields
     | SweepCommentClaimFields
+    | SweepMaintenanceReplayFields
     | CommentClaimSettingsLogFields;
   msg?: string;
 };
@@ -150,9 +153,13 @@ describe("runSweep", () => {
     expect(captured[2]).toContain("UPDATE workspace_invites");
     const countAt = captured.findIndex((query) => query.includes("FROM review_failures"));
     expect(captured[countAt]).toContain("created_at > datetime('now', '-24 hours')");
-    // A healthy window has no page to de-bounce, so nothing follows the read:
+    // The maintenance signal is its own trailing-window read, in the same
+    // window, right after the grouped one.
+    expect(captured[countAt + 1]).toContain("stage = 'maintenance_deferred'");
+    expect(captured[countAt + 1]).toContain("created_at > datetime('now', '-24 hours')");
+    // A healthy window has no page to de-bounce, so nothing follows the reads:
     // no state write, no audit append.
-    expect(captured).toHaveLength(countAt + 1);
+    expect(captured).toHaveLength(countAt + 2);
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,
@@ -617,8 +624,33 @@ describe("runSweep", () => {
     const { log, calls } = captureLog();
     const result = await runSweep(db, { log });
     expect(result.failures24h).toBe(1);
-    expect(calls).toHaveLength(0);
+    // The deferral posts on its own (its own lane), but never as infrastructure:
+    // the total and the breakdown are the sandbox row alone.
+    const alert = calls[0]!.fields as SweepAlertFields;
+    expect(alert.failures_24h).toBe(1);
+    expect(alert.stages).toEqual([{ stage: "sandbox", count: 1 }]);
+    expect(alert.maintenance_deferred).toEqual({ count: 1 });
+    expect(alert.due).toEqual(["maintenance"]);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
+  });
+
+  test("a maintenance_deferred row rides the breach payload under its own key, leaving the total alone", async () => {
+    const db = failureDb();
+    const store = createFailureStore(db);
+    await store.record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+
+    const { log, calls } = captureLog();
+    const result = await runSweep(db, { log });
+    // The deferral is not infrastructure: the total, the breach decision and the
+    // breakdown are the same as without it.
+    expect(result.failures24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
+    expect(result.thresholdBreached).toBe(true);
+    const alert = calls[0]!.fields as SweepAlertFields;
+    expect(alert.maintenance_deferred).toEqual({ count: 1 });
+    expect(alert.due).toEqual(["infrastructure", "maintenance"]);
+    expect(alert.failures_24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
+    expect(alert.stages).toEqual([{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }]);
   });
 
   test("threshold boundary: ONE fully-failed message's rows do not alert", async () => {
@@ -660,6 +692,7 @@ describe("runSweep", () => {
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
       // The seeded rows are all `runner`: the breakdown is the total's parts.
       stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      due: ["infrastructure"],
     });
   });
 
@@ -686,6 +719,7 @@ describe("runSweep", () => {
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
       stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      due: ["infrastructure"],
     });
   });
 
@@ -1005,6 +1039,202 @@ describe("runSweep — paging audit window", () => {
 });
 
 /**
+ * The maintenance lane's own audit window (`alert.maintenance_deferred`): a
+ * deferral posts on its own even when infrastructure is healthy, de-bounces on
+ * its OWN action, and shares one POST with a simultaneous infrastructure breach.
+ */
+describe("runSweep — maintenance audit window", () => {
+  function auditRows(db: TestD1, action: string): Array<{ detail_json: string }> {
+    return db.raw
+      .query("SELECT detail_json FROM platform_audit_events WHERE action = ? ORDER BY created_at")
+      .all(action) as Array<{ detail_json: string }>;
+  }
+
+  function seedAudit(db: TestD1, action: string, targetId: string, at: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO platform_audit_events
+           (id, actor_login, action, target_type, target_id, detail_json, created_at)
+         VALUES (?, 'sweep', ?, 'sweep', ?, '{}', ?)`,
+      )
+      .run(crypto.randomUUID(), action, targetId, at);
+  }
+
+  async function seedDeferral(db: TestD1): Promise<void> {
+    await createFailureStore(db).record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
+  }
+
+  /** A sink that accepts every POST, recording each body it was sent. */
+  function sink(): { fetchImpl: typeof fetch; bodies: () => string[] } {
+    const bodies: string[] = [];
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    return { fetchImpl, bodies: () => bodies };
+  }
+
+  test("a deferral alone posts with a healthy infrastructure total", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    const { fetchImpl, bodies } = sink();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    expect(result).toMatchObject({ failures24h: 0, thresholdBreached: false, webhook: "posted" });
+    expect(bodies()).toHaveLength(1);
+    expect(JSON.parse(bodies()[0]!)).toEqual({
+      event: "ops_sweep_alert",
+      failures_24h: 0,
+      dlq_check: "skipped",
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+      stages: [],
+      maintenance_deferred: { count: 1 },
+      due: ["maintenance"],
+    });
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+    expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(0);
+  });
+
+  test("a deferral inside the maintenance window does not post again", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    const { fetchImpl, bodies } = sink();
+    const log = captureLog().log;
+
+    const start = Date.parse("2026-01-01T00:00:00.000Z");
+    jest.useFakeTimers();
+    jest.setSystemTime(start);
+    try {
+      const first = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(first.webhook).toBe("posted");
+      expect(bodies()).toHaveLength(1);
+
+      jest.setSystemTime(start + 60_000);
+      const second = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(second).toMatchObject({ thresholdBreached: false, webhook: "not_attempted" });
+      expect(bodies()).toHaveLength(1);
+      expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("a paging alert does not suppress the maintenance alert in the same sweep", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, bodies } = sink();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    expect(result.webhook).toBe("posted");
+    // ONE POST carrying both keys, each describing its own signal.
+    expect(bodies()).toHaveLength(1);
+    expect(JSON.parse(bodies()[0]!)).toEqual({
+      event: "ops_sweep_alert",
+      failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
+      dlq_check: "skipped",
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+      stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      maintenance_deferred: { count: 1 },
+      due: ["infrastructure", "maintenance"],
+    });
+    // Each due lane records under its own action.
+    expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(1);
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+  });
+
+  test("an already-latched paging lane leaves the maintenance lane to post alone", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    seedAudit(db, ALERT_PAGING_AUDIT_ACTION, "failure_paging", new Date(Date.now() - 3_600_000).toISOString());
+    const { fetchImpl, bodies } = sink();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+    expect(bodies()).toHaveLength(1);
+    // `failures_24h`/`stages` keep meaning infrastructure-only and keep showing
+    // the standing breach, but `due` says the maintenance lane is the only one
+    // this post is owed by: the paging lane already announced the breach.
+    expect(JSON.parse(bodies()[0]!)).toEqual({
+      event: "ops_sweep_alert",
+      failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
+      dlq_check: "skipped",
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+      stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      maintenance_deferred: { count: 1 },
+      due: ["maintenance"],
+    });
+    // The latched paging lane writes no second row; only maintenance is recorded.
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+    expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(1);
+  });
+
+  test("a failed maintenance POST records nothing, so the next sweep retries", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    const log = captureLog().log;
+    const rejecting = (async () => new Response("sink degraded", { status: 503 })) as unknown as typeof fetch;
+
+    const failed = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl: rejecting, log });
+    expect(failed.webhook).toBe("failed");
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(0);
+
+    const { fetchImpl, bodies } = sink();
+    const retried = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(retried.webhook).toBe("posted");
+    expect(bodies()).toHaveLength(1);
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+  });
+
+  test("the deferral count travels under the frozen nested key, never the camelCase one", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedDeferral(db);
+    const { fetchImpl, bodies } = sink();
+
+    await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    const body = JSON.parse(bodies()[0]!) as Record<string, unknown>;
+    // The contract's shape exactly: `maintenance_deferred: {count}`, so a
+    // consumer reading the specified key observes the deferral count.
+    expect(body.maintenance_deferred).toEqual({ count: 2 });
+    expect(body).not.toHaveProperty("maintenanceDeferred");
+  });
+
+  test("due names both lanes when one sweep owes both alerts", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, bodies } = sink();
+
+    await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    const body = JSON.parse(bodies()[0]!) as { due: string[]; maintenance_deferred?: { count: number } };
+    expect(body.due).toEqual(["infrastructure", "maintenance"]);
+    expect(body.maintenance_deferred).toEqual({ count: 1 });
+  });
+
+  test("a de-bounced maintenance lane is not listed in due and carries no count key", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // The deferral was announced already; only the fresh breach owes a post.
+    seedAudit(db, ALERT_MAINTENANCE_AUDIT_ACTION, "maintenance_deferred", new Date(Date.now() - 60_000).toISOString());
+    const { fetchImpl, bodies } = sink();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+    expect(bodies()).toHaveLength(1);
+    const body = JSON.parse(bodies()[0]!) as Record<string, unknown> & { due: string[] };
+    // The standing deferral count is not an alert: `due` excludes the lane and
+    // the count key is absent, so the receiver cannot misread it as active.
+    expect(body.due).toEqual(["infrastructure"]);
+    expect(body).not.toHaveProperty("maintenance_deferred");
+    expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(1);
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+  });
+});
+
+/**
  * Comment-claim outbox (migration 0048): a claim row whose worker-side send
  * never happened must reach the queue eventually, and a claim that never gets
  * consumed must stop being retried. Real migrated DDL for the table, a
@@ -1216,5 +1446,389 @@ describe("runSweep — comment-claim outbox", () => {
       max_attempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
       outbox_cap: COMMENT_CLAIM_OUTBOX_DEFAULT,
     });
+  });
+});
+
+/**
+ * Maintenance-replay outbox (migration 0071): an operator request
+ * whose send never resolved is retried by the sweep, but ONLY while the
+ * maintenance window is readable and open — the same fail-closed predicate the
+ * replay route uses. Real migrated DDL, a recording queue double.
+ */
+describe("runSweep — maintenance replay outbox", () => {
+  /** One requested-but-unsent deferred row (the operator's durable request). */
+  async function seedPendingReplay(
+    db: TestD1,
+    overrides: { targetId?: string; requestedAt?: string } = {},
+  ): Promise<string> {
+    const id = crypto.randomUUID();
+    const { targetId = BASE.target_id, requestedAt = "2026-11-01T00:00:00.000Z" } = overrides;
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures
+           (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error,
+            maintenance_replay_requested_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'maintenance_deferred', 'maintenance_window', ?)`,
+      )
+      .run(id, targetId, BASE.installation_id, BASE.owner, BASE.repo, BASE.pr_number, BASE.head_sha, requestedAt);
+    return id;
+  }
+
+  function replayRow(db: TestD1, id: string) {
+    return db.raw
+      .query(
+        `SELECT maintenance_replay_requested_at, maintenance_replay_sent_at, maintenance_replay_last_attempt_at
+           FROM review_failures WHERE id = ?`,
+      )
+      .get(id) as {
+      maintenance_replay_requested_at: string | null;
+      maintenance_replay_sent_at: string | null;
+      maintenance_replay_last_attempt_at: string | null;
+    };
+  }
+
+  function setMaintenance(db: TestD1, enabled: boolean): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('platform.maintenance.enabled', ?, '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run(enabled ? "1" : "0");
+  }
+
+  function fakeQueue(): { queue: SweepDeps["queue"]; sent: unknown[] } {
+    const sent: unknown[] = [];
+    return {
+      sent,
+      queue: {
+        send: async (message: unknown) => {
+          sent.push(message);
+        },
+      } as never,
+    };
+  }
+
+  test("a pending replay is sent once with the frozen payload while maintenance is off", async () => {
+    const db = failureDb();
+    const id = await seedPendingReplay(db);
+    setMaintenance(db, false);
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(1);
+    // The frozen replay payload: live target/bot, authoritative head left to
+    // the consumer, no comment id and no old webhook body.
+    expect(sent[0]).toEqual({
+      installation_id: BASE.installation_id,
+      owner: BASE.owner,
+      repo: BASE.repo,
+      pr_number: BASE.pr_number,
+      head_sha: null,
+      action: "maintenance_replay",
+      triggered_by: "pull_request",
+      botRef: { appId: "bot-sweep" },
+      targetId: BASE.target_id,
+    });
+    expect(replayRow(db, id).maintenance_replay_sent_at).not.toBeNull();
+    expect(calls.some((call) => call.fields.event === "maintenance_replay_outbox")).toBe(true);
+
+    // The sent stamp is the outbox's only exit: the next sweep sends nothing.
+    await runSweep(db, { log, queue });
+    expect(sent).toHaveLength(1);
+  });
+
+  test("cap 1 with a pending replay reserves the slot for the replay, and the comment lane is served next sweep", async () => {
+    const db = failureDb();
+    await seedPendingReplay(db);
+    // One stale comment claim and one pending replay under cap 1: the reservation
+    // keeps the replay lane's last slot, so the operator's request is attempted
+    // THIS pass instead of waiting behind a sustained comment backlog.
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (123, 'acme', 'widgets', 42, 9001, 'queued', ?, 0, 0, 0)`,
+      )
+      .run(JSON.stringify({ ...BASE, head_sha: null, action: "created", triggered_by: "issue_comment" }));
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const { queue, sent } = fakeQueue();
+
+    await runSweep(db, { log: captureLog().log, queue });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: "maintenance_replay" });
+
+    // Nothing replayable is left, so the comment lane gets the whole cap.
+    await runSweep(db, { log: captureLog().log, queue });
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({ triggered_by: "issue_comment" });
+  });
+
+  test("cap 2 gives a pending replay one slot and the comment lane the other", async () => {
+    const db = failureDb();
+    await seedPendingReplay(db);
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (123, 'acme', 'widgets', 42, 9001, 'queued', ?, 0, 0, 0)`,
+      )
+      .run(JSON.stringify({ ...BASE, head_sha: null, action: "created", triggered_by: "issue_comment" }));
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '2', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const { queue, sent } = fakeQueue();
+
+    await runSweep(db, { log: captureLog().log, queue });
+
+    // Both lanes recovered in ONE pass, exactly one send each — no starvation,
+    // no double spending.
+    expect(sent).toHaveLength(2);
+    expect(sent.some((message) => JSON.stringify(message).includes('"issue_comment"'))).toBe(true);
+    expect(sent.some((message) => JSON.stringify(message).includes('"maintenance_replay"'))).toBe(true);
+  });
+
+  test("nothing is sent while maintenance is active", async () => {
+    const db = failureDb();
+    const id = await seedPendingReplay(db);
+    setMaintenance(db, true);
+    const { queue, sent } = fakeQueue();
+    const { log } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(0);
+    // The request stands, unsent, for the first open sweep.
+    expect(replayRow(db, id)).toMatchObject({
+      maintenance_replay_requested_at: "2026-11-01T00:00:00.000Z",
+      maintenance_replay_sent_at: null,
+    });
+  });
+
+  test("a dead oldest target does not starve the next pending request in the same sweep", async () => {
+    const db = failureDb();
+    // The oldest request names a target that is now soft-deleted: it stays
+    // pending (never resurrected), but it must not own the batch.
+    const deadTarget = seedTarget(db, "bot-sweep", { id: "target-dead" });
+    db.raw
+      .prepare("UPDATE review_targets SET deleted_at = ? WHERE id = ?")
+      .run("2026-11-02T00:00:00.000Z", deadTarget);
+    const dead = await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-01T00:00:00.000Z" });
+    const live = await seedPendingReplay(db, { requestedAt: "2026-11-05T00:00:00.000Z" });
+    // Cap 2: one slot for the dead row's attempt, one for the live request.
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '2', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: "maintenance_replay", targetId: BASE.target_id });
+    expect(replayRow(db, live).maintenance_replay_sent_at).not.toBeNull();
+    // The dead request is never sent — an unavailable target cannot be
+    // resurrected — but its attempt IS stamped so it rotates behind the rest.
+    expect(replayRow(db, dead)).toMatchObject({
+      maintenance_replay_requested_at: "2026-11-01T00:00:00.000Z",
+      maintenance_replay_sent_at: null,
+    });
+    expect(replayRow(db, dead).maintenance_replay_last_attempt_at).not.toBeNull();
+    const outboxLog = calls.find((call) => call.fields.event === "maintenance_replay_outbox");
+    expect(outboxLog?.fields).toEqual({ event: "maintenance_replay_outbox", sent: 1, failed: 0, target_unavailable: 1 });
+  });
+
+  test("a dead backlog is bounded per pass: cap 1 touches one row and the next sweep moves on", async () => {
+    const db = failureDb();
+    // Three requests whose target is gone. They stay pending forever by
+    // contract, so the ONLY thing keeping the sweep bounded is that each touched
+    // row spends the shared budget and stamps its attempt.
+    const deadTarget = seedTarget(db, "bot-sweep", { id: "target-dead" });
+    db.raw
+      .prepare("UPDATE review_targets SET deleted_at = ? WHERE id = ?")
+      .run("2026-11-02T00:00:00.000Z", deadTarget);
+    const dead = [
+      await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-01T00:00:00.000Z" }),
+      await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-02T00:00:00.000Z" }),
+      await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-03T00:00:00.000Z" }),
+    ];
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    // Cap 1 = at most ONE row touched this pass, and no queue write at all.
+    expect(sent).toHaveLength(0);
+    expect(calls.find((call) => call.fields.event === "maintenance_replay_outbox")?.fields).toEqual({
+      event: "maintenance_replay_outbox",
+      sent: 0,
+      failed: 0,
+      target_unavailable: 1,
+    });
+    const touched = () => dead.filter((id) => replayRow(db, id).maintenance_replay_last_attempt_at !== null);
+    expect(touched()).toHaveLength(1);
+
+    await runSweep(db, { log, queue });
+
+    // The stamped row rotates back, so the next sweep touches a DIFFERENT one
+    // instead of walking the same dead prefix again.
+    expect(touched()).toHaveLength(2);
+    expect(sent).toHaveLength(0);
+  });
+
+  test("a replay whose send keeps failing rotates behind the next pending request on the next sweep", async () => {
+    const db = failureDb();
+    // Two live targets: only the OLDEST request's send throws, so it stays
+    // pending forever while a later request waits behind it.
+    const stuckTarget = seedTarget(db, "bot-sweep", { id: "target-stuck" });
+    const stuck = await seedPendingReplay(db, { targetId: stuckTarget, requestedAt: "2026-11-01T00:00:00.000Z" });
+    const later = await seedPendingReplay(db, { requestedAt: "2026-11-05T00:00:00.000Z" });
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const sent: unknown[] = [];
+    const queue = {
+      send: async (message: { targetId?: string }) => {
+        if (message.targetId === stuckTarget) throw new Error("queue is down");
+        sent.push(message);
+      },
+    } as unknown as SweepDeps["queue"];
+    const { log } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    // Cap 1: the oldest request got the only attempt and failed. The attempt
+    // stamp is what moves it back — no attempt cap, no persisted counter.
+    expect(sent).toHaveLength(0);
+    expect(replayRow(db, stuck).maintenance_replay_sent_at).toBeNull();
+    expect(replayRow(db, stuck).maintenance_replay_last_attempt_at).not.toBeNull();
+
+    await runSweep(db, { log, queue });
+
+    // The later request is attempted instead of the same failing row again.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: "maintenance_replay", targetId: BASE.target_id });
+    expect(replayRow(db, later).maintenance_replay_sent_at).not.toBeNull();
+    expect(replayRow(db, stuck).maintenance_replay_sent_at).toBeNull();
+  });
+
+  test("a comment attempt whose DB write fails still spends the comment lane's share", async () => {
+    const db = failureDb();
+    await seedPendingReplay(db);
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (123, 'acme', 'widgets', 42, 9001, 'queued', ?, 0, 0, 0)`,
+      )
+      .run(JSON.stringify({ ...BASE, head_sha: null, action: "created", triggered_by: "issue_comment" }));
+    // Cap 2 = one slot per lane while a replay is pending.
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '2', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    // The send succeeds, then the claim's own attempts update throws — the
+    // attempt is still spent, so the replay lane gets only its own reserved slot.
+    const lockedUpdate: D1StatementLike = {
+      bind: () => lockedUpdate,
+      first: async () => null,
+      all: async () => ({ results: [] }),
+      async run() {
+        throw new Error("claim row locked");
+      },
+    };
+    const brokenWrites: D1Like = {
+      prepare(query: string): D1StatementLike {
+        return query.includes("UPDATE comment_trigger_claims SET attempts")
+          ? lockedUpdate
+          : db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const { queue, sent } = fakeQueue();
+    const { log } = captureLog();
+
+    await runSweep(brokenWrites, { log, queue });
+
+    // Exactly the cap: the comment attempt happened, and the replay still got
+    // the slot reserved for it — no attempt was refunded.
+    expect(sent).toHaveLength(2);
+    expect(sent.some((message) => JSON.stringify(message).includes('"issue_comment"'))).toBe(true);
+    expect(sent.some((message) => JSON.stringify(message).includes('"maintenance_replay"'))).toBe(true);
+  });
+
+  test("a queue send that resolves but a sent stamp that fails leaves the row pending for the next sweep", async () => {
+    const db = failureDb();
+    const id = await seedPendingReplay(db);
+    // Cap 1: one attempt this pass, so the pending state is observed without a
+    // second in-pass retry.
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    // The queue accepts the job; only the sent stamp throws. The row must stay
+    // pending (a send whose stamp never landed is not proof of delivery), and
+    // the next open sweep must retry it — at-least-once, never a lost recovery.
+    const lockedStamp: D1StatementLike = {
+      bind: () => lockedStamp,
+      first: async () => null,
+      all: async () => ({ results: [] }),
+      async run() {
+        throw new Error("review_failures locked");
+      },
+    };
+    let failStamp = true;
+    const flaky: D1Like = {
+      prepare(query: string): D1StatementLike {
+        return failStamp && query.includes("SET maintenance_replay_sent_at")
+          ? lockedStamp
+          : db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(flaky, { log, queue });
+
+    expect(sent).toHaveLength(1);
+    expect(replayRow(db, id).maintenance_replay_sent_at).toBeNull();
+    // The attempt is stamped before the send, so the row rotates back instead of
+    // owning the next sweep's budget.
+    expect(replayRow(db, id).maintenance_replay_last_attempt_at).not.toBeNull();
+    expect(calls.some((call) => call.fields.event === "maintenance_replay_outbox_send_failed")).toBe(true);
+
+    failStamp = false;
+    await runSweep(flaky, { log, queue });
+
+    // The retry lands the stamp and the row leaves the outbox.
+    expect(replayRow(db, id).maintenance_replay_sent_at).not.toBeNull();
+    await runSweep(flaky, { log, queue });
+    expect(sent).toHaveLength(2);
   });
 });
