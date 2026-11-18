@@ -38,7 +38,7 @@
  * out unbounded reads. A target whose pairs did not all fit is left in the
  * worklist (its migrated pairs are gone, so the next step resumes on what is
  * left) — EXCEPT one this batch emptied of every pair it held: the worklist
- * finds a row only by a `pull_requests` row, so such a row is retired by the
+ * finds a row only by a ledger row, so such a row is retired by the
  * same batch instead of stranding as a live row nobody will scan again.
  * `IN (…)` lists are chunked at IN_CHUNK values — D1 refuses a statement that
  * binds more than 100 parameters.
@@ -70,21 +70,33 @@ const LEFTOVER_TARGET = `t.deleted_at IS NULL
   AND t.repo_id IS NULL AND t.repo_owner IS NULL AND t.repo_name IS NULL`;
 
 /**
- * Ledger rows sitting on a soft-deleted target this item's worklist could not
- * visit again (a live target of the same bot already covers the repository,
- * wherever it lives). The split is a TIME comparison, not a flag: retirement
- * stamps `deleted_at`, and this run's own start stamp is what separates its
- * work from deletions that predate it. `%s` is the time predicate on that stamp.
+ * Every ledger row's claim on a repository. `pull_requests` is the only table
+ * that carries `pr_number`/`last_seen_at`, but a target is leftover work while
+ * ANY of the four tables still points at it: sweeping the PRs does not sweep
+ * the reviews, findings or failures written for them.
  */
-const RETIRED_LEDGER_ROWS = `FROM (
-   SELECT target_id, owner, repo FROM pull_requests
+const LEDGER_IDENTITIES = `SELECT target_id, owner, repo FROM pull_requests
    UNION ALL SELECT target_id, owner, repo FROM reviews
    UNION ALL SELECT target_id, owner, repo FROM review_findings
-   UNION ALL SELECT target_id, owner, repo FROM review_failures) x
+   UNION ALL SELECT target_id, owner, repo FROM review_failures`;
+
+/** Any ledger row at all on `target`: the eligibility predicate of every seam. */
+function hasLedger(target: string): string {
+  return `EXISTS (SELECT 1 FROM (${LEDGER_IDENTITIES}) x WHERE x.target_id = ${target})`;
+}
+
+/**
+ * Ledger rows sitting on a soft-deleted target this item's worklist could not
+ * visit again (a live target of the same bot already covers the repository,
+ * wherever it lives — naming it is enough, it need not hold a PR). The split is
+ * a TIME comparison, not a flag: retirement stamps `deleted_at`, and this run's
+ * own start stamp is what separates its work from deletions that predate it.
+ * `%s` is the time predicate on that stamp.
+ */
+const RETIRED_LEDGER_ROWS = `FROM (${LEDGER_IDENTITIES}) x
   JOIN review_targets d ON d.id = x.target_id AND d.deleted_at IS NOT NULL
  WHERE EXISTS (
    SELECT 1 FROM review_targets l
-     JOIN pull_requests lp ON lp.target_id = l.id
     WHERE l.deleted_at IS NULL AND l.bot_id = d.bot_id
       AND l.repo_owner = x.owner COLLATE NOCASE
       AND l.repo_name = x.repo COLLATE NOCASE)
@@ -188,6 +200,11 @@ async function countRows(db: DashboardD1, sql: string, ...values: unknown[]): Pr
  * the same repo. Bot scope also spans workspaces, because 0068's claim and
  * `resolveByRepo` do: a repository a bot reviews is one target, not one per
  * workspace.
+ *
+ * A member is any ledger table's claim: a target whose PRs were swept but whose
+ * reviews or findings remain still holds this repository's history. With no PR
+ * row its `last_seen` is NULL — D22 falls through to the review stamp, not to
+ * "no member".
  */
 async function readMembers(db: DashboardD1, group: Group): Promise<MemberRow[]> {
   const res = await db
@@ -201,9 +218,9 @@ async function readMembers(db: DashboardD1, group: Group): Promise<MemberRow[]> 
                   AND r.repo = ?3 COLLATE NOCASE) AS last_reviewed
          FROM review_targets t
         WHERE t.bot_id = ?1 AND ${LEFTOVER_TARGET}
-          AND EXISTS (SELECT 1 FROM pull_requests p
-                       WHERE p.target_id = t.id AND p.owner = ?2 COLLATE NOCASE
-                         AND p.repo = ?3 COLLATE NOCASE)`,
+          AND EXISTS (SELECT 1 FROM (${LEDGER_IDENTITIES}) x
+                       WHERE x.target_id = t.id AND x.owner = ?2 COLLATE NOCASE
+                         AND x.repo = ?3 COLLATE NOCASE)`,
     )
     .bind(group.botId, group.owner, group.repo)
     .all<MemberRow>();
@@ -234,7 +251,7 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
     .prepare(
       `SELECT t.id, t.bot_id FROM review_targets t
         WHERE t.id > ?1 AND ${LEFTOVER_TARGET}
-          AND EXISTS (SELECT 1 FROM pull_requests p WHERE p.target_id = t.id)
+          AND ${hasLedger("t.id")}
         ORDER BY t.id LIMIT ?2`,
     )
     .bind(after, SCAN_LIMIT)
@@ -258,11 +275,11 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
   // next step re-reads it, and the pairs already migrated no longer show up.
   // The scan CONTINUES past it, though: a later row whose pairs were all
   // planned by an earlier row's group has no ledger rows left to keep it in
-  // the worklist (`EXISTS (pull_requests)` is what finds a row), so this batch
+  // the worklist (`EXISTS (ledger)` is what finds a row), so this batch
   // must retire it — otherwise it strands as a live all-NULL ghost.
   for (const row of rows) {
     const pairs = await db
-      .prepare("SELECT DISTINCT owner, repo FROM pull_requests WHERE target_id = ?1")
+      .prepare(`SELECT DISTINCT owner, repo FROM (${LEDGER_IDENTITIES}) x WHERE x.target_id = ?1`)
       .bind(row.id)
       .all<{ owner: string; repo: string }>();
     let drained = true;
@@ -300,7 +317,7 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
       `UPDATE review_targets SET follow_workspace_defaults = 0, updated_at = datetime('now')
         WHERE deleted_at IS NULL AND repo_id IS NULL AND repo_owner IS NULL AND repo_name IS NULL
           AND follow_workspace_defaults = 1
-          AND NOT EXISTS (SELECT 1 FROM pull_requests p WHERE p.target_id = review_targets.id)`,
+          AND NOT ${hasLedger("review_targets.id")}`,
     ),
   );
 
@@ -481,13 +498,15 @@ export const repoBackfill: DataUpgradeItem = {
       ),
       // The (target, repository) pairs the split moves rows for — filtered to
       // the leftover shape, so the count is what a run will actually move.
+      // Any of the four ledger tables contributes a pair: a swept PR row does
+      // not take its reviews' repository with it.
       ledger_pairs: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (
-           SELECT p.target_id, p.owner, p.repo FROM pull_requests p
-             JOIN review_targets t ON t.id = p.target_id
+           SELECT x.target_id, x.owner, x.repo FROM (${LEDGER_IDENTITIES}) x
+             JOIN review_targets t ON t.id = x.target_id
             WHERE ${LEFTOVER_TARGET}
-            GROUP BY p.target_id, p.owner COLLATE NOCASE, p.repo COLLATE NOCASE)`,
+            GROUP BY x.target_id, x.owner COLLATE NOCASE, x.repo COLLATE NOCASE)`,
       ),
       // Repositories covered by more than one live row: D22 collapses them.
       // Bot-scoped, matching 0068's `(bot_id, repo_id)` claim: the same
@@ -496,10 +515,10 @@ export const repoBackfill: DataUpgradeItem = {
       conflicting_groups: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (
-           SELECT p.owner, p.repo FROM pull_requests p
-             JOIN review_targets t ON t.id = p.target_id
+           SELECT x.owner, x.repo FROM (${LEDGER_IDENTITIES}) x
+             JOIN review_targets t ON t.id = x.target_id
             WHERE ${LEFTOVER_TARGET}
-            GROUP BY t.bot_id, p.owner COLLATE NOCASE, p.repo COLLATE NOCASE
+            GROUP BY t.bot_id, x.owner COLLATE NOCASE, x.repo COLLATE NOCASE
            HAVING COUNT(DISTINCT t.id) > 1)`,
       ),
       // Leftover rows awaiting their first delivery: the batch leaves them in
@@ -509,8 +528,7 @@ export const repoBackfill: DataUpgradeItem = {
       leftover_without_ledger: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM review_targets t
-          WHERE ${LEFTOVER_TARGET}
-            AND NOT EXISTS (SELECT 1 FROM pull_requests p WHERE p.target_id = t.id)`,
+          WHERE ${LEFTOVER_TARGET} AND NOT ${hasLedger("t.id")}`,
       ),
     };
   },
@@ -535,8 +553,8 @@ export const repoBackfill: DataUpgradeItem = {
   },
 
   /**
-   * Read-only checks. Every blocking entry must read 0; `historical_rows` is
-   * advisory — reported, never a failure.
+   * Read-only checks. Every blocking entry must read 0; `historical_rows` and
+   * `ledger_rows_without_pr` are advisory — reported, never a failure.
    *
    * The unrepointed check is the crash residual, not a data-quality opinion: a
    * ledger row still naming a retired target WHILE a live target of the same bot
@@ -547,7 +565,7 @@ export const repoBackfill: DataUpgradeItem = {
    * and never fails the item. With no run start recorded, nothing was retired by
    * this run: every such row is history.
    */
-  advisoryChecks: ["historical_rows"],
+  advisoryChecks: ["historical_rows", "ledger_rows_without_pr"],
 
   async verify(db: DashboardD1, context: UpgradeVerifyContext): Promise<UpgradeCounts> {
     const runStart = context.runStartedAt;
@@ -561,7 +579,7 @@ export const repoBackfill: DataUpgradeItem = {
         db,
         `SELECT COUNT(*) AS n FROM review_targets t
           WHERE t.deleted_at IS NULL AND (t.repo_owner IS NULL OR t.repo_name IS NULL)
-            AND EXISTS (SELECT 1 FROM pull_requests p WHERE p.target_id = t.id)`,
+            AND ${hasLedger("t.id")}`,
       ),
       unrepointed_ledger_rows: await countRows(db, `SELECT COUNT(*) AS n ${blockingSql}`, ...blockingBinds),
       historical_rows: await countRows(db, `SELECT COUNT(*) AS n ${historicalSql}`, ...blockingBinds),
@@ -570,9 +588,25 @@ export const repoBackfill: DataUpgradeItem = {
         `SELECT COUNT(*) AS n FROM (
            SELECT t.bot_id, t.repo_owner, t.repo_name FROM review_targets t
             WHERE t.deleted_at IS NULL AND t.repo_owner IS NOT NULL AND t.repo_name IS NOT NULL
-              AND EXISTS (SELECT 1 FROM pull_requests p WHERE p.target_id = t.id)
+              AND ${hasLedger("t.id")}
             GROUP BY t.bot_id, t.repo_owner COLLATE NOCASE, t.repo_name COLLATE NOCASE
            HAVING COUNT(*) > 1)`,
+      ),
+      // Advisory, and exact: ledger ROWS outside `pull_requests` whose
+      // repository has no PR row left — a swept PR does not sweep its reviews,
+      // findings or failures. Not a failure: the row is still on a live named
+      // target and nothing points at a retired one, so the item has no repair
+      // to offer. An unidentified leftover still blocks above.
+      ledger_rows_without_pr: await countRows(
+        db,
+        `SELECT COUNT(*) AS n FROM (
+           SELECT target_id, owner, repo FROM reviews
+           UNION ALL SELECT target_id, owner, repo FROM review_findings
+           UNION ALL SELECT target_id, owner, repo FROM review_failures) x
+          WHERE NOT EXISTS (SELECT 1 FROM pull_requests p
+                             WHERE p.target_id = x.target_id
+                               AND p.owner = x.owner COLLATE NOCASE
+                               AND p.repo = x.repo COLLATE NOCASE)`,
       ),
     };
   },
