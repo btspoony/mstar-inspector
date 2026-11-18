@@ -46,8 +46,21 @@ import path from "node:path";
 
 const ROOT = path.resolve(".");
 
-/** The committed pins, read from the surfaces that declare them. */
-export type Pins = { omp: string; engine: string; harness: string; harnessRef: string; bumped: string };
+/** The committed pins, read from the surfaces that declare them.
+ *
+ *  `anchorTag` is what the Dockerfile's anchor comment SAYS, parsed from the
+ *  comment itself. It is deliberately not `harness`: a version-only bump used to
+ *  move `HARNESS_VERSION` while leaving the anchor on the old tag, and the next
+ *  ref bump then built its match string from the assumed tag and threw. Reading
+ *  what the file carries keeps each edit anchored on a literal that exists. */
+export type Pins = {
+  omp: string;
+  engine: string;
+  harness: string;
+  harnessRef: string;
+  anchorTag: string;
+  bumped: string;
+};
 
 /** One pin rewrite: a file, the literal it carries, and the replacement. */
 export type PinEdit = { file: string; from: string; to: string };
@@ -77,16 +90,16 @@ async function currentPins(dir: string = ROOT): Promise<Pins> {
     throw new Error("src/contracts/sandbox-images.ts does not declare HARNESS_VERSION and harnessRef");
   }
   const dockerfile = await readFile(path.join(dir, "sandbox-image/Dockerfile"), "utf8");
-  const bumped = /# mstar-harness plugin, pinned ref [0-9a-f]{40} \(tag v[^,]+, bumped (\d{4}-\d{2}-\d{2})\)/.exec(
-    dockerfile,
-  )?.[1];
-  if (bumped === undefined) throw new Error("the Dockerfile's mstar-harness anchor comment is missing");
+  const anchor =
+    /# mstar-harness plugin, pinned ref [0-9a-f]{40} \(tag v([^,]+), bumped (\d{4}-\d{2}-\d{2})\)/.exec(dockerfile);
+  if (anchor === null) throw new Error("the Dockerfile's mstar-harness anchor comment is missing");
   return {
     omp: root.dependencies["@oh-my-pi/pi-coding-agent"]!,
     engine: root.dependencies["@mstar-harness/engine"]!,
     harness,
     harnessRef,
-    bumped,
+    anchorTag: anchor[1]!,
+    bumped: anchor[2]!,
   };
 }
 
@@ -181,7 +194,22 @@ export function planEdits(
       });
     }
   }
-  if (to.engine !== undefined && to.engine !== engineFrom) {
+  const engineMoves = to.engine !== undefined && to.engine !== engineFrom;
+  const refMoves = to.harnessRef !== undefined && to.harnessRef !== from.harnessRef;
+  // HARNESS_VERSION, the CLI pin and the Dockerfile's ref/tag anchor describe
+  // ONE release. Moving the version without the ref would declare v4.8.0 over a
+  // 4.7.3 commit — and, because the next run would then build its anchor match
+  // from the assumed tag, wedge every later bump. So the two move together or
+  // neither does: a version-only call with no new ref is refused before a single
+  // byte is written.
+  if (engineMoves !== refMoves) {
+    throw new Error(
+      engineMoves
+        ? `--engine ${to.engine} moves HARNESS_VERSION, the CLI pin and the image's tag together — pass --harness-ref for the tag's commit (v${to.engine}), or change nothing`
+        : `--harness-ref ${to.harnessRef} re-tags the image — pass --engine for the release it belongs to (the anchor records one version for all of them)`,
+    );
+  }
+  if (engineMoves && refMoves) {
     edits.push({
       file: "package.json",
       from: `"@mstar-harness/engine": "^${engineFrom}"`,
@@ -202,20 +230,19 @@ export function planEdits(
       from: `"@mstar-harness/cli": "${from.harness}"`,
       to: `"@mstar-harness/cli": "${to.engine}"`,
     });
-  }
-  if (to.harnessRef !== undefined && to.harnessRef !== from.harnessRef) {
-    const tag = to.engine ?? from.harness;
     edits.push({
       file: "src/contracts/sandbox-images.ts",
       from: `harnessRef: "${from.harnessRef}"`,
       to: `harnessRef: "${to.harnessRef}"`,
     });
-    // The anchor comment names the ref, the tag AND the day it moved — all
-    // three are pinned by tests/contracts/sandbox-images.test.ts.
+    // The anchor comment names the ref, the tag AND the day it moved. The tag is
+    // taken from the comment the file actually carries (`from.anchorTag`), so a
+    // file that drifted is reported instead of being silently rewritten into a
+    // shape no match string expects.
     edits.push({
       file: "sandbox-image/Dockerfile",
-      from: `# mstar-harness plugin, pinned ref ${from.harnessRef} (tag v${from.harness}, bumped ${from.bumped})`,
-      to: `# mstar-harness plugin, pinned ref ${to.harnessRef} (tag v${tag}, bumped ${date})`,
+      from: `# mstar-harness plugin, pinned ref ${from.harnessRef} (tag v${from.anchorTag}, bumped ${from.bumped})`,
+      to: `# mstar-harness plugin, pinned ref ${to.harnessRef} (tag v${to.engine}, bumped ${date})`,
     });
     edits.push({
       file: "sandbox-image/Dockerfile",

@@ -53,14 +53,28 @@ function tablePaths(): string[] {
 }
 
 /**
- * A dated snapshot's date is its provenance, so a refresh that moves data also
- * moves this file name. The contract therefore names the FAMILY — the table row
- * reads `inputs/models.dev-<date>.json` — and comparison normalises the date on
- * both sides. Without this, the first real refresh's layout test goes red — and
- * under the publication gate that means the refresh publishes NOTHING, forever.
+ * The table names a FAMILY for the dated snapshot (`inputs/models.dev-<date>.json`),
+ * because a refresh that moves data also moves that file name. A `<date>` row is
+ * a WILDCARD over ISO dates, matched against the tracked listing — not a
+ * normalisation applied to both sides of the comparison, which would make every
+ * assertion hold by construction (round 4). A row written with a literal date is
+ * therefore a real failure once the date moves, which is the regression this
+ * rule exists to prevent: under the publication gate such a red test means the
+ * refresh publishes nothing, forever.
  */
-function asFamily(path: string): string {
-  return path.replace(/models\.dev-\d{4}-\d{2}-\d{2}\.json/g, "models.dev-<date>.json");
+function asPattern(row: string): RegExp {
+  const literal = row.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${literal.replaceAll("<date>", "\\d{4}-\\d{2}-\\d{2}")}$`);
+}
+
+/** Does `listing` satisfy `readme`'s table? Every row must name exactly one
+ *  tracked file, and every tracked file must be named by exactly one row. */
+function tableMatches(readme: string, listing: readonly string[]): boolean {
+  const rows = [...readme.matchAll(/^\| `([^`]+)` \|/gm)].map((match) => match[1]!);
+  const patterns = rows.map(asPattern);
+  const covered = listing.filter((file) => patterns.some((pattern) => pattern.test(file)));
+  const used = patterns.filter((pattern) => listing.some((file) => pattern.test(file)));
+  return covered.length === listing.length && used.length === patterns.length && rows.length === listing.length;
 }
 
 describe("provider-catalog directory contract", () => {
@@ -68,27 +82,43 @@ describe("provider-catalog directory contract", () => {
 
   test("every tracked file is named in the README", () => {
     for (const file of files) {
-      // The dated snapshot is named by its family row, so it is checked there.
-      expect(README, `${file} is tracked but the README does not name it`).toContain(asFamily(file));
+      expect(README, `${file} is tracked but the README does not name it`).toContain(file.replace(
+        /models\.dev-\d{4}-\d{2}-\d{2}\.json/,
+        "models.dev-<date>.json",
+      ));
     }
   });
 
   test("the README's table is exactly `git ls-files` — no stale row, no undocumented file", () => {
     // Set equality, not one-way containment: this is what makes the table the
     // contract. A new file must gain a row, and a rename must move its row, in
-    // the same commit that changes the layout. The dated snapshot compares as a
-    // family — see `asFamily`.
-    expect(tablePaths().map(asFamily).sort()).toEqual(files.map(asFamily).sort());
+    // the same commit that changes the layout.
+    expect(tableMatches(README, files)).toBe(true);
   });
 
-  test("a refresh that renames the snapshot keeps the contract green", () => {
-    // The refresh workflow commits the new dated file BEFORE running the tests,
-    // so this is the state every data-changing refresh PR is in. Simulate it by
-    // comparing the committed table against a listing whose snapshot has moved.
-    const moved = files.map((file) => file.replace(/models\.dev-\d{4}-\d{2}-\d{2}\.json/, "models.dev-2999-12-31.json"));
-    expect(moved).not.toEqual(files);
-    expect(tablePaths().map(asFamily).sort()).toEqual(moved.map(asFamily).sort());
-    // And the row really is a family, not a literal: a literal would pin one day.
+  test("a tree whose snapshot date differs still satisfies the contract", () => {
+    // The refresh commits the new dated file BEFORE this suite runs, so the
+    // property that matters is: the committed README satisfies a listing from a
+    // DIFFERENT day. Rather than normalising both sides (a tautology), build
+    // that listing and run the same matcher.
+    const movedFiles = (date: string): string[] =>
+      files.map((file) => file.replace(/models\.dev-\d{4}-\d{2}-\d{2}\.json/, `models.dev-${date}.json`));
+
+    for (const date of ["2026-11-18", "2999-12-31"]) {
+      const listing = movedFiles(date);
+      expect(listing, date).not.toEqual(files);
+      // The COMMITTED README, unchanged, must accept tomorrow's tree.
+      expect(tableMatches(README, listing), date).toBe(true);
+    }
+
+    // The regression this replaces: a README whose row is a literal date does
+    // NOT accept a tree from another day. (With the family row it does.)
+    const pinned = README.replace(/models\.dev-<date>\.json/g, "models.dev-2026-11-13.json");
+    expect(pinned).not.toBe(README);
+    expect(tableMatches(pinned, movedFiles("2026-11-18"))).toBe(false);
+    expect(tableMatches(pinned, files)).toBe(true);
+
+    // And the committed row really is the family, not a literal.
     expect(tablePaths()).toContain("inputs/models.dev-<date>.json");
     expect(tablePaths().some((path) => /models\.dev-\d{4}-\d{2}-\d{2}\.json/.test(path))).toBe(false);
   });

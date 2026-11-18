@@ -228,61 +228,82 @@ describe("refresh-catalog.yml guards", () => {
   });
 
   test("a red run performs no git push and no gh pr create (stubbed tools)", () => {
-    // The gate plus the two publishing steps, run as the job would run them:
-    // the gate's own script, then the commit/push and PR steps driven by their
-    // real scripts with `git` and `gh` replaced by recorders. A red gate must
-    // leave both recorders empty.
+    // The REAL gate, the REAL push step and the REAL PR step, in a scratch
+    // directory, with `git` and `gh` replaced by argv recorders. Each case runs
+    // the whole chain under `bash -e` exactly as the job does: if the gate exits
+    // non-zero, `bash -e` stops before the publishing steps — which is the
+    // property, not a claim about it. The green case proves the chain CAN reach
+    // them, so an empty recorder in the red cases means something.
     const gate = byId.get("gate")!;
     const push = steps.find((step) => step.name === "Commit and force-update the refresh branch")!;
     const pr = steps.find((step) => step.name === "Open or update the refresh PR")!;
+    const verdictScript = join(REPO_ROOT, "scripts/provider-catalog/pr-verdict.ts");
 
-    const run = (log: string, typecheck: string): string => {
+    /** Run the chain; return the recorder's lines. */
+    const chain = (log: string, typecheck: string, test: string): { code: number; calls: string[] } => {
       const dir = mkdtempSync(join(tmpdir(), "publish-"));
       try {
         const bin = join(dir, "bin");
         mkdirSync(bin);
         const record = join(dir, "argv.log");
-        // Every publishing tool the steps may call.
         for (const tool of ["git", "gh"]) {
           writeFileSync(
             join(bin, tool),
             `#!/bin/sh\nprintf '%s %s\\n' ${JSON.stringify(tool)} "$*" >> ${JSON.stringify(record)}\n` +
+              // `gh pr list` reports no open PR, so the create path is the one
+              // a broken gate would take.
               `case "$*" in\n  *"pr list"*) echo "" ;;\nesac\n`,
           );
           chmodSync(join(bin, tool), 0o755);
         }
         writeFileSync(join(dir, "test.log"), log);
+        writeFileSync(join(dir, "pr-body.md"), "body\n");
+        // The gate's script, with the repo-relative path made absolute: the
+        // cwd is the scratch dir, and a broken path would make bun fail for the
+        // wrong reason (round 4 caught exactly that).
+        const gateRun = gate.run!.replace("scripts/provider-catalog/pr-verdict.ts", verdictScript);
+        expect(gateRun).not.toContain("bun run scripts/");
         const script = [
           `RUNNER_TEMP=${JSON.stringify(dir)}`,
+          "BRANCH=chore/catalog-refresh",
           `TYPECHECK_OUTCOME=${typecheck}`,
-          `TEST_OUTCOME=success`,
-          gate.run,
+          `TEST_OUTCOME=${test}`,
+          gateRun,
+          push.run,
+          pr.run,
         ].join("\n");
         const proc = Bun.spawnSync(["bash", "-e", "-c", script], {
           cwd: dir,
-          env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GH_TOKEN: "x" },
           stdout: "pipe",
           stderr: "pipe",
         });
-        // A red gate exits non-zero, so `bash -e` never reaches the next step.
-        expect(proc.exitCode, proc.stdout.toString()).not.toBe(0);
-        // Emulate the job: later steps are skipped on a failed step, so nothing
-        // else runs. Assert the recorder saw no push and no create even if a
-        // future edit made them unconditional.
-        const calls = existsSync(record) ? readFileSync(record, "utf8") : "";
-        expect(calls).not.toContain("push");
-        expect(calls).not.toContain("pr create");
-        void push;
-        void pr;
-        return calls;
+        const calls = existsSync(record)
+          ? readFileSync(record, "utf8").split("\n").filter((line) => line !== "")
+          : [];
+        return { code: proc.exitCode ?? -1, calls };
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     };
 
-    // A failing typecheck and a lost-exit-code test run (log says N fail).
-    expect(run(" 1 pass\n 0 fail\n", "failure")).toBe("");
-    expect(run(" 1 pass\n 79 fail\n", "success")).toBe("");
+    // Red: failing typecheck. Red: a lost exit status with a failing log.
+    for (const red of [
+      chain(" 1 pass\n 0 fail\n", "failure", "success"),
+      chain(" 1 pass\n 79 fail\n", "success", "success"),
+    ]) {
+      expect(red.code).not.toBe(0);
+      expect(red.calls.filter((line) => line.includes("push"))).toEqual([]);
+      expect(red.calls.filter((line) => line.includes("pr create"))).toEqual([]);
+      expect(red.calls.filter((line) => line.includes("pr edit"))).toEqual([]);
+    }
+
+    // Green reaches both steps — the control that makes the empty red recorders
+    // meaningful.
+    const green = chain(" 5679 pass\n 0 fail\n", "success", "success");
+    expect(green.code, JSON.stringify(green.calls)).toBe(0);
+    expect(green.calls.some((line) => line.includes("push --force origin chore/catalog-refresh"))).toBe(true);
+    expect(green.calls.some((line) => line.includes("pr create"))).toBe(true);
   });
 
   test("every trigger builds from the default branch, never from a dispatched feature branch", () => {
@@ -314,7 +335,20 @@ describe("refresh-catalog.yml guards", () => {
     // An engine release whose CLI is not published yet cannot build the image
     // (the CLI pin is installed from a frozen lock at HARNESS_VERSION).
     expect(latest.run).toContain('npm view "@mstar-harness/cli@${ENGINE}" version');
-    expect(byId.get("pins")!.run).toContain('"$CLI_STATE" = "available"');
+    expect(byId.get("pins")!.run).toContain('"$CLI_STATE" != "available"');
+    // A version bump with no annotated tag must HOLD the pins: the version, the
+    // CLI pin, harnessRef and the Dockerfile tag anchor describe one release, so
+    // a version-only move is a half-moved tree (round 4's wedge). `ENGINE_ARG` is
+    // set only inside the branch where the dereferenced tag exists.
+    const pins = byId.get("pins")!.run!;
+    const tagGuard = pins.indexOf('refs/tags/v${ENGINE_LATEST}^{}');
+    const setEngine = pins.indexOf('ENGINE_ARG="$ENGINE_LATEST"');
+    expect(tagGuard).toBeGreaterThan(-1);
+    expect(setEngine).toBeGreaterThan(tagGuard);
+    // …and the missing-tag branch must not set it.
+    const missing = pins.slice(pins.indexOf('if [ -z "$REF" ]'), setEngine);
+    expect(missing).not.toContain('ENGINE_ARG=');
+    expect(pins).toContain("holding the pins");
   });
 
   test("the pins step delegates to bump-pins, which owns every lock beside a manifest", () => {

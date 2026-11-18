@@ -252,6 +252,7 @@ describe("pin bump plan", () => {
     engine: "^4.7.3",
     harness: "4.7.3",
     harnessRef: "30e6c0844db11583ec5e92d7b03fb0c2c1ec72f0",
+    anchorTag: "4.7.3",
     bumped: "2026-11-18",
   };
 
@@ -276,8 +277,11 @@ describe("pin bump plan", () => {
       from: '"@mstar-harness/engine": "4.7.3"',
       to: '"@mstar-harness/engine": "4.8.0"',
     });
-    // The anchor comment names ref, tag AND the day it moved (both are pinned
-    // by tests/contracts/sandbox-images.test.ts).
+    // The anchor comment names ref, tag AND the day it moved. `from` is the tag
+    // the file actually carries (`anchorTag`), not an assumed one — and
+    // tests/contracts/sandbox-images.test.ts now pins the tag against
+    // harnessVersion, which is the guard that keeps a version-only bump from
+    // shipping.
     expect(edits).toContainEqual({
       file: "sandbox-image/Dockerfile",
       from: `# mstar-harness plugin, pinned ref ${from.harnessRef} (tag v4.7.3, bumped ${from.bumped})`,
@@ -351,11 +355,16 @@ describe("pin bump plan", () => {
       );
       write("scripts/provider-catalog/bump-pins.ts", readFileSync(join(REPO_ROOT, "scripts/provider-catalog/bump-pins.ts"), "utf8"));
 
-      const proc = Bun.spawnSync(["bun", "run", "scripts/provider-catalog/bump-pins.ts", "--engine", "4.8.0"], {
-        cwd: root,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      // Version + ref together: the four image pins describe one release, so a
+      // version-only call is refused (round 4).
+      const proc = Bun.spawnSync(
+        ["bun", "run", "scripts/provider-catalog/bump-pins.ts", "--engine", "4.8.0", "--harness-ref", "d".repeat(40)],
+        {
+          cwd: root,
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
       expect(proc.exitCode, proc.stderr.toString()).toBe(0);
 
       // All three locks moved with the pin. Bun records a `file:` override by

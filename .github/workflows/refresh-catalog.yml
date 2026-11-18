@@ -130,18 +130,25 @@ jobs:
           # `$OMP_LATEST`/`$ENGINE_LATEST` may be the literal "unknown" (registry
           # unreachable); the comparison above then keeps the committed pin.
           if [ "$NEWER" != "${ENGINE_NOW#^}" ] && [ "$ENGINE_LATEST" != "unknown" ]; then
-            if [ "$CLI_STATE" = "available" ]; then
-              ENGINE_ARG="$ENGINE_LATEST"
-              # A tag cannot yield a commit: dereference the annotated tag. A
-              # registry hiccup here is a warning, never a failed refresh.
+            # HARNESS_VERSION, the CLI pin, harnessRef and the Dockerfile's
+            # tag anchor describe ONE release, so they move together or not at
+            # all. That makes two prerequisites, and either one missing means
+            # this run holds the engine pin:
+            #   - the CLI for that version must be published (the image installs
+            #     it from a frozen lock at HARNESS_VERSION);
+            #   - the annotated tag must exist and dereference to a commit (a tag
+            #     cannot yield a sha). A version-only move would leave the image
+            #     tag and the ref describing the previous release.
+            if [ "$CLI_STATE" != "available" ]; then
+              echo "::warning::engine ${ENGINE_LATEST} has no published @mstar-harness/cli — holding the pins until the release ships both"
+            else
               REF=$(git ls-remote --tags https://github.com/btspoony/mstar-harness "refs/tags/v${ENGINE_LATEST}^{}" | cut -f1 || true)
               if [ -z "$REF" ]; then
-                echo "::warning::no annotated tag v${ENGINE_LATEST} yet — moving the version pins without a new harness ref"
+                echo "::warning::no annotated tag v${ENGINE_LATEST} on origin yet — holding the pins; the next run picks the release up once the tag exists"
               else
+                ENGINE_ARG="$ENGINE_LATEST"
                 REF_ARG="$REF"
               fi
-            else
-              echo "::warning::engine ${ENGINE_LATEST} has no published @mstar-harness/cli — holding the engine pin until the harness release ships both"
             fi
           fi
 

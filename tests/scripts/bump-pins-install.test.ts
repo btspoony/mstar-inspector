@@ -21,6 +21,10 @@ import { expectedInstalls, planEdits, runBump } from "../../scripts/provider-cat
 
 const REPO_ROOT = join(import.meta.dir, "../..");
 const OMP = "@oh-my-pi/pi-coding-agent";
+/** The committed harness ref, read from the registry (the anchor carries it). */
+const REPO_HARNESS_REF = /harnessRef: "([0-9a-f]{40})"/.exec(
+  readFileSync(join(REPO_ROOT, "src/contracts/sandbox-images.ts"), "utf8"),
+)![1]!;
 const SCRIPT = join(REPO_ROOT, "scripts/provider-catalog/bump-pins.ts");
 /** The committed harness ref — the anchor comment carries it verbatim. */
 const REF = /harnessRef: "([0-9a-f]{40})"/.exec(
@@ -81,6 +85,9 @@ function scratchRepo(sdkVersion: string): string {
     "src/contracts/sandbox-images.ts",
     `export const HARNESS_VERSION = "4.7.3";\nexport const OMP_SANDBOX_IMAGE_PINS = Object.freeze({\n  harnessRef: "${REF}",\n});\n`,
   );
+  // The CLI pin's manifest + lock: the workflow's restore set names them, so the
+  // fixture must carry them or `git checkout -- <paths>` could not restore them.
+  write("sandbox-image/cli-global/package.json", `${JSON.stringify({ dependencies: { "@mstar-harness/cli": "4.7.3" } }, null, 2)}\n`);
   write(
     "sandbox-image/Dockerfile",
     `# mstar-harness plugin, pinned ref ${REF} (tag v4.7.3, bumped 2026-11-18).\nRUN git -C /opt/mstar-harness fetch --depth 1 origin ${REF}\n`,
@@ -172,13 +179,65 @@ describe("bump-pins edit plan", () => {
     engine: "^4.7.3",
     harness: "4.7.3",
     harnessRef: REF,
+    // The anchor comment's OWN tag and date, read from the committed file — a
+    // version-only bump must match the literal the file carries, not an assumed
+    // one (round 4's wedge).
+    anchorTag: /# mstar-harness plugin, pinned ref [0-9a-f]{40} \(tag v([^,]+),/.exec(
+      readFileSync(join(REPO_ROOT, "sandbox-image/Dockerfile"), "utf8"),
+    )![1]!,
     bumped: /bumped (\d{4}-\d{2}-\d{2})/.exec(
       readFileSync(join(REPO_ROOT, "sandbox-image/Dockerfile"), "utf8"),
     )![1]!,
   };
 
+  test("a version-only engine move is refused: the ref and anchor move with it", () => {
+    // Round 4's wedge: `--engine` alone moved HARNESS_VERSION and the CLI pin
+    // while the ref and the Dockerfile tag stayed on the previous release, so the
+    // next `--harness-ref` bump threw. The two move together or not at all.
+    expect(() => planEdits(from, { engine: "4.8.0" }, "2026-12-01")).toThrow(
+      /pass --harness-ref for the tag's commit/,
+    );
+    // And a ref with no version is refused too: one anchor records one release.
+    expect(() =>
+      planEdits(from, { harnessRef: "c".repeat(40) }, "2026-12-01"),
+    ).toThrow(/pass --engine for the release it belongs to/);
+    // The pair together produces a fully consistent plan.
+    const edits = planEdits(from, { engine: "4.8.0", harnessRef: "c".repeat(40) }, "2026-12-01");
+    const anchor = edits.find((edit) => edit.to.startsWith("# mstar-harness plugin"));
+    expect(anchor?.to).toContain(`(tag v4.8.0, bumped 2026-12-01)`);
+    expect(anchor?.to).toContain(`pinned ref ${"c".repeat(40)}`);
+    expect(edits.find((edit) => edit.to.includes("harnessRef:"))?.to).toContain("c".repeat(40));
+    expect(edits.find((edit) => edit.to.includes("HARNESS_VERSION"))?.to).toContain('"4.8.0"');
+  });
+
+  test("a later full bump still succeeds from a tree an earlier release left alone", async () => {
+    // The sequence the wedge broke: the workflow holds the pins when a tag is
+    // missing (it passes no flags — nothing moves), then a later run has both the
+    // version and the ref. The second bump must find the anchors it expects.
+    const root = scratchRepo("18.22.1");
+    try {
+      expect(Bun.spawnSync(["bun", "install"], { cwd: root, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+      // The "tag missing" run: no flag reaches the script, so the tree is
+      // untouched — the workflow's own decision, reproduced.
+      const held = runBumpCli(root, []);
+      expect(held.code).toBe(0);
+      expect(held.out).toContain("nothing to do");
+
+      // The later run has a ref: version + ref move together and the anchor is
+      // rewritten from the literal the file actually carries.
+      publish(root, "18.22.2");
+      const later = runBumpCli(root, ["--omp", "18.22.2", "--engine", "4.7.3", "--harness-ref", REF]);
+      // 4.7.3 is already the engine version here, so only the omp pin moves — the
+      // point is that the call is ACCEPTED rather than throwing "does not carry".
+      expect(later.code, later.out).toBe(0);
+      expect(later.out).not.toContain("does not carry");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("the expected installs come from each manifest's own range shape", () => {
-    const edits = planEdits(from, { engine: "4.8.0" }, "2026-12-01");
+    const edits = planEdits(from, { engine: "4.8.0", harnessRef: "c".repeat(40) }, "2026-12-01");
     // Root keeps the caret; the runner pins exactly — verified separately.
     expect(expectedInstalls(edits, "package.json")).toEqual([
       { name: "@mstar-harness/engine", version: "4.8.0", caret: true },
@@ -231,72 +290,132 @@ describe("an aborted bump leaves the tree consistent with the HELD pins", () => 
     }
   }
 
-  test("the restore pair (files + reinstall) returns the installed tree to the held pin", async () => {
+  /** The workflow's restore branch, read from the workflow itself: every path it
+   *  restores and the exact reinstall command. Extracted rather than restated, so
+   *  a test cannot pass against a restore the workflow no longer performs. */
+  function workflowRestore(): { paths: string[]; reinstall: string } {
+    const workflow = readFileSync(join(REPO_ROOT, ".github/workflows/refresh-catalog.yml"), "utf8");
+    const listed = /PINS=\(([\s\S]*?)\)/.exec(workflow)?.[1];
+    expect(listed, "the workflow has no PINS list").toBeDefined();
+    // The PINS list is written with two paths per line (`package.json bun.lock`),
+    // so split on whitespace, not lines.
+    const paths = listed!
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.startsWith("#"))
+      .flatMap((line) => line.split(/\s+/));
+    const reinstall = /git checkout -- "\$\{PINS\[@\]\}"\n\s*(bun install --frozen-lockfile)/.exec(workflow)?.[1];
+    expect(reinstall, "the restore branch must reinstall after restoring the files").toBeDefined();
+    return { paths, reinstall: reinstall! };
+  }
+
+  test("the workflow's own restore pair returns the installed tree to the held pin", async () => {
     const root = scratchRepo("18.22.1");
     try {
-      expect(Bun.spawnSync(["bun", "install"], { cwd: root, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+      // A real git checkout, so `git checkout -- <paths>` is the actual command
+      // the workflow runs — not an emulation of it.
+      const git = (...args: string[]): void => {
+        const proc = Bun.spawnSync(["git", ...args], {
+          cwd: root,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@example.com",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@example.com",
+          },
+        });
+        expect(proc.exitCode, `${args.join(" ")}: ${proc.stderr.toString()}`).toBe(0);
+      };
+      // Seed the locks the workflow restores: the fixture ships manifests only,
+      // and `git checkout -- bun.lock` needs the file to exist in the commit.
+      const seeded = Bun.spawnSync(["bun", "install"], { cwd: root, stdout: "pipe", stderr: "pipe" });
+      expect(seeded.exitCode, seeded.stderr.toString()).toBe(0);
+      for (const dir of ["packages/runner", "sandbox-image/cli-global"]) {
+        const seededLock = Bun.spawnSync(["bun", "install", "--lockfile-only"], {
+          cwd: join(root, dir),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(seededLock.exitCode, `${dir}: ${seededLock.stderr.toString()}`).toBe(0);
+      }
+      const { paths, reinstall } = workflowRestore();
+      git("init", "-q", ".");
+      git("add", "-A");
+      git("commit", "-q", "-m", "held pins");
       expect(installed(root, OMP)).toBe("18.22.1");
 
-      // The bump would succeed as far as the ROOT install — the SDK release is
-      // published — and then abort on a later surface, exactly where the
-      // workflow's `else` branch is reachable.
+      // The bump reaches the ROOT install (the release is published) and then
+      // aborts on a later surface — exactly where the workflow's else is reachable.
       publish(root, "18.22.2");
       await expect(
-        runBump(
-          root,
-          { omp: "18.22.2" },
-          {
-            afterRootInstall: () => {
-              throw new Error("the runner copy could not resolve the release");
-            },
+        runBump(root, { omp: "18.22.2" }, {
+          afterRootInstall: () => {
+            throw new Error("the runner copy could not resolve the release");
           },
-        ),
+        }),
       ).rejects.toThrow(/runner copy/);
 
-      // Mid-failure state: the manifests and the INSTALLED tree both carry the
-      // attempted version. This is the state the workflow used to continue from.
+      // Mid-failure: manifests AND the installed tree carry the attempted version.
       expect(installed(root, OMP)).toBe("18.22.2");
-      expect((JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { dependencies: Record<string, string> })
-        .dependencies[OMP]).toBe("18.22.2");
+      expect(
+        (JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { dependencies: Record<string, string> })
+          .dependencies[OMP],
+      ).toBe("18.22.2");
 
-      // The restore the workflow now performs: files back, then reinstall so the
-      // installed tree matches the held pin again. Without the reinstall the
-      // extractor would keep reading 18.22.2 under a 18.22.1 manifest.
-      for (const rel of ["package.json", "packages/runner/package.json", "bun.lock", "packages/runner/bun.lock"]) {
-        const committed = Bun.spawnSync(["git", "checkout", "--", rel], { cwd: root, stdout: "pipe", stderr: "pipe" });
-        // The scratch repo is not a git checkout; emulate the restore by writing
-        // the held manifest back, which is what `git checkout --` does.
-        void committed;
-      }
-      publish(root, "18.22.1");
-      for (const rel of ["package.json", "packages/runner/package.json"]) {
-        const file = join(root, rel);
-        const manifest = JSON.parse(readFileSync(file, "utf8")) as {
-          dependencies: Record<string, string>;
-          overrides: Record<string, string>;
-        };
-        manifest.dependencies[OMP] = "18.22.1";
-        writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
-      }
-      const reinstall = Bun.spawnSync(["bun", "install"], { cwd: root, stdout: "pipe", stderr: "pipe" });
-      expect(reinstall.exitCode, reinstall.stderr.toString()).toBe(0);
+      // The workflow's restore branch, verbatim: restore those paths, then the
+      // frozen install it names. Without the reinstall the extractor would read
+      // 18.22.2 under an 18.22.1 manifest — the divergence the install prevents.
+      git("checkout", "--", ...paths);
+      const reinstalled = Bun.spawnSync(["bash", "-c", reinstall], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(reinstalled.exitCode, reinstalled.stderr.toString()).toBe(0);
       expect(installed(root, OMP)).toBe("18.22.1");
+      // And every RESTORED path is byte-identical to the held commit again (the
+      // fixture's own stub tarballs are untracked noise, not restored surfaces).
+      const dirty = Bun.spawnSync(["git", "status", "--porcelain", "--", ...paths], {
+        cwd: root,
+        stdout: "pipe",
+      }).stdout.toString().trim();
+      expect(dirty).toBe("");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test("the workflow's restore branch reinstalls after restoring the pin files", () => {
-    // The failure branch must not stop at `git checkout --`: the bump installs
-    // for real, so the installed tree carries the attempted version until an
-    // install puts it back. Asserted on the workflow text because the ordering is
-    // the guarantee; the test above proves the mechanism.
-    const workflow = readFileSync(join(REPO_ROOT, ".github/workflows/refresh-catalog.yml"), "utf8");
-    const restore = workflow.indexOf('git checkout -- "${PINS[@]}"');
-    expect(restore).toBeGreaterThan(-1);
-    const after = workflow.slice(restore);
-    expect(after).toMatch(/bun install --frozen-lockfile/);
-    // …and it happens before the note that lets the refresh continue.
-    expect(after.indexOf("bun install --frozen-lockfile")).toBeLessThan(after.indexOf("pins held at"));
+  test("the restore covers every surface a bump can move", () => {
+    // The list is read from the workflow; this asserts it is complete, which is
+    // what makes the test above meaningful (a missing path would stay moved).
+    const { paths } = workflowRestore();
+    for (const path of [
+      "package.json",
+      "bun.lock",
+      "packages/runner/package.json",
+      "packages/runner/bun.lock",
+      "src/contracts/sandbox-images.ts",
+      "sandbox-image/cli-global/package.json",
+      "sandbox-image/cli-global/bun.lock",
+      "sandbox-image/Dockerfile",
+    ]) {
+      expect(paths, path).toContain(path);
+    }
+    // Every file `planEdits` can write is in the list — the coupling that keeps
+    // them equal as surfaces are added.
+    const from = {
+      omp: "18.22.2",
+      engine: "^4.7.3",
+      harness: "4.7.3",
+      harnessRef: REPO_HARNESS_REF,
+      anchorTag: "4.7.3",
+      bumped: "2026-11-18",
+    };
+    for (const edit of planEdits(from, { omp: "18.23.0", engine: "4.8.0", harnessRef: "b".repeat(40) })) {
+      expect(paths, edit.file).toContain(edit.file);
+    }
   });
 });
