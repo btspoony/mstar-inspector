@@ -887,6 +887,20 @@ describe("runSweep — paging audit window", () => {
     expect(alertRows(db)).toHaveLength(2);
   });
 
+  test("a barely future-dated stamp is still no recent alert, so the breach posts", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // Seconds ahead is not a delivered alert either: only a past stamp counts.
+    seedAlert(db, new Date(Date.now() + 30_000).toISOString());
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+    expect(calls()).toBe(1);
+    expect(alertRows(db)).toHaveLength(2);
+  });
+
   test("an unreadable window read logs and still pages the breach", async () => {
     const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);

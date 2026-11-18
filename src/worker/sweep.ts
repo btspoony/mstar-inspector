@@ -98,13 +98,6 @@ export const SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1;
 /** Trailing count window in hours (AL-6): `datetime('now', '-24 hours')`. */
 export const SWEEP_WINDOW_HOURS = 24;
 
-/**
- * Forward tolerance on the observed alert stamp, so a row another instance
- * wrote a moment ahead of this clock still counts as "just announced". Beyond
- * it the stamp is corrupt — and a corrupt stamp must never silence paging.
- */
-const SWEEP_ALERT_CLOCK_SKEW_MS = 60_000;
-
 /** Webhook POST timeout — a hung alert sink must never stall the cron. */
 export const SWEEP_WEBHOOK_TIMEOUT_MS = 3000;
 
@@ -540,17 +533,14 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     // Read the window BEFORE the POST: the newest recorded alert suppresses
     // this one. Nothing is latched, so a window with no recent row always
     // pages; the cost of overlapping sweeps is one bounded duplicate.
-    // Both sides bounded: the stamp must be inside the trailing window and no
-    // further ahead than clock skew. A clock-ahead row would otherwise stay
-    // "recent" until the wall clock catches up — silencing paging for as long
-    // as the corrupt stamp is ahead.
+    // Both sides bounded: the stamp must be in the past and inside the trailing
+    // window. A clock-ahead row is not evidence of a delivered alert, so it never
+    // suppresses the page.
     const lastAlertAt = await readLastAlertAt(db, log, deps.alertUrl);
     const nowMs = Date.now();
     const windowMs = SWEEP_WINDOW_HOURS * 3_600_000;
     const announced =
-      lastAlertAt !== null &&
-      nowMs - lastAlertAt < windowMs &&
-      lastAlertAt - nowMs <= SWEEP_ALERT_CLOCK_SKEW_MS;
+      lastAlertAt !== null && lastAlertAt <= nowMs && nowMs - lastAlertAt < windowMs;
     if (!announced) {
       alert = {
         event: "ops_sweep_alert",
