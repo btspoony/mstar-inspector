@@ -11,7 +11,7 @@
  *   snapshots the fields the body omits from the values the target runs with
  *   now, so this page never has to echo values back.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 import {
   Button,
@@ -64,6 +64,13 @@ export type TargetPolicySettings = {
 };
 
 /**
+ * What the TARGET runs with: the four answers plus the draft switch, which is
+ * a target-owned admission fact (D12). The workspace defaults answer no such
+ * question, so the switch rides only this face.
+ */
+export type TargetPolicyEffective = TargetPolicySettings & { reviewDrafts: boolean };
+
+/**
  * `GET /:ref/api/targets/:targetId`. Named apart from `data.ts`'s
  * `TargetSettingsPayload`, which is the App-settings payload's manage/blocked
  * union — a different wire face with a colliding name.
@@ -76,8 +83,10 @@ export type TargetPolicyPayload = {
     app_name: string | null;
     review_enabled: number;
     follow_workspace_defaults: number;
+    /** The target-owned draft switch: 0 = a draft is held until it is ready. */
+    review_drafts: 0 | 1;
   };
-  effective: TargetPolicySettings;
+  effective: TargetPolicyEffective;
   defaults: TargetPolicySettings;
 };
 
@@ -92,6 +101,12 @@ function isPolicySettings(value: unknown): value is TargetPolicySettings {
     row.check_pass_verdicts.every((verdict) => typeof verdict === "string") &&
     typeof row.check_pass_verdicts_readable === "boolean"
   );
+}
+
+/** The target's effective answers: the policy block plus the draft switch. */
+function isEffectivePolicySettings(value: unknown): value is TargetPolicyEffective {
+  if (!isPolicySettings(value)) return false;
+  return "reviewDrafts" in value && typeof value.reviewDrafts === "boolean";
 }
 
 /**
@@ -113,7 +128,9 @@ export function parseTargetPolicyPayload(data: unknown): TargetPolicyPayload | n
   if (appName !== null && typeof appName !== "string") return null;
   if (typeof row.review_enabled !== "number") return null;
   if (typeof row.follow_workspace_defaults !== "number") return null;
-  if (!isPolicySettings(effective) || !isPolicySettings(defaults)) return null;
+  const draftSwitch = row.review_drafts;
+  if (draftSwitch !== 0 && draftSwitch !== 1) return null;
+  if (!isEffectivePolicySettings(effective) || !isPolicySettings(defaults)) return null;
   return {
     target: {
       target_id: row.target_id,
@@ -122,6 +139,7 @@ export function parseTargetPolicyPayload(data: unknown): TargetPolicyPayload | n
       app_name: appName,
       review_enabled: row.review_enabled,
       follow_workspace_defaults: row.follow_workspace_defaults,
+      review_drafts: draftSwitch,
     },
     effective,
     defaults,
@@ -152,6 +170,7 @@ export function ReviewPolicyFields({
   settings,
   levelDefault,
   readOnly,
+  afterTrigger,
   onSave,
 }: {
   locale: Locale;
@@ -159,6 +178,11 @@ export function ReviewPolicyFields({
   /** The level the depth select's inherit face names as the current default. */
   levelDefault: ReviewLevel | null;
   readOnly: boolean;
+  /**
+   * A control the target face owns and the defaults face does not — the draft
+   * switch (D12), rendered with the trigger so it reads as an admission rule.
+   */
+  afterTrigger?: ReactNode;
   /** The caller's save: the one changed field, and only that field. */
   onSave: (fields: Record<string, unknown>) => Promise<void>;
 }) {
@@ -207,6 +231,8 @@ export function ReviewPolicyFields({
           </ToggleGroup>
         </div>
       </div>
+
+      {afterTrigger}
 
       <div className="flex flex-col gap-2">
         <span className="text-sm font-medium">{levelLabel}</span>
@@ -346,6 +372,26 @@ export function TargetSettingsTab({
   const savePolicy = (fields: Record<string, unknown>): Promise<void> =>
     save({ ...fields, follow: 0 });
 
+  /**
+   * The draft switch (D12): a target-owned admission fact, so it sits beside
+   * the trigger but outside the inheritance read-only group — a repository
+   * following the workspace defaults still owns this answer. Its save names
+   * only `review_drafts` (no `follow`), so it snapshots no policy column and
+   * stays available while the stored gate is unreadable.
+   */
+  const draftSwitch = (
+    <label className="flex w-fit items-center gap-2 text-sm font-medium">
+      <input
+        type="checkbox"
+        className={SWITCH_CLASS}
+        checked={effective.reviewDrafts}
+        disabled={busy}
+        onChange={(event) => void save({ review_drafts: event.target.checked })}
+      />
+      {t(locale, "settings.reviewDrafts")}
+    </label>
+  );
+
   return (
     <SectionCard tier="secondary">
       <CardHeader>
@@ -357,6 +403,7 @@ export function TargetSettingsTab({
           settings={effective}
           levelDefault={defaults.review_level}
           readOnly={busy || inheriting || gateUnreadable}
+          afterTrigger={draftSwitch}
           onSave={savePolicy}
         />
 

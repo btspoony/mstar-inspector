@@ -181,14 +181,17 @@ describe("GET /dashboard/:workspaceRef/api/targets/:targetId", () => {
         app_name: "settings-bot",
         review_enabled: 1,
         follow_workspace_defaults: 1,
+        review_drafts: 1,
       },
-      // The workspace defaults answer — never the row's inert placeholders.
+      // The workspace defaults answer — never the row's inert placeholders —
+      // plus the target-owned draft switch (D12).
       effective: {
         trigger_mode: "open",
         review_level: "deep",
         check_min_score: 45,
         check_pass_verdicts: ["ship it", "blocked"],
         check_pass_verdicts_readable: true,
+        reviewDrafts: true,
       },
       defaults: {
         trigger_mode: "open",
@@ -274,6 +277,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
       check_min_score: 45,
       check_pass_verdicts: ["ship it", "blocked"],
       check_pass_verdicts_readable: true,
+      reviewDrafts: true,
     });
     expect(targetRow(db, targetId)).toMatchObject({
       follow_workspace_defaults: 0,
@@ -371,6 +375,96 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     });
     expect(paused.status).toBe(200);
     expect(targetRow(db, targetId)).toMatchObject({ review_enabled: 0, follow_workspace_defaults: 1 });
+
+    // The draft switch names no policy column either, so the same refusal does
+    // not reach it: it must stay operable on a target whose gate is corrupt.
+    const draft = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+      review_drafts: false,
+    });
+    expect(draft.status).toBe(200);
+    expect(targetRow(db, targetId)).toMatchObject({ review_drafts: 0, follow_workspace_defaults: 1 });
+  });
+
+  test("review_drafts is target-owned: it writes alone, keeps follow, and survives a reload", async () => {
+    const { db, targetId } = await seededWorld();
+
+    const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+      review_drafts: false,
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      target: { review_drafts: number; follow_workspace_defaults: number };
+      effective: { reviewDrafts: boolean; trigger_mode: string };
+    };
+    expect(body.target.review_drafts).toBe(0);
+    // Inheriting never answered this question, so the save does not flip it.
+    expect(body.target.follow_workspace_defaults).toBe(1);
+    expect(body.effective.reviewDrafts).toBe(false);
+    expect(body.effective.trigger_mode).toBe("open");
+    expect(targetRow(db, targetId)).toMatchObject({
+      review_drafts: 0,
+      follow_workspace_defaults: 1,
+      review_trigger_mode: "manual",
+      check_min_score: 90,
+    });
+
+    const reloaded = await get(db, `/dashboard/default/api/targets/${targetId}`, "trudy");
+    expect(reloaded.status).toBe(200);
+    const read = (await reloaded.json()) as {
+      target: { review_drafts: number };
+      effective: { reviewDrafts: boolean };
+    };
+    expect(read.target.review_drafts).toBe(0);
+    expect(read.effective.reviewDrafts).toBe(false);
+  });
+
+  test("a non-boolean review_drafts is a 400 that writes nothing", async () => {
+    const { db, targetId } = await seededWorld();
+    const before = targetRow(db, targetId);
+
+    for (const value of [0, "0", "false", null]) {
+      const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+        review_drafts: value,
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid review_drafts" });
+    }
+    expect(targetRow(db, targetId)).toEqual(before);
+  });
+
+  test("the draft switch keeps the family's 403 and 404 refusals and writes nothing", async () => {
+    const { db, targetId } = await seededWorld();
+    const before = targetRow(db, targetId);
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+         SELECT ?, id, 'owner', datetime('now') FROM users WHERE github_login = 'trudy'`,
+      )
+      .run(OTHER_WS);
+    const foreign = (
+      db.raw
+        .query("SELECT id FROM review_targets WHERE workspace_id = ? AND repo_id = 660002")
+        .get(OTHER_WS) as { id: string }
+    ).id;
+
+    const refused = await post(db, `/dashboard/default/api/targets/${targetId}`, "trudy", {
+      review_drafts: false,
+    });
+    expect(refused.status).toBe(403);
+    // A target of another workspace, addressed from its own workspace ref.
+    const foreignRes = await post(db, `/dashboard/${OTHER_WS}/api/targets/${targetId}`, "trudy", {
+      review_drafts: false,
+    });
+    expect(foreignRes.status).toBe(404);
+    expect(targetRow(db, targetId)).toEqual(before);
+    expect(targetRow(db, foreign).review_drafts).toBe(1);
+
+    db.raw.prepare("UPDATE review_targets SET deleted_at = datetime('now') WHERE id = ?").run(targetId);
+    const deleted = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+      review_drafts: false,
+    });
+    expect(deleted.status).toBe(404);
   });
 
   test("off-vocabulary values are a 400 with nothing written", async () => {

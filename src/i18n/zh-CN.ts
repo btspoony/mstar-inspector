@@ -746,6 +746,8 @@ export const zhCN: Dictionary = {
 
     triggerModeMention: "PR 作者或仓库所有者：在 PR 评论中 @ 它即可（重新）启动审查：",
     triggerModeMentionAria: "机器人提及：{mention}",
+    // 目标自有的草稿准入开关（0070，D12）：按仓库配置，没有工作区默认。
+    reviewDrafts: "审查草稿 PR",
     // 评审深度（migration 0047）：App 深度选择器的四个面孔。线上取值保持
     // quick/default/deep（另有 inherit 面孔自有哨兵值），仅标签本地化。
     reviewDepth: "评审深度",
