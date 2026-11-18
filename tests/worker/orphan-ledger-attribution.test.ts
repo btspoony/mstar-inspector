@@ -30,6 +30,10 @@ import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 import { orphanLedgerAttribution } from "../../src/admin/data-upgrades/orphan-ledger-attribution";
 import {
+  readEffectiveTargetSettings,
+  type ReviewTargetRow,
+} from "../../src/dashboard/targets-store";
+import {
   DATA_UPGRADES,
   resetDataUpgrade,
   stepDataUpgrade,
@@ -218,10 +222,12 @@ describe("orphan-ledger-attribution item", () => {
       workspace_id: string;
       created_by: string;
     };
-    // No fabricated numeric id: the first delivery claims it (0067).
+    // No fabricated numeric id: the first delivery claims it (0067). The
+    // inheritance flag is the UI-create rule (J4), never 0: a repository this
+    // item creates inherits the workspace's review answers.
     expect(row).toEqual({
       repo_id: null,
-      follow_workspace_defaults: 0,
+      follow_workspace_defaults: 1,
       workspace_id: "default",
       created_by: OPERATOR,
     });
@@ -331,6 +337,42 @@ describe("orphan-ledger-attribution item", () => {
       unattributed_ledger_rows: 0,
       unattributable_groups: 1,
     });
+  });
+
+  test("a created target inherits the workspace's review defaults", async () => {
+    const db = fixture();
+    // The workspace answers `manual` at depth `deep` with a 90 gate: the target
+    // this item creates is an ordinary repository, so those answers are what it
+    // must run with.
+    db.raw
+      .prepare(
+        `UPDATE workspaces SET default_review_trigger_mode = 'manual',
+                               default_review_level = 'deep',
+                               check_min_score = 90,
+                               default_check_pass_verdicts = '["ship it","needs fixes"]'
+          WHERE id = 'default'`,
+      )
+      .run();
+
+    const batch = await orphanLedgerAttribution.runBatch(db, null, OPERATOR);
+    expect(batch.log).toMatchObject({ created: 1 });
+    const created = db.raw
+      .prepare("SELECT * FROM review_targets WHERE id = ?")
+      .get(liveTargets(db).find((row) => row.repo_name === "beta")!.id) as ReviewTargetRow;
+    expect(created.follow_workspace_defaults).toBe(1);
+    expect(await readEffectiveTargetSettings(db, created)).toMatchObject({
+      triggerMode: "manual",
+      level: "deep",
+      checkMinScore: 90,
+      checkPassVerdicts: ["ship it", "needs fixes"],
+    });
+
+    // Inheriting, not snapshotted: a later change to the workspace's answers
+    // moves the repository with it.
+    db.raw
+      .prepare("UPDATE workspaces SET default_review_trigger_mode = 'open' WHERE id = 'default'")
+      .run();
+    expect((await readEffectiveTargetSettings(db, created)).triggerMode).toBe("open");
   });
 
   test("a group with no bot evidence falls back to the deployment's only bot and is attributed", async () => {

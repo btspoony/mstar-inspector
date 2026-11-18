@@ -252,12 +252,18 @@ const LEDGER_TABLES = ["pull_requests", "reviews", "review_findings", "review_fa
  * `created_by` is the operator actor, threaded in from the running step: the
  * row must name who caused it, and the actor is the one fact the runner knows
  * and an item does not.
+ *
+ * `follow_workspace_defaults = 1` is the UI-create rule (J4), the same value
+ * `ledger-target-alignment` writes: a repository this item creates is an
+ * ordinary repository, so it inherits the workspace's review answers exactly as
+ * one added through the add-repository dialog does. Setting 0 here would opt it
+ * out of the workspace defaults permanently, and nobody chose that.
  */
 const INSERT_TARGET = `
   INSERT INTO review_targets
     (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
      follow_workspace_defaults, created_by, created_at, updated_at)
-  SELECT ?4, w.workspace_id, ?1, ?5, NULL, ?2, ?3, 0, ?6, datetime('now'), datetime('now')
+  SELECT ?4, w.workspace_id, ?1, ?5, NULL, ?2, ?3, 1, ?6, datetime('now'), datetime('now')
     FROM bot_workspaces w
    WHERE w.bot_id = ?1
      AND NOT EXISTS (${matchingTargets("?1", "?2", "?3")})
