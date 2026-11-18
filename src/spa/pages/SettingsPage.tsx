@@ -1607,28 +1607,43 @@ export function SeatsSection({
           void submit();
         }}
       >
-        {payload.model_role_ids.map((role) => (
-          <label key={role} className="flex w-fit flex-col gap-1.5 text-sm font-medium">
-            {role} — {roleHint(role)}
-            <Select
-              value={seatSelectValue(tabs, seats[role])}
-              onValueChange={(value) => setSeats((current) => ({ ...current, [role]: value }))}
+        {/* (I-000648) One row per seat: the seat's identity and the chain it
+            runs on read together, so five seats are five scannable lines
+            instead of five stacked blocks. The split is the ops-row idiom
+            (identity left, control on the trailing edge) and it wraps as whole
+            parts at narrow widths. Each row IS the label element, so the
+            select keeps the implicit name the stacked version had. */}
+        <div className="flex flex-col divide-y divide-(--border-subtle)">
+          {payload.model_role_ids.map((role) => (
+            <label
+              key={role}
+              className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-3 pb-3 text-sm font-medium first:pt-0 last:pb-0"
             >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={DEFAULT_CHAIN_NAME}>{t(locale, "settings.useDefaultChain")}</SelectItem>
-                {namedTabs.map((tab) => (
-                  <SelectItem key={tab.id} value={tab.id}>
-                    {tab.id}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </label>
-        ))}
-        <div>
+              <span>
+                {role} — {roleHint(role)}
+              </span>
+              <Select
+                value={seatSelectValue(tabs, seats[role])}
+                onValueChange={(value) => setSeats((current) => ({ ...current, [role]: value }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEFAULT_CHAIN_NAME}>{t(locale, "settings.useDefaultChain")}</SelectItem>
+                  {namedTabs.map((tab) => (
+                    <SelectItem key={tab.id} value={tab.id}>
+                      {tab.id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+          ))}
+        </div>
+        {/* The save is the section's, not the last seat's: its own trailing
+            row after the list, on the section's action edge. */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
             {t(locale, "settings.saveRoleModels")}
           </Button>
