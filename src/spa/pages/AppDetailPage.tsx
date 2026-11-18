@@ -19,6 +19,7 @@ import {
   TabsTrigger,
 } from "@design-system";
 import { AppInstallSection, OpsSection, SettingsView, pendingConfirmCopy, postPinnedOutcome } from "./SettingsPage";
+import { AppDeliveryTab } from "./AppDeliveryTab";
 import { BotSettingsView } from "./BotSettingsPage";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
@@ -337,31 +338,17 @@ export function TargetHeader({
 
 /**
  * The App's repository-count states — no repository at all, or several — both
- * state the fact and point at the repository surface, which is where the
- * review policy and the repositories themselves are created.
+ * state the fact. No link: the repository surface is not reachable backwards
+ * from here, and a dead reference would be worse than the sentence alone.
  */
-function TargetsNotice({
+function RepositoriesNotice({
   locale,
   copy,
-  link,
 }: {
   locale: SpaBoot["locale"];
   copy: DictionaryKey;
-  link: DictionaryKey;
 }) {
-  const href = `${apiBase()}/targets`;
-  return (
-    <div className="flex flex-col gap-2 py-3">
-      <p className="text-sm text-muted-foreground">{t(locale, copy)}</p>
-      <a
-        className="w-fit text-sm text-primary underline-offset-4 hover:underline"
-        href={href}
-        onClick={(event) => spaClick(href, event)}
-      >
-        {t(locale, link)}
-      </a>
-    </div>
-  );
+  return <p className="py-3 text-sm text-muted-foreground">{t(locale, copy)}</p>;
 }
 
 /**
@@ -501,7 +488,7 @@ export function AppDetailView({
   const bot = payload.blocked ? null : payload;
 
   function onTabChange(next: string): void {
-    if (next !== "settings" && next !== "installations") return;
+    if (next !== "settings" && next !== "delivery" && next !== "installations") return;
     onSearch({ ...search, tab: next });
   }
 
@@ -523,20 +510,23 @@ export function AppDetailView({
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
           <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
+          <TabsTrigger value="delivery">{t(locale, "appDetail.tabDelivery")}</TabsTrigger>
           <TabsTrigger value="installations">{t(locale, "appDetail.tabInstallations")}</TabsTrigger>
         </TabsList>
-        {/* forceMount on both panels (mount-once tab switching): the settings
-            tab's typed input and the install block's state survive a switch —
-            no unmount, no refetch. Radix does NOT hide forced-mounted inactive
-            panels itself; the panel's `data-[state=inactive]:hidden` carries
-            the one-visible-panel invariant (ui-bugs knowledge pin). */}
+        {/* forceMount on the two STATEFUL panels (mount-once tab switching):
+            the settings tab's typed input and the install block's state
+            survive a switch — no unmount, no refetch. Radix does NOT hide
+            forced-mounted inactive panels itself; the panel's
+            `data-[state=inactive]:hidden` carries the one-visible-panel
+            invariant (ui-bugs knowledge pin). The delivery panel has no typed
+            state and reads on open, so it deliberately does not forceMount. */}
         <TabsContent value="settings" forceMount>
           <div className="flex flex-col">
             {target === null ? (
               payload.targets_many ? (
-                <TargetsNotice locale={locale} copy="appDetail.targetsMany" link="targets.heading" />
+                <RepositoriesNotice locale={locale} copy="appDetail.targetsMany" />
               ) : (
-                <TargetsNotice locale={locale} copy="appDetail.noRepository" link="targets.add" />
+                <RepositoriesNotice locale={locale} copy="appDetail.noRepository" />
               )
             ) : null}
             {target === null ? null : (
@@ -549,6 +539,25 @@ export function AppDetailView({
                 groups={groups}
                 notice={null}
                 onReload={onReload}
+              />
+            )}
+          </div>
+        </TabsContent>
+        {/* NOT forceMount: this panel holds no typed state, and mounting it
+            eagerly would fire its read on every App settings visit. It reads
+            when opened, which is when its data is wanted. */}
+        <TabsContent value="delivery">
+          <div className="flex flex-col">
+            {bot === null ? (
+              <p className="py-3 text-sm text-muted-foreground">{t(locale, "appDetail.delivery.unavailable")}</p>
+            ) : (
+              <AppDeliveryTab
+                locale={locale}
+                appId={appId}
+                summary={{
+                  last_webhook_at: bot.app.last_webhook_at,
+                  rejected24h: bot.delivery_summary?.rejected24h ?? 0,
+                }}
               />
             )}
           </div>

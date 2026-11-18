@@ -65,6 +65,7 @@ import { createInstallClaimsStore } from "./install-claims-store";
 import {
   AppCountExceededError,
   createReviewBotsStore,
+  type DeliveryFilters,
   type DeliverySummary,
   type GithubAppRow,
   type GithubAppTenantRow,
@@ -3649,7 +3650,6 @@ async function refreshGithubMetadataForRead(
 async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionKey: string) {
   const apps = createReviewBotsStore(db);
   const installations = await apps.listInstallations(app.id);
-  const deliveries = await apps.listRecentDeliveries(app.id, 10);
   const deliverySummary = await apps.deliverySummary(app.id);
   const store = createAppConfigStore(db, encryptionKey);
   const maskedKeys = await store.listProviderKeys(app.id);
@@ -3674,13 +3674,6 @@ async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionK
   const ompRuntime = isOmpRuntimeImage(app.sandbox_image_id);
   return {
     installations,
-    deliveries: deliveries.map((d) => ({
-      event_name: d.event_name,
-      outcome: d.outcome,
-      status_code: d.status_code,
-      repository_full_name: d.repository_full_name,
-      created_at: d.created_at,
-    })),
     delivery_summary: {
       latest: deliverySummary.latest
         ? {
@@ -4166,6 +4159,114 @@ const appBotRoute = async (c: DashboardContext) => {
       github_metadata_synced_at: app.github_metadata_synced_at ?? null,
     },
     ...sections,
+  });
+};
+
+/**
+ * The delivery-status bounds. `limit` is fixed by the tab's page size — the
+ * caller pages with `offset`, so a client-chosen page size would only let one
+ * request do unbounded work. `offset` is bounded for the same reason the record
+ * sections bound theirs: a window past the retention's real row count cannot
+ * address a page.
+ */
+const DELIVERY_PAGE_LIMIT = 20;
+const DELIVERY_PAGE_OFFSET_MAX = 100_000;
+
+/**
+ * The widest `since` window the route accepts, in days. The page offers a
+ * segmented 1/7/30/90 set and the retention sweep drops rows after 30, so no
+ * real row sits past this — anything larger is a caller error, not a window.
+ */
+const DELIVERY_SINCE_DAYS_MAX = 3650;
+
+type DeliveryQueryResult =
+  | { ok: true; filters: DeliveryFilters }
+  | { ok: false; error: string };
+
+/**
+ * The delivery-status query string: `repo` (exact `owner/name`), `since` (whole
+ * days), `type` (the `x-github-event` name) and `offset`.
+ *
+ * A MALFORMED value is a 400 — a filter the server cannot apply must not answer
+ * as an unfiltered table. A well-formed value that happens to match nothing is
+ * not: `repo=nobody/nothing` or an event name this App never received is an
+ * empty page with a real total of 0, which is the honest answer. `since` takes
+ * any whole-day count inside DELIVERY_SINCE_DAYS_MAX, the insights window's own
+ * rule (arbitrary integer windows stay legal on the API; the page only offers
+ * the segmented set). Absent means "no filter", a real state rather than an
+ * error.
+ */
+function parseDeliveryQuery(c: DashboardContext): DeliveryQueryResult {
+  const repo = c.req.query("repo") ?? "";
+  const since = c.req.query("since") ?? "";
+  const type = c.req.query("type") ?? "";
+  const rawOffset = c.req.query("offset") ?? "0";
+  // Exactly two non-empty segments (the ledger's own `repo` grammar).
+  if (repo !== "" && !/^[^/]+\/[^/]+$/.test(repo)) {
+    return { ok: false, error: "invalid repo" };
+  }
+  let sinceDays: number | null = null;
+  if (since !== "") {
+    if (!/^[0-9]+$/.test(since)) return { ok: false, error: "invalid since" };
+    const days = Number(since);
+    if (!Number.isSafeInteger(days) || days < 1 || days > DELIVERY_SINCE_DAYS_MAX) {
+      return { ok: false, error: "invalid since" };
+    }
+    sinceDays = days;
+  }
+  if (!/^[0-9]+$/.test(rawOffset)) return { ok: false, error: "invalid offset" };
+  const offset = Number(rawOffset);
+  if (!Number.isSafeInteger(offset) || offset > DELIVERY_PAGE_OFFSET_MAX) {
+    return { ok: false, error: "invalid offset" };
+  }
+  return {
+    ok: true,
+    filters: {
+      repo: repo === "" ? null : repo,
+      sinceDays,
+      eventName: type === "" ? null : type,
+      limit: DELIVERY_PAGE_LIMIT,
+      offset,
+    },
+  };
+}
+
+/**
+ * `GET /api/apps/:appId/deliveries` — the 投递状态 tab's read face: the bot's
+ * webhook deliveries, narrowed by repository / time window / delivery type and
+ * paged on the server, with the matching total beside the page.
+ *
+ * The option sets ride the same response, unnarrowed: a filter whose next value
+ * sits outside the current result must stay selectable. A non-manager reads the
+ * same rows the tab shows a manager — deliveries are diagnostics, not
+ * configuration — but the route is `write`-classed with its App siblings, so a
+ * granted platform operator cannot read a tenant's delivery log.
+ */
+const appDeliveriesRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const app = await resolveVisibleBot(
+    createReviewBotsStore(member.db),
+    c.req.param("appId") ?? "",
+    member.scope,
+  );
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  const query = parseDeliveryQuery(c);
+  if (!query.ok) return c.json({ error: query.error }, 400);
+  const page = await createReviewBotsStore(member.db).listDeliveries(app.id, query.filters);
+  c.header("Cache-Control", "private, no-store");
+  return c.json({
+    deliveries: page.rows.map((row) => ({
+      event_name: row.event_name,
+      outcome: row.outcome,
+      status_code: row.status_code,
+      repository_full_name: row.repository_full_name,
+      reason: row.reason,
+      created_at: row.created_at,
+    })),
+    total: page.total,
+    repos: page.repos,
+    types: page.types,
   });
 };
 
@@ -6567,6 +6668,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId/deliveries", handler: appDeliveriesRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/claim", handler: appClaimRoute, access: "write" },

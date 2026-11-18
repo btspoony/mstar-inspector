@@ -862,6 +862,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       // off the classifier's own single parse of the body — null when the
       // payload carries no repository.
       repositoryFullName: webhookRepositoryFullName(classified),
+      // Why a refusal happened: the classifier's own sentence, and only for a
+      // reject — every other outcome has none.
+      reason: outcome.kind === "reject" ? outcome.reason : null,
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

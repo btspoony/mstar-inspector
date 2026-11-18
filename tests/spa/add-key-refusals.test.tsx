@@ -66,7 +66,6 @@ function payload(): BotSettingsPayload {
     custom_provider_api_ids: [],
     sandbox_images: [{ id: "omp", enabled: true }],
     installations: [],
-    deliveries: [],
   };
 }
 

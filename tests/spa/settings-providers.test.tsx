@@ -85,7 +85,6 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
     custom_provider_api_ids: ["openai-completions"],
     sandbox_images: [{ id: "omp", enabled: true }],
     installations: [],
-    deliveries: [],
     ...overrides,
   };
 }

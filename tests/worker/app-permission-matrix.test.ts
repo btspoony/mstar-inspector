@@ -503,8 +503,8 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
         can_manage: boolean;
         app: Record<string, unknown>;
         installations: unknown[];
-        deliveries: unknown[];
         delivery_summary: { rejected24h: number };
+        deliveries?: unknown;
         keys?: unknown;
       };
       expect(body.can_manage).toBe(true);
@@ -512,7 +512,9 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       expect(body.app).toHaveProperty("last_webhook_at");
       expect(body.app).toHaveProperty("review_trigger_mode");
       expect(body.installations).toEqual([]);
-      expect(body.deliveries).toEqual([]);
+      // The delivery log has its own paged read face, so the settings payload
+      // no longer carries the fixed recent list.
+      expect(body.deliveries).toBeUndefined();
       expect(body.delivery_summary.rejected24h).toBe(0);
       expect(body.keys).toEqual([]);
     });

@@ -98,13 +98,13 @@
  *     target the bot owns in ONE batch: the user-facing delete removes one
  *     product surface, and a target left live would keep a deleted bot's
  *     configuration readable.
- *   - recordDelivery / deliverySummary / listRecentDeliveries (migration
+ *   - recordDelivery / deliverySummary / listDeliveries (migration
  *     0011) are the webhook_deliveries face: the per-App webhook
  *     route appends one best-effort row per CLASSIFIED delivery (ok /
  *     paused / ignored / rejected — outcome vocabulary DELIVERY_OUTCOMES,
  *     producer-side enforced), and the dashboard reads the health summary +
- *     recent list through the same store (AL-20-1: the legacy face records
- *     nothing).
+ *     the filtered, paged delivery list through the same store (AL-20-1: the
+ *     legacy face records nothing).
  *   - deliverySummaries (QC wave 1, W-1) is the BATCHED health
  *     read face for the Apps list: newest verdict row + 24h rejected count for
  *     every requested app in exactly TWO statements regardless of N;
@@ -402,6 +402,15 @@ export const EVENT_NAME_MAX_LENGTH = 64;
 export const REPOSITORY_FULL_NAME_MAX_LENGTH = 160;
 
 /**
+ * Persist bound for a delivery's refusal reason (migration 0074). The text is
+ * composed by this Worker's own classifier from fixed strings
+ * (`src/worker/webhooks.ts` WebhookOutcome's `reject.reason`), never echoed
+ * from a request body, so the bound is headroom for a future longer sentence
+ * rather than a payload limit — the DDL has no length constraint.
+ */
+export const DELIVERY_REASON_MAX_LENGTH = 200;
+
+/**
  * Bound on `listPullRequests`. Any third party who opens a PR mints a ledger
  * row and only TERMINAL rows are swept, so the live set grows with every open
  * PR across every installed repo. 200 is the newest window an operator can
@@ -529,6 +538,12 @@ export type RecordDeliveryInput = {
    * defence-in-depth — not an attacker payload bound like `eventName`).
    */
   repositoryFullName: string | null;
+  /**
+   * The classifier's refusal reason, for a `rejected` delivery; NULL for every
+   * other outcome and for rows written before migration 0074. Bounded to
+   * DELIVERY_REASON_MAX_LENGTH at persist.
+   */
+  reason: string | null;
 };
 
 /** A row of `webhook_deliveries` (D1 column names, snake_case; migration 0011). */
@@ -540,6 +555,8 @@ export type WebhookDeliveryRow = {
   status_code: number | null;
   /** `owner/name` of the source repo (0043); NULL = unknown source. */
   repository_full_name: string | null;
+  /** The classifier's refusal reason (0074); NULL = not a reject / not recorded. */
+  reason: string | null;
   created_at: string;
 };
 
@@ -554,6 +571,30 @@ export type WebhookDeliveryRow = {
 export type DeliverySummary = {
   latest: WebhookDeliveryRow | null;
   rejected24h: number;
+};
+
+/**
+ * The delivery-status filters, already validated by the route: `null` means
+ * "no filter", never "empty string matches nothing". `sinceDays` is the
+ * caller's closed window in whole days, `eventName` the delivery TYPE (the
+ * `x-github-event` name the log stores).
+ */
+export type DeliveryFilters = {
+  repo: string | null;
+  sinceDays: number | null;
+  eventName: string | null;
+  limit: number;
+  offset: number;
+};
+
+/** One filtered page of deliveries plus the unpaged, matching total. */
+export type DeliveryPage = {
+  rows: WebhookDeliveryRow[];
+  total: number;
+  /** The App's whole repository set — the filter's options, never narrowed. */
+  repos: string[];
+  /** The App's whole delivery-type set — the filter's options, never narrowed. */
+  types: string[];
 };
 
 /** Input for upsertPullRequest — one VERIFIED `pull_request` delivery. */
@@ -1517,10 +1558,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         input.repositoryFullName === null
           ? null
           : truncateBounded(input.repositoryFullName, REPOSITORY_FULL_NAME_MAX_LENGTH);
+      const reason = input.reason === null ? null : truncateBounded(input.reason, DELIVERY_REASON_MAX_LENGTH);
       await db
         .prepare(
-          `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           crypto.randomUUID(),
@@ -1529,6 +1571,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           input.outcome,
           input.statusCode,
           repositoryFullName,
+          reason,
         )
         .run();
     },
@@ -1554,31 +1597,77 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     sweepTerminalPullRequests,
 
     /**
-     * Recent-deliveries read face (settings panel): THIS App's rows, verdict
-     * tier first, newest first inside each tier (created_at has second
-     * precision, so rowid breaks ties inside one second — the order is total
-     * and deterministic), bounded by the caller's N (default 10).
+     * The delivery-status read face: THIS App's rows, filtered and paged in
+     * the STORE, with the unpaged total beside the page.
      *
-     * The panel exists for one question — is review flowing? — and bypass
-     * traffic (`check_run`, `ping`, …) dwarfs review traffic while landing in
-     * `ignored`, so a raw newest-first list renders five identical
-     * `check_run · ignored` lines even while reviews run fine. Ranking by the
-     * same verdict tier the Apps list health column uses (see
-     * DELIVERY_VERDICT_TIER_SQL) keeps the verdict in view. Stored rows are
-     * untouched, and an App whose ONLY traffic is bypass rows still returns
-     * those rows — the list never goes empty because of the ranking.
+     * Ordering is the panel's original one — verdict tier first, newest first
+     * inside each tier (created_at has second precision, so rowid breaks ties
+     * inside one second). It stays deterministic under OFFSET paging because
+     * rowid is in the ORDER BY: a page boundary cannot repeat or skip a row.
+     * The ranking exists because bypass traffic (`check_run`, `ping`, …)
+     * dwarfs review traffic while landing in `ignored`, so a raw newest-first
+     * list opens with identical `check_run · ignored` lines even while reviews
+     * run fine (see DELIVERY_VERDICT_TIER_SQL).
+     *
+     * The filters narrow BOTH the page and the total — the count is not the
+     * unfiltered table size, or the pager would offer pages the filters cannot
+     * fill. `repos` / `types` are the App's whole option sets, deliberately
+     * NOT narrowed: a filter whose next value sits outside the current result
+     * must still be selectable.
      */
-    async listRecentDeliveries(appId: string, limit = 10): Promise<WebhookDeliveryRow[]> {
-      const res = await db
+    async listDeliveries(appId: string, filters: DeliveryFilters): Promise<DeliveryPage> {
+      const predicates = ["bot_id = ?"];
+      const binds: (string | number)[] = [appId];
+      if (filters.repo !== null) {
+        predicates.push("repository_full_name = ?");
+        binds.push(filters.repo);
+      }
+      if (filters.sinceDays !== null) {
+        // The modifier is a validated integer, so this is not a bound value
+        // SQLite could reinterpret.
+        predicates.push("created_at > datetime('now', ?)");
+        binds.push(`-${filters.sinceDays} days`);
+      }
+      if (filters.eventName !== null) {
+        predicates.push("event_name = ?");
+        binds.push(filters.eventName);
+      }
+      const where = predicates.join(" AND ");
+      const page = await db
         .prepare(
           `SELECT * FROM webhook_deliveries
-           WHERE bot_id = ?
+           WHERE ${where}
            ORDER BY ${DELIVERY_VERDICT_TIER_SQL}, created_at DESC, rowid DESC
-           LIMIT ?`,
+           LIMIT ? OFFSET ?`,
         )
-        .bind(appId, limit)
+        .bind(...binds, filters.limit, filters.offset)
         .all<WebhookDeliveryRow>();
-      return res.results;
+      const counted = await db
+        .prepare(`SELECT COUNT(*) AS n FROM webhook_deliveries WHERE ${where}`)
+        .bind(...binds)
+        .first<{ n: number }>();
+      const repos = await db
+        .prepare(
+          `SELECT DISTINCT repository_full_name AS name FROM webhook_deliveries
+           WHERE bot_id = ? AND repository_full_name IS NOT NULL
+           ORDER BY repository_full_name`,
+        )
+        .bind(appId)
+        .all<{ name: string }>();
+      const types = await db
+        .prepare(
+          `SELECT DISTINCT event_name AS name FROM webhook_deliveries
+           WHERE bot_id = ? AND event_name IS NOT NULL
+           ORDER BY event_name`,
+        )
+        .bind(appId)
+        .all<{ name: string }>();
+      return {
+        rows: page.results,
+        total: counted?.n ?? 0,
+        repos: repos.results.map((row) => row.name),
+        types: types.results.map((row) => row.name),
+      };
     },
 
     /**

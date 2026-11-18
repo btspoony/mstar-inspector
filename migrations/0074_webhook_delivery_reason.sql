@@ -1,0 +1,21 @@
+-- 0074_webhook_delivery_reason.sql — why a delivery was refused.
+--
+-- The delivery log recorded the outcome and the classifier's status code, so a
+-- `rejected` row said "401" and nothing else. The delivery-status surface has to
+-- answer "why", and the classifier already states the reason
+-- (`src/worker/webhooks.ts`, WebhookOutcome's `reject.reason`); it was simply
+-- never persisted.
+--
+-- Nullable by design: only a `reject` classification carries a reason. Every
+-- other outcome (`ok` / `paused` / `ignored` / `skipped`) has none, and rows
+-- written before this migration cannot be backfilled — the value was dropped
+-- at write time. NULL therefore means "no reason recorded", never "the store
+-- lost it".
+--
+-- Bounded to 200 chars at persist time (DELIVERY_REASON_MAX_LENGTH), the same
+-- defence-in-depth shape as `repository_full_name` in 0043: the text is
+-- composed by our own classifier from fixed strings, never echoed from a
+-- request body. Forward-only `ALTER TABLE … ADD COLUMN`: no table rewrite, no
+-- backfill, existing rows keep reading NULL.
+
+ALTER TABLE webhook_deliveries ADD COLUMN reason TEXT;

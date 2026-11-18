@@ -13,11 +13,9 @@ import {
   StatusBadge,
 } from "@design-system";
 import { PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
-import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
-import { formatRelativeTime } from "../relative-time";
 import {
   appDisplayName,
   configuredKeySlot,
@@ -186,7 +184,6 @@ export function BotSettingsView({
         </div>
       )}
       <div className="flex flex-col">
-        <BotHealthSection locale={locale} payload={payload} />
         <SandboxSection locale={locale} payload={payload} onSettings={submitSettings} />
         {payload.can_manage ? (
           <>
@@ -278,58 +275,6 @@ export function SandboxSection({
           {t(locale, "settings.runtimeHarnessValue", { id: payload.app.sandbox_image_id })}
         </p>
       )}
-    </FlowSection>
-  );
-}
-
-/**
- * Credentials health: the bot's last verified delivery, its refused count and
- * the recent deliveries. Bot-scoped — deliveries arrive on the bot's webhook
- * whatever target a review lands on.
- */
-export function BotHealthSection({ locale, payload }: { locale: SpaBoot["locale"]; payload: BotConfigSections }) {
-  const rejected = payload.delivery_summary?.rejected24h ?? 0;
-  return (
-    <FlowSection title={t(locale, "botSettings.health")} subtitle={t(locale, "botSettings.healthCopy")}>
-      <p className="text-sm text-muted-foreground">
-        {t(locale, "settings.lastWebhook", {
-          time: formatRelativeTime(payload.app.last_webhook_at, locale),
-        })}
-        {rejected > 0 ? (
-          <>
-            {" · "}
-            <span className="text-(--tone-danger-fg)">
-              {t(locale, "apps.health.rejected24h", { count: rejected })}
-            </span>
-          </>
-        ) : null}
-      </p>
-      <div className="flex flex-col gap-1">
-        <h3 className="text-sm font-medium">{t(locale, "settings.recentDeliveries")}</h3>
-        <p className="text-sm text-muted-foreground">{t(locale, "settings.recentDeliveriesCopy")}</p>
-        {payload.deliveries.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "settings.noDeliveries")}</p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {payload.deliveries.map((delivery, index) => (
-              <li key={`${delivery.created_at}-${index}`} className="text-sm">
-                <span className="font-medium">
-                  {delivery.repository_full_name ?? t(locale, "settings.unknownSource")}
-                </span>
-                <span className="text-muted-foreground">
-                  {" "}
-                  · {delivery.event_name ?? t(locale, "settings.unknownEvent")} ·{" "}
-                  {formatRelativeTime(delivery.created_at, locale)} ·{" "}
-                  {deliveryOutcomeLabel(delivery.outcome, locale)} ·{" "}
-                  {t(locale, "settings.status", {
-                    code: delivery.status_code === null ? "—" : String(delivery.status_code),
-                  })}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
     </FlowSection>
   );
 }

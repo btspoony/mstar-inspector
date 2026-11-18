@@ -102,7 +102,6 @@ const managePayload: SettingsManagePayload = {
   custom_provider_api_ids: [],
   sandbox_images: [{ id: "omp", enabled: true }],
   installations: [],
-  deliveries: [],
 };
 
 const search = { tab: "settings" as const, window: "30" as const, repo: "", pr: "" };

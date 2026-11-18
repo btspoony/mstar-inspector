@@ -527,7 +527,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
       // Bot-scoped sections ride the face…
       for (const key of [
         "installations",
-        "deliveries",
         "delivery_summary",
         "keys",
         "model_chain",
@@ -1234,7 +1233,7 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect(ownerBody.installations).toEqual([
       { installation_id: 777, account_login: "acme-org", seen_at: "2026-01-01 00:00:00" },
     ]);
-    expect(Array.isArray(ownerBody.deliveries)).toBe(true);
+    expect(ownerBody.deliveries).toBeUndefined();
     expect(Array.isArray(ownerBody.keys)).toBe(true);
     expect(Array.isArray(ownerBody.provider_catalog)).toBe(true);
   });
@@ -1267,5 +1266,204 @@ describe("a retained target on another workspace's bot grants no bot-scope write
       { op: "save-sandbox-image", sandbox_image_id: "omp" },
     );
     expect(ownerOp.status).toBe(200);
+  });
+});
+
+/**
+ * `GET /dashboard/:ref/api/apps/:appId/deliveries` — the 投递状态 tab's read
+ * face. Filters and paging are request parameters, so the server narrows and
+ * pages BEFORE the response exists; the response carries the matching total
+ * and the unnarrowed option sets the filter controls list.
+ */
+describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status read face)", () => {
+  const DELIVERIES = (ref: string, githubAppId: number) =>
+    `/dashboard/${ref}/api/apps/${githubAppId}/deliveries`;
+
+  /** Seed deliveries for the fixture App through the store's own writer. */
+  async function seedDeliveries(db: ReturnType<typeof createAppsUiD1>) {
+    const botId = (
+      db.raw.query("SELECT id FROM review_bots WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
+        id: string;
+      }
+    ).id;
+    const store = createReviewBotsStore(db);
+    const rows: Array<{ eventName: string; repo: string | null; outcome: "ok" | "rejected" }> = [
+      { eventName: "pull_request", repo: "acme/web", outcome: "ok" },
+      { eventName: "check_run", repo: "acme/web", outcome: "ok" },
+      { eventName: "pull_request", repo: "acme/api", outcome: "rejected" },
+      { eventName: "pull_request", repo: "acme/web", outcome: "ok" },
+    ];
+    for (const row of rows) {
+      await store.recordDelivery({
+        appId: botId,
+        eventName: row.eventName,
+        outcome: row.outcome,
+        statusCode: row.outcome === "rejected" ? 401 : null,
+        repositoryFullName: row.repo,
+        reason: row.outcome === "rejected" ? "signature verification failed" : null,
+      });
+    }
+    // The oldest row leaves a 7-day window but stays inside the retained log.
+    db.raw
+      .prepare(
+        `UPDATE webhook_deliveries SET created_at = datetime('now', '-30 days')
+         WHERE id = (SELECT id FROM webhook_deliveries ORDER BY rowid ASC LIMIT 1)`,
+      )
+      .run();
+    return botId;
+  }
+
+  type DeliveryBody = {
+    deliveries: Array<{
+      event_name: string | null;
+      outcome: string;
+      status_code: number | null;
+      repository_full_name: string | null;
+      reason: string | null;
+      created_at: string;
+    }>;
+    total: number;
+    repos: string[];
+    types: string[];
+  };
+
+  async function read(query: string, db: ReturnType<typeof createAppsUiD1>, login = "mallory") {
+    const res = await get(
+      `${DELIVERIES("default", MALLORY_APP_ID)}${query}`,
+      `${SESSION_COOKIE}=${await sessionCookie(login)}`,
+      makeEnv(db),
+    );
+    return { status: res.status, body: res.status === 200 ? ((await res.json()) as DeliveryBody) : null };
+  }
+
+  test("each filter narrows both the rows and the total, and the option sets stay whole", async () => {
+    const db = await seededWorld();
+    await seedDeliveries(db);
+
+    const all = await read("", db);
+    expect(all.status).toBe(200);
+    expect(all.body!.total).toBe(4);
+
+    const byRepo = await read("?repo=acme%2Fapi", db);
+    expect(byRepo.body!.total).toBe(1);
+    expect(byRepo.body!.deliveries.every((row) => row.repository_full_name === "acme/api")).toBe(true);
+
+    const byType = await read("?type=check_run", db);
+    expect(byType.body!.total).toBe(1);
+    expect(byType.body!.deliveries[0]!.event_name).toBe("check_run");
+
+    const byWindow = await read("?since=7", db);
+    expect(byWindow.body!.total).toBe(3);
+    // The option sets are the App's whole history, never narrowed by a filter:
+    // a value outside the current result must stay selectable.
+    expect(byType.body!.repos).toEqual(["acme/api", "acme/web"]);
+    expect(byType.body!.types).toEqual(["check_run", "pull_request"]);
+    // A rejected row carries the classifier's reason; every other outcome has none.
+    expect(byRepo.body!.deliveries[0]!.reason).toBe("signature verification failed");
+    expect(all.body!.deliveries.find((row) => row.outcome === "ok")!.reason).toBeNull();
+  });
+
+  test("paging returns the requested window and the unpaged total", async () => {
+    const db = await seededWorld();
+    const botId = (
+      db.raw.query("SELECT id FROM review_bots WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
+        id: string;
+      }
+    ).id;
+    const store = createReviewBotsStore(db);
+    // One second apart, so every row has its own strictly ordered stamp and the
+    // windows are decided by time rather than by the rowid tiebreak alone.
+    for (let i = 0; i < 25; i++) {
+      await store.recordDelivery({
+        appId: botId,
+        eventName: "pull_request",
+        outcome: "ok",
+        statusCode: null,
+        repositoryFullName: "acme/web",
+        reason: null,
+      });
+      db.raw
+        .prepare(
+          `UPDATE webhook_deliveries SET created_at = datetime('now', ?)
+           WHERE id = (SELECT id FROM webhook_deliveries ORDER BY rowid DESC LIMIT 1)`,
+        )
+        .run(`-${100 - i} seconds`);
+    }
+
+    const first = await read("?offset=0", db);
+    const second = await read("?offset=20", db);
+    // The route's page size is fixed; the caller moves the window.
+    expect(first.body!.deliveries).toHaveLength(20);
+    expect(second.body!.deliveries).toHaveLength(5);
+    // The total is the FILTERED size, not the window and not the table size.
+    expect(first.body!.total).toBe(25);
+    expect(second.body!.total).toBe(25);
+    // The windows are disjoint: a page boundary can neither repeat nor skip a
+    // row (the ORDER BY ends in rowid).
+    const seen = new Set(first.body!.deliveries.map((row) => row.created_at));
+    expect(second.body!.deliveries.every((row) => !seen.has(row.created_at))).toBe(true);
+    // The newest row opens the first page: ordering is documented, not implicit.
+    expect(first.body!.deliveries[0]!.created_at >= first.body!.deliveries[19]!.created_at).toBe(true);
+    // Past the end is an empty page, not an error.
+    const past = await read("?offset=40", db);
+    expect(past.status).toBe(200);
+    expect(past.body!.deliveries).toEqual([]);
+    expect(past.body!.total).toBe(25);
+  });
+
+  test("an unknown filter value is an empty page, never a 500 and never unfiltered", async () => {
+    const db = await seededWorld();
+    await seedDeliveries(db);
+
+    for (const query of ["?repo=nobody%2Fnothing", "?type=never_sent"]) {
+      const res = await read(query, db);
+      expect(res.status, query).toBe(200);
+      expect(res.body!.deliveries).toEqual([]);
+      expect(res.body!.total).toBe(0);
+    }
+  });
+
+  test("a malformed query value is a 400, so a caller never believes it filtered", async () => {
+    const db = await seededWorld();
+    await seedDeliveries(db);
+    for (const query of [
+      "?repo=acme",
+      "?repo=acme%2F",
+      "?repo=a%2Fb%2Fc",
+      "?since=soon",
+      "?since=0",
+      "?since=5000",
+      "?offset=x",
+    ]) {
+      const res = await read(query, db);
+      expect(res.status, query).toBe(400);
+    }
+  });
+
+  test("an unknown App is a 404, and another workspace's owned bot is invisible too", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const env = makeEnv(db);
+    for (const path of [
+      DELIVERIES("default", 9999),
+      "/dashboard/default/api/apps/not-a-number/deliveries",
+      DELIVERIES("default", -1),
+    ]) {
+      const res = await get(path, cookie, env);
+      expect(res.status, path).toBe(404);
+      expect(await res.json()).toEqual({ error: "unknown app" });
+    }
+  });
+
+  test("a plain member reads the log; the tenant boundary is the App's visibility, not the role", async () => {
+    const db = await seededWorld();
+    await seedDeliveries(db);
+    // hubot is a plain member of the workspace that owns the App.
+    const res = await read("", db, "hubot");
+    expect(res.status).toBe(200);
+    expect(res.body!.total).toBe(4);
+    // ada's App's log is a different App's: the option sets prove the query
+    // never crossed the bot boundary.
+    expect(res.body!.repos).toEqual(["acme/api", "acme/web"]);
   });
 });

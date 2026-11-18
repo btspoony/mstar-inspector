@@ -78,7 +78,6 @@ function payload(overrides: Partial<SettingsManagePayload> = {}): SettingsManage
     custom_provider_api_ids: [],
     sandbox_images: [],
     installations: [],
-    deliveries: [],
     ...overrides,
   };
 }
