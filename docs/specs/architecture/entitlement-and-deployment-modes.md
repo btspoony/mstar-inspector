@@ -9,9 +9,11 @@ Plan catalogue, nullable seat limits, membership-based free slots, and SaaS/self
 
 `plans` has eight columns: `id`, `name`, `monthly_price_cents`,
 `included_members`, `extra_member_price_cents`, `apps_per_workspace`,
-`created_at` and `shared_bot_allowed`. Entitlement decisions read three limit/
-capability columns: `included_members`, `apps_per_workspace` and
-`shared_bot_allowed`.
+`created_at` and `shared_bot_allowed`. This is the schema from
+`0032_unlimited_plan.sql` after `0061_plan_shared_bot_allowed.sql` adds the
+capability and `0063_quota_profiles.sql` drops the two consumption columns.
+Entitlement decisions read three limit/capability columns: `included_members`,
+`apps_per_workspace` and `shared_bot_allowed`.
 
 NULL on a nullable limit means unlimited: for example, the `unlimited` row's
 `included_members` and `apps_per_workspace` are NULL. Migration
@@ -211,8 +213,9 @@ toward the global infrastructure alert. `quota` stays visible too, but joins
 only the paging exclusion set: one tenant's exhausted month is not a platform
 incident. The sweep reads one grouped statement over the trailing 24 hours;
 the returned stage counts supply both the infrastructure total and its
-breakdown, so they describe the same read. The paging threshold is more than
-`SWEEP_FAILURE_THRESHOLD` (7) counted failures.
+breakdown, so they describe the same read. Paging requires counted failures
+strictly greater than `SWEEP_FAILURE_THRESHOLD`, derived in `src/worker/sweep.ts`
+as `QUEUE_MAX_ATTEMPTS + 1` from `src/store/failure-store.ts`.
 
 ## RP metering and the monthly ceiling
 
@@ -304,8 +307,10 @@ refusal; the authoritative guard is inside the App insert, counting live bots
 of the workspace (`bot_workspaces` joined live `review_bots`, so a soft-deleted
 App frees its slot). The ownership insert is conditional on that App existing
 in the same batch, so concurrent cap refusals leave neither row and retain the
-existing HTTP 409 `app_cap_reached` response. `self-hosted` never reads the
-limit — the mode resolves the unlimited constant before its first read.
+existing `app_cap_reached` outcome. Both manifest handlers in
+`src/dashboard/index.ts` map that outcome to an HTTP 409 HTML error page.
+`self-hosted` never reads the limit — the mode resolves the unlimited constant
+before its first read.
 
 ## Invariants
 

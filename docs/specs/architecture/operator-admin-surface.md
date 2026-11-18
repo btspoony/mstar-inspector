@@ -261,9 +261,11 @@ platform scope is a different lifecycle.
 
 Audit ownership: no admin action loses its audit trail.
 Every admin WRITE has exactly one home — flag toggles, plan assignment, quota
-publication and runtime decisions are platform-scope → `platform_audit_events` (actor, action, target,
-before/after detail); support-grant create/delete are workspace-scope writes →
-`audit_events`, whose `workspace_id NOT NULL`
+publication and runtime decisions are platform-scope → `platform_audit_events`
+(actor, action, target, and action-specific detail: quota publication records
+the candidate configuration, §3.7, not before/after objects; the other actions
+record before/after detail). Support-grant create/delete are workspace-scope
+writes → `audit_events`, whose `workspace_id NOT NULL`
 (`migrations/0029_operator_support.sql`) the grant's target workspace
 always satisfies. Admin list reads are deliberately unaudited: audit rows
 attach to writes and to operator presence inside a tenant (the existing
