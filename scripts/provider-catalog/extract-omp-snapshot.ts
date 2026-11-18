@@ -44,12 +44,14 @@ import path from "node:path";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { createRequire } from "node:module";
 import { applyOverrides, PROTOCOL_SUFFIX, type Override } from "./overrides";
+import { CATALOG_DIR, newestSnapshot } from "./snapshot";
 
 const PI_CATALOG_DIR = path.dirname(
   createRequire(import.meta.url).resolve("@oh-my-pi/pi-catalog/package.json"),
 );
 const RULES_PATH = path.join(PI_CATALOG_DIR, "src/compat/rules.json");
-const MODELS_DEV_PATH = path.resolve("scripts/provider-catalog/models.dev-2026-11-13.json");
+/** The newest committed models.dev snapshot (the generator reads the same one). */
+const MODELS_DEV_PATH = path.join(CATALOG_DIR, newestSnapshot().file);
 const OUT_PROVIDERS_PATH = path.resolve("scripts/provider-catalog/omp-api-key-providers.json");
 const OUT_VERIFY_PATH = path.resolve("scripts/provider-catalog/omp-provider-verify.json");
 /**
@@ -411,8 +413,32 @@ const verifyOut = {
   endpoints,
 };
 
-await writeFile(OUT_PROVIDERS_PATH, `${JSON.stringify(providersOut, null, 2)}\n`);
-await writeFile(OUT_VERIFY_PATH, `${JSON.stringify(verifyOut, null, 2)}\n`);
+/** Keep the committed extraction date when the extraction itself is unchanged:
+ *  the refresh workflow runs this daily, and a date-only diff would open a PR
+ *  for data that did not move. */
+async function stableExtracted<T extends { source: { extracted: string } }>(
+  outPath: string,
+  next: T,
+): Promise<T> {
+  const previous = await readFile(outPath, "utf8").then(
+    (text) => JSON.parse(text) as T,
+    () => undefined,
+  );
+  if (previous?.source.extracted === undefined) return next;
+  const withoutStamp = (doc: T): string =>
+    JSON.stringify({ ...doc, source: { ...doc.source, extracted: "" } });
+  if (withoutStamp(previous) === withoutStamp(next)) next.source.extracted = previous.source.extracted;
+  return next;
+}
+
+await writeFile(
+  OUT_PROVIDERS_PATH,
+  `${JSON.stringify(await stableExtracted(OUT_PROVIDERS_PATH, providersOut), null, 2)}\n`,
+);
+await writeFile(
+  OUT_VERIFY_PATH,
+  `${JSON.stringify(await stableExtracted(OUT_VERIFY_PATH, verifyOut), null, 2)}\n`,
+);
 
 console.log(
   `omp ${version}: ${overridden.records.length} provider records, ${endpoints.length} verify endpoints, ` +

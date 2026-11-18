@@ -2242,6 +2242,37 @@ The same gate runs locally against any base rev:
 bun scripts/check-image-inputs.ts --base origin/main
 ```
 
+## Provider catalog refresh (scheduled)
+
+The provider catalog — the `src/contracts/provider-catalog.generated.ts` /
+`provider-model-limits.generated.ts` pair an App's model chain resolves
+against — is refreshed by
+[`.github/workflows/refresh-catalog.yml`](../.github/workflows/refresh-catalog.yml),
+daily at **04:17 UTC** (plus a manual `workflow_dispatch`).
+
+It re-fetches `https://models.dev/api.json` through
+`scripts/provider-catalog/fetch-models-dev.ts`, regenerates both contracts
+with `bun run provider:catalog`, and moves the omp SDK / harness-engine pins
+first when npm publishes a newer release — a refresh that skipped the SDK bump
+would validate the catalog against a registry the image no longer ships. The
+workflow keeps **one** snapshot in git: an unchanged upstream leaves the
+committed `models.dev-<date>.json` (and its date) alone, so a no-op night opens
+no branch and no pull request at all.
+
+A night that does change something lands on the fixed branch
+**`chore/catalog-refresh`** and opens **one** pull request; a later run pushes
+to the same branch and updates that PR in place instead of opening a second.
+The body lists what the regeneration **removed** — every provider that
+disappeared and every model id dropped from a provider that survived — because
+that is the failure that bites: a chain still naming a vanished id fails at
+request time, not at save time. It also states whether the pins moved.
+
+Red is a signal, not a merge. A run whose typecheck or tests fail still pushes
+the branch and opens the PR, with `⚠ tests red` in the title and the failing
+step named in the body — so a red PR is the SDK change asking to be looked at,
+never a green one that would ship a broken chain. There is no auto-merge, and
+the workflow never pushes to `main`.
+
 ## Image pins and digest record
 
 The image's versioned build inputs — base digest, sandbox-shim tag plus digest,
