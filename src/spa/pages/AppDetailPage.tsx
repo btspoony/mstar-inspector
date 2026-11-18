@@ -18,7 +18,14 @@ import {
   TabsList,
   TabsTrigger,
 } from "@design-system";
-import { AppInstallSection, OpsSection, SettingsView, pendingConfirmCopy, postPinnedOutcome } from "./SettingsPage";
+import {
+  AppInstallationsSection,
+  AppInstallSection,
+  OpsSection,
+  SettingsView,
+  pendingConfirmCopy,
+  postPinnedOutcome,
+} from "./SettingsPage";
 import { AppDeliveryTab } from "./AppDeliveryTab";
 import { BotSettingsView } from "./BotSettingsPage";
 import { fetchJson } from "../api";
@@ -573,6 +580,13 @@ export function AppDetailView({
               blocked={payload.blocked}
               onReload={onReload}
             />
+            {/* The roster reads `bot`'s own array — the same one the header
+                band counts — and a Blocked face carries no installation rows at
+                all (they belong to the owning workspace), so it renders no
+                table rather than a false "none". */}
+            {bot === null ? null : (
+              <AppInstallationsSection locale={locale} installations={bot.installations} />
+            )}
           </div>
         </TabsContent>
       </Tabs>

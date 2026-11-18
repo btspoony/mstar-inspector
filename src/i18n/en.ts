@@ -760,6 +760,15 @@ export const en = {
     installationsAccount: "Account",
     installationsId: "Installation ID",
     installationsLastSync: "Last sync",
+    /**
+     * The roster's state column. The settings read carries LIVE rows only
+     * (`bot_installations.removed_at IS NULL`), so the column states that
+     * filter: an uninstalled installation is not silently omitted from a table
+     * that would otherwise read as the full history.
+     */
+    installationsState: "State (live only)",
+    installationsLive: "Live",
+    noInstallations: "No installations yet.",
     /** Metric-band label for the provider-key count on the App detail face. */
     metricKeys: "Keys",
     addToChain: "Add to chain",

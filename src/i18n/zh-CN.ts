@@ -661,6 +661,9 @@ export const zhCN: Dictionary = {
     installationsAccount: "账号",
     installationsId: "安装 ID",
     installationsLastSync: "最近同步",
+    installationsState: "状态（仅在线）",
+    installationsLive: "在线",
+    noInstallations: "还没有安装。",
     /** App 详情页指标带中 provider 密钥数的标签。 */
     metricKeys: "密钥",
     addToChain: "加入模型链",

@@ -277,6 +277,9 @@ describe("App detail IA copy", () => {
       "settings.installationsLastSync",
       "settings.installationsCount",
       "settings.installationsCountOne",
+      "settings.installationsState",
+      "settings.installationsLive",
+      "settings.noInstallations",
     ] as const) {
       expect(isDictionaryKey(key), key).toBe(true);
       expect(t("en", key).length, key).toBeGreaterThan(0);
@@ -302,7 +305,6 @@ describe("App detail IA copy", () => {
       "settings.availabilityValid",
       "settings.availabilityInvalid",
       "settings.installationsNotVisible",
-      "settings.noInstallations",
       "settings.allowlist",
       "settings.allowlistCopy",
       "settings.allowlistEnable",

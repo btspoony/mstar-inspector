@@ -171,7 +171,8 @@ describe("settings section flow (r3 baseline § 5)", () => {
     };
     for (const [section, end, titleKey] of [
       ["export function AppInfoSection", "export function AppInstallSection", "settings.appInfo"],
-      ["export function AppInstallSection", "export function RuntimeHarnessEditor", "settings.install"],
+      ["export function AppInstallSection", "export function AppInstallationsSection", "settings.install"],
+      ["export function AppInstallationsSection", "export function RuntimeHarnessEditor", "settings.installations"],
       ["export function ChainsSection", "export function SeatsSection", "settings.modelChains"],
       ["export function SeatsSection", "export function DraftChainPanel", "settings.seats"],
       ["function OpsSection", "export function WorkspaceNameCard", "settings.ops"],
