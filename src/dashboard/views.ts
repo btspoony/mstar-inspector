@@ -510,14 +510,17 @@ export function manifestOnboardingPage(
     workspaceRef === null
       ? "/dashboard"
       : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
-  const reposBase =
-    workspaceRef === null
-      ? "/dashboard"
-      : `/dashboard/${escapeHtml(workspaceRef)}/repos`;
+  // The CTA needs a workspace segment to name a repository detail: without one
+  // the only honest address is the dashboard root, which redirects a signed-in
+  // request to its workspace's overview. Interpolating the target into the
+  // REF slot would build `/dashboard/<targetId>` — a workspace-ref-shaped path
+  // that names no workspace at all.
   const settingsHref =
-    settingsTargetId === null
-      ? reposBase
-      : `${reposBase}/${encodeURIComponent(settingsTargetId)}`;
+    workspaceRef === null || settingsTargetId === null
+      ? workspaceRef === null
+        ? "/dashboard"
+        : `/dashboard/${escapeHtml(workspaceRef)}/repos`
+      : `/dashboard/${escapeHtml(workspaceRef)}/repos/${encodeURIComponent(settingsTargetId)}`;
   const dashboardHref = workspaceRef === null ? "/dashboard" : settingsBase;
   return page(
     t(locale, "manifest.onboarding.title"),

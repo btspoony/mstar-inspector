@@ -2852,6 +2852,26 @@ describe("SSR views honor the stored theme (F-13)", () => {
     expect(views).not.toContain(':root:not([data-theme="dark"])');
   });
 
+  test("the onboarding CTA never puts a target id in the workspace-ref slot", () => {
+    // With no workspace ref there is no segment to hang a repository detail
+    // off: `/dashboard/<targetId>` would read as a WORKSPACE ref and match no
+    // page. The only honest address there is the dashboard root, which redirects
+    // a signed-in request to its workspace's overview.
+    const user: { login: string; name?: string } = { login: "octocat" };
+    const app = { id: 1234, name: "fixture", slug: null, webhookUrl: "https://worker.local/webhook/x" };
+    const targetId = "2a0e6d1c-7f3a-4c86-9a1f-0e5e3f2a9b7d";
+
+    const legacy = manifestOnboardingPage(user, app, "en", null, targetId);
+    expect(legacy).toContain('href="/dashboard"');
+    expect(legacy).not.toContain(`href="/dashboard/${targetId}"`);
+
+    const scoped = manifestOnboardingPage(user, app, "en", "acme", targetId);
+    expect(scoped).toContain(`href="/dashboard/acme/repos/${targetId}"`);
+
+    // No ref, no target: the same root.
+    expect(manifestOnboardingPage(user, app, "en", null, null)).toContain('href="/dashboard"');
+  });
+
   test("explicit stored-dark branch is a no-op and dark stays the :root default", () => {
     const style = renderedStyle();
     const dark = blockAfter(style, ':root[data-theme="dark"] {');

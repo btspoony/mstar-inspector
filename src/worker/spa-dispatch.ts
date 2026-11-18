@@ -51,6 +51,7 @@ import {
   isSpaAssetPath,
   matchSpaRoute,
   settingsTabRedirect,
+  targetsFamilyRedirect,
   wantsHtml,
 } from "../spa/routes";
 import { deploymentModeOf, type DeploymentMode, type Env } from "./env";
@@ -361,6 +362,11 @@ export function spaDispatch(): MiddlewareHandler<{ Bindings: Env }> {
     // no session: the destination enforces its own access.
     const settingsTarget = settingsTabRedirect(pathname, url.search);
     if (settingsTarget !== null) return c.redirect(settingsTarget, 302);
+    // The repository family was renamed `targets` → `repos`; a bookmark from
+    // before the rename answers ONE 302 to the address that page now carries,
+    // its target segment included. Without this the old family is a bare 404.
+    const renamedTargets = targetsFamilyRedirect(pathname);
+    if (renamedTargets !== null) return c.redirect(renamedTargets, 302);
     const assets = c.env.ASSETS;
     if (!assets) return next();
     const accept = c.req.header("Accept") ?? null;

@@ -85,11 +85,16 @@ export function workspaceRefOf(pathname: string): string | null {
 /**
  * The same path with its workspace segment replaced — every other segment and
  * the query are preserved, so a renamed workspace lands on the SAME page under
- * its new ref. Null when the pathname carries no workspace segment (a
- * deployment-level page has nothing to rewrite).
+ * its new ref. A retired `targets` path is rewritten to its live `repos`
+ * spelling FIRST, so a switch from a bookmark lands on the page it names rather
+ * than the unknown-path stub. Null when the pathname carries no workspace
+ * segment (a deployment-level page has nothing to rewrite).
  */
 export function replaceWorkspaceRef(pathname: string, nextRef: string): string | null {
-  const match = /^\/dashboard\/([^/]+)(\/.*)?$/.exec(pathname);
+  // A bookmark on the retired family moves onto the live page it names, so the
+  // switch lands somewhere real instead of the unknown-path stub.
+  const live = targetsFamilyRedirect(pathname) ?? pathname;
+  const match = /^\/dashboard\/([^/]+)(\/.*)?$/.exec(live);
   if (!match || match[1] === undefined || RESERVED_WORKSPACE_SLUGS.has(match[1])) return null;
   return `/dashboard/${nextRef}${match[2] ?? ""}`;
 }
@@ -118,6 +123,30 @@ export const DASHBOARD_ROOT_PATHS: ReadonlySet<string> = new Set(["/dashboard", 
 /** The repository overview of `ref` — the landing every root request resolves to. */
 export function reposHomePath(ref: string): string {
   return `/dashboard/${ref}/repos`;
+}
+
+/** The retired `targets` family's list and detail spellings. */
+const RETIRED_TARGETS_LIST_PATH = /^\/dashboard\/([^/]+)\/targets$/;
+const RETIRED_TARGETS_DETAIL_PATH = /^\/dashboard\/([^/]+)\/targets\/([^/]+)$/;
+
+/**
+ * The repository address a retired `targets` path resolves to, or null for any
+ * other path. The family was renamed to `repos`; a bookmark from before the
+ * rename would otherwise reach no page at all, so both spellings answer ONE 302
+ * with their target segment carried over — the SAME repository, never the
+ * overview when the path named one.
+ *
+ * The ref's own validity is not judged here: an unknown or foreign ref lands on
+ * a page whose read answers the outsider 404, exactly as the live spelling does.
+ */
+export function targetsFamilyRedirect(pathname: string): string | null {
+  const [, listRef] = RETIRED_TARGETS_LIST_PATH.exec(pathname) ?? [];
+  if (listRef !== undefined) return reposHomePath(listRef);
+  const [, detailRef, targetId] = RETIRED_TARGETS_DETAIL_PATH.exec(pathname) ?? [];
+  if (detailRef !== undefined && targetId !== undefined) {
+    return `${reposHomePath(detailRef)}/${targetId}`;
+  }
+  return null;
 }
 
 /**

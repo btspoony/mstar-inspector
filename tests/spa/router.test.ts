@@ -16,8 +16,10 @@ import {
   WORKSPACE_FAMILY_SEGMENTS,
   isSpaAssetPath,
   matchSpaRoute,
+  replaceWorkspaceRef,
   reposHomePath,
   settingsTabRedirect,
+  targetsFamilyRedirect,
   wantsHtml,
   workspaceRefOf,
 } from "../../src/spa/routes";
@@ -244,6 +246,35 @@ describe("matchSpaRoute — workspace-scoped surfaces", () => {
     ]) {
       expect(isWorkspaceRoute(path), path).toBe(false);
     }
+  });
+});
+
+describe("the retired targets family", () => {
+  test("both spellings redirect to the repository address that carries them now", () => {
+    // A bookmark from before the rename must reach the SAME page: the list
+    // becomes the overview, the detail keeps its target segment.
+    expect(targetsFamilyRedirect("/dashboard/acme/targets")).toBe("/dashboard/acme/repos");
+    expect(targetsFamilyRedirect("/dashboard/acme/targets/12345")).toBe(
+      "/dashboard/acme/repos/12345",
+    );
+    expect(targetsFamilyRedirect("/dashboard/acme/targets/all")).toBe("/dashboard/acme/repos/all");
+    // The live spelling and every other path are left alone.
+    expect(targetsFamilyRedirect("/dashboard/acme/repos")).toBeNull();
+    expect(targetsFamilyRedirect("/dashboard/acme/repos/12345")).toBeNull();
+    expect(targetsFamilyRedirect("/dashboard/targets")).toBeNull();
+    expect(targetsFamilyRedirect("/dashboard/acme/targets/12345/extra")).toBeNull();
+  });
+
+  test("a workspace switch from a retired bookmark lands on the live page, not a 404 stub", () => {
+    // `replaceWorkspaceRef` rewrites the segment of the page the path NAMES, so
+    // a retired path is translated first and keeps its target segment.
+    expect(replaceWorkspaceRef("/dashboard/acme/targets", "beta")).toBe("/dashboard/beta/repos");
+    expect(replaceWorkspaceRef("/dashboard/acme/targets/12345", "beta")).toBe(
+      "/dashboard/beta/repos/12345",
+    );
+    expect(replaceWorkspaceRef("/dashboard/acme/repos/12345", "beta")).toBe(
+      "/dashboard/beta/repos/12345",
+    );
   });
 });
 

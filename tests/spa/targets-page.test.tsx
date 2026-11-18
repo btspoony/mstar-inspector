@@ -93,6 +93,18 @@ function renderBody(props: {
   );
 }
 
+/**
+ * One row's own markup, cut at the next row so a string the metric band also
+ * renders (the 待安装 label is a metric key too) cannot satisfy an assertion
+ * about that row.
+ */
+function rowMarkup(markup: string, identity: string): string {
+  const rows = markup.split('data-slot="list-row"').slice(1);
+  const row = rows.find((part) => part.includes(identity));
+  if (row === undefined) throw new Error(`no row names ${identity}`);
+  return row;
+}
+
 /** The metric band as `{ key: value }`, read off the rendered markup. */
 function metricValues(markup: string): Record<string, string> {
   const pairs = markup.matchAll(
@@ -187,9 +199,14 @@ describe("repository list (static SSR)", () => {
       ),
     );
     expect(markup).toContain("42ch-dev/nexus");
-    expect(markup).toContain(t("en", "targets.status.uninstalled"));
+    // The badge is asserted on the ROW's own subtree: the metric band renders
+    // the same label as a key, so a page-wide `toContain` would pass even if
+    // the row carried no badge at all.
+    const targetRow = rowMarkup(markup, "42ch-dev/nexus");
+    expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
+    expect(targetRow).toContain('data-tone="warn"');
     // No row fell back to the dash: the one target row named its repository.
-    expect(markup).not.toContain(">—</a>");
+    expect(targetRow).not.toContain(">—</a>");
   });
 
   test("a target with neither an id nor a name still falls back to the dash", () => {
@@ -203,8 +220,11 @@ describe("repository list (static SSR)", () => {
         }),
       ),
     );
-    expect(markup).toContain(">—</a>");
-    expect(markup).toContain(t("en", "targets.metaUninstalled"));
+    const targetRow = rowMarkup(markup, "—</a>");
+    expect(targetRow).toContain(">—</a>");
+    expect(targetRow).toContain(t("en", "targets.metaUninstalled"));
+    // The same installation axis: no repo_id means the 待安装 pill.
+    expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
   });
 
   test("the overview states what repositories are and the figures the list proves", () => {
@@ -224,6 +244,10 @@ describe("repository list (static SSR)", () => {
     );
     // The one explanatory block — no second endpoint, no second paragraph.
     expect(markup).toContain(t("en", "targets.headingDescription"));
+    // The figure and the pill are the SAME axis: t-2 names a repository but
+    // carries no repo_id, and both read it as 待安装.
+    expect(rowMarkup(markup, "acme/web")).toContain(t("en", "targets.status.uninstalled"));
+    expect(rowMarkup(markup, "acme/web")).toContain("acme/");
     // Three figures from the loaded payload: count, unbound rows, newest review.
     expect(metricValues(markup)).toEqual({
       [t("en", "targets.metricRepositories")]: "3",
