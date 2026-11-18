@@ -683,10 +683,17 @@ describe("image gate CLI", () => {
       const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
       const { code, out } = runGate(dir, sha, script);
       expect(code).toBe(1);
+      // The verdict is the fingerprint's, so it is unchanged by the bad base...
       expect(out).toContain("::error::image-inputs-stale");
       expect(out).toContain(`--base ${sha} --write`);
-      // A missing base is a missing MESSAGE, not a pass and not a crash.
-      expect(out).not.toContain("image-gate-base-unreachable");
+      // ...and the missing base is REPORTED, naming the commit and why it could
+      // not be resolved, instead of an empty family list reading as "nothing
+      // changed". This is the assertion the previous revision could not make:
+      // it pinned the absence of an annotation the CLI never emitted.
+      expect(out).toContain("::warning::image-gate-base-unresolved");
+      expect(out).toContain(sha);
+      expect(out).toContain("not reachable in this checkout");
+      expect(out).not.toContain("image-gate-base-recovered");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -577,10 +577,17 @@ if (import.meta.main) {
   if (verdict !== undefined && !verdict.ok) {
     // `--base` supplies the MESSAGE only: which families moved since the base
     // revision. A base that cannot be resolved leaves the list empty rather
-    // than failing a verdict the fingerprint already decided.
+    // than failing a verdict the fingerprint already decided — but it says so:
+    // "no family list" and "the base is gone" are different facts, and an
+    // operator who cannot see which one happened reads the empty list as
+    // "nothing changed".
     const resolved = resolveBase(base, ref, gitQuiet);
     const families = new Set<string>();
-    if (!("error" in resolved)) {
+    if ("error" in resolved) {
+      console.error(
+        `::warning::image-gate-base-unresolved: ${resolved.error} — the verdict below stands on the fingerprint; only the changed-family list is missing. Pass --base <sha> with a commit this checkout has to see it.`,
+      );
+    } else {
       if (resolved.recovered !== undefined) {
         const how = resolved.recovered === "fetched" ? "fetched from origin" : `the merge base with ${ref}`;
         console.error(
