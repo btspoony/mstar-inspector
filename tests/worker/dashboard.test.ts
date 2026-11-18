@@ -488,7 +488,7 @@ describe("/dashboard routes", () => {
       withSpaAssets(makeEnv()),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
 
     // The shell that redirect lands on injects the boot: identity + the
     // workspace membership, never `users.role`.
@@ -605,7 +605,7 @@ describe("/dashboard routes", () => {
       makeEnv(),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
   });
 
   test("callback without state cookie → 400 and no session cookie (fail-closed)", async () => {
@@ -1491,7 +1491,10 @@ describe("/dashboard manifest routes", () => {
     expect(body).toContain(CONVERSION.name);
     expect(body).toContain(`Slug: ${CONVERSION.slug}`);
     expect(body).toContain(`https://worker.local/webhook/default/${startAppId}`);
-    expect(body).toContain(`href="/dashboard/default/targets/${CONVERSION.id}"`);
+    // A committed App holds no review target yet, so the CTA opens the
+    // repository overview — an address a detail read can always resolve.
+    expect(body).toContain('href="/dashboard/default/repos"');
+    expect(body).not.toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
     expect(body).toContain(">Open Settings</a>");
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
@@ -2633,7 +2636,8 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const html = await landing.text();
     expect(html).toContain(`Slug: ${CONVERSION.slug}`);
     expect(html).toContain(startUrl);
-    expect(html).toContain(`href="/dashboard/default/targets/${CONVERSION.id}"`);
+    expect(html).toContain('href="/dashboard/default/repos"');
+    expect(html).not.toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
     // …and re-running the whole flow lands a SECOND App row with its OWN
     // identity, never one row twice.
     stubGitHubConversionOnly({ ...CONVERSION, id: CONVERSION.id + 1, name: `${CONVERSION.name}-2` });
@@ -2846,6 +2850,26 @@ describe("SSR views honor the stored theme (F-13)", () => {
     // dark is the unconditional :root default and light is stored-choice-only.
     expect(views).not.toContain("@media (prefers-color-scheme: light)");
     expect(views).not.toContain(':root:not([data-theme="dark"])');
+  });
+
+  test("the onboarding CTA never puts a target id in the workspace-ref slot", () => {
+    // With no workspace ref there is no segment to hang a repository detail
+    // off: `/dashboard/<targetId>` would read as a WORKSPACE ref and match no
+    // page. The only honest address there is the dashboard root, which redirects
+    // a signed-in request to its workspace's overview.
+    const user: { login: string; name?: string } = { login: "octocat" };
+    const app = { id: 1234, name: "fixture", slug: null, webhookUrl: "https://worker.local/webhook/x" };
+    const targetId = "2a0e6d1c-7f3a-4c86-9a1f-0e5e3f2a9b7d";
+
+    const legacy = manifestOnboardingPage(user, app, "en", null, targetId);
+    expect(legacy).toContain('href="/dashboard"');
+    expect(legacy).not.toContain(`href="/dashboard/${targetId}"`);
+
+    const scoped = manifestOnboardingPage(user, app, "en", "acme", targetId);
+    expect(scoped).toContain(`href="/dashboard/acme/repos/${targetId}"`);
+
+    // No ref, no target: the same root.
+    expect(manifestOnboardingPage(user, app, "en", null, null)).toContain('href="/dashboard"');
   });
 
   test("explicit stored-dark branch is a no-op and dark stays the :root default", () => {
@@ -3273,7 +3297,10 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     expect(body).toContain(`Slug: ${CONVERSION.slug}`);
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(body).toContain(`https://worker.local/webhook/default/${app.id}`);
-    expect(body).toContain(`href="/dashboard/default/targets/${CONVERSION.id}"`);
+    // A committed App holds no review target yet, so the CTA opens the
+    // repository overview — an address a detail read can always resolve.
+    expect(body).toContain('href="/dashboard/default/repos"');
+    expect(body).not.toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
     expect(body).toContain(">Open Settings</a>");
     expect(body).toContain("Next: open Settings and configure a provider");
     expect(body).not.toContain("BEGIN");
@@ -3299,9 +3326,9 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     await seedApp(env, { createdBy: "someone-else" });
     const res = await worker.fetch(await onboardingRequest(CONVERSION.id), env);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain(
-      `href="/dashboard/default/targets/${CONVERSION.id}"`,
-    );
+    const body = await res.text();
+    expect(body).toContain('href="/dashboard/default/repos"');
+    expect(body).not.toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
   });
 
   test("Accept-Language zh renders the onboarding page in zh_CN", async () => {
@@ -3859,7 +3886,7 @@ describe("/dashboard/oauth/callback sign-in", () => {
     stubGitHubIdentity("octocat");
     const res = await oauthCallback("octocat", makeDbEnv(db));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
   });
 
   test("existing member row → 302 with no second row (row-hit precedence)", async () => {

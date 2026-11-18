@@ -1,14 +1,18 @@
 /**
- * The repository surface (`/dashboard/<ref>/targets`): the workspace's
+ * The repository surface (`/dashboard/<ref>/repos`): the workspace's
  * repositories, listed from `GET /:ref/api/targets`, with the fixed 所有仓库
- * entry first (product spec J1) and the add-repository dialog (J2).
+ * entry first (product spec J1) and the add-repository dialog (J2). It is the
+ * dashboard default, so its header carries the page's own explanation and the
+ * three figures the loaded list already proves.
  *
  * A row IS a target: one repository under one workspace. `repo_id: null` is the
- * 待安装 state a migrated row carries until a delivery claims it (D15) — the list
- * needs no installation call to say so, which is why the read carries the
- * discriminator instead of per-row installation facts.
+ * 待安装 state — the list needs no installation call to say so, which is why the
+ * read carries the discriminator instead of per-row installation facts. A row
+ * that still names `owner/name` is a target whose installation went away: it
+ * keeps the name it was reviewed under, so only a row naming no repository at
+ * all reads as an empty shell.
  *
- * The detail address (`…/targets/<targetId>`) renders `TargetDetailPage`: one
+ * The detail address (`…/repos/<targetId>`) renders `TargetDetailPage`: one
  * target's 评审配置 (its own policy plus the inheritance toggle), 洞察 and
  * 拉取请求 (the scoped read families).
  */
@@ -35,6 +39,7 @@ import {
   TabsList,
   TabsTrigger,
 } from "@design-system";
+import { MetricBand, type Metric } from "@/components/MetricBand";
 import { PageHeader } from "@/components/PageHeader";
 import { ListRow, ListRowGroup } from "@/components/ListRow";
 import { EmptyState } from "../components/state/EmptyState";
@@ -79,7 +84,7 @@ import {
  * back-link slot, the loading and not-found faces in {@link TargetDetailShell}.
  */
 export function TargetDetailBackLink({ locale }: { locale: SpaBoot["locale"] }) {
-  const href = `${apiBase()}/targets`;
+  const href = `${apiBase()}/repos`;
   return (
     <a
       className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
@@ -154,10 +159,22 @@ export function targetStatusPill(
   return { tone: "success", label: t(locale, "targets.status.reviewing") };
 }
 
-/** `owner/name`, or the 待安装 fallback for a row without repository identity. */
-export function targetRepositoryName(target: TargetListRow): string {
+/** The two identity columns both target faces carry. */
+type RepositoryIdentity = { repo_owner: string | null; repo_name: string | null };
+
+/** `owner/name`, or "" when the row names no repository at all. */
+export function targetRepositoryName(target: RepositoryIdentity): string {
   if (target.repo_owner === null || target.repo_name === null) return "";
   return `${target.repo_owner}/${target.repo_name}`;
+}
+
+/**
+ * The row names no repository at all — no id and no name, so nothing was ever
+ * bound and no review can exist. A row whose installation was removed keeps its
+ * `owner/name` and therefore its history; `repo_id` alone is not this test.
+ */
+export function targetIsUnbound(target: TargetListRow): boolean {
+  return target.repo_id === null && targetRepositoryName(target) === "";
 }
 
 /**
@@ -179,10 +196,39 @@ export function TargetsView({
 }) {
   const rows = targets ?? [];
   const base = apiBase();
-  const allHref = `${base}/targets/all`;
+  const allHref = `${base}/repos/all`;
+  // Payload arithmetic only: the list already carries every figure the band
+  // shows, so the overview needs no second read. `last_reviewed_at` is a sortable
+  // UTC stamp, so the newest one is the last review the workspace ran — and it
+  // counts EVERY row, named-but-unbound ones included: such a row lost its
+  // installation, not its history.
+  const latestReview = rows.reduce<string | null>(
+    (latest, target) =>
+      target.last_reviewed_at !== null && (latest === null || target.last_reviewed_at > latest)
+        ? target.last_reviewed_at
+        : latest,
+    null,
+  );
+  const metrics: Metric[] =
+    state === "ok"
+      ? [
+          { key: t(locale, "targets.metricRepositories"), value: rows.length },
+          // The same axis the row badges use, so the figure and the pills agree.
+          {
+            key: t(locale, "targets.metricUninstalled"),
+            value: rows.filter((target) => target.repo_id === null).length,
+          },
+          { key: t(locale, "targets.metricLastReview"), value: formatRelativeTime(latestReview, locale) },
+        ]
+      : [];
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title={t(locale, "targets.heading")} actions={addControl} />
+      <PageHeader
+        title={t(locale, "targets.heading")}
+        description={t(locale, "targets.headingDescription")}
+        actions={addControl}
+        metrics={<MetricBand metrics={metrics} />}
+      />
       {state === "error" ? <ErrorState locale={locale} onRetry={onRetry} /> : null}
       {state === "ok" ? (
         <div className="flex flex-col gap-4">
@@ -201,7 +247,7 @@ export function TargetsView({
               meta={t(locale, "targets.allRepositoriesMeta")}
             />
             {rows.map((target) => {
-              const href = `${base}/targets/${target.target_id}`;
+              const href = `${base}/repos/${target.target_id}`;
               const pill = targetStatusPill(locale, target);
               return (
                 <ListRow
@@ -212,12 +258,12 @@ export function TargetsView({
                       href={href}
                       onClick={(event) => spaClick(href, event)}
                     >
-                      {target.repo_id === null ? "—" : targetRepositoryName(target)}
+                      {targetRepositoryName(target) || "—"}
                     </a>
                   }
                   status={<StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>}
                   meta={
-                    target.repo_id === null
+                    targetIsUnbound(target)
                       ? t(locale, "targets.metaUninstalled")
                       : target.last_reviewed_at === null
                         ? t(locale, "targets.metaNever", { app: target.app_name })
@@ -708,9 +754,9 @@ const ALL_TARGETS = "all";
 
 /**
  * The repository detail page, one component for BOTH variants:
- * - `/dashboard/<ref>/targets/<uuid>` — one target's policy (its own plus the
+ * - `/dashboard/<ref>/repos/<uuid>` — one target's policy (its own plus the
  *   inheritance toggle), read from `GET /api/targets/<uuid>`;
- * - `/dashboard/<ref>/targets/all` — the fixed 所有仓库 row: the workspace
+ * - `/dashboard/<ref>/repos/all` — the fixed 所有仓库 row: the workspace
  *   defaults (which every inheriting target runs with) and the live count,
  *   read from `GET /api/targets/all`, with no inheritance switch or pause.
  *
@@ -838,12 +884,11 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
     description = repositoryCountLabel(locale, data.payload.target_count);
   } else {
     const { target } = data.payload;
-    // A migrated row carries no repository identity yet (D15): the title states
-    // the 待安装 fact the list's row states rather than printing an empty heading.
-    title =
-      target.repo_owner === null || target.repo_name === null
-        ? t(locale, "targets.status.uninstalled")
-        : `${target.repo_owner}/${target.repo_name}`;
+    // A row that names no repository at all states the 待安装 fact rather than
+    // printing an empty heading; one whose installation went away keeps the
+    // `owner/name` it was reviewed under.
+    const name = targetRepositoryName(target);
+    title = name === "" ? t(locale, "targets.status.uninstalled") : name;
     description = target.app_name ?? undefined;
   }
   const scope: ReadScope =

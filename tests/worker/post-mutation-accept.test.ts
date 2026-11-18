@@ -156,6 +156,9 @@ describe("POST mutation Accept routing (QC W-2)", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${DEMO_APP_ID}`);
+    // The seeded App owns no review target, so the landing is the overview. The
+    // App id is NOT a target id — pinning it here is what let a dead detail
+    // page through.
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
   });
 });

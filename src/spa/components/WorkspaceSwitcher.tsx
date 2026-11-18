@@ -43,8 +43,9 @@ const BLOCKED_REASON_KEY: Record<BlockedReason, DictionaryKey> = {
 /**
  * Point the page at another workspace and hand the router the new path: either
  * rewrite the current path's workspace segment, or — on a path that names no
- * workspace — open that workspace's Apps page. False when a rewrite was asked
- * for and the pathname names no workspace to rewrite.
+ * workspace — open that workspace's repository overview, the dashboard
+ * default. False when a rewrite was asked for and the pathname names no
+ * workspace to rewrite.
  */
 export function switchWorkspace(
   nextRef: string,
@@ -53,8 +54,8 @@ export function switchWorkspace(
   search: string = window.location.search,
   hash: string = window.location.hash,
 ): boolean {
-  if (target === "apps") {
-    navigate(`/dashboard/${nextRef}/apps`);
+  if (target === "repos") {
+    navigate(`/dashboard/${nextRef}/repos`);
     return true;
   }
   const path = replaceWorkspaceRef(pathname, nextRef);

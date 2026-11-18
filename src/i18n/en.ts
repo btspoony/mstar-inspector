@@ -23,7 +23,7 @@ export const en = {
     brand: "Morning Star Inspector",
     primary: "Primary navigation",
     apps: "Apps",
-    /** The repository surface (`/dashboard/<ref>/targets`). */
+    /** The repository overview (`/dashboard/<ref>/repos`, the dashboard default). */
     targets: "Repositories",
     members: "Members",
     settings: "Settings",
@@ -198,12 +198,19 @@ export const en = {
       "This bot is no longer shared with this workspace, so this target reviews nothing. Ask the platform operator to share it again.",
   },
   /**
-   * The review-target surface (`/dashboard/<ref>/targets`): a workspace's
-   * claim on a bot, listed and edited on its own page. Its detail body keeps
-   * the `settings.*` labels of the tab it was moved from.
+   * The repository surface (`/dashboard/<ref>/repos`, the dashboard default):
+   * a workspace's claim on a bot, listed and edited on its own page. Its detail
+   * body keeps the `settings.*` labels of the tab it was moved from.
    */
   targets: {
     heading: "Repositories",
+    /** The overview's one explanatory block (the app-overview layout). */
+    headingDescription:
+      "Each row is one repository this workspace reviews. Review settings live on the repository itself; insights and pull requests are shared across the workspace.",
+    /** The overview band — three figures the loaded list already proves. */
+    metricRepositories: "Repositories",
+    metricUninstalled: "Awaiting install",
+    metricLastReview: "Last review",
     backToList: "Back to repositories",
     /** The three detail tabs. */
     tabInsights: "Insights",
@@ -233,8 +240,8 @@ export const en = {
     },
     meta: "{app} · reviewed {time}",
     metaNever: "{app} · never reviewed",
-    /** The 待安装 meta line: a target with no repository identity yet. */
-    metaUninstalled: "No installation bound · waiting for a delivery",
+    /** The 待安装 meta line: a target naming no repository at all. */
+    metaUninstalled: "No repository bound · waiting for a delivery",
     add: "Add repository",
     addDialog: {
       title: "Add repository",

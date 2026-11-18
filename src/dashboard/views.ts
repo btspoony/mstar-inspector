@@ -362,8 +362,8 @@ ${STYLE}
  * the SPA navbar tokens. Manifest pages never pass `adminNav` (Members
  * stays on the dashboard shell only). No language toggle — current IA.
  * Brand and Apps point at the request's workspace Apps page when the page
- * was reached through one (`/dashboard/<ref>/apps`), else the workbench
- * (`/dashboard` — the legacy `/dashboard/apps` page is a 301 alias).
+ * was reached through one (`/dashboard/<ref>/apps`), else the dashboard root
+ * (which redirects a signed-in request to the repository overview).
  */
 function shellHeader(
   user: { login: string; name?: string },
@@ -478,12 +478,16 @@ export function manifestConfirmPage(
 /**
  * App onboarding surface (AC4b) — the post-commit landing page:
  * App name, numeric id, GitHub slug, webhook URL, and the provider-first
- * next-step CTA into Settings. Same summary discipline as the confirm gate:
- * tabular id, no success green. PEM / webhook_secret NEVER appear here.
+ * next-step CTA into review settings. Same summary discipline as the confirm
+ * gate: tabular id, no success green. PEM / webhook_secret NEVER appear here.
  * The GitHub slug is what GitHub actually shows and can rename, so before the
  * first metadata sync the page shows the numeric App id under an **App ID**
- * label instead of inventing a slug; the Settings link addresses the App by
- * that same immutable id.
+ * label instead of inventing a slug.
+ *
+ * `settingsTargetId` is the review target the CTA opens: the caller resolves
+ * the App's ONE live target here (a target id is a UUID, never the App id), and
+ * passes null when the App holds none or several — the CTA then opens the
+ * repository overview, which is always a real page.
  */
 export function manifestOnboardingPage(
   user: { login: string; name?: string },
@@ -491,6 +495,8 @@ export function manifestOnboardingPage(
   locale: Locale = "en",
   /** Workspace ref (id or slug) under `strict`; null renders today's legacy targets. */
   workspaceRef: string | null = null,
+  /** The review target the CTA opens; null = the repository overview. */
+  settingsTargetId: string | null = null,
 ): string {
   const connected = t(locale, "manifest.onboarding.connected", {
     appName: `<strong>${escapeHtml(app.name)}</strong>`,
@@ -498,17 +504,23 @@ export function manifestOnboardingPage(
   });
   // The legacy App family answers 404 under `strict`, so the primary CTA
   // follows the workspace the page was reached through. The review policy it
-  // opens lives on the review-target surface now. The secondary link follows
-  // the same workspace; only a page with no ref falls back to the workbench
-  // root.
+  // opens lives on the repository surface now. The secondary link follows the
+  // same workspace; only a page with no ref falls back to the dashboard root.
   const settingsBase =
     workspaceRef === null
-      ? "/dashboard/apps"
+      ? "/dashboard"
       : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
-  const targetBase =
-    workspaceRef === null
-      ? "/dashboard/apps"
-      : `/dashboard/${escapeHtml(workspaceRef)}/targets`;
+  // The CTA needs a workspace segment to name a repository detail: without one
+  // the only honest address is the dashboard root, which redirects a signed-in
+  // request to its workspace's overview. Interpolating the target into the
+  // REF slot would build `/dashboard/<targetId>` — a workspace-ref-shaped path
+  // that names no workspace at all.
+  const settingsHref =
+    workspaceRef === null || settingsTargetId === null
+      ? workspaceRef === null
+        ? "/dashboard"
+        : `/dashboard/${escapeHtml(workspaceRef)}/repos`
+      : `/dashboard/${escapeHtml(workspaceRef)}/repos/${encodeURIComponent(settingsTargetId)}`;
   const dashboardHref = workspaceRef === null ? "/dashboard" : settingsBase;
   return page(
     t(locale, "manifest.onboarding.title"),
@@ -519,7 +531,7 @@ export function manifestOnboardingPage(
       <p>${connected}</p>
       <p class="status">${escapeHtml(app.slug ? t(locale, "manifest.onboarding.slug", { slug: app.slug }) : t(locale, "manifest.onboarding.appId", { id: app.id }))}<br>${escapeHtml(t(locale, "manifest.onboarding.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
       <p class="note">${escapeHtml(t(locale, "manifest.onboarding.nextStep"))}</p>
-      <p><a class="primary" href="${targetBase}/${app.id}">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="${dashboardHref}">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
+      <p><a class="primary" href="${settingsHref}">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="${dashboardHref}">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
     </section>
   </main>`,
     locale,

@@ -21,7 +21,7 @@ const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat" 
 describe("shell models", () => {
   test("nav order is Repositories → Apps → Members → Settings (insights retired)", () => {
     expect(NAV_ITEMS.map((item) => item.href)).toEqual([
-      "/dashboard/targets",
+      "/dashboard/repos",
       "/dashboard/apps",
       "/dashboard/members",
       "/dashboard/settings",
@@ -46,7 +46,7 @@ describe("shell models", () => {
     ]);
     const scoped = buildSidebarModel(member, "/dashboard/acme/apps");
     expect(scoped.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/targets",
+      "/dashboard/acme/repos",
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
@@ -58,7 +58,7 @@ describe("shell models", () => {
   test("the admin sees the same entries", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/acme/members");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/targets",
+      "/dashboard/acme/repos",
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
@@ -82,14 +82,14 @@ describe("shell models", () => {
     expect(buildSidebarModel(admin, "/dashboard/acme/members").brand).toBe(t("zh_CN", "nav.brand"));
   });
 
-  test("the wordmark follows the workspace, like the Apps entry", () => {
-    // Legacy pages keep the root; a workspace page names its own Apps list,
-    // so the brand link never lands on the strict-mode dead end.
+  test("the wordmark follows the workspace repository overview", () => {
+    // The overview is the dashboard default: a workspace page names its own
+    // overview, so the brand link never lands on the strict-mode dead end.
     expect(buildSidebarModel(member, "/dashboard/apps").brandHref).toBe("/dashboard");
-    expect(buildSidebarModel(admin, "/dashboard/acme/apps").brandHref).toBe("/dashboard/acme/apps");
+    expect(buildSidebarModel(admin, "/dashboard/acme/repos").brandHref).toBe("/dashboard/acme/repos");
     expect(
       buildSidebarModel(admin, "/dashboard/acme/apps/acme-app/settings").brandHref,
-    ).toBe("/dashboard/acme/apps");
+    ).toBe("/dashboard/acme/repos");
   });
 
   test("language toggle targets the other locale", () => {
@@ -111,25 +111,26 @@ describe("shell models", () => {
     expect(navbar.accountLabel).toBeNull();
   });
 
-  test("Apps current is /dashboard, /dashboard/apps and settings", () => {
-    expect(isNavCurrent("/dashboard/apps", "/dashboard")).toBe(true);
-    expect(isNavCurrent("/dashboard/apps", "/dashboard/apps")).toBe(true);
-    expect(isNavCurrent("/dashboard/apps", "/dashboard/apps/acme/settings")).toBe(true);
-    const apps = buildSidebarModel(member, "/dashboard/apps");
-    expect(apps.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(true);
+  test("Repositories is current on the overview and both dashboard roots", () => {
+    expect(isNavCurrent("/dashboard/repos", "/dashboard/repos")).toBe(true);
+    expect(isNavCurrent("/dashboard/repos", "/dashboard/repos/12345")).toBe(true);
+    expect(isNavCurrent("/dashboard/repos", "/dashboard")).toBe(true);
+    expect(isNavCurrent("/dashboard/repos", "/dashboard/apps")).toBe(true);
+    expect(isNavCurrent("/dashboard/apps", "/dashboard/acme/apps")).toBe(false);
   });
 
-  test("root highlights Apps", () => {
+  test("root highlights Repositories", () => {
     const root = buildSidebarModel(member, "/dashboard");
-    expect(root.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(true);
+    expect(root.items.find((item) => item.href === "/dashboard/repos")?.current).toBe(true);
+    expect(root.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(false);
   });
 
   test("each surface lights exactly one entry — its own", () => {
     const cases: Array<[string, string]> = [
       ["/dashboard/acme/apps", "/dashboard/acme/apps"],
       ["/dashboard/acme/apps/12345", "/dashboard/acme/apps"],
-      ["/dashboard/acme/targets", "/dashboard/acme/targets"],
-      ["/dashboard/acme/targets/12345", "/dashboard/acme/targets"],
+      ["/dashboard/acme/repos", "/dashboard/acme/repos"],
+      ["/dashboard/acme/repos/12345", "/dashboard/acme/repos"],
       ["/dashboard/acme/members", "/dashboard/acme/members"],
       ["/dashboard/acme/settings", "/dashboard/acme/settings"],
     ];
@@ -143,7 +144,7 @@ describe("shell models", () => {
   test("a workspace page keeps BOTH nav entries inside its workspace", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/targets",
+      "/dashboard/acme/repos",
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
@@ -159,9 +160,9 @@ describe("shell models", () => {
     // Members is workspace-routed, so the pathname itself names
     // the workspace; every nav target stays inside it.
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/members");
-    expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
+    expect(sidebar.brandHref).toBe("/dashboard/acme/repos");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/targets",
+      "/dashboard/acme/repos",
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
@@ -172,12 +173,12 @@ describe("shell models", () => {
   test("the page's own workspace wins over the boot ref (one workspace identity per page)", () => {
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/targets",
+      "/dashboard/acme/repos",
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
-    expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
+    expect(sidebar.brandHref).toBe("/dashboard/acme/repos");
   });
 
   test("the boot ref still scopes a pathname that names no workspace", () => {
@@ -185,9 +186,9 @@ describe("shell models", () => {
     // server-resolved ref (the workspace id) carries the workspace into both
     // nav targets.
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "acme" }, "/dashboard/apps");
-    expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
+    expect(sidebar.brandHref).toBe("/dashboard/acme/repos");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/acme/targets",
+      "/dashboard/acme/repos",
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
@@ -205,18 +206,18 @@ describe("shell models", () => {
       "/dashboard/apps",
     );
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/ws_acme/targets",
+      "/dashboard/ws_acme/repos",
       "/dashboard/ws_acme/apps",
       "/dashboard/ws_acme/members",
       "/dashboard/ws_acme/settings",
     ]);
   });
 
-  test("no boot ref → the legacy targets are unchanged", () => {
+  test("no boot ref → the legacy paths are unchanged", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/apps");
     expect(sidebar.brandHref).toBe("/dashboard");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/targets",
+      "/dashboard/repos",
       "/dashboard/apps",
       "/dashboard/members",
       "/dashboard/settings",

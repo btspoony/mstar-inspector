@@ -1488,7 +1488,7 @@ describe("ops danger zone: one row per action", () => {
     // The App page's own ops zone (disable / enable / delete) and the repository
     // surface's target ops (pause / resume) are the same section; this
     // suite reads the target-owned face, which renders the review row too.
-    const html = withLocation("/dashboard/acme/targets/1", () =>
+    const html = withLocation("/dashboard/acme/repos/1", () =>
       renderToStaticMarkup(
         createElement(OpsSection, {
           locale,

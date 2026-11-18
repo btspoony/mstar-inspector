@@ -554,7 +554,7 @@ describe("the shell boot asks the gate's own classifier", () => {
     // The support view derives its API base from the pathname's workspace
     // segment; on the bare mount that read has no tenant and 404s.
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
     // A shell navigation is not a workspace route: no audit row.
     expect(auditRows(db)).toEqual([]);
   });
@@ -589,7 +589,7 @@ describe("the shell boot asks the gate's own classifier", () => {
       env,
     );
     expect(landing.status).toBe(302);
-    expect(landing.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
+    expect(landing.headers.get("Location")).toBe("/dashboard/ws-acme/repos");
     const shell = await worker.fetch(
       await authedRequest("/dashboard/ws-acme/apps", OPERATOR, { accept: "text/html" }),
       env,
@@ -688,7 +688,7 @@ describe("the shell boot reads the workspace facts once", () => {
       withSpaAssets(envFor(observed)),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
     // The landing resolves from the boot extras — the same request must not
     // re-run the sole-vs-ref resolution.
     expect(count(statements, ACCESS_JOIN)).toBe(1);
@@ -709,7 +709,7 @@ describe("the shell boot reads the workspace facts once", () => {
       withSpaAssets(envFor(observed)),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
     // Reinstating a second `workspaceBoot` (the landing re-reading what the
     // dispatch already resolved) raises this count and fails here.
     expect(count(statements, ACCESS_JOIN)).toBe(1);

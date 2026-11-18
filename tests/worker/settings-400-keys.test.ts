@@ -42,8 +42,8 @@ async function seededWorld(malloryRole: "owner" | "member" = "owner") {
     workspaceId: "default",
     maxApps: null,
   });
-  seedTarget(db, id, { name: "mallorys-app" });
-  return { db, app };
+  const targetId = seedTarget(db, id, { name: "mallorys-app" });
+  return { db, app, targetId };
 }
 
 function makeEnv(db: unknown): Env {
@@ -263,7 +263,7 @@ describe("settings 400 key transport", () => {
   });
 
   test("native HTML form post keeps the legacy 302 — the keyed body is never seen", async () => {
-    const { db } = await seededWorld();
+    const { db, targetId } = await seededWorld();
     const res = await postForm(
       SETTINGS,
       "mallory",
@@ -272,7 +272,9 @@ describe("settings 400 key transport", () => {
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
+    // The detail address carries the target's OWN id, never the App id.
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/repos/${targetId}`);
+    expect(res.headers.get("Location")).not.toBe(`/dashboard/default/repos/${APP_ID}`);
   });
 });
 

@@ -24,14 +24,14 @@ export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBo
     return <SupportPage boot={boot} />;
   }
   switch (route.page) {
-    case "apps":
-      return <AppsPage boot={boot} />;
-    case "targets":
+    case "repos":
       return route.targetId ? (
         <TargetDetailPage boot={boot} targetId={route.targetId} />
       ) : (
         <TargetsPage boot={boot} />
       );
+    case "apps":
+      return <AppsPage boot={boot} />;
     case "members":
       return <MembersPage boot={boot} />;
     case "settings":

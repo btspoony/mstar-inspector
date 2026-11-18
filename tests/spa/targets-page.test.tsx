@@ -20,6 +20,7 @@ import { type Element as DomElement, type Window as DomWindow } from "happy-dom"
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
+import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   AddRepositoryDialogBody,
   AddRepositoryDialog,
@@ -71,7 +72,7 @@ function renderBody(props: {
   selected?: number[];
   notice?: { kind: "warn" | "error"; message: string } | null;
 }): string {
-  return withLocation("/dashboard/acme/targets", () =>
+  return withLocation("/dashboard/acme/repos", () =>
     renderToStaticMarkup(
       createElement(AddRepositoryDialogBody, {
         locale: "en",
@@ -93,6 +94,26 @@ function renderBody(props: {
 }
 
 /**
+ * One row's own markup, cut at the next row so a string the metric band also
+ * renders (the 待安装 label is a metric key too) cannot satisfy an assertion
+ * about that row.
+ */
+function rowMarkup(markup: string, identity: string): string {
+  const rows = markup.split('data-slot="list-row"').slice(1);
+  const row = rows.find((part) => part.includes(identity));
+  if (row === undefined) throw new Error(`no row names ${identity}`);
+  return row;
+}
+
+/** The metric band as `{ key: value }`, read off the rendered markup. */
+function metricValues(markup: string): Record<string, string> {
+  const pairs = markup.matchAll(
+    /data-slot="metric-key"[^>]*>([^<]*)<\/span>.*?data-slot="metric-value"[^>]*>([^<]*)<\/span>/gs,
+  );
+  return Object.fromEntries([...pairs].map((match) => [match[1] ?? "", match[2] ?? ""]));
+}
+
+/**
  * The confirm button's disabled state, read off the rendered markup. React SSR
  * writes the attribute as `disabled=""`; the button's class list also mentions
  * `disabled:` variants, so only the bare attribute proves the state.
@@ -107,7 +128,7 @@ function confirmDisabled(markup: string): boolean {
 
 describe("repository list (static SSR)", () => {
   test("the fixed 所有仓库 row leads, and each live target gets one row", () => {
-    const markup = withLocation("/dashboard/acme/targets", () =>
+    const markup = withLocation("/dashboard/acme/repos", () =>
       renderToStaticMarkup(
         createElement(TargetsView, {
           locale: "en",
@@ -126,16 +147,16 @@ describe("repository list (static SSR)", () => {
     );
     expect(markup).toContain(t("en", "targets.allRepositoriesMeta"));
     expect(markup).toContain("2 repositories");
-    expect(markup).toContain('href="/dashboard/acme/targets/all"');
-    expect(markup).toContain('href="/dashboard/acme/targets/t-1"');
-    expect(markup).toContain('href="/dashboard/acme/targets/t-2"');
+    expect(markup).toContain('href="/dashboard/acme/repos/all"');
+    expect(markup).toContain('href="/dashboard/acme/repos/t-1"');
+    expect(markup).toContain('href="/dashboard/acme/repos/t-2"');
     // Status pills: reviewing and paused.
     expect(markup).toContain(t("en", "targets.status.reviewing"));
     expect(markup).toContain(t("en", "targets.status.paused"));
   });
 
   test("an empty workspace keeps the fixed row and states the empty case", () => {
-    const markup = withLocation("/dashboard/acme/targets", () =>
+    const markup = withLocation("/dashboard/acme/repos", () =>
       renderToStaticMarkup(
         createElement(TargetsView, { locale: "en", state: "ok", targets: [], onRetry: () => {} }),
       ),
@@ -147,7 +168,7 @@ describe("repository list (static SSR)", () => {
   });
 
   test("a 待安装 row reports the discriminator instead of an invented name", () => {
-    const markup = withLocation("/dashboard/acme/targets", () =>
+    const markup = withLocation("/dashboard/acme/repos", () =>
       renderToStaticMarkup(
         createElement(TargetsView, {
           locale: "en",
@@ -163,8 +184,96 @@ describe("repository list (static SSR)", () => {
     expect(markup).not.toContain("null/null");
   });
 
+  test("a target without repo_id but with owner/name renders the name, not a dash", () => {
+    // The staging shape: a target that lost its installation still names the
+    // repository it was reviewed under. `repo_id` stays the 待安装 badge's key,
+    // but it must not erase the identity.
+    const markup = withLocation("/dashboard/acme/repos", () =>
+      renderToStaticMarkup(
+        createElement(TargetsView, {
+          locale: "en",
+          state: "ok",
+          targets: [row({ repo_id: null, repo_owner: "42ch-dev", repo_name: "nexus" })],
+          onRetry: () => {},
+        }),
+      ),
+    );
+    expect(markup).toContain("42ch-dev/nexus");
+    // The badge is asserted on the ROW's own subtree: the metric band renders
+    // the same label as a key, so a page-wide `toContain` would pass even if
+    // the row carried no badge at all.
+    const targetRow = rowMarkup(markup, "42ch-dev/nexus");
+    expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
+    expect(targetRow).toContain('data-tone="warn"');
+    // No row fell back to the dash: the one target row named its repository.
+    expect(targetRow).not.toContain(">—</a>");
+  });
+
+  test("a target with neither an id nor a name still falls back to the dash", () => {
+    const markup = withLocation("/dashboard/acme/repos", () =>
+      renderToStaticMarkup(
+        createElement(TargetsView, {
+          locale: "en",
+          state: "ok",
+          targets: [row({ repo_id: null, repo_owner: null, repo_name: null })],
+          onRetry: () => {},
+        }),
+      ),
+    );
+    const targetRow = rowMarkup(markup, "—</a>");
+    expect(targetRow).toContain(">—</a>");
+    expect(targetRow).toContain(t("en", "targets.metaUninstalled"));
+    // The same installation axis: no repo_id means the 待安装 pill.
+    expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
+  });
+
+  test("the overview states what repositories are and the figures the list proves", () => {
+    const markup = withLocation("/dashboard/acme/repos", () =>
+      renderToStaticMarkup(
+        createElement(TargetsView, {
+          locale: "en",
+          state: "ok",
+          targets: [
+            row({ target_id: "t-1", last_reviewed_at: "2026-01-01 00:00:00" }),
+            row({ target_id: "t-2", repo_id: null, repo_owner: "acme", repo_name: "web", last_reviewed_at: "2026-01-03 00:00:00" }),
+            row({ target_id: "t-3", repo_id: null, repo_owner: null, repo_name: null }),
+          ],
+          onRetry: () => {},
+        }),
+      ),
+    );
+    // The one explanatory block — no second endpoint, no second paragraph.
+    expect(markup).toContain(t("en", "targets.headingDescription"));
+    // The figure and the pill are the SAME axis: t-2 names a repository but
+    // carries no repo_id, and both read it as 待安装.
+    expect(rowMarkup(markup, "acme/web")).toContain(t("en", "targets.status.uninstalled"));
+    expect(rowMarkup(markup, "acme/web")).toContain("acme/");
+    // Three figures from the loaded payload: count, unbound rows, newest review.
+    expect(metricValues(markup)).toEqual({
+      [t("en", "targets.metricRepositories")]: "3",
+      // The badge axis: t-2 and t-3 carry no repo_id (both read 待安装 above).
+      [t("en", "targets.metricUninstalled")]: "2",
+      // …and the newest stamp is t-2's, a named-but-unbound row: losing the
+      // installation does not erase the history, so it still sets this figure.
+      [t("en", "targets.metricLastReview")]: formatRelativeTime("2026-01-03 00:00:00", "en"),
+    });
+  });
+
+  test("an empty workspace reports never reviewed rather than a bogus date", () => {
+    const markup = withLocation("/dashboard/acme/repos", () =>
+      renderToStaticMarkup(
+        createElement(TargetsView, { locale: "en", state: "ok", targets: [], onRetry: () => {} }),
+      ),
+    );
+    expect(metricValues(markup)).toEqual({
+      [t("en", "targets.metricRepositories")]: "0",
+      [t("en", "targets.metricUninstalled")]: "0",
+      [t("en", "targets.metricLastReview")]: t("en", "common.time.never"),
+    });
+  });
+
   test("a load failure shows the error face with the fixed row still reachable", () => {
-    const markup = withLocation("/dashboard/acme/targets", () =>
+    const markup = withLocation("/dashboard/acme/repos", () =>
       renderToStaticMarkup(
         createElement(TargetsView, { locale: "en", state: "error", targets: null, onRetry: () => {} }),
       ),
@@ -333,7 +442,7 @@ async function mountTargets(
   element: ReturnType<typeof createElement>,
   respond: (wire: Wire) => Response | Promise<Response>,
 ) {
-  const { win, cleanup } = installDom("http://localhost/dashboard/acme/targets");
+  const { win, cleanup } = installDom("http://localhost/dashboard/acme/repos");
   const realFetch = globalThis.fetch;
   const sent: Wire[] = [];
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
@@ -727,7 +836,7 @@ describe("the list failure face", () => {
       return wireJson({});
     });
     try {
-      view.win.history.pushState(null, "", "/dashboard/beta/targets");
+      view.win.history.pushState(null, "", "/dashboard/beta/repos");
       await view.rerender(createElement(TargetsPage, { boot: BOOT }));
       expect(view.text()).toContain("beta/site");
 
@@ -803,7 +912,7 @@ function renderSettingsTab(
   reviewEnabled: 0 | 1 = 1,
   verdictsReadable = true,
 ): string {
-  return withLocation("/dashboard/acme/targets/t-1", () =>
+  return withLocation("/dashboard/acme/repos/t-1", () =>
     renderToStaticMarkup(
       createElement(TargetSettingsTab, {
         locale: "en",
@@ -886,7 +995,7 @@ async function mountDetail(
 ) {
   const targetId = options.targetId ?? "t-1";
   const { win, cleanup } = installDom(
-    `http://localhost${options.path ?? `/dashboard/acme/targets/${targetId}`}`,
+    `http://localhost${options.path ?? `/dashboard/acme/repos/${targetId}`}`,
   );
   const realFetch = globalThis.fetch;
   const sent: Wire[] = [];
@@ -1019,7 +1128,7 @@ describe("repository detail page (mounted)", () => {
       // No retry: the address names no target of this workspace, so the only
       // way out is the list.
       expect(view.text()).not.toContain(t("en", "common.retry"));
-      expect(view.win.document.querySelector("a")?.getAttribute("href")).toBe("/dashboard/acme/targets");
+      expect(view.win.document.querySelector("a")?.getAttribute("href")).toBe("/dashboard/acme/repos");
     } finally {
       await view.unmount();
     }
@@ -1027,7 +1136,7 @@ describe("repository detail page (mounted)", () => {
 });
 
 /**
- * The fixed 所有仓库 entry (`…/targets/all`, product spec J1/J4): the workspace
+ * The fixed 所有仓库 entry (`…/repos/all`, product spec J1/J4): the workspace
  * defaults form — no inheritance switch, no pause — over the workspace-scoped
  * 洞察 / 拉取请求 tabs, with the live count in the header.
  */
@@ -1047,7 +1156,7 @@ describe("all-repositories detail (mounted)", () => {
   test("renders the defaults form, the workspace tabs and the live count", async () => {
     const view = await mountDetail(
       (wire) => (wire.url.endsWith("/api/targets/all") ? wireJson(workspaceDefaults()) : wireJson({}, 500)),
-      { path: "/dashboard/acme/targets/all", targetId: "all" },
+      { path: "/dashboard/acme/repos/all", targetId: "all" },
     );
     try {
       expect(view.text()).toContain(t("en", "targets.allRepositories"));
@@ -1077,7 +1186,7 @@ describe("all-repositories detail (mounted)", () => {
       ...BOOT,
       memberships: [{ id: "acme", slug: "acme", name: "Acme", role: "member" as const, plan: "Free" }],
     };
-    const { win, cleanup } = installDom("http://localhost/dashboard/acme/targets/all");
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/repos/all");
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async () => wireJson(workspaceDefaults())) as unknown as typeof fetch;
     const container = win.document.createElement("div");
@@ -1108,7 +1217,7 @@ describe("all-repositories detail (mounted)", () => {
           : wire.url.endsWith("/api/targets/all")
             ? wireJson(workspaceDefaults())
             : wireJson({}, 500),
-      { path: "/dashboard/acme/targets/all", targetId: "all" },
+      { path: "/dashboard/acme/repos/all", targetId: "all" },
     );
     try {
       const manual = [...view.win.document.querySelectorAll("button")].find(
@@ -1132,7 +1241,7 @@ describe("all-repositories detail (mounted)", () => {
   test("?tab=insights opens the insights tab, and picking a tab writes it to the address", async () => {
     const view = await mountDetail(
       (wire) => (wire.url.endsWith("/api/targets/all") ? wireJson(workspaceDefaults()) : wireJson({}, 500)),
-      { path: "/dashboard/acme/targets/all?tab=insights", targetId: "all" },
+      { path: "/dashboard/acme/repos/all?tab=insights", targetId: "all" },
     );
     try {
       expect(view.activeTab()).toBe(t("en", "targets.tabInsights"));

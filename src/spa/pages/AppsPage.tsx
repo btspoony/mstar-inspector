@@ -229,7 +229,7 @@ function CreateAppChooser({
   reason: string;
   sharedBots: ReadonlyArray<SharedBotRow>;
 }) {
-  const addHref = `${apiBase()}/targets`;
+  const addHref = `${apiBase()}/repos`;
 
   return (
     <div className="flex flex-wrap items-center gap-2" data-slot="create-app-chooser">

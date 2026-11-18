@@ -149,7 +149,7 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
           <div
             id="content"
             tabIndex={-1}
-            className={`mx-auto w-full outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) focus-visible:ring-inset ${!proseFace && (page === "apps" || page === "members") ? "max-w-[1200px]" : "max-w-[960px]"}`}
+            className={`mx-auto w-full outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) focus-visible:ring-inset ${!proseFace && (page === "repos" || page === "apps" || page === "members") ? "max-w-[1200px]" : "max-w-[960px]"}`}
           >
             <SupportNotice boot={boot} pathname={pathname} />
             {/* One-shot outcome from the page just left (the delete flow): the

@@ -196,7 +196,7 @@ describe("AppsPage create dialog", () => {
       },
       /** The repository-surface link the dialog offers as its creation path. */
       addLink(): DomElement | null {
-        const href = `${apiBase()}/targets`;
+        const href = `${apiBase()}/repos`;
         return (
           [...(dialog()?.querySelectorAll("a") ?? [])].find(
             (node) => node.getAttribute("href") === href && node.textContent === t("en", "targets.add"),
@@ -217,7 +217,7 @@ describe("AppsPage create dialog", () => {
       await page.open();
       expect(page.dialog()).not.toBeNull();
       // The one target-creation entry is the repository surface's add flow.
-      expect(page.addLink()?.getAttribute("href")).toBe("/dashboard/acme/targets");
+      expect(page.addLink()?.getAttribute("href")).toBe("/dashboard/acme/repos");
       // No target form, no Select, no submit-to-/api/targets path.
       expect(page.dialog()?.querySelector('[data-slot="create-target-form"]')).toBeNull();
       expect(page.dialog()?.querySelector("form[action$='/api/targets']")).toBeNull();

@@ -129,13 +129,13 @@ describe("workspace switcher — URL-only switch", () => {
     expect(rec.cookieWrites).toEqual([]);
   });
 
-  test("a path with no workspace segment navigates to the picked workspace's Apps page", () => {
-    // The root workbench has no workspace segment to rewrite: the control is a
+  test("a path with no workspace segment navigates to the picked workspace's repository overview", () => {
+    // The dashboard root has no workspace segment to rewrite: the control is a
     // navigator, and the picked row opens a real page of that workspace.
     const rec = withBrowser("/dashboard", "", () => {
-      expect(switchWorkspace("ws_7d41", "apps")).toBe(true);
+      expect(switchWorkspace("ws_7d41", "repos")).toBe(true);
     });
-    expect(rec.pushed).toEqual(["/dashboard/ws_7d41/apps"]);
+    expect(rec.pushed).toEqual(["/dashboard/ws_7d41/repos"]);
     expect(rec.events).toEqual(["popstate"]);
     expect(rec.requests).toEqual([]);
   });
@@ -196,10 +196,10 @@ describe("workspace switcher — the control's list", () => {
   test("a path with no workspace segment is a navigator, not a rewriter", () => {
     // `/dashboard` is the post-login landing and `/index.html` the shell
     // document addressed directly: neither has a segment to rewrite, so a pick
-    // must OPEN that workspace's Apps page.
+    // must OPEN that workspace's repository overview.
     for (const pathname of ["/dashboard", "/dashboard/apps", "/index.html"]) {
       const model = buildWorkspaceSwitcherModel(boot, pathname);
-      expect(model?.target, pathname).toBe("apps");
+      expect(model?.target, pathname).toBe("repos");
       // Nothing is current: the URL names no workspace.
       expect(model?.currentRef, pathname).toBeNull();
     }
@@ -210,7 +210,7 @@ describe("workspace switcher — the control's list", () => {
     // `workspaceRefOf` reads `apps|members|api` as the second segment; a path
     // outside that family names no workspace page, so the control opens a real
     // one. A routed workspace path keeps the in-place rewrite.
-    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/nope")?.target).toBe("apps");
+    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/nope")?.target).toBe("repos");
     expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps/thing")?.target).toBe("replace");
   });
 });
@@ -323,16 +323,16 @@ describe("workspace switcher — the plan chip follows the URL", () => {
   });
 
   test("entering a workspace from the root path shows that workspace's plan", () => {
-    // The root workbench names no workspace, so there is no chip to carry
+    // The dashboard root names no workspace, so there is no chip to carry
     // over: the pick opens a real workspace page, and the chip follows it.
     expect(renderSwitcher(boot, "/dashboard")).not.toContain("Free");
     const model = buildWorkspaceSwitcherModel(boot, "/dashboard");
-    expect(model?.target).toBe("apps");
+    expect(model?.target).toBe("repos");
 
     const rec = withBrowser("/dashboard", "", () => {
       switchWorkspace("ws_7d41", model!.target);
     });
-    expect(rec.pushed).toEqual(["/dashboard/ws_7d41/apps"]);
+    expect(rec.pushed).toEqual(["/dashboard/ws_7d41/repos"]);
 
     const html = renderSwitcher(boot, "/dashboard/ws_7d41/apps");
     expect(html).toContain("Unlimited");

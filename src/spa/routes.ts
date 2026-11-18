@@ -1,17 +1,18 @@
 /**
  * Enumerated SPA pages (the `SPA_PAGES` interface; the four workspace
- * surfaces — apps, targets, members, settings — the App detail and login).
+ * surfaces — repositories, apps, members, settings — the App detail and login).
  *
- * `/dashboard` and `/dashboard/apps` are one root-routing rule: both render
- * the Apps workbench (the insights home at the root is retired, as is the
- * Worker 301 alias). Under `strict` the same pages live under the workspace
- * prefix (`/dashboard/<workspaceRef>/apps…`) — the Worker's tenant gate
- * admits those paths and this matcher serves their shell. History fallback is
- * this matcher, not wrangler `not_found_handling`.
+ * The repository overview is the dashboard default. `/dashboard` and the
+ * retired `/dashboard/apps` spelling are not pages: both answer one redirect to
+ * `/dashboard/<workspaceRef>/repos`, whose ref the Worker's landing policy
+ * names. Under `strict` the same pages live under the workspace prefix
+ * (`/dashboard/<workspaceRef>/apps…`) — the Worker's tenant gate admits those
+ * paths and this matcher serves their shell. History fallback is this matcher,
+ * not wrangler `not_found_handling`.
  */
 export const SPA_PAGES = [
+  "repos",
   "apps",
-  "targets",
   "members",
   "settings",
   "login",
@@ -26,8 +27,8 @@ export type SpaPageId = (typeof SPA_PAGES)[number];
  * therefore no field.
  */
 export type SpaRoute =
-  | { page: "apps"; pathname: string; workspaceRef?: string }
-  | { page: "targets"; pathname: string; workspaceRef: string; targetId?: string }
+  | { page: "repos"; pathname: string; workspaceRef: string; targetId?: string }
+  | { page: "apps"; pathname: string; workspaceRef: string }
   | { page: "members"; pathname: string; workspaceRef: string }
   | { page: "settings"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
@@ -41,7 +42,7 @@ export type SpaRoute =
  *
  * Reserved words occupy the FIRST segment after the mount; the route family
  * below is the SECOND. The Worker admits only `apps`, `members` and `api` —
- * `targets` and `settings` are SPA page paths with no Worker route under
+ * `repos` and `settings` are SPA page paths with no Worker route under
  * `/<ref>/` — so the two lists are not interchangeable; only the reserved set
  * is shared verbatim.
  */
@@ -62,7 +63,7 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
  * route to a workspace. ONE source for the SPA matcher below and the Worker's
  * route-family gate (`src/dashboard/index.ts`), which derives from it.
  */
-export const WORKSPACE_FAMILY_SEGMENTS = ["apps", "targets", "members", "settings", "api"] as const;
+export const WORKSPACE_FAMILY_SEGMENTS = ["repos", "apps", "members", "settings", "api"] as const;
 
 /**
  * The non-reserved workspace ref (an id or a slug) a `/dashboard/<ref>/<family
@@ -84,24 +85,69 @@ export function workspaceRefOf(pathname: string): string | null {
 /**
  * The same path with its workspace segment replaced — every other segment and
  * the query are preserved, so a renamed workspace lands on the SAME page under
- * its new ref. Null when the pathname carries no workspace segment (a
- * deployment-level page has nothing to rewrite).
+ * its new ref. A retired `targets` path is rewritten to its live `repos`
+ * spelling FIRST, so a switch from a bookmark lands on the page it names rather
+ * than the unknown-path stub. Null when the pathname carries no workspace
+ * segment (a deployment-level page has nothing to rewrite).
  */
 export function replaceWorkspaceRef(pathname: string, nextRef: string): string | null {
-  const match = /^\/dashboard\/([^/]+)(\/.*)?$/.exec(pathname);
+  // A bookmark on the retired family moves onto the live page it names, so the
+  // switch lands somewhere real instead of the unknown-path stub.
+  const live = targetsFamilyRedirect(pathname) ?? pathname;
+  const match = /^\/dashboard\/([^/]+)(\/.*)?$/.exec(live);
   if (!match || match[1] === undefined || RESERVED_WORKSPACE_SLUGS.has(match[1])) return null;
   return `/dashboard/${nextRef}${match[2] ?? ""}`;
 }
 
 const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)$/;
+const WORKSPACE_REPOS_PATH = /^\/dashboard\/([^/]+)\/repos$/;
+const WORKSPACE_REPOS_DETAIL_PATH = /^\/dashboard\/([^/]+)\/repos\/([^/]+)$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
-const WORKSPACE_TARGETS_PATH = /^\/dashboard\/([^/]+)\/targets$/;
-const WORKSPACE_TARGET_PATH = /^\/dashboard\/([^/]+)\/targets\/([^/]+)$/;
 const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;
 const WORKSPACE_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/settings$/;
 const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)$/;
 const WORKSPACE_APP_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)\/settings$/;
 const WORKSPACE_APP_BOT_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)\/bot$/;
+
+/**
+ * The two dashboard root spellings — `/dashboard` and the retired
+ * `/dashboard/apps` page. Neither is a page: the overview is workspace-scoped,
+ * so both answer one redirect to the addressed workspace's repository
+ * overview. Only the Worker can name that ref (it reads the session's sole
+ * workspace, else the login's first membership), so the target is
+ * {@link reposHomePath} of a ref it resolves — never something this matcher
+ * could decide.
+ */
+export const DASHBOARD_ROOT_PATHS: ReadonlySet<string> = new Set(["/dashboard", "/dashboard/apps"]);
+
+/** The repository overview of `ref` — the landing every root request resolves to. */
+export function reposHomePath(ref: string): string {
+  return `/dashboard/${ref}/repos`;
+}
+
+/** The retired `targets` family's list and detail spellings. */
+const RETIRED_TARGETS_LIST_PATH = /^\/dashboard\/([^/]+)\/targets$/;
+const RETIRED_TARGETS_DETAIL_PATH = /^\/dashboard\/([^/]+)\/targets\/([^/]+)$/;
+
+/**
+ * The repository address a retired `targets` path resolves to, or null for any
+ * other path. The family was renamed to `repos`; a bookmark from before the
+ * rename would otherwise reach no page at all, so both spellings answer ONE 302
+ * with their target segment carried over — the SAME repository, never the
+ * overview when the path named one.
+ *
+ * The ref's own validity is not judged here: an unknown or foreign ref lands on
+ * a page whose read answers the outsider 404, exactly as the live spelling does.
+ */
+export function targetsFamilyRedirect(pathname: string): string | null {
+  const [, listRef] = RETIRED_TARGETS_LIST_PATH.exec(pathname) ?? [];
+  if (listRef !== undefined) return reposHomePath(listRef);
+  const [, detailRef, targetId] = RETIRED_TARGETS_DETAIL_PATH.exec(pathname) ?? [];
+  if (detailRef !== undefined && targetId !== undefined) {
+    return `${reposHomePath(detailRef)}/${targetId}`;
+  }
+  return null;
+}
 
 /**
  * The app-detail address a retired path spelling resolves to, or null for any
@@ -129,25 +175,21 @@ export function settingsTabRedirect(pathname: string, _search: string): string |
  * `/settings` and `/bot` sub-paths are redirects, not pages, so a sub-path
  * never matches here.
  *
- * A repositories detail is `/dashboard/<workspaceRef>/targets/:targetId`:
- * a target UUID, or `all` for the workspace-defaults entry.
+ * The repository overview is `/dashboard/<workspaceRef>/repos`, and one
+ * repository is `…/repos/:targetId` — a target UUID, or `all` for the
+ * workspace-defaults entry. The two dashboard roots are redirects
+ * ({@link DASHBOARD_ROOT_PATHS}), never pages.
  */
 export function matchSpaRoute(pathname: string): SpaRoute | null {
-  switch (pathname) {
-    case "/dashboard":
-    case "/dashboard/apps":
-      return { page: "apps", pathname };
-    case "/dashboard/login":
-      return { page: "login", pathname };
-  }
+  if (pathname === "/dashboard/login") return { page: "login", pathname };
   const workspaceRef = workspaceRefOf(pathname);
   if (workspaceRef !== null) {
+    if (WORKSPACE_REPOS_PATH.test(pathname)) return { page: "repos", pathname, workspaceRef };
     if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceRef };
     if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceRef };
     if (WORKSPACE_SETTINGS_PATH.test(pathname)) return { page: "settings", pathname, workspaceRef };
-    if (WORKSPACE_TARGETS_PATH.test(pathname)) return { page: "targets", pathname, workspaceRef };
-    const targetId = WORKSPACE_TARGET_PATH.exec(pathname)?.[2];
-    if (targetId) return { page: "targets", pathname, workspaceRef, targetId };
+    const targetId = WORKSPACE_REPOS_DETAIL_PATH.exec(pathname)?.[2];
+    if (targetId) return { page: "repos", pathname, workspaceRef, targetId };
     const appId = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
     if (appId) return { page: "app-detail", pathname, appId, workspaceRef };
     return null;

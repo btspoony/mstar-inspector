@@ -155,8 +155,8 @@ describe("SPA dispatch", () => {
       "/dashboard",
       "/dashboard/acme/apps",
       "/dashboard/acme/apps/12345",
-      "/dashboard/acme/targets",
-      "/dashboard/acme/targets/12345",
+      "/dashboard/acme/repos",
+      "/dashboard/acme/repos/12345",
       // Members is workspace-scoped: the root path is retired.
       "/dashboard/acme/members",
       "/dashboard/login",
@@ -353,7 +353,7 @@ describe("SPA dispatch", () => {
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/apps/12345",
-      "/dashboard/acme/targets/12345",
+      "/dashboard/acme/repos/12345",
     ];
     for (const path of deepLinks) {
       const { env, calls } = makeEnv();
@@ -476,6 +476,39 @@ describe("SPA dispatch", () => {
   });
 });
 
+describe("the retired targets family redirects once", () => {
+  // The repository family was renamed `targets` → `repos`. A bookmark from
+  // before the rename must reach the page it names, with its target segment.
+  const redirects: Array<[string, string]> = [
+    ["/dashboard/acme/targets", "/dashboard/acme/repos"],
+    ["/dashboard/acme/targets/12345", "/dashboard/acme/repos/12345"],
+    ["/dashboard/acme/targets/all", "/dashboard/acme/repos/all"],
+  ];
+
+  for (const [from, to] of redirects) {
+    test(`${from} → 302 ${to}`, async () => {
+      const { env, calls } = makeEnv({ DB: memberDbStub() });
+      const session = await createSessionValue("octocat", null, SESSION_SECRET);
+      const res = await worker.fetch(
+        htmlGetRequest(from, { Cookie: `${SESSION_COOKIE}=${session}` }),
+        env,
+      );
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe(to);
+      // The retired address renders no page: no shell read, no ASSETS.
+      expect(calls).toEqual([]);
+    });
+  }
+
+  test("the redirect needs no session (the destination enforces access)", async () => {
+    const { env, calls } = makeEnv();
+    const res = await worker.fetch(htmlGetRequest("/dashboard/acme/targets"), env);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/acme/repos");
+    expect(calls).toEqual([]);
+  });
+});
+
 describe("the retired settings-tab addresses redirect once", () => {
   const redirects: Array<[string, string]> = [
     ["/dashboard/acme/apps/12345/settings", "/dashboard/acme/apps/12345?tab=settings"],
@@ -511,7 +544,7 @@ describe("the retired settings-tab addresses redirect once", () => {
       "/dashboard/acme/apps/12345",
       "/dashboard/acme/apps/12345?tab=settings",
       "/dashboard/acme/apps/12345?tab=insights",
-      "/dashboard/acme/targets/12345",
+      "/dashboard/acme/repos/12345",
     ]) {
       const { env, calls } = makeEnv({ DB: memberDbStub() });
       const session = await createSessionValue("octocat", null, SESSION_SECRET);

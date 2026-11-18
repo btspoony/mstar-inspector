@@ -139,13 +139,13 @@ async function openMenu(
 
 function created(): Response {
   return new Response(
-    JSON.stringify({ id: "ws_new", slug: "ws_new", name: "New one", role: "owner", appsPath: "/dashboard/ws_new/apps" }),
+    JSON.stringify({ id: "ws_new", slug: "ws_new", name: "New one", role: "owner", homePath: "/dashboard/ws_new/repos" }),
     { status: 201, headers: { "Content-Type": "application/json" } },
   );
 }
 
 describe("create from the switcher menu", () => {
-  test("the item opens a dialog that posts one name field and lands on the new workspace's apps page", async () => {
+  test("the item opens a dialog that posts one name field and lands on the new workspace's repository overview", async () => {
     const surface = await openMenu(() => created());
     try {
       expect(surface.dialog()).toBeNull();
@@ -163,7 +163,7 @@ describe("create from the switcher menu", () => {
       expect(surface.posts[0]?.body).toBe("name=New+one");
       // The 201 names the landing: a full navigation, so the fresh boot lists
       // the new membership (the in-memory one cannot).
-      expect(surface.assigned).toEqual(["/dashboard/ws_new/apps"]);
+      expect(surface.assigned).toEqual(["/dashboard/ws_new/repos"]);
     } finally {
       await surface.cleanup();
     }

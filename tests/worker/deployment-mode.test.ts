@@ -333,7 +333,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
 
       const landed = await shell("/dashboard", env, cookies);
       expect(landed.status).toBe(302);
-      expect(landed.headers.get("Location")).toBe("/dashboard/default/apps");
+      expect(landed.headers.get("Location")).toBe("/dashboard/default/repos");
       expect(spendsMarker(landed)).toBe(false);
 
       // The browser follows that 302; this response renders the first-login
