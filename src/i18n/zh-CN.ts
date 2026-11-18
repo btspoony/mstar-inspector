@@ -520,6 +520,9 @@ export const zhCN: Dictionary = {
     inviteAcceptFailed: "接受邀请失败，请重试。",
     /** `/dashboard/<ref>/settings` 的管理者门禁——普通成员看到此文案。 */
     settingsOwnerOnly: "只有工作区所有者和管理员可以修改这些设置。",
+    /** 两个标签页：只读的花费，以及管理者可写的设置。 */
+    tabQuota: "额度",
+    tabConfiguration: "配置",
     /**
      * 只读的用量卡片（spec bot-scope-and-claiming § Review usage）：本月（UTC）、
      * 两个计数，以及共享机器人一行的状态。两个不可用状态文案不同——一个由读者
@@ -539,9 +542,9 @@ export const zhCN: Dictionary = {
     usageNotDesignatedHint:
       "此平台尚未指定共享机器人。共享机器人由平台运营者指定；在此之前，由你自有的 GitHub App 审查你的拉取请求。",
     /**
-     * 发布审查计数之上的额度区块。所有数值都是整数 RP；额度一行按当月判定
-     * profile 的 `rp_per_credit` 换算并保留两位小数。单位写在标签里，数值只有
-     * 一对数字——绝不写成「12 额度」。
+     * 发布审查计数之上的额度区块。服务端给的是整数 RP，卡片按当月判定 profile
+     * 的 `rp_per_credit` 换算并保留两位小数——运营者只会看到「额度」这一个单位。
+     * 单位写在标签里，数值只有一对数字——绝不写成「12 额度」。
      */
     quotaHeading: "额度用量",
     /** {month} = UTC 月份，例如 2026-11。卡片唯一的月份标签。 */
@@ -551,13 +554,7 @@ export const zhCN: Dictionary = {
     quotaCredits: "{used} / {limit}",
     /** `monthly_rp` 为 NULL：绝不显示 0，也不留空上限。 */
     quotaNoLimit: "当前套餐无月度上限",
-    /** {rpPerCredit} = 当月判定 profile 自己的比率，绝不写成常量。 */
-    quotaRpLabel: "RP（1 额度 = {rpPerCredit} RP）",
-    /** {used} / {limit}，以 RP 计，纯整数。 */
-    quotaRp: "{used} / {limit}",
-    /** 无上限套餐的同一行：花费仍然真实存在。 */
-    quotaRpNoLimit: "已用 {used} RP",
-    quotaSplitLabel: "去向",
+    quotaSplitLabel: "去向（额度）",
     quotaSharedBot: "共享机器人",
     quotaByok: "自有密钥（BYOK）",
     /** {version} = 当月判定的版本（"v2"）；{date} = 其起始日，YYYY-MM-DD。 */

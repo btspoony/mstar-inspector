@@ -606,6 +606,9 @@ export const en = {
     inviteAcceptFailed: "Could not accept the invitation — try again.",
     /** The manager gate on `/dashboard/<ref>/settings` — a plain member sees it. */
     settingsOwnerOnly: "Only workspace owners and admins can change these settings.",
+    /** The two tabs: the read-only spend, then the settings a manager may write. */
+    tabQuota: "Quota",
+    tabConfiguration: "Configuration",
     /**
      * The read-only usage card (spec bot-scope-and-claiming § Review usage):
      * this UTC month, the two counts, and the shared-bot row's state. The two
@@ -626,10 +629,11 @@ export const en = {
     usageNotDesignatedHint:
       "No shared bot is designated on this platform. A platform operator designates it; until then your own GitHub Apps review your pull requests.",
     /**
-     * The credit block that sits above the published-review counts. Every
-     * figure is integer RP; the credits row divides by the judging profile's
-     * `rp_per_credit` and shows two decimals. The LABEL carries the unit and
-     * the value is the bare pair — never "12 credits".
+     * The credit block that sits above the published-review counts. The wire
+     * sends integer RP and the card divides by the judging profile's
+     * `rp_per_credit` to two decimals — credits are the only unit the operator
+     * ever reads. The LABEL carries the unit and the value is the bare pair —
+     * never "12 credits".
      */
     quotaHeading: "Credit usage",
     /** {month} = the UTC calendar month, e.g. 2026-11. The card's only month label. */
@@ -639,13 +643,7 @@ export const en = {
     quotaCredits: "{used} / {limit}",
     /** `monthly_rp` NULL: never 0, never an empty limit. */
     quotaNoLimit: "No monthly limit on this plan",
-    /** {rpPerCredit} = the judging profile's own ratio, never a constant. */
-    quotaRpLabel: "RP (1 credit = {rpPerCredit} RP)",
-    /** {used} / {limit} in RP, plain integers. */
-    quotaRp: "{used} / {limit}",
-    /** The same row for a plan with no ceiling: the spend is still real. */
-    quotaRpNoLimit: "{used} RP used",
-    quotaSplitLabel: "Where it went",
+    quotaSplitLabel: "Where it went (credits)",
     quotaSharedBot: "Shared bot",
     quotaByok: "BYOK",
     /** {version} = the judging profile ("v2"); {date} = its start, YYYY-MM-DD. */
