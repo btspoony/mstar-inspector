@@ -457,15 +457,21 @@ function logArmingOnJournalHandoff(arm: () => void) {
 }
 
 /** Seed a publication-journal row for the delivered head (the hand-off probe). */
-function seedJournalRow(db: TestD1, headSha: string, phase = "prepared", payloadJson = "{}"): void {
+function seedJournalRow(
+  db: TestD1,
+  headSha: string,
+  phase = "prepared",
+  payloadJson = "{}",
+  kind: "review" | "degraded" = "review",
+): void {
   db.raw
     .prepare(
       `INSERT INTO review_publications
          (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, created_ms, updated_ms)
-       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', ?, ?, 1000, 1000)`,
+       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, 1000, 1000)`,
     )
-    .run(`journal-${phase}`, TEST_APP_ID, headSha, phase, payloadJson);
+    .run(`journal-${phase}`, TEST_APP_ID, headSha, kind, phase, payloadJson);
 }
 
 /** Seed the App/installation mapping the reconciler's D1 pair gate reads. */
@@ -2407,6 +2413,11 @@ describe("createReviewConsumer", () => {
     h.kvState.getValue = "done"; // an orphan mark: no `reviews` row backs it
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // A journal row the §7.7 step 2 hand-off probe WOULD find for this head.
+    // `degraded` keeps it off the review row's unique (scope, head, kind), so
+    // the paid review can still stage; before the guard this delivery hands
+    // off here and returns without a review.
+    seedJournalRow(db, SHA, "prepared", "{}", "degraded");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await consumer(h.makeBatch(makePayload()));
@@ -2427,15 +2438,26 @@ describe("createReviewConsumer", () => {
     );
     expect(warnLine).toBeDefined();
     expect(h.logLines.some((l) => l.msg.includes("KV idempotency hit"))).toBe(false);
+    // No later branch in this delivery acks as done: the journal hand-off is
+    // skipped with its own line, so the missing review is produced.
+    const skipLine = h.logLines.find(
+      (l) => l.level === "warn" && l.msg.includes("journal hand-off skipped"),
+    );
+    expect(skipLine).toBeDefined();
+    expect(h.logLines.some((l) => l.msg.includes("publication journal hit"))).toBe(false);
   });
 
   test("KV done-state hit where the D1 confirmation read throws → proceeds, never acks", async () => {
     h.kvState.getValue = "done";
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // A journal row that would otherwise hand off and ack without a review.
+    seedJournalRow(db, SHA, "prepared", "{}", "degraded");
     const real = createArtifactStore(db);
+    const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
       // Only the dedup's confirmation read faults; every other store call
       // stays real, so the run's own writes still land.
       store: {
@@ -2456,7 +2478,20 @@ describe("createReviewConsumer", () => {
     );
     expect(warnLine).toBeDefined();
     expect(h.logLines.some((l) => l.msg.includes("KV idempotency hit"))).toBe(false);
+    // The fault takes the SAME no-ack route as the orphan: the journal branch
+    // is skipped, so nothing downstream can close this delivery as done.
+    expect(
+      h.logLines.some((l) => l.level === "warn" && l.msg.includes("journal hand-off skipped")),
+    ).toBe(true);
+    expect(h.logLines.some((l) => l.msg.includes("publication journal hit"))).toBe(false);
+    // No `skipped` (done-as-a-duplicate) conclusion: the delivered run is not
+    // closed by the unconfirmed mark, and the published review's own gate
+    // result is what the Check reports.
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).not.toBe("in_progress");
+    expect(row.desired_summary).not.toBe(CHECK_SUMMARIES.skipped);
   });
+
 
   test("lifecycle apply failure after a successful post → one comment, proof + KV done, warn + ack, no rethrow", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -8349,18 +8384,18 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       h.sandbox.resolvedSha = SHA2; // the checkout moved to a NEWER commit
       const db = await createSeededTestD1();
       const key = idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA2 });
-      if (dedup === "kv") {
-        h.kvState.entries.set(key, "done");
-      } else {
-        await createArtifactStore(db).put({
-          kind: "review",
-          key,
-          schema: "mstar.review/v1",
-          payload: VALID_OUTPUT,
-          appId: TEST_APP_ID,
-          targetId: `target-${TEST_APP_ID}`,
-        });
-      }
+      // BOTH variants are CONFIRMED dedup hits: the KV mark is proof only
+      // together with the D1 row it was written after (an orphan mark now
+      // proceeds to a review instead of acking).
+      await createArtifactStore(db).put({
+        kind: "review",
+        key,
+        schema: "mstar.review/v1",
+        payload: VALID_OUTPUT,
+        appId: TEST_APP_ID,
+        targetId: `target-${TEST_APP_ID}`,
+      });
+      if (dedup === "kv") h.kvState.entries.set(key, "done");
       const adapter = checksAdapterFor(db);
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
@@ -8371,8 +8406,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
       // The contradicted claim is decided BEFORE the dedup read, so it stays
       // superseded; only the new head's admitted run is closed by the hit, and
-      // it closes with the head's INHERITED result: both variants have an
-      // unreadable baseline here (no review row / no tally), which fails closed.
+      // it closes with the head's INHERITED result: both variants seed the same
+      // row, which carries no tally, so the gate read fails closed.
       expect(checkRequests.map((r) => r.op), dedup).toEqual([
         "create",
         "update",

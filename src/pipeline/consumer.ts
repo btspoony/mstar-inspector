@@ -5127,6 +5127,11 @@ async function processMessage(
     // A D1 read fault is not evidence of a completed review: it must never
     // terminalize the run, so it is caught here and treated as "unconfirmed".
     const kvMarked = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
+    // A `done` mark this delivery could not confirm (no D1 row, or a read
+    // fault) must not be re-acked later in the SAME delivery: the journal
+    // hand-off below acks too, and its `applied` row would otherwise dead-end
+    // the head with no review row. One predicate, two consumers.
+    let kvUnconfirmed = false;
     if (kvMarked) {
       let confirmed: ReviewRow | null | undefined;
       try {
@@ -5150,6 +5155,9 @@ async function processMessage(
         await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
         return { kind: "ok" };
       }
+      // Neither an orphan mark nor a fault is confirmation: this delivery must
+      // not ack as done anywhere below (the journal hand-off is guarded on it).
+      kvUnconfirmed = true;
       if (confirmed === null) {
         deps.log.warn(
           fields,
@@ -5169,7 +5177,17 @@ async function processMessage(
     // prepared/sending/unknown/confirmed row for this exact scope/SHA hands
     // off to recovery and ACKs without another paid review. Pending recovery
     // is never deleted by a same-SHA mention re-run.
-    const journalRow = await journalHandoffRow(deps.env.DB, lifecycleScope, headSha);
+    // SKIPPED for a KV mark this delivery could not confirm: an `applied`
+    // journal row would not hand off at all, and a non-terminal one would ack
+    // without the D1 row the mark claims — either way the head keeps no
+    // review. This delivery produces the missing review instead.
+    if (kvUnconfirmed) {
+      deps.log.warn(
+        fields,
+        "idempotency KV unconfirmed and journal hand-off skipped — proceeding to produce the review",
+      );
+    }
+    const journalRow = kvUnconfirmed ? null : await journalHandoffRow(deps.env.DB, lifecycleScope, headSha);
     if (journalRow !== null) {
       deps.log.info(
         fields,
