@@ -12,7 +12,7 @@
     "rules": [
       "One record per omp API-key LLM provider that the models.dev snapshot lacks. Not materialized: ids already in the catalog, naming aliases of a catalog row, non-model providers (search / local-inference / no env key), and OAuth- or device-code-only logins.",
       "`api` is the provider's materializable protocol (anthropic-messages / openai-completions / openai-responses / typesafe). A mixed-protocol provider gets one record per protocol — a custom-provider declaration carries exactly one `api`.",
-      "`baseUrl` is the record's most common model base URL, else the authored seed base URL or factory default; null when omp ships none, or when omp's default is a loopback http:// endpoint (the declaration store requires https), so the operator supplies it at save time.",
+      "`baseUrl` is the record's most common model base URL, else the authored seed base URL; null when omp ships none, or when every candidate is a loopback/plain-http host (the declaration store requires https), so the operator supplies it at save time.",
       "`models` is the provider's FULL seed/bundled vocabulary — no cap.",
       "A mixed-protocol provider contributes one record per protocol; `sourceProviderId` names the omp provider where a record id differs from it.",
       "`overrides.json` is applied last and wins: a named protocol bucket replaces that record's vocabulary wholesale instead of unioning, because the package and the vendor's live endpoint use different id dialects. The bucket carries the vendor's ids verbatim."

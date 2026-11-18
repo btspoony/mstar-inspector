@@ -13,6 +13,7 @@
  *      `run:` would abort the job before the PR is opened).
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -124,14 +125,41 @@ describe("refresh-catalog.yml guards", () => {
       expect(byId.get(id)!.if, id).toBe("steps.diff.outputs.changed == 'true'");
     }
     const body = steps.find((step) => step.name === "Build the PR body")!;
-    expect(body.run).toContain('grep -q \'❌\'');
-    expect(body.run).toContain("typecheck FAILED");
-    expect(body.run).toContain("bun test tests FAILED");
+    // The verdict is a script (unit-tested against every outcome combination),
+    // not inline shell: the label cannot rot into a hardcoded ✅.
+    expect(body.run).toContain("scripts/provider-catalog/pr-verdict.ts");
+    expect(body.run).toContain("$TYPECHECK_OUTCOME");
+    expect(body.run).toContain("$TEST_OUTCOME");
     const prStep = steps.find((step) => step.name === "Open or update the refresh PR")!;
     expect(prStep.run).toContain("⚠ tests red");
     // No auto-merge, ever: the PR is a review surface, not a merge trigger.
     expect(runs).not.toContain("--auto");
     expect(runs).not.toContain("gh pr merge");
+  });
+
+  test("the test step's exit status is the test's, not `tee`'s", () => {
+    // The workflow declares no `shell:`, so GitHub runs `bash -e {0}` — and a
+    // bare `bun test | tee` then reports 0 through tee even when the suite
+    // fails. Combined with `continue-on-error`, that turned a red suite into a
+    // green PR. Any pipeline into `tee` must be preceded by `pipefail`.
+    const test = byId.get("test")!;
+    expect(test.run).toBeDefined();
+    if (/\|\s*tee\b/.test(test.run!)) {
+      expect(test.run).toMatch(/set -o pipefail/);
+    }
+    expect(byId.get("test")!.run).toContain('"${RUNNER_TEMP}/test.log"');
+    // Belt and braces: even if that construct were lost, the verdict script
+    // reads the log, so a recorded failure still labels the PR red.
+    const verdict = readFileSync(join(REPO_ROOT, "scripts/provider-catalog/pr-verdict.ts"), "utf8");
+    expect(verdict).toContain("fail");
+  });
+
+  test("every trigger builds from the default branch, never from a dispatched feature branch", () => {
+    // `workflow_dispatch` may be run from any branch; without a pinned ref the
+    // refresh branch (and its PR) would carry that branch's unmerged commits
+    // while the removals diff still compares origin/main.
+    const checkout = steps.find((step) => step.uses?.startsWith("actions/checkout"))!;
+    expect(checkout.with?.ref).toContain("github.event.repository.default_branch");
   });
 
   test("the PR body reports catalog removals and the pin movement", () => {
@@ -158,11 +186,18 @@ describe("refresh-catalog.yml guards", () => {
     expect(byId.get("pins")!.run).toContain('"$CLI_STATE" = "available"');
   });
 
-  test("the runner lock is regenerated from the committed lock, not from scratch", () => {
-    // Resolving packages/runner/package.json alone also lifts caret-ranged
-    // transitives (the SDK's own deps), turning a one-line pin bump into an
-    // unrelated dependency upgrade inside the review image.
-    expect(byId.get("pins")!.run).toContain('cp packages/runner/package.json packages/runner/bun.lock "$TMP"');
-    expect(byId.get("pins")!.run).toContain("--lockfile-only");
+  test("the pins step delegates to bump-pins, which owns every lock beside a manifest", () => {
+    // The workflow used to re-do the runner lock itself; a second implementation
+    // drifted from the script's documented local path (the review caught the
+    // local path leaving both locks stale). One owner, one behaviour.
+    const pins = byId.get("pins")!.run!;
+    expect(pins).toContain("scripts/provider-catalog/bump-pins.ts");
+    expect(pins).not.toContain("bun install --lockfile-only");
+    expect(pins).toContain("PINS=(");
+    expect(pins).toContain("git checkout -- \"${PINS[@]}\"");
+    // The rollback must cover every lock the script may have rewritten.
+    for (const path of ["package.json", "bun.lock", "packages/runner/package.json", "packages/runner/bun.lock"]) {
+      expect(pins, path).toContain(path);
+    }
   });
 });

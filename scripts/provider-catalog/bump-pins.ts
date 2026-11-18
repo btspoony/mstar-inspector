@@ -9,8 +9,8 @@
  * the pins by hand (the image cannot import the module, and the runner's
  * manifest installs separately):
  *
- *   - `package.json`                           root engine (caret) + omp (exact)
- *   - `packages/runner/package.json`          exact engine + omp the image installs
+ *   - `package.json` + `bun.lock`             root engine (caret) + omp (exact)
+ *   - `packages/runner/package.json` + `bun.lock`  exact engine + omp the image installs
  *   - `src/contracts/sandbox-images.ts`       HARNESS_VERSION + harnessRef literals
  *   - `sandbox-image/cli-global/package.json` + `bun.lock`  the CLI pin
  *   - `sandbox-image/Dockerfile`              the clone's ref and its anchor comment
@@ -20,10 +20,20 @@
  * tag cannot yield a commit, so `--harness-ref` supplies the dereferenced sha;
  * without one the version literals still move and the run says the ref did not.
  *
+ * The script owns the locks too, so its own documented invocation leaves a tree
+ * `bun install --frozen-lockfile` accepts. Each lock is regenerated from the
+ * COMMITTED one (`--lockfile-only`), so only the pin's rows move — resolving
+ * from the manifest alone would also lift the caret-ranged transitives the
+ * committed lock already fixed. The runner lock is regenerated in a temp copy,
+ * because a nested `packages/runner/node_modules` would shadow the root
+ * resolution the repo's typecheck and tests use.
+ *
  * Every rewrite is anchored on the current pin, so a surface that already moved
  * by hand fails the run instead of silently doing nothing.
  */
+import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 const ROOT = path.resolve(".");
@@ -70,6 +80,20 @@ async function currentPins(): Promise<Pins> {
     harnessRef,
     bumped,
   };
+}
+
+/** Regenerate `dir`'s bun.lock from the committed lock + manifest beside it.
+ *  `path.resolve`, not `path.join`: the runner's lock is built in an absolute
+ *  temp directory, and `join` would nest it under the repo root instead. */
+function regenerateLock(dir: string): void {
+  const install = Bun.spawnSync(["bun", "install", "--lockfile-only"], {
+    cwd: path.resolve(ROOT, dir),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (install.exitCode !== 0) {
+    throw new Error(`${path.join(dir, "bun.lock")} regeneration failed: ${install.stderr.toString()}`);
+  }
 }
 
 /** The edits that move every surface from the committed pins to the requested
@@ -152,15 +176,26 @@ if (import.meta.main) {
       await writeFile(path.join(ROOT, file), text, "utf8");
       console.log(`updated ${file} (${fileEdits.length} pin${fileEdits.length === 1 ? "" : "s"})`);
     }
-    // The CLI's own lock is a second exact pin: regenerate it in place.
-    if (edits.some((edit) => edit.file === "sandbox-image/cli-global/package.json")) {
-      const install = Bun.spawnSync(["bun", "install", "--lockfile-only"], {
-        cwd: path.join(ROOT, "sandbox-image/cli-global"),
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      if (install.exitCode !== 0) throw new Error(`cli-global lock regeneration failed: ${install.stderr.toString()}`);
-      console.log("regenerated sandbox-image/cli-global/bun.lock");
+    // Locks: one per manifest that moved. The root and CLI locks regenerate in
+    // place from their committed state; the runner's is built in a temp copy so
+    // no nested node_modules lands inside the tree.
+    for (const dir of ["", "sandbox-image/cli-global"]) {
+      if (!edits.some((edit) => edit.file === path.join(dir, "package.json"))) continue;
+      regenerateLock(dir);
+      console.log(`regenerated ${path.join(dir, "bun.lock")}`);
+    }
+    if (edits.some((edit) => edit.file === "packages/runner/package.json")) {
+      const tmp = mkdtempSync(path.join(tmpdir(), "runner-lock-"));
+      try {
+        for (const name of ["package.json", "bun.lock"]) {
+          copyFileSync(path.join(ROOT, "packages/runner", name), path.join(tmp, name));
+        }
+        regenerateLock(tmp);
+        copyFileSync(path.join(tmp, "bun.lock"), path.join(ROOT, "packages/runner/bun.lock"));
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+      console.log("regenerated packages/runner/bun.lock");
     }
   }
 }

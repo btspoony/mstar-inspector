@@ -27,8 +27,9 @@
  *   3. `models` is the FULL vocabulary — no cap. The store's own bound applies
  *      at declaration time, not here.
  *   4. `baseUrl` is the most common model `baseUrl` in the record, else the
- *      seed api/base-url; null when omp ships none or only a loopback http://
- *      host (the declaration store requires https).
+ *      authored seed base URL; null when omp ships none, or when every candidate
+ *      is a loopback/plain-http host the declaration store rejects (it requires
+ *      https) — the operator supplies the URL at save time.
  *   5. The verify snapshot keeps only `login "api-key"` rules that validate a
  *      pasted key against a GET models/identity endpoint — never an inference
  *      call. `headersHook` is carried verbatim.
@@ -223,6 +224,24 @@ function modelRows(id: string, rule: Rule | undefined) {
   return [...bundled, ...seeded];
 }
 
+/** A URL a custom-provider declaration can actually store: https, no loopback
+ *  host. Everything else is treated as absent (`null`), which the save flow
+ *  already models as "the operator supplies it" — the rule this script publishes
+ *  in `source.rules`, enforced here instead of only written down. */
+function declarationBaseUrl(url: string | null | undefined): string | null {
+  if (typeof url !== "string") return null;
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return null;
+  }
+  return url.startsWith("https://") && !LOOPBACK_HOSTS.test(host) ? url : null;
+}
+
+/** Hosts only the local machine can reach (`localhost`, `127.0.0.0/8`, `::1`). */
+const LOOPBACK_HOSTS = /^(localhost|127\.\d+\.\d+\.\d+|\[?::1\]?)$/i;
+
 function mostCommon<T>(values: T[]): T | undefined {
   const counts = new Map<T, number>();
   for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
@@ -289,11 +308,14 @@ for (const auth of rules.auth.providers) {
   for (const api of apis) {
     const group = byApi.get(api)!;
     const recordId = api === primary ? id : `${id}-${PROTOCOL_SUFFIX[api] ?? api}`;
-    const baseUrl =
+    // `seed.api` is the protocol dialect (see `modelRows`), NOT a URL: using it
+    // as a base-URL fallback would prefill a template row with
+    // "openai-completions". Only real URLs enter the chain, and each candidate
+    // must survive the declaration store's https rule.
+    const baseUrl = declarationBaseUrl(
       mostCommon(group.map((r) => r.baseUrl).filter((b): b is string => typeof b === "string")) ??
-      rule?.seed?.baseUrl ??
-      rule?.seed?.api ??
-      null;
+        rule?.seed?.baseUrl,
+    );
     const placeholders = [...(baseUrl ?? "").matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!);
     const unusable =
       !ID_PATTERN.test(recordId)
@@ -369,7 +391,7 @@ const providersOut = {
     rules: [
       "One record per omp API-key LLM provider that the models.dev snapshot lacks. Not materialized: ids already in the catalog, naming aliases of a catalog row, non-model providers (search / local-inference / no env key), and OAuth- or device-code-only logins.",
       "`api` is the provider's materializable protocol (anthropic-messages / openai-completions / openai-responses / typesafe). A mixed-protocol provider gets one record per protocol — a custom-provider declaration carries exactly one `api`.",
-      "`baseUrl` is the record's most common model base URL, else the authored seed base URL or factory default; null when omp ships none, or when omp's default is a loopback http:// endpoint (the declaration store requires https), so the operator supplies it at save time.",
+      "`baseUrl` is the record's most common model base URL, else the authored seed base URL; null when omp ships none, or when every candidate is a loopback/plain-http host (the declaration store requires https), so the operator supplies it at save time.",
       "`models` is the provider's FULL seed/bundled vocabulary — no cap.",
       "A mixed-protocol provider contributes one record per protocol; `sourceProviderId` names the omp provider where a record id differs from it.",
       "`overrides.json` is applied last and wins: a named protocol bucket replaces that record's vocabulary wholesale instead of unioning, because the package and the vendor's live endpoint use different id dialects. The bucket carries the vendor's ids verbatim.",
