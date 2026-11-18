@@ -40,6 +40,7 @@ import {
   getMaintenanceMode,
   isRuntimeSettingKey,
   readFailurePagingState,
+  rearmFailurePagingState,
   readOfficialWorkspaceId,
   setMaintenanceMode,
   setOfficialWorkspace,
@@ -352,35 +353,63 @@ describe("failure paging generation (sweep machine state)", () => {
       .run(FAILURE_PAGING_STATE_KEY, value);
   }
 
-  test("an absent row is clear, and each state round-trips through its stamp", async () => {
+  test("an absent row is clear at generation 0, and each state round-trips", async () => {
     const db = createMigratedTestD1();
-    expect(await readFailurePagingState(db)).toEqual({ tripped: false, degraded: null });
+    expect(await readFailurePagingState(db)).toEqual({ state: "clear", gen: 0, degraded: null });
 
-    expect(await compareAndSetFailurePagingState(db, "tripped", NOW)).toBe(true);
-    expect(stored(db)).toBe(`tripped:${NOW}`);
-    expect(await readFailurePagingState(db)).toEqual({ tripped: true, degraded: null });
+    expect(await compareAndSetFailurePagingState(db, "tripped", 1)).toBe(true);
+    expect(stored(db)).toBe("tripped:1");
+    expect(await readFailurePagingState(db)).toEqual({ state: "tripped", gen: 1, degraded: null });
 
-    expect(await compareAndSetFailurePagingState(db, "clear", LATER)).toBe(true);
-    expect(stored(db)).toBe(`clear:${LATER}`);
-    expect(await readFailurePagingState(db)).toEqual({ tripped: false, degraded: null });
+    expect(await compareAndSetFailurePagingState(db, "clear", 2)).toBe(true);
+    expect(stored(db)).toBe("clear:2");
+    expect(await readFailurePagingState(db)).toEqual({ state: "clear", gen: 2, degraded: null });
   });
 
-  test("an older stamp never overwrites a newer generation", async () => {
+  test("only a strictly greater generation lands", async () => {
     const db = createMigratedTestD1();
-    await compareAndSetFailurePagingState(db, "clear", LATER);
-    expect(await compareAndSetFailurePagingState(db, "tripped", NOW)).toBe(false);
-    expect(stored(db)).toBe(`clear:${LATER}`);
+    await compareAndSetFailurePagingState(db, "clear", 2);
+    // An older sweep resuming late.
+    expect(await compareAndSetFailurePagingState(db, "tripped", 1)).toBe(false);
+    // Two sweeps that read the same ticket claim the same generation: the
+    // first write stands and the second loses, whichever state it holds.
+    expect(await compareAndSetFailurePagingState(db, "tripped", 2)).toBe(false);
+    expect(stored(db)).toBe("clear:2");
+    expect(await compareAndSetFailurePagingState(db, "tripped", 3)).toBe(true);
+    expect(stored(db)).toBe("tripped:3");
   });
 
-  test("a value no writer produced is clear plus malformed, and the next write replaces it", async () => {
+  test("a value no writer produced is clear at generation 0, and the next write repairs it", async () => {
     const db = createMigratedTestD1();
-    for (const junk of ["tripped", "maybe", "tripped:", "tripped:not-a-date", "latched:" + NOW]) {
+    for (const junk of [
+      "tripped",
+      "maybe",
+      "tripped:",
+      "tripped:0",
+      "tripped:not-a-number",
+      "tripped:99junk",
+      "latched:9",
+      // The retired ISO generation: a bare CAST would rank it as the year and
+      // block every generation the sweep can reach.
+      "tripped:2026-11-18T00:00:00.000Z",
+    ]) {
       db.raw.exec("DELETE FROM review_runtime_settings");
       seed(db, junk);
-      expect(await readFailurePagingState(db), junk).toEqual({ tripped: false, degraded: "malformed" });
-      // A corrupt stamp ranks below every real one, so it cannot block a write.
-      expect(await compareAndSetFailurePagingState(db, "clear", NOW), junk).toBe(true);
+      expect(await readFailurePagingState(db), junk).toEqual({ state: "clear", gen: 0, degraded: "malformed" });
+      // A value no writer produced ranks below every real generation, so it
+      // cannot block its own repair.
+      expect(await compareAndSetFailurePagingState(db, "clear", 1), junk).toBe(true);
+      expect(stored(db), junk).toBe("clear:1");
     }
+  });
+
+  test("the re-arm bypasses the compare-and-set, so an untrusted read can open a stale edge", async () => {
+    const db = createMigratedTestD1();
+    await compareAndSetFailurePagingState(db, "tripped", 9);
+    // Generation 1 would lose the CAS against generation 9.
+    await rearmFailurePagingState(db, 1);
+    expect(stored(db)).toBe("clear:1");
+    expect(await readFailurePagingState(db)).toEqual({ state: "clear", gen: 1, degraded: null });
   });
 });
 

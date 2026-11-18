@@ -23,17 +23,20 @@
  *
  * The alert posts on the breach TRANSITION, not on every breach: the one
  * machine-state row `platform.alert.failure_paging` in
- * `review_runtime_settings` holds a GENERATION — `clear:<ISO>` or
- * `tripped:<ISO>`, stamped with the instant its writer observed the window —
- * and is never deleted. The POST comes FIRST and only a 2xx advances the row
- * to `tripped`; a healthy sweep advances it to `clear`. Both writes are
- * compare-and-set on the stamp: newer stamp wins, so an older sweep that
- * resumes after a recovery cannot close the edge a newer breach owns, and a
- * lost CAS costs at most a duplicate alert. The row is never a flag that can
- * be set without a delivered alert, which is the whole point: duplicate
- * alerts are acceptable, a missed alert is not. A state read that cannot be
- * trusted counts as unannounced (the post it might suppress is the one that
- * matters), and storage failure is never sold as exactly-once.
+ * `review_runtime_settings` holds a GENERATION — `clear:<n>` or `tripped:<n>`,
+ * where n is the integer ticket its writer took from the row it read — and is
+ * never deleted. The POST comes FIRST and only a 2xx advances the row to
+ * `tripped`; a healthy sweep advances it to `clear`. Both writes are
+ * compare-and-set on the generation: only a strictly greater generation lands,
+ * and the ticket is read BEFORE the window query, so a sweep that resumes after
+ * a recovery cannot close the edge a newer observation owns. No clock orders
+ * the row; a lost CAS costs at most a duplicate alert. The row is never a flag
+ * that can be set without a delivered alert, which is the whole point:
+ * duplicate alerts are acceptable, a missed alert is not. A state read that
+ * cannot be trusted counts as unannounced (the post it might suppress is the
+ * one that matters) and re-arms the row unconditionally when that post does not
+ * land, so a stale `tripped` row cannot silence the retry; storage failure is
+ * never sold as exactly-once.
  *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
  * - DLQ depth is NOT read: there is no CF API token surface,
@@ -73,6 +76,7 @@ import { expireLapsedInvites } from "../dashboard/invite-store";
 import {
   compareAndSetFailurePagingState,
   readFailurePagingState,
+  rearmFailurePagingState,
   type FailurePagingStatus,
 } from "../dashboard/runtime-config-store";
 import {
@@ -264,10 +268,10 @@ const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_
 
 /**
  * The breach TRANSITION is a generation, not a flag: `platform.alert.failure_paging`
- * holds `<state>:<ISO stamp>` where the stamp is the instant this sweep read the
- * window, and every write is a compare-and-set on that stamp (see
- * `compareAndSetFailurePagingState`). The write lives in the settings store beside
- * the row it owns; only the observation instant is the sweep's.
+ * holds `<state>:<n>` where n is the integer ticket this sweep read before its
+ * window query, and every write is a compare-and-set on that generation (see
+ * `compareAndSetFailurePagingState`). The write lives in the settings store
+ * beside the row it owns; only the ticket is the sweep's.
  */
 export type SweepDeps = {
   /** Alert webhook URL (env `ALERT_WEBHOOK_URL`); absent/empty = log-only. */
@@ -448,6 +452,20 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       );
     }
   }
+  // The GENERATION TICKET: the state row is read BEFORE the window query, so
+  // this sweep's generation precedes the observation it is about to make. Two
+  // sweeps that read the same ticket cannot both advance it, so a delayed
+  // sweep's write loses to any observation a recovery landed after its read.
+  const paging = await readFailurePagingState(db);
+  if (paging.degraded !== null) {
+    // A value no writer produced is not evidence the alert was posted, and the
+    // post it might suppress is the one that matters. The line is the
+    // operator's only cue that state is broken.
+    log.warn(
+      { event: "ops_sweep_alert_state_degraded", detail: paging.degraded },
+      "failure paging state unreadable — treating the alert as unannounced",
+    );
+  }
   // ONE grouped read supplies both the total and its breakdown, so a payload
   // can never describe a different instant than its own count.
   const { results: stageRows } = await db
@@ -460,36 +478,22 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   const stages = stageRows.map((row) => ({ stage: row.stage, count: row.count }));
   const failures24h = stages.reduce((sum, row) => sum + row.count, 0);
   const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
-  // The breach-transition GENERATION: the alert is posted on the EDGE, not on
-  // every sweep that still sees the same breach. The stored value is
-  // `<state>:<ISO>` and this sweep's observation instant is the stamp it
-  // writes, so a newer observation always outranks an older one. An untrusted
-  // read is CLEAR (the post it might suppress is the one that matters); a
-  // healthy window still advances the generation, which is what defeats a
-  // stale post that resolves after a recovery.
-  const observedAt = new Date().toISOString();
-  const state = await readFailurePagingState(db);
-  if (state.degraded !== null) {
-    // A value no writer produced is not evidence the alert was posted, and the
-    // post it might suppress is the one that matters. The line is the
-    // operator's only cue that state is broken.
-    log.warn(
-      { event: "ops_sweep_alert_state_degraded", detail: state.degraded },
-      "failure paging state unreadable — treating the alert as unannounced",
-    );
-  }
+  // One generation per accepted write, derived from the ticket read above: two
+  // sweeps holding the same ticket claim the SAME generation and one of them
+  // loses, which costs a duplicate alert and never a missed one.
+  const nextGen = paging.gen + 1;
   // The infrastructure decision only SETS the disposition and, when it owes a
   // page, composes the alert body; delivery and the single exit are below.
   let webhook: SweepResult["webhook"] = "not_attempted";
   /** Advance the generation, logging only the outcomes an operator must see. */
   const advance = async (status: FailurePagingStatus): Promise<void> => {
     try {
-      if (await compareAndSetFailurePagingState(db, status, observedAt)) return;
-      // The alert was delivered either way; this only means a newer
-      // observation already owns the row and will not be overwritten.
+      if (await compareAndSetFailurePagingState(db, status, nextGen)) return;
+      // The alert was delivered either way; this only means another sweep
+      // claimed this generation first and will not be overwritten.
       if (status === "tripped") {
         log.warn(
-          { event: "ops_sweep_alert_state_cas_lost", detail: `state moved past ${observedAt}` },
+          { event: "ops_sweep_alert_state_cas_lost", detail: `generation ${nextGen} already claimed` },
           "failure paging generation did not advance — a newer observation stands",
         );
       }
@@ -508,11 +512,11 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // A healthy window advances the generation so the next breach is a new edge.
   // A lost CAS here is the documented no-op: a newer breach owns the row.
   if (!thresholdBreached) await advance("clear");
-  // Sustained breach already announced (state.tripped): no body, no POST, no
-  // state write. A breach on a clear state owes this one. `let` because the
-  // maintenance lane below may merge its key into the same body.
+  // Sustained breach already announced (paging.state === "tripped"): no body, no
+  // POST, no state write. A breach on a clear state owes this one. `let` because
+  // the maintenance lane below may merge its key into the same body.
   let alert: SweepAlertFields | null =
-    thresholdBreached && !state.tripped
+    thresholdBreached && paging.state !== "tripped"
       ? {
           event: "ops_sweep_alert",
           failures_24h: failures24h,
@@ -567,9 +571,26 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           },
           "alert webhook POST failed — log-only alert stands",
         );
-        // No generation write: an undelivered alert leaves the edge open, so
-        // the next breaching sweep retries without a compensating clear.
+        // No generation write for a TRUSTED read: an undelivered alert leaves
+        // the edge open, so the next breaching sweep retries without a
+        // compensating clear.
         webhook = "failed";
+      }
+    }
+    // An untrusted read plus an undelivered alert. The stored row may still say
+    // `tripped` at a generation this sweep never saw: the compare-and-set cannot
+    // repair that (there is nothing trustworthy to compare against) and the row
+    // would silence every later breach once the read recovers. Overwriting it
+    // unconditionally is the only write that survives that, and it can at worst
+    // repeat an alert.
+    if (paging.degraded !== null && webhook !== "posted") {
+      try {
+        await rearmFailurePagingState(db, nextGen);
+      } catch (error) {
+        log.warn(
+          { event: "ops_sweep_alert_state_clear_failed", detail: warnDetail(error, deps.alertUrl) },
+          "failure paging state clear failed — the next healthy sweep retries it",
+        );
       }
     }
   }
