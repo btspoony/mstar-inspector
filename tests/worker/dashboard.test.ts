@@ -488,7 +488,7 @@ describe("/dashboard routes", () => {
       withSpaAssets(makeEnv()),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
 
     // The shell that redirect lands on injects the boot: identity + the
     // workspace membership, never `users.role`.
@@ -605,7 +605,7 @@ describe("/dashboard routes", () => {
       makeEnv(),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
   });
 
   test("callback without state cookie → 400 and no session cookie (fail-closed)", async () => {
@@ -1491,7 +1491,7 @@ describe("/dashboard manifest routes", () => {
     expect(body).toContain(CONVERSION.name);
     expect(body).toContain(`Slug: ${CONVERSION.slug}`);
     expect(body).toContain(`https://worker.local/webhook/default/${startAppId}`);
-    expect(body).toContain(`href="/dashboard/default/targets/${CONVERSION.id}"`);
+    expect(body).toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
     expect(body).toContain(">Open Settings</a>");
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
@@ -2633,7 +2633,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const html = await landing.text();
     expect(html).toContain(`Slug: ${CONVERSION.slug}`);
     expect(html).toContain(startUrl);
-    expect(html).toContain(`href="/dashboard/default/targets/${CONVERSION.id}"`);
+    expect(html).toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
     // …and re-running the whole flow lands a SECOND App row with its OWN
     // identity, never one row twice.
     stubGitHubConversionOnly({ ...CONVERSION, id: CONVERSION.id + 1, name: `${CONVERSION.name}-2` });
@@ -3273,7 +3273,7 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     expect(body).toContain(`Slug: ${CONVERSION.slug}`);
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(body).toContain(`https://worker.local/webhook/default/${app.id}`);
-    expect(body).toContain(`href="/dashboard/default/targets/${CONVERSION.id}"`);
+    expect(body).toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
     expect(body).toContain(">Open Settings</a>");
     expect(body).toContain("Next: open Settings and configure a provider");
     expect(body).not.toContain("BEGIN");
@@ -3300,7 +3300,7 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     const res = await worker.fetch(await onboardingRequest(CONVERSION.id), env);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain(
-      `href="/dashboard/default/targets/${CONVERSION.id}"`,
+      `href="/dashboard/default/repos/${CONVERSION.id}"`,
     );
   });
 
@@ -3859,7 +3859,7 @@ describe("/dashboard/oauth/callback sign-in", () => {
     stubGitHubIdentity("octocat");
     const res = await oauthCallback("octocat", makeDbEnv(db));
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
   });
 
   test("existing member row → 302 with no second row (row-hit precedence)", async () => {

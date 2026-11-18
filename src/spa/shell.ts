@@ -41,25 +41,28 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
 }
 
 /**
- * Apps → `/dashboard`, `/dashboard/apps` (+ settings under
- * `/dashboard/apps/:appId`) — the root lands on Apps, so the brand href and
- * `/dashboard/apps` highlight the same entry. Remaining entries follow the
- * generic rule below.
+ * The sidebar nav is workspace-scoped throughout: Repositories →
+ * `/dashboard/<ref>/repos`, Apps → `/dashboard/<ref>/apps` (+ settings under
+ * `/dashboard/<ref>/apps/:appId`), Members and Settings likewise. The
+ * repository overview is the dashboard default, so the brand href and the
+ * Repositories entry point at the same page.
  *
- * On a workspace-scoped page BOTH entries follow that workspace: Apps becomes
- * `/dashboard/<ref>/apps` and Members `/dashboard/<ref>/members`, because both
- * route families are workspace-scoped. The workspace comes from the pathname,
- * else from the boot (`SpaBoot.workspaceRef`), else from the login's first
- * membership — so no entry ever points at the retired `/dashboard/apps`
- * family. The generic prefix rule then also marks the scoped Apps entry
- * current on its own detail pages.
+ * The workspace comes from the pathname, else from the boot
+ * (`SpaBoot.workspaceRef`), else from the login's first membership — so no
+ * entry ever points at a retired family. The generic prefix rule marks an
+ * entry current on its own detail pages too.
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
-  if (href === "/dashboard/apps") {
+  // The repository overview is where the dashboard root now lands: the two
+  // root spellings are redirects, but a shell can still be served on one
+  // (`/index.html`, a pre-redirect document), and there Repositories is the
+  // page the click will open.
+  if (href === "/dashboard/repos") {
     return (
       pathname === "/dashboard" ||
       pathname === "/dashboard/apps" ||
-      pathname.startsWith("/dashboard/apps/")
+      pathname === "/dashboard/repos" ||
+      pathname.startsWith("/dashboard/repos/")
     );
   }
   return pathname === href || pathname.startsWith(`${href}/`);
@@ -87,9 +90,9 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
   const items = boot.needsWorkspace === true || boot.supportOnly === true ? [] : NAV_ITEMS;
   return {
     brand: t(boot.locale, "nav.brand"),
-    // The root workbench 404s its data reads under `strict`, so the wordmark
-    // follows the same workspace Apps target as the nav entry there.
-    brandHref: workspaceRef === null ? "/dashboard" : `/dashboard/${workspaceRef}/apps`,
+    // The repository overview is the dashboard default, so the wordmark
+    // follows the same workspace target as the Repositories entry.
+    brandHref: workspaceRef === null ? "/dashboard" : `/dashboard/${workspaceRef}/repos`,
     navLabel: t(boot.locale, "nav.primary"),
     items: items.map((item) => {
       const href = navHref(item.href, workspaceRef);
@@ -121,9 +124,9 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
  *
  * `target` is how a pick moves: `replace` rewrites the current path's workspace
  * segment, so the page stays the same page under another workspace. A path with
- * no workspace segment (the root workbench, `/index.html`) has nothing to
+ * no workspace segment (the dashboard root, `/index.html`) has nothing to
  * rewrite — there the control is a NAVIGATOR and a pick opens that workspace's
- * Apps page.
+ * repository overview, the dashboard default.
  *
  * `currentRef` is the `id` of the membership the pathname names, else null:
  * the path can carry an identifier this login no longer lists (a renamed slug,
@@ -140,7 +143,7 @@ export type WorkspaceSwitcherModel = {
   label: string;
   currentRef: string | null;
   currentPlan?: string;
-  target: "replace" | "apps";
+  target: "replace" | "repos";
   options: Array<{ ref: string; name: string }>;
 };
 
@@ -159,7 +162,7 @@ export function buildWorkspaceSwitcherModel(
     label,
     currentRef: current?.id ?? null,
     currentPlan: current?.plan,
-    target: pathRef === null ? "apps" : "replace",
+    target: pathRef === null ? "repos" : "replace",
     options,
   };
 }

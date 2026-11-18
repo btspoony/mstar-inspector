@@ -272,7 +272,7 @@ describe("settings 400 key transport", () => {
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/repos/${APP_ID}`);
   });
 });
 

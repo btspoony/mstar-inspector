@@ -156,6 +156,6 @@ describe("POST mutation Accept routing (QC W-2)", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/default/targets/${DEMO_APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/repos/${DEMO_APP_ID}`);
   });
 });

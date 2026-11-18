@@ -212,17 +212,20 @@ describe("the Apps page shell (workspace-scoped SPA route)", () => {
     expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member","plan":"Unlimited"}]');
   });
 
-  test("the retired deployment-level /dashboard/apps answers 404", async () => {
+  test("the retired deployment-level /dashboard/apps spelling is a dashboard root: no session → login", async () => {
+    // It is no longer a page and no longer a 404: it is one of the two root
+    // spellings, so an anonymous hit takes the same login bounce `/dashboard` does.
     const db = await seededWorld();
-    const res = await get("/dashboard/apps", "", makeEnv(db));
-    expect(res.status).toBe(404);
+    const res = await get("/dashboard/apps", "", withSpaAssets(makeEnv(db)));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
-  test("GET /dashboard with a member session → the sole workspace's Apps page", async () => {
+  test("GET /dashboard with a member session → the sole workspace's repository overview", async () => {
     const db = await seededWorld();
     const shell = await get("/dashboard", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, withSpaAssets(makeEnv(db)));
     expect(shell.status).toBe(302);
-    expect(shell.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(shell.headers.get("Location")).toBe("/dashboard/default/repos");
   });
 });
 

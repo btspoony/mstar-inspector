@@ -14,18 +14,18 @@ Out of scope: review pipeline behaviour, billing and quota faces, cross-workspac
 
 | ID | Contract |
 |----|----------|
-| N1 | The sidebar carries four entries in the order 仓库 (Repositories) → 应用 (Apps) → 成员 (Members) → 设置 (Settings). The repository entry uses the `FolderGit2` icon and is current on every `/dashboard/<workspaceRef>/targets…` path. |
-| N2 | The family keeps the `targets` route segment: the list is `/dashboard/<workspaceRef>/targets`, the fixed default entry is `/dashboard/<workspaceRef>/targets/all`, one repository is `/dashboard/<workspaceRef>/targets/<targetId>` carrying the target UUID. 仓库 / Repositories is a display name, never a path segment. |
-| N3 | The workspace page segments are `apps`, `targets`, `members`, `settings`. There is no deployment-level copy of the repository surface: a workspace-less `/dashboard/…` path is the family's 404 before SPA dispatch. |
+| N1 | The sidebar carries four entries in the order 仓库 (Repositories) → 应用 (Apps) → 成员 (Members) → 设置 (Settings). The repository entry uses the `FolderGit2` icon and is current on every `/dashboard/<workspaceRef>/repos…` path. |
+| N2 | The family carries the `repos` route segment: the list is `/dashboard/<workspaceRef>/repos` — the dashboard default, where `/dashboard` and the retired `/dashboard/apps` spelling both redirect — the fixed default entry is `/dashboard/<workspaceRef>/repos/all`, one repository is `/dashboard/<workspaceRef>/repos/<targetId>` carrying the target UUID. 仓库 / Repositories is a display name, never a path segment. |
+| N3 | The workspace page segments are `repos`, `apps`, `members`, `settings`. There is no deployment-level copy of the repository surface: the two dashboard roots refuse to render it (they redirect), and a workspace-less `/dashboard/<segment>/…` path is the family's 404 before SPA dispatch. |
 
 ### Repository list
 
 | ID | Contract |
 |----|----------|
-| R1 | The first row is the fixed entry 所有仓库, linking to `/targets/all`, with the meta line "工作区默认评审配置 · 全工作区洞察与拉取请求" and a pill carrying the count of the workspace's live targets ("0 个仓库" / "1 个仓库" / "<n> 个仓库"). |
-| R2 | Every following row is one live target: `owner/name` as the title, the meta line `<应用名> · 最近审查 <relative time>` (or `· never reviewed`), and one status pill. Rows are ordered newest first with the target id as a stable tiebreak. A row whose `repo_id` is still null renders the placeholder title `—` and the 未绑定安装 · 等待接收投递 meta line instead of the application/时间 line, because its repository identity is not confirmed by a delivery yet. |
+| R1 | The first row is the fixed entry 所有仓库, linking to `/repos/all`, with the meta line "工作区默认评审配置 · 全工作区洞察与拉取请求" and a pill carrying the count of the workspace's live targets ("0 个仓库" / "1 个仓库" / "<n> 个仓库"). |
+| R2 | Every following row is one live target: `owner/name` as the title, the meta line `<应用名> · 最近审查 <relative time>` (or `· never reviewed`), and one status pill. Rows are ordered newest first with the target id as a stable tiebreak. A row whose `repo_id` is still null but that names `owner/name` keeps that name, because such a row is a target whose installation went away and its review history is real: `repo_id` keys the 待安装 badge and the meta discriminator, never the row's identity. Only a row naming no repository at all renders the placeholder title `—` with the 未绑定仓库 · 等待接收投递 meta line. |
 | R3 | The status pill vocabulary is 审查中 / 待安装 / 已暂停, decided by the row alone: 待安装 exactly when `repo_id` is null (awaiting the first delivery that carries the id), 已暂停 when the business pause is off, 审查中 otherwise. |
-| R4 | The list costs one read (`GET /dashboard/<workspaceRef>/api/targets`), which carries the application display name and the newest review stamp per row. `repo_id: null` is the only 待安装 discriminator; the page makes no second installation call to decide a row's state. |
+| R4 | The list costs one read (`GET /dashboard/<workspaceRef>/api/targets`), which carries the application display name and the newest review stamp per row. `repo_id: null` is the only 待安装 discriminator; the page makes no second installation call to decide a row's state. The page header derives its three figures from that same payload — the target count, how many rows name no repository at all, and the newest review stamp — so the overview needs no second read. |
 | R5 | Zero targets: the 所有仓库 row is still present with "0 个仓库" and an empty state 还没有仓库 whose single call to action is 添加仓库. The empty state never replaces the 所有仓库 row. |
 | R6 | A failed list load renders an inline error row with a retry action; the 所有仓库 row stays navigable, so the workspace-default face is reachable while the target rows are not. |
 
@@ -44,7 +44,7 @@ Out of scope: review pipeline behaviour, billing and quota faces, cross-workspac
 
 | ID | Contract |
 |----|----------|
-| T1 | `/targets/<targetId>` is the repository detail with the header `owner/name` and exactly three tabs: 评审配置 / 洞察 / 拉取请求. A target whose repository columns are still empty names the 待安装 state in the header instead of rendering an empty heading. |
+| T1 | `/repos/<targetId>` is the repository detail with the header `owner/name` and exactly three tabs: 评审配置 / 洞察 / 拉取请求. A target naming no repository at all names the 待安装 state in the header instead of rendering an empty heading. |
 | T2 | The 评审配置 tab carries 评审触发, 审查深度, 审查门禁 (最低分 plus 通过结论), 继承开关 and 暂停开关. 审查范围 is static copy — 本仓库（随应用安装自动授权） — because no allowlist control exists anywhere on this surface. |
 | T3 | 洞察 and 拉取请求 read the single-target scope; the 所有仓库 entry reads the workspace scope over every live target. Both scopes are manager reads, and a target-scope payload is the one-id set of the same store call the workspace face makes. |
 | T4 | An unknown, foreign or soft-deleted `targetId` is a 404 page with a link back to the repository list. A target with no insight or pull-request data renders 暂无洞察数据 / 暂无拉取请求, never an error. |

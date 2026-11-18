@@ -1826,7 +1826,7 @@ export function appDetailSearchQuery(search: AppDetailSearch): string {
 
 /**
  * The repository detail's three tabs, one vocabulary for BOTH detail variants
- * (`…/targets/<uuid>` and `…/targets/all`). Kept apart from
+ * (`…/repos/<uuid>` and `…/repos/all`). Kept apart from
  * {@link AppDetailTab}: the App detail's two faces are a different page.
  * `settings` is the bare path, so it has no `tab` param of its own.
  */
@@ -2149,22 +2149,23 @@ export function parseTargetCreate(
 }
 
 /**
- * `POST /api/workspaces` 201 body — the new workspace's ref plus the Apps page
- * the creator lands on. The landing is server-chosen: only the Worker knows the
- * deployment's tenant read mode, and `strict`'s sole-workspace resolver cannot
- * name a workspace once a second one exists.
+ * `POST /api/workspaces` 201 body — the new workspace's ref plus the page the
+ * creator lands on (that workspace's repository overview). The landing is
+ * server-chosen: only the Worker knows the deployment's tenant read mode, and
+ * `strict`'s sole-workspace resolver cannot name a workspace once a second one
+ * exists.
  */
-export function parseCreatedWorkspace(data: string): { id: string; appsPath: string } | null {
+export function parseCreatedWorkspace(data: string): { id: string; homePath: string } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(data);
   } catch {
     return null;
   }
-  if (!isRecord(parsed) || typeof parsed.id !== "string" || typeof parsed.appsPath !== "string") {
+  if (!isRecord(parsed) || typeof parsed.id !== "string" || typeof parsed.homePath !== "string") {
     return null;
   }
-  return { id: parsed.id, appsPath: parsed.appsPath };
+  return { id: parsed.id, homePath: parsed.homePath };
 }
 
 /**

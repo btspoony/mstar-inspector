@@ -17,9 +17,9 @@ export function inviteAcceptPath(workspaceRef: string, inviteId: string): string
   return `/dashboard/${workspaceRef}/api/members/invites/${inviteId}/accept`;
 }
 
-/** A successful accept lands on the invited workspace's Apps page. */
+/** A successful accept lands on the invited workspace's repository overview. */
 export function inviteLanding(workspaceRef: string): string {
-  return `/dashboard/${workspaceRef}/apps`;
+  return `/dashboard/${workspaceRef}/repos`;
 }
 
 /** The refusal body (`invite.expired` 409 / "no longer pending" 410, or an
@@ -43,7 +43,7 @@ const NAME_MAX_LENGTH = 80;
  */
 export function creationLanding(status: number, body: string): string | null {
   if (status !== 201) return null;
-  return parseCreatedWorkspace(body)?.appsPath ?? null;
+  return parseCreatedWorkspace(body)?.homePath ?? null;
 }
 
 /**

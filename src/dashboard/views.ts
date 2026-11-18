@@ -362,8 +362,8 @@ ${STYLE}
  * the SPA navbar tokens. Manifest pages never pass `adminNav` (Members
  * stays on the dashboard shell only). No language toggle — current IA.
  * Brand and Apps point at the request's workspace Apps page when the page
- * was reached through one (`/dashboard/<ref>/apps`), else the workbench
- * (`/dashboard` — the legacy `/dashboard/apps` page is a 301 alias).
+ * was reached through one (`/dashboard/<ref>/apps`), else the dashboard root
+ * (which redirects a signed-in request to the repository overview).
  */
 function shellHeader(
   user: { login: string; name?: string },
@@ -498,17 +498,16 @@ export function manifestOnboardingPage(
   });
   // The legacy App family answers 404 under `strict`, so the primary CTA
   // follows the workspace the page was reached through. The review policy it
-  // opens lives on the review-target surface now. The secondary link follows
-  // the same workspace; only a page with no ref falls back to the workbench
-  // root.
+  // opens lives on the repository surface now. The secondary link follows the
+  // same workspace; only a page with no ref falls back to the dashboard root.
   const settingsBase =
     workspaceRef === null
-      ? "/dashboard/apps"
+      ? "/dashboard"
       : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
   const targetBase =
     workspaceRef === null
-      ? "/dashboard/apps"
-      : `/dashboard/${escapeHtml(workspaceRef)}/targets`;
+      ? "/dashboard"
+      : `/dashboard/${escapeHtml(workspaceRef)}/repos`;
   const dashboardHref = workspaceRef === null ? "/dashboard" : settingsBase;
   return page(
     t(locale, "manifest.onboarding.title"),

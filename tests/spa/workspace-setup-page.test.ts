@@ -69,13 +69,9 @@ describe("workspace creation page", () => {
 
   test("success lands on the workspace the response names, never on the bare root", () => {
     // The page cannot compute the target: it does not know the tenant mode.
-    expect(creationLanding(201, JSON.stringify({ id: "ws_x", appsPath: "/dashboard/ws_x/apps" }))).toBe(
-      "/dashboard/ws_x/apps",
-    );
-    // `off` serves no workspace routes; the server names the legacy list.
-    expect(creationLanding(201, JSON.stringify({ id: "ws_x", appsPath: "/dashboard/apps" }))).toBe(
-      "/dashboard/apps",
-    );
+    expect(
+      creationLanding(201, JSON.stringify({ id: "ws_x", homePath: "/dashboard/ws_x/repos" })),
+    ).toBe("/dashboard/ws_x/repos");
     // A refusal or an unparseable body is a failure notice, never a navigation.
     expect(creationLanding(400, "")).toBeNull();
     expect(creationLanding(201, "not json")).toBeNull();
@@ -140,11 +136,11 @@ describe("workspace creation page — pending invitations", () => {
     expect(markup).not.toContain(t("en", "workspace.inviteAccept"));
   });
 
-  test("accept posts under the invited workspace's ref and lands on its Apps page", () => {
+  test("accept posts under the invited workspace's ref and lands on its repository overview", () => {
     // The invite row carries the ref — the `needsWorkspace` path names none,
     // so the POST must address the invite's workspace prefix.
     expect(inviteAcceptPath("acme", "inv_1")).toBe("/dashboard/acme/api/members/invites/inv_1/accept");
-    expect(inviteLanding("acme")).toBe("/dashboard/acme/apps");
+    expect(inviteLanding("acme")).toBe("/dashboard/acme/repos");
   });
 
   test("a failed accept maps the refusal body onto a dictionary notice", () => {

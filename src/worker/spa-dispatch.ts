@@ -2,10 +2,12 @@
  * Worker-side SPA dispatch.
  *
  * GET/HEAD + enumerated SPA page → `ASSETS` `/index.html` with
- * `window.__BOOT__` injected. `/dashboard` is the SPA workbench for EVERY
- * Accept variant (the legacy SSR home is retired); other
- * enumerated pages require HTML navigation (`Accept: text/html`) so API and
- * test clients never get the shell. Direct `GET /index.html` takes the same
+ * `window.__BOOT__` injected. The dashboard roots (`/dashboard`, and the
+ * retired `/dashboard/apps` spelling) answer every Accept variant — a signed-in
+ * request redirects to its workspace's repository overview, and a login with no
+ * workspace gets the creation surface; other enumerated pages require HTML
+ * navigation (`Accept: text/html`) so API and test clients never get the shell.
+ * Direct `GET /index.html` takes the same
  * boot path (no production route sends it here — Workers Routes hand that path
  * to the marketing Worker). `/app-assets/*` are the Vite hashed files, also
  * ASSETS. Every shell response re-reads membership (QC W-001): a session whose
@@ -44,7 +46,13 @@ import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
 import { documentFaceOf, pageDocumentTitle } from "../spa/document-title";
 import { localizeDocument } from "./document-locale";
-import { isSpaAssetPath, matchSpaRoute, settingsTabRedirect, wantsHtml } from "../spa/routes";
+import {
+  DASHBOARD_ROOT_PATHS,
+  isSpaAssetPath,
+  matchSpaRoute,
+  settingsTabRedirect,
+  wantsHtml,
+} from "../spa/routes";
 import { deploymentModeOf, type DeploymentMode, type Env } from "./env";
 
 type SpaContext = Context<{ Bindings: Env }>;
@@ -206,14 +214,17 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
       : await Promise.all([pendingInvitesForLogin(c.env, login), workspaceMembershipsForLogin(c.env, login)]);
   const pendingInvites = lists?.[0] ?? [];
   const memberships = lists?.[1] ?? [];
-  if (c.req.path === "/dashboard" && login !== null) {
-    if (supportRef !== null) return c.redirect(`/dashboard/${supportRef}/apps`, 302);
+  // Both dashboard roots — `/dashboard` and the retired `/dashboard/apps`
+  // spelling — answer one redirect to the repository overview: the overview is
+  // the dashboard default, and only this request knows the workspace ref.
+  if (DASHBOARD_ROOT_PATHS.has(c.req.path) && login !== null) {
+    if (supportRef !== null) return c.redirect(`/dashboard/${supportRef}/repos`, 302);
     // A login with no workspace of its own still needs a path into the
     // workspace UI; a newcomer (needsWorkspace) keeps the creation surface
     // instead of being sent to a page that answers the outsider 404. A
-    // multi-workspace login lands on its FIRST membership's Apps page — a real
-    // route — because the root workbench has no workspace segment (its data
-    // reads all hang off one) and `/dashboard/apps` is retired (404).
+    // multi-workspace login lands on its FIRST membership's repository
+    // overview — a real route — because the root carries no workspace segment
+    // (its data reads all hang off one).
     // ONE landing policy (`signedInLanding`), shared with the OAuth callback
     // and the login bounce, so the root path cannot disagree with sign-in. The
     // extras above ARE that policy's input for this same request, so they are
@@ -353,10 +364,11 @@ export function spaDispatch(): MiddlewareHandler<{ Bindings: Env }> {
     const assets = c.env.ASSETS;
     if (!assets) return next();
     const accept = c.req.header("Accept") ?? null;
-    // `/dashboard` is the SPA workbench for EVERY Accept variant (the
-    // legacy SSR home is retired). Other enumerated pages keep the
-    // HTML-navigation gate so API/test clients never get the shell.
-    if (pathname === "/dashboard" || (matchSpaRoute(pathname) && wantsHtml(accept))) {
+    // The two dashboard roots are the shell for EVERY Accept variant (they
+    // redirect a signed-in request, and serve the creation surface without a
+    // workspace). Other enumerated pages keep the HTML-navigation gate so
+    // API/test clients never get the shell.
+    if (DASHBOARD_ROOT_PATHS.has(pathname) || (matchSpaRoute(pathname) && wantsHtml(accept))) {
       return serveSpaIndex(c);
     }
     // Direct /index.html hits the same boot-injected shell as enumerated pages.

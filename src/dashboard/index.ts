@@ -239,7 +239,12 @@ import {
   isCheckMinScoreValue,
 } from "../contracts/review-gate";
 import { isLocale, resolveLocale, serializeLocaleCookie, t, type DictionaryKey, type Locale } from "../i18n";
-import { RESERVED_WORKSPACE_SLUGS, WORKSPACE_FAMILY_SEGMENTS, wantsHtml } from "../spa/routes";
+import {
+  RESERVED_WORKSPACE_SLUGS,
+  WORKSPACE_FAMILY_SEGMENTS,
+  reposHomePath,
+  wantsHtml,
+} from "../spa/routes";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
 
 /**
@@ -303,21 +308,21 @@ export const dashboardApp = new Hono<{ Bindings: Env; Variables: DashboardVariab
 
 /** SPA shell entry for members/apps list mutations (QC W-2, apps route). */
 const DASHBOARD_SHELL_REDIRECT = "/dashboard";
+/** The repository overview and the Apps list — both workspace-scoped page
+ * families this file re-targets under the request's workspace ref. */
+const REPOS_LIST_REDIRECT = "/dashboard/repos";
 const APPS_LIST_REDIRECT = "/dashboard/apps";
-/** The review-target surface's list entry; its detail path is the one the
- * moved settings tab redirects to. */
-const TARGETS_LIST_REDIRECT = "/dashboard/targets";
 
 /**
- * An Apps or review-targets path rewritten under the request's workspace ref:
- * the pre-workspace App family answers 404, so a redirect to the bare path
- * would land on a dead URL. Requests with no workspace context and paths
- * outside those two families are returned unchanged.
+ * An Apps or repository path rewritten under the request's workspace ref: the
+ * pre-workspace App family answers 404, so a redirect to the bare path would
+ * land on a dead URL. Requests with no workspace context and paths outside
+ * those two families are returned unchanged.
  */
 function scopedAppPath(c: DashboardContext, path: string): string {
   const tenant = c.get("tenant");
   if (!tenant) return path;
-  const inFamily = [APPS_LIST_REDIRECT, TARGETS_LIST_REDIRECT].some(
+  const inFamily = [REPOS_LIST_REDIRECT, APPS_LIST_REDIRECT].some(
     (base) => path === base || path.startsWith(`${base}/`),
   );
   return inFamily ? `/dashboard/${tenant.ref}${path.slice(DASHBOARD_MOUNT.length)}` : path;
@@ -635,11 +640,11 @@ export async function signedInLanding(
   // A caller that already booted this login for the same request (`/dashboard`
   // in spa-dispatch) passes the result instead of paying the read twice.
   const extras = boot ?? (await workspaceBoot(env, login));
-  if (extras.workspaceRef !== undefined) return `/dashboard/${extras.workspaceRef}/apps`;
+  if (extras.workspaceRef !== undefined) return reposHomePath(extras.workspaceRef);
   if (extras.needsWorkspace === true) return DASHBOARD_MOUNT;
   const memberships = await workspaceMembershipsForLogin(env, login);
   const first = memberships[0];
-  if (first !== undefined) return `/dashboard/${first.id}/apps`;
+  if (first !== undefined) return reposHomePath(first.id);
   // A login that belongs to no workspace is the EXPECTED landing on the
   // creation surface, not a configuration fault; only a member the deployment
   // cannot place is the operator-facing dead end.
@@ -762,13 +767,17 @@ function isAppsUniqueViolation(err: unknown, column: "github_app_id"): boolean {
 // (`/apps…`, `/api/apps…`) answers the same 404 an unmatched path does.
 const DASHBOARD_MOUNT = "/dashboard";
 
-/** The retired pre-workspace App family: `/apps…` and `/api/apps…`. */
+/**
+ * The retired pre-workspace App family: `/apps/<appId>…` and `/api/apps…`.
+ * The bare `/dashboard/apps` spelling is NOT retired — it is one of the two
+ * dashboard roots, and `spaDispatch` redirects it to the repository overview.
+ */
 function isRetiredAppPath(pathname: string): boolean {
   const relative = pathname.startsWith(`${DASHBOARD_MOUNT}/`)
     ? pathname.slice(DASHBOARD_MOUNT.length)
     : pathname;
   const [, first, second] = relative.split("/");
-  return first === "apps" || (first === "api" && second === "apps");
+  return (first === "apps" && second !== undefined) || (first === "api" && second === "apps");
 }
 
 /**
@@ -776,13 +785,13 @@ function isRetiredAppPath(pathname: string): boolean {
  *
  * Derived from the ONE SPA family (`WORKSPACE_FAMILY_SEGMENTS`) so a new
  * segment cannot drift across the bundle boundary. The two SPA-only segments
- * are excluded: `settings` and `targets` are page paths with no Worker route
+ * are excluded: `settings` and `repos` are page paths with no Worker route
  * under `/<ref>/`, and admitting either would route a page path through this
  * gate. This exclusion list IS the gate's admission list: a new SPA-only
  * segment has to be excluded here too.
  */
 const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
-  WORKSPACE_FAMILY_SEGMENTS.filter((segment) => segment !== "settings" && segment !== "targets"),
+  WORKSPACE_FAMILY_SEGMENTS.filter((segment) => segment !== "settings" && segment !== "repos"),
 );
 
 /**
@@ -791,7 +800,7 @@ const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
  * export (`WORKSPACE_FAMILY_SEGMENTS` in `src/spa/routes.ts`): the SPA's
  * `workspaceRefOf` builds its alternation from it, and `WORKSPACE_SEGMENTS`
  * above is its derivation, not a second list. The family has five members;
- * this gate admits three because `settings` and `targets` are SPA page paths
+ * this gate admits three because `settings` and `repos` are SPA page paths
  * with no Worker route.
  * A reserved first segment is never a workspace, so `:workspaceRef` cannot
  * capture a real route (`/apps`, `/api/apps`, `/login`, `/members`, …).
@@ -1386,9 +1395,10 @@ dashboardApp.post("/api/workspaces", async (c) => {
       if (created) {
         // The client cannot derive the post-creation landing: a new workspace
         // may be the second one, so `/dashboard` would strand the creator on a
-        // slug-less shell. The new workspace's own App list is the answer.
+        // slug-less shell. The new workspace's own repository overview is the
+        // answer.
         return c.json(
-          { id, slug: id, name, role: "owner" as const, appsPath: `/dashboard/${id}/apps` },
+          { id, slug: id, name, role: "owner" as const, homePath: reposHomePath(id) },
           201,
         );
       }
@@ -3031,7 +3041,7 @@ async function appStatusAction(
 // discriminator (add-key | save-chain | save-roles) because the zero-JS page
 // has three forms on one action path — and the delete-key action path
 // …/settings/key/delete (the HTML-form convention cannot emit a DELETE verb).
-// The family's GET is a 302 to /dashboard/<ref>/targets/:appId (the review
+// The family's GET is a 302 to /dashboard/<ref>/repos/:appId (the review
 // policy moved to the target surface); the POST family keeps its own paths.
 //
 // Encryption-dependent reads AND writes: masking needs plaintext (the last-4
@@ -3171,7 +3181,7 @@ function settingsPostResponse(
   message: string,
   status: 200 | 500 = 200,
 ): Response {
-  return pinnedPostMutationResponse(c, `/dashboard/targets/${appId}`, message, status);
+  return pinnedPostMutationResponse(c, `/dashboard/repos/${appId}`, message, status);
 }
 
 /**
@@ -3188,7 +3198,7 @@ function settingsRemoveResponse(
   message: string,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/targets/${appId}`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/repos/${appId}`), 302);
   }
   return c.json({ changed, message }, 200);
 }
@@ -3375,7 +3385,7 @@ function settings400Response(
   params?: Record<string, string | number>,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/targets/${appId}`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/repos/${appId}`), 302);
   }
   return keyed400(c, key, params);
 }
@@ -3447,7 +3457,7 @@ function settingsVerifyFailResponse(
   const mapped = mapVerifyReason(reason);
   const message = verifyFailCopy(mapped);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/targets/${appId}`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/repos/${appId}`), 302);
   }
   return c.json({ ok: false, reason: mapped, message }, 400);
 }
@@ -3466,7 +3476,7 @@ function settingsMembershipFailResponse(
 ): Response {
   const message = membershipFailCopy(selector);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/targets/${appId}`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/repos/${appId}`), 302);
   }
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }

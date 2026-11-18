@@ -51,7 +51,8 @@ const html = renderToStaticMarkup(
 
 describe("content measure tier (SSR)", () => {
   test("list/table faces take the wide tier at their real pathnames", () => {
-    expect(tierAt("/dashboard/apps")).toBe("max-w-[1200px]");
+    expect(tierAt("/dashboard/acme/repos")).toBe("max-w-[1200px]");
+    expect(tierAt("/dashboard/acme/apps")).toBe("max-w-[1200px]");
     expect(tierAt("/dashboard/acme/members")).toBe("max-w-[1200px]");
   });
 
@@ -61,11 +62,11 @@ describe("content measure tier (SSR)", () => {
   });
 
   test("a workspace-less boot sees the prose tier even at a list pathname", () => {
-    expect(tierAt("/dashboard/apps", { needsWorkspace: true })).toBe("max-w-[960px]");
+    expect(tierAt("/dashboard/acme/repos", { needsWorkspace: true })).toBe("max-w-[960px]");
   });
 
   test("a support-only boot sees the prose tier even at a list pathname", () => {
-    expect(tierAt("/dashboard/apps", { supportOnly: true })).toBe("max-w-[960px]");
+    expect(tierAt("/dashboard/acme/repos", { supportOnly: true })).toBe("max-w-[960px]");
   });
 });
 

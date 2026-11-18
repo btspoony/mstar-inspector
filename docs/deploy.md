@@ -554,11 +554,11 @@ scheduled job and no status column, so an expired grant answers exactly like no
 grant. Every operator decision the workspace gate makes appends one
 `audit_events` row **before dispatch** (`support.read` / `support.forbidden` /
 `support.denied`), so a route added later cannot skip the record. HTML shell
-loads (`/dashboard`, `/dashboard/<ref>/apps`) are served by `spa-dispatch`
+loads (`/dashboard`, `/dashboard/<ref>/repos`) are served by `spa-dispatch`
 rather than the workspace gate, so they are classified by the same function but
 append no row.
 
-A membership-less operator's landing is `/dashboard/<ref>/apps`: the shell
+A membership-less operator's landing is `/dashboard/<ref>/repos`: the shell
 redirects the bare `/dashboard` there whenever the gate would classify that
 login `operator-granted`, because the support view derives its API base from
 the pathname's workspace segment.
@@ -810,21 +810,24 @@ the workspace. Three invariants carry that guarantee:
 
 | Path | Answers |
 |---|---|
+| `/dashboard/<slug>/repos` | that workspace's repositories (the dashboard default) |
+| `/dashboard/<slug>/repos/<targetId>` | one repository's review settings, insights and pull requests |
 | `/dashboard/<slug>/apps` | that workspace's Apps |
 | `/dashboard/<slug>/apps/<app>/settings` | that App's settings |
 | `/dashboard/<slug>/members` | that workspace's members |
 | `/dashboard/<slug>/settings` | that workspace's settings (owner-only) |
 | `/dashboard/<slug>/api/apps` | that workspace's Apps API |
 | `/dashboard/<slug>/api/apps/<app>/…` | that App's API |
-| `/dashboard/apps…`, `/dashboard/api/apps…` | 404 |
+| `/dashboard/apps…`, `/dashboard/api/apps…` | 404 (`/dashboard/apps` itself is a dashboard root and redirects) |
 
 The workspace route family is the **second** segment that scopes a path to a
-workspace: `apps`, `members`, `settings`, `api` (one array,
+workspace: `repos`, `apps`, `members`, `settings`, `api` (one array,
 `WORKSPACE_FAMILY_SEGMENTS` in
 [`src/spa/routes.ts`](../src/spa/routes.ts), which both the SPA matcher and the
 Worker gate read). `apps`, `members` and `api` carry Worker routes below that
-prefix; `settings` is served by the shell alone (the workspace settings page),
-so the Worker's route-family gate admits exactly the other three.
+prefix; `repos` and `settings` are served by the shell alone (the repository
+overview and the workspace settings page), so the Worker's route-family gate
+admits exactly the other three.
 
 The reserved first segments (`apps`, `api`, `oauth`, `members`, `login`,
 `logout`, `manifest`, `locale`, `healthz`) never name a workspace. That is a

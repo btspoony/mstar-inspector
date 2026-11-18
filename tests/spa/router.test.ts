@@ -1,17 +1,22 @@
 /**
  * Enumerated client router (pathname + params). The four workspace surfaces
- * (apps, targets, members, settings) plus the App detail and the bot page.
- * A repositories detail is a target id (`all` for the workspace default); the
+ * (repos, apps, members, settings) plus the App detail and the login page.
+ * A repository detail is a target id (`all` for the workspace default); the
  * app detail's retired `…/settings` path spelling answers one redirect to the
  * app's own settings tab.
+ *
+ * The repository overview is the dashboard default, so neither dashboard root
+ * is a page: both are redirects whose target only the Worker can name.
  */
 import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
 import {
+  DASHBOARD_ROOT_PATHS,
   RESERVED_WORKSPACE_SLUGS,
   WORKSPACE_FAMILY_SEGMENTS,
   isSpaAssetPath,
   matchSpaRoute,
+  reposHomePath,
   settingsTabRedirect,
   wantsHtml,
   workspaceRefOf,
@@ -23,10 +28,29 @@ function isWorkspaceRoute(pathname: string): boolean {
   return route !== null && "workspaceRef" in route;
 }
 
+describe("the dashboard default", () => {
+  test("both roots are redirect spellings, never pages", () => {
+    for (const root of ["/dashboard", "/dashboard/apps"]) {
+      expect(matchSpaRoute(root), root).toBeNull();
+      expect(matchRoute(root).page, root).toBe("unknown");
+      expect(DASHBOARD_ROOT_PATHS.has(root), root).toBe(true);
+    }
+    expect(DASHBOARD_ROOT_PATHS.has("/dashboard/repos")).toBe(false);
+  });
+
+  test("the overview address is the workspace-scoped page the root resolves to", () => {
+    expect(reposHomePath("acme")).toBe("/dashboard/acme/repos");
+    expect(matchSpaRoute(reposHomePath("acme"))).toEqual({
+      page: "repos",
+      pathname: "/dashboard/acme/repos",
+      workspaceRef: "acme",
+    });
+    expect(matchRoute("/dashboard/acme/repos").page).toBe("repos");
+  });
+});
+
 describe("matchSpaRoute", () => {
   test("matches exact enumerated paths", () => {
-    expect(matchSpaRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
-    expect(matchSpaRoute("/dashboard/apps")).toEqual({ page: "apps", pathname: "/dashboard/apps" });
     // Members is workspace-scoped: the root path is retired.
     expect(matchSpaRoute("/dashboard/members")).toBeNull();
     expect(matchSpaRoute("/dashboard/acme/members")).toEqual({
@@ -70,12 +94,6 @@ describe("matchSpaRoute", () => {
     });
   });
 
-  test("/dashboard and /dashboard/apps resolve to the same Apps page", () => {
-    expect(matchSpaRoute("/dashboard")?.page).toBe("apps");
-    expect(matchSpaRoute("/dashboard/apps")?.page).toBe("apps");
-    expect(matchRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
-  });
-
   test("the retired bot page is a redirect to the App's settings tab, not a page", () => {
     // The `/bot` sub-path answers one 302 to the tab address: no page id
     // serves it, on either family.
@@ -95,7 +113,7 @@ describe("matchSpaRoute", () => {
 
   test("does not match nested extras beyond the detail paths", () => {
     expect(matchSpaRoute("/dashboard/apps/acme/settings/key/delete")).toBeNull();
-    expect(matchSpaRoute("/dashboard/acme/targets/12345/onboarding")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/repos/12345/onboarding")).toBeNull();
     expect(matchSpaRoute("/dashboard/api/insights/summary")).toBeNull();
     // The global insights page is retired: its path is no longer a SPA page.
     expect(matchSpaRoute("/dashboard/insights")).toBeNull();
@@ -110,28 +128,30 @@ describe("matchSpaRoute — workspace-scoped surfaces", () => {
       pathname: "/dashboard/acme/apps",
       workspaceRef: "acme",
     });
-    expect(matchSpaRoute("/dashboard/acme/targets")).toEqual({
-      page: "targets",
-      pathname: "/dashboard/acme/targets",
+    expect(matchSpaRoute("/dashboard/acme/repos")).toEqual({
+      page: "repos",
+      pathname: "/dashboard/acme/repos",
       workspaceRef: "acme",
     });
-    expect(matchSpaRoute("/dashboard/acme/targets/12345")).toEqual({
-      page: "targets",
-      pathname: "/dashboard/acme/targets/12345",
+    expect(matchSpaRoute("/dashboard/acme/repos/12345")).toEqual({
+      page: "repos",
+      pathname: "/dashboard/acme/repos/12345",
       workspaceRef: "acme",
       targetId: "12345",
     });
     // `all` is the reserved default detail, not a workspace word.
-    expect(matchSpaRoute("/dashboard/acme/targets/all")).toEqual({
-      page: "targets",
-      pathname: "/dashboard/acme/targets/all",
+    expect(matchSpaRoute("/dashboard/acme/repos/all")).toEqual({
+      page: "repos",
+      pathname: "/dashboard/acme/repos/all",
       workspaceRef: "acme",
       targetId: "all",
     });
     expect(matchSpaRoute("/dashboard/acme/members")?.page).toBe("members");
     expect(matchSpaRoute("/dashboard/acme/settings")?.page).toBe("settings");
-    // The targets surface is workspace-scoped only: no root spelling exists.
-    expect(matchSpaRoute("/dashboard/targets")).toBeNull();
+    // The repository surface is workspace-scoped only: no root spelling exists.
+    expect(matchSpaRoute("/dashboard/repos")).toBeNull();
+    // …and the retired `targets` segment resolves to no page anywhere.
+    expect(matchSpaRoute("/dashboard/acme/targets")).toBeNull();
   });
 
   test("the app detail keeps its path; its retired settings path spelling redirects to the tab", () => {
@@ -154,7 +174,7 @@ describe("matchSpaRoute — workspace-scoped surfaces", () => {
     for (const [path, search] of [
       ["/dashboard/acme/apps/12345", ""],
       ["/dashboard/acme/apps/12345", "?tab=insights"],
-      ["/dashboard/acme/targets/12345", ""],
+      ["/dashboard/acme/repos/12345", ""],
       ["/dashboard/acme/apps", ""],
       ["/dashboard/acme/api/apps/12345/settings", ""],
       ["/dashboard/acme/api/apps/12345/bot", ""],
@@ -171,10 +191,10 @@ describe("matchSpaRoute — workspace-scoped surfaces", () => {
     expect(matchSpaRoute("/dashboard/acme/api/targets")).toBeNull();
   });
 
-  test("targets is in the one workspace family (and not a reserved slug)", () => {
-    expect(WORKSPACE_FAMILY_SEGMENTS).toContain("targets");
-    expect(RESERVED_WORKSPACE_SLUGS.has("targets")).toBe(false);
-    expect(workspaceRefOf("/dashboard/acme/targets/12345")).toBe("acme");
+  test("repos is in the one workspace family (and not a reserved slug)", () => {
+    expect(WORKSPACE_FAMILY_SEGMENTS).toContain("repos");
+    expect(RESERVED_WORKSPACE_SLUGS.has("repos")).toBe(false);
+    expect(workspaceRefOf("/dashboard/acme/repos/12345")).toBe("acme");
   });
 
   test("a reserved first segment is never a workspace", () => {

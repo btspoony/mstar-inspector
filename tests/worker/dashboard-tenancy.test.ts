@@ -472,9 +472,11 @@ describe("workspace paths serve", () => {
   test("the ROUTING gate's 404s carry the same styled page (N2)", async () => {
     // The gate answers a retired route family before any session or membership
     // read. HTML navigation must render the member gate's page, not bare text.
+    // `/dashboard/apps` itself is a dashboard root (it redirects); the retired
+    // App family is the sub-path.
     const { db } = tenancyFixture();
     const env = envFor(db);
-    const path = "/dashboard/apps";
+    const path = `/dashboard/apps/${ACME_APP_ID}/settings`;
     const page = await worker.fetch(
       await authedRequest(path, "octocat", { accept: "text/html" }),
       env,
@@ -553,7 +555,7 @@ describe("success redirects stay in the workspace route family", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/acme/targets/${ACME_APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/acme/repos/${ACME_APP_ID}`);
   });
 
   test("a native validation 400 keeps the same workspace-prefixed target", async () => {
@@ -568,7 +570,7 @@ describe("success redirects stay in the workspace route family", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe(`/dashboard/acme/targets/${ACME_APP_ID}`);
+    expect(res.headers.get("Location")).toBe(`/dashboard/acme/repos/${ACME_APP_ID}`);
   });
 
   test("the SPA fetch form post keeps its plain 2xx body (no redirect)", async () => {
@@ -688,7 +690,9 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
   test("retired App HTML GET and HEAD answer 404, not the SPA shell", async () => {
     const { db } = tenancyFixture();
     const env = withSpaAssets(envFor(db));
-    for (const path of ["/dashboard/apps", `/dashboard/apps/${ACME_APP_ID}/settings`]) {
+    // The bare `/dashboard/apps` is the dashboard root (a redirect); the
+    // retired family is every path below it.
+    for (const path of [`/dashboard/apps/${ACME_APP_ID}/settings`, `/dashboard/apps/${ACME_APP_ID}/onboarding`]) {
       const get = await worker.fetch(
         await authedRequest(path, "octocat", { accept: "text/html" }),
         env,
@@ -813,7 +817,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
   test("a retired App page answers 404 even with ASSETS bound (gate before dispatch)", async () => {
     const { db } = tenancyFixture();
     const env = withSpaAssets(envFor(db));
-    for (const path of ["/dashboard/apps", `/dashboard/apps/${ACME_APP_ID}/settings`]) {
+    for (const path of [`/dashboard/apps/${ACME_APP_ID}/settings`, `/dashboard/apps/${ACME_APP_ID}/onboarding`]) {
       const res = await worker.fetch(
         await authedRequest(path, "octocat", { accept: "text/html" }),
         env,
@@ -824,19 +828,19 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
   });
 });
 
-describe("the review-target surface is a page family, not a Worker route family", () => {
-  test("targets joins the SPA family and the bare spelling is no page", () => {
+describe("the repository surface is a page family, not a Worker route family", () => {
+  test("repos joins the SPA family and the bare spelling is no page", () => {
     // ONE edit (the family) makes `workspaceRefOf`, the SPA matcher, `apiBase`
     // and the sidebar follow the segment. Tenant ownership is proven through
     // the real requests below, not by pinning the gate's internal set.
-    expect(WORKSPACE_FAMILY_SEGMENTS).toContain("targets");
-    expect(matchSpaRoute("/dashboard/targets")).toBeNull();
+    expect(WORKSPACE_FAMILY_SEGMENTS).toContain("repos");
+    expect(matchSpaRoute("/dashboard/repos")).toBeNull();
   });
 
-  test("both target paths serve the shell scoped to their workspace", async () => {
+  test("both repository paths serve the shell scoped to their workspace", async () => {
     const { db } = tenancyFixture();
     const env = withSpaAssets(envFor(db));
-    for (const path of ["/dashboard/acme/targets", `/dashboard/acme/targets/${ACME_APP_ID}`]) {
+    for (const path of ["/dashboard/acme/repos", `/dashboard/acme/repos/${ACME_APP_ID}`]) {
       const res = await worker.fetch(await authedRequest(path, "dana", { accept: "text/html" }), env);
       expect(res.status, path).toBe(200);
       const boot = bootOf(await res.text());
@@ -845,7 +849,7 @@ describe("the review-target surface is a page family, not a Worker route family"
   });
 });
 
-describe("the post-authentication landing is the workspace Apps page", () => {
+describe("the post-authentication landing is the workspace repository overview", () => {
   /** ONE live workspace — the M1 shape `getSoleWorkspace` resolves. */
   function soleWorkspaceFixture() {
     const db = createMigratedTestD1();
@@ -854,7 +858,7 @@ describe("the post-authentication landing is the workspace Apps page", () => {
     return { db };
   }
 
-  test("a signed-in HTML GET /dashboard 302s to the workspace Apps list, not the legacy root", async () => {
+  test("a signed-in HTML GET /dashboard 302s to the workspace repository overview, not a page", async () => {
     const { db } = soleWorkspaceFixture();
     const env = withSpaAssets(envFor(db));
     const res = await worker.fetch(
@@ -862,9 +866,23 @@ describe("the post-authentication landing is the workspace Apps page", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
     // The dead-end shell is never served on this path.
     expect(await res.text()).not.toContain("window.__BOOT__");
+  });
+
+  test("the retired /dashboard/apps spelling answers the same redirect as the root", async () => {
+    // Both spellings are dashboard roots: one landing rule, one target. The
+    // ref is the same workspace the root resolves, never a bare path.
+    const { db } = soleWorkspaceFixture();
+    for (const root of ["/dashboard", "/dashboard/apps"]) {
+      const res = await worker.fetch(
+        await authedRequest(root, "octocat", { accept: "text/html" }),
+        withSpaAssets(envFor(db)),
+      );
+      expect(res.status, root).toBe(302);
+      expect(res.headers.get("Location"), root).toBe("/dashboard/default/repos");
+    }
   });
 
   test("an unsigned /dashboard still 302s into the login page", async () => {
@@ -877,14 +895,14 @@ describe("the post-authentication landing is the workspace Apps page", () => {
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
-  test("an already-signed-in login bounce lands on the same workspace Apps page", async () => {
+  test("an already-signed-in login bounce lands on the same workspace repository overview", async () => {
     const { db } = soleWorkspaceFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/login", "octocat"),
       envFor(db),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
   });
 
   test("several live workspaces → the login's own first membership, never the retired /dashboard/apps", async () => {
@@ -898,7 +916,7 @@ describe("the post-authentication landing is the workspace Apps page", () => {
     );
     expect(res.status).toBe(302);
     // The emitted ref is the workspace ID, never the mutable slug.
-    expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/repos");
     expect(res.headers.get("Location")).not.toBe("/dashboard/apps");
   });
 
@@ -912,7 +930,7 @@ describe("the post-authentication landing is the workspace Apps page", () => {
       withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/repos");
 
     // The shell that redirect lands on still offers both workspaces.
     const shell = await worker.fetch(
@@ -1002,7 +1020,7 @@ describe("a workspace URL never carries a mutable value", () => {
       env,
     );
     expect(landing.status).toBe(302);
-    expect(landing.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
+    expect(landing.headers.get("Location")).toBe("/dashboard/ws-acme/repos");
   });
 });
 
@@ -1070,13 +1088,13 @@ describe("a login with no workspace gets the creation surface", () => {
     // `/dashboard` would strand the creator on a workspace-less shell. The
     // landing is the new workspace's ID — the same ref every other emission
     // site uses.
-    const created = (await res.json()) as { id: string; appsPath: string };
-    expect(created.appsPath).toBe(`/dashboard/${created.id}/apps`);
+    const created = (await res.json()) as { id: string; homePath: string };
+    expect(created.homePath).toBe(`/dashboard/${created.id}/repos`);
 
     // The new membership is real: the login now reaches that workspace's own
     // pages (the outsider 404 is gone) and the boot no longer offers creation.
     const shell = await worker.fetch(
-      await authedRequest(`/dashboard/${created.id}/apps`, "newcomer", {
+      await authedRequest(`/dashboard/${created.id}/repos`, "newcomer", {
         accept: "text/html",
       }),
       withSpaAssets(envFor(db)),
@@ -1102,7 +1120,7 @@ describe("a login with no workspace gets the creation surface", () => {
       withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
   });
 });
 
@@ -1117,7 +1135,7 @@ describe("the onboarding CTA stays inside the workspace", () => {
     const body = await res.text();
     // GitHub's slug is NULL in this fixture (never synced), so the page shows
     // the App id; the Settings CTA opens the review-target page by that id.
-    expect(body).toContain(`href="/dashboard/acme/targets/${appAcmeId(db)}"`);
+    expect(body).toContain(`href="/dashboard/acme/repos/${appAcmeId(db)}"`);
     expect(body).not.toContain('href=`/dashboard/apps/${ACME_APP_ID}/settings`');
   });
 

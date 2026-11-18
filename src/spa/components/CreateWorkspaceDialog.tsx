@@ -3,7 +3,7 @@
  * surface, the menu item sent an existing member to `/dashboard`, which serves
  * the creation form only for a `needsWorkspace` boot — so the click landed on
  * their own workspace. The dialog posts the same route with the same name
- * limits, then hands the browser a FULL navigation to the apps page the 201
+ * limits, then hands the browser a FULL navigation to the landing page the 201
  * names: the in-memory boot is pre-creation and lists no membership for the
  * new workspace, so an in-SPA `navigate()` would render a shell that cannot
  * name it.
@@ -75,9 +75,9 @@ export function CreateWorkspaceDialog({
     setBusy(true);
     try {
       const { status, body } = await postForm("/dashboard/api/workspaces", { name: trimmed });
-      const appsPath = status === 201 ? parseCreatedWorkspace(body)?.appsPath ?? null : null;
-      if (appsPath !== null) {
-        window.location.assign(appsPath);
+      const homePath = status === 201 ? parseCreatedWorkspace(body)?.homePath ?? null : null;
+      if (homePath !== null) {
+        window.location.assign(homePath);
         return;
       }
       // 409 is the server's free-slot / creation-closed refusal. Its two named

@@ -13,7 +13,7 @@ export const zhCN: Dictionary = {
     brand: "Morning Star Inspector",
     primary: "主导航",
     apps: "应用",
-    /** 仓库页（`/dashboard/<ref>/targets`）。 */
+    /** 仓库总览页（`/dashboard/<ref>/repos`，仪表盘默认页）。 */
     targets: "仓库",
     members: "成员",
     settings: "设置",
@@ -166,9 +166,16 @@ export const zhCN: Dictionary = {
     blockedBotNotShared:
       "该机器人已不再共享给本工作区，因此此目标不会进行任何评审。请联系平台运营者重新共享。",
   },
-  /** 仓库页（`/dashboard/<ref>/targets`）：工作区对一个仓库的认领，独立成页。详情页沿用被移出的“应用设置”标签的 `settings.*` 文案。 */
+  /** 仓库页（`/dashboard/<ref>/repos`，仪表盘默认页）：工作区对一个仓库的认领，独立成页。详情页沿用被移出的“应用设置”标签的 `settings.*` 文案。 */
   targets: {
     heading: "仓库",
+    /** 总览页唯一的说明段落（应用总览版式）。 */
+    headingDescription:
+      "每一行代表本工作区正在评审的一个仓库。评审配置在各自仓库页里；洞察与拉取请求由整个工作区共享。",
+    /** 总览指标带：仅由已加载的列表可证的三个数字。 */
+    metricRepositories: "仓库",
+    metricUninstalled: "待安装",
+    metricLastReview: "最近评审",
     backToList: "返回仓库",
     /** 详情页的三个标签。 */
     tabInsights: "洞察",
@@ -197,8 +204,8 @@ export const zhCN: Dictionary = {
     },
     meta: "{app} · 最近审查 {time}",
     metaNever: "{app} · 尚未审查",
-    /** 待安装行的 meta。 */
-    metaUninstalled: "未绑定安装 · 等待接收投递",
+    /** 待安装行的 meta：完全没有仓库标识的目标。 */
+    metaUninstalled: "未绑定仓库 · 等待接收投递",
     add: "添加仓库",
     addDialog: {
       title: "添加仓库",
