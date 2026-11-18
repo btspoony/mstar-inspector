@@ -1894,13 +1894,18 @@ function ChainEditor({
       )}
       {/* One control row (the RuntimeHarnessEditor shape): the picker keeps
           its content-adaptive shell — no reserved slot — and the add, save and
-          caller actions sit beside it at their intrinsic widths, wrapping
-          below cleanly on narrow screens. */}
-      <div className="flex flex-wrap items-center gap-2">
+          caller actions sit beside it at their intrinsic widths. The row hangs
+          off the panel's trailing edge (I-000647) so it can never run past the
+          container's edge, and it still wraps whole controls below on narrow
+          screens with every wrapped line right-aligned. `min-w-0` lets the
+          picker compress rather than overflow when its longest selector is
+          wider than the panel; the trigger's line-clamp then shortens the
+          value. 保存模型链 stays the primary face of the row. */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <span className="text-sm font-medium">{t(locale, "settings.modelChainField")}</span>
-        <div className="w-fit max-w-xs">
+        <div className="w-fit max-w-xs min-w-0">
           <Select value={pick} onValueChange={setPick}>
-            <SelectTrigger aria-label={t(locale, "settings.modelChainField")}>
+            <SelectTrigger className="max-w-full" aria-label={t(locale, "settings.modelChainField")}>
               <SelectValue placeholder={t(locale, "settings.pickModel")} />
             </SelectTrigger>
             <SelectContent>
