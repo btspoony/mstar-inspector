@@ -291,8 +291,6 @@ const SETTINGS_PAYLOAD: SettingsManagePayload = {
     github_visibility: "unknown",
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
-  allowlist: { enabled: false, owners: [] },
-  owner_overlap: false,
   keys: [],
   model_chain: null,
   model_limits_snapshot: "2026-01-01",

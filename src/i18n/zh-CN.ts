@@ -729,12 +729,6 @@ export const zhCN: Dictionary = {
     opsReviewsCopy: "暂停期间，每次投递都以 2xx 应答并被忽略 — 不会进行任何审查；恢复后此 App 重新开始审查。",
     opsDeliveryTitle: "投递应答",
     opsDeliveryCopy: "停用后，每次投递都以 404 应答，因此不会进行任何审查；重新启用后此 App 重新开始审查。",
-    opsParkTitle: "停放此目标",
-    opsParkCopy: "本工作区中另一个存活目标声明了同一所有者。停放会在一步审计操作中暂停此目标并清除其账号声明；目标及其设置保留。",
-    opsParkAction: "停放目标",
-    confirmParkTitle: "停放 {name}？",
-    confirmParkBody: "此目标将被暂停且账号声明被清除，所有者重叠随之消除。不会删除任何内容，之后仍可恢复评审。",
-    confirmParkAction: "停放",
     opsDeleteTitle: "删除此 App",
     opsDeleteCopy: "软删除 — App 从此列表移除，其所有安装都会被关闭。",
     // 评审触发模式（spec review-trigger-policy §2/§3）：分段标签本地化；
