@@ -42,10 +42,12 @@
  * `impact` line states that a completed run takes no further batch).
  *
  * A batch is ONE `db.batch` transaction over at most GROUPS_PER_BATCH groups,
- * in a cursor over the case-folded group key. The worklist predicate is
- * `target_id IS NULL`, so a replay over finished work matches nothing; the
- * UPDATEs carry the same predicate, so a non-NULL target is never rewritten
- * and no row is ever deleted.
+ * in a cursor over the case-folded group key. The cursor is pushed INTO the
+ * worklist read, so each batch aggregates only the groups it can still walk —
+ * the walk stays linear in orphan rows instead of re-reading the whole worklist
+ * per step. The worklist predicate is `target_id IS NULL`, so a replay over
+ * finished work matches nothing; the UPDATEs carry the same predicate, so a
+ * non-NULL target is never rewritten and no row is ever deleted.
  */
 import type { DashboardD1, DashboardD1Statement } from "../../dashboard/users";
 import type {
@@ -73,10 +75,15 @@ const matchingTargets = (botId: string, owner: string, repo: string) => `
 
 /**
  * The group's own orphan rows, re-read INSIDE the batch transaction, tested for
- * "every row still resolves to the bound bot". A row that names no bot, names
- * another, or whose installation now resolves to another means the group's
- * shape changed between planning and commit — a mapping written mid-run, a
- * delivery arriving — and the statements below write nothing for that group.
+ * "every row still resolves to the bound bot". It is the SAME resolution the
+ * planner applied, so a group the single-bot fallback resolved stays writable:
+ * a group with no evidence at all names no bot in any row, and rejecting it
+ * here would plan rows forever while verify blocked on them.
+ *
+ * Rejected shapes are the ones where the group moved under the plan: a row
+ * naming another bot, an installation resolving to another bot, or a MIXTURE of
+ * resolved and unresolved rows — there the unresolved row could belong to any
+ * bot, and writing it would borrow a sibling's bot at commit time.
  * The read is restricted to the one group, so the guard stays a seek.
  */
 const groupStillUniform = (bot: string, owner: string, repo: string) => `
@@ -92,30 +99,56 @@ const groupStillUniform = (bot: string, owner: string, repo: string) => `
        WHERE target_id IS NULL AND owner = ${owner} COLLATE NOCASE AND repo = ${repo} COLLATE NOCASE
       UNION ALL
       SELECT NULL, installation_id FROM review_failures
-       WHERE target_id IS NULL AND owner = ${owner} COLLATE NOCASE AND repo = ${repo} COLLATE NOCASE)
-    SELECT 1 FROM g
-     WHERE (g.bot_id IS NULL
-            AND NOT EXISTS (SELECT 1 FROM bot_installations i
-                             WHERE i.installation_id = g.installation_id))
-        OR (g.bot_id IS NOT NULL AND g.bot_id <> ${bot})
-        OR EXISTS (SELECT 1 FROM bot_installations i
-                    WHERE i.installation_id = g.installation_id AND i.bot_id <> ${bot}))`;
+       WHERE target_id IS NULL AND owner = ${owner} COLLATE NOCASE AND repo = ${repo} COLLATE NOCASE),
+    shape(other, unknown, known) AS (
+      SELECT SUM((g.bot_id IS NOT NULL AND g.bot_id <> ${bot})
+                  OR EXISTS (SELECT 1 FROM bot_installations i
+                              WHERE i.installation_id = g.installation_id AND i.bot_id <> ${bot})),
+             SUM(g.bot_id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM bot_installations i
+                                  WHERE i.installation_id = g.installation_id)),
+             SUM(g.bot_id = ${bot}
+                 OR EXISTS (SELECT 1 FROM bot_installations i
+                             WHERE i.installation_id = g.installation_id AND i.bot_id = ${bot}))
+        FROM g)
+    SELECT 1 FROM shape WHERE other > 0 OR (unknown > 0 AND known > 0))`;
 
 /**
  * Every ledger row still holding no target, one row per ledger row, with the
- * bot it names itself. `review_failures` carries no bot of its own — it is
- * attributed through `installation_id` alone. `row_bot` is that resolution:
- * the row's own `bot_id` when set, else the bot its installation names (a
- * removed installation row still resolves — it is history, not absence).
+ * bot it names itself and the group key it belongs to. `review_failures`
+ * carries no bot of its own — it is attributed through `installation_id` alone.
+ * `row_bot` is that resolution: the row's own `bot_id` when set, else the bot
+ * its installation names (a removed installation row still resolves — it is
+ * history, not absence).
+ *
+ * `group_key` is computed per ROW rather than from the group's aggregates, so
+ * `after` — an SQL term, `''` for no floor — filters the base read by the
+ * cursor instead of aggregating the groups the walk has already passed. Every
+ * row of a group carries the same key, so the filter never splits a group.
+ *
+ * shortcut: the floor is an expression, so each table is still scanned for
+ * NULL-target rows rather than seeked; upgrade when a stored/indexed group-key
+ * column exists to range over.
  */
-const ORPHAN_ROWS = `
-  SELECT 'pull_requests' AS src, id, bot_id, NULL AS installation_id, owner, repo FROM pull_requests WHERE target_id IS NULL
+const orphanRows = (after: string) => {
+  const floor = ` AND lower(owner) || '/' || lower(repo) > ${after}`;
+  return `
+  SELECT 'pull_requests' AS src, id, bot_id, NULL AS installation_id, owner, repo,
+         lower(owner) || '/' || lower(repo) AS group_key
+    FROM pull_requests WHERE target_id IS NULL${floor}
   UNION ALL
-  SELECT 'reviews', id, bot_id, installation_id, owner, repo FROM reviews WHERE target_id IS NULL
+  SELECT 'reviews', id, bot_id, installation_id, owner, repo,
+         lower(owner) || '/' || lower(repo)
+    FROM reviews WHERE target_id IS NULL${floor}
   UNION ALL
-  SELECT 'review_findings', id, bot_id, installation_id, owner, repo FROM review_findings WHERE target_id IS NULL
+  SELECT 'review_findings', id, bot_id, installation_id, owner, repo,
+         lower(owner) || '/' || lower(repo)
+    FROM review_findings WHERE target_id IS NULL${floor}
   UNION ALL
-  SELECT 'review_failures', id, NULL, installation_id, owner, repo FROM review_failures WHERE target_id IS NULL`;
+  SELECT 'review_failures', id, NULL, installation_id, owner, repo,
+         lower(owner) || '/' || lower(repo)
+    FROM review_failures WHERE target_id IS NULL${floor}`;
+};
 
 /**
  * One row per orphan group: the spelling to write, the bot the group resolves
@@ -138,38 +171,40 @@ const ORPHAN_ROWS = `
  * A bot with no `bot_workspaces` row has no tenant, so no target could be
  * created for it. `unattributable_groups` and the attribute step both read
  * this, so preflight, verify and the batch cannot disagree about what resolves.
+ *
+ * `after` is the cursor floor, pushed into the base read (`''` = the whole
+ * worklist), so a batch aggregates only the groups it can still walk instead
+ * of re-reading every orphan row the walk has already passed.
  */
-const RESOLVED_GROUPS = `
-  WITH orphan(src, id, bot_id, installation_id, owner, repo) AS (${ORPHAN_ROWS}),
+const resolvedGroups = (after: string) => `
+  WITH orphan(src, id, bot_id, installation_id, owner, repo, group_key) AS (${orphanRows(after)}),
   row_bot(src, id, bot_id) AS (
     SELECT src, id, bot_id FROM orphan WHERE bot_id IS NOT NULL
     UNION
     SELECT o.src, o.id, i.bot_id FROM orphan o
       JOIN bot_installations i ON i.installation_id = o.installation_id),
-  named(owner, repo) AS (
-    SELECT MIN(owner), MIN(repo) FROM orphan
-     GROUP BY owner COLLATE NOCASE, repo COLLATE NOCASE),
-  claim(owner, repo, unknown, bots, candidate_bot) AS (
-    SELECT n.owner, n.repo,
+  named(group_key, owner, repo) AS (
+    SELECT group_key, MIN(owner), MIN(repo) FROM orphan
+     GROUP BY group_key),
+  claim(group_key, owner, repo, unknown, bots, candidate_bot) AS (
+    SELECT n.group_key, n.owner, n.repo,
            SUM(NOT EXISTS (SELECT 1 FROM row_bot rb WHERE rb.src = o.src AND rb.id = o.id)),
            COUNT(DISTINCT rb.bot_id), MIN(rb.bot_id)
       FROM named n
-      JOIN orphan o ON o.owner = n.owner COLLATE NOCASE
-                   AND o.repo = n.repo COLLATE NOCASE
+      JOIN orphan o ON o.group_key = n.group_key
       LEFT JOIN row_bot rb ON rb.src = o.src AND rb.id = o.id
-     GROUP BY n.owner, n.repo),
+     GROUP BY n.group_key, n.owner, n.repo),
   only_bot(bot_id) AS (
     SELECT CASE WHEN COUNT(DISTINCT bot_id) = 1 THEN MIN(bot_id) END FROM bot_workspaces),
-  attributed(owner, repo, bot_id) AS (
-    SELECT c.owner, c.repo,
+  attributed(group_key, owner, repo, bot_id) AS (
+    SELECT c.group_key, c.owner, c.repo,
            CASE WHEN c.unknown = 0 AND c.bots = 1 THEN c.candidate_bot
                 WHEN c.bots = 0 THEN (SELECT bot_id FROM only_bot) END
       FROM claim c),
-  resolved(owner, repo, bot_id, workspace_id, targets, sort_key) AS (
-    SELECT a.owner, a.repo, a.bot_id,
+  resolved(group_key, owner, repo, bot_id, workspace_id, targets) AS (
+    SELECT a.group_key, a.owner, a.repo, a.bot_id,
            (SELECT w.workspace_id FROM bot_workspaces w WHERE w.bot_id = a.bot_id),
-           (SELECT COUNT(*) FROM (${matchingTargets("a.bot_id", "a.owner", "a.repo")})),
-           lower(a.owner) || '/' || lower(a.repo)
+           (SELECT COUNT(*) FROM (${matchingTargets("a.bot_id", "a.owner", "a.repo")}))
       FROM attributed a)`;
 
 /** One group's read: its spelling, what it resolved to, and its cursor key. */
@@ -277,9 +312,9 @@ async function planBatch(
   const after = typeof cursor?.last_group === "string" ? cursor.last_group : "";
   const read = await db
     .prepare(
-      `${RESOLVED_GROUPS}
-       SELECT owner, repo, bot_id, workspace_id, targets, sort_key FROM resolved
-        WHERE sort_key > ?1 ORDER BY sort_key LIMIT ?2`,
+      `${resolvedGroups("?1")}
+       SELECT owner, repo, bot_id, workspace_id, targets, group_key AS sort_key FROM resolved
+        ORDER BY sort_key LIMIT ?2`,
     )
     .bind(after, GROUPS_PER_BATCH)
     .all<ResolvedGroup>();
@@ -355,7 +390,7 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
   async preflight(db: DashboardD1): Promise<UpgradeCounts> {
     const counts = await db
       .prepare(
-        `${RESOLVED_GROUPS}
+        `${resolvedGroups("''")}
          SELECT COUNT(*) AS groups,
                 COALESCE(SUM(${attributable("")} AND targets = 1), 0) AS groups_with_target,
                 COALESCE(SUM(${attributable("")} AND targets = 0), 0) AS groups_needing_target,
@@ -365,7 +400,7 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
       )
       .first<UpgradeCounts>();
     return {
-      orphan_rows: await countRows(db, `SELECT COUNT(*) AS n FROM (${ORPHAN_ROWS})`),
+      orphan_rows: await countRows(db, `SELECT COUNT(*) AS n FROM (${orphanRows("''")})`),
       groups: counts?.groups ?? 0,
       groups_with_target: counts?.groups_with_target ?? 0,
       groups_needing_target: counts?.groups_needing_target ?? 0,
@@ -381,6 +416,10 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
    * a group whose target an operator retired between the read and the commit
    * had its guarded updates match nothing, and reporting it as attributed would
    * hide that from the operator until verify blocked on it.
+   *
+   * `processed` is the LEDGER ROWS the batch moved (`UpgradeBatch.processed`'s
+   * contract, and what the console's "rows processed" means); `log.attributed`
+   * stays the count of groups, which is the unit the walk pages in.
    */
   async runBatch(
     db: DashboardD1,
@@ -391,11 +430,16 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
     const results = plan.statements.length > 0 ? await db.batch(plan.statements) : [];
     const moved = (index: number) => results[index]?.meta.changes ?? 0;
 
+    let rows = 0;
     let attributed = 0;
     let created = 0;
     for (const write of plan.writes) {
       if (write.insert !== null && moved(write.insert) > 0) created += 1;
-      if (write.updates.some((index) => moved(index) > 0)) attributed += 1;
+      // The four updates are per-table and disjoint, so their sum is the rows
+      // this group moved — zero when the guards stood the group down.
+      const touched = write.updates.reduce((sum, index) => sum + moved(index), 0);
+      if (touched > 0) attributed += 1;
+      rows += touched;
     }
     // A group whose statements all matched nothing changed shape between the
     // plan and the commit (a mapping repaired mid-run, or a target retired).
@@ -403,7 +447,7 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
     const changed = plan.writes.length - attributed;
     return {
       cursor: plan.cursor === null ? null : { last_group: plan.cursor },
-      processed: attributed,
+      processed: rows,
       done: plan.done,
       log: {
         groups: plan.groups,
@@ -428,10 +472,9 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
   async verify(db: DashboardD1): Promise<UpgradeCounts> {
     const row = await db
       .prepare(
-        `${RESOLVED_GROUPS}
+        `${resolvedGroups("''")}
          SELECT (SELECT COUNT(*) FROM orphan o
-                   JOIN resolved r ON r.owner = o.owner COLLATE NOCASE
-                                  AND r.repo = o.repo COLLATE NOCASE
+                   JOIN resolved r ON r.group_key = o.group_key
                   WHERE ${attributable("r.")})
                   AS unattributed_ledger_rows,
                 (SELECT COUNT(*) FROM resolved WHERE NOT (${attributable("")}))

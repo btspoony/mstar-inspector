@@ -45,7 +45,7 @@ const UPGRADES: DataUpgradeRow[] = [
     id: "repo-backfill",
     title: "Repository identity backfill",
     impact:
-      "Merges duplicate review targets into one per repository and repoints their pull requests, reviews, findings and failures onto it. Never deletes a ledger row.",
+      "Merges duplicate review targets into one per repository and repoints their pull requests, reviews, findings and failures onto it. Never deletes reviews, findings or failures.",
     requiresDowntime: true,
     state: state(),
     preflight: { unidentified_targets: 4, ledger_pairs: 12 },
@@ -206,7 +206,7 @@ describe("data upgrade screen — static faces", () => {
       {
         id: "repo-backfill",
         title: "Repository identity backfill",
-        impact: "Splits duplicate targets and repoints their ledger rows. Never deletes a ledger row.",
+        impact: "Splits duplicate targets and repoints their ledger rows. Never deletes reviews, findings or failures.",
         requiresDowntime: false,
         state: state({ status: "completed", processed: 0, finishedAt: "2026-11-16T09:00:00.000Z" }),
         preflight: { unidentified_targets: 0, ledger_pairs: 0, conflicting_groups: 0 },
@@ -221,7 +221,8 @@ describe("data upgrade screen — static faces", () => {
     expect(markup).toContain(t("en", "admin.dataUpgrades.nothingToMigrate"));
     // The control is rendered but unusable — an operator reads why, not an absent button.
     // (`disabled=""` is the rendered attribute; the base class string also says `disabled:`.)
-    const start = /<button[^>]*disabled=""[^>]*>Start upgrade<\/button>/;
+    const startLabel = t("en", "admin.dataUpgrades.startAction").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const start = new RegExp(`<button[^>]*disabled=""[^>]*>${startLabel}</button>`);
     expect(markup).toMatch(start);
     // Both dictionaries state it.
     const zh = view({ locale: "zh_CN", data: { upgrades: zero, maintenance: RUNTIME.maintenance } });

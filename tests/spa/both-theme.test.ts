@@ -394,7 +394,7 @@ const ADMIN_UPGRADES = [
   {
     id: "repo-backfill",
     title: "Repository identity backfill",
-    impact: "Splits duplicate targets and repoints their ledger rows. Never deletes a ledger row.",
+    impact: "Splits duplicate targets and repoints their ledger rows. Never deletes reviews, findings or failures.",
     requiresDowntime: true,
     state: {
       status: "running",

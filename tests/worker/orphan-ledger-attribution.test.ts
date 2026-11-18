@@ -191,7 +191,9 @@ describe("orphan-ledger-attribution item", () => {
     const db = fixture();
     const batch = await orphanLedgerAttribution.runBatch(db, null, OPERATOR);
 
-    expect(batch.processed).toBe(2);
+    // `processed` is ledger ROWS, not groups: alpha's two rows and beta's three.
+    // The group count is the log's `attributed` — the unit the walk pages in.
+    expect(batch.processed).toBe(5);
     expect(batch.done).toBe(true);
     expect(batch.log).toEqual({
       groups: 3,
@@ -285,6 +287,10 @@ describe("orphan-ledger-attribution item", () => {
 
     const second = await orphanLedgerAttribution.runBatch(db, first.cursor, OPERATOR);
     expect(second).toMatchObject({ processed: 1, done: true });
+    // The cursor is pushed into the worklist read, so the second batch
+    // aggregates the one group it still has to walk — not the twenty it passed.
+    expect(first.log).toMatchObject({ groups: 20 });
+    expect(second.log).toMatchObject({ groups: 1 });
     expect(liveTargets(db)).toHaveLength(21);
     // Past the last group the walk is empty: nothing more to move.
     expect(await orphanLedgerAttribution.runBatch(db, second.cursor, OPERATOR)).toMatchObject({
@@ -324,6 +330,33 @@ describe("orphan-ledger-attribution item", () => {
     expect(await orphanLedgerAttribution.verify(db, { runStartedAt: null })).toEqual({
       unattributed_ledger_rows: 0,
       unattributable_groups: 1,
+    });
+  });
+
+  test("a group with no bot evidence falls back to the deployment's only bot and is attributed", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedBotWorkspace(db, BOT);
+    // The failure row names an installation no bot owns and carries no bot of
+    // its own: the group has NO evidence. One bot exists, so the fallback picks
+    // it — and the batch must be able to write that resolution, or the group is
+    // planned forever and verify blocks on rows nothing could move.
+    seedOrphanFailure(db, "fl-fallback", { installationId: 99, repo: "alpha" });
+
+    expect(await orphanLedgerAttribution.preflight(db)).toMatchObject({
+      groups: 1,
+      groups_needing_target: 1,
+      unattributable_groups: 0,
+    });
+
+    const batch = await orphanLedgerAttribution.runBatch(db, null, OPERATOR);
+    expect(batch).toMatchObject({ processed: 1, done: true });
+    const target = liveTargets(db)[0]!;
+    expect(target).toMatchObject({ bot_id: BOT, repo_owner: "acme", repo_name: "alpha" });
+    expect(targetOf(db, "review_failures", "fl-fallback")).toBe(target.id);
+    expect(await orphanLedgerAttribution.verify(db, { runStartedAt: null })).toEqual({
+      unattributed_ledger_rows: 0,
+      unattributable_groups: 0,
     });
   });
 

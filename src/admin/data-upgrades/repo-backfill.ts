@@ -517,7 +517,13 @@ export const repoBackfill: DataUpgradeItem = {
     };
   },
 
-  /** ONE transaction per call; a replay over migrated rows processes nothing. */
+  /**
+   * ONE transaction per call; a replay over migrated rows processes nothing.
+   *
+   * No `actor`: the only target this item creates inherits the D22 winner's
+   * `created_by` (spec B5 — the merged row keeps that winner's configuration),
+   * so naming the operator would misattribute a historical row.
+   */
   async runBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise<UpgradeBatch> {
     const plan = await planBatch(db, cursor);
     if (plan.statements.length > 0) await db.batch(plan.statements);
