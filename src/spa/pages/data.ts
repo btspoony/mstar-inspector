@@ -2855,6 +2855,39 @@ export function splitModelChain(raw: string | null | undefined): string[] {
     .filter((selector) => selector.length > 0);
 }
 
+/**
+ * I-000645: swap one chain entry with its neighbour. The stored order IS the
+ * chain string (no ordinal column), so reordering is a pure array swap the
+ * existing `join(", ")` save persists. `delta` is -1 (up) or +1 (down); an index
+ * at the end, or a list too short to have a neighbour there, comes back
+ * unchanged rather than wrapping — the end buttons are disabled anyway, and a
+ * wrap would silently reorder a chain the operator only nudged.
+ */
+export function moveChainEntry(chain: readonly string[], index: number, delta: -1 | 1): string[] {
+  const target = index + delta;
+  const moved = chain[index];
+  const displaced = chain[target];
+  if (moved === undefined || displaced === undefined) return [...chain];
+  const next = [...chain];
+  next[index] = displaced;
+  next[target] = moved;
+  return next;
+}
+
+/**
+ * One chain row's React key. Keyed by INDEX a swap remounts both rows and drops
+ * keyboard focus mid-reorder (I-000645: "focus stays on the moved row's
+ * control"). The selector plus its occurrence ordinal is stable across a move:
+ * React re-parents the existing node — focus, hover and the pressed control all
+ * travel with it — and duplicate selectors still get one key each.
+ */
+export function chainRowKey(chain: readonly string[], index: number): string {
+  const selector = chain[index] ?? "";
+  let occurrence = 0;
+  for (let i = 0; i < index; i += 1) if (chain[i] === selector) occurrence += 1;
+  return `${selector}#${occurrence}`;
+}
+
 /** Same GitHub login grammar the invite route enforces. */
 export const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 

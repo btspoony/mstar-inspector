@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { ExternalLink, Plus } from "lucide-react";
+import { ChevronDown, ChevronUp, ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import {
   Button,
@@ -48,6 +48,8 @@ import {
   seatRoleValues,
   seatSelectValue,
   splitModelChain,
+  chainRowKey,
+  moveChainEntry,
   type ChainTab,
   type BotConfigSections,
   type ModelOptionGroup,
@@ -1777,23 +1779,53 @@ function ChainEditor({
         <ul className="flex flex-col gap-2">
           {chain.map((selector, index) => (
             <li
-              key={`${selector}-${index}`}
+              key={chainRowKey(chain, index)}
               className="flex items-center justify-between gap-2 rounded-(--radius-control) border border-(--border-default) bg-(--surface-inset) px-3 py-2"
             >
               <span className="font-mono text-sm">{selector}</span>
-              {/* (review deferral): removing a selector edits
-                  the UNSAVED local list — recoverable by re-picking, no
-                  dialog, no server op — so it rides the AD-552 local-edit
-                  face (outline + sm, the discard idiom). The destructive red
-                  stays reserved for confirm-gated stored-data removals. */}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setChain(chain.filter((_, i) => i !== index))}
-              >
-                {t(locale, "settings.remove")}
-              </Button>
+              <div className="flex items-center gap-1">
+                {/* I-000645: order IS the stored `chain` string, so a move is a
+                    plain swap in this UNSAVED array — the existing
+                    `chain.join(", ")` save then persists the new order with no
+                    route or schema change. Moving is a local edit exactly like
+                    移除: the operator can move rows and save once. The ends are
+                    disabled rather than wrapping, so the first/last row states
+                    its position. Focus stays on the SAME control after the swap
+                    (see the row key), so a keyboard operator can keep pressing. */}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label={t(locale, "settings.moveChainUp")}
+                  disabled={index === 0}
+                  onClick={() => setChain(moveChainEntry(chain, index, -1))}
+                >
+                  <ChevronUp aria-hidden="true" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label={t(locale, "settings.moveChainDown")}
+                  disabled={index === chain.length - 1}
+                  onClick={() => setChain(moveChainEntry(chain, index, 1))}
+                >
+                  <ChevronDown aria-hidden="true" />
+                </Button>
+                {/* (review deferral): removing a selector edits
+                    the UNSAVED local list — recoverable by re-picking, no
+                    dialog, no server op — so it rides the AD-552 local-edit
+                    face (outline + sm, the discard idiom). The destructive red
+                    stays reserved for confirm-gated stored-data removals. */}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setChain(chain.filter((_, i) => i !== index))}
+                >
+                  {t(locale, "settings.remove")}
+                </Button>
+              </div>
             </li>
           ))}
         </ul>
