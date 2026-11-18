@@ -188,6 +188,12 @@ export function DeliveryStatusView({
 
   const repoOptions = page?.repos ?? [];
   const typeOptions = page?.types ?? [];
+  // I-000649: nothing is known until the first read RESOLVES. Reading a null
+  // page as "zero rows" painted the empty state under the in-flight line, so
+  // the operator was told the bot never received a webhook mid-request. The
+  // table and its pager therefore render only once a page is in hand; the
+  // in-flight line above is the first read's face.
+  const resolved = page !== null;
   const total = page?.total ?? 0;
   const from = total === 0 ? 0 : Math.min(offset + 1, total);
   const to = Math.min(offset + DELIVERY_PAGE_SIZE, total);
@@ -277,56 +283,60 @@ export function DeliveryStatusView({
           </span>
         ) : null}
       </div>
-      <DataTable
-        columns={columns}
-        rows={page?.rows ?? []}
-        rowKey={(row) => `${row.created_at}-${row.event_name ?? ""}-${row.repository_full_name ?? ""}`}
-        empty={
-          <EmptyState
-            title={t(locale, "appDetail.delivery.emptyTitle")}
-            description={t(locale, "appDetail.delivery.emptyDescription")}
+      {resolved ? (
+        <>
+          <DataTable
+            columns={columns}
+            rows={page.rows}
+            rowKey={(row) => `${row.created_at}-${row.event_name ?? ""}-${row.repository_full_name ?? ""}`}
+            empty={
+              <EmptyState
+                title={t(locale, "appDetail.delivery.emptyTitle")}
+                description={t(locale, "appDetail.delivery.emptyDescription")}
+              />
+            }
           />
-        }
-      />
-      <div data-slot="pager" className="flex flex-wrap items-center justify-between gap-2">
-        <span
-          data-slot="pager-range"
-          aria-live="polite"
-          className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tabular-nums text-(--text-faint)"
-        >
-          {t(locale, "appDetail.delivery.pageRange", { from, to, total })}
-        </span>
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            disabled={loading || offset === 0}
-            onClick={() => onPage(Math.max(0, offset - DELIVERY_PAGE_SIZE))}
-          >
-            {t(locale, "appDetail.delivery.pagePrev")}
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            disabled={loading || to >= total}
-            onClick={() => onPage(offset + DELIVERY_PAGE_SIZE)}
-          >
-            {t(locale, "appDetail.delivery.pageNext")}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            aria-label={t(locale, "appDetail.delivery.refreshAria")}
-            disabled={loading}
-            onClick={onReload}
-          >
-            <RefreshCw aria-hidden="true" />
-          </Button>
-        </div>
-      </div>
+          <div data-slot="pager" className="flex flex-wrap items-center justify-between gap-2">
+            <span
+              data-slot="pager-range"
+              aria-live="polite"
+              className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tabular-nums text-(--text-faint)"
+            >
+              {t(locale, "appDetail.delivery.pageRange", { from, to, total })}
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                disabled={loading || offset === 0}
+                onClick={() => onPage(Math.max(0, offset - DELIVERY_PAGE_SIZE))}
+              >
+                {t(locale, "appDetail.delivery.pagePrev")}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                disabled={loading || to >= total}
+                onClick={() => onPage(offset + DELIVERY_PAGE_SIZE)}
+              >
+                {t(locale, "appDetail.delivery.pageNext")}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={t(locale, "appDetail.delivery.refreshAria")}
+                disabled={loading}
+                onClick={onReload}
+              >
+                <RefreshCw aria-hidden="true" />
+              </Button>
+            </div>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
