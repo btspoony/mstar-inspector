@@ -109,7 +109,12 @@ async function readFailure(db: DashboardD1, id: string): Promise<MaintenanceRepl
  * unresolvable: the record stays visible and is never resurrected.
  */
 async function readLiveTarget(db: DashboardD1, failureId: string): Promise<MaintenanceReplayTarget | null> {
+  // One statement, so every predicate is read from one snapshot: a target retired
+  // between two reads would otherwise be enqueued with its stale bot.
   const row = await db
+    // shortcut: tenant-bypass — internal maintenance read (operator route and sweep
+    // retry); it returns no identity or ownership column, and the workspace join is
+    // the tenant gate.
     .prepare(
       `SELECT t.id AS target_id, t.bot_id AS bot_id
          FROM review_failures f
