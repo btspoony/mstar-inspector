@@ -66,6 +66,7 @@ import {
   verifyDataUpgrade,
 } from "./data-upgrades";
 import { operatorLogin, type AdminContext } from "./gate";
+import { createRepoLookup } from "./installation-repositories";
 import { requestMaintenanceReplay, type MaintenanceReplayOutcome } from "./maintenance-replay";
 import { createSupportGrant, revokeSupportGrant } from "./support-grants";
 import { listUsers } from "./users";
@@ -932,7 +933,9 @@ async function dataUpgradeAction(c: AdminContext): Promise<Response> {
     return c.json({ id: item.id, preflight: await item.preflight(db) });
   }
   if (action === "step") {
-    const outcome = await stepDataUpgrade(db, item, login, now);
+    const outcome = await stepDataUpgrade(db, item, login, now, {
+      repoLookup: createRepoLookup(db, c.env.DASHBOARD_ENCRYPTION_KEY),
+    });
     return outcome.kind === "refused"
       ? c.json({ error: outcome.reason, state: outcome.state }, 409)
       : c.json({ state: outcome.state, batch: outcome.batch });
