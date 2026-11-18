@@ -15,6 +15,7 @@ import {
   SelectLabel,
   SelectTrigger,
   SelectValue,
+  StatusBadge,
   Tabs,
   TabsContent,
   TabsList,
@@ -674,6 +675,67 @@ export function AppInstallSection({
           ) : null}
         </div>
       </div>
+    </FlowSection>
+  );
+}
+
+/**
+ * The bot's installation roster — every installation the settings read
+ * carries, one row each, under the same heading and count the header band
+ * already names. Both figures come from `installations`, the one array the
+ * payload hands this page, so a row can never disagree with the band.
+ *
+ * The read carries LIVE rows only (`listInstallations` filters
+ * `removed_at IS NULL`), and the state column says so instead of leaving the
+ * table to read as the App's full install history: an uninstalled installation
+ * still has its own face in the install block above (the bound row says
+ * reviews stopped), so it is not lost, only out of this roster.
+ */
+export function AppInstallationsSection({
+  locale,
+  installations,
+}: {
+  locale: SpaBoot["locale"];
+  installations: BotConfigSections["installations"];
+}) {
+  const columns: DataTableColumn<BotConfigSections["installations"][number]>[] = [
+    {
+      header: t(locale, "settings.installationsAccount"),
+      cell: (row) => row.account_login ?? t(locale, "common.time.unknown"),
+    },
+    {
+      header: t(locale, "settings.installationsId"),
+      cell: (row) => <span className="font-mono tabular-nums">{row.installation_id}</span>,
+    },
+    {
+      header: t(locale, "settings.installationsLastSync"),
+      cell: (row) => (
+        <span className="text-muted-foreground tabular-nums" title={row.seen_at}>
+          {formatRelativeTime(row.seen_at, locale)}
+        </span>
+      ),
+    },
+    {
+      header: t(locale, "settings.installationsState"),
+      cell: () => <StatusBadge tone="success">{t(locale, "settings.installationsLive")}</StatusBadge>,
+    },
+  ];
+
+  return (
+    <FlowSection
+      title={t(locale, "settings.installations")}
+      subtitle={t(
+        locale,
+        installations.length === 1 ? "settings.installationsCountOne" : "settings.installationsCount",
+        { count: installations.length },
+      )}
+    >
+      <DataTable
+        columns={columns}
+        rows={installations}
+        rowKey={(row) => String(row.installation_id)}
+        empty={<p className="text-sm text-muted-foreground">{t(locale, "settings.noInstallations")}</p>}
+      />
     </FlowSection>
   );
 }
