@@ -563,8 +563,79 @@ describe("add-repository dialog (mounted)", () => {
         t("en", "targets.addDialog.matchCount").replace("{count}", "6").replace("{total}", "45"),
       );
 
+      // Upper case is the same query: one case fold, not two code paths.
+      await filter(view.win, "REPO-4");
+      expect(listed(view.win)).toEqual(narrowed);
+
       await filter(view.win, "");
       expect(listed(view.win)).toHaveLength(REPOSITORY_LIST_CAP);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a broad query renders every match; the cap bounds only the empty list", async () => {
+    const view = await mountTargets(
+      createElement(AddRepositoryDialog, {
+        locale: "en",
+        open: true,
+        apps: [app()],
+        existingRepoIds: new Set<number>(),
+        onAdded: () => {},
+        onClose: () => {},
+      }),
+      (wire) => (wire.url.endsWith("/installation-repositories") ? listing(many(45)) : wireJson({})),
+    );
+    try {
+      // "repo-" matches all 45 rows — past the 40-row cap, and all of them mount.
+      await filter(view.win, "repo-");
+      expect(listed(view.win)).toHaveLength(45);
+      expect(view.dialog()?.textContent ?? "").toContain(
+        t("en", "targets.addDialog.matchCount").replace("{count}", "45").replace("{total}", "45"),
+      );
+      expect(view.dialog()?.textContent ?? "").not.toContain(
+        t("en", "targets.addDialog.capped").replace("{total}", "45").replace("{cap}", "40"),
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a row hidden by a later query still reaches the submitted payload", async () => {
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/targets") && wire.method === "POST") {
+        return wireJson({ created: [], duplicates: [] }, 201);
+      }
+      if (wire.url.endsWith("/api/targets")) return wireJson({ targets: [] });
+      if (wire.url.endsWith("/api/apps")) {
+        return wireJson({
+          viewer: { login: "mallory", role: "admin" },
+          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector" }],
+          shared_bots: [],
+        });
+      }
+      if (wire.url.endsWith("/installation-repositories")) return listing(many(45));
+      return wireJson({});
+    });
+    try {
+      const addButton = [...view.win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      await view.click(addButton);
+      // Tick the first row, then filter it out of sight.
+      await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
+      await filter(view.win, "repo-44");
+      expect(listed(view.win)).toHaveLength(1);
+      expect(view.dialog()?.textContent ?? "").toContain(
+        t("en", "targets.addDialog.matchCount").replace("{count}", "1").replace("{total}", "45"),
+      );
+
+      await view.click(confirmButton(view.win));
+      const post = view.sent.find((wire) => wire.method === "POST");
+      expect(JSON.parse(post?.body ?? "null")).toEqual({
+        bot_id: "bot-1",
+        repositories: [{ repo_id: 500, owner: "acme", name: "repo-0" }],
+      });
     } finally {
       await view.unmount();
     }
