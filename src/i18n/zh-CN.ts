@@ -172,19 +172,34 @@ export const zhCN: Dictionary = {
     /** 总览页唯一的说明段落（应用总览版式）。 */
     headingDescription:
       "每一行代表本工作区正在评审的一个仓库。评审配置在各自仓库页里；洞察与拉取请求由整个工作区共享。",
-    /** 总览指标带：仅由已加载的列表可证的三个数字。 */
+    /** 总览指标带：由行聚合求和得出的评审量。 */
     metricRepositories: "仓库",
-    metricUninstalled: "待安装",
-    metricLastReview: "最近评审",
+    metricReviews: "评审总数",
+    metricReviews7d: "近 7 天评审",
+    /** 列表的列（沿用应用列表的用词）。 */
+    columnRepository: "仓库",
+    columnState: "状态",
+    columnReviews: "评审数",
+    columnReviews7d: "近 7 天",
+    columnLastReview: "最近评审",
+    /** 待安装筛选：一个带计数的分段控件。 */
+    filterLabel: "筛选仓库",
+    filterAll: "全部",
+    filterUninstalled: "待安装（{count}）",
     backToList: "返回仓库",
     /** 详情页的三个标签。 */
     tabInsights: "洞察",
     tabPullRequests: "拉取请求",
-    /** 评审配置标签自身的文案；`heading` 同时作为标签名。 */
+    /**
+     * 评审配置标签自身的文案；`heading` 同时作为标签名。
+     * `boundApp` 说明该仓库评审所用的机器人（只读：暂不支持改绑）。
+     */
     settings: {
       heading: "评审配置",
       follow: "继承工作区默认",
       following: "跟随工作区默认；关闭继承后可单独覆盖。",
+      boundApp: "绑定的应用",
+      boundAppPlanned: "更改仓库绑定的应用已在计划中，暂不支持。",
     },
     /** 组合空状态（EmptyState 的标题 + 描述）。 */
     emptyTitle: "还没有仓库",
@@ -202,32 +217,44 @@ export const zhCN: Dictionary = {
       uninstalled: "待安装",
       paused: "已暂停",
     },
-    meta: "{app} · 最近审查 {time}",
-    metaNever: "{app} · 尚未审查",
-    /** 待安装行的 meta：完全没有仓库标识的目标。 */
-    metaUninstalled: "未绑定仓库 · 等待接收投递",
     add: "添加仓库",
     addDialog: {
       title: "添加仓库",
-      description: "选择应用，以及它要审查的仓库。",
+      description: "先选应用，再确认安装，最后搜索要审查的仓库。",
+      /** 三步流程，按渲染顺序。 */
+      stepApp: "1 · 应用（机器人）",
+      stepInstall: "2 · 安装",
+      stepRepos: "3 · 仓库",
       appLabel: "应用",
+      sharedScopeComing: "跨应用共享仓库范围已在计划中；目前每个应用各自命名自己的仓库。",
       noApps: "本工作区还没有应用",
       goToApps: "跳转到应用页面",
-      binding: "将绑定到 {app}",
+      loadingInstallations: "正在检查安装…",
+      loadInstallationsFailed: "无法读取该应用的安装信息。",
+      noInstallations: "该应用尚未安装到任何账号。",
+      /** 指向 GitHub 安装页；由应用自身的 slug 拼出。 */
+      installNow: "在 GitHub 上安装该应用",
+      recheck: "重新检查",
+      /** 一行安装信息：账号、安装 ID 与最近一次可见时间。 */
+      installationRow: "{account} · 安装 {id} · 最近可见 {time}",
+      installationNoAccount: "未知账号",
       repoLabel: "仓库",
-      noInstallationRepos: "该应用尚未安装到任何仓库",
+      searchLabel: "搜索仓库",
+      searchHint: "输入所有者或仓库名来搜索该应用安装范围内的仓库。",
+      resultsCount: "匹配 {count} 个 · 继续输入可缩小范围",
+      resultsTruncated: "匹配 {count} 个，显示前 {cap} 个 — 继续输入可缩小范围。",
+      noMatch: "没有匹配“{query}”的仓库",
+      noInstallationRepos: "该应用已安装，但没有授予任何仓库。",
       goToInstalled: "打开该应用的已安装标签页",
-      loadingRepos: "正在加载仓库…",
+      loadingRepos: "正在搜索仓库…",
       loadReposFailed: "无法加载该应用的仓库。",
       alreadyAdded: "已添加",
       degraded: "部分安装无法读取 — 此列表可能不完整。",
       duplicates: "以下仓库已存在：{names}",
-      searchLabel: "筛选仓库",
-      capped: "共 {total} 个仓库，显示前 {cap} 个。",
-      matchCount: "共 {total} 个仓库，匹配 {count} 个。",
-      noMatch: "没有匹配“{query}”的仓库",
       confirm: "添加",
     },
+    /** 待安装筛选自身的空状态（有行，但没有待安装的）。 */
+    filterEmpty: "没有等待安装的仓库。",
   },
   /** 机器人自身拥有的配置，由 App 详情页的“应用设置”标签组合在身份头下。target 级文案沿用 `settings.*`。 */
   botSettings: {
@@ -401,7 +428,6 @@ export const zhCN: Dictionary = {
     /** 组合式空态（EmptyState 标题 + 描述）。 */
     emptyTitle: "还没有 App",
     emptyDescription: "使用「创建 GitHub App」连接第一个。",
-    detail: "详情",
     appId: "App id {id}",
     by: "创建者 {login}",
     status: {
