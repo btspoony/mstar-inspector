@@ -469,7 +469,7 @@ export const repoBackfill: DataUpgradeItem = {
   id: "repo-backfill",
   title: "Repository identity backfill",
   impact:
-    "Merges duplicate review targets into one per repository and repoints their pull requests, reviews, findings and failures onto it. Never deletes a ledger row.",
+    "Merges duplicate review targets into one per repository and repoints their pull requests, reviews, findings and failures onto it, deleting the duplicate pull request rows a PR leaves behind on both sides. Never deletes reviews, findings or failures.",
   requiresDowntime: true,
   order: 10,
 

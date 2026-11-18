@@ -711,9 +711,11 @@ describe("the data-upgrade routes", () => {
     // The card's impact line comes from the item, never from the console.
     expect(listed.impact).toBe("Flips fixture flag rows. Never deletes a flag.");
     // Both shipped items state what they change AND what they never touch.
-    expect(body.upgrades.find((item) => item.id === "repo-backfill")!.impact).toContain(
-      "Never deletes a ledger row.",
-    );
+    // The backfill DOES drop duplicate `pull_requests` rows, so its card may
+    // never claim it deletes no ledger row (spec B13).
+    const backfill = body.upgrades.find((item) => item.id === "repo-backfill")!.impact;
+    expect(backfill).not.toContain("Never deletes a ledger row.");
+    expect(backfill).toContain("Never deletes reviews, findings or failures.");
     expect(body.upgrades.find((item) => item.id === "orphan-ledger-attribution")!.impact).toContain(
       "Never rewrites a row that already has one.",
     );
