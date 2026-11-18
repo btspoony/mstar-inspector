@@ -509,8 +509,7 @@ export type AppIdentityCardApp = {
 /**
  * Cached GitHub App visibility (migration 0045): the anonymous
  * `GET /apps/{slug}` probe's last answer. `unknown` = never probed or the
- * probe could not answer — treated as "cannot prove private", so the
- * allowlist surface stays visible.
+ * probe could not answer — treated as "cannot prove private".
  */
 export type GithubVisibility = "public" | "private" | "unknown";
 
@@ -530,16 +529,6 @@ export const PR_VERDICTS = ["ship it", "needs fixes", "blocked", "incomplete"] a
 export type CheckGateSettings = {
   min_score: number;
   pass_verdicts: string[];
-};
-
-/**
- * The per-App owner allowlist (migration 0045): `enabled` off behaves exactly
- * as before this App configuration existed; on with an empty `owners` refuses
- * every owner (fail closed).
- */
-export type AllowlistSettings = {
-  enabled: boolean;
-  owners: string[];
 };
 
 /**
@@ -596,9 +585,6 @@ export function isBlockedReason(value: unknown): value is BlockedReason {
  */
 type TargetOwnedSections = {
   check_gate: CheckGateSettings | null;
-  allowlist: AllowlistSettings;
-  /** Whether the park action would land for this target (owner overlap). */
-  owner_overlap: boolean;
 };
 
 /**
@@ -648,8 +634,6 @@ export type TargetReviewSlice = {
     "status" | "review_enabled" | "review_trigger_mode" | "review_level" | "default_review_level" | "github_slug"
   >;
   check_gate: CheckGateSettings | null;
-  allowlist: AllowlistSettings;
-  owner_overlap: boolean;
 };
 
 /**
@@ -860,14 +844,6 @@ export type SettingsManagePayload = SettingsManageBase & {
    * notice, since a gate that cannot be read cannot be edited.
    */
   check_gate: CheckGateSettings | null;
-  /** The owner allowlist switch + accepted owner logins (migration 0045). */
-  allowlist: AllowlistSettings;
-  /**
-   * Whether the park action would be accepted: this target's account claim is
-   * duplicated by another live target of a multi-target bot. The route refuses
-   * it otherwise, so the affordance never offers a write that cannot land.
-   */
-  owner_overlap: boolean;
 };
 
 /**
@@ -880,8 +856,6 @@ export type SettingsManagePayload = SettingsManageBase & {
 export type SettingsUntargetedPayload = SettingsManageBase & {
   target_id?: undefined;
   check_gate?: undefined;
-  allowlist?: undefined;
-  owner_overlap?: undefined;
   app: BotSettingsAppMeta & { created_by: string; github_visibility: GithubVisibility | null };
 };
 
@@ -2470,8 +2444,6 @@ export function parseSettings(data: unknown): SettingsPayload | null {
     if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
     if (!isReviewLevel(data.app.default_review_level)) return null;
     if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
-    if (!isAllowlistSettings(data.allowlist)) return null;
-    if (typeof data.owner_overlap !== "boolean") return null;
     if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
     return data as SettingsPayload;
   }
@@ -2515,15 +2487,12 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // of rendering a dead selection.
   if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
   if (!isReviewLevel(data.app.default_review_level)) return null;
-  // The review gate and the owner allowlist ride the MANAGER face
-  // (migration 0045): the Check's pass condition and the owner admission
-  // set. A gate whose stored verdict list is unreadable arrives as explicit
-  // `null` (the server's honest degradation), which the section renders as a
-  // read-only notice; any other malformed shape fails the parse instead of
-  // rendering a control that cannot round-trip.
+  // The review gate rides the MANAGER face (migration 0045): the Check's
+  // pass condition. A gate whose stored verdict list is unreadable arrives as
+  // explicit `null` (the server's honest degradation), which the section
+  // renders as a read-only notice; any other malformed shape fails the parse
+  // instead of rendering a control that cannot round-trip.
   if (data.check_gate !== null && !isCheckGateSettings(data.check_gate)) return null;
-  if (!isAllowlistSettings(data.allowlist)) return null;
-  if (typeof data.owner_overlap !== "boolean") return null;
   return data as SettingsPayload;
 }
 
@@ -2588,11 +2557,6 @@ function isCheckGateSettings(value: unknown): value is CheckGateSettings {
     isStringArray(value.pass_verdicts) &&
     value.pass_verdicts.every(isPrVerdict)
   );
-}
-
-/** The owner allowlist (migration 0045): the switch + the stored logins. */
-function isAllowlistSettings(value: unknown): value is AllowlistSettings {
-  return isRecord(value) && typeof value.enabled === "boolean" && isStringArray(value.owners);
 }
 
 /** `null` (row unreadable) or a probe vocabulary value; anything else is drift. */
@@ -2735,7 +2699,6 @@ export function parseStoredCheckMinScore(body: string): number | null {
  * report, no card).
  */
 export type ReviewUsageQuota = {
-  month: string;
   usedRp: number;
   /** NULL = no monthly limit on this plan. */
   limitRp: number | null;
@@ -2765,9 +2728,8 @@ export type ReviewUsage = {
 
 function parseReviewUsageQuota(value: unknown): ReviewUsageQuota | null {
   if (!isRecord(value)) return null;
-  const { month, usedRp, limitRp, sharedRp, byokRp, rpPerCredit, profileVersion, profileFrom, resetOn } = value;
+  const { usedRp, limitRp, sharedRp, byokRp, rpPerCredit, profileVersion, profileFrom, resetOn } = value;
   if (
-    typeof month !== "string" ||
     typeof usedRp !== "number" ||
     typeof sharedRp !== "number" ||
     typeof byokRp !== "number" ||
@@ -2779,7 +2741,7 @@ function parseReviewUsageQuota(value: unknown): ReviewUsageQuota | null {
     return null;
   }
   if (limitRp !== null && typeof limitRp !== "number") return null;
-  return { month, usedRp, limitRp, sharedRp, byokRp, rpPerCredit, profileVersion, profileFrom, resetOn };
+  return { usedRp, limitRp, sharedRp, byokRp, rpPerCredit, profileVersion, profileFrom, resetOn };
 }
 
 export function parseReviewUsage(data: unknown): ReviewUsage | null {

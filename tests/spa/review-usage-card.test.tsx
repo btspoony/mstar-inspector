@@ -45,7 +45,6 @@ async function mountCard(
 
 /** The credit block under the ceiling: 750 of 2000 RP, both sources spending. */
 const QUOTA = {
-  month: "2026-11",
   usedRp: 750,
   limitRp: 2000,
   sharedRp: 620,

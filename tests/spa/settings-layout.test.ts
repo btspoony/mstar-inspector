@@ -106,8 +106,6 @@ const detailPayload = (): SettingsManagePayload => ({
     github_visibility: "unknown",
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
-  allowlist: { enabled: false, owners: [] },
-  owner_overlap: false,
   keys: [],
   model_chain: null,
   model_limits_snapshot: "2026-01-01",
@@ -1490,7 +1488,7 @@ describe("ops danger zone: one row per action", () => {
   const opsSectionHtml = (locale: SpaBoot["locale"], app: Partial<SettingsAppMeta> = {}): string => {
     const payload = detailPayload();
     // The App page's own ops zone (disable / enable / delete) and the repository
-    // surface's target ops (pause / resume / park) are the same section; this
+    // surface's target ops (pause / resume) are the same section; this
     // suite reads the target-owned face, which renders the review row too.
     const html = withLocation("/dashboard/acme/targets/1", () =>
       renderToStaticMarkup(
@@ -2477,8 +2475,8 @@ describe("review depth control", () => {
 /**
  * The settings sections split by OWNER: the bot's credentials, providers,
  * chains, seats, sandbox image and installations are bot-scoped and live on
- * the bot page; the review policy (trigger, depth, gate, allowlist, pause)
- * belongs to the repository surface's target detail. The App page's settings
+ * the bot page; the review policy (trigger, depth, gate, pause) belongs to
+ * the repository surface's target detail. The App page's settings
  * body is the identity card alone — it has no manager branch left to render.
  */
 describe("bot-scoped sections left the target detail", () => {

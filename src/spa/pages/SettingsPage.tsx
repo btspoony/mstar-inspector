@@ -66,7 +66,7 @@ import { LoadingNotice, LoadFailedNotice, NoticeRegion, PageNotice, SaveInFlight
 import { ProvidersSection } from "./settings-providers";
 
 export type PendingAction =
-  | { kind: "pause" | "resume" | "disable" | "enable" | "delete" | "park" }
+  | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
   | { kind: "remove-chain"; name: string }
   | { kind: "remove-key"; provider: string; keyId: string; last4: string }
   | { kind: "remove-custom"; providerId: string };
@@ -262,14 +262,6 @@ export function pendingConfirmCopy(
   pending: PendingAction | null,
 ): { title: string; body: string; action: string; destructive: boolean } | null {
   if (!pending) return null;
-  if (pending.kind === "park") {
-    return {
-      title: t(locale, "settings.confirmParkTitle", { name }),
-      body: t(locale, "settings.confirmParkBody"),
-      action: t(locale, "settings.confirmParkAction"),
-      destructive: true,
-    };
-  }
   if (pending.kind === "remove-chain") {
     return {
       title: t(locale, "settings.confirmRemoveChainTitle", { name: pending.name }),
@@ -841,8 +833,8 @@ export function OpsSection({
   notice: OpNotice | null;
   /**
    * Whether the bot's own lifecycle is this workspace's to drive. A Blocked
-   * target keeps the pause and the park (target-owned); the bot's
-   * disable/enable/delete would be refused by the server, so they never render.
+   * target keeps the pause (target-owned); the bot's disable/enable/delete
+   * would be refused by the server, so they never render.
    */
   botWritable: boolean;
   /**
@@ -887,16 +879,6 @@ export function OpsSection({
                   {t(locale, "apps.actions.enable")}
                 </Button>
               )}
-            </OpsRow>
-          ) : null}
-          {payload.owner_overlap ? (
-            // Park is the repair for an overlapping owner claim, and the route
-            // refuses it when the claim no longer overlaps — so the control
-            // renders only while the payload proves it would land.
-            <OpsRow title={t(locale, "settings.opsParkTitle")} copy={t(locale, "settings.opsParkCopy")}>
-              <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "park" })}>
-                {t(locale, "settings.opsParkAction")}
-              </Button>
             </OpsRow>
           ) : null}
           {botWritable ? (

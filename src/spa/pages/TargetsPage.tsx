@@ -23,6 +23,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  Input,
   Select,
   SelectContent,
   SelectItem,
@@ -238,6 +239,13 @@ export function TargetsView({
   );
 }
 
+/**
+ * How many rows the unfiltered list renders. An App installed on "All
+ * repositories" grants hundreds; the dialog has no virtualizer, so it caps the
+ * rows it mounts and states the totals above them.
+ */
+export const REPOSITORY_LIST_CAP = 40;
+
 /** The dialog's repository read: idle (no App), loading, failed, or loaded. */
 export type RepositoryOptionsState =
   | { state: "loading" }
@@ -286,6 +294,13 @@ export function AddRepositoryDialogBody({
     repositories.state !== "ok" ||
     selectedRepoIds.size === 0 ||
     busy;
+  const [query, setQuery] = useState("");
+  const all = repositories.state === "ok" ? repositories.repositories : [];
+  const needle = query.trim().toLowerCase();
+  const matches =
+    needle === "" ? all : all.filter((repository) => `${repository.owner}/${repository.name}`.toLowerCase().includes(needle));
+  // A query answers with every match; an empty one keeps the list bounded.
+  const visible = needle === "" ? matches.slice(0, REPOSITORY_LIST_CAP) : matches;
 
   return (
     <div className="flex flex-col gap-4" data-slot="add-repository-body">
@@ -355,29 +370,60 @@ export function AddRepositoryDialogBody({
             {repositories.state === "ok" && repositories.degraded ? (
               <p className="text-sm text-(--tone-warn-fg)">{t(locale, "targets.addDialog.degraded")}</p>
             ) : null}
-            {repositories.state === "ok" && repositories.repositories.length > 0 ? (
-              <ul className="flex flex-col gap-1.5">
-                {repositories.repositories.map((repository) => {
-                  const added = existingRepoIds.has(repository.repo_id);
-                  const label = `${repository.owner}/${repository.name}`;
-                  return (
-                    <li key={repository.repo_id} className="flex items-center gap-2">
-                      <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={added || selectedRepoIds.has(repository.repo_id)}
-                          disabled={added || busy}
-                          onChange={() => onToggleRepo?.(repository.repo_id)}
-                        />
-                        <span>{label}</span>
-                      </label>
-                      {added ? (
-                        <StatusBadge tone="neutral">{t(locale, "targets.addDialog.alreadyAdded")}</StatusBadge>
-                      ) : null}
-                    </li>
-                  );
-                })}
-              </ul>
+            {repositories.state === "ok" && all.length > 0 ? (
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-medium" htmlFor="add-repository-search">
+                    {t(locale, "targets.addDialog.searchLabel")}
+                  </label>
+                  <Input
+                    id="add-repository-search"
+                    type="search"
+                    autoComplete="off"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </div>
+                {needle === "" ? (
+                  all.length > REPOSITORY_LIST_CAP ? (
+                    <p className="text-sm text-muted-foreground">
+                      {t(locale, "targets.addDialog.capped", { total: all.length, cap: REPOSITORY_LIST_CAP })}
+                    </p>
+                  ) : null
+                ) : matches.length > 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    {t(locale, "targets.addDialog.matchCount", { count: matches.length, total: all.length })}
+                  </p>
+                ) : null}
+                {matches.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    {t(locale, "targets.addDialog.noMatch", { query })}
+                  </p>
+                ) : (
+                  <ul className="flex flex-col gap-1.5">
+                    {visible.map((repository) => {
+                      const added = existingRepoIds.has(repository.repo_id);
+                      const label = `${repository.owner}/${repository.name}`;
+                      return (
+                        <li key={repository.repo_id} className="flex items-center gap-2">
+                          <label className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={added || selectedRepoIds.has(repository.repo_id)}
+                              disabled={added || busy}
+                              onChange={() => onToggleRepo?.(repository.repo_id)}
+                            />
+                            <span>{label}</span>
+                          </label>
+                          {added ? (
+                            <StatusBadge tone="neutral">{t(locale, "targets.addDialog.alreadyAdded")}</StatusBadge>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </>
             ) : null}
           </div>
         </>
