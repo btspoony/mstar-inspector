@@ -150,11 +150,19 @@ export type SweepAlertFields = {
   thresholds: { failures_24h: number; window_hours: number };
   stages: Array<{ stage: string; count: number }>;
   /**
-   * Maintenance-deferred rows in the same trailing window, present only when
-   * nonzero: the platform's own existence signal, beside (never inside) the
-   * infrastructure total above.
+   * Maintenance-deferred rows in the same trailing window — the platform's own
+   * existence signal, beside (never inside) the infrastructure total above.
+   * The frozen contract key is nested (`{count}`), and it appears only when
+   * THIS post owes the maintenance lane: a deferral already announced inside
+   * the window is not an active alert.
    */
-  maintenanceDeferred?: number;
+  maintenance_deferred?: { count: number };
+  /**
+   * The lanes that justified THIS post. One shared body cannot otherwise say
+   * whether a breaching `failures_24h` is the alert or a de-bounced snapshot;
+   * a lane missing here was already recorded inside the window.
+   */
+  due: Array<"infrastructure" | "maintenance">;
 };
 
 /**
@@ -671,15 +679,21 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     maintenanceDue = lastAlertAt === null || lastAlertAt >= nowMs || nowMs - lastAlertAt >= windowMs;
   }
   if (pagingDue || maintenanceDue) {
-    // ONE body for both lanes: when both are due they travel in a single POST,
-    // each key still describing its own signal.
+    // ONE body for both lanes: `due` names which lanes owe it, and each signal
+    // key appears only for a lane that is actually due — a lane de-bounced by
+    // its own audit window must not read as an active alert.
+    const due: SweepAlertFields["due"] = [
+      ...(pagingDue ? (["infrastructure"] as const) : []),
+      ...(maintenanceDue ? (["maintenance"] as const) : []),
+    ];
     const alert: SweepAlertFields = {
       event: "ops_sweep_alert",
       failures_24h: failures24h,
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
       stages,
-      ...(maintenanceDeferred > 0 ? { maintenanceDeferred } : {}),
+      ...(maintenanceDue ? { maintenance_deferred: { count: maintenanceDeferred } } : {}),
+      due,
     };
     log.warn(alert, pagingDue ? "review failure threshold breached" : "maintenance deferrals in window");
     if (!deps.alertUrl) {
@@ -724,7 +738,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
             db,
             ALERT_MAINTENANCE_AUDIT_ACTION,
             "maintenance_deferred",
-            { maintenanceDeferred },
+            { maintenance_deferred: { count: maintenanceDeferred } },
             log,
             deps.alertUrl,
           );

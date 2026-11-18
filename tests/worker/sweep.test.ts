@@ -629,7 +629,8 @@ describe("runSweep", () => {
     const alert = calls[0]!.fields as SweepAlertFields;
     expect(alert.failures_24h).toBe(1);
     expect(alert.stages).toEqual([{ stage: "sandbox", count: 1 }]);
-    expect(alert.maintenanceDeferred).toBe(1);
+    expect(alert.maintenance_deferred).toEqual({ count: 1 });
+    expect(alert.due).toEqual(["maintenance"]);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
   });
 
@@ -646,7 +647,8 @@ describe("runSweep", () => {
     expect(result.failures24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
     expect(result.thresholdBreached).toBe(true);
     const alert = calls[0]!.fields as SweepAlertFields;
-    expect(alert.maintenanceDeferred).toBe(1);
+    expect(alert.maintenance_deferred).toEqual({ count: 1 });
+    expect(alert.due).toEqual(["infrastructure", "maintenance"]);
     expect(alert.failures_24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
     expect(alert.stages).toEqual([{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }]);
   });
@@ -690,6 +692,7 @@ describe("runSweep", () => {
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
       // The seeded rows are all `runner`: the breakdown is the total's parts.
       stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      due: ["infrastructure"],
     });
   });
 
@@ -716,6 +719,7 @@ describe("runSweep", () => {
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
       stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      due: ["infrastructure"],
     });
   });
 
@@ -1084,7 +1088,8 @@ describe("runSweep — maintenance audit window", () => {
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
       stages: [],
-      maintenanceDeferred: 1,
+      maintenance_deferred: { count: 1 },
+      due: ["maintenance"],
     });
     expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
     expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(0);
@@ -1130,7 +1135,8 @@ describe("runSweep — maintenance audit window", () => {
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
       stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
-      maintenanceDeferred: 1,
+      maintenance_deferred: { count: 1 },
+      due: ["infrastructure", "maintenance"],
     });
     // Each due lane records under its own action.
     expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(1);
@@ -1147,11 +1153,17 @@ describe("runSweep — maintenance audit window", () => {
     const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
     expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
     expect(bodies()).toHaveLength(1);
-    // One fixed payload shape: `failures_24h`/`stages` keep meaning
-    // infrastructure-only even when this POST is owed by the maintenance lane.
-    expect(JSON.parse(bodies()[0]!)).toMatchObject({
+    // `failures_24h`/`stages` keep meaning infrastructure-only and keep showing
+    // the standing breach, but `due` says the maintenance lane is the only one
+    // this post is owed by: the paging lane already announced the breach.
+    expect(JSON.parse(bodies()[0]!)).toEqual({
+      event: "ops_sweep_alert",
       failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
-      maintenanceDeferred: 1,
+      dlq_check: "skipped",
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+      stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      maintenance_deferred: { count: 1 },
+      due: ["maintenance"],
     });
     // The latched paging lane writes no second row; only maintenance is recorded.
     expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
@@ -1172,6 +1184,52 @@ describe("runSweep — maintenance audit window", () => {
     const retried = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
     expect(retried.webhook).toBe("posted");
     expect(bodies()).toHaveLength(1);
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+  });
+
+  test("the deferral count travels under the frozen nested key, never the camelCase one", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedDeferral(db);
+    const { fetchImpl, bodies } = sink();
+
+    await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    const body = JSON.parse(bodies()[0]!) as Record<string, unknown>;
+    // The contract's shape exactly: `maintenance_deferred: {count}`, so a
+    // consumer reading the specified key observes the deferral count.
+    expect(body.maintenance_deferred).toEqual({ count: 2 });
+    expect(body).not.toHaveProperty("maintenanceDeferred");
+  });
+
+  test("due names both lanes when one sweep owes both alerts", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, bodies } = sink();
+
+    await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    const body = JSON.parse(bodies()[0]!) as { due: string[]; maintenance_deferred?: { count: number } };
+    expect(body.due).toEqual(["infrastructure", "maintenance"]);
+    expect(body.maintenance_deferred).toEqual({ count: 1 });
+  });
+
+  test("a de-bounced maintenance lane is not listed in due and carries no count key", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // The deferral was announced already; only the fresh breach owes a post.
+    seedAudit(db, ALERT_MAINTENANCE_AUDIT_ACTION, "maintenance_deferred", new Date(Date.now() - 60_000).toISOString());
+    const { fetchImpl, bodies } = sink();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+    expect(bodies()).toHaveLength(1);
+    const body = JSON.parse(bodies()[0]!) as Record<string, unknown> & { due: string[] };
+    // The standing deferral count is not an alert: `due` excludes the lane and
+    // the count key is absent, so the receiver cannot misread it as active.
+    expect(body.due).toEqual(["infrastructure"]);
+    expect(body).not.toHaveProperty("maintenance_deferred");
+    expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(1);
     expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
   });
 });
