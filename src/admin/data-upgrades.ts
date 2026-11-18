@@ -68,14 +68,15 @@ export type DataUpgradeItem = {
   preflight(db: DashboardD1): Promise<UpgradeCounts>;
   /**
    * Move one batch of rows. ONE transaction; a replay over migrated rows moves
-   * nothing. `actor` is the operator login the runner already holds: a row the
-   * batch CREATES records it as `created_by`, so the audit trail names whoever
-   * caused the row rather than the item that happened to write it.
+   * nothing. `actor` is optional: the runner passes the operator login it
+   * holds, and a row the batch CREATES records it as `created_by`, so the audit
+   * trail names whoever caused the row rather than the item that happened to
+   * write it.
    */
   runBatch(
     db: DashboardD1,
     cursor: UpgradeCursor | null,
-    actor: string,
+    actor?: string,
   ): Promise<UpgradeBatch>;
   /**
    * Read-only checks; every entry must read `0` for the item to complete,
