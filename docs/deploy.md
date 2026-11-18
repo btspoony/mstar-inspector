@@ -2677,9 +2677,12 @@ behave.
   rows written by migration 0010 make this table the sufficient failure
   signal). `failures_24h` is the sum of those rows and the SAME ordered rows
   are the alert payload's `stages`, so the total and its breakdown always
-  describe one snapshot — never two independently timed counts. Both are
-  filtered by `PAGING_EXCLUDED_STAGES` in `src/contracts/failure-stages.ts`,
-  and no query writes a stage literal by hand.
+  describe one snapshot — never two independently timed counts. Both, and the
+  breach latch of the same sweep, come from ONE predicate
+  (`FAILURE_PAGING_WHERE_SQL` in `src/worker/sweep.ts`) that applies **two**
+  exclusions: `stage NOT IN (PAGING_EXCLUDED_STAGES)` and
+  `stage <> MAINTENANCE_DEFERRED_STAGE`, both read from
+  `src/contracts/failure-stages.ts` — no query writes a stage literal by hand.
 - The paging exclusion is the attribution set plus `quota`. The attribution
   stages (`ATTRIBUTION_EXCLUDED_STAGES`) are rows written for a review that
   kept going — a recheck round that budget-skipped, lost its seat or produced
@@ -2690,6 +2693,12 @@ behave.
   workspace that spent this month's RP ceiling, a commercial limit rather than
   a platform incident, so a single tenant's exhausted month never latches the
   global pager. All of them stay in `review_failures`.
+- `maintenance_deferred` is a SECOND, separate exclusion, not part of
+  `PAGING_EXCLUDED_STAGES`. The stage is in NEITHER exclusion list in
+  `src/contracts/failure-stages.ts`: such a row stays a real stored failure, and
+  the sweep's predicate keeps it out of the infrastructure total by its own
+  `stage <> MAINTENANCE_DEFERRED_STAGE` term. The sweep neither counts nor
+  alerts on such a row; its existence is not an infrastructure signal here.
 - The dashboard's own predicates come from the attribution list alone: the
   per-PR failure COUNT and the per-PR failure HISTORY exclude the same three
   stages, so the tab's number and the history under it agree. The pager is the
@@ -2705,7 +2714,8 @@ behave.
   degrades to a warn log, never throws). Absent `ALERT_WEBHOOK_URL` =
   log-only alerting. `stages` is `[{stage, count}, …]` in stage order — the
   exact rows whose counts sum to `failures_24h`, each one a stage an operator
-  can act on; quota and the attribution stages never appear in either value.
+  can act on; `quota`, the attribution stages and `maintenance_deferred` never
+  appear in either value, because not one of them passes the predicate above.
 - The alert posts on the breach TRANSITION, not on every sweep that still sees
   the same breach: the runtime key `platform.alert.failure_paging` in
   `review_runtime_settings` holds `tripped` once a sink accepted the POST
