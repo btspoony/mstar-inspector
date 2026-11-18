@@ -641,6 +641,8 @@ export const zhCN: Dictionary = {
     noProviderMatch: "没有匹配「{query}」的模型提供方。",
     modelChainField: "模型链",
     saveChain: "保存模型链",
+    moveChainUp: "上移此选择器",
+    moveChainDown: "下移此选择器",
     providerId: "Provider id",
     baseUrl: "Base URL",
     api: "API",
@@ -723,6 +725,9 @@ export const zhCN: Dictionary = {
       modelMetaMalformed: "无法读取按模型填写的详细信息 — 未存储任何内容。",
       customProviderDeclRejected: "该自定义 provider 被拒绝 — 未存储任何内容。",
       customProviderUndeclared: "{provider} 不是此 App 已声明的自定义 provider — 请先声明再添加密钥。未存储任何内容。",
+      providerModelsEmpty: "{provider} 有响应，但未列出此声明协议可运行的任何模型 — 已存储的模型列表未改变。",
+      providerModelsKeyRequired:
+        "{provider} 的模型端点需要密钥，而此 App 未为其保存密钥 — 请先添加密钥再同步。已存储的模型列表未改变。",
       providerEndpointLocked:
         "{provider} 已为其当前端点存储了密钥 — 请先移除这些密钥再更改其 Base URL 或 API 协议。未存储任何内容。",
       templateUnknown: "未知的 provider 模板 — 未存储任何内容。",
@@ -814,6 +819,19 @@ export const zhCN: Dictionary = {
       verifiedAt: "{time} 验证通过",
       modelCount: "{count} 个模型",
       modelCountOne: "{count} 个模型",
+      catalogVocabulary: "目录词表",
+      sync: {
+        trigger: "同步模型",
+        title: "从 {label} 的端点同步模型",
+        body: "这会向 {provider} 询问它当前提供的模型列表，并用该列表替换此 App 已存储的列表。你为模型填写的尺寸会保留；端点不再列出的 id 会被移除。",
+        action: "抓取 provider 的列表",
+        refetch: "重新抓取",
+        notFetched: "尚未抓取 — 下方数字是你已存储的列表，不是 provider 的列表。",
+        summary: "provider 为此协议列出 {fetched} 个模型 — {kept} 个已存储，{added} 个新增，{dropped} 个已存储的 id 已不再列出。",
+        confirm: "替换已存储的列表",
+        saved: "已从端点同步 {provider} 的 {count} 个模型。",
+        fetchFailed: "该请求未能到达服务器 — 未抓取到任何内容，也未存储任何内容。",
+      },
       models: {
         trigger: "编辑模型",
         title: "{label} 的模型",

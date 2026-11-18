@@ -1,0 +1,12 @@
+---
+category: Fixed
+---
+
+- **A provider card's model count now reports what the App actually runs**: the count and the model-id disclosure follow the stored declaration, which is the same list the 编辑模型 dialog seeds from. The catalog snapshot's per-protocol vocabulary is only the prefill for a provider the App has not declared yet, and that case is now labelled as the catalog's vocabulary instead of being passed off as the App's. Before this, a snapshot that was both stale and spelled in an older dialect made a provider serving 104 models report 50 (`I-000644`).
+- **A declared provider's model list can be synced from the provider's own endpoint**: 同步模型 on the provider card asks the declaration's `/models` URL for the vocabulary it serves now, shows the replace arithmetic (how many stored ids it keeps, how many it adds, how many it drops), and — only then — replaces the stored list. The credential is optional: several template providers publish their directory unauthenticated, so a stored key is presented when the pool has one and the request goes out without one when it does not. Ids are stored verbatim (no prefix added or stripped: one vendor serves `org/Model` ids on its chat endpoint and bare ids on its messages endpoint), an id is dropped only when the provider's own `supported_endpoints` says the declaration's protocol cannot reach it, and a provider error, an empty list, a key-mandatory endpoint, or a list past the 128-entry bound each leaves the stored list untouched.
+- **Model-chain rows can be reordered**: each row carries move-up / move-down controls, disabled at the chain's ends. A move swaps adjacent entries in the unsaved local array, so the existing save persists the new order — no route or schema change — and the row keeps keyboard focus after the swap (`I-000645`).
+
+<!-- CN -->
+- **模型提供方卡片上的模型数量现在反映 App 实际能运行的模型**：数量与模型 id 列表都以已存储的声明为准，这也正是「编辑模型」对话框的初始数据来源。目录快照中按协议划分的词表仅在该 App 尚未声明该 provider 时作为预填，且这种情况下会标注为「目录词表」，不再冒充 App 自己的列表。在此之前，一份既过时、id 拼写又属旧方言的快照，会让实际提供 104 个模型的 provider 显示为 50 个（`I-000644`）。
+- **已声明的 provider 可以从其自身端点同步模型列表**：卡片上的「同步模型」会向该声明的 `/models` 地址询问它当前提供的词表，先展示替换结果（保留多少个已存 id、新增多少、移除多少），然后才替换已存储的列表。密钥是可选的：多个模板 provider 会无鉴权地公开其目录，因此密钥池中有密钥就带上，没有则以无鉴权方式请求。id 按原样存储（不添加也不剥离前缀：同一厂商在 chat 端点用 `org/Model`、在 messages 端点用裸 id），只有 provider 自身声明的 `supported_endpoints` 表明该声明协议无法访问时才会丢弃该 id；provider 报错、返回空列表、端点必须携带密钥、或列表超过 128 条上限，这四种情况都不会改动已存储的列表。
+- **模型链的行可以重新排序**：每行都有上移 / 下移按钮，位于链首尾时相应按钮禁用。移动只在未保存的本地数组中交换相邻条目，因此沿用既有的保存流程即可持久化新顺序 — 无需改动路由或表结构 — 且交换后键盘焦点仍停留在该行的控件上（`I-000645`）。

@@ -639,6 +639,167 @@ async function verifyCustomProvider(
 }
 
 /**
+ * The inference endpoint each declared protocol posts to. A provider's per-id
+ * `supported_endpoints` names these paths, and an id that states a set WITHOUT
+ * this path cannot serve this declaration — its id would be stored, offered in
+ * the chain picker, and then fail at request time looking like a bad key
+ * (I-000644: one vendor serves `org/Model` ids on /chat/completions and bare
+ * `claude-*` ids on /messages only, and neither spelling is a truncation of
+ * the other).
+ *
+ * `typesafe` states no inference path of its own, so it maps to null and every
+ * id is kept: an unknown capability is never a refusal.
+ */
+export function protocolInferencePath(api: CustomProviderApi): string | null {
+  switch (api) {
+    case "openai-completions":
+      return "/chat/completions";
+    case "openai-responses":
+      return "/responses";
+    case "anthropic-messages":
+      return "/messages";
+    case "typesafe":
+      return null;
+  }
+}
+
+/**
+ * Whether one fetched entry can serve `api`. An entry stating NO endpoints is
+ * kept (unknown, not refused); an entry stating a set decides it.
+ */
+function entryServesProtocol(entry: ModelListEntry, api: CustomProviderApi): boolean {
+  if (entry.endpoints === null) return true;
+  const path = protocolInferencePath(api);
+  return path === null || entry.endpoints.includes(path);
+}
+
+/**
+ * The ids of a fetched vocabulary this declaration's protocol can actually
+ * run, in the provider's own order and spelling. The sync stores exactly this
+ * set: an id the protocol cannot reach is not "more models", it is a chain
+ * entry that fails at request time.
+ */
+export function modelIdsForProtocol(entries: readonly ModelListEntry[], api: CustomProviderApi): string[] {
+  return entries.filter((entry) => entryServesProtocol(entry, api)).map((entry) => entry.id);
+}
+
+/**
+ * One declared provider's model vocabulary, as its own endpoint states it.
+ * `entries` keep the provider's own spelling (never normalized: one provider
+ * may serve `org/Model` ids on its chat endpoint and bare ids on its messages
+ * endpoint, and either form is correct where it is correct). `endpoints` is the
+ * provider's own `supported_endpoints` claim, or null when it states none.
+ * `keyless` marks a failure raised by a request that carried NO credential, so
+ * the caller can tell "this endpoint needs a key" from "the key was rejected".
+ */
+export type ModelListEntry = { id: string; endpoints: readonly string[] | null };
+export type ModelListFetchResult =
+  | { ok: true; entries: ModelListEntry[] }
+  | { ok: false; reason: VerifyFailureReason; keyless: boolean };
+
+/**
+ * The `data[]` / `models[]` entry pair `parseModelList` reads, before its id
+ * projection: same shapes, same order, same `models/` strip for the Gemini
+ * shape (the bare id is what every consumer selects). The ADDITIONAL field is
+ * `supported_endpoints` — a provider that publishes no such field answers null
+ * for every entry, and the caller must then keep the id rather than assume.
+ */
+function parseModelEntries(body: unknown): ModelListEntry[] | null {
+  if (typeof body !== "object" || body === null) return null;
+  const record = body as Record<string, unknown>;
+  const out: ModelListEntry[] = [];
+  const endpointsOf = (entry: Record<string, unknown>): readonly string[] | null => {
+    const raw = entry.supported_endpoints ?? entry.supportedEndpoints;
+    if (!Array.isArray(raw)) return null;
+    const list = raw.filter((candidate): candidate is string => typeof candidate === "string");
+    return list.length === 0 ? null : list;
+  };
+  if (Array.isArray(record.data)) {
+    for (const entry of record.data) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.id === "string" && e.id.length > 0) out.push({ id: e.id, endpoints: endpointsOf(e) });
+    }
+  } else if (Array.isArray(record.models)) {
+    for (const entry of record.models) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const e = entry as Record<string, unknown>;
+      const raw =
+        (typeof e.name === "string" ? e.name : undefined) ?? (typeof e.id === "string" ? e.id : undefined);
+      if (raw === undefined || raw.length === 0) continue;
+      out.push({
+        id: raw.startsWith("models/") ? raw.slice("models/".length) : raw,
+        endpoints: endpointsOf(e),
+      });
+    }
+  } else {
+    return null;
+  }
+  // First-seen wins, so a repeated id keeps the endpoints its first entry stated.
+  const seen = new Set<string>();
+  return out.filter((entry) => (seen.has(entry.id) ? false : (seen.add(entry.id), true)));
+}
+
+/**
+ * Fetch a DECLARED provider's full model vocabulary from its own models
+ * endpoint (I-000644). Everything about the request is the declare probe's:
+ * the same URL derivation (`customModelsUrl`), the same protocol-appropriate
+ * auth shape, the same body parser (`parseModelList`) and the same failure
+ * classifier — so the sync and the verify path can never disagree about what
+ * "the provider's list" means, and no second fetcher exists.
+ *
+ * `key: null` is a first-class input, not a fallback: several template
+ * providers publish their model directory unauthenticated, so requiring a
+ * stored credential would hide the very list the operator asked for. The
+ * request then carries only the client headers and NO authorization header.
+ *
+ * Never invents or truncates: an unparseable body is `unexpected_response`, and
+ * a 2xx with zero models is `ok` + `[]` (whether an empty list is worth storing
+ * is the caller's decision, not this function's).
+ */
+export async function fetchDeclaredProviderModels(
+  deps: VerifyDeps,
+  custom: { baseUrl: string; api: CustomProviderApi },
+  key: string | null,
+): Promise<ModelListFetchResult> {
+  const keyless = key === null;
+  const probe = customModelsUrl(custom.baseUrl);
+  if (probe === null) return { ok: false, reason: "unreachable", keyless };
+  const headers =
+    key === null
+      ? { accept: "application/json", "user-agent": VERIFY_USER_AGENT }
+      : custom.api === "anthropic-messages"
+        ? { ...requestHeaders("x-api-key", key), "anthropic-version": "2023-06-01" }
+        : requestHeaders("bearer", key);
+  let res: Response;
+  try {
+    res = await deps.fetch(probe.toString(), {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(deps.timeoutMs ?? VERIFY_TIMEOUT_MS),
+    });
+  } catch (e) {
+    warnTransportFailure("models", probe.toString(), e);
+    return { ok: false, reason: "unreachable", keyless };
+  }
+  if (responseLeftOrigin(res, probe.toString())) {
+    return { ok: false, reason: "unexpected_response", keyless };
+  }
+  if (!res.ok) {
+    return { ok: false, reason: await failureReason(res), keyless };
+  }
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { ok: false, reason: "unexpected_response", keyless };
+  }
+  const entries = parseModelEntries(body);
+  if (entries === null) return { ok: false, reason: "unexpected_response", keyless };
+  return { ok: true, entries };
+}
+
+/**
  * Verify a freshly typed provider key against its provider's public surface
  * (spec §6.2). Callers pass the NOT-yet-stored plaintext key; the module
  * sends it outbound only, never logs it, and returns a structured result.

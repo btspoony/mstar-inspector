@@ -196,6 +196,7 @@ export function BotSettingsView({
               notice={providersNotice}
               removeOutcome={providersRemoveOutcome}
               onOutcome={setProvidersNotice}
+              onReload={() => onReload({ background: true })}
             />
             <ChainsSection
               locale={locale}

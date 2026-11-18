@@ -168,6 +168,7 @@ import {
   parseModelChain,
   type AppConfigBatchFace,
   type AppConfigStore,
+  type CustomProviderApi,
   type CustomProviderModelMeta,
   type CustomProviderModelsMeta,
 } from "./app-config-store";
@@ -182,6 +183,8 @@ import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import {
   PROVIDER_VERIFY_ENDPOINTS,
+  fetchDeclaredProviderModels,
+  modelIdsForProtocol,
   verifyFetch,
   verifyProviderKey,
   type VerifyFailureReason,
@@ -3273,6 +3276,8 @@ const SETTINGS_400_KEYS = {
   customProviderUndeclared: "settings.error.customProviderUndeclared",
   modelMetaInvalid: "settings.error.modelMetaInvalid",
   modelMetaMalformed: "settings.error.modelMetaMalformed",
+  providerModelsEmpty: "settings.error.providerModelsEmpty",
+  providerModelsKeyRequired: "settings.error.providerModelsKeyRequired",
   providerEndpointLocked: "settings.error.providerEndpointLocked",
   templateUnknown: "settings.error.templateUnknown",
   templateIncomplete: "settings.error.templateIncomplete",
@@ -4329,6 +4334,146 @@ const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> =
   return settingsPostResponse(c, repositoryLandingPath(gate), `Refreshed ${appDisplayName(refresh.row)} from GitHub.`);
 };
 
+/**
+ * I-000644: one DECLARED provider's model vocabulary, fetched from the
+ * provider's own `/models` endpoint. Everything about the request lives in
+ * `fetchDeclaredProviderModels` (the declare probe's URL derivation, auth shape,
+ * parser and failure classifier); this helper owns only what the route layer
+ * must decide — which credential to present, and which refusal face each
+ * outcome gets.
+ *
+ * The credential is OPTIONAL BY MEASUREMENT, not by fallback: several template
+ * providers publish their directory unauthenticated (commandcode answers its
+ * full list to a bare GET), so a stored key is used when the pool has one and
+ * the request goes out keyless when it does not. A keyless 401/403 is reported
+ * as `providerModelsKeyRequired` — "this endpoint wants a key" — never as an
+ * invalid key, because no key was judged.
+ *
+ * The fetched ids are stored VERBATIM and filtered only by the declaration's own
+ * protocol: a provider may serve `org/Model` ids on one endpoint and bare ids on
+ * another, so normalizing them would hand the runtime ids the provider rejects.
+ * `modelIdsForProtocol` keeps exactly the ids the declared `api` can reach.
+ */
+type DeclaredVocabulary =
+  | {
+      ok: true;
+      api: CustomProviderApi;
+      baseUrl: string;
+      /** What the App runs now — the "replace" arithmetic the confirmation shows. */
+      current: readonly string[];
+      /** The protocol-filtered vocabulary the write would store. */
+      models: string[];
+    }
+  | { ok: false; response: Response };
+
+async function loadDeclaredVocabulary(
+  c: DashboardContext,
+  gate: { app: { id: string }; target: ReviewTargetRow | null },
+  store: AppConfigStore,
+  providerId: string,
+): Promise<DeclaredVocabulary> {
+  const landing = repositoryLandingPath(gate);
+  if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
+    return { ok: false, response: settings400Response(c, landing, SETTINGS_400_KEYS.providerIdInvalid) };
+  }
+  const declared = (await store.listCustomProviders(gate.app.id)).find((row) => row.provider_id === providerId);
+  if (declared === undefined) {
+    return {
+      ok: false,
+      response: settings400Response(c, landing, SETTINGS_400_KEYS.customProviderUndeclared, {
+        provider: providerId,
+      }),
+    };
+  }
+  // Any credential of the pool will do: every row decrypts with its own AAD and
+  // they all belong to the same declaration (the endpoint lock guarantees it).
+  const keys = await store.listCustomProviderKeys(gate.app.id, providerId);
+  const first = keys[0];
+  const stored =
+    first === undefined ? null : await store.getProviderKeyPlaintext(gate.app.id, providerId, first.keyId);
+  const fetched = await fetchDeclaredProviderModels(
+    { fetch: verifyFetch },
+    { baseUrl: declared.base_url, api: declared.api },
+    stored?.plainKey ?? null,
+  );
+  if (!fetched.ok) {
+    if (fetched.keyless && (fetched.reason === "invalid_key" || fetched.reason === "quota_exhausted")) {
+      return {
+        ok: false,
+        response: settings400Response(c, landing, SETTINGS_400_KEYS.providerModelsKeyRequired, {
+          provider: providerId,
+        }),
+      };
+    }
+    return { ok: false, response: settingsVerifyFailResponse(c, landing, fetched.reason) };
+  }
+  const models = modelIdsForProtocol(fetched.entries, declared.api);
+  // A provider that answers with an empty list (or an empty list FOR THIS
+  // protocol) leaves the stored declaration untouched: "no models" is a
+  // provider-side condition, never an instruction to wipe a working vocabulary.
+  if (models.length === 0) {
+    return {
+      ok: false,
+      response: settings400Response(c, landing, SETTINGS_400_KEYS.providerModelsEmpty, { provider: providerId }),
+    };
+  }
+  // The stored bound is reported, never silently applied: a provider that
+  // publishes more than the App can hold says so instead of losing the tail.
+  if (models.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
+    return {
+      ok: false,
+      response: settings400Response(c, landing, SETTINGS_400_KEYS.modelIdsTooMany, {
+        count: models.length,
+        limit: MAX_CUSTOM_PROVIDER_MODEL_IDS,
+      }),
+    };
+  }
+  if (models.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
+    return {
+      ok: false,
+      response: settings400Response(c, landing, SETTINGS_400_KEYS.modelIdTooLong, {
+        limit: MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
+      }),
+    };
+  }
+  return { ok: true, api: declared.api, baseUrl: declared.base_url, current: declared.model_ids, models };
+}
+
+/**
+ * I-000644 preview: `GET /api/apps/:appId/provider-models/preview?provider=<id>`
+ * answers the list the sync WOULD store, plus the replace arithmetic, and writes
+ * nothing. Read-scoped (it mutates nothing and its only outbound request is the
+ * same unauthenticated-or-stored-key GET the verify path already performs), so
+ * the confirmation dialog can state "44 kept · 6 dropped · 60 new" before the
+ * operator commits.
+ */
+const appProviderModelsPreviewRoute = async (c: DashboardContext): Promise<Response> => {
+  const gate = await requireAppSettings(c);
+  if (!gate.ok) return gate.response;
+  if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
+  const providerId = (c.req.query("provider") ?? "").trim();
+  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  try {
+    const vocabulary = await loadDeclaredVocabulary(c, gate, store, providerId);
+    if (!vocabulary.ok) return vocabulary.response;
+    const current = new Set(vocabulary.current);
+    const fetched = new Set(vocabulary.models);
+    c.header("Cache-Control", "private, no-store");
+    return c.json({
+      ok: true,
+      provider: providerId,
+      current: vocabulary.current.length,
+      fetched: vocabulary.models.length,
+      kept: vocabulary.models.filter((id) => current.has(id)).length,
+      added: vocabulary.models.filter((id) => !current.has(id)).length,
+      dropped: vocabulary.current.filter((id) => !fetched.has(id)).length,
+    });
+  } catch (err) {
+    logSettingsFailure("provider_models_preview", gate.app.id, err);
+    return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+  }
+};
+
 const appModelsRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
@@ -4646,6 +4791,7 @@ const BOT_SCOPED_SETTINGS_OPS: ReadonlySet<string> = new Set([
   "add-custom-provider-key",
   "add-template-provider",
   "update-provider-models",
+  "sync-provider-models",
   "remove-custom-provider",
   "save-sandbox-image",
 ]);
@@ -5332,6 +5478,41 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       repositoryLandingPath(gate),
       `Saved the ${providerId} model list for ${appDisplayName(gate.app)}.`,
     );
+  }
+  if (op === "sync-provider-models") {
+    // I-000644: replace ONE declaration's model vocabulary with the list its
+    // own endpoint publishes. Replace, not union, is the operator's explicit
+    // ask ("give me the provider's real list"): a union would keep the stale
+    // ids this action exists to retire, and after a dialect change those ids
+    // fail at request time. The confirmation dialog states the arithmetic
+    // (kept / added / dropped) before the operator commits.
+    //
+    // Zero writes on every failure: an undeclared provider, an endpoint that
+    // wants a key, a provider error, an empty list, or a list past the store's
+    // 1..128 × ≤128 bound each answers its keyed 400 with the stored
+    // declaration untouched.
+    const providerId = typeof form.provider === "string" ? form.provider.trim() : "";
+    try {
+      const vocabulary = await loadDeclaredVocabulary(c, gate, store, providerId);
+      if (!vocabulary.ok) return vocabulary.response;
+      // models_meta is carried across, pruned to the surviving ids — the
+      // store's own rule for every model-list write, so a sync never wipes
+      // sizes the operator stated for an id that survived.
+      await store.updateCustomProviderModels(gate.app.id, providerId, vocabulary.models);
+      return settingsPostResponse(
+        c,
+        repositoryLandingPath(gate),
+        `Synced ${vocabulary.models.length} models for ${providerId} from its endpoint for ${appDisplayName(gate.app)}.`,
+      );
+    } catch (err) {
+      logSettingsFailure("sync_provider_models", gate.app.id, err);
+      if (err instanceof InvalidCustomProviderError) {
+        return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.customProviderUndeclared, {
+          provider: providerId,
+        });
+      }
+      return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
+    }
   }
   if (op === "remove-custom-provider") {
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
@@ -6703,6 +6884,15 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/deliveries", handler: appDeliveriesRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
+  // `write`-classified like every App JSON read: the preview spends the App's
+  // stored credential on an outbound request, which is not an operator-grant
+  // read.
+  {
+    method: "get",
+    path: "/api/apps/:appId/provider-models/preview",
+    handler: appProviderModelsPreviewRoute,
+    access: "write",
+  },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/claim", handler: appClaimRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/bind-installation", handler: appBindInstallationRoute, access: "write" },
