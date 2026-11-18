@@ -33,6 +33,7 @@ const APP_INPUT: CreateAppInput = {
   webhookSecretEnc: "v1.primary.aXZpdi.d2ViaG9vaw==",
   createdBy: "octocat",
   workspaceId: "default",
+  maxApps: null,
 };
 
 async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Promise<GithubAppRow> {
@@ -154,6 +155,28 @@ function readSites(src: string): { line: number; sql: string }[] {
 }
 
 /**
+ * The statement's selected columns: from its first `select` to the `from` that
+ * closes the projection at paren depth 0. A subquery in the projection list
+ * carries its own `from`, so depth — not the first `from` anywhere — decides
+ * where the outer projection ends. A column name in a JOIN predicate is a
+ * filter on another table's row, not a tenant-facing field of the read, so only
+ * the projection is scanned.
+ */
+function projection(sql: string): string {
+  const start = sql.search(/\bselect\b/i);
+  let depth = 0;
+  for (let i = start; i >= 0 && i < sql.length; i++) {
+    const ch = sql[i]!;
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (depth === 0 && /^from\b/i.test(sql.slice(i, i + 4)) && !/\w/.test(sql[i - 1] ?? "")) {
+      return sql.slice(start, i);
+    }
+  }
+  return start < 0 ? sql : sql.slice(start);
+}
+
+/**
  * True when the `.prepare(` line is IMMEDIATELY preceded by a contiguous
  * `//` comment block carrying the marker. A blank line or any code line
  * between the comment and the call means unannotated. Two calls on one line
@@ -176,6 +199,10 @@ function directReadFiles(): string[] {
 
 /** The maintenance face: every direct `review_bots` read outside apps-store. */
 const MAINTENANCE_SITES: Record<string, number> = {
+  // The replay lane resolves a failure's live target/bot/workspace for both callers
+  // (the operator route and the internal sweep retry); it is a maintenance read,
+  // never a tenant read.
+  "admin/maintenance-replay.ts": 1,
   "worker/lifecycle-reconcile.ts": 1,
   "worker/check-reconcile.ts": 3,
   "pipeline/review-threads.ts": 1,
@@ -256,18 +283,35 @@ describe("tenant read face allowlist", () => {
    * columns (`private_key_enc` is frozen plan-scope maintenance credential
    * routing, not a response field). The scan is the read's own statement, not
    * every statement in the file: a mixed file (a store that also serves tenant
-   * faces of `review_targets`) selects those columns for its own rows.
+   * faces of `review_targets`) selects those columns for its own rows. Within
+   * the statement only the projection is scanned: a column named in a JOIN
+   * predicate filters another table's row and is never returned, so it is not a
+   * tenant-facing field of the read.
    */
   test("a maintenance read selects no identity or ownership column", () => {
     const TENANT_FACING = /\b(?:github_slug|name|workspace_id)\b/i;
     for (const rel of Object.keys(MAINTENANCE_SITES)) {
       for (const site of readSites(readFileSync(join(SRC_DIR, rel), "utf8"))) {
-        expect({ file: rel, line: site.line + 1, tenantFacing: TENANT_FACING.test(site.sql) }).toEqual({
+        expect({ file: rel, line: site.line + 1, tenantFacing: TENANT_FACING.test(projection(site.sql)) }).toEqual({
           file: rel,
           line: site.line + 1,
           tenantFacing: false,
         });
       }
     }
+  });
+
+  /**
+   * The projection ends at the outer `from` only: a subquery in the select list
+   * carries its own `from` and must not end the scan early, or a tenant-facing
+   * column after it would escape the guard above.
+   */
+  test("the projection scan crosses a subquery in the select list", () => {
+    const sql = "select (select 1 from workspaces limit 1), b.name from review_bots b";
+    expect(projection(sql)).toContain("b.name");
+    expect(projection(sql)).not.toContain("review_bots");
+    // The JOIN side still stays out: only the returned columns are scanned.
+    const joined = "select t.id from review_targets t join review_bots b on b.id = t.bot_id and b.name = t.name";
+    expect(projection(joined)).not.toContain("b.name");
   });
 });

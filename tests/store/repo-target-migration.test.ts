@@ -254,4 +254,46 @@ describe("migration 0068: one repository, one workspace per bot", () => {
 
     expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(6);
   });
+
+  test("the cross-workspace claim is 0068's index itself, not the insert path", () => {
+    const db = dbAt0066();
+    applyMigrations(db, [MIGRATION, MIGRATION_0068]);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('other', 'other', 'other', 'acme', '2026-01-01')`,
+      )
+      .run();
+    seedBot(db, "bot-2", 7002);
+    const insert = (id: string, workspaceId: string, botId: string, repoId: number | null, deletedAt: string | null = null) =>
+      db.raw
+        .prepare(
+          `INSERT INTO review_targets
+             (id, workspace_id, bot_id, name, repo_id, created_by, created_at, updated_at, deleted_at)
+           VALUES (?, ?, ?, ?, ?, 'fixture', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ?)`,
+        )
+        .run(id, workspaceId, botId, `acme/repo-${id}`, repoId, deletedAt);
+
+    // dbAt0066 seeds bot-1's migrated leftover row: the counts below are
+    // that row plus the ones this test inserts.
+    // A soft-deleted predecessor releases the repository, so the live row of a
+    // SIBLING workspace is the only claim on it.
+    insert("t-retired", "default", "bot-1", 501, "2026-02-01T00:00:00.000Z");
+    insert("t-live", "other", "bot-1", 501);
+    // The refusal names the claimed columns: bot and repository, no workspace.
+    expect(() => insert("t-second", "default", "bot-1", 501)).toThrow(
+      "UNIQUE constraint failed: review_targets.bot_id, review_targets.repo_id",
+    );
+    expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(3);
+    // Unclaimed rows (repo_id NULL) are outside the claim and stack freely.
+    insert("t-unclaimed", "default", "bot-2", null);
+    insert("t-unclaimed-2", "other", "bot-2", null);
+    expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(5);
+    // The claim IS the index's `WHERE repo_id IS NOT NULL AND deleted_at IS
+    // NULL`: with 0068's index dropped the same duplicate is accepted — this
+    // test fails if the index is dropped or narrowed.
+    db.raw.exec("DROP INDEX review_targets_bot_repo_unique");
+    insert("t-second", "default", "bot-1", 501);
+    expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(6);
+  });
 });

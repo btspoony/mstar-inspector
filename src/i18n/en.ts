@@ -881,6 +881,11 @@ export const en = {
     triggerModeManual: "Manual",
     triggerModeMention: "PR author or repo owner: comment this on the PR to (re-)start a review:",
     triggerModeMentionAria: "Bot mention: {mention}",
+    /**
+     * The target-owned draft admission switch (0070, D12) — per repository,
+     * never a workspace default. On = review a draft like any other PR.
+     */
+    reviewDrafts: "Review draft pull requests",
     // Review depth (migration 0047): the four faces of the App's depth select.
     // Wire values stay quick/default/deep (plus the inherit face's own
     // sentinel); only the labels localize. "Standard" is the `default` enum's

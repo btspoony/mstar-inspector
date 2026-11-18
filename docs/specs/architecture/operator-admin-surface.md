@@ -2,7 +2,7 @@
 
 ## Scope
 
-The SaaS-only `/_internal_admin` authorization boundary, flags, plan assignment, bot scope, platform settings, read lists, support grants and audit ledgers.
+The SaaS-only `/_internal_admin` authorization boundary, flags, plan assignment, quota versions, bot scope, platform settings, read lists, support grants and audit ledgers.
 
 ## Current state
 ### 1. Identity and authorization
@@ -207,11 +207,45 @@ family's copy, and the one shared "unexpected response" sentence survives only
 for a 400 naming a reason the page does not know. No face echoes the submitted
 key, the response body or the status code.
 
+### 3.7 Quota versions
+
+Quota pricing and monthly ceilings are append-only versions in `quota_profiles`
+and `quota_profile_plans`; they do not edit the `plans` catalogue. A profile's
+end is derived from its successor's `effective_from`. Each plan must have a
+ceiling row: `monthly_rp = NULL` means unlimited, not missing.
+
+| Route | Contract |
+|-------|----------|
+| `GET /_internal_admin/api/quota-versions` | Returns `judgingVersion`, `nextVersion`, `plans`, `versions` and `uncoveredPlanIds`. Each version includes its derived interval, `past`/`current`/`scheduled` state, pricing factors, notes and per-plan ceilings. |
+| `POST /_internal_admin/api/quota-versions/preview` | Accepts `{ effectiveFrom, monthlyRp }`; reads current UTC-month usage and returns `{ count, total, startsOn }` without writing. This is today's usage against the candidate ceilings, not a prediction of next month's spend. |
+| `POST /_internal_admin/api/quota-versions` | Accepts the candidate plus `base`, `source`, `rpPerCredit`, optional `notes` and the preview's `impact: { count, total, startsOn }`. Appends the profile, all per-plan ceilings and one audit row in a single batch; returns `201 { version, startsOn }`. |
+
+The GET uses two SELECTs in one batch: ordered profiles joined to their plan
+ceilings, and the plan catalogue. The judging profile, intervals, next ordinal
+and missing-plan notice are derived from that same snapshot. A present NULL
+ceiling is covered. The judging profile covers the month's first UTC instant,
+falling back to the earliest profile if none has started; an empty profile
+table throws rather than inventing an unlimited version.
+
+Publication requires `effectiveFrom` (a UTC `YYYY-MM-DD` date) after the current
+month's first day, a ceiling for every catalogue plan, positive integer pricing
+factors and positive integer or NULL ceilings. Missing/invalid input or preview
+is 400. The handler recomputes impact: a changed result is 409 and requires a
+new preview. An already-used effective date is also 409. `version` is derived
+inside the insert as `MAX(version) + 1`, with unique constraints on version and
+effective date. Existing profiles are never rewritten.
+
+The write's audit action is `quota.profile.create`, with `target_type`
+`quota_profile`, the new profile id as `target_id`, and the candidate pricing,
+ceilings, effective date and notes in `detail_json`. GET and preview append no
+audit rows.
+
 ### 4. Platform audit
 
 Table `platform_audit_events (id TEXT PRIMARY KEY, actor_login TEXT NOT NULL COLLATE NOCASE, action TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL, detail_json TEXT, created_at TEXT NOT NULL)` with an index on `(created_at)`.
 
-Written for: flag toggles, workspace plan changes, and the two runtime
+Written for: flag toggles, workspace plan changes, quota publication
+(`quota.profile.create`, §3.7), and the two runtime
 decisions — `runtime.official_workspace.set` (`target_type` `runtime`,
 `target_id` `platform.official_workspace_id`, `detail_json`
 `{"before":<id>|null,"after":<id>|null}`) and `runtime.bot_scope.set`
@@ -226,10 +260,12 @@ is a forward-only column contract shared with workspace-level auditing, and
 platform scope is a different lifecycle.
 
 Audit ownership: no admin action loses its audit trail.
-Every admin WRITE has exactly one home — flag toggles and plan assignment are
-platform-scope decisions → `platform_audit_events` (actor, action, target,
-before/after detail); support-grant create/delete are workspace-scope writes →
-`audit_events`, whose `workspace_id NOT NULL`
+Every admin WRITE has exactly one home — flag toggles, plan assignment, quota
+publication and runtime decisions are platform-scope → `platform_audit_events`
+(actor, action, target, and action-specific detail: quota publication records
+the candidate configuration, §3.7, not before/after objects; the other actions
+record before/after detail). Support-grant create/delete are workspace-scope
+writes → `audit_events`, whose `workspace_id NOT NULL`
 (`migrations/0029_operator_support.sql`) the grant's target workspace
 always satisfies. Admin list reads are deliberately unaudited: audit rows
 attach to writes and to operator presence inside a tenant (the existing
@@ -298,6 +334,9 @@ string — the mode is a separate conjunct.
 - `src/dashboard/runtime-config-store.ts`: the platform parameter store —
   `platform.official_workspace_id` and the key-domain registry.
 - `src/dashboard/apps-store.ts`: the bot-scope transition and its audit row.
+- `src/admin/quota-versions.ts`: quota version snapshot, impact preview, publication validation and atomic audit write.
+- `src/store/quota-store.ts`: profile projection/decoding, judging selection and shared quota arithmetic.
+- `migrations/0063_quota_profiles.sql`: append-only profiles, per-plan ceilings and unique version/effective date constraints.
 - `src/spa/pages/provider-models-dialog.tsx`: the per-model size fields, the
   catalog pre-fill and the unknown-size sentence (§3.6).
 - `src/spa/pages/SettingsPage.tsx` (`verifyRefusalMessage`): the add-key

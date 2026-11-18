@@ -287,6 +287,8 @@ async function seedApp(
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     createdBy: opts.createdBy,
     workspaceId: "default",
+    // Fixture seeding: the plan cap is not what this test exercises.
+    maxApps: null,
   });
   // Creation writes no target (D13): the App pages read its repository target,
   // so the fixture seeds the one a real add-repository would.

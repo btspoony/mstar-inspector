@@ -1,19 +1,46 @@
 /**
- * Ops failure sweep (architect verdict AL-6) — the cron
- * handler's read-only scan: count `review_failures` rows over the trailing
- * 24h across the infra-failure stages (parse + runner/sandbox/pipeline — the
- * infra-failure rows make this table the sufficient failure signal, closing
- * the "DLQ-bound failure leaves zero D1 trace" blind spot) and alert when
- * the count breaches the threshold.
+ * Ops failure sweep (architect verdict AL-6) — the cron handler's scan: read
+ * `review_failures` ONCE over the trailing 24h grouped by stage (parse +
+ * runner/sandbox/pipeline are the infra-failure rows that make this table the
+ * sufficient failure signal, closing the "DLQ-bound failure leaves zero D1
+ * trace" blind spot), sum the group counts, and alert when that total breaches
+ * the threshold. The same ordered rows are the payload's `stages`.
  *
- * The attribution stages (PAGING_EXCLUDED_STAGES) are EXCLUDED from that
- * count — all of them are degraded-but-successful attribution written for a
- * review that continued: `recheck` marks a budget skip, a dead seat or one
- * invalid document; `usage` marks a `usage_events` insert that failed while
- * the review went on; `rate-limit` marks a degraded-comment sweep GitHub
- * throttled while the review itself stood.
- * Counting them would page ops for reviews that published normally. They stay
- * in `review_failures` — only the paging signal ignores them.
+ * The paging-excluded stages (PAGING_EXCLUDED_STAGES) are EXCLUDED from that
+ * count: the attribution stages are degraded-but-successful attribution
+ * written for a review that continued (`recheck` marks a budget skip, a dead
+ * seat or one invalid document; `usage` marks a `usage_events` insert that
+ * failed while the review went on; `rate-limit` marks a degraded-comment sweep
+ * GitHub throttled while the review itself stood), and `quota` marks one
+ * tenant's exhausted month. Counting them would page ops for reviews that
+ * published normally, or for a commercial ceiling that is not an incident.
+ * They stay in `review_failures` — only the paging signal ignores them, and
+ * the dashboard still counts `quota` as a failure.
+ *
+ * `quota` is excluded on a premise — ONE tenant's month — and the premise is
+ * checked: when the same window refuses deliveries in more than one workspace,
+ * the ceiling itself is wrong at the platform level (a published profile with
+ * no allowance stops every shared-bot delivery) and those rows RE-ENTER the
+ * total through their own predicate term. The readmission is derived from the
+ * same window as everything else, so one tenant's spent month never pages and
+ * a platform-wide refusal always does.
+ *
+ * The same query returns the per-stage breakdown (`stages`) that travels in
+ * the alert payload: one grouped read, so the total and its parts always
+ * describe the same instant.
+ *
+ * The alert posts AT MOST ONCE PER SWEEP WINDOW, and the de-bounce is an AUDIT
+ * WINDOW rather than stored state: before posting, the sweep reads the most
+ * recent `platform_audit_events` row for the lane's own action —
+ * `alert.failure_paging` (compass D17) for infrastructure, and
+ * `alert.maintenance_deferred` for the maintenance signal — and posts nothing
+ * while that stamp is inside `SWEEP_WINDOW_HOURS`; a 2xx POST appends the row.
+ * Two actions, so neither lane can silence the other. Nothing is ever latched,
+ * so a breaching window with no recent alert always pages — a missed alert is
+ * structurally impossible, and the price is that two sweeps overlapping inside
+ * one window may each post once. A failed read or an unparseable stamp is "no
+ * recent alert" (the post it might suppress is the one that matters); a failed
+ * append is logged and leaves the POST result alone.
  *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
  * - DLQ depth is NOT read: there is no CF API token surface,
@@ -23,10 +50,14 @@
  *   upper bound (a wrong delete of a live guard is worse than a TTL leak).
  * - Bounded janitor writes ride along (webhook_deliveries retention, the
  *   invite lapse flip) beside one optional webhook POST; the rest is reads and
- *   logs. The ONE queue write is the comment-claim outbox (migration 0048): a
- *   `queued` claim older than the retry window has its stored payload re-sent,
- *   which is what makes "claim before send" survive an isolate dying between
- *   the two. It NEVER mutates KV keys.
+ *   logs. The queue writes are the two recovery outboxes, sharing ONE
+ *   per-sweep cap taken from `review.comment_claim.outbox_cap`: the
+ *   comment-claim outbox (migration 0048), where a `queued` claim older than
+ *   the retry window has its stored payload re-sent — what makes "claim before
+ *   send" survive an isolate dying between the two — and the maintenance-replay
+ *   outbox (migration 0071), which retries an operator's requested-but-unsent
+ *   replay while the maintenance window is readable and open. It NEVER mutates
+ *   KV keys.
  *
  * Threshold semantics: PER-ATTEMPT rows — a DLQ'd message leaves up to
  * QUEUE_MAX_ATTEMPTS rows (one per delivery: 1 initial + the queue's
@@ -50,7 +81,15 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
-import { PAGING_EXCLUDED_STAGES, QUEUE_MAX_ATTEMPTS, sqlStageList } from "../store/failure-store";
+import { getMaintenanceMode, maintenanceClosed } from "../dashboard/runtime-config-store";
+import { retryMaintenanceReplay } from "../admin/maintenance-replay";
+import {
+  MAINTENANCE_DEFERRED_STAGE,
+  PAGING_EXCLUDED_STAGES,
+  QUEUE_MAX_ATTEMPTS,
+  sqlStageList,
+} from "../store/failure-store";
+import { QUOTA_STAGE } from "../contracts/failure-stages";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
@@ -65,6 +104,47 @@ export const COMMENT_CLAIM_OUTBOX_SQL = `SELECT installation_id, owner, repo, pr
             WHERE state = 'queued' AND attempts < ? AND queued_ms <= ?
             ORDER BY queued_ms
             LIMIT ?`;
+
+/**
+ * The maintenance-replay outbox scan: rows an operator requested whose send
+ * never resolved. `limit` is the sweep's REMAINING shared budget, and every row
+ * it returns spends one unit — so one pass touches at most that many rows.
+ *
+ * The ordering is a ROTATION, not oldest-request-first: a row that keeps failing
+ * (or whose target is gone) stays pending, so ordering by request time alone
+ * would hand it the whole cap on every open sweep and later requests would never
+ * be attempted. `maintenance_replay_last_attempt_at` is stamped on every attempt,
+ * dead target included, so a never-tried row (`COALESCE(..., '')` sorts before
+ * any ISO-8601 stamp) and then the least-recently-tried go first; request time
+ * and id only break ties. A dead backlog therefore costs at most one attempt per
+ * sweep per free slot instead of being walked in full before the alert lanes.
+ *
+ * That ORDER BY is served by `idx_review_failures_maintenance_replay_rotation`
+ * (migration 0073): same predicate, same key order, so `LIMIT` stops the scan
+ * instead of the backlog being read and sorted on every selection.
+ *
+ * Binds: `tried` (JSON array of ids), `limit`.
+ */
+export const MAINTENANCE_REPLAY_OUTBOX_SQL = `SELECT id FROM review_failures
+            WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'
+              AND maintenance_replay_requested_at IS NOT NULL
+              AND maintenance_replay_sent_at IS NULL
+              AND id NOT IN (SELECT value FROM json_each(?))
+            ORDER BY COALESCE(maintenance_replay_last_attempt_at, '') ASC,
+                     maintenance_replay_requested_at ASC,
+                     id ASC
+            LIMIT ?`;
+
+/**
+ * Is ANY replay request pending and unsent? The comment lane asks this before it
+ * spends the shared budget, so it can leave the replay lane one slot. Served by
+ * the pending partial index; one row is all the answer needs.
+ */
+const MAINTENANCE_REPLAY_PENDING_SQL = `SELECT 1 AS pending FROM review_failures
+            WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'
+              AND maintenance_replay_requested_at IS NOT NULL
+              AND maintenance_replay_sent_at IS NULL
+            LIMIT 1`;
 
 /**
  * Breach when `failures_24h > SWEEP_FAILURE_THRESHOLD` (AL-6): one row above a
@@ -96,13 +176,30 @@ export const SWEEP_INVITE_LAPSE_CAP = 500;
  * channel (SweepLog below), also POSTed verbatim to the webhook.
  * `dlq_check` is always "skipped" (AL-6: no CF API token surface);
  * `thresholds` echoes the pinned constants so an alert is
- * self-describing when the constants later move.
+ * self-describing when the constants later move. `stages` is the same
+ * grouped read that produced `failures_24h`, stage-ordered: the parts of the
+ * total an operator can act on, never a second snapshot.
  */
 export type SweepAlertFields = {
   event: "ops_sweep_alert";
   failures_24h: number;
   dlq_check: "skipped";
   thresholds: { failures_24h: number; window_hours: number };
+  stages: Array<{ stage: string; count: number }>;
+  /**
+   * Maintenance-deferred rows in the same trailing window — the platform's own
+   * existence signal, beside (never inside) the infrastructure total above.
+   * The frozen contract key is nested (`{count}`), and it appears only when
+   * THIS post owes the maintenance lane: a deferral already announced inside
+   * the window is not an active alert.
+   */
+  maintenance_deferred?: { count: number };
+  /**
+   * The lanes that justified THIS post. One shared body cannot otherwise say
+   * whether a breaching `failures_24h` is the alert or a de-bounced snapshot;
+   * a lane missing here was already recorded inside the window.
+   */
+  due: Array<"infrastructure" | "maintenance">;
 };
 
 /**
@@ -114,6 +211,12 @@ export type SweepAlertFields = {
 export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
   event:
     | "ops_sweep_alert_webhook_failed"
+    // The audit-window de-bounce (`alert.failure_paging` in
+    // `platform_audit_events`): an unreadable window read, and the append that
+    // records a delivered alert. Both degrade to a warn — neither may suppress
+    // or alter the post the sweep owes.
+    | "ops_sweep_alert_window_unreadable"
+    | "ops_sweep_alert_audit_failed"
     | "ops_sweep_failed"
     | "ops_sweep_db_unbound"
     // §7.11: the scheduled composition's independent catch for the
@@ -165,6 +268,18 @@ export type SweepCommentClaimFields =
   | { event: "comment_claim_outbox_failed"; detail: string };
 
 /**
+ * Maintenance replay outbox fields (migration 0071): the sweep retrying a
+ * pending operator request while the window is open. A row that never finds a
+ * live target stays pending forever (no attempt cap drops an operator's
+ * recovery), so its count rides every sweep that sees one.
+ */
+export type SweepMaintenanceReplayFields =
+  | { event: "maintenance_replay_outbox"; sent: number; failed: number; target_unavailable: number }
+  | { event: "maintenance_replay_outbox_send_failed"; failure_id: string; detail: string }
+  | { event: "maintenance_replay_outbox_failed"; detail: string }
+  | { event: "maintenance_replay_pending_unreadable"; detail: string };
+
+/**
  * The sweep only ever warns: a quiet system logs nothing. A warn-only view
  * of the consumer log channel — the `msg` parameter type is derived from
  * `ConsumerLog["warn"]` so the call shape cannot drift; the field union is
@@ -180,17 +295,79 @@ export type SweepLog = {
       | SweepLedgerRetentionFields
       | SweepInviteLapseFields
       | SweepCommentClaimFields
+      | SweepMaintenanceReplayFields
       // The comment-claim settings reader owns its own degraded warn shape.
       | CommentClaimSettingsLogFields,
     msg?: Parameters<ConsumerLog["warn"]>[1],
   ) => void;
 };
 
+/**
+ * One warn `detail`: redact BEFORE truncate (repo convention — a secret
+ * straddling the cut would leak a partial token), then cap the line. The
+ * configured alert URL is exact-string-replaced because a URL-shaped value
+ * evades the shape patterns (SEC-02).
+ */
+function warnDetail(error: unknown, alertUrl?: string): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const detail = redactExactSecrets(redactSecrets(raw), alertUrl ? [alertUrl] : []);
+  return detail.length <= SWEEP_LOG_DETAIL_MAX ? detail : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`;
+}
+
 /** Default sink: structured JSON lines on stderr. No secrets are logged. */
 export const defaultSweepLog: SweepLog = {
   warn: (fields, msg) => console.warn(JSON.stringify({ ...fields, msg: msg ?? "" })),
 };
 
+/**
+ * The trailing-window predicate identifying the infrastructure failures that
+ * page. The window modifier comes from SWEEP_WINDOW_HOURS (the constant is the
+ * single source) so the SQL cannot drift from the pinned threshold table, and
+ * the composed text stays byte-identical to the pre-constant form
+ * (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
+ * `stage NOT IN (<paging stages>)` is the paging exclusion: attribution rows
+ * are reviews that continued, and `quota` is one tenant's spent month (see the
+ * header). The list comes from the contract's written partition, never a local
+ * literal. `quota` re-enters when the SAME window shows it in more than one
+ * workspace — the premise "one tenant" is what the exclusion rests on, so a
+ * platform-wide ceiling fault must page. Maintenance is the platform's own
+ * existence signal, owned by its separate lane and never part of the
+ * infrastructure total — so it is excluded here too, by its constant. ONE
+ * predicate, so the grouped read and the window decision below can never
+ * disagree about what a breach is.
+ */
+const QUOTA_SPREAD_SQL = `(SELECT COUNT(DISTINCT t.workspace_id)
+              FROM review_failures q
+              JOIN review_targets t ON t.id = q.target_id
+             WHERE q.stage = '${QUOTA_STAGE}'
+               AND q.created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')) > 1`;
+
+const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
+         AND (stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+              OR (stage = '${QUOTA_STAGE}' AND ${QUOTA_SPREAD_SQL}))
+         AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'`;
+
+/**
+ * The maintenance-deferred existence signal: rows the platform deferred in the
+ * same trailing window. Its own count, never a `stages` group — maintenance is
+ * not an infrastructure failure, so it stays out of `failures_24h`.
+ */
+const MAINTENANCE_DEFERRED_COUNT_SQL = `SELECT COUNT(*) AS count FROM review_failures
+       WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'
+         AND created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')`;
+
+/**
+ * The audit-window de-bounce is ONE read plus ONE append against
+ * `platform_audit_events` (compass D17), per lane: `alert.failure_paging` rows
+ * record delivered infrastructure alerts and `alert.maintenance_deferred` rows
+ * record the maintenance signal, and the newest stamp for that action inside
+ * `SWEEP_WINDOW_HOURS` suppresses the POST. There is no stored latch and no
+ * generation — a due window with no recent alert always alerts, and two
+ * concurrent sweeps may each post once. The ledger
+ * (migrations/0033_platform_admin.sql) is append-only and platform-scoped,
+ * which is exactly the shape a "was it already announced" question needs. The
+ * writer is the sweep itself, so the actor is `sweep`.
+ */
 export type SweepDeps = {
   /** Alert webhook URL (env `ALERT_WEBHOOK_URL`); absent/empty = log-only. */
   alertUrl?: string;
@@ -217,19 +394,104 @@ export type SweepResult = {
   invitesExpired: number | null;
   /**
    * Webhook disposition: absent (unset), posted, failed (throw or non-2xx,
-   * warn-logged), or not_attempted (no breach).
+   * warn-logged), or not_attempted (nothing due, or every due lane already
+   * recorded inside the sweep window — at most one post per window).
    */
   webhook: "absent" | "posted" | "failed" | "not_attempted";
 };
 
+/** The audit action that records a delivered paging alert (compass D17). */
+export const ALERT_PAGING_AUDIT_ACTION = "alert.failure_paging";
+
 /**
- * Run one sweep: count the trailing-24h failure rows, and on breach emit the
- * `ops_sweep_alert` structured event + optionally POST it to `alertUrl`
- * (JSON body, SWEEP_WEBHOOK_TIMEOUT_MS timeout). A webhook failure
+ * The audit action that records a delivered maintenance alert. Its own action,
+ * so each lane's window is independent: a paging alert never suppresses the
+ * maintenance alert and vice versa.
+ */
+export const ALERT_MAINTENANCE_AUDIT_ACTION = "alert.maintenance_deferred";
+
+/**
+ * The newest alert recorded under `action`, as epoch milliseconds, or `null`
+ * when the ledger holds none. A read that throws or a stamp `Date.parse` cannot
+ * read is "no recent alert": the post it might suppress is the one that
+ * matters, so the caller logs and alerts. Never throws.
+ */
+async function readLastAlertAt(
+  db: D1Like,
+  action: string,
+  log: SweepLog,
+  alertUrl?: string,
+): Promise<number | null> {
+  try {
+    const row = await db
+      .prepare(`SELECT MAX(created_at) AS at FROM platform_audit_events WHERE action = ?`)
+      .bind(action)
+      .first<{ at: string | null }>();
+    if (row?.at == null) return null;
+    const at = Date.parse(row.at);
+    if (Number.isNaN(at)) {
+      log.warn(
+        { event: "ops_sweep_alert_window_unreadable", detail: "unparseable alert stamp" },
+        "paging alert window unreadable — treating the alert as unannounced",
+      );
+      return null;
+    }
+    return at;
+  } catch (error) {
+    log.warn(
+      { event: "ops_sweep_alert_window_unreadable", detail: warnDetail(error, alertUrl) },
+      "paging alert window unreadable — treating the alert as unannounced",
+    );
+    return null;
+  }
+}
+
+/**
+ * Record a delivered alert. The POST already succeeded, so a storage failure
+ * here only means the next sweep may post once more: it is logged and never
+ * changes the POST outcome. `detail` carries the same numbers the payload sent
+ * under that action, which is what makes the ledger row a usable record alone.
+ */
+async function appendAlertAudit(
+  db: D1Like,
+  action: string,
+  targetId: string,
+  detail: Record<string, unknown>,
+  log: SweepLog,
+  alertUrl?: string,
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO platform_audit_events
+           (id, actor_login, action, target_type, target_id, detail_json, created_at)
+         VALUES (?, 'sweep', ?, 'sweep', ?, ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), action, targetId, JSON.stringify(detail), new Date().toISOString())
+      .run();
+  } catch (error) {
+    log.warn(
+      { event: "ops_sweep_alert_audit_failed", detail: warnDetail(error, alertUrl) },
+      "alert audit row not written — the next sweep may alert again",
+    );
+  }
+}
+
+/**
+ * Run one sweep: read the trailing-24h failure rows grouped by stage, and when
+ * that total breaches the threshold AND no alert is recorded inside the sweep
+ * window, emit the `ops_sweep_alert` structured event + optionally POST it to
+ * `alertUrl` (JSON body, SWEEP_WEBHOOK_TIMEOUT_MS timeout). A webhook failure
  * (network/timeout throw OR a non-2xx response) degrades to a warn log — it
  * NEVER throws (the alert must not take down the cron that produced it). D1
  * errors DO propagate to the caller (the `scheduled` handler wraps the whole
  * sweep in try/catch).
+ *
+ * The infrastructure decision and the maintenance-signal decision each set a
+ * due flag from their OWN audit window; the body is composed and delivered once
+ * for whichever lanes are due, and the function returns once, at the bottom. A
+ * healthy infrastructure total never short-circuits the maintenance lane, and a
+ * deferral never joins `failures_24h`.
  */
 export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepResult> {
   const log = deps.log ?? defaultSweepLog;
@@ -249,18 +511,8 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       log.warn({ event: "retention_swept", deleted: retention.meta.changes }, "webhook_deliveries retention sweep");
     }
   } catch (error) {
-    // Redact before truncate (repo convention: a secret straddling the cut
-    // would leak a partial token) — same posture as the webhook-failure path.
-    const raw = error instanceof Error ? error.message : String(error);
-    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
     log.warn(
-      {
-        event: "retention_swept_failed",
-        detail:
-          detail.length <= SWEEP_LOG_DETAIL_MAX
-            ? detail
-            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
-      },
+      { event: "retention_swept_failed", detail: warnDetail(error, deps.alertUrl) },
       "webhook_deliveries retention sweep failed — continuing",
     );
   }
@@ -275,16 +527,8 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       log.warn({ event: "pull_request_retention_swept", deleted }, "pull_requests retention sweep");
     }
   } catch (error) {
-    const raw = error instanceof Error ? error.message : String(error);
-    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
     log.warn(
-      {
-        event: "pull_request_retention_swept_failed",
-        detail:
-          detail.length <= SWEEP_LOG_DETAIL_MAX
-            ? detail
-            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
-      },
+      { event: "pull_request_retention_swept_failed", detail: warnDetail(error, deps.alertUrl) },
       "pull_requests retention sweep failed — continuing",
     );
   }
@@ -299,16 +543,8 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   try {
     invitesExpired = await expireLapsedInvites(db, new Date().toISOString(), SWEEP_INVITE_LAPSE_CAP);
   } catch (error) {
-    const raw = error instanceof Error ? error.message : String(error);
-    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
     log.warn(
-      {
-        event: "invite_lapse_swept_failed",
-        detail:
-          detail.length <= SWEEP_LOG_DETAIL_MAX
-            ? detail
-            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
-      },
+      { event: "invite_lapse_swept_failed", detail: warnDetail(error, deps.alertUrl) },
       "workspace invite lapse sweep failed — continuing",
     );
   }
@@ -320,13 +556,38 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // consume keeps execution at-most-once. Best-effort in the same shape as
   // every janitor above: a failure warns and never breaks the failure sweep.
   if (deps.queue !== undefined) {
+    const queue = deps.queue;
+    // The three budgets are operator settings on the global runtime-config
+    // surface (`review.comment_claim.*`, AGENTS.md 「Configuration surfaces」):
+    // read once per sweep, shared by both recovery lanes. A degraded read
+    // answers the documented defaults with one structured warn and never
+    // throws, so a broken settings row cannot stop recovery.
+    const settings = await readCommentClaimSettings(db, log);
+    // The maintenance window is read ONCE, before the lanes split the budget:
+    // the replay lane's reservation and the lane itself must agree on it. Only
+    // an OPEN window may write the queue, so an unreadable window is closed —
+    // the same fail-closed predicate as the route.
+    const replayOpen = !maintenanceClosed(await getMaintenanceMode(db));
+    // The ONE combined recovery budget: two de-bounded lanes, one cap, so
+    // neither lane can double the sweep's queue writes. The split is fair by
+    // construction: while an operator's replay is pending AND the window is
+    // open, the comment lane may claim at most cap-1 and the replay lane keeps
+    // the last unit; with nothing waiting (or a closed window) the comment lane
+    // keeps the whole cap.
+    let replayWaiting = false;
+    if (replayOpen) {
+      try {
+        replayWaiting = (await db.prepare(MAINTENANCE_REPLAY_PENDING_SQL).first()) !== null;
+      } catch (error) {
+        log.warn(
+          { event: "maintenance_replay_pending_unreadable", detail: warnDetail(error, deps.alertUrl) },
+          "maintenance replay outbox unreadable — comment lane keeps the full cap",
+        );
+      }
+    }
+    let outboxRemaining = settings.outboxCap;
+    const commentBudget = replayWaiting ? settings.outboxCap - 1 : settings.outboxCap;
     try {
-      // The three budgets are operator settings on the global runtime-config
-      // surface (`review.comment_claim.*`, AGENTS.md 「Configuration surfaces」):
-      // read once per sweep. A degraded read answers the documented defaults
-      // with one structured warn and never throws, so a broken settings row
-      // cannot stop claim recovery.
-      const settings = await readCommentClaimSettings(db, log);
       const nowMs = Date.now();
       // Rows at the cap have exhausted every re-send: flip them to `expired`
       // FIRST, so the selection below can never pick them again. The payload is
@@ -342,7 +603,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         .run();
       const stale = await db
         .prepare(COMMENT_CLAIM_OUTBOX_SQL)
-        .bind(settings.maxAttempts, nowMs - settings.retryMs, settings.outboxCap)
+        .bind(settings.maxAttempts, nowMs - settings.retryMs, commentBudget)
         .all<{
           installation_id: number;
           owner: string;
@@ -355,10 +616,15 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       let resendFailed = 0;
       for (const claim of stale.results) {
         // Per row: one poisoned claim (a send that keeps failing) must not
-        // starve the rest of the batch, which is ordered oldest-first.
+        // starve the rest of the batch, which is ordered oldest-first. The
+        // budget is spent HERE, before the send: an attempt is what the cap
+        // counts, so a send that succeeds and then throws on its own
+        // attempts update can never hand the replay lane a budget it already
+        // spent.
+        outboxRemaining -= 1;
         let delivered = false;
         try {
-          await deps.queue.send(JSON.parse(claim.payload_json) as ReviewJobPayload);
+          await queue.send(JSON.parse(claim.payload_json) as ReviewJobPayload);
           delivered = true;
           resent += 1;
         } catch {
@@ -383,87 +649,197 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         );
       }
     } catch (error) {
-      const raw = error instanceof Error ? error.message : String(error);
-      const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
       log.warn(
-        {
-          event: "comment_claim_outbox_failed",
-          detail:
-            detail.length <= SWEEP_LOG_DETAIL_MAX
-              ? detail
-              : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
-        },
+        { event: "comment_claim_outbox_failed", detail: warnDetail(error, deps.alertUrl) },
         "comment trigger outbox sweep failed — continuing",
       );
     }
-  }
-  // The window modifier is built from SWEEP_WINDOW_HOURS (the constant is
-  // the single source) so the SQL cannot drift from the pinned threshold
-  // table. The composed text is byte-identical to the pre-constant form
-  // (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
-  // `stage NOT IN (<attribution stages>)` is the paging exclusion: both rows are
-  // attribution for reviews that continued (see the header). The list comes
-  // from the failure store's one written partition, never a local literal.
-  const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM review_failures
-       WHERE created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
-         AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})`,
-    )
-    .first<{ n: number }>();
-  const failures24h = row?.n ?? 0;
-  const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
-  if (!thresholdBreached) {
-    return { failures24h, thresholdBreached, invitesExpired, webhook: "not_attempted" };
-  }
-
-  const alert: SweepAlertFields = {
-    event: "ops_sweep_alert",
-    failures_24h: failures24h,
-    dlq_check: "skipped",
-    thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
-  };
-  log.warn(alert, "review failure threshold breached");
-  if (!deps.alertUrl) {
-    return { failures24h, thresholdBreached, invitesExpired, webhook: "absent" };
-  }
-
-  // An arrow over a globalThis property call, never the bare `fetch` reference:
-  // calling a stored reference loses the global receiver and workerd's native
-  // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
-  const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
-  try {
-    const response = await fetchImpl(deps.alertUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(alert),
-      signal: AbortSignal.timeout(SWEEP_WEBHOOK_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      // Non-2xx = NOT posted: the sink rejected the alert. Throw a synthetic
-      // status-only error (never the URL or body) so the shared catch path
-      // below emits the warn and the "failed" disposition.
-      throw new Error(`alert webhook POST returned HTTP ${response.status}`);
+    // Maintenance-replay outbox (migrations 0071/0072): an operator's request
+    // can outlive its send — the isolate died between the request batch and
+    // `queue.send`, or the send/its sent-stamp failed. Only an OPEN window may
+    // write the queue, so the lane runs under the SAME fail-closed predicate as
+    // the route (`replayOpen`, read above): unreadable is closed.
+    if (outboxRemaining > 0 && replayOpen) {
+      try {
+        const now = new Date().toISOString();
+        // The ids THIS pass already took: one row is attempted at most once per
+        // sweep. It can hold no more than the starting budget.
+        const tried: string[] = [];
+        let sent = 0;
+        let failed = 0;
+        let unavailable = 0;
+        // Every row this pass TOUCHES spends one unit of the shared budget,
+        // including a row whose target is gone — the scan can therefore never
+        // outgrow the budget. The per-attempt stamp (written for dead targets
+        // too) rotates the rows this pass did not reach to the front of the
+        // next one, so a dead backlog costs one attempt per free slot per sweep
+        // instead of being walked in full before the alert lanes run.
+        while (outboxRemaining > 0) {
+          const row = await db
+            .prepare(MAINTENANCE_REPLAY_OUTBOX_SQL)
+            .bind(JSON.stringify(tried), outboxRemaining)
+            .first<{ id: string }>();
+          if (row === null) break;
+          tried.push(row.id);
+          outboxRemaining -= 1;
+          try {
+            const outcome = await retryMaintenanceReplay(db, queue, row.id, now);
+            if (outcome === "sent") sent += 1;
+            else unavailable += 1;
+          } catch (error) {
+            // A send/stamp failure leaves the row pending: no attempt cap, so
+            // the next open sweep retries it — behind the rows this sweep did
+            // not reach, because the attempt stamp moved it back.
+            failed += 1;
+            log.warn(
+              {
+                event: "maintenance_replay_outbox_send_failed",
+                failure_id: row.id,
+                detail: warnDetail(error, deps.alertUrl),
+              },
+              "maintenance replay send failed — row stays pending",
+            );
+          }
+        }
+        if (sent > 0 || failed > 0 || unavailable > 0) {
+          log.warn(
+            { event: "maintenance_replay_outbox", sent, failed, target_unavailable: unavailable },
+            "maintenance replay outbox recovery",
+          );
+        }
+      } catch (error) {
+        log.warn(
+          { event: "maintenance_replay_outbox_failed", detail: warnDetail(error, deps.alertUrl) },
+          "maintenance replay outbox sweep failed — continuing",
+        );
+      }
     }
-    return { failures24h, thresholdBreached, invitesExpired, webhook: "posted" };
-  } catch (error) {
-    // Redact BEFORE truncate (repo convention: a secret straddling the cut
-    // would leak a partial token) — ALERT_WEBHOOK_URL is secret-class and a
-    // runtime may interpolate the request URL into the error message.
-    // SEC-02: additionally exact-string-replace the configured alertUrl
-    // itself (a URL-shaped value evades the shape patterns) when present.
-    const raw = error instanceof Error ? error.message : String(error);
-    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
-    log.warn(
-      {
-        event: "ops_sweep_alert_webhook_failed",
-        detail:
-          detail.length <= SWEEP_LOG_DETAIL_MAX
-            ? detail
-            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
-      },
-      "alert webhook POST failed — log-only alert stands",
-    );
-    return { failures24h, thresholdBreached, invitesExpired, webhook: "failed" };
   }
+  // ONE grouped read supplies both the total and its breakdown, so a payload
+  // can never describe a different instant than its own count.
+  const { results: stageRows } = await db
+    .prepare(
+      `SELECT stage, COUNT(*) AS count FROM review_failures
+       WHERE ${FAILURE_PAGING_WHERE_SQL}
+       GROUP BY stage ORDER BY stage`,
+    )
+    .all<{ stage: string; count: number }>();
+  const stages = stageRows.map((row) => ({ stage: row.stage, count: row.count }));
+  const failures24h = stages.reduce((sum, row) => sum + row.count, 0);
+  const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
+  // The maintenance existence signal: its own trailing-window count, read before
+  // the paging decision consumes it, so a healthy infrastructure total still
+  // runs this lane and a deferral can never hide a breach or vice versa.
+  const maintenanceRow = await db
+    .prepare(MAINTENANCE_DEFERRED_COUNT_SQL)
+    .first<{ count: number }>();
+  const maintenanceDeferred = maintenanceRow?.count ?? 0;
+  // The infrastructure decision only SETS the disposition and, when it owes a
+  // page, composes the alert body; delivery and the single exit are below.
+  let webhook: SweepResult["webhook"] = "not_attempted";
+  const nowMs = Date.now();
+  const windowMs = SWEEP_WINDOW_HOURS * 3_600_000;
+  // Each lane de-bounces on its OWN audit action, so neither can silence the
+  // other: a paging alert never suppresses the maintenance alert. A stamp only
+  // suppresses when it is in the past and inside the trailing window — a
+  // clock-ahead row is not evidence of a delivered alert.
+  let pagingDue = false;
+  if (thresholdBreached) {
+    // Read the window BEFORE the POST: the newest recorded alert suppresses
+    // this one. Nothing is latched, so a window with no recent row always
+    // pages; the cost of overlapping sweeps is one bounded duplicate.
+    const lastAlertAt = await readLastAlertAt(db, ALERT_PAGING_AUDIT_ACTION, log, deps.alertUrl);
+    pagingDue = lastAlertAt === null || lastAlertAt >= nowMs || nowMs - lastAlertAt >= windowMs;
+  }
+  // The maintenance existence signal joins HERE, on its own action and window:
+  // a healthy infrastructure total cannot skip it, and it never adds to
+  // `failures_24h` or the paging decision.
+  let maintenanceDue = false;
+  if (maintenanceDeferred > 0) {
+    const lastAlertAt = await readLastAlertAt(db, ALERT_MAINTENANCE_AUDIT_ACTION, log, deps.alertUrl);
+    maintenanceDue = lastAlertAt === null || lastAlertAt >= nowMs || nowMs - lastAlertAt >= windowMs;
+  }
+  if (pagingDue || maintenanceDue) {
+    // ONE body for both lanes: `due` names which lanes owe it, and each signal
+    // key appears only for a lane that is actually due — a lane de-bounced by
+    // its own audit window must not read as an active alert.
+    const due: SweepAlertFields["due"] = [
+      ...(pagingDue ? (["infrastructure"] as const) : []),
+      ...(maintenanceDue ? (["maintenance"] as const) : []),
+    ];
+    const alert: SweepAlertFields = {
+      event: "ops_sweep_alert",
+      failures_24h: failures24h,
+      dlq_check: "skipped",
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+      stages,
+      ...(maintenanceDue ? { maintenance_deferred: { count: maintenanceDeferred } } : {}),
+      due,
+    };
+    log.warn(alert, pagingDue ? "review failure threshold breached" : "maintenance deferrals in window");
+    if (!deps.alertUrl) {
+      webhook = "absent";
+    } else {
+      // POST FIRST, append the audit rows only for a delivered alert. A row
+      // written before the POST would let a terminated invocation suppress the
+      // only alert this window ever sends; one written after a 2xx can at worst
+      // repeat an alert next sweep, which is the permitted duplication.
+      // An arrow over a globalThis property call, never the bare `fetch` reference:
+      // calling a stored reference loses the global receiver and workerd's native
+      // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
+      const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
+      try {
+        const response = await fetchImpl(deps.alertUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(alert),
+          signal: AbortSignal.timeout(SWEEP_WEBHOOK_TIMEOUT_MS),
+        });
+        if (!response.ok) {
+          // Non-2xx = NOT posted: the sink rejected the alert. Throw a synthetic
+          // status-only error (never the URL or body) so the shared catch path
+          // below emits the warn and the "failed" disposition.
+          throw new Error(`alert webhook POST returned HTTP ${response.status}`);
+        }
+        webhook = "posted";
+        // The alert IS delivered; only now is each due lane recorded, under its
+        // own action. An append never changes this disposition.
+        if (pagingDue) {
+          await appendAlertAudit(
+            db,
+            ALERT_PAGING_AUDIT_ACTION,
+            "failure_paging",
+            { failures_24h: alert.failures_24h, stages: alert.stages },
+            log,
+            deps.alertUrl,
+          );
+        }
+        if (maintenanceDue) {
+          await appendAlertAudit(
+            db,
+            ALERT_MAINTENANCE_AUDIT_ACTION,
+            "maintenance_deferred",
+            { maintenance_deferred: { count: maintenanceDeferred } },
+            log,
+            deps.alertUrl,
+          );
+        }
+      } catch (error) {
+        // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
+        // request URL into the error message; `warnDetail` redacts and caps it.
+        log.warn(
+          {
+            event: "ops_sweep_alert_webhook_failed",
+            detail: warnDetail(error, deps.alertUrl),
+          },
+          "alert webhook POST failed — log-only alert stands",
+        );
+        // Nothing is recorded, so the window still counts as unannounced and
+        // the next sweep retries.
+        webhook = "failed";
+      }
+    }
+  }
+
+  return { failures24h, thresholdBreached, invitesExpired, webhook };
 }

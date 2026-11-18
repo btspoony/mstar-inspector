@@ -79,11 +79,30 @@ const PROFILE_COLUMNS = `id            AS id,
             source_shared AS source_shared,
             rp_per_credit AS rp_per_credit`;
 
+/** The one error an empty `quota_profiles` table produces, on every read path. */
+export const QUOTA_PROFILES_EMPTY_ERROR = "quota_profiles is empty; apply migration 0063_quota_profiles.sql";
+
 /**
- * The profile whose `effective_from` is the greatest <= `at`. An instant
- * before every profile answers the EARLIEST profile — there was no earlier
- * configured state, which is what makes the cutover month resolvable. Throws
- * only when the table is empty (migration 0063 not applied).
+ * The profile judging `at`, picked from a list already in `effective_from`
+ * order (oldest first): the last one at or before `at`, else the earliest —
+ * there was no earlier configured state, which is what makes the cutover month
+ * resolvable. Throws only when the list is empty (migration 0063 not applied).
+ */
+export function pickQuotaProfile<T extends QuotaProfile>(profiles: readonly T[], at: string): T {
+  const first = profiles[0];
+  if (first === undefined) throw new Error(QUOTA_PROFILES_EMPTY_ERROR);
+  let judging = first;
+  for (const profile of profiles) {
+    if (profile.effectiveFrom <= at) judging = profile;
+  }
+  return judging;
+}
+
+/**
+ * The profile whose `effective_from` is the greatest <= `at`, read on its own.
+ * {@link pickQuotaProfile} is the same rule over a list; this one exists for
+ * callers that hold no snapshot. An instant before every profile answers the
+ * EARLIEST profile. Throws only when the table is empty.
  */
 export async function resolveQuotaProfile(db: D1Like, at: string): Promise<QuotaProfile> {
   const atOrBefore = await db
@@ -101,7 +120,7 @@ export async function resolveQuotaProfile(db: D1Like, at: string): Promise<Quota
     .prepare(`SELECT ${PROFILE_COLUMNS} FROM quota_profiles ORDER BY effective_from ASC LIMIT 1`)
     .first<QuotaProfileRow>();
   if (earliest === null) {
-    throw new Error("quota_profiles is empty; apply migration 0063_quota_profiles.sql");
+    throw new Error(QUOTA_PROFILES_EMPTY_ERROR);
   }
   return quotaProfile(earliest);
 }
@@ -190,15 +209,19 @@ export type QuotaProfileVersion = QuotaProfile & {
   monthlyRp: Record<string, number | null>;
 };
 
+/** One list row: a profile column set plus one ceiling row (absent = no plan). */
+export type QuotaProfileListRow = QuotaProfileRow & {
+  notes: string | null;
+  plan_id: string | null;
+  monthly_rp: number | null;
+};
+
 /**
- * Every stored profile, oldest first, with its ceilings — the operator list's
- * read. The interval END is the next row's `effective_from` (no second stored
- * endpoint), so callers derive it from this order.
+ * The profile-list statement: every stored profile, oldest first, with its
+ * ceilings. Exported so a caller can place it in a `batch` beside its own
+ * statement and read both from ONE snapshot.
  */
-export async function listQuotaProfiles(db: D1Like): Promise<QuotaProfileVersion[]> {
-  const res = await db
-    .prepare(
-      `SELECT p.id            AS id,
+export const QUOTA_PROFILES_SQL = `SELECT p.id            AS id,
               p.version       AS version,
               p.effective_from AS effective_from,
               p.base_quick    AS base_quick,
@@ -212,12 +235,13 @@ export async function listQuotaProfiles(db: D1Like): Promise<QuotaProfileVersion
               q.monthly_rp    AS monthly_rp
          FROM quota_profiles p
          LEFT JOIN quota_profile_plans q ON q.profile_id = p.id
-        ORDER BY p.effective_from ASC, q.plan_id ASC`,
-    )
-    .all<QuotaProfileRow & { notes: string | null; plan_id: string | null; monthly_rp: number | null }>();
+        ORDER BY p.effective_from ASC, q.plan_id ASC`;
+
+/** The rows above → one version per profile, oldest first, ceilings merged. */
+export function decodeQuotaProfiles(rows: readonly QuotaProfileListRow[]): QuotaProfileVersion[] {
   const versions: QuotaProfileVersion[] = [];
   const byId = new Map<string, QuotaProfileVersion>();
-  for (const row of res.results) {
+  for (const row of rows) {
     let version = byId.get(row.id);
     if (version === undefined) {
       version = { ...quotaProfile(row), notes: row.notes, monthlyRp: {} };

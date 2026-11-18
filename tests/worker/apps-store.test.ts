@@ -23,7 +23,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1, execMigrationScript } from "../store/helpers";
-import { createReviewBotsStore } from "../../src/dashboard/apps-store";
+import { AppCountExceededError, createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { D1Like } from "../../src/store/types";
 import type {
@@ -103,6 +103,9 @@ const APP_INPUT: CreateAppInput = {
   createdBy: "octocat",
   // Required: ownership is a caller input, never a store lookup.
   workspaceId: "default",
+  // Fixture seeding: these cases are about identity and storage shape, not the
+  // plan's App cap.
+  maxApps: null,
 };
 
 async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Promise<GithubAppRow> {
@@ -808,6 +811,12 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     await expect(store(createMigratedD1()).createApp(input)).rejects.toThrow();
   });
 
+  test("CreateAppInput.maxApps is required: an omitted cap cannot mean unlimited", async () => {
+    const { maxApps: _omitted, ...input } = APP_INPUT;
+    // @ts-expect-error — maxApps is required; an omitted cap would be a silent bypass
+    await expect(store(createMigratedD1()).createApp(input)).rejects.toThrow(/AppCountExceededError|already owns/);
+  });
+
   test("a NAMED workspace target receives the App's mapping", async () => {
     const db = createMigratedD1();
     rawRun(
@@ -847,6 +856,49 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     const row = db.raw.query("SELECT COUNT(*) AS n FROM workspaces").get() as CountRow;
     expect(row.n).toBe(1);
     expect(mappingRows(db)).toHaveLength(2);
+  });
+
+  test("maxApps caps the write: the insert past the cap lands no row of either kind", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { githubAppId: 7101, maxApps: 1 });
+    await expect(seedApp(db, { githubAppId: 7102, maxApps: 1 })).rejects.toThrow(AppCountExceededError);
+    expect(appCount(db)).toBe(1);
+    expect(mappingRows(db)).toHaveLength(1);
+  });
+
+  test("maxApps: 0 refuses every creation", async () => {
+    const db = createMigratedD1();
+    await expect(seedApp(db, { githubAppId: 7201, maxApps: 0 })).rejects.toThrow(AppCountExceededError);
+    expect(appCount(db)).toBe(0);
+    expect(mappingRows(db)).toEqual([]);
+  });
+
+  test("a soft-deleted App frees its cap slot: the mapping row alone does not count", async () => {
+    const db = createMigratedD1();
+    const first = await seedApp(db, { githubAppId: 7301, maxApps: 1 });
+    rawRun(db, "UPDATE review_bots SET deleted_at = datetime('now') WHERE id = ?", first.id);
+    // The mapping row survives the soft delete; only the LIVE bot counts.
+    const second = await seedApp(db, { githubAppId: 7302, maxApps: 1 });
+    expect(mappingRows(db)).toEqual([
+      { bot_id: first.id, workspace_id: "default" },
+      { bot_id: second.id, workspace_id: "default" },
+    ]);
+  });
+
+  test("a github_app_id conflict is still a UNIQUE error, never reclassified as a cap hit", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { githubAppId: 7401, maxApps: null });
+    await expect(seedApp(db, { githubAppId: 7401, maxApps: null })).rejects.toThrow(
+      /UNIQUE constraint failed: review_bots.github_app_id/,
+    );
+    expect(appCount(db)).toBe(1);
+  });
+
+  test("a NULL cap is unlimited: an eleventh App still lands", async () => {
+    const db = createMigratedD1();
+    for (let at = 0; at < 11; at += 1) await seedApp(db, { githubAppId: 7600 + at, maxApps: null });
+    expect(appCount(db)).toBe(11);
+    expect(mappingRows(db)).toHaveLength(11);
   });
 
   test("every execution-facing read joins bot_workspaces in ONE statement", async () => {

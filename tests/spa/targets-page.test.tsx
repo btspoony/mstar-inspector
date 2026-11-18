@@ -765,9 +765,10 @@ describe("the list failure face", () => {
  */
 function targetPayload(
   follow: 0 | 1,
-  overrides: { review_enabled?: 0 | 1; verdictsReadable?: boolean } = {},
+  overrides: { review_enabled?: 0 | 1; verdictsReadable?: boolean; reviewDrafts?: boolean } = {},
 ) {
   const readable = overrides.verdictsReadable ?? true;
+  const draftSwitch: 0 | 1 = overrides.reviewDrafts === false ? 0 : 1;
   return {
     target: {
       target_id: "t-1",
@@ -776,6 +777,7 @@ function targetPayload(
       app_name: "Acme Inspector",
       review_enabled: overrides.review_enabled ?? 1,
       follow_workspace_defaults: follow,
+      review_drafts: draftSwitch,
     },
     effective: {
       trigger_mode: "every_push" as const,
@@ -784,6 +786,7 @@ function targetPayload(
       // An unreadable stored list arrives as the server's empty placeholder.
       check_pass_verdicts: readable ? ["ship it"] : [],
       check_pass_verdicts_readable: readable,
+      reviewDrafts: overrides.reviewDrafts ?? true,
     },
     defaults: {
       trigger_mode: "open" as const,
@@ -828,10 +831,11 @@ describe("target settings tab (static SSR)", () => {
     expect(markup).toContain("Deep");
     expect(markup).toContain('value="45"');
     // The policy cluster's controls are all disabled — the score field and the
-    // four verdict boxes — while the two switches (inheritance, pause) stay
-    // operable: 7 inputs, 5 of them disabled.
+    // four verdict boxes — while the three admission switches (draft,
+    // inheritance, pause) stay operable: 8 inputs, 5 of them disabled. The
+    // draft switch is target-owned (D12), so inheriting does not lock it.
     const inputs = [...markup.matchAll(/<input[^>]*>/g)];
-    expect(inputs.length).toBe(7);
+    expect(inputs.length).toBe(8);
     expect(disabledInputs(markup)).toBe(5);
     expect(markup).toContain("Following the workspace defaults");
     expect(markup).toContain(t("en", "settings.reviewGateSave"));
@@ -859,12 +863,14 @@ describe("target settings tab (static SSR)", () => {
     expect(markup).toContain("stored review gate could not be read");
     expect(markup).not.toContain(t("en", "settings.reviewGateSave"));
     expect(markup).not.toContain('type="number"');
-    // Only the two switches survive, and inheritance is locked: turning it off
-    // snapshots the placeholder into the row.
+    // Three switches survive — draft, inheritance, pause — and inheritance is
+    // locked: turning it off snapshots the placeholder into the row. The draft
+    // switch names no policy column, so it stays operable.
     const inputs = [...markup.matchAll(/<input[^>]*>/g)];
-    expect(inputs.length).toBe(2);
+    expect(inputs.length).toBe(3);
     expect(disabledInputs(markup)).toBe(1);
     expect(markup).toContain(t("en", "settings.pauseReviews"));
+    expect(markup).toContain(t("en", "settings.reviewDrafts"));
   });
 });
 
@@ -921,6 +927,47 @@ async function mountDetail(
 }
 
 describe("repository detail page (mounted)", () => {
+  test("the draft switch posts only review_drafts and survives the reload while inheriting", async () => {
+    // The D12 face: the switch is target-owned, so its save names exactly one
+    // field, never `follow`, and an inheriting target keeps the new value.
+    let draftOn = true;
+    const view = await mountDetail((wire) => {
+      if (wire.method === "POST") {
+        expect(JSON.parse(wire.body ?? "null")).toEqual({ review_drafts: false });
+        expect(wire.url).toBe("/dashboard/acme/api/targets/t-1");
+        draftOn = false;
+        return wireJson(targetPayload(1, { reviewDrafts: false }));
+      }
+      return wire.url.endsWith("/api/targets/t-1")
+        ? wireJson(targetPayload(1, { reviewDrafts: draftOn }))
+        : wireJson({}, 500);
+    });
+    /** The draft switch, found by the label it is bound to. */
+    const draftSwitch = (): HTMLInputElement | null =>
+      [...view.win.document.querySelectorAll("label")]
+        .find((node) => node.textContent === t("en", "settings.reviewDrafts"))
+        ?.querySelector('input[type="checkbox"]') as unknown as HTMLInputElement | null;
+    try {
+      expect(draftSwitch()?.checked).toBe(true);
+      // Inheriting locks the policy cluster, not this admission switch.
+      expect(draftSwitch()?.disabled).toBe(false);
+
+      await act(async () => {
+        draftSwitch()?.dispatchEvent(
+          new view.win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as unknown as Event,
+        );
+      });
+      for (let flush = 0; flush < 6; flush += 1) await act(async () => {});
+
+      expect(view.sent.filter((wire) => wire.method === "POST")).toHaveLength(1);
+      // The reload painted the stored off value with `follow` still 1.
+      expect(draftSwitch()?.checked).toBe(false);
+      expect(view.text()).toContain("Following the workspace defaults");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("renders the three tabs and hands the loaded payload to the settings tab", async () => {
     const view = await mountDetail((wire) =>
       wire.url.endsWith("/api/targets/t-1") ? wireJson(targetPayload(1)) : wireJson({}, 500),
@@ -1012,9 +1059,11 @@ describe("all-repositories detail (mounted)", () => {
       ]);
       // The workspace defaults, editable — and the two per-target switches are
       // absent, because neither inherits nor pauses anything at this level.
+      // The draft switch is target-owned (D12), so it is absent too.
       expect(view.text()).toContain(t("en", "settings.triggerModeOpen"));
       expect(view.text()).not.toContain(t("en", "settings.pauseReviews"));
       expect(view.text()).not.toContain(t("en", "targets.settings.follow"));
+      expect(view.text()).not.toContain(t("en", "settings.reviewDrafts"));
       const score = view.win.document.querySelector('input[type="number"]');
       expect((score as unknown as { value: string } | null)?.value).toBe("60");
       expect((score as unknown as { disabled: boolean } | null)?.disabled).toBe(false);

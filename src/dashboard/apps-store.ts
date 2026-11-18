@@ -126,7 +126,7 @@
  *     (bot_id, installation_id) pairs, and unknown app references are
  *     caller-visible errors, never swallowed.
  */
-import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
+import { ATTRIBUTION_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
@@ -264,7 +264,32 @@ export type CreateAppInput = {
    * silently mis-home an App and no caller can leave the owner unstated.
    */
   workspaceId: string;
+  /**
+   * The plan's `apps_per_workspace` cap for that workspace: the count this
+   * insert enforces. Required — an omitted cap would be a silent bypass, and
+   * the caller already holds the plan from its own entitlement read. `null` is
+   * no cap (including `self-hosted`, whose plan answers the unlimited
+   * constant); `0` refuses every creation.
+   */
+  maxApps: number | null;
 };
+
+/**
+ * Thrown by {@link createApp} when the guarded insert wrote no row because the
+ * workspace already owns `maxApps` live Apps. The cap is decided BY the write,
+ * so a concurrent pair cannot both land. Callers map it onto the existing
+ * refusal surface; it is not a database fault and must not be retried as one.
+ */
+export class AppCountExceededError extends Error {
+  /** The plan cap the insert compared against (never `null`: a null cap has no guard). */
+  readonly limit: number;
+
+  constructor(limit: number) {
+    super(`apps-store: createApp refused — the workspace already owns ${limit} live Apps`);
+    this.name = "AppCountExceededError";
+    this.limit = limit;
+  }
+}
 
 export type UpsertInstallationInput = {
   appId: string;
@@ -876,6 +901,12 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * registry's default image ('omp') — the store face for changing it is
      * setSandboxImage. A UNIQUE violation on github_app_id throws — the
      * commit path turns it into `already_connected` (409).
+     *
+     * `maxApps` is enforced by the insert itself, not by a read before it: the
+     * batch re-counts the workspace's live Apps, so concurrent creations can
+     * never land more rows than the cap allows. When exactly one slot is left
+     * the loser's guarded insert changes no row and it gets
+     * {@link AppCountExceededError}.
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
@@ -889,13 +920,26 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       if (!liveWorkspace) {
         throw new Error("apps-store: createApp target workspace is not live");
       }
-      await db.batch([
+      // The cap is enforced BY the write: the insert carries the workspace's
+      // live count, so two concurrent creations cannot both pass a read that
+      // both saw under the limit. A NULL cap has no guard at all — binding NULL
+      // would make `count < NULL` NULL and refuse every creation.
+      const capGuard =
+        input.maxApps === null
+          ? ""
+          : `
+              AND (SELECT COUNT(*)
+                     FROM bot_workspaces w
+                     JOIN review_bots b ON b.id = w.bot_id
+                    WHERE w.workspace_id = ?8 AND b.deleted_at IS NULL) < ?9`;
+      const results = await db.batch([
         db
           .prepare(
             `INSERT INTO review_bots
                (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
                 created_by, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', datetime('now'), datetime('now')
+              WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?8 AND deleted_at IS NULL)${capGuard}`,
           )
           .bind(
             id,
@@ -905,11 +949,40 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             input.privateKeyEnc,
             input.webhookSecretEnc,
             input.createdBy,
+            input.workspaceId,
+            ...(input.maxApps === null ? [] : [input.maxApps]),
           ),
+        // Conditional too, and bound to THIS batch's insert: `changes()` is the
+        // row count of the statement above in this same transaction. A refused
+        // (zero-row) insert therefore leaves this one matching nothing — while
+        // an id lookup alone would find a CONCURRENT winner's bot under the
+        // same caller-supplied id and turn the refusal into a mapping
+        // primary-key fault.
         db
-          .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)`)
+          .prepare(
+            `INSERT INTO bot_workspaces (bot_id, workspace_id)
+             SELECT id, ?2 FROM review_bots WHERE id = ?1 AND changes() > 0`,
+          )
           .bind(id, input.workspaceId),
       ]);
+      // Zero rows is the refusal, classified by its cause: the workspace
+      // predicate refused because the tenant was soft-deleted between the read
+      // above and this batch, or the cap predicate did. A genuine SQL/UNIQUE
+      // error threw out of the batch instead and is never reclassified.
+      if (results[0]!.meta.changes === 0) {
+        const stillLive = await db
+          .prepare(`SELECT id FROM workspaces WHERE id = ? AND deleted_at IS NULL`)
+          .bind(input.workspaceId)
+          .first<{ id: string }>();
+        if (!stillLive) {
+          throw new Error("apps-store: createApp target workspace is not live");
+        }
+        if (input.maxApps === null) {
+          // Unreachable: an uncapped insert for a live workspace always matches.
+          throw new Error("apps-store: createApp row vanished on read-back");
+        }
+        throw new AppCountExceededError(input.maxApps);
+      }
       const row = await db.prepare(`SELECT * FROM review_bots WHERE id = ?`).bind(id).first<GithubAppRow>();
       if (!row) {
         throw new Error("apps-store: createApp row vanished on read-back");
@@ -920,8 +993,9 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     /**
      * How many Apps a workspace currently OWNS: `bot_workspaces` joined to the
      * LIVE `review_bots` rows. A soft-deleted App keeps its mapping row, so the
-     * join condition is what frees its slot — the plan's
-     * `apps_per_workspace` cap counts this number at creation.
+     * join condition is what frees its slot. `createApp`'s insert re-checks
+     * this same count in its own statement (the authority for a concurrent
+     * pair); this read is only the commit path's fast-fail pre-check.
      */
     async countLiveApps(workspaceId: string): Promise<number> {
       const row = await db
@@ -1680,7 +1754,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * cannot attribute carries NULL and is invisible here — the migration's
      * guards refuse to leave one behind.
      *
-     * `PAGING_EXCLUDED_STAGES` rows are NOT failures of the review —
+     * `ATTRIBUTION_EXCLUDED_STAGES` rows are NOT failures of the review —
      * each is per-round attribution written for rounds that continued
      * (`recheck` a budget skip / dead seat / invalid document, `usage` a
      * failed `usage_events` insert, `rate-limit` a GitHub-throttled
@@ -1737,7 +1811,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
               `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
                FROM review_failures f
                WHERE ${ledgerScopeSql("f", scope)}
-                 AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+                 AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
                  AND (f.owner, f.repo, f.pr_number) IN (${window})
                GROUP BY f.owner, f.repo, f.pr_number`,
             )
@@ -1819,7 +1893,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     /**
      * The record totals — the head payload's `counts`. Every failure count on
      * this face (this one, the list's `failure_count`, the failures section's
-     * `total`) carries ONE rule: `PAGING_EXCLUDED_STAGES` rows are per-round
+     * `total`) carries ONE rule: `ATTRIBUTION_EXCLUDED_STAGES` rows are per-round
      * ATTRIBUTION for reviews that continued (`recheck` a budget skip / dead
      * seat / invalid document, `usage` a failed `usage_events` insert), not
      * failures of the review ledger this face pages, so a clean PR never
@@ -1860,7 +1934,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT COUNT(*) AS n FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
-               AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
           .bind(...scopeBinds, owner, repo, prNumber),
@@ -2044,7 +2118,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     /**
      * One page of a PR's review failures, newest first — the diagnostic
      * payload this face exists for. COUNT and SELECT carry the SAME
-     * `PAGING_EXCLUDED_STAGES` predicate `countPullRequestRecords` applies, so
+     * `ATTRIBUTION_EXCLUDED_STAGES` predicate `countPullRequestRecords` applies, so
      * the tab's number, this `total` and the pager agree with the rendered
      * rows. `null` = the App's ledger does not hold this PR.
      */
@@ -2063,7 +2137,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             `SELECT COUNT(*) AS n
              FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
-               AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
           .bind(...scopeBinds, owner, repo, prNumber),
@@ -2072,7 +2146,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
-               AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC
              LIMIT ? OFFSET ?`,

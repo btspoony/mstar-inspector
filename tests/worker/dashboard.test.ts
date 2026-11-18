@@ -1514,6 +1514,7 @@ describe("/dashboard manifest routes", () => {
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
       workspaceId: "default",
+      maxApps: null,
     });
     const { session, state } = await startManifest();
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
@@ -2204,9 +2205,8 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
 
   /**
    * Seed `count` extra live Apps into the default workspace through the real
-   * store (the cap guard sits ABOVE createApp, so the store itself never
-   * refuses — that is what makes these fixtures possible and the guard's
-   * position observable).
+   * store, passing an unlimited cap: these fixtures must sit at or above the
+   * plan's cap so the commit path's own guard is what the cases observe.
    */
   async function seedApps(env: Env, count: number): Promise<void> {
     for (let at = 0; at < count; at += 1) {
@@ -2219,6 +2219,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
         webhookSecretEnc: "v1.primary.aXZpdi5i.cHJldGV4dA==",
         createdBy: "octocat",
         workspaceId: "default",
+        maxApps: null,
       });
     }
   }
@@ -2245,6 +2246,100 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(relatedRowCount(env, "review_targets")).toBe(0);
     expect(await refused.text()).toContain(appCapCopy(1));
     // Non-retryable: a resubmit cannot free a slot, so the hold is burned.
+    expectHoldExpired(refused);
+  });
+
+  test("saas: two concurrent capped commits create exactly one App and one refusal", async () => {
+    const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
+    // The free plan caps the workspace at ONE App and it owns none, so both
+    // requests' pre-checks pass — the insert's own count is what must decide.
+    expect(appRowCount(env)).toBe(0);
+    const [a, b] = await Promise.all([
+      doCommit({
+        env,
+        holdValue: await createHoldValue(CONVERSION, "octocat", SESSION_SECRET, crypto.randomUUID(), "default"),
+      }),
+      doCommit({
+        env,
+        holdValue: await createHoldValue(CONVERSION, "octocat", SESSION_SECRET, crypto.randomUUID(), "default"),
+      }),
+    ]);
+
+    const statuses = [a.status, b.status].sort();
+    expect(statuses).toEqual([302, 409]);
+    // One App row and one ownership mapping — the loser wrote neither.
+    expect(appRowCount(env)).toBe(1);
+    expect(relatedRowCount(env, "bot_workspaces")).toBe(1);
+    expect(relatedRowCount(env, "review_targets")).toBe(0);
+    // The refusal is the existing 409 shape: same body, hold burned.
+    const refused = a.status === 409 ? a : b;
+    expect(await refused.text()).toContain(appCapCopy(1));
+    expectHoldExpired(refused);
+  });
+
+  /**
+   * A commit env whose `countLiveApps` read answers zero — the stale answer a
+   * racing request sees, so only the guarded insert can refuse. Matched on the
+   * counter's own projection: the insert's cap subquery joins the same tables.
+   */
+  function staleCountEnv(env: Env): Env {
+    const db = dbOf(env);
+    return {
+      ...env,
+      DB: {
+        ...db,
+        prepare(query: string): DashboardD1Statement {
+          const stmt = db.prepare(query);
+          if (!query.includes("COUNT(*) AS n")) return stmt;
+          const zero: DashboardD1Statement = {
+            bind: () => zero,
+            first: async <T = Record<string, unknown>>() => ({ n: 0 }) as T,
+            all: async <T = Record<string, unknown>>() => ({ results: [] as T[] }),
+            run: () => stmt.run(),
+          };
+          return zero;
+        },
+      },
+    } as unknown as Env;
+  }
+
+  test("saas: a same-hold resubmit racing for the last slot is refused, never a mapping fault", async () => {
+    const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
+    // The free plan caps the workspace at ONE App and it owns none. Both commits
+    // present the SAME signed hold, so both carry the same caller-supplied App
+    // id — the winner inserts that id, and the loser's guarded insert changes no
+    // row while its id lookup would still find the winner's bot. A mapping
+    // insert keyed by id alone would collide on bot_workspaces' primary key and
+    // surface a retryable 500 instead of the cap's 409.
+    const holdValue = await freshHold();
+    const [a, b] = await Promise.all([
+      doCommit({ env: staleCountEnv(env), holdValue }),
+      doCommit({ env: staleCountEnv(env), holdValue }),
+    ]);
+
+    expect([a.status, b.status].sort()).toEqual([302, 409]);
+    expect(appRowCount(env)).toBe(1);
+    expect(relatedRowCount(env, "bot_workspaces")).toBe(1);
+    const refused = a.status === 409 ? a : b;
+    expect(await refused.text()).toContain(appCapCopy(1));
+    // The cap outcome, not a database rejection: non-retryable, hold burned.
+    expectHoldExpired(refused);
+  });
+
+  test("saas: the insert's own count refuses when the fast-path read saw zero", async () => {
+    const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
+    await seedApps(env, 1);
+    // The pre-check's fast path is stubbed to the stale answer a racing request
+    // reads; only the guarded insert can refuse from here.
+    const staleCount = staleCountEnv(env);
+
+    const refused = await doCommit({ env: staleCount, holdValue: await freshHold() });
+
+    expect(refused.status).toBe(409);
+    expect(appRowCount(env)).toBe(1);
+    expect(relatedRowCount(env, "bot_workspaces")).toBe(1);
+    expect(await refused.text()).toContain(appCapCopy(1));
+    // Non-retryable: the refusal is the same outcome the fast path produces.
     expectHoldExpired(refused);
   });
 
@@ -2574,6 +2669,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
       workspaceId: "default",
+      maxApps: null,
     });
     const res = await doCommit({ env, holdValue: await freshHold() });
     expect(res.status).toBe(302);
@@ -2593,6 +2689,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
       workspaceId: "default",
+      maxApps: null,
     });
     const res = await doCommit({ env, holdValue: await freshHold() });
     expect(res.status).toBe(409);
@@ -3113,6 +3210,7 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: overrides.createdBy ?? "octocat",
       workspaceId: "default",
+      maxApps: null,
     }).then(async (row) => {
       if (!overrides.deletedAt) return row;
       await dbOf(env).raw
@@ -3435,6 +3533,7 @@ describe("dashboard users store (users.ts)", () => {
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "octocat",
       workspaceId: "default",
+      maxApps: null,
     });
     // The accepted-invite shape: a users row (sign-in) plus the membership the
     // accept POST writes. createUser alone admits nobody.

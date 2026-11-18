@@ -244,6 +244,7 @@ describe("repo-backfill item", () => {
       unrepointed_ledger_rows: 0,
       historical_rows: 0,
       duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 0,
     });
   });
 
@@ -385,6 +386,7 @@ describe("repo-backfill item", () => {
       unrepointed_ledger_rows: 0,
       historical_rows: 0,
       duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 0,
     });
   });
 
@@ -480,6 +482,7 @@ describe("repo-backfill item", () => {
       unrepointed_ledger_rows: 0,
       historical_rows: 0,
       duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 0,
     });
   });
 
@@ -503,6 +506,31 @@ describe("repo-backfill item", () => {
     expect((await repoBackfill.verify(db, { runStartedAt: null })).duplicate_repository_groups).toBe(0);
   });
 
+  test("a non-ASCII case variant stays a separate identity: NOCASE folds ASCII only", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-old");
+    seedPr(db, "pr-upper", "target-old", "Ä", "alpha", 1, "2026-01-01T00:00:00.000Z");
+    seedPr(db, "pr-lower", "target-old", "ä", "alpha", 2, "2026-02-01T00:00:00.000Z");
+
+    const batch = await repoBackfill.runBatch(db, null);
+    expect(batch.log).toMatchObject({ created: 2, consumed: 1 });
+
+    const live = liveTargets(db);
+    expect(live.map((target) => target.repo_owner).sort()).toEqual(["Ä", "ä"]);
+    const prs = db.raw.query("SELECT target_id FROM pull_requests ORDER BY id").all() as Array<{
+      target_id: string;
+    }>;
+    expect(new Set(prs.map((row) => row.target_id)).size).toBe(2);
+    expect(await repoBackfill.verify(db, { runStartedAt: RUN_1_START })).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      historical_rows: 0,
+      duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 0,
+    });
+  });
+
   test("a target naming many repositories migrates without overrunning the bind list", async () => {
     const db = createMigratedTestD1();
     seedBot(db, BOT, 7001);
@@ -521,7 +549,236 @@ describe("repo-backfill item", () => {
       unrepointed_ledger_rows: 0,
       historical_rows: 0,
       duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 0,
     });
+  });
+});
+
+/** One ledger row's home table, seeded with no `pull_requests` row at all. */
+const NON_PR_LEDGER: ReadonlyArray<readonly [string, (db: TestD1, id: string, targetId: string) => void]> = [
+  [
+    "reviews",
+    (db, id, targetId) => seedReview(db, id, targetId, "acme", "alpha", 1, "2026-02-01T00:00:00.000Z"),
+  ],
+  ["review_findings", (db, id, targetId) => seedFinding(db, id, targetId, "acme", "alpha")],
+  ["review_failures", (db, id, targetId) => seedFailure(db, id, targetId, "acme", "alpha")],
+];
+
+/**
+ * A swept `pull_requests` row does not sweep the reviews, findings or failures
+ * written for it: each of the other three tables alone must still reach the
+ * worklist, preflight, group and verify.
+ */
+describe("repo-backfill over non-PR ledger rows", () => {
+  test.each([0, 1])("copies the winning target's draft policy (%i) without PR rows", async (reviewDrafts) => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-older");
+    seedLeftoverTarget(db, "target-newer");
+    db.raw.prepare("UPDATE review_targets SET review_drafts = ? WHERE id = ?").run(1 - reviewDrafts, "target-older");
+    db.raw.prepare("UPDATE review_targets SET review_drafts = ? WHERE id = ?").run(reviewDrafts, "target-newer");
+    seedReview(db, "rv-older", "target-older", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
+    seedReview(db, "rv-newer", "target-newer", "acme", "alpha", 2, "2026-02-01T00:00:00.000Z");
+
+    await repoBackfill.runBatch(db, null);
+
+    expect(db.raw.query("SELECT review_drafts FROM review_targets WHERE deleted_at IS NULL").all()).toEqual([
+      { review_drafts: reviewDrafts },
+    ]);
+  });
+
+  for (const [table, seed] of NON_PR_LEDGER) {
+    test(`a target whose only ledger row is in ${table} still reaches the worklist`, async () => {
+      const db = createMigratedTestD1();
+      seedBot(db, BOT, 7001);
+      seedLeftoverTarget(db, "target-old", { minScore: 64 });
+      seed(db, `row-${table}`, "target-old");
+
+      // Preflight, worklist and the pre-run verify all see the same leftovers.
+      expect(await repoBackfill.preflight(db)).toEqual({
+        unidentified_targets: 1,
+        ledger_pairs: 1,
+        conflicting_groups: 0,
+        leftover_without_ledger: 0,
+      });
+      const before = await repoBackfill.verify(db, { runStartedAt: null });
+      expect(before.unidentified_targets_with_ledger).toBe(1);
+      expect(before.ledger_rows_without_pr).toBe(1);
+
+      const batch = await repoBackfill.runBatch(db, null);
+      expect(batch.processed).toBe(1);
+      expect(batch.done).toBe(true);
+
+      const live = liveTargets(db);
+      expect(live).toHaveLength(1);
+      expect(live[0]).toMatchObject({ repo_owner: "acme", repo_name: "alpha", check_min_score: 64 });
+      const row = db.raw
+        .prepare(`SELECT target_id FROM ${table} WHERE id = ?`)
+        .get(`row-${table}`) as { target_id: string };
+      expect(row.target_id).toBe(live[0]!.id);
+
+      // Passing: the row now sits on a target that names its repository. It has
+      // no PR of its own, which is exactly what the advisory counts.
+      expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
+        unidentified_targets_with_ledger: 0,
+        unrepointed_ledger_rows: 0,
+        historical_rows: 0,
+        duplicate_repository_groups: 0,
+        ledger_rows_without_pr: 1,
+      });
+      expect(repoBackfill.advisoryChecks).toEqual(["historical_rows", "ledger_rows_without_pr"]);
+      // Clean replay: nothing is left in the worklist.
+      expect(await repoBackfill.runBatch(db, null)).toMatchObject({ processed: 0, done: true });
+    });
+  }
+
+  test("three non-PR rows with no PR row anywhere yield advisory 3 and the item passes", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    // Already migrated: the target names its repository and holds one row in
+    // each non-PR table. Nothing points at a retired target, so there is no
+    // repair for the item to offer — the count is evidence, not a failure.
+    seedLeftoverTarget(db, "target-live", { owner: "acme", repo: "alpha" });
+    seedReview(db, "rv", "target-live", "acme", "alpha", 1, "2026-02-01T00:00:00.000Z");
+    seedFinding(db, "fd", "target-live", "acme", "alpha");
+    seedFailure(db, "fl", "target-live", "acme", "alpha");
+
+    expect(await repoBackfill.runBatch(db, null)).toMatchObject({ processed: 0, done: true });
+    expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      historical_rows: 0,
+      duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 3,
+    });
+
+    // Through the runner: reported, and the item still completes.
+    expect((await stepDataUpgrade(db, repoBackfill, OPERATOR, RUN_1_START)).kind).toBe("ok");
+    const verified = await verifyDataUpgrade(db, repoBackfill, OPERATOR, "2026-06-01T00:10:00.000Z");
+    expect(verified.kind === "ok" && verified.state.status).toBe("completed");
+    expect(verified.kind === "ok" && verified.checks.ledger_rows_without_pr).toBe(3);
+  });
+
+  test("a case-variant group with no PR rows still collapses onto one target", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-lower");
+    seedLeftoverTarget(db, "target-upper");
+    seedReview(db, "rv-lower", "target-lower", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
+    seedFailure(db, "fl-upper", "target-upper", "Acme", "ALPHA");
+
+    expect(await repoBackfill.preflight(db)).toMatchObject({ ledger_pairs: 2, conflicting_groups: 1 });
+    const batch = await repoBackfill.runBatch(db, null);
+    expect(batch.log).toMatchObject({ created: 1, discarded: 1 });
+
+    const live = liveTargets(db);
+    expect(live).toHaveLength(1);
+    for (const [table, id] of [
+      ["reviews", "rv-lower"],
+      ["review_failures", "fl-upper"],
+    ] as const) {
+      const row = db.raw.prepare(`SELECT target_id FROM ${table} WHERE id = ?`).get(id) as {
+        target_id: string;
+      };
+      expect(row.target_id, id).toBe(live[0]!.id);
+    }
+    expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      historical_rows: 0,
+      duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 2,
+    });
+  });
+
+  test("one bot's two workspaces collapse with no PR rows", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+         VALUES ('second', 'second', 'Second', NULL, '2026-01-01T00:00:00.000Z', NULL)`,
+      )
+      .run();
+    seedLeftoverTarget(db, "target-default", { minScore: 60 });
+    seedLeftoverTarget(db, "target-second", { minScore: 90, workspaceId: "second" });
+    seedReview(db, "rv-default", "target-default", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
+    // Newer review stamp: the second workspace's row wins D22.
+    seedReview(db, "rv-second", "target-second", "acme", "alpha", 2, "2026-03-01T00:00:00.000Z");
+
+    const batch = await repoBackfill.runBatch(db, null);
+    expect(batch.log).toMatchObject({ created: 1, discarded: 1 });
+    const live = db.raw
+      .query("SELECT workspace_id, check_min_score FROM review_targets WHERE deleted_at IS NULL")
+      .all() as Array<{ workspace_id: string; check_min_score: number }>;
+    expect(live).toEqual([{ workspace_id: "second", check_min_score: 90 }]);
+    expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      historical_rows: 0,
+      duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 2,
+    });
+  });
+
+  test("all three non-PR tables on one leftover target drain together", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-old");
+    seedReview(db, "rv", "target-old", "acme", "alpha", 1, "2026-02-01T00:00:00.000Z");
+    seedFinding(db, "fd", "target-old", "acme", "alpha");
+    seedFailure(db, "fl", "target-old", "acme", "alpha");
+
+    expect(await repoBackfill.preflight(db)).toEqual({
+      unidentified_targets: 1,
+      ledger_pairs: 1,
+      conflicting_groups: 0,
+      leftover_without_ledger: 0,
+    });
+    const batch = await repoBackfill.runBatch(db, null);
+    expect(batch.log).toMatchObject({ created: 1, repointed: 0, consumed: 1 });
+    expect(batch.done).toBe(true);
+
+    const live = liveTargets(db);
+    expect(live).toHaveLength(1);
+    for (const [table, id] of [
+      ["reviews", "rv"],
+      ["review_findings", "fd"],
+      ["review_failures", "fl"],
+    ] as const) {
+      const row = db.raw.prepare(`SELECT target_id FROM ${table} WHERE id = ?`).get(id) as {
+        target_id: string;
+      };
+      expect(row.target_id, table).toBe(live[0]!.id);
+    }
+    // The retired source keeps no ledger rows, so nothing is stranded.
+    expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      historical_rows: 0,
+      duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 3,
+    });
+    expect(await repoBackfill.runBatch(db, null)).toMatchObject({ processed: 0, done: true });
+  });
+
+  test("a named destination with no PR row adopts a non-PR ledger row", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    // The repository's live home names it but holds no PR: naming is coverage.
+    seedLeftoverTarget(db, "target-home", { owner: "acme", repo: "alpha" });
+    seedLeftoverTarget(db, "target-old");
+    seedReview(db, "rv", "target-old", "acme", "alpha", 5, "2026-02-01T00:00:00.000Z");
+
+    const batch = await repoBackfill.runBatch(db, null);
+    // A migrated group counts even though `repointed` (PR rows) is zero.
+    expect(batch.log).toMatchObject({ created: 0, adopted: 1, repointed: 0, consumed: 1 });
+    const row = db.raw.prepare("SELECT target_id FROM reviews WHERE id = 'rv'").get() as {
+      target_id: string;
+    };
+    expect(row.target_id).toBe("target-home");
+    expect(liveTargets(db).map((target) => target.id)).toEqual(["target-home"]);
+    expect((await repoBackfill.runBatch(db, null)).processed).toBe(0);
   });
 });
 
@@ -551,6 +808,7 @@ describe("repo-backfill verify: this run's retirements vs history", () => {
       unrepointed_ledger_rows: 0,
       historical_rows: 1,
       duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 0,
     });
     // Advisory only: the run completes.
     expect(repoBackfill.advisoryChecks).toContain("historical_rows");
@@ -571,6 +829,90 @@ describe("repo-backfill verify: this run's retirements vs history", () => {
 
     const checks = await repoBackfill.verify(db, { runStartedAt: null });
     expect(checks).toMatchObject({ unrepointed_ledger_rows: 0, historical_rows: 1 });
+  });
+
+  /**
+   * The live destination need not hold a PR: naming the repository is what
+   * covers it. A retired target's reviews then count just like its PRs would.
+   */
+  test("a retired target's non-PR row blocks when the live destination has no PR", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-live", { owner: "acme", repo: "alpha" });
+    seedLeftoverTarget(db, "target-retired", { deletedAt: "2026-06-02 00:00:00" });
+    seedReview(db, "rv-retired", "target-retired", "acme", "alpha", 3, "2026-02-01T00:00:00.000Z");
+
+    const checks = await repoBackfill.verify(db, { runStartedAt: "2026-06-01T00:00:00.000Z" });
+    expect(checks).toMatchObject({ unrepointed_ledger_rows: 1, historical_rows: 0 });
+  });
+
+  test("a retired target's non-PR row on no live destination is not covered", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    // A live target naming ANOTHER repository covers nothing here.
+    seedLeftoverTarget(db, "target-other", { owner: "acme", repo: "beta" });
+    seedLeftoverTarget(db, "target-retired", { deletedAt: "2026-06-02 00:00:00" });
+    seedFailure(db, "fl-retired", "target-retired", "acme", "alpha");
+
+    const checks = await repoBackfill.verify(db, { runStartedAt: "2026-06-01T00:00:00.000Z" });
+    // No live cover, so no unrepointed residual — but the row still has no PR.
+    expect(checks).toMatchObject({
+      unrepointed_ledger_rows: 0,
+      historical_rows: 0,
+      ledger_rows_without_pr: 1,
+    });
+  });
+
+  /**
+   * The advisory is exact and independent of the blocking split: three non-PR
+   * rows on a retired target are three rows, and do not suppress the blocking
+   * unrepointed count when a live destination covers them.
+   */
+  test("the advisory counts rows and leaves the blocking count alone", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-live", { owner: "acme", repo: "alpha" });
+    seedLeftoverTarget(db, "target-retired", { deletedAt: "2026-06-02 00:00:00" });
+    seedReview(db, "rv-retired", "target-retired", "acme", "alpha", 3, "2026-02-01T00:00:00.000Z");
+    seedFinding(db, "fd-retired", "target-retired", "acme", "alpha");
+    seedFailure(db, "fl-retired", "target-retired", "acme", "alpha");
+
+    const checks = await repoBackfill.verify(db, { runStartedAt: "2026-06-01T00:00:00.000Z" });
+    expect(checks).toMatchObject({ unrepointed_ledger_rows: 3, ledger_rows_without_pr: 3 });
+  });
+
+  /**
+   * Acceptance shape: a leftover target whose `pull_requests` rows are gone but
+   * whose reviews remain. Verify reports it in the advisory AND still fails the
+   * item on the blocking unidentified count — the advisory never suppresses it.
+   */
+  test("a PR-less leftover blocks the item while the advisory reports the same shape", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    // The run stamps its boundary on an empty ledger, then the leftover lands —
+    // a review written against an old target after the batch scanned it.
+    expect((await stepDataUpgrade(db, repoBackfill, OPERATOR, RUN_1_START)).kind).toBe("ok");
+    seedLeftoverTarget(db, "target-old");
+    seedReview(db, "rv", "target-old", "acme", "alpha", 1, "2026-02-01T00:00:00.000Z");
+
+    const failed = await verifyDataUpgrade(db, repoBackfill, OPERATOR, "2026-06-01T00:10:00.000Z");
+    expect(failed.kind === "ok" && failed.state.status).toBe("failed");
+    expect(failed.kind === "ok" && failed.state.lastError).toContain("unidentified_targets_with_ledger=1");
+    expect(failed.kind === "ok" && failed.checks).toMatchObject({
+      unidentified_targets_with_ledger: 1,
+      ledger_rows_without_pr: 1,
+    });
+
+    // The worklist drains it; then it passes, with the advisory still standing
+    // for the row that has no PR of its own.
+    expect((await resetDataUpgrade(db, repoBackfill, OPERATOR, "2026-06-01T00:20:00.000Z")).kind).toBe("ok");
+    expect((await stepDataUpgrade(db, repoBackfill, OPERATOR, "2026-06-01T00:30:00.000Z")).kind).toBe("ok");
+    const passed = await verifyDataUpgrade(db, repoBackfill, OPERATOR, "2026-06-01T00:40:00.000Z");
+    expect(passed.kind === "ok" && passed.state.status).toBe("completed");
+    expect(passed.kind === "ok" && passed.checks).toMatchObject({
+      unidentified_targets_with_ledger: 0,
+      ledger_rows_without_pr: 1,
+    });
   });
 
   test("a row retired during run 1 still blocks after a reset and re-run", async () => {
