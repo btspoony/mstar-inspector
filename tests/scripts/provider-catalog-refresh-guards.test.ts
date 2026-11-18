@@ -13,8 +13,10 @@
  *      `run:` would abort the job before the PR is opened).
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { verificationMarks } from "../../scripts/provider-catalog/pr-verdict";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const PY_DUMP = "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))";
@@ -108,13 +110,61 @@ describe("refresh-catalog.yml guards", () => {
 
   test("never creates a duplicate PR: an open PR for the branch is updated in place", () => {
     const prStep = steps.find((step) => step.name === "Open or update the refresh PR")!;
-    expect(prStep.run).toContain("gh pr list --head \"$BRANCH\" --state open --json number");
-    expect(prStep.run).toContain("gh pr edit");
-    // `create` only runs in the else branch of the open-PR test.
-    const create = prStep.run!.indexOf("gh pr create");
-    expect(prStep.run!.slice(0, create)).toContain("else");
-    expect(prStep.run!.slice(create)).toContain('--head "$BRANCH"');
-    expect(prStep.run!.slice(create)).toContain("--base main");
+    const script = prStep.run!;
+    expect(script).toContain("gh pr list --head \"$BRANCH\" --state open --json number");
+    expect(script).toContain("gh pr edit");
+    // Not "the word else appears somewhere": `gh pr create` must sit INSIDE the
+    // branch taken when the lookup found nothing. The script is run here (with
+    // `gh` stubbed) under both cases, so removing the guard makes this fail
+    // instead of passing on the title branch's `else`.
+    expect(script).toMatch(/if \[ -n "\$OPEN" \]; then/);
+    expect(script).toMatch(/else\s+gh pr create/);
+    expect(script.indexOf("gh pr create")).toBeGreaterThan(script.indexOf("else"));
+    expect(script.slice(script.indexOf("gh pr create"))).toContain('--head "$BRANCH"');
+    expect(script.slice(script.indexOf("gh pr create"))).toContain("--base main");
+  });
+
+  test("the create/update choice is exercised, not just read", () => {
+    // A stub `gh` that records its argv; the step's own script drives it.
+    const prStep = steps.find((step) => step.name === "Open or update the refresh PR")!;
+    for (const [open, expected] of [
+      ["", "create"],
+      ["7", "edit"],
+    ] as const) {
+      const dir = mkdtempSync(join(tmpdir(), "pr-step-"));
+      try {
+        const bin = join(dir, "bin");
+        mkdirSync(bin);
+        const record = join(dir, "argv.log");
+        writeFileSync(
+          join(bin, "gh"),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(record)}\n` +
+            `case "$1 $2" in\n  "pr list") echo ${JSON.stringify(open)} ;;\nesac\n`,
+        );
+        chmodSync(join(bin, "gh"), 0o755);
+        // The step's script with its env; only `gh` is stubbed.
+        const script = `BRANCH=chore/catalog-refresh\nRED=false\nRUNNER_TEMP=${JSON.stringify(dir)}\n` +
+          `printf 'body\\n' > "$RUNNER_TEMP/pr-body.md"\n${prStep.run}`;
+        const proc = Bun.spawnSync(["bash", "-e", "-c", script], {
+          cwd: dir,
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GH_TOKEN: "x" },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+        const calls = readFileSync(record, "utf8");
+        expect(calls).toContain("pr list");
+        if (expected === "create") {
+          expect(calls).toContain("pr create");
+          expect(calls).not.toContain("pr edit");
+        } else {
+          expect(calls).toContain("pr edit 7");
+          expect(calls).not.toContain("pr create");
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   test("red checks are labelled: title and body both say so, and neither step aborts the job", () => {
@@ -148,10 +198,13 @@ describe("refresh-catalog.yml guards", () => {
       expect(test.run).toMatch(/set -o pipefail/);
     }
     expect(byId.get("test")!.run).toContain('"${RUNNER_TEMP}/test.log"');
-    // Belt and braces: even if that construct were lost, the verdict script
-    // reads the log, so a recorded failure still labels the PR red.
-    const verdict = readFileSync(join(REPO_ROOT, "scripts/provider-catalog/pr-verdict.ts"), "utf8");
-    expect(verdict).toContain("fail");
+    // Belt and braces, asserted as BEHAVIOUR: even if that construct were lost
+    // (step reports success) the verdict reads the log, so a recorded failure
+    // still labels the PR red. The source-text check this replaced could never
+    // fail — `pr-verdict.ts` contains "fail" in a comment.
+    const lostStatus = verificationMarks("success", "success", " 5679 pass\n 79 fail\n");
+    expect(lostStatus.red).toBe(true);
+    expect(lostStatus.lines.join("\\n")).not.toContain("✅ bun test tests");
   });
 
   test("every trigger builds from the default branch, never from a dispatched feature branch", () => {
