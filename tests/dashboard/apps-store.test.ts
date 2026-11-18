@@ -61,6 +61,7 @@ describe("app creation (D13)", () => {
       webhookSecretEnc: "enc",
       createdBy: "acme",
       workspaceId: WS,
+      maxApps: null,
     });
 
     const app = await store.getAppById("app-created");
@@ -83,6 +84,7 @@ describe("app creation (D13)", () => {
         webhookSecretEnc: "enc",
         createdBy: "acme",
         workspaceId: "ws-missing",
+        maxApps: null,
       }),
     ).rejects.toThrow(/workspace is not live/);
   });
@@ -101,6 +103,7 @@ describe("app delete", () => {
       webhookSecretEnc: "enc",
       createdBy: "acme",
       workspaceId: WS,
+      maxApps: null,
     });
     const targets = createTargetsStore(db);
     const created = await targets.create({

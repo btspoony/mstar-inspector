@@ -79,6 +79,7 @@ async function seedApp(db: DashboardD1, slug: string): Promise<GithubAppRow> {
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     createdBy: "mallory",
     workspaceId: "default",
+    maxApps: null,
   });
 }
 

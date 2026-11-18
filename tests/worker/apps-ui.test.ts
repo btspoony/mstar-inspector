@@ -83,6 +83,7 @@ async function seedApp(
     webhookSecretEnc: enc.webhookSecretEnc,
     createdBy: opts.createdBy,
     workspaceId: "default",
+    maxApps: null,
   });
   // A target IS a repository (migration 0067) and creation no longer writes
   // one, so the fixture gives each App its single reviewing target: the App

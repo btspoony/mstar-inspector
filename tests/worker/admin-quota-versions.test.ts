@@ -23,6 +23,8 @@ import type { Env } from "../../src/worker/env";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { quotaMonth, quotaStartsOn } from "../../src/store/quota-store";
+import { listQuotaVersions } from "../../src/admin/quota-versions";
+import type { DashboardD1, DashboardD1Statement } from "../../src/dashboard/users";
 import { QUOTA_SKIP_REASON, QUOTA_STAGE } from "../../src/contracts/failure-stages";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -654,5 +656,115 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
     const body = (await res.json()) as { judgingVersion: number; uncoveredPlanIds: string[] };
     expect(body.judgingVersion).toBe(1);
     expect(body.uncoveredPlanIds).toEqual([]);
+  });
+
+  /**
+   * The read-consistency seam: the judging profile and the catalogue are ONE
+   * `batch` (one D1 transaction) and neither is read again on its own — a
+   * second read could see a publish that the other result predates and report
+   * a gap the judge already covers.
+   */
+  test("the judging profile and the plan list come from one batch, with no independent read", async () => {
+    const db = fixtureMissing(["pro"]);
+    const reads = { batches: [] as number[], readsOutsideBatch: 0 };
+    const wrapped = new Map<DashboardD1Statement, ReturnType<TestD1["prepare"]>>();
+    const probe: DashboardD1 = {
+      prepare(sql) {
+        const inner = db.prepare(sql);
+        const face: DashboardD1Statement = {
+          bind(...values) {
+            inner.bind(...values);
+            return face;
+          },
+          async first() {
+            reads.readsOutsideBatch += 1;
+            return inner.first();
+          },
+          async all() {
+            reads.readsOutsideBatch += 1;
+            return inner.all();
+          },
+          async run() {
+            reads.readsOutsideBatch += 1;
+            return inner.run();
+          },
+        };
+        wrapped.set(face, inner);
+        return face;
+      },
+      async batch(statements) {
+        reads.batches.push(statements.length);
+        return db.batch(statements.map((statement) => wrapped.get(statement)!));
+      },
+    };
+
+    const payload = await listQuotaVersions(probe, new Date());
+
+    expect(reads.batches).toEqual([2]);
+    expect(reads.readsOutsideBatch).toBe(0);
+    expect(payload.judgingVersion).toBe(2);
+    expect(payload.uncoveredPlanIds).toEqual(["pro"]);
+  });
+
+  test("a covered plan with a null ceiling is covered, not missing", async () => {
+    const db = fixtureMissing([]);
+    seed(db, "UPDATE quota_profile_plans SET monthly_rp = NULL WHERE profile_id = 'quota-gap' AND plan_id = 'unlimited'");
+    const res = await adminFetch(db, "GET", "/api/quota-versions");
+    const body = (await res.json()) as { judgingVersion: number; uncoveredPlanIds: string[] };
+    expect(body.judgingVersion).toBe(2);
+    expect(body.uncoveredPlanIds).toEqual([]);
+  });
+
+  test("a month preceding every version is judged by the earliest profile, and its gap is reported", async () => {
+    const db = fixture();
+    const month = quotaMonth(new Date());
+    // Both profiles start after this month's 1st, so the fallback decides. They
+    // cover different plans: only the earlier one judges, otherwise the page
+    // would report the later profile's gaps.
+    const start = new Date(month.startIso);
+    const nearIso = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1)).toISOString();
+    const farIso = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 2, 1)).toISOString();
+    seed(db, "DELETE FROM quota_profile_plans");
+    seed(db, "DELETE FROM quota_profiles");
+    seed(
+      db,
+      `INSERT INTO quota_profiles (
+         id, version, effective_from, base_quick, base_standard, base_deep,
+         source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
+       VALUES ('quota-near', 9, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
+      nearIso,
+      nearIso,
+    );
+    seed(
+      db,
+      `INSERT INTO quota_profiles (
+         id, version, effective_from, base_quick, base_standard, base_deep,
+         source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
+       VALUES ('quota-far', 10, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
+      farIso,
+      farIso,
+    );
+    seed(
+      db,
+      "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-near', 'free', 1000)",
+    );
+    seed(
+      db,
+      "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-near', 'pro', 2000)",
+    );
+    seed(db, "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-far', 'free', 3000)");
+    const res = await adminFetch(db, "GET", "/api/quota-versions");
+    const body = (await res.json()) as { judgingVersion: number; uncoveredPlanIds: string[] };
+    // The earliest profile (9) judges and its own gap is reported; picking the
+    // later one (10) would answer 10 and ["pro", "unlimited"] instead.
+    expect(body.judgingVersion).toBe(9);
+    expect(body.uncoveredPlanIds).toEqual(["unlimited"]);
+  });
+
+  test("an empty profile table is the missing-migration error, unchanged", async () => {
+    const db = fixture();
+    seed(db, "DELETE FROM quota_profile_plans");
+    seed(db, "DELETE FROM quota_profiles");
+    await expect(listQuotaVersions(db, new Date())).rejects.toThrow(/0063_quota_profiles\.sql/);
   });
 });

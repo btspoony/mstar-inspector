@@ -125,6 +125,7 @@ async function insightsWorld(): Promise<{
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${appId}`),
     createdBy: "mallory",
     workspaceId: "default",
+    maxApps: null,
   });
   const targetId = seedTarget(db, appId, { name: "widgets-app", repoName: "widgets" });
   await createReviewBotsStore(db).createApp({
@@ -136,6 +137,7 @@ async function insightsWorld(): Promise<{
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${otherAppId}`),
     createdBy: "mallory",
     workspaceId: "default",
+    maxApps: null,
   });
   seedTarget(db, otherAppId, { name: "other-app", repoName: "other" });
 

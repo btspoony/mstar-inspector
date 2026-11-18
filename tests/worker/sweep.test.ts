@@ -11,11 +11,12 @@
  * absent = log-only, webhook failure = warn log only (never throws).
  */
 
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, jest, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
+  ALERT_PAGING_AUDIT_ACTION,
   runSweep,
   SWEEP_FAILURE_THRESHOLD,
   SWEEP_INVITE_LAPSE_CAP,
@@ -106,7 +107,9 @@ function recordingDb(captured: string[]): D1Like {
           return stmt;
         },
         async first<T = Record<string, unknown>>(): Promise<T | null> {
-          return { n: 0 } as T;
+          // The only `first()` the sweep issues is the paging window read: an
+          // absent MAX is "no recent alert".
+          return null;
         },
         async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
           return { results: [] as T[] };
@@ -140,14 +143,16 @@ describe("runSweep", () => {
   test("counts review_failures with the trailing-24h window SQL", async () => {
     const captured: string[] = [];
     const result = await runSweep(recordingDb(captured));
-    expect(captured).toHaveLength(4);
     expect(captured[0]).toContain("DELETE FROM webhook_deliveries");
     // Migration 0039: the ledger's own bounded retention, terminal rows only.
     expect(captured[1]).toContain("DELETE FROM pull_requests");
     expect(captured[1]).toContain("state IN ('closed', 'merged')");
     expect(captured[2]).toContain("UPDATE workspace_invites");
-    expect(captured[3]).toContain("FROM review_failures");
-    expect(captured[3]).toContain("created_at > datetime('now', '-24 hours')");
+    const countAt = captured.findIndex((query) => query.includes("FROM review_failures"));
+    expect(captured[countAt]).toContain("created_at > datetime('now', '-24 hours')");
+    // A healthy window has no page to de-bounce, so nothing follows the read:
+    // no state write, no audit append.
+    expect(captured).toHaveLength(countAt + 1);
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,
@@ -368,7 +373,9 @@ describe("runSweep", () => {
             return stmt;
           },
           async first<T = Record<string, unknown>>(): Promise<T | null> {
-            return { n: 0 } as T;
+            // The sweep's only `first()` is the paging window read: no MAX =
+            // no recent alert.
+            return null;
           },
           async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
             return { results: [] as T[] };
@@ -390,11 +397,14 @@ describe("runSweep", () => {
     const result = await runSweep(db, { log });
     // The retention DELETE is parameter-free — no `?` placeholders to bind.
     expect(captured[0]).not.toContain("?");
-    // The only bound statement in the run is the invite-lapse flip: its ISO
-    // clock plus the per-run row cap.
-    expect(binds).toHaveLength(1);
-    expect(binds[0]).toHaveLength(2);
-    expect(binds[0]![1]).toBe(SWEEP_INVITE_LAPSE_CAP);
+    // The only TWO-placeholder statement in the run is the invite-lapse flip:
+    // its ISO clock plus the per-run row cap. Every other bound statement is a
+    // single key (the paging window read) — a healthy run never reaches the
+    // audit append.
+    const inviteBound = binds.find((values) => values.length === 2);
+    expect(inviteBound).toBeDefined();
+    expect(inviteBound![1]).toBe(SWEEP_INVITE_LAPSE_CAP);
+    expect(binds.every((values) => values.length === 1 || values.length === 2)).toBe(true);
     // The fake reports changes: 3 for EVERY statement, so both janitors log;
     // the delivery sweep's line comes first.
     expect(calls).toHaveLength(2);
@@ -541,6 +551,76 @@ describe("runSweep", () => {
     });
   }
 
+  test("a quota refusal does not page ops while a sandbox failure does, and the breakdown names it", async () => {
+    const db = failureDb();
+    const store = createFailureStore(db);
+    // One tenant's exhausted month beside one real infrastructure failure: the
+    // first is a dashboard failure (commercial ceiling), the second is an
+    // incident. Only the second belongs in the global alert.
+    await store.record({ ...BASE, stage: "quota", error: "quota exceeded" });
+    await store.record({ ...BASE, stage: "sandbox", error: "container acquisition failed" });
+
+    const { log, calls } = captureLog();
+    const quiet = await runSweep(db, { log });
+    expect(quiet).toEqual({
+      failures24h: 1,
+      thresholdBreached: false,
+      invitesExpired: 0,
+      webhook: "not_attempted",
+    });
+    expect(calls).toHaveLength(0);
+    // The quota row is still a stored failure — only paging ignores it.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
+
+    // Push the sandbox stage over the threshold: the payload's parts are the
+    // excluded-nothing total, quota absent from both.
+    for (let i = 0; i < SWEEP_FAILURE_THRESHOLD; i++) {
+      await store.record({ ...BASE, stage: "sandbox", error: `boom-${i}` });
+    }
+    const { log: breachLog, calls: breachCalls } = captureLog();
+    await runSweep(db, { log: breachLog });
+    const alert = breachCalls[0]!.fields as SweepAlertFields;
+    expect(alert.failures_24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
+    expect(alert.stages).toEqual([{ stage: "sandbox", count: SWEEP_FAILURE_THRESHOLD + 1 }]);
+  });
+
+  test("the payload's stages preserve the query's ordered, non-empty stage groups", async () => {
+    const db = failureDb();
+    const store = createFailureStore(db);
+    // Two included stages with unequal counts, inserted biggest-first: the
+    // payload must follow the query's stage order, not the insertion order, and
+    // must carry no empty group for an excluded stage.
+    for (let i = 0; i < 5; i++) {
+      await store.record({ ...BASE, stage: "sandbox", error: `sandbox-${i}` });
+    }
+    for (let i = 0; i < 3; i++) {
+      await store.record({ ...BASE, stage: "parse", error: `parse-${i}` });
+    }
+    await store.record({ ...BASE, stage: "quota", error: "quota exceeded" });
+
+    const { log, calls } = captureLog();
+    await runSweep(db, { log });
+    const alert = calls[0]!.fields as SweepAlertFields;
+    expect(alert.failures_24h).toBe(8);
+    expect(alert.stages).toEqual([
+      { stage: "parse", count: 3 },
+      { stage: "sandbox", count: 5 },
+    ]);
+  });
+
+  test("a maintenance_deferred row is a separate existence signal, never part of the infrastructure total", async () => {
+    const db = failureDb();
+    const store = createFailureStore(db);
+    await store.record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
+    await store.record({ ...BASE, stage: "sandbox", error: "container acquisition failed" });
+
+    const { log, calls } = captureLog();
+    const result = await runSweep(db, { log });
+    expect(result.failures24h).toBe(1);
+    expect(calls).toHaveLength(0);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
+  });
+
   test("threshold boundary: ONE fully-failed message's rows do not alert", async () => {
     const db = failureDb();
     // The threshold's own case: a single DLQ'd job leaves exactly this many rows
@@ -578,6 +658,8 @@ describe("runSweep", () => {
       failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
+      // The seeded rows are all `runner`: the breakdown is the total's parts.
+      stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
     });
   });
 
@@ -603,6 +685,7 @@ describe("runSweep", () => {
       failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
+      stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
     });
   });
 
@@ -661,6 +744,263 @@ describe("runSweep", () => {
       },
     };
     await expect(runSweep(broken, { log: captureLog().log })).rejects.toThrow("d1 down");
+  });
+});
+
+/**
+ * The AUDIT WINDOW (`alert.failure_paging` in `platform_audit_events`, compass
+ * D17): the sweep posts at most once per `SWEEP_WINDOW_HOURS` and nothing is
+ * latched. The newest recorded alert suppresses the POST; a delivered POST
+ * appends the row. A missed alert is impossible because no stored state has to
+ * be cleared before the next breach can page.
+ */
+describe("runSweep — paging audit window", () => {
+  /** Every recorded paging alert, oldest first. */
+  function alertRows(db: TestD1): Array<{ actor_login: string; detail_json: string; created_at: string }> {
+    return db.raw
+      .query("SELECT actor_login, detail_json, created_at FROM platform_audit_events WHERE action = ? ORDER BY created_at")
+      .all(ALERT_PAGING_AUDIT_ACTION) as Array<{ actor_login: string; detail_json: string; created_at: string }>;
+  }
+
+  /** Plant an alert as an earlier sweep would have left it, `at` ISO-stamped. */
+  function seedAlert(db: TestD1, at: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO platform_audit_events
+           (id, actor_login, action, target_type, target_id, detail_json, created_at)
+         VALUES (?, 'sweep', ?, 'sweep', 'failure_paging', '{}', ?)`,
+      )
+      .run(crypto.randomUUID(), ALERT_PAGING_AUDIT_ACTION, at);
+  }
+
+  /** A sink that accepts every POST and counts the calls. */
+  function okSink(): { fetchImpl: typeof fetch; calls: () => number } {
+    let n = 0;
+    const fetchImpl = (async () => {
+      n += 1;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    return { fetchImpl, calls: () => n };
+  }
+
+  test("a breach posts once, and a second breaching sweep inside the window posts nothing", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+
+    // Pinned clock: the suppression is "stamp strictly earlier than the
+    // reading clock", so the second sweep must read a later millisecond than
+    // the row the first one wrote.
+    const start = Date.parse("2026-01-01T00:00:00.000Z");
+    jest.useFakeTimers();
+    jest.setSystemTime(start);
+    try {
+      const first = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(first.webhook).toBe("posted");
+      expect(calls()).toBe(1);
+      // Only a delivered alert is recorded, and the row names the sweep.
+      expect(alertRows(db)).toHaveLength(1);
+      expect(alertRows(db)[0]!.actor_login).toBe("sweep");
+      expect(JSON.parse(alertRows(db)[0]!.detail_json)).toEqual({
+        failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
+        stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      });
+
+      // Same breach, fresh sweep instance: the recorded alert is inside the
+      // window, so nothing is posted and nothing is appended.
+      jest.setSystemTime(start + 1_000);
+      const second = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(second).toMatchObject({ thresholdBreached: true, webhook: "not_attempted" });
+      expect(calls()).toBe(1);
+      expect(alertRows(db)).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("once the recorded alert slides out of the window, a new breach posts again", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+
+    // An alert older than the window is not a reason to stay quiet.
+    db.raw.exec("DELETE FROM platform_audit_events");
+    seedAlert(db, new Date(Date.now() - (SWEEP_WINDOW_HOURS + 1) * 3_600_000).toISOString());
+
+    const breach = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(breach.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+    expect(alertRows(db)).toHaveLength(2);
+  });
+
+  test("a failed audit append still reports the alert as posted, and logs", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const { log, calls: warns } = captureLog();
+    const blockedAppend: D1Like = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("INSERT INTO platform_audit_events")) throw new Error("audit locked");
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+
+    const result = await runSweep(blockedAppend, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+    expect(warns.at(-1)!.fields).toMatchObject({ event: "ops_sweep_alert_audit_failed", detail: "audit locked" });
+
+    // Nothing was recorded, so the next breaching sweep posts once more — the
+    // documented duplicate a failed append may cause.
+    const again = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(again.webhook).toBe("posted");
+    expect(calls()).toBe(2);
+  });
+
+  test("an absent sink records nothing, so the alert stays retryable", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+
+    const logOnly = await runSweep(db, { log });
+    expect(logOnly.webhook).toBe("absent");
+    expect(alertRows(db)).toHaveLength(0);
+
+    const posted = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(posted.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+  });
+
+  test("a POST failure records nothing, so the next sweep retries", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    const rejecting = (async () => new Response("sink degraded", { status: 503 })) as unknown as typeof fetch;
+
+    const failed = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl: rejecting, log });
+    expect(failed.webhook).toBe("failed");
+    expect(alertRows(db)).toHaveLength(0);
+
+    const retried = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(retried.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+    expect(alertRows(db)).toHaveLength(1);
+  });
+
+  test("an ordinary in-window stamp suppresses the post", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    seedAlert(db, new Date(Date.now() - 3_600_000).toISOString());
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "not_attempted" });
+    expect(calls()).toBe(0);
+  });
+
+  test("a future-dated stamp is no recent alert, so the breach still posts", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // A clock-ahead row must not silence paging until the wall clock catches up.
+    seedAlert(db, new Date(Date.now() + 24 * 3_600_000).toISOString());
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+    expect(calls()).toBe(1);
+    expect(alertRows(db)).toHaveLength(2);
+  });
+
+  test("a barely future-dated stamp is still no recent alert, so the breach posts", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // Seconds ahead is not a delivered alert either: only a past stamp counts.
+    seedAlert(db, new Date(Date.now() + 30_000).toISOString());
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+    expect(calls()).toBe(1);
+    expect(alertRows(db)).toHaveLength(2);
+  });
+
+  test("a stamp equal to the reading clock is not a past alert, so the breach posts", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // Same-millisecond stamp: only a STRICTLY past alert proves a delivered
+    // page, so an equality cannot suppress the alert owed by this window.
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    seedAlert(db, now.toISOString());
+    jest.useFakeTimers();
+    jest.setSystemTime(now);
+    try {
+      const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+      expect(calls()).toBe(1);
+      expect(alertRows(db)).toHaveLength(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("an unreadable window read logs and still pages the breach", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const { log, calls: warns } = captureLog();
+    const unreadable: D1Like = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("MAX(created_at)")) throw new Error("audit locked");
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+
+    const result = await runSweep(unreadable, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+    expect(warns[0]!.fields).toMatchObject({
+      event: "ops_sweep_alert_window_unreadable",
+      detail: "audit locked",
+    });
+  });
+
+  test("an unparseable recorded stamp counts as no recent alert", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    seedAlert(db, "not-a-timestamp");
+    const { fetchImpl, calls } = okSink();
+    const { log, calls: warns } = captureLog();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+    expect(warns[0]!.fields).toMatchObject({ event: "ops_sweep_alert_window_unreadable" });
+  });
+
+  test("a healthy window writes nothing and a later breach still pages", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+
+    const healthy = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(healthy).toMatchObject({ thresholdBreached: false, webhook: "not_attempted" });
+    expect(alertRows(db)).toHaveLength(0);
+
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const breach = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(breach.webhook).toBe("posted");
+    expect(calls()).toBe(1);
   });
 });
 

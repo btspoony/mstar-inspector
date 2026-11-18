@@ -56,6 +56,8 @@ type TargetSeed = {
   mode?: "open" | "every_push" | "manual";
   /** OMITTED → the DDL DEFAULT 1 (the business pause off). */
   reviewEnabled?: 0 | 1;
+  /** OMITTED → the DDL DEFAULT 1 (drafts are reviewed). 0 holds them back. */
+  reviewDrafts?: 0 | 1;
 };
 
 /** The repository every delivery in this suite comes from. */
@@ -130,8 +132,8 @@ async function seedApp(
       .prepare(
         `INSERT INTO review_targets
            (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
-            review_enabled, review_trigger_mode, created_by, created_at, updated_at)
-         VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
+            review_enabled, review_drafts, review_trigger_mode, created_by, created_at, updated_at)
+         VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
       )
       .run(
         targetId,
@@ -141,6 +143,7 @@ async function seedApp(
         target.repoOwner ?? FIXTURE_REPO.owner,
         target.repoName ?? FIXTURE_REPO.name,
         target.reviewEnabled ?? 1,
+        target.reviewDrafts ?? 1,
         target.mode ?? "every_push",
       );
     return targetId;
@@ -993,6 +996,139 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       triggered_by: "issue_comment",
       botRef: { appId: appRow.id },
       targetId: appRow.targetId,
+    });
+  });
+
+  describe("draft review gate (migration 0070) on the delivery path", () => {
+    const DRAFT_SHA = "abc123";
+    const idemOf = (sha: string) => `idem:123:test-owner/test-repo:42:${sha}`;
+
+    /** One pull_request delivery of a draft PR, on the fixture repository. */
+    const delivery = (action: string, opts: { sha?: string } = {}) => ({
+      ...PR_PAYLOAD,
+      action,
+      pull_request: { ...PR_PAYLOAD.pull_request, draft: true, head: { sha: opts.sha ?? DRAFT_SHA } },
+    });
+
+    async function post(env: RouteEnv, payload: unknown): Promise<Response> {
+      const body = JSON.stringify(payload);
+      return postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+        env,
+      );
+    }
+
+    test("switch off: a draft synchronize writes no job, no Check, no failure row and no KV claim", async () => {
+      // The switch is the target's (D12); this is the whole delivery face with
+      // it off. Every side effect the gate must NOT produce is asserted here,
+      // including the idempotency claim — an ignore claims nothing, so a later
+      // ready delivery for this head is not mistaken for a queued one.
+      const db = createMigratedTestD1();
+      const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewDrafts: 0 }] });
+      const { kv, store } = makeKv();
+      const { queue, sent } = makeQueue();
+      const env = makeEnv(db, { REVIEW_QUEUE: queue as never, IDEMPOTENCY_KV: kv as never });
+
+      const res = await post(env, delivery("synchronize"));
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("ignored");
+      expect(sent).toHaveLength(0);
+      expect(store.size).toBe(0);
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM review_checks").get()).toEqual({ n: 0 });
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
+      // Ordinary bookkeeping still runs: the delivery row records the ignore
+      // (never `skipped`, the refusal vocabulary).
+      const recorded = db.raw
+        .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+        .get(appRow.id) as { outcome: string };
+      expect(recorded.outcome).toBe("ignored");
+    });
+
+    test("switch off: ready_for_review on the same head enqueues once, and a live claim keeps the redelivery out", async () => {
+      const db = createMigratedTestD1();
+      await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewDrafts: 0 }] });
+      const { kv, store } = makeKv();
+      const { queue, sent } = makeQueue();
+      const env = makeEnv(db, { REVIEW_QUEUE: queue as never, IDEMPOTENCY_KV: kv as never });
+
+      // The ignored draft synchronize left no claim, so ready is the head's
+      // first admitted delivery: exactly one job, one Check, one claim.
+      expect(await (await post(env, delivery("synchronize"))).text()).toBe("ignored");
+      const ready = await post(env, delivery("ready_for_review"));
+      expect(ready.status).toBe(200);
+      expect(await ready.text()).toBe("accepted");
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ action: "ready_for_review", pr_number: 42, head_sha: DRAFT_SHA });
+      expect(store.get(idemOf(DRAFT_SHA))).toBe("1");
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM review_checks").get()).toEqual({ n: 1 });
+
+      // GitHub's redelivery of the same ready delivery: the live claim keeps it
+      // out — sequential KV suppression, not an exactly-once promise.
+      expect(await (await post(env, delivery("ready_for_review"))).text()).toBe("accepted");
+      expect(sent).toHaveLength(1);
+
+      // A new head is a different key and therefore a new job.
+      expect(await (await post(env, delivery("ready_for_review", { sha: "def456" }))).text()).toBe("accepted");
+      expect(sent).toHaveLength(2);
+      expect(sent[1]).toMatchObject({ head_sha: "def456" });
+    });
+
+    test("switch off: a 'done' claim for the same head suppresses the ready delivery", async () => {
+      // The other enqueued claim value: this head was already reviewed, so the
+      // consumer's done state is reused instead of requesting a second review.
+      const db = createMigratedTestD1();
+      await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewDrafts: 0 }] });
+      const { kv, store } = makeKv();
+      store.set(idemOf(DRAFT_SHA), "done");
+      const { queue, sent } = makeQueue();
+      const env = makeEnv(db, { REVIEW_QUEUE: queue as never, IDEMPOTENCY_KV: kv as never });
+
+      const res = await post(env, delivery("ready_for_review"));
+
+      expect(res.status).toBe(200);
+      expect(sent).toHaveLength(0);
+      expect(store.get(idemOf(DRAFT_SHA))).toBe("done");
+    });
+
+    test("switch off: a faulting KV admits the ready delivery — the D1/consumer guard is the backstop", async () => {
+      // A KV read fault is a conservative pass (never a silent skip): the head
+      // may enqueue twice, and the consumer's durable dedup is what prevents a
+      // second completed review. Exactly-once enqueue is NOT promised.
+      const db = createMigratedTestD1();
+      await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewDrafts: 0 }] });
+      const { queue, sent } = makeQueue();
+      const env = makeEnv(db, {
+        REVIEW_QUEUE: queue as never,
+        IDEMPOTENCY_KV: {
+          get: async () => {
+            throw new Error("kv unavailable (test injection)");
+          },
+          put: async () => {},
+        } as never,
+      });
+
+      expect(await (await post(env, delivery("ready_for_review"))).text()).toBe("accepted");
+      expect(await (await post(env, delivery("ready_for_review"))).text()).toBe("accepted");
+      expect(sent).toHaveLength(2);
+    });
+
+    test("switch on: the same draft synchronize enqueues — the switch decides, not the action", async () => {
+      // The default (and an explicitly re-enabled) target reviews drafts, so
+      // this delivery is the control the switch-off assertions are read against.
+      const db = createMigratedTestD1();
+      await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewDrafts: 1 }] });
+      const { queue, sent } = makeQueue();
+      const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+
+      const res = await post(env, delivery("synchronize"));
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("accepted");
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ action: "synchronize", pr_number: 42, head_sha: DRAFT_SHA });
     });
   });
 

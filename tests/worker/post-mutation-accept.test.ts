@@ -104,6 +104,7 @@ async function seed(db: ReturnType<typeof createD1>): Promise<void> {
     privateKeyEnc: enc.privateKeyEnc,
     webhookSecretEnc: enc.webhookSecretEnc,
     workspaceId: "default",
+    maxApps: null,
   });
 }
 

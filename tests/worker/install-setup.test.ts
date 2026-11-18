@@ -65,6 +65,7 @@ async function seededWorld(): Promise<World> {
     webhookSecretEnc: "enc",
     createdBy: "acme",
     workspaceId: WS,
+    maxApps: null,
   });
   db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(botId);
   // No target is minted at setup (0067/D19): a claim names the App, and the
@@ -84,6 +85,7 @@ async function addBot(world: World, id: string): Promise<string> {
     webhookSecretEnc: "enc",
     createdBy: "acme",
     workspaceId: WS,
+    maxApps: null,
   });
   world.db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(id);
   return id;

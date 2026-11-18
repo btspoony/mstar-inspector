@@ -33,6 +33,7 @@ const APP_INPUT: CreateAppInput = {
   webhookSecretEnc: "v1.primary.aXZpdi.d2ViaG9vaw==",
   createdBy: "octocat",
   workspaceId: "default",
+  maxApps: null,
 };
 
 async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Promise<GithubAppRow> {

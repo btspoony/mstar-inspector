@@ -62,6 +62,7 @@ async function seedWorld(opts: { scope?: "owned" | "shared"; botId?: string } = 
     webhookSecretEnc: "enc",
     createdBy: "acme",
     workspaceId: WS,
+    maxApps: null,
   });
   db.raw.prepare("UPDATE review_bots SET scope = ? WHERE id = ?").run(opts.scope ?? "shared", botId);
   const userId = (await createUser(db, { login: "mallory", role: "member" })).id;

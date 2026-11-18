@@ -644,7 +644,8 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // second lookup. The mention target is GitHub's own slug (`github_slug`),
   // NOT our webhook path: a rename changes the login that can trigger a
   // review. NULL (never synced) collapses to "" and matches nothing — the
-  // existing fail-safe.
+  // existing fail-safe. The target's `review_drafts` switch rides the same
+  // context, so a draft delivery is classified against the row that owns it.
   const appSlug = row.github_slug ?? "";
   // The classifier's ONE parse, kept for the delivery row's source repository
   // and the PR ledger below — recording either must not re-parse up-to-1 MB of
@@ -672,7 +673,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         target.follow_workspace_defaults === 1
           ? (await getWorkspaceReviewDefaults(db, target.workspace_id)).triggerMode
           : target.review_trigger_mode;
-      return { mode, appSlug };
+      // The draft switch is target-owned (D12), so the already-resolved row
+      // answers it in both inheritance branches — the same derivation
+      // `ownTargetSettings` uses, with no second defaults read.
+      return { mode, appSlug, reviewDrafts: target.review_drafts !== 0 };
     },
     (parsed) => {
       classified = parsed;

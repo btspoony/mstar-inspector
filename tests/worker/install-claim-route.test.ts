@@ -78,6 +78,7 @@ async function seededWorld(opts: {
     webhookSecretEnc: "enc",
     createdBy: "mallory",
     workspaceId: "default",
+    maxApps: null,
   });
   db.raw.prepare("UPDATE review_bots SET scope = ? WHERE id = ?").run(opts.scope ?? "shared", botId);
   return { db, botId };

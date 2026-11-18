@@ -41,9 +41,9 @@
  */
 
 import {
+  ATTRIBUTION_EXCLUDED_STAGES,
   GITHUB_RATE_LIMIT_PREFIX,
   MAINTENANCE_DEFERRED_STAGE,
-  PAGING_EXCLUDED_STAGES,
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_STAGE,
 } from "../contracts/failure-stages";
@@ -83,16 +83,18 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "runner",
   "sandbox",
   "pipeline",
-  // A delivery refused before execution (the plan lacks the shared bot, or the
-  // month's RP ceiling is spent): no review ran, so the row stays paged — it is
-  // not in PAGING_EXCLUDED_STAGES.
+  // A delivery refused before execution (the plan lacks the shared bot): no
+  // review ran, so the row stays paged AND attributed — it is in neither
+  // exclusion list.
   SHARED_BOT_ENTITLEMENT_STAGE,
+  // A delivery refused at enqueue because the month's RP ceiling is spent: a
+  // real failure on the dashboard, kept out of the global ops alert only.
   QUOTA_STAGE,
-  // A delivery the maintenance window could not defer: no review ran, so the
-  // row stays paged — the sweep is what turns "closed platform" into an alert
-  // instead of a silent dead-letter.
+  // A delivery the maintenance window could not defer: in neither exclusion
+  // list, and kept out of the sweep's infrastructure total by its own
+  // predicate — its separate existence signal has its own lane.
   MAINTENANCE_DEFERRED_STAGE,
-  ...PAGING_EXCLUDED_STAGES,
+  ...ATTRIBUTION_EXCLUDED_STAGES,
 ]);
 
 export type FailureStage =
@@ -108,12 +110,17 @@ export type FailureStage =
   | "rate-limit";
 
 /**
- * The attribution partition of the vocabulary, re-exported from the
+ * The two exclusion partitions of the vocabulary, re-exported from the
  * zero-dependency contract so the store and the dashboard interpolate the
- * SAME list (the dashboard may not import this module — architect decision
- * Q2 — so the contract is where it is written).
+ * SAME lists (the dashboard may not import this module — architect decision
+ * Q2 — so the contract is where they are written).
  */
-export { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
+export {
+  ATTRIBUTION_EXCLUDED_STAGES,
+  MAINTENANCE_DEFERRED_STAGE,
+  PAGING_EXCLUDED_STAGES,
+  sqlStageList,
+} from "../contracts/failure-stages";
 
 /**
  * One failure event to record. `head_sha` is the AUTHORITATIVE checkout sha

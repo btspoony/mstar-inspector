@@ -548,6 +548,8 @@ describe("effective settings and inheritance", () => {
       checkMinScore: 45,
       checkPassVerdicts: ["ship it", "blocked"],
       checkPassVerdictsReadable: true,
+      // Target-owned, so it answers from the row even while inheriting.
+      reviewDrafts: true,
     });
     const own = (await store.getInWorkspace(WS, "t-own"))!;
     expect(effectiveTargetSettings(own, defaults)).toEqual({
@@ -556,6 +558,7 @@ describe("effective settings and inheritance", () => {
       checkMinScore: 90,
       checkPassVerdicts: ["ship it"],
       checkPassVerdictsReadable: true,
+      reviewDrafts: true,
     });
   });
 
