@@ -184,7 +184,7 @@ describe("repo-backfill item", () => {
 
   test("one step splits the target into one per repository and repoints the ledger", async () => {
     const db = fixture();
-    const batch = await repoBackfill.runBatch(db, null);
+    const batch = await repoBackfill.runBatch(db, null, OPERATOR);
     expect(batch.processed).toBe(1);
     expect(batch.done).toBe(true);
 
@@ -222,10 +222,10 @@ describe("repo-backfill item", () => {
 
   test("a second step processes nothing", async () => {
     const db = fixture();
-    await repoBackfill.runBatch(db, null);
+    await repoBackfill.runBatch(db, null, OPERATOR);
     const afterFirst = liveTargets(db);
 
-    const replay = await repoBackfill.runBatch(db, null);
+    const replay = await repoBackfill.runBatch(db, null, OPERATOR);
     expect(replay.processed).toBe(0);
     expect(replay.done).toBe(true);
     expect(replay.cursor).toBeNull();
@@ -238,7 +238,7 @@ describe("repo-backfill item", () => {
     const outstanding = await repoBackfill.verify(db, { runStartedAt: null });
     expect(Object.values(outstanding).some((value) => value !== 0)).toBe(true);
 
-    await repoBackfill.runBatch(db, null);
+    await repoBackfill.runBatch(db, null, OPERATOR);
     expect(await repoBackfill.verify(db, { runStartedAt: null })).toEqual({
       unidentified_targets_with_ledger: 0,
       unrepointed_ledger_rows: 0,
@@ -258,7 +258,7 @@ describe("repo-backfill item", () => {
 
     expect(await repoBackfill.preflight(db)).toMatchObject({ conflicting_groups: 1 });
 
-    const batch = await repoBackfill.runBatch(db, null);
+    const batch = await repoBackfill.runBatch(db, null, OPERATOR);
     expect(batch.log).toMatchObject({ created: 1, discarded: 1 });
 
     const live = liveTargets(db);
@@ -281,7 +281,7 @@ describe("repo-backfill item", () => {
     seedPr(db, "pr-stale", "target-a", "acme", "alpha", 7, "2026-01-01T00:00:00.000Z");
     seedPr(db, "pr-fresh", "target-b", "acme", "alpha", 7, "2026-05-01T00:00:00.000Z");
 
-    await repoBackfill.runBatch(db, null);
+    await repoBackfill.runBatch(db, null, OPERATOR);
     const rows = db.raw.query("SELECT id FROM pull_requests").all() as Array<{ id: string }>;
     expect(rows.map((row) => row.id)).toEqual(["pr-fresh"]);
     expect((await repoBackfill.verify(db, { runStartedAt: null })).unrepointed_ledger_rows).toBe(0);
@@ -300,7 +300,7 @@ describe("repo-backfill item", () => {
     seedPr(db, "pr-home-8", "target-home", "acme", "alpha", 8, "2026-01-01T00:00:00.000Z");
     seedPr(db, "pr-old-8", "target-old", "acme", "alpha", 8, "2026-05-01T00:00:00.000Z");
 
-    const batch = await repoBackfill.runBatch(db, null);
+    const batch = await repoBackfill.runBatch(db, null, OPERATOR);
     expect(batch.done).toBe(true);
     expect(batch.log).toMatchObject({ adopted: 1, created: 0 });
 
@@ -314,7 +314,7 @@ describe("repo-backfill item", () => {
     expect((await repoBackfill.verify(db, { runStartedAt: null })).unrepointed_ledger_rows).toBe(0);
 
     // A replay is a no-op: the collision is settled, not retried.
-    const replay = await repoBackfill.runBatch(db, null);
+    const replay = await repoBackfill.runBatch(db, null, OPERATOR);
     expect(replay.processed).toBe(0);
     expect(replay.done).toBe(true);
   });
@@ -333,7 +333,7 @@ describe("repo-backfill item", () => {
     const counts = await repoBackfill.preflight(db);
     expect(counts).toMatchObject({ unidentified_targets: 2, leftover_without_ledger: 1 });
 
-    await repoBackfill.runBatch(db, null);
+    await repoBackfill.runBatch(db, null, OPERATOR);
     const empty = db.raw
       .query(
         "SELECT check_min_score, follow_workspace_defaults FROM review_targets WHERE id = 'target-empty'",
@@ -346,7 +346,7 @@ describe("repo-backfill item", () => {
   async function drain(db: TestD1): Promise<Array<{ created: number; consumed: number; done: boolean }>> {
     const batches: Array<{ created: number; consumed: number; done: boolean }> = [];
     for (let cursor: UpgradeCursor | null = null; ; ) {
-      const batch = await repoBackfill.runBatch(db, cursor);
+      const batch = await repoBackfill.runBatch(db, cursor, OPERATOR);
       const log = batch.log ?? {};
       batches.push({
         created: typeof log.created === "number" ? log.created : 0,
@@ -368,7 +368,7 @@ describe("repo-backfill item", () => {
       seedPr(db, `pr-${index}`, "target-many", "acme", `repo-${index}`, 1, "2026-02-01T00:00:00.000Z");
     }
 
-    const first = await repoBackfill.runBatch(db, null);
+    const first = await repoBackfill.runBatch(db, null, OPERATOR);
     expect(first.done).toBe(false);
     expect(first.log).toMatchObject({ created: 20, consumed: 0 });
     // The row is NOT retired: it still holds `repo-20`'s ledger row.
@@ -397,7 +397,7 @@ describe("repo-backfill item", () => {
     seedPr(db, "pr-bot-1", "target-bot-1", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
     seedPr(db, "pr-bot-2", "target-bot-2", "acme", "alpha", 1, "2026-02-01T00:00:00.000Z", "bot-2");
 
-    const batch = await repoBackfill.runBatch(db, null);
+    const batch = await repoBackfill.runBatch(db, null, OPERATOR);
     expect(batch.log).toMatchObject({ created: 2, discarded: 0 });
 
     const live = db.raw
@@ -436,7 +436,7 @@ describe("repo-backfill item", () => {
 
     // Both rows claim one repository: 0068's claim is bot-scoped, so is this.
     expect(await repoBackfill.preflight(db)).toMatchObject({ conflicting_groups: 1 });
-    const batch = await repoBackfill.runBatch(db, null);
+    const batch = await repoBackfill.runBatch(db, null, OPERATOR);
     expect(batch.log).toMatchObject({ created: 1, discarded: 1 });
 
     const live = db.raw
@@ -491,7 +491,7 @@ describe("repo-backfill item", () => {
     seedPr(db, "pr-lower", "target-lower", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
     seedPr(db, "pr-upper", "target-upper", "Acme", "alpha", 2, "2026-02-01T00:00:00.000Z");
 
-    const batch = await repoBackfill.runBatch(db, null);
+    const batch = await repoBackfill.runBatch(db, null, OPERATOR);
     expect(batch.log).toMatchObject({ created: 1, discarded: 1 });
 
     const live = liveTargets(db);

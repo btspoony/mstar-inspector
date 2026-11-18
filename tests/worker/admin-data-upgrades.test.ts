@@ -282,10 +282,10 @@ describe("the data-upgrade runner", () => {
     // Hold the first batch in flight so the second request provably overlaps it.
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
+      async runBatch(dbApi, cursor, actor) {
         entered.resolve();
         await release.promise;
-        return inner.runBatch(dbApi, cursor);
+        return inner.runBatch(dbApi, cursor, actor);
       },
     });
 
@@ -316,8 +316,8 @@ describe("the data-upgrade runner", () => {
     // write: a successor now holds the row under its own token.
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
-        const batch = await inner.runBatch(dbApi, cursor);
+      async runBatch(dbApi, cursor, actor) {
+        const batch = await inner.runBatch(dbApi, cursor, actor);
         db.raw
           .prepare("UPDATE operator_data_upgrades SET started_at = ?, claim_token = ? WHERE id = ?")
           .run(successorStamp, "claim-successor", ITEM_ID);
@@ -351,9 +351,9 @@ describe("the data-upgrade runner", () => {
     let failing = true;
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
+      async runBatch(dbApi, cursor, actor) {
         if (failing) throw new Error("batch exploded");
-        return inner.runBatch(dbApi, cursor);
+        return inner.runBatch(dbApi, cursor, actor);
       },
     });
 
@@ -372,10 +372,10 @@ describe("the data-upgrade runner", () => {
     const inner = fixtureItem();
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
+      async runBatch(dbApi, cursor, actor) {
         entered.resolve();
         await release.promise;
-        return inner.runBatch(dbApi, cursor);
+        return inner.runBatch(dbApi, cursor, actor);
       },
     });
 
@@ -673,10 +673,10 @@ describe("the data-upgrade runner", () => {
     const inner = fixtureItem();
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
+      async runBatch(dbApi, cursor, actor) {
         // The claim is in flight while the batch runs: a token names it.
         expect(claimToken(db)).not.toBeNull();
-        return inner.runBatch(dbApi, cursor);
+        return inner.runBatch(dbApi, cursor, actor);
       },
     });
 

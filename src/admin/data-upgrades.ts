@@ -66,8 +66,17 @@ export type DataUpgradeItem = {
   order: number;
   /** Counts the operator sees before starting. No writes. */
   preflight(db: DashboardD1): Promise<UpgradeCounts>;
-  /** Move one batch of rows. ONE transaction; a replay over migrated rows moves nothing. */
-  runBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise<UpgradeBatch>;
+  /**
+   * Move one batch of rows. ONE transaction; a replay over migrated rows moves
+   * nothing. `actor` is the operator login the runner already holds: a row the
+   * batch CREATES records it as `created_by`, so the audit trail names whoever
+   * caused the row rather than the item that happened to write it.
+   */
+  runBatch(
+    db: DashboardD1,
+    cursor: UpgradeCursor | null,
+    actor: string,
+  ): Promise<UpgradeBatch>;
   /**
    * Read-only checks; every entry must read `0` for the item to complete,
    * except the ones named here — those are REPORTED (in `checks`, and so on the
@@ -593,7 +602,7 @@ export async function stepDataUpgrade(
   if (opensWindow) {
     await setMaintenanceMode(db, { enabled: true, reason: `data upgrade: ${item.title}`, actor }, now);
   }
-  const batch = await item.runBatch(db, before.cursor).catch(async (err: unknown) => {
+  const batch = await item.runBatch(db, before.cursor, actor).catch(async (err: unknown) => {
     // The batch is ONE transaction, so a throw moved nothing: release the claim
     // (a hard process death leaves it to expire instead) and surface the real error.
     await releaseClaim(db, item.id, now, token);
