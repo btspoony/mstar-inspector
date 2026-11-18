@@ -2582,6 +2582,9 @@ Two more fields ride that same runtime read, and the same page renders both:
   failure. The sweep rows are an attribution stage (`rate-limit`), which every
   failure count excludes (§ Cron failure sweep) in exactly the way it excludes
   `recheck` and `usage` rows — a throttled cleanup is not a failed review.
+  Paging excludes those three AND `quota`, so this paragraph's "every failure
+  count" means the dashboard's counts; the pager drops one more stage than
+  they do.
 
 ### Review concurrency caps (runtime configuration)
 
@@ -2668,36 +2671,60 @@ behave.
   (src/worker/sweep.ts), then the lifecycle reconciler
   ([§ Lifecycle recovery](#lifecycle-recovery-7111)), then the
   Check recovery reconciler ([§ Check recovery](#check-recovery-7112)),
-  each stage in its own try/catch so none can break another. The sweep counts
-  `review_failures` rows over the
-  trailing 24h across the infra-failure stages only (parse +
-  runner/sandbox/pipeline; the
-  per-attempt rows written by migration 0010 make this table the sufficient failure
-  signal). The attribution stages (`PAGING_EXCLUDED_STAGES` in
-  `src/contracts/failure-stages.ts`) are rows written for a
-  review that kept going — a recheck round that budget-skipped, lost its seat
-  or produced an invalid document (`recheck`), a `usage_events` insert that
-  failed while the review continued (`usage`), and a degraded comment-delete
-  sweep GitHub throttled while the review itself stood (`rate-limit`) — so the
-  count excludes them. They stay in the
-  table as attribution and never page ops. The same contract supplies the
-  dashboard's own predicates: the per-PR failure COUNT and the per-PR failure
-  HISTORY exclude the same three stages, so the tab's number and the pager under
-  it always agree. The stage lists are written once.
+  each stage in its own try/catch so none can break another. The sweep reads
+  `review_failures` ONCE over the trailing 24h, grouped by stage
+  (`SELECT stage, COUNT(*) … GROUP BY stage ORDER BY stage`; the per-attempt
+  rows written by migration 0010 make this table the sufficient failure
+  signal). `failures_24h` is the sum of those rows and the SAME ordered rows
+  are the alert payload's `stages`, so the total and its breakdown always
+  describe one snapshot — never two independently timed counts. Both are
+  filtered by `PAGING_EXCLUDED_STAGES` in `src/contracts/failure-stages.ts`,
+  and no query writes a stage literal by hand.
+- The paging exclusion is the attribution set plus `quota`. The attribution
+  stages (`ATTRIBUTION_EXCLUDED_STAGES`) are rows written for a review that
+  kept going — a recheck round that budget-skipped, lost its seat or produced
+  an invalid document (`recheck`), a `usage_events` insert that failed while
+  the review continued (`usage`), and a degraded comment-delete sweep GitHub
+  throttled while the review itself stood (`rate-limit`) — so they never page
+  ops. `quota` is a REAL failure the dashboard counts and lists: it marks one
+  workspace that spent this month's RP ceiling, a commercial limit rather than
+  a platform incident, so a single tenant's exhausted month never latches the
+  global pager. All of them stay in `review_failures`.
+- The dashboard's own predicates come from the attribution list alone: the
+  per-PR failure COUNT and the per-PR failure HISTORY exclude the same three
+  stages, so the tab's number and the history under it agree. The pager is the
+  only reader that adds `quota`, so extending the paging set never hides a row
+  from the dashboard. The stage lists are written once.
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
   Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,
   `SWEEP_WINDOW_HOURS`, `SWEEP_WEBHOOK_TIMEOUT_MS`).
 - Alert transport: structured `ops_sweep_alert` log event
-  (`{failures_24h, dlq_check: "skipped", thresholds}`) + optional POST to
-  `ALERT_WEBHOOK_URL` (JSON body, 3s timeout; a POST failure degrades to a
-  warn log, never throws). Absent `ALERT_WEBHOOK_URL` = log-only alerting.
+  (`{event, failures_24h, dlq_check: "skipped", thresholds, stages}`) +
+  optional POST to `ALERT_WEBHOOK_URL` (JSON body, 3s timeout; a POST failure
+  degrades to a warn log, never throws). Absent `ALERT_WEBHOOK_URL` =
+  log-only alerting. `stages` is `[{stage, count}, …]` in stage order — the
+  exact rows whose counts sum to `failures_24h`, each one a stage an operator
+  can act on; quota and the attribution stages never appear in either value.
+- The alert posts on the breach TRANSITION, not on every sweep that still sees
+  the same breach: the runtime key `platform.alert.failure_paging` in
+  `review_runtime_settings` holds `tripped` once a sink accepted the POST
+  (HTTP 2xx), and the first healthy sweep deletes the row so the next breach
+  pages again. Absent sink, timeout, fetch throw or non-2xx never latches and
+  stays retryable on the next sweep; a failed latch write or a failed clear
+  warns each sweep and is retried (`ops_sweep_alert_state_*` events). This is
+  machine state, not a tunable — no console control, no audit row.
 - DLQ depth is NOT read (no CF API token surface — `dlq_check: "skipped"`);
   guard-leak cleanup stays out of cron (KV guard TTL is the leak upper
   bound).
-- The sweep stage is read-only: D1 query + log/webhook only — no queue/KV/D1
-  mutation. (The composed lifecycle-recovery stage below does write its own
-  D1 journal rows and may call GitHub, strictly within its own bounds.)
+- The sweep never edits what it counts: it writes no `review_failures` row and
+  no `reviews` row (AL-6), and no KV guard. Its D1 writes are the paging latch
+  above and the bounded janitor lanes it already ran (delivery/PR-ledger
+  retention, invite lapse, comment-claim recovery); its one queue write is the
+  comment-claim lane re-sending an ALREADY stored claim payload — recovery of
+  a send that never happened, never a new review. (The composed
+  lifecycle-recovery stage below does write its own D1 journal rows and may
+  call GitHub, strictly within its own bounds.)
 
 ### Lifecycle recovery (§7.11.1)
 
@@ -2807,8 +2834,9 @@ never created while paused. The same-name duplicate-run possibility above
 `review_failures` is an append-only per-attempt event log: a DLQ'd message
 leaves up to 4 rows (1 initial delivery + max_retries = 3 retries), so the
 table grows with every failed attempt. Retention is **runbook-executed** —
-the cron sweep **stage** is read-only by design (AL-6) and must never mutate
-D1 (the separate lifecycle-recovery stage owns its own journal rows).
+the cron sweep counts this table and must never delete from it (AL-6: counting
+must not edit what it counts); its only D1 writes are the breach-transition
+latch and its own janitor lanes (§ Cron failure sweep).
 
 Monthly (or when the table grows noticeably), delete rows older than 30
 days:

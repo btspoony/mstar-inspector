@@ -1,10 +1,10 @@
 /**
- * Ops failure sweep (architect verdict AL-6) — the cron
- * handler's read-only scan: count `review_failures` rows over the trailing
- * 24h across the infra-failure stages (parse + runner/sandbox/pipeline — the
- * infra-failure rows make this table the sufficient failure signal, closing
- * the "DLQ-bound failure leaves zero D1 trace" blind spot) and alert when
- * the count breaches the threshold.
+ * Ops failure sweep (architect verdict AL-6) — the cron handler's scan: read
+ * `review_failures` ONCE over the trailing 24h grouped by stage (parse +
+ * runner/sandbox/pipeline are the infra-failure rows that make this table the
+ * sufficient failure signal, closing the "DLQ-bound failure leaves zero D1
+ * trace" blind spot), sum the group counts, and alert when that total breaches
+ * the threshold. The same ordered rows are the payload's `stages`.
  *
  * The paging-excluded stages (PAGING_EXCLUDED_STAGES) are EXCLUDED from that
  * count: the attribution stages are degraded-but-successful attribution
@@ -271,13 +271,19 @@ export type SweepResult = {
 };
 
 /**
- * Run one sweep: count the trailing-24h failure rows, and on breach emit the
- * `ops_sweep_alert` structured event + optionally POST it to `alertUrl`
- * (JSON body, SWEEP_WEBHOOK_TIMEOUT_MS timeout). A webhook failure
- * (network/timeout throw OR a non-2xx response) degrades to a warn log — it
- * NEVER throws (the alert must not take down the cron that produced it). D1
- * errors DO propagate to the caller (the `scheduled` handler wraps the whole
- * sweep in try/catch).
+ * Run one sweep: read the trailing-24h failure rows grouped by stage, and on
+ * the breach TRANSITION emit the `ops_sweep_alert` structured event +
+ * optionally POST it to `alertUrl` (JSON body, SWEEP_WEBHOOK_TIMEOUT_MS
+ * timeout). A webhook failure (network/timeout throw OR a non-2xx response)
+ * degrades to a warn log — it NEVER throws (the alert must not take down the
+ * cron that produced it). D1 errors DO propagate to the caller (the
+ * `scheduled` handler wraps the whole sweep in try/catch).
+ *
+ * The infrastructure decision composes the alert body and sets the webhook
+ * disposition; the body is delivered and the function returns once, at the
+ * bottom. A separate lane whose signal must not be skipped by a healthy
+ * infrastructure total (the maintenance-window existence signal) joins between
+ * those two points, so this function never returns early after the read.
  */
 export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepResult> {
   const log = deps.log ?? defaultSweepLog;
@@ -449,6 +455,9 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       "failure paging state unreadable — treating the alert as unannounced",
     );
   }
+  // The infrastructure decision only SETS the disposition and, when it owes a
+  // page, composes the alert body; delivery and the single exit are below.
+  let webhook: SweepResult["webhook"] = "not_attempted";
   if (!thresholdBreached) {
     // Always attempted, even when the read above failed: a stale latch would
     // swallow the next breach, and only a successful DELETE actually rearms.
@@ -463,66 +472,74 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         "failure paging state clear failed — the latch may suppress the next breach",
       );
     }
-    return { failures24h, thresholdBreached, invitesExpired, webhook: "not_attempted" };
   }
-  if (state.tripped) {
-    // Sustained breach already announced: no POST, no state write.
-    return { failures24h, thresholdBreached, invitesExpired, webhook: "not_attempted" };
+  // Sustained breach already announced (state.tripped): no body, no POST, no
+  // state write. A breach on a clear state owes this one. `let` because the
+  // maintenance lane below may merge its key into the same body.
+  let alert: SweepAlertFields | null =
+    thresholdBreached && !state.tripped
+      ? {
+          event: "ops_sweep_alert",
+          failures_24h: failures24h,
+          dlq_check: "skipped",
+          thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+          stages,
+        }
+      : null;
+  // 377's maintenance existence signal joins HERE: it reads its own count and
+  // latch, and when it owes a page it extends this same body with its key, so
+  // both transitions travel in ONE alert. Neither decision may return above
+  // this point — a healthy infrastructure total must not skip that lane.
+  if (alert !== null) {
+    log.warn(alert, "review failure threshold breached");
+    if (!deps.alertUrl) {
+      webhook = "absent";
+    } else {
+      // An arrow over a globalThis property call, never the bare `fetch` reference:
+      // calling a stored reference loses the global receiver and workerd's native
+      // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
+      const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
+      try {
+        const response = await fetchImpl(deps.alertUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(alert),
+          signal: AbortSignal.timeout(SWEEP_WEBHOOK_TIMEOUT_MS),
+        });
+        if (!response.ok) {
+          // Non-2xx = NOT posted: the sink rejected the alert. Throw a synthetic
+          // status-only error (never the URL or body) so the shared catch path
+          // below emits the warn and the "failed" disposition.
+          throw new Error(`alert webhook POST returned HTTP ${response.status}`);
+        }
+        // Latch ONLY after the sink accepted the alert: an absent sink, a timeout,
+        // a throw or a non-2xx must stay retryable on the next sweep, so a failed
+        // post never rearms the edge. A successful post whose latch write fails
+        // logs and may post again next sweep — that bounded duplicate is the price
+        // of never losing the alert.
+        try {
+          await setFailurePagingTripped(db, new Date().toISOString());
+        } catch (error) {
+          log.warn(
+            { event: "ops_sweep_alert_state_set_failed", detail: warnDetail(error, deps.alertUrl) },
+            "failure paging state write failed — this alert may post again",
+          );
+        }
+        webhook = "posted";
+      } catch (error) {
+        // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
+        // request URL into the error message; `warnDetail` redacts and caps it.
+        log.warn(
+          {
+            event: "ops_sweep_alert_webhook_failed",
+            detail: warnDetail(error, deps.alertUrl),
+          },
+          "alert webhook POST failed — log-only alert stands",
+        );
+        webhook = "failed";
+      }
+    }
   }
 
-  const alert: SweepAlertFields = {
-    event: "ops_sweep_alert",
-    failures_24h: failures24h,
-    dlq_check: "skipped",
-    thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
-    stages,
-  };
-  log.warn(alert, "review failure threshold breached");
-  if (!deps.alertUrl) {
-    return { failures24h, thresholdBreached, invitesExpired, webhook: "absent" };
-  }
-
-  // An arrow over a globalThis property call, never the bare `fetch` reference:
-  // calling a stored reference loses the global receiver and workerd's native
-  // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
-  const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
-  try {
-    const response = await fetchImpl(deps.alertUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(alert),
-      signal: AbortSignal.timeout(SWEEP_WEBHOOK_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      // Non-2xx = NOT posted: the sink rejected the alert. Throw a synthetic
-      // status-only error (never the URL or body) so the shared catch path
-      // below emits the warn and the "failed" disposition.
-      throw new Error(`alert webhook POST returned HTTP ${response.status}`);
-    }
-    // Latch ONLY after the sink accepted the alert: an absent sink, a timeout,
-    // a throw or a non-2xx must stay retryable on the next sweep, so a failed
-    // post never rearms the edge. A successful post whose latch write fails
-    // logs and may post again next sweep — that bounded duplicate is the price
-    // of never losing the alert.
-    try {
-      await setFailurePagingTripped(db, new Date().toISOString());
-    } catch (error) {
-      log.warn(
-        { event: "ops_sweep_alert_state_set_failed", detail: warnDetail(error, deps.alertUrl) },
-        "failure paging state write failed — this alert may post again",
-      );
-    }
-    return { failures24h, thresholdBreached, invitesExpired, webhook: "posted" };
-  } catch (error) {
-    // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
-    // request URL into the error message; `warnDetail` redacts and caps it.
-    log.warn(
-      {
-        event: "ops_sweep_alert_webhook_failed",
-        detail: warnDetail(error, deps.alertUrl),
-      },
-      "alert webhook POST failed — log-only alert stands",
-    );
-    return { failures24h, thresholdBreached, invitesExpired, webhook: "failed" };
-  }
+  return { failures24h, thresholdBreached, invitesExpired, webhook };
 }
