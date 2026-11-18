@@ -44,6 +44,8 @@ const UPGRADES: DataUpgradeRow[] = [
   {
     id: "repo-backfill",
     title: "Repository identity backfill",
+    impact:
+      "Merges duplicate review targets into one per repository and repoints their pull requests, reviews, findings and failures onto it. Never deletes reviews, findings or failures.",
     requiresDowntime: true,
     state: state(),
     preflight: { unidentified_targets: 4, ledger_pairs: 12 },
@@ -51,6 +53,7 @@ const UPGRADES: DataUpgradeRow[] = [
   {
     id: "quota-reprice",
     title: "Quota reprice",
+    impact: "Rewrites the recorded quota for every workspace. Never changes a workspace's plan.",
     requiresDowntime: false,
     state: state({ status: "running", processed: 40, startedAt: "2026-11-16T08:00:00.000Z" }),
     preflight: { rows: 120 },
@@ -58,6 +61,7 @@ const UPGRADES: DataUpgradeRow[] = [
   {
     id: "finding-index",
     title: "Finding index rebuild",
+    impact: "Rebuilds the finding index from stored findings. Never rewrites a stored finding.",
     requiresDowntime: false,
     state: state({
       status: "failed",
@@ -136,11 +140,13 @@ describe("data upgrade screen — static faces", () => {
     expect(running).toContain(formatRelativeTime("2026-11-16T08:00:00.000Z", "en"));
   });
 
-  test("a pending item states its preflight counts and offers start", () => {
+  test("a pending item states its impact, its preflight counts and offers start", () => {
     const markup = viewOf(0);
     expect(markup).toContain(t("en", "admin.nav.dataUpgrades"));
     expect(markup).toContain("Repository identity backfill");
     expect(markup).toContain(t("en", "admin.dataUpgrades.statusPending"));
+    // The item's own impact line: what it changes and what it never touches.
+    expect(markup).toContain(UPGRADES[0]!.impact);
     // The counts are the item's own names, never renamed by the console.
     expect(markup).toContain("unidentified_targets");
     expect(markup).toContain("ledger_pairs");
@@ -151,7 +157,7 @@ describe("data upgrade screen — static faces", () => {
     expect(markup).toContain(t("en", "admin.dataUpgrades.downtimeBadge"));
   });
 
-  test("a running item states its progress and offers continue, verify and reset", () => {
+  test("a running item states its progress and offers continue, verify and abandon", () => {
     const markup = viewOf(1);
     expect(markup).toContain(t("en", "admin.dataUpgrades.statusRunning"));
     expect(markup).toContain(t("en", "admin.dataUpgrades.progressProcessed", { count: 40 }));
@@ -163,16 +169,24 @@ describe("data upgrade screen — static faces", () => {
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.stopAction"));
   });
 
-  test("a failed item shows the stored last_error and offers verify and reset", () => {
+  test("a failed item shows the stored last_error and offers the named retry with its consequence", () => {
     const markup = viewOf(2);
     expect(markup).toContain(t("en", "admin.dataUpgrades.statusFailed"));
     expect(markup).toContain("verify failed: orphan_rows=2");
-    // A failed item takes no new batch: only a reset returns it to pending.
+    // A failed item takes no new batch: only the retry returns it to pending.
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.continueAction"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.startAction"));
+    // The ambiguous `Reset` is gone; the retry says what it does AND what it does not undo.
+    expect(markup).not.toContain(t("en", "admin.dataUpgrades.resetAction"));
+    expect(markup).toContain(t("en", "admin.dataUpgrades.restartAction"));
+    expect(markup).toContain(t("en", "admin.dataUpgrades.restartConsequence"));
+    // Both faces say it: the Chinese card states the same consequence.
+    const zh = viewOf(2, { locale: "zh_CN" });
+    expect(zh).toContain(t("zh_CN", "admin.dataUpgrades.restartAction"));
+    expect(zh).toContain("已迁移的行不会回滚");
   });
 
-  test("a completed item offers no batch and no verify, only reset", () => {
+  test("a completed item offers no batch, no verify and no destructive-looking control", () => {
     const done = UPGRADES.map((row) => ({
       ...row,
       state: state({ status: "completed" as const, processed: 12, finishedAt: "2026-11-16T09:00:00.000Z" }),
@@ -181,7 +195,42 @@ describe("data upgrade screen — static faces", () => {
     expect(markup).toContain(t("en", "admin.dataUpgrades.statusCompleted"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.verifyAction"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.continueAction"));
-    expect(markup).toContain(t("en", "admin.dataUpgrades.resetAction"));
+    // Nothing to reset a finished run to, and no retry for a run that succeeded.
+    expect(markup).not.toContain(t("en", "admin.dataUpgrades.resetAction"));
+    expect(markup).not.toContain(t("en", "admin.dataUpgrades.restartAction"));
+  });
+
+  test("zero preflight disables the run control and states there is nothing to migrate", () => {
+    // The staging face: `已完成` beside every counter at 0 and a live start button.
+    const zero: DataUpgradeRow[] = [
+      {
+        id: "repo-backfill",
+        title: "Repository identity backfill",
+        impact: "Splits duplicate targets and repoints their ledger rows. Never deletes reviews, findings or failures.",
+        requiresDowntime: false,
+        state: state({ status: "completed", processed: 0, finishedAt: "2026-11-16T09:00:00.000Z" }),
+        preflight: { unidentified_targets: 0, ledger_pairs: 0, conflicting_groups: 0 },
+      },
+      {
+        ...UPGRADES[0]!,
+        state: state({ status: "pending" }),
+        preflight: { unidentified_targets: 0, ledger_pairs: 0 },
+      },
+    ];
+    const markup = view({ data: { upgrades: zero, maintenance: RUNTIME.maintenance } });
+    expect(markup).toContain(t("en", "admin.dataUpgrades.nothingToMigrate"));
+    // The control is rendered but unusable — an operator reads why, not an absent button.
+    // (`disabled=""` is the rendered attribute; the base class string also says `disabled:`.)
+    const startLabel = t("en", "admin.dataUpgrades.startAction").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const start = new RegExp(`<button[^>]*disabled=""[^>]*>${startLabel}</button>`);
+    expect(markup).toMatch(start);
+    // Both dictionaries state it.
+    const zh = view({ locale: "zh_CN", data: { upgrades: zero, maintenance: RUNTIME.maintenance } });
+    expect(zh).toContain(t("zh_CN", "admin.dataUpgrades.nothingToMigrate"));
+    // A counter above zero is work: the control stays live.
+    const live = viewOf(0);
+    expect(live).not.toContain(t("en", "admin.dataUpgrades.nothingToMigrate"));
+    expect(live).not.toMatch(start);
   });
 
   test("the banner states the window, the current item, its progress and the last error", () => {
@@ -403,7 +452,7 @@ describe("data upgrade screen — mounted", () => {
     await surface.close();
   });
 
-  test("reset returns the item to pending and drops its error", async () => {
+  test("the failed item's retry returns it to pending and drops its error", async () => {
     const surface = await mount((request) => {
       if (request.method === "POST" && request.url.endsWith("/finding-index/reset")) {
         return json({ state: state() });
@@ -411,7 +460,11 @@ describe("data upgrade screen — mounted", () => {
       return readStub()(request);
     });
 
-    await surface.click(control(surface.container, "finding-index", t("en", "admin.dataUpgrades.resetAction")));
+    // The retry is the ONLY control a failed item offers for starting again.
+    expect(control(surface.container, "finding-index", t("en", "admin.dataUpgrades.resetAction"))).toBeNull();
+    await surface.click(
+      control(surface.container, "finding-index", t("en", "admin.dataUpgrades.restartAction")),
+    );
     await surface.settle();
 
     const text = card(surface.container, "finding-index")?.textContent ?? "";

@@ -394,6 +394,7 @@ const ADMIN_UPGRADES = [
   {
     id: "repo-backfill",
     title: "Repository identity backfill",
+    impact: "Splits duplicate targets and repoints their ledger rows. Never deletes reviews, findings or failures.",
     requiresDowntime: true,
     state: {
       status: "running",
@@ -407,6 +408,7 @@ const ADMIN_UPGRADES = [
   {
     id: "finding-index",
     title: "Finding index rebuild",
+    impact: "Rebuilds the finding index. Never rewrites a stored finding.",
     requiresDowntime: false,
     state: {
       status: "failed",

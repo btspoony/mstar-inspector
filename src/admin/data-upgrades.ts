@@ -24,6 +24,7 @@
  */
 import { getMaintenanceMode, setMaintenanceMode } from "../dashboard/runtime-config-store";
 import type { DashboardD1, DashboardD1Statement } from "../dashboard/users";
+import { orphanLedgerAttribution } from "./data-upgrades/orphan-ledger-attribution";
 import { repoBackfill } from "./data-upgrades/repo-backfill";
 
 /** Where an item resumes. Opaque to the runner; the item owns its shape. */
@@ -53,14 +54,33 @@ export type DataUpgradeItem = {
   /** Stable slug; the state row's primary key. */
   id: string;
   title: string;
+  /**
+   * One or two sentences the console renders on the item's card: which rows it
+   * changes and what it never touches. Server-owned like `title` — the item's
+   * own words, so the card holds no per-item copy.
+   */
+  impact: string;
   /** Refuses `step` while the maintenance window is off (after its first step). */
   requiresDowntime: boolean;
   /** Run order in the console's list. */
   order: number;
   /** Counts the operator sees before starting. No writes. */
   preflight(db: DashboardD1): Promise<UpgradeCounts>;
-  /** Move one batch of rows. ONE transaction; a replay over migrated rows moves nothing. */
-  runBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise<UpgradeBatch>;
+  /**
+   * Move one batch of rows. ONE transaction; a replay over migrated rows moves
+   * nothing. The runner passes the operator login as `actor`, and a row the
+   * batch CREATES records it as `created_by`, so the audit trail names whoever
+   * caused the row rather than the item that happened to write it.
+   *
+   * `actor` is optional only so a caller tree that predates its introduction
+   * still type-checks (CI resolves a merge tree that carries such calls); the
+   * runner always supplies it.
+   */
+  runBatch(
+    db: DashboardD1,
+    cursor: UpgradeCursor | null,
+    actor?: string,
+  ): Promise<UpgradeBatch>;
   /**
    * Read-only checks; every entry must read `0` for the item to complete,
    * except the ones named here — those are REPORTED (in `checks`, and so on the
@@ -101,11 +121,14 @@ export type DataUpgradeState = {
 
 /**
  * Every registered upgrade, in run order — the registry's single source.
- * `repo-backfill` is the historical-identity item; the
+ * `repo-backfill` is the historical-identity item, and
+ * `orphan-ledger-attribution` follows it: it gives rows written before
+ * `review_targets` existed the target its `(owner, repo)` group resolves to,
+ * which the backfill cannot see. The
  * runner, the table and the routes are item-agnostic, so registering an item
  * is the only change a new upgrade needs.
  */
-export const DATA_UPGRADES: DataUpgradeItem[] = [repoBackfill];
+export const DATA_UPGRADES: DataUpgradeItem[] = [repoBackfill, orphanLedgerAttribution];
 
 /** Resolve a registered item; `null` is the route layer's 404. */
 export function findDataUpgrade(id: string): DataUpgradeItem | null {
@@ -200,6 +223,7 @@ async function readDataUpgradeState(db: DashboardD1, id: string): Promise<DataUp
 export type DataUpgradeListing = {
   id: string;
   title: string;
+  impact: string;
   requiresDowntime: boolean;
   order: number;
   state: DataUpgradeState;
@@ -222,6 +246,7 @@ export async function listDataUpgrades(db: DashboardD1): Promise<DataUpgradeList
       .map(async (item) => ({
         id: item.id,
         title: item.title,
+        impact: item.impact,
         requiresDowntime: item.requiresDowntime,
         order: item.order,
         state: stored.get(item.id) ?? pendingState(item.id),
@@ -581,7 +606,7 @@ export async function stepDataUpgrade(
   if (opensWindow) {
     await setMaintenanceMode(db, { enabled: true, reason: `data upgrade: ${item.title}`, actor }, now);
   }
-  const batch = await item.runBatch(db, before.cursor).catch(async (err: unknown) => {
+  const batch = await item.runBatch(db, before.cursor, actor).catch(async (err: unknown) => {
     // The batch is ONE transaction, so a throw moved nothing: release the claim
     // (a hard process death leaves it to expire instead) and surface the real error.
     await releaseClaim(db, item.id, now, token);

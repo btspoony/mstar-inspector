@@ -1403,11 +1403,17 @@ export const zhCN: Dictionary = {
       continueAction: "继续",
       verifyAction: "校验",
       stopAction: "停止",
-      resetAction: "重置",
+      /** 进行中的运行唯一的出口：状态行回到待开始。 */
+      resetAction: "回到待开始",
+      /** 失败项唯一的恢复动作，以及它不会撤销什么。 */
+      restartAction: "重新开始升级",
+      restartConsequence: "已迁移的行不会回滚。",
+      /** 预检计数全为零：再跑也不会移动任何行。 */
+      nothingToMigrate: "无可迁移数据 — 此升级已无待处理内容。",
       preflightFailed: "无法为 {title} 执行预检。",
       stepFailed: "{title} 的批次被拒绝。",
       verifyFailed: "无法校验 {title}。",
-      resetFailed: "无法重置 {title}。",
+      resetFailed: "无法将 {title} 移回待开始。",
       emptyTitle: "没有数据升级",
       emptyDescription: "此部署没有注册任何数据迁移。",
     },

@@ -495,6 +495,8 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
 export const repoBackfill: DataUpgradeItem = {
   id: "repo-backfill",
   title: "Repository identity backfill",
+  impact:
+    "Merges duplicate review targets into one per repository and repoints their pull requests, reviews, findings and failures onto it, deleting the duplicate pull request rows a PR leaves behind on both sides. Never deletes reviews, findings or failures.",
   requiresDowntime: true,
   order: 10,
 
@@ -543,7 +545,13 @@ export const repoBackfill: DataUpgradeItem = {
     };
   },
 
-  /** ONE transaction per call; a replay over migrated rows processes nothing. */
+  /**
+   * ONE transaction per call; a replay over migrated rows processes nothing.
+   *
+   * No `actor`: the only target this item creates inherits the D22 winner's
+   * `created_by` (spec B5 — the merged row keeps that winner's configuration),
+   * so naming the operator would misattribute a historical row.
+   */
   async runBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise<UpgradeBatch> {
     const plan = await planBatch(db, cursor);
     if (plan.statements.length > 0) await db.batch(plan.statements);

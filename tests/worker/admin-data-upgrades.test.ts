@@ -46,6 +46,7 @@ function fixtureItem(overrides: Partial<DataUpgradeItem> = {}): DataUpgradeItem 
   return {
     id: ITEM_ID,
     title: "fixture upgrade",
+    impact: "Flips fixture flag rows. Never deletes a flag.",
     requiresDowntime: false,
     order: 1,
     async preflight(db: DashboardD1) {
@@ -281,10 +282,10 @@ describe("the data-upgrade runner", () => {
     // Hold the first batch in flight so the second request provably overlaps it.
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
+      async runBatch(dbApi, cursor, actor) {
         entered.resolve();
         await release.promise;
-        return inner.runBatch(dbApi, cursor);
+        return inner.runBatch(dbApi, cursor, actor);
       },
     });
 
@@ -315,8 +316,8 @@ describe("the data-upgrade runner", () => {
     // write: a successor now holds the row under its own token.
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
-        const batch = await inner.runBatch(dbApi, cursor);
+      async runBatch(dbApi, cursor, actor) {
+        const batch = await inner.runBatch(dbApi, cursor, actor);
         db.raw
           .prepare("UPDATE operator_data_upgrades SET started_at = ?, claim_token = ? WHERE id = ?")
           .run(successorStamp, "claim-successor", ITEM_ID);
@@ -350,9 +351,9 @@ describe("the data-upgrade runner", () => {
     let failing = true;
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
+      async runBatch(dbApi, cursor, actor) {
         if (failing) throw new Error("batch exploded");
-        return inner.runBatch(dbApi, cursor);
+        return inner.runBatch(dbApi, cursor, actor);
       },
     });
 
@@ -371,10 +372,10 @@ describe("the data-upgrade runner", () => {
     const inner = fixtureItem();
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
+      async runBatch(dbApi, cursor, actor) {
         entered.resolve();
         await release.promise;
-        return inner.runBatch(dbApi, cursor);
+        return inner.runBatch(dbApi, cursor, actor);
       },
     });
 
@@ -672,10 +673,10 @@ describe("the data-upgrade runner", () => {
     const inner = fixtureItem();
     register({
       ...inner,
-      async runBatch(dbApi, cursor) {
+      async runBatch(dbApi, cursor, actor) {
         // The claim is in flight while the batch runs: a token names it.
         expect(claimToken(db)).not.toBeNull();
-        return inner.runBatch(dbApi, cursor);
+        return inner.runBatch(dbApi, cursor, actor);
       },
     });
 
@@ -691,13 +692,33 @@ describe("the data-upgrade routes", () => {
     const res = await api(db, "GET", "/api/data-upgrades");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      upgrades: Array<{ id: string; state: { status: string }; preflight: Record<string, number> }>;
+      upgrades: Array<{
+        id: string;
+        impact: string;
+        state: { status: string };
+        preflight: Record<string, number>;
+      }>;
     };
-    // The shipped registry renders beside the fixture item: `repo-backfill`.
-    expect(body.upgrades.map((item) => item.id).sort()).toEqual(["fixture-upgrade", "repo-backfill"]);
+    // The shipped registry renders beside the fixture item: both shipped items.
+    expect(body.upgrades.map((item) => item.id).sort()).toEqual([
+      "fixture-upgrade",
+      "orphan-ledger-attribution",
+      "repo-backfill",
+    ]);
     const listed = body.upgrades.find((item) => item.id === ITEM_ID)!;
     expect(listed.state.status).toBe("pending");
     expect(listed.preflight).toEqual({ pending: 2 });
+    // The card's impact line comes from the item, never from the console.
+    expect(listed.impact).toBe("Flips fixture flag rows. Never deletes a flag.");
+    // Both shipped items state what they change AND what they never touch.
+    // The backfill DOES drop duplicate `pull_requests` rows, so its card may
+    // never claim it deletes no ledger row (spec B13).
+    const backfill = body.upgrades.find((item) => item.id === "repo-backfill")!.impact;
+    expect(backfill).not.toContain("Never deletes a ledger row.");
+    expect(backfill).toContain("Never deletes reviews, findings or failures.");
+    expect(body.upgrades.find((item) => item.id === "orphan-ledger-attribution")!.impact).toContain(
+      "Never rewrites a row that already has one.",
+    );
   });
 
   test("an unknown id is a 404 and a non-operator sees the namespace 404", async () => {

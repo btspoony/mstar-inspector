@@ -796,6 +796,8 @@ export type DataUpgradeCounts = Record<string, number>;
 export type DataUpgradeRow = {
   id: string;
   title: string;
+  /** The item's own statement of which rows it changes and never touches. */
+  impact: string;
   /** The item refuses a second batch while the maintenance window is off. */
   requiresDowntime: boolean;
   state: DataUpgradeState;
@@ -844,6 +846,7 @@ export async function readDataUpgrades(): Promise<DataUpgradeRow[]> {
   return list(body.upgrades, "upgrades").map((row) => ({
     id: text(row, "id"),
     title: text(row, "title"),
+    impact: text(row, "impact"),
     requiresDowntime: bool(row, "requiresDowntime"),
     state: upgradeState(row.state),
     preflight: upgradeCounts(row.preflight, "preflight"),
