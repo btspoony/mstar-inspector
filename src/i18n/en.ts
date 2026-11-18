@@ -226,6 +226,12 @@ export const en = {
       alreadyAdded: "Added",
       degraded: "Some installations could not be read — this list may be incomplete.",
       duplicates: "Already added: {names}",
+      searchLabel: "Filter repositories",
+      /** Empty query with more rows than the dialog mounts. {total} = all, {cap} = rows shown. */
+      capped: "{total} repositories — showing the first {cap}.",
+      /** A query's answer size. {count} = matches, {total} = all repositories. */
+      matchCount: "{count} of {total} repositories match.",
+      noMatch: 'No repository matches "{query}".',
       confirm: "Add",
     },
   },
