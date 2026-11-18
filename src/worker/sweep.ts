@@ -23,10 +23,12 @@
  *
  * The alert posts AT MOST ONCE PER SWEEP WINDOW, and the de-bounce is an AUDIT
  * WINDOW rather than stored state: before posting, the sweep reads the most
- * recent `platform_audit_events` row with action `alert.failure_paging`
- * (compass D17) and posts nothing while that stamp is inside
- * `SWEEP_WINDOW_HOURS`; a 2xx POST appends the row. Nothing is ever latched, so
- * a breaching window with no recent alert always pages — a missed alert is
+ * recent `platform_audit_events` row for the lane's own action —
+ * `alert.failure_paging` (compass D17) for infrastructure, and
+ * `alert.maintenance_deferred` for the maintenance signal — and posts nothing
+ * while that stamp is inside `SWEEP_WINDOW_HOURS`; a 2xx POST appends the row.
+ * Two actions, so neither lane can silence the other. Nothing is ever latched,
+ * so a breaching window with no recent alert always pages — a missed alert is
  * structurally impossible, and the price is that two sweeps overlapping inside
  * one window may each post once. A failed read or an unparseable stamp is "no
  * recent alert" (the post it might suppress is the one that matters); a failed
@@ -269,13 +271,15 @@ const MAINTENANCE_DEFERRED_COUNT_SQL = `SELECT COUNT(*) AS count FROM review_fai
 
 /**
  * The audit-window de-bounce is ONE read plus ONE append against
- * `platform_audit_events` (compass D17): `alert.failure_paging` rows record
- * delivered alerts, and the newest stamp inside `SWEEP_WINDOW_HOURS` suppresses
- * the POST. There is no stored latch and no generation — a breaching window
- * with no recent alert always pages, and two concurrent sweeps may each post
- * once. The ledger (migrations/0033_platform_admin.sql) is append-only and
- * platform-scoped, which is exactly the shape a "was it already announced"
- * question needs. The writer is the sweep itself, so the actor is `sweep`.
+ * `platform_audit_events` (compass D17), per lane: `alert.failure_paging` rows
+ * record delivered infrastructure alerts and `alert.maintenance_deferred` rows
+ * record the maintenance signal, and the newest stamp for that action inside
+ * `SWEEP_WINDOW_HOURS` suppresses the POST. There is no stored latch and no
+ * generation — a due window with no recent alert always alerts, and two
+ * concurrent sweeps may each post once. The ledger
+ * (migrations/0033_platform_admin.sql) is append-only and platform-scoped,
+ * which is exactly the shape a "was it already announced" question needs. The
+ * writer is the sweep itself, so the actor is `sweep`.
  */
 export type SweepDeps = {
   /** Alert webhook URL (env `ALERT_WEBHOOK_URL`); absent/empty = log-only. */
@@ -303,8 +307,8 @@ export type SweepResult = {
   invitesExpired: number | null;
   /**
    * Webhook disposition: absent (unset), posted, failed (throw or non-2xx,
-   * warn-logged), or not_attempted (no breach, or an alert already recorded
-   * inside the sweep window — at most one post per window).
+   * warn-logged), or not_attempted (nothing due, or every due lane already
+   * recorded inside the sweep window — at most one post per window).
    */
   webhook: "absent" | "posted" | "failed" | "not_attempted";
 };
@@ -313,16 +317,28 @@ export type SweepResult = {
 export const ALERT_PAGING_AUDIT_ACTION = "alert.failure_paging";
 
 /**
- * The newest recorded paging alert, as epoch milliseconds, or `null` when the
- * ledger holds none. A read that throws or a stamp `Date.parse` cannot read is
- * "no recent alert": the post it might suppress is the one that matters, so the
- * caller logs and pages. Never throws.
+ * The audit action that records a delivered maintenance alert. Its own action,
+ * so each lane's window is independent: a paging alert never suppresses the
+ * maintenance alert and vice versa.
  */
-async function readLastAlertAt(db: D1Like, log: SweepLog, alertUrl?: string): Promise<number | null> {
+export const ALERT_MAINTENANCE_AUDIT_ACTION = "alert.maintenance_deferred";
+
+/**
+ * The newest alert recorded under `action`, as epoch milliseconds, or `null`
+ * when the ledger holds none. A read that throws or a stamp `Date.parse` cannot
+ * read is "no recent alert": the post it might suppress is the one that
+ * matters, so the caller logs and alerts. Never throws.
+ */
+async function readLastAlertAt(
+  db: D1Like,
+  action: string,
+  log: SweepLog,
+  alertUrl?: string,
+): Promise<number | null> {
   try {
     const row = await db
       .prepare(`SELECT MAX(created_at) AS at FROM platform_audit_events WHERE action = ?`)
-      .bind(ALERT_PAGING_AUDIT_ACTION)
+      .bind(action)
       .first<{ at: string | null }>();
     if (row?.at == null) return null;
     const at = Date.parse(row.at);
@@ -345,13 +361,15 @@ async function readLastAlertAt(db: D1Like, log: SweepLog, alertUrl?: string): Pr
 
 /**
  * Record a delivered alert. The POST already succeeded, so a storage failure
- * here only means the next breaching sweep may post once more: it is logged and
- * never changes the POST outcome. The detail carries the same numbers the
- * payload did, which is what makes the ledger row a usable record on its own.
+ * here only means the next sweep may post once more: it is logged and never
+ * changes the POST outcome. `detail` carries the same numbers the payload sent
+ * under that action, which is what makes the ledger row a usable record alone.
  */
 async function appendAlertAudit(
   db: D1Like,
-  alert: SweepAlertFields,
+  action: string,
+  targetId: string,
+  detail: Record<string, unknown>,
   log: SweepLog,
   alertUrl?: string,
 ): Promise<void> {
@@ -362,18 +380,12 @@ async function appendAlertAudit(
            (id, actor_login, action, target_type, target_id, detail_json, created_at)
          VALUES (?, 'sweep', ?, 'sweep', ?, ?, ?)`,
       )
-      .bind(
-        crypto.randomUUID(),
-        ALERT_PAGING_AUDIT_ACTION,
-        "failure_paging",
-        JSON.stringify({ failures_24h: alert.failures_24h, stages: alert.stages }),
-        new Date().toISOString(),
-      )
+      .bind(crypto.randomUUID(), action, targetId, JSON.stringify(detail), new Date().toISOString())
       .run();
   } catch (error) {
     log.warn(
       { event: "ops_sweep_alert_audit_failed", detail: warnDetail(error, alertUrl) },
-      "paging alert audit row not written — the next sweep may alert again",
+      "alert audit row not written — the next sweep may alert again",
     );
   }
 }
@@ -388,11 +400,11 @@ async function appendAlertAudit(
  * errors DO propagate to the caller (the `scheduled` handler wraps the whole
  * sweep in try/catch).
  *
- * The infrastructure decision composes the alert body and sets the webhook
- * disposition; the body is delivered and the function returns once, at the
- * bottom. A separate lane whose signal must not be skipped by a healthy
- * infrastructure total (the maintenance-window existence signal) joins between
- * those two points, so this function never returns early after the read.
+ * The infrastructure decision and the maintenance-signal decision each set a
+ * due flag from their OWN audit window; the body is composed and delivered once
+ * for whichever lanes are due, and the function returns once, at the bottom. A
+ * healthy infrastructure total never short-circuits the maintenance lane, and a
+ * deferral never joins `failures_24h`.
  */
 export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepResult> {
   const log = deps.log ?? defaultSweepLog;
@@ -548,46 +560,46 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // The infrastructure decision only SETS the disposition and, when it owes a
   // page, composes the alert body; delivery and the single exit are below.
   let webhook: SweepResult["webhook"] = "not_attempted";
-  // At most one page per sweep window (compass D17). `let` because the
-  // maintenance lane below may merge its key into the same body.
-  let alert: SweepAlertFields | null = null;
+  const nowMs = Date.now();
+  const windowMs = SWEEP_WINDOW_HOURS * 3_600_000;
+  // Each lane de-bounces on its OWN audit action, so neither can silence the
+  // other: a paging alert never suppresses the maintenance alert. A stamp only
+  // suppresses when it is in the past and inside the trailing window — a
+  // clock-ahead row is not evidence of a delivered alert.
+  let pagingDue = false;
   if (thresholdBreached) {
     // Read the window BEFORE the POST: the newest recorded alert suppresses
     // this one. Nothing is latched, so a window with no recent row always
     // pages; the cost of overlapping sweeps is one bounded duplicate.
-    // Both sides bounded: the stamp must be in the past and inside the trailing
-    // window. A clock-ahead row is not evidence of a delivered alert, so it never
-    // suppresses the page.
-    const lastAlertAt = await readLastAlertAt(db, log, deps.alertUrl);
-    const nowMs = Date.now();
-    const windowMs = SWEEP_WINDOW_HOURS * 3_600_000;
-    const announced =
-      lastAlertAt !== null && lastAlertAt < nowMs && nowMs - lastAlertAt < windowMs;
-    if (!announced) {
-      alert = {
-        event: "ops_sweep_alert",
-        failures_24h: failures24h,
-        dlq_check: "skipped",
-        thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
-        stages,
-      };
-    }
+    const lastAlertAt = await readLastAlertAt(db, ALERT_PAGING_AUDIT_ACTION, log, deps.alertUrl);
+    pagingDue = lastAlertAt === null || lastAlertAt >= nowMs || nowMs - lastAlertAt >= windowMs;
   }
-  // The maintenance existence signal joins HERE: it extends an infrastructure
-  // body with its own key so both alerts travel in ONE POST, and it never adds
-  // to `failures_24h` or the paging decision — a deferral is the platform's own
-  // state, not an infra incident. Neither decision may return above this point.
-  if (alert !== null && maintenanceDeferred > 0) {
-    alert = { ...alert, maintenanceDeferred };
+  // The maintenance existence signal joins HERE, on its own action and window:
+  // a healthy infrastructure total cannot skip it, and it never adds to
+  // `failures_24h` or the paging decision.
+  let maintenanceDue = false;
+  if (maintenanceDeferred > 0) {
+    const lastAlertAt = await readLastAlertAt(db, ALERT_MAINTENANCE_AUDIT_ACTION, log, deps.alertUrl);
+    maintenanceDue = lastAlertAt === null || lastAlertAt >= nowMs || nowMs - lastAlertAt >= windowMs;
   }
-  if (alert !== null) {
-    log.warn(alert, "review failure threshold breached");
+  if (pagingDue || maintenanceDue) {
+    // ONE body for both lanes: when both are due they travel in a single POST,
+    // each key still describing its own signal.
+    const alert: SweepAlertFields = {
+      event: "ops_sweep_alert",
+      failures_24h: failures24h,
+      dlq_check: "skipped",
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+      stages,
+      ...(maintenanceDeferred > 0 ? { maintenanceDeferred } : {}),
+    };
+    log.warn(alert, pagingDue ? "review failure threshold breached" : "maintenance deferrals in window");
     if (!deps.alertUrl) {
       webhook = "absent";
     } else {
-      // POST FIRST, append the audit row only for a delivered alert. A row
+      // POST FIRST, append the audit rows only for a delivered alert. A row
       // written before the POST would let a terminated invocation suppress the
-      // only alert this breach ever sends; one written after a 2xx can at worst
+      // only alert this window ever sends; one written after a 2xx can at worst
       // repeat an alert next sweep, which is the permitted duplication.
       // An arrow over a globalThis property call, never the bare `fetch` reference:
       // calling a stored reference loses the global receiver and workerd's native
@@ -607,9 +619,28 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           throw new Error(`alert webhook POST returned HTTP ${response.status}`);
         }
         webhook = "posted";
-        // The alert IS delivered; only now is it recorded. The append never
-        // changes this disposition.
-        await appendAlertAudit(db, alert, log, deps.alertUrl);
+        // The alert IS delivered; only now is each due lane recorded, under its
+        // own action. An append never changes this disposition.
+        if (pagingDue) {
+          await appendAlertAudit(
+            db,
+            ALERT_PAGING_AUDIT_ACTION,
+            "failure_paging",
+            { failures_24h: alert.failures_24h, stages: alert.stages },
+            log,
+            deps.alertUrl,
+          );
+        }
+        if (maintenanceDue) {
+          await appendAlertAudit(
+            db,
+            ALERT_MAINTENANCE_AUDIT_ACTION,
+            "maintenance_deferred",
+            { maintenanceDeferred },
+            log,
+            deps.alertUrl,
+          );
+        }
       } catch (error) {
         // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
         // request URL into the error message; `warnDetail` redacts and caps it.
@@ -621,7 +652,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           "alert webhook POST failed — log-only alert stands",
         );
         // Nothing is recorded, so the window still counts as unannounced and
-        // the next breaching sweep retries.
+        // the next sweep retries.
         webhook = "failed";
       }
     }

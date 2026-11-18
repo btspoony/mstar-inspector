@@ -16,6 +16,7 @@ import type { Database } from "bun:sqlite";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
+  ALERT_MAINTENANCE_AUDIT_ACTION,
   ALERT_PAGING_AUDIT_ACTION,
   runSweep,
   SWEEP_FAILURE_THRESHOLD,
@@ -621,7 +622,12 @@ describe("runSweep", () => {
     const { log, calls } = captureLog();
     const result = await runSweep(db, { log });
     expect(result.failures24h).toBe(1);
-    expect(calls).toHaveLength(0);
+    // The deferral posts on its own (its own lane), but never as infrastructure:
+    // the total and the breakdown are the sandbox row alone.
+    const alert = calls[0]!.fields as SweepAlertFields;
+    expect(alert.failures_24h).toBe(1);
+    expect(alert.stages).toEqual([{ stage: "sandbox", count: 1 }]);
+    expect(alert.maintenanceDeferred).toBe(1);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
   });
 
@@ -1023,6 +1029,148 @@ describe("runSweep — paging audit window", () => {
     const breach = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
     expect(breach.webhook).toBe("posted");
     expect(calls()).toBe(1);
+  });
+});
+
+/**
+ * The maintenance lane's own audit window (`alert.maintenance_deferred`): a
+ * deferral posts on its own even when infrastructure is healthy, de-bounces on
+ * its OWN action, and shares one POST with a simultaneous infrastructure breach.
+ */
+describe("runSweep — maintenance audit window", () => {
+  function auditRows(db: TestD1, action: string): Array<{ detail_json: string }> {
+    return db.raw
+      .query("SELECT detail_json FROM platform_audit_events WHERE action = ? ORDER BY created_at")
+      .all(action) as Array<{ detail_json: string }>;
+  }
+
+  function seedAudit(db: TestD1, action: string, targetId: string, at: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO platform_audit_events
+           (id, actor_login, action, target_type, target_id, detail_json, created_at)
+         VALUES (?, 'sweep', ?, 'sweep', ?, '{}', ?)`,
+      )
+      .run(crypto.randomUUID(), action, targetId, at);
+  }
+
+  async function seedDeferral(db: TestD1): Promise<void> {
+    await createFailureStore(db).record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
+  }
+
+  /** A sink that accepts every POST, recording each body it was sent. */
+  function sink(): { fetchImpl: typeof fetch; bodies: () => string[] } {
+    const bodies: string[] = [];
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    return { fetchImpl, bodies: () => bodies };
+  }
+
+  test("a deferral alone posts with a healthy infrastructure total", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    const { fetchImpl, bodies } = sink();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    expect(result).toMatchObject({ failures24h: 0, thresholdBreached: false, webhook: "posted" });
+    expect(bodies()).toHaveLength(1);
+    expect(JSON.parse(bodies()[0]!)).toEqual({
+      event: "ops_sweep_alert",
+      failures_24h: 0,
+      dlq_check: "skipped",
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+      stages: [],
+      maintenanceDeferred: 1,
+    });
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+    expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(0);
+  });
+
+  test("a deferral inside the maintenance window does not post again", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    const { fetchImpl, bodies } = sink();
+    const log = captureLog().log;
+
+    const start = Date.parse("2026-01-01T00:00:00.000Z");
+    jest.useFakeTimers();
+    jest.setSystemTime(start);
+    try {
+      const first = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(first.webhook).toBe("posted");
+      expect(bodies()).toHaveLength(1);
+
+      jest.setSystemTime(start + 60_000);
+      const second = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(second).toMatchObject({ thresholdBreached: false, webhook: "not_attempted" });
+      expect(bodies()).toHaveLength(1);
+      expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("a paging alert does not suppress the maintenance alert in the same sweep", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, bodies } = sink();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    expect(result.webhook).toBe("posted");
+    // ONE POST carrying both keys, each describing its own signal.
+    expect(bodies()).toHaveLength(1);
+    expect(JSON.parse(bodies()[0]!)).toEqual({
+      event: "ops_sweep_alert",
+      failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
+      dlq_check: "skipped",
+      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+      stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      maintenanceDeferred: 1,
+    });
+    // Each due lane records under its own action.
+    expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(1);
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+  });
+
+  test("an already-latched paging lane leaves the maintenance lane to post alone", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    seedAudit(db, ALERT_PAGING_AUDIT_ACTION, "failure_paging", new Date(Date.now() - 3_600_000).toISOString());
+    const { fetchImpl, bodies } = sink();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+    expect(bodies()).toHaveLength(1);
+    // One fixed payload shape: `failures_24h`/`stages` keep meaning
+    // infrastructure-only even when this POST is owed by the maintenance lane.
+    expect(JSON.parse(bodies()[0]!)).toMatchObject({
+      failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
+      maintenanceDeferred: 1,
+    });
+    // The latched paging lane writes no second row; only maintenance is recorded.
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
+    expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(1);
+  });
+
+  test("a failed maintenance POST records nothing, so the next sweep retries", async () => {
+    const db = failureDb();
+    await seedDeferral(db);
+    const log = captureLog().log;
+    const rejecting = (async () => new Response("sink degraded", { status: 503 })) as unknown as typeof fetch;
+
+    const failed = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl: rejecting, log });
+    expect(failed.webhook).toBe("failed");
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(0);
+
+    const { fetchImpl, bodies } = sink();
+    const retried = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(retried.webhook).toBe("posted");
+    expect(bodies()).toHaveLength(1);
+    expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
   });
 });
 
