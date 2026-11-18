@@ -530,12 +530,15 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
         expect(dispatch.out, "deploy.yml: a dispatch skip must name the trigger").toContain("workflow_dispatch");
 
         // ... but a dispatch that NAMES a base runs the gate instead of
-        // skipping it: the scratch tree is no repository, so the script
-        // refuses — a failing gate, never a silent pass.
+        // skipping it. The scratch tree has neither a git repository nor a
+        // config, so the gate refuses on the first fact it cannot read — a
+        // failing gate, never a silent pass. Which fact is named first is the
+        // script's ordering, not this workflow's contract.
         const withBase = ran("workflow_dispatch", "", "f".repeat(40));
         expect(withBase.code, `deploy.yml: a dispatch with a base must evaluate\n${withBase.out}`).toBe(1);
-        expect(withBase.out, "deploy.yml: the recovery must run the gate").toContain(
-          "image-gate-base-unreachable",
+        expect(withBase.out, "deploy.yml: the recovery must run the gate").toContain("::error::");
+        expect(withBase.out, "deploy.yml: an unreadable tree is never a pass").toContain(
+          "treat as unverified, not a pass",
         );
 
         const firstPush = ran("push", "0".repeat(40), "");

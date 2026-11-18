@@ -17,15 +17,19 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   changedFamilies,
+  collectImageInputPaths,
   containerSignature,
   evaluateImageGate,
   familyPattern,
+  familyRoot,
+  imageInputFingerprint,
   imageRebuildInstruction,
   IMAGE_INPUT_FAMILIES,
   readDockerfilePaths,
+  readImageInputsMarker,
   resolveBase,
   touchesImageInput,
-  touchesRebuildMarker,
+  withImageInputsMarker,
 } from "./check-image-inputs";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -71,7 +75,7 @@ describe("image input vocabulary parity", () => {
   test("AGENTS.md, docs/deploy.md and the gate declare the same families", () => {
     const agents = documentedFamilies(
       readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8"),
-      "Touch the `# rebuild:` marker block",
+      "of everything the image is built from:",
       "\nCheck before merging",
     );
     const deploy = documentedFamilies(
@@ -121,7 +125,8 @@ describe("image input vocabulary parity", () => {
     expect(readDockerfilePaths(readFileSync(join(REPO_ROOT, "wrangler.smoke.jsonc"), "utf8"))).toEqual(
       configured,
     );
-    expect(readFileSync(join(REPO_ROOT, configured[0]!), "utf8")).toContain("rebuild:");
+    // The configured file is the one the gate reads the fingerprint line from.
+    expect(readFileSync(join(REPO_ROOT, configured[0]!), "utf8")).toContain("# image-inputs:");
   });
 
   test("a config without a container image answers no paths instead of a guessed one", () => {
@@ -148,79 +153,119 @@ describe("image input vocabulary parity", () => {
   });
 });
 
+describe("imageInputFingerprint", () => {
+  const block = '[{"name":"c","images":{}}]';
+  const file = (path: string, content = "export const x = 1;\n") => ({ path, content });
+
+  test("the same tree hashes the same, whatever order it is listed in", () => {
+    const a = imageInputFingerprint([file("a.ts"), file("b.ts", "x\n")], block);
+    const b = imageInputFingerprint([file("b.ts", "x\n"), file("a.ts")], block);
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  test("a path rename, a content edit and a container-block edit each move it", () => {
+    const base = imageInputFingerprint([file("a.ts")], block);
+    // Same bytes at a new path: the deploy copies a different tree.
+    expect(imageInputFingerprint([file("renamed.ts")], block)).not.toBe(base);
+    expect(imageInputFingerprint([file("a.ts", "export const x = 2;\n")], block)).not.toBe(base);
+    expect(imageInputFingerprint([file("a.ts")], '[{"name":"c","images":{"sandbox":{}}}]')).not.toBe(
+      base,
+    );
+  });
+
+  test("CRLF is the same file as LF, so a Windows checkout cannot force a rebuild", () => {
+    expect(imageInputFingerprint([file("a.ts", "one\ntwo\n")], block)).toBe(
+      imageInputFingerprint([file("a.ts", "one\r\ntwo\r\n")], block),
+    );
+  });
+});
+
+describe("the recorded fingerprint line", () => {
+  test("a Dockerfile with no line records nothing; a malformed one is not a record", () => {
+    expect(readImageInputsMarker("FROM scratch\n")).toBeUndefined();
+    expect(readImageInputsMarker("# image-inputs: not-a-hash\nFROM scratch\n")).toBeUndefined();
+    expect(readImageInputsMarker("# image-inputs:  deadbeef\n")).toBe("deadbeef");
+  });
+
+  test("writing replaces the existing line in place instead of accumulating lines", () => {
+    const once = withImageInputsMarker("FROM scratch\n# image-inputs: aaaa\n", "bbbb");
+    expect(once).toBe("FROM scratch\n# image-inputs: bbbb\n");
+    expect(withImageInputsMarker(once, "cccc")).toBe("FROM scratch\n# image-inputs: cccc\n");
+  });
+
+  test("a Dockerfile without the line gets exactly one, and nothing else moves", () => {
+    const written = withImageInputsMarker("FROM scratch\nRUN true\n", "ffff");
+    expect(written).toBe("# image-inputs: ffff\nFROM scratch\nRUN true\n");
+    expect(readImageInputsMarker(written)).toBe("ffff");
+  });
+
+  test("the committed Dockerfile records the tree it ships, and only that line mentions it", () => {
+    const dockerfile = readFileSync(join(REPO_ROOT, "sandbox-image", "Dockerfile"), "utf8");
+    expect(readImageInputsMarker(dockerfile)).toMatch(/^[0-9a-f]{32}$/);
+    // The retired convention: a human-written changelog entry per change.
+    expect(dockerfile).not.toMatch(/^\s*#\s*rebuild:/m);
+  });
+});
+
 describe("image gate", () => {
-  test("a runner source change without a marker change fails", () =>
-    expect(evaluateImageGate(["packages/runner/src/index.ts"], "", false)).toEqual({
+  const FP = "0123456789abcdef0123456789abcdef";
+
+  test("a Dockerfile recording the tree's own value passes", () =>
+    expect(evaluateImageGate(FP, FP)).toEqual({ ok: true, fingerprint: FP }));
+
+  test("a stale record fails, naming what it recorded and what the tree hashes to", () =>
+    expect(evaluateImageGate("aaaa", FP, ["packages/runner/src/**"])).toEqual({
       ok: false,
-      reason: "image-input-without-marker",
+      reason: "image-inputs-stale",
+      fingerprint: FP,
+      recorded: "aaaa",
       families: ["packages/runner/src/**"],
     }));
 
-  test("the same change with a rebuild marker diff passes", () =>
+  test("a Dockerfile that records nothing is stale, not exempt", () =>
+    expect(evaluateImageGate(undefined, FP)).toEqual({
+      ok: false,
+      reason: "image-inputs-stale",
+      fingerprint: FP,
+      recorded: undefined,
+      families: [],
+    }));
+
+  test("the verdict does not depend on the base diff: families are the message only", () => {
+    // A first push, a squashed base, an unreadable range — the fingerprint
+    // already decided, so a missing family list still fails.
+    expect(evaluateImageGate("aaaa", FP).ok).toBe(false);
+    expect(evaluateImageGate(FP, FP).ok).toBe(true);
+  });
+});
+
+describe("the input set the fingerprint covers", () => {
+  test("the Dockerfiles are excluded, or writing the line would invalidate it", () => {
+    const listed = [
+      "packages/runner/src/index.ts",
+      "sandbox-image/Dockerfile",
+      "sandbox-image/Prod.Dockerfile",
+      ".dockerignore",
+      "docs/deploy.md",
+    ];
     expect(
-      evaluateImageGate(["packages/runner/src/index.ts"], "+# rebuild: runner source change", false),
-    ).toEqual({ ok: true }));
-
-  test("a docs-only change passes", () =>
-    expect(evaluateImageGate(["docs/deploy.md"], "", false)).toEqual({ ok: true }));
-
-  test("a sandbox-image shim change fails without the marker", () =>
-    expect(evaluateImageGate(["sandbox-image/entry.sh"], "", false)).toEqual({
-      ok: false,
-      reason: "image-input-without-marker",
-      families: ["sandbox-image/**"],
-    }));
-
-  test("a verify-synthesis.sh change alone fails without the marker", () =>
-    expect(evaluateImageGate(["packages/runner/verify-synthesis.sh"], "", false)).toEqual({
-      ok: false,
-      reason: "image-input-without-marker",
-      families: ["packages/runner/verify-synthesis.sh"],
-    }));
-
-  test("a Dockerfile change that does not touch the marker fails", () =>
-    expect(evaluateImageGate(["sandbox-image/Dockerfile"], "-FROM old\n+FROM new", false)).toEqual({
-      ok: false,
-      reason: "image-input-without-marker",
-      families: ["sandbox-image/**"],
-    }));
-
-  test("the verdict names only the families the diff touches", () =>
-    // The whole vocabulary printed for every failure tells an operator nothing
-    // about which input moved; the verdict carries the diff-derived subset.
-    expect(
-      evaluateImageGate(
-        ["packages/runner/src/pipeline/sandbox.ts", ".dockerignore", "docs/deploy.md"],
-        "",
-        false,
+      collectImageInputPaths(
+        () => listed,
+        ["packages", "sandbox-image"],
+        ["sandbox-image/Dockerfile", "sandbox-image/Prod.Dockerfile"],
       ),
-    ).toEqual({
-      ok: false,
-      reason: "image-input-without-marker",
-      families: ["packages/runner/src/**", ".dockerignore"],
-    }));
+    ).toEqual([".dockerignore", "packages/runner/src/index.ts"]);
+  });
 
-  test("a container-block change alone fails without the marker", () =>
-    // No copied path changed, but the image a deploy builds did.
-    expect(evaluateImageGate([], "", true)).toEqual({
-      ok: false,
-      reason: "image-input-without-marker",
-      families: ["wrangler.jsonc containers block"],
-    }));
-
-  test("a config path override names that file's container block", () =>
-    expect(evaluateImageGate([], "", true, "wrangler.staging.jsonc")).toEqual({
-      ok: false,
-      reason: "image-input-without-marker",
-      families: ["wrangler.staging.jsonc containers block"],
-    }));
-
-  test("a container-block change with the marker passes", () =>
-    expect(evaluateImageGate([], "+# rebuild: build context repointed", true)).toEqual({ ok: true }));
-
-  test("an unrelated wrangler.jsonc edit needs no marker", () =>
-    // `wrangler.jsonc` is not a family: a vars-only change cannot move the image.
-    expect(evaluateImageGate(["wrangler.jsonc"], "", false)).toEqual({ ok: true }));
+  test("the enumeration roots are the families' literal prefixes, never the repo root", () => {
+    expect(familyRoot("packages/runner/src/**")).toBe("packages/runner/src");
+    expect(familyRoot("packages/runner/package.json")).toBe("packages/runner/package.json");
+    expect(familyRoot("sandbox-image/**")).toBe("sandbox-image");
+    expect(familyRoot(".dockerignore")).toBe(".dockerignore");
+    // A leading wildcard has no literal prefix: the walk widens rather than miss.
+    expect(familyRoot("**/*.ts")).toBe(".");
+  });
 });
 
 describe("containerSignature", () => {
@@ -332,34 +377,6 @@ describe("touchesImageInput", () => {
     expect(single.test("sandbox-image/.sh")).toBe(false);
     expect(single.test("sandbox-image/ab.sh")).toBe(false);
   });
-});
-
-describe("touchesRebuildMarker", () => {
-  test("an added marker line counts", () =>
-    expect(touchesRebuildMarker("+# rebuild: new runner source")).toBe(true));
-
-  test("a removed marker line counts", () =>
-    expect(touchesRebuildMarker("-# rebuild: stale note")).toBe(true));
-
-  test("an indented comment marker still counts", () =>
-    expect(touchesRebuildMarker("+  # rebuild: indented marker")).toBe(true));
-
-  test("a comment marker with no space after the hash counts", () =>
-    expect(touchesRebuildMarker("-#rebuild: tight marker")).toBe(true));
-
-  test("prose that merely mentions the marker does not count", () =>
-    expect(touchesRebuildMarker("+# the rebuild: note moved to AGENTS.md")).toBe(false));
-
-  test("an instruction line echoing the marker text does not count", () =>
-    expect(touchesRebuildMarker('+RUN echo "rebuild: stale image" > /tmp/note')).toBe(false));
-
-  test("diff headers naming the file do not count", () =>
-    expect(touchesRebuildMarker("--- a/sandbox-image/Dockerfile\n+++ b/sandbox-image/Dockerfile")).toBe(
-      false,
-    ));
-
-  test("context lines and unrelated hunks do not count", () =>
-    expect(touchesRebuildMarker(" # rebuild: context only\n+FROM new")).toBe(false));
 });
 
 /** A throwaway repo whose only commits are the ones this test writes. */
@@ -514,68 +531,88 @@ describe("resolveBase", () => {
 describe("image gate CLI", () => {
   const script = join(import.meta.dir, "check-image-inputs.ts");
 
-  test("a rename out of an input family fails the gate", () => {
-    const { dir, git } = tempRepo();
+  /** A temp repo whose image inputs are committed and whose line is current. */
+  function seeded(): { dir: string; git: (...args: string[]) => string } {
+    const repo = tempRepo();
+    write(repo.dir, "sandbox-image/Dockerfile", "# image-inputs: 0000\nFROM scratch\n");
+    write(repo.dir, "packages/runner/src/index.ts");
+    repo.git("add", "-A");
+    repo.git("commit", "-qm", "image + inputs");
+    expect(runGate(repo.dir, repo.git("rev-parse", "HEAD~0"), script, "--write").code).toBe(0);
+    repo.git("add", "-A");
+    repo.git("commit", "-qm", "recorded fingerprint");
+    return repo;
+  }
+
+  test("a tree whose line records it passes, and so does an unchanged rerun", () => {
+    const { dir, git } = seeded();
     try {
-      write(dir, "packages/runner/src/moved.ts");
-      write(dir, "docs/notes.md", "notes\n");
-      git("add", "-A");
-      git("commit", "-qm", "add runner source");
       const base = git("rev-parse", "HEAD");
-
-      git("mv", "packages/runner/src/moved.ts", "docs/moved.ts");
-      git("commit", "-qm", "move it out of the image inputs");
-
-      expect(runGate(dir, base, script).code).toBe(1);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("a changed Dockerfile at the CONFIGURED path carries the marker and passes", () => {
-    const { dir, git } = tempRepo();
-    try {
-      write(dir, "sandbox-image/Dockerfile", "# rebuild: initial\nFROM scratch\n");
-      git("add", "-A");
-      git("commit", "-qm", "image");
-      const base = git("rev-parse", "HEAD");
-
-      write(dir, "sandbox-image/Dockerfile", "# rebuild: initial\n# rebuild: runner source changed\nFROM scratch\n");
-      git("add", "-A");
-      git("commit", "-qm", "marker");
-
+      const first = runGate(dir, base, script);
+      expect(first.code).toBe(0);
+      expect(first.out).toContain("recorded in");
       expect(runGate(dir, base, script).code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("a non-ASCII input path is matched despite Git quoting", () => {
-    const { dir, git } = tempRepo();
+  test("an input changed without re-recording fails, and `--write` repairs it", () => {
+    const { dir, git } = seeded();
     try {
-      write(dir, "docs/notes.md", "notes\n");
-      git("add", "-A");
-      git("commit", "-qm", "docs only");
       const base = git("rev-parse", "HEAD");
-
-      write(dir, "packages/runner/src/中文.ts");
+      write(dir, "packages/runner/src/index.ts", "export const changed = true;\n");
       git("add", "-A");
-      git("commit", "-qm", "non-ASCII runner source");
+      git("commit", "-qm", "touch an image input without the line");
 
-      expect(runGate(dir, base, script).code).toBe(1);
+      const stale = runGate(dir, base, script);
+      expect(stale.code).toBe(1);
+      expect(stale.out).toContain("::error::image-inputs-stale");
+      // The message names the changed family and the exact repair command.
+      expect(stale.out).toContain("- packages/runner/src/**");
+      expect(stale.out).toContain("--write");
+
+      expect(runGate(dir, base, script, "--write").code).toBe(0);
+      expect(runGate(dir, base, script).code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("a wrangler.jsonc edit outside the container block needs no marker", () => {
-    const { dir, git } = tempRepo();
+  test("a new image input file fails until it is recorded too", () => {
+    const { dir, git } = seeded();
     try {
-      git("add", "-A");
-      git("commit", "-qm", "config");
       const base = git("rev-parse", "HEAD");
+      write(dir, "packages/shared/src/added.ts");
+      git("add", "-A");
+      git("commit", "-qm", "new shared file");
 
-      // The container block is byte-for-byte the same; only deploy settings moved.
+      const { code, out } = runGate(dir, base, script);
+      expect(code).toBe(1);
+      expect(out).toContain("- packages/shared/src/**");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a non-ASCII input path is fingerprinted despite Git quoting", () => {
+    const { dir, git } = seeded();
+    try {
+      const base = git("rev-parse", "HEAD");
+      write(dir, "packages/runner/src/中文.ts");
+      git("add", "-A");
+      git("commit", "-qm", "non-ASCII runner source");
+      expect(runGate(dir, base, script).code).toBe(1);
+      expect(runGate(dir, base, script, "--write").code).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a wrangler.jsonc edit outside the container block moves nothing", () => {
+    const { dir, git } = seeded();
+    try {
+      const base = git("rev-parse", "HEAD");
       write(
         dir,
         "wrangler.jsonc",
@@ -583,207 +620,73 @@ describe("image gate CLI", () => {
       );
       git("add", "-A");
       git("commit", "-qm", "vars only");
-
       expect(runGate(dir, base, script).code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("a build_context repoint fails without the marker, and passes with it", () => {
-    const { dir, git } = tempRepo();
+  test("a build_context repoint fails until recorded, because the image it builds moved", () => {
+    const { dir, git } = seeded();
     try {
-      write(dir, "sandbox-image/Dockerfile", "# rebuild: initial\nFROM scratch\n");
-      git("add", "-A");
-      git("commit", "-qm", "config + image");
       const base = git("rev-parse", "HEAD");
-
-      const repointed =
-        '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile", "build_context": "." } } }]\n}\n';
-      write(dir, "wrangler.jsonc", repointed);
-      git("add", "-A");
-      git("commit", "-qm", "repoint the build context");
-      expect(runGate(dir, base, script).code).toBe(1);
-
       write(
         dir,
-        "sandbox-image/Dockerfile",
-        "# rebuild: initial\n# rebuild: build context repointed\nFROM scratch\n",
+        "wrangler.jsonc",
+        '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile", "build_context": "." } } }]\n}\n',
       );
       git("add", "-A");
-      git("commit", "-qm", "marker");
-      expect(runGate(dir, base, script).code).toBe(0);
+      git("commit", "-qm", "repoint the build context");
+
+      const { code, out } = runGate(dir, base, script);
+      expect(code).toBe(1);
+      expect(out).toContain("wrangler.jsonc containers block");
+      expect(runGate(dir, base, script, "--write").code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("an env.production-only image edit is gated against the production Dockerfile", () => {
-    const { dir, git } = tempRepo();
+  test("an env.production container block is recorded in the Dockerfile a prod deploy hashes", () => {
+    const { dir, git } = seeded();
     try {
-      // Production builds from its own container block and its own Dockerfile.
-      // The CLI diffs every configured Dockerfile together and accepts any
-      // `rebuild:` line in that diff, so a marker in either file passes.
       const config = (buildContext: string) =>
         '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile" } } }],\n' +
         `  "env": { "production": { "containers": [{ "name": "prod", "images": { "sandbox": { "dockerfile": "./sandbox-image/Prod.Dockerfile", "build_context": "${buildContext}" } } }] } }\n}\n`;
-      write(dir, "sandbox-image/Dockerfile", "# rebuild: staging\nFROM scratch\n");
-      write(dir, "sandbox-image/Prod.Dockerfile", "# rebuild: production\nFROM scratch\n");
+      write(dir, "sandbox-image/Prod.Dockerfile", "FROM scratch\n");
       write(dir, "wrangler.jsonc", config("."));
       git("add", "-A");
-      git("commit", "-qm", "config + both images");
+      git("commit", "-qm", "production image");
+      // Both configured files carry the same value.
+      expect(runGate(dir, dir, script, "--write").code).toBe(0);
+      git("add", "-A");
+      git("commit", "-qm", "recorded in both");
       const base = git("rev-parse", "HEAD");
 
-      // No copied path changed: the container signature is the only signal.
       write(dir, "wrangler.jsonc", config("./sandbox-image"));
       git("add", "-A");
       git("commit", "-qm", "repoint only the production build context");
       expect(runGate(dir, base, script).code).toBe(1);
-
-      // Marked in the production file: either file's marker line clears the
-      // gate, and this is the file the production deploy hashes.
-      write(dir, "sandbox-image/Prod.Dockerfile", "# rebuild: production\n# rebuild: prod context\nFROM scratch\n");
-      git("add", "-A");
-      git("commit", "-qm", "production marker");
-      expect(runGate(dir, base, script).code).toBe(0);
+      expect(runGate(dir, base, script, "--write").code).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("the failure names the CHANGED families and the marker repair", () => {
-    const { dir, git } = tempRepo();
+  test("an unknown base still decides the verdict, and the repair stays a command", () => {
+    const { dir, git } = seeded();
     try {
-      write(dir, "packages/runner/src/gate.ts");
-      write(dir, "sandbox-image/entry.sh", "#!/bin/sh\n");
+      write(dir, "packages/runner/src/index.ts", "export const changed = true;\n");
       git("add", "-A");
-      git("commit", "-qm", "image inputs");
-      const base = git("rev-parse", "HEAD");
+      git("commit", "-qm", "touch an input");
 
-      write(dir, "packages/runner/src/gate.ts", "export const changed = true;\n");
-      git("add", "-A");
-      git("commit", "-qm", "touch one image input");
-
-      const { code, out } = runGate(dir, base, script);
-      expect(code).toBe(1);
-      expect(out).toContain("::error::image-input-without-marker");
-      expect(out).toContain("Changed image inputs:");
-      expect(out).toContain("- packages/runner/src/**");
-      // `sandbox-image/entry.sh` did not change in this range, so its family
-      // must not be listed as a changed input (the doc's own bullets stay).
-      expect(out).not.toContain("- sandbox-image/**");
-      expect(out).toContain("# rebuild:");
-      expect(out).toContain("sandbox-image/Dockerfile");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("an unknown --base refuses instead of passing, and names the base", () => {
-    const { dir, git } = tempRepo();
-    try {
-      git("add", "-A");
-      git("commit", "-qm", "config");
-
-      // A base that was never fetched, e.g. an orphaned force-push tip.
       const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
       const { code, out } = runGate(dir, sha, script);
       expect(code).toBe(1);
-      expect(out).toContain("::error::image-gate-base-unreachable");
-      expect(out).toContain(sha);
-      // The wrong cause this fix removes: the config was readable all along.
-      expect(out).not.toContain("could not read the container blocks");
-      expect(out).toContain("treat as unverified, not a pass");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("an unreachable base recovers to the merge base and the gate still evaluates", () => {
-    const { dir, git } = tempRepo();
-    try {
-      write(dir, "sandbox-image/Dockerfile", "FROM scratch\n");
-      git("add", "-A");
-      git("commit", "-qm", "base");
-      const base = git("rev-parse", "HEAD");
-      // The target branch stays at the divergence point; the feature branch
-      // moves on, so its merge base with the target is the base commit.
-      git("branch", "target");
-
-      write(dir, "packages/runner/src/gate.ts", "export const changed = true;\n");
-      git("add", "-A");
-      git("commit", "-qm", "feature work");
-
-      // The push's previous tip is gone (force-push): the fallback names what
-      // it used and the diff is still evaluated — a failure, not a skip.
-      const { code, out } = runGate(dir, "f".repeat(40), script, "--ref", "target");
-      expect(code).toBe(1);
-      expect(out).toContain("::warning::image-gate-base-recovered");
-      expect(out).toContain("::error::image-input-without-marker");
-      expect(out).toContain("- packages/runner/src/**");
+      expect(out).toContain("::error::image-inputs-stale");
+      expect(out).toContain(`--base ${sha} --write`);
+      // A missing base is a missing MESSAGE, not a pass and not a crash.
       expect(out).not.toContain("image-gate-base-unreachable");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("a config that is new in this diff gets the family list, not the unverified message", () => {
-    const { dir, git } = tempRepo();
-    try {
-      // The base revision predates the containers block entirely.
-      rmSync(join(dir, "wrangler.jsonc"));
-      write(dir, "packages/runner/src/gate.ts");
-      write(dir, "sandbox-image/Dockerfile", "FROM scratch\n");
-      git("add", "-A");
-      git("commit", "-qm", "no config yet");
-      const base = git("rev-parse", "HEAD");
-
-      write(
-        dir,
-        "wrangler.jsonc",
-        '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile" } } }]\n}\n',
-      );
-      write(dir, "packages/runner/src/gate.ts", "export const changed = true;\n");
-      git("add", "-A");
-      git("commit", "-qm", "add the containers block and touch an input");
-
-      const { code, out } = runGate(dir, base, script);
-      expect(code).toBe(1);
-      expect(out).toContain("::error::image-input-without-marker");
-      expect(out).toContain("- packages/runner/src/**");
-      expect(out).toContain("wrangler.jsonc containers block");
-      expect(out).not.toContain("unverified");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("a base with no merge base makes the diff unreadable and refuses", () => {
-    const { dir, git } = tempRepo();
-    try {
-      git("add", "-A");
-      git("commit", "-qm", "config");
-      const head = git("rev-parse", "HEAD");
-
-      // The config is readable at this revision, but the unrelated history has
-      // no merge base, so `git diff <base>...HEAD` fails.
-      git("checkout", "-q", "--orphan", "unrelated");
-      git("rm", "-rqf", ".");
-      write(
-        dir,
-        "wrangler.jsonc",
-        '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile" } } }]\n}\n',
-      );
-      write(dir, "sandbox-image/Dockerfile", "# rebuild: unrelated\nFROM scratch\n");
-      git("add", "-A");
-      git("commit", "-qm", "unrelated history");
-      const unrelated = git("rev-parse", "HEAD");
-      git("checkout", "-q", head);
-
-      const { code, out } = runGate(dir, unrelated, script);
-      expect(code).toBe(1);
-      expect(out).toContain("could not read the diff");
-      expect(out).toContain("treat as unverified, not a pass");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

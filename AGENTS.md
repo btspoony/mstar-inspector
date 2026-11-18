@@ -119,8 +119,8 @@ to those sources therefore deploys the Worker without rebuilding the image, and
 the container keeps running the previous build: no error, no warning, no
 failing check.
 
-Touch the `# rebuild:` marker block in `sandbox-image/Dockerfile` in the same
-commit whenever you change any of:
+The Dockerfile therefore records, in one `# image-inputs: <hex>` line, a hash
+of everything the image is built from:
 
 - `packages/runner/src/**`
 - `packages/shared/src/**`
@@ -130,11 +130,11 @@ commit whenever you change any of:
 - `sandbox-image/**` — the CLI shims and their lockfiles
 - `.dockerignore` — it decides which of these sources reach the build context
 
-Also touch it when the container block in `wrangler.jsonc` changes — the
+The container block in `wrangler.jsonc` is part of that hash too — the
 container's `name`, its `images` entry, or that entry's `dockerfile` /
 `build_context` — because that block decides which tree the Dockerfile sees and
 which file is hashed. Every other `wrangler.jsonc` edit (vars, queues, routes,
-observability) leaves the image untouched and needs no marker.
+observability) leaves the image untouched and moves nothing.
 
 Check before merging anything that touches those paths — the same gate CI runs,
 against the revision the deploy builds on:
@@ -143,10 +143,20 @@ against the revision the deploy builds on:
 bun scripts/check-image-inputs.ts --base origin/main
 ```
 
-Exit 0 means the diff needs no rebuild; exit 1 prints the family list above and
-names the marker line it wanted, and it also covers the container-block rule and
-every other family — a partial `git log` over two paths would miss the rest.
-Pass `--base <rev>` to diff the deployed tip instead of the trunk.
+Exit 0 means the recorded line matches the tree. Exit 1 means it does not:
+the output names the families that changed since `--base <rev>` and prints the
+one command that repairs it:
+
+```bash
+bun scripts/check-image-inputs.ts --base origin/main --write
+```
+
+That rewrites the `# image-inputs:` line (and only that line) in every
+Dockerfile `wrangler.jsonc` names, so the commit that changes an input also
+changes the file `wrangler` hashes. Commit the result — CI runs the same check
+and fails a stale line. Never edit the line by hand; the hash covers the sorted
+copy sources' paths and contents plus the container block, so nobody can
+predict it.
 
 ### The failure this prevents
 

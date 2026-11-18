@@ -2152,9 +2152,9 @@ controls are installed (the Dockerfile carries the documentation block only).
 `wrangler` hashes `sandbox-image/Dockerfile` alone — not the sources the
 Dockerfile copies in — so a change to those sources can deploy the Worker while
 the container keeps the previous build, silently. `scripts/check-image-inputs.ts`
-turns that mismatch into a failing check: it diffs the pull request against its
-base commit and fails when the diff touches an image input without also changing
-the `# rebuild:` marker block in `sandbox-image/Dockerfile`.
+turns that mismatch into a failing check: the Dockerfile records a fingerprint of
+its own inputs in one `# image-inputs: <hex>` line, and the gate fails whenever
+that recorded value differs from what the tree hashes to.
 
 The input path families it covers — the gate's path vocabulary:
 
@@ -2177,19 +2177,33 @@ image itself: every `COPY <src>` source in `sandbox-image/Dockerfile` must be
 matched by one of the patterns, so a new copied path that is not declared fails
 the test rather than silently escaping the gate.
 
-A diff that touches an image input passes only with one added or removed
-Dockerfile line containing `rebuild:` in the same diff; a
-Dockerfile change that does not touch the marker fails like any other image
-input. A diff that touches no image input passes without any Dockerfile change.
+The fingerprint is SHA-256 over the sorted, repo-relative paths and contents of
+every input file (newline-normalized, enumerated from `git ls-files` so ignored
+trees never enter it) plus the serialized container block. It deliberately
+excludes the Dockerfile itself: the line that records the value lives in that
+file, so covering it would invalidate the value on every write. Nothing
+machine-specific enters the hash — no absolute path, mtime or platform fact — so
+the same tree hashes the same in CI and on a laptop, which is what makes a
+committed value meaningful. `--write` recomputes it and rewrites the line, and
+that is the whole repair:
+
+```bash
+bun scripts/check-image-inputs.ts --base origin/main --write
+```
+
+A commit that touches no image input leaves the line alone and passes. The
+verdict is the fingerprint alone: `--base` is not part of it. That revision only
+supplies the failure MESSAGE — the families that moved since it — so an
+unresolvable base (the force-push case below) costs the list, never the verdict.
 The Dockerfile path is not written into the script: the gate reads
 `containers[].images.sandbox.dockerfile` from `wrangler.jsonc` (`--config`
 overrides the file), so it diffs exactly the file a deploy hashes. The gate
 reads git output plus the two revisions of that config — it never builds the
 image — and an unreadable diff, config or container block fails the run rather
 than passing unverified. A config that is absent at the base revision is not a
-truncated checkout: its containers block is new in this diff, so the gate fails
-with the changed families and the marker repair, exactly as for any other new
-image input.
+truncated checkout: its containers block is new in this diff, so the tree's hash
+moves (or, before the first recording, the line is absent and the gate fails
+with the repair command).
 
 **Pull requests and pushes.** The `Image rebuild gate` step in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) diffs a pull request
@@ -2217,9 +2231,9 @@ from `origin`, or the merge base with the target branch (where the rewritten
 history actually diverged) — emits a `::warning::` naming what it used, and
 still evaluates the diff. Only when none of those resolves does it fail closed,
 with `::error::image-gate-base-unreachable` naming the unreachable commit and
-the `--base` recovery; pass the deploy dispatch's `base_sha` then. The failure output names
-the input families the diff actually touched and the `# rebuild:` line to add;
-the marker instruction is the one in
+the `--base` recovery; pass the deploy dispatch's `base_sha` then. The failure
+output names the input families the diff actually touched and the `--write`
+command that repairs the line; the surrounding explanation is the one in
 [`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild.
 
 The same gate runs locally against any base rev:

@@ -1,24 +1,34 @@
 #!/usr/bin/env bun
 /**
- * check-image-inputs.ts — fail a diff that changes the sources copied into the
- * sandbox image without touching the Dockerfile's `# rebuild:` marker block.
+ * check-image-inputs.ts — fail a commit whose sandbox image inputs changed
+ * without the Dockerfile recording them.
  *
  * Usage:
- *   bun scripts/check-image-inputs.ts --base <sha> [--config wrangler.jsonc]
+ *   bun scripts/check-image-inputs.ts --base <sha> [--ref <branch>] [--config wrangler.jsonc] [--write]
  *
  * `wrangler` hashes the container's Dockerfile alone — read from the config's
  * `containers[].images.sandbox.dockerfile`, never hardcoded here — so a
  * runner/shared change that does not touch that file deploys the Worker while
- * the container keeps running the previous build — silently. The decision is
- * pure; the CLI only feeds it two git outputs, so the rule is unit-testable
- * without Docker. Both container blocks count: a named environment does not
- * inherit `containers`, so `env.production` declares its own image
- * (`dockerfile`, `build_context`, `name`) and a prod deploy builds from it.
+ * the container keeps running the previous build — silently. The Dockerfile is
+ * the only lever a deploy reacts to, so the gate records the input set IN it:
+ * one `# image-inputs: <hex>` line hashing every copied path's repo-relative
+ * name and content plus the container block. Changing an input changes the
+ * hash, so that line (and with it the hashed file) must move in the same
+ * commit; `--write` recomputes it. The hash never covers the Dockerfile itself,
+ * or writing the line would invalidate it.
  *
- * Exit codes: 0 = pass; 1 = image input changed without the marker, or the
- * diff/config could not be read (an unreadable answer is never a pass).
+ * The fingerprint alone decides. `--base` supplies the message — WHICH families
+ * the diff changed — and is not part of the verdict. Both container blocks
+ * count: a named environment does not inherit `containers`, so `env.production`
+ * declares its own image (`dockerfile`, `build_context`, `name`) and a prod
+ * deploy builds from it.
+ *
+ * Exit codes: 0 = pass; 1 = a Dockerfile records a different input set than the
+ * tree holds, or the tree/config could not be read (an unreadable answer is
+ * never a pass).
  */
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -227,8 +237,14 @@ export function containerSignature(configText: string): string | undefined {
 }
 
 export type ImageGateVerdict =
-  | { ok: true }
-  | { ok: false; reason: "image-input-without-marker"; families: readonly string[] };
+  | { ok: true; fingerprint: string }
+  | {
+      ok: false;
+      reason: "image-inputs-stale";
+      fingerprint: string;
+      recorded: string | undefined;
+      families: readonly string[];
+    };
 
 export function touchesImageInput(paths: string[]): boolean {
   return changedFamilies(paths).length > 0;
@@ -241,44 +257,96 @@ export function changedFamilies(paths: string[]): string[] {
   );
 }
 
-/** `# rebuild:` at a line's comment start, indentation and the hash gap tolerated. */
-const REBUILD_MARKER = /^\s*#\s*rebuild:/;
+/** The one machine-maintained line each Dockerfile carries. */
+const IMAGE_INPUTS_LINE = /^\s*#\s*image-inputs:\s*([0-9a-f]+)\s*$/;
 
-/**
- * A marker change is an added or removed line whose comment declares
- * `rebuild:` — the marker convention is a Dockerfile comment, so prose and
- * instruction lines that merely contain the text are not a declaration.
- * Diff headers (`+++ b/...`, `--- a/...`) are not content lines.
- */
-export function touchesRebuildMarker(dockerfileDiff: string): boolean {
-  return dockerfileDiff.split("\n").some(
-    (line) =>
-      (line.startsWith("+") || line.startsWith("-")) &&
-      !line.startsWith("+++") &&
-      !line.startsWith("---") &&
-      REBUILD_MARKER.test(line.slice(1)),
-  );
+/** The fingerprint a Dockerfile records, or `undefined` when it records none. */
+export function readImageInputsMarker(dockerfileText: string): string | undefined {
+  for (const line of dockerfileText.split("\n")) {
+    const match = IMAGE_INPUTS_LINE.exec(line);
+    if (match !== null) return match[1]!;
+  }
+  return undefined;
 }
 
 /**
- * `containersChanged` is the config half of the vocabulary: the parsed
- * container block differs between base and head, so the image a deploy builds
- * changed even when no copied path did.
+ * The input set as one value: sorted repo-relative paths, their contents with
+ * newlines normalized, and the container block. No absolute path, mtime or
+ * machine fact enters it, so the same tree hashes the same everywhere — CI
+ * reproducibility is the whole point of recording it in a committed file.
+ *
+ * 128 bits of SHA-256: a collision here would have to be adversarially
+ * constructed against a value nobody gains from forging.
+ */
+export function imageInputFingerprint(
+  files: readonly { path: string; content: string }[],
+  containerBlock: string,
+): string {
+  const hash = createHash("sha256");
+  const normalized = (text: string) => text.replace(/\r\n/g, "\n");
+  for (const file of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    hash.update(`${file.path}\0${normalized(file.content)}\0`);
+  }
+  // The container block decides which tree the Dockerfile sees and which file
+  // a deploy hashes, so it belongs to the same value as the copied sources.
+  hash.update(`containers\0${normalized(containerBlock)}\0`);
+  return hash.digest("hex").slice(0, 32);
+}
+
+/** The Dockerfile with its fingerprint line replaced, or added above the first line. */
+export function withImageInputsMarker(dockerfileText: string, fingerprint: string): string {
+  const line = `# image-inputs: ${fingerprint}`;
+  const lines = dockerfileText.split("\n");
+  const at = lines.findIndex((candidate) => IMAGE_INPUTS_LINE.test(candidate));
+  if (at >= 0) {
+    lines[at] = line;
+    return lines.join("\n");
+  }
+  // Above every instruction: nothing a build reads moves, only the file's bytes.
+  return [line, ...lines].join("\n");
+}
+
+/**
+ * The verdict is the recorded value against the tree's own — a Dockerfile with
+ * no line records nothing, so it is stale. `families` is the message's part:
+ * computed from the base diff when one can be read, and empty otherwise.
  */
 export function evaluateImageGate(
-  paths: string[],
-  dockerfileDiff: string,
-  containersChanged: boolean,
-  configPath = "wrangler.jsonc",
+  recorded: string | undefined,
+  fingerprint: string,
+  families: readonly string[] = [],
 ): ImageGateVerdict {
-  const families = changedFamilies(paths);
-  if (families.length === 0 && !containersChanged) return { ok: true };
-  if (touchesRebuildMarker(dockerfileDiff)) return { ok: true };
-  return {
-    ok: false,
-    reason: "image-input-without-marker",
-    families: containersChanged ? [...families, `${configPath} containers block`] : families,
-  };
+  if (recorded === fingerprint) return { ok: true, fingerprint };
+  return { ok: false, reason: "image-inputs-stale", fingerprint, recorded, families };
+}
+
+/**
+ * The repo-relative paths of every file the image copies in, from git's own
+ * view (tracked plus untracked-but-not-ignored, so a run before the first
+ * `git add` sees the same set a commit will), minus the Dockerfiles: the
+ * fingerprint lives in those, and covering them would invalidate it on write.
+ */
+export function collectImageInputPaths(
+  listFiles: (roots: readonly string[]) => string[],
+  roots: readonly string[],
+  dockerfilePaths: readonly string[],
+): string[] {
+  return listFiles(roots)
+    .filter((path) => touchesImageInput([path]))
+    .filter((path) => !dockerfilePaths.includes(path))
+    .sort();
+}
+
+/**
+ * The literal directory prefix of a family glob — the roots handed to git, so
+ * the enumeration never walks the whole repository.
+ */
+export function familyRoot(family: string): string {
+  const segments = family.split("/");
+  const wildcard = segments.findIndex((segment) => /[*?]/.test(segment));
+  // No wildcard: the family names one file, and that file is the root.
+  const literal = wildcard < 0 ? segments : segments.slice(0, wildcard);
+  return literal.join("/") === "" ? "." : literal.join("/");
 }
 
 /** `git diff --name-only -z` output: NUL-separated, never quoted or escaped. */
@@ -374,11 +442,19 @@ export function resolveBase(
       (ref === undefined || ref === "" ? "" : `, and ${ref} offers no older merge base`),
   };
 }
-
 function printUsage(): void {
   console.error(
-    "usage: bun scripts/check-image-inputs.ts --base <sha> [--ref <branch>] [--config wrangler.jsonc]",
+    "usage: bun scripts/check-image-inputs.ts --base <sha> [--ref <branch>] [--config wrangler.jsonc] [--write]",
   );
+}
+
+/** `git ls-files` over the family roots: tracked plus untracked, never ignored. */
+function listImageInputPaths(roots: readonly string[]): string[] {
+  const output = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...roots]);
+  if (output === undefined) {
+    throw new Error(`could not enumerate the image inputs under ${roots.join(", ")}`);
+  }
+  return parseNameOnly(output);
 }
 
 if (import.meta.main) {
@@ -386,11 +462,13 @@ if (import.meta.main) {
   let base = "";
   let ref = "";
   let configPath = "wrangler.jsonc";
+  let write = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--base") base = argv[++i] ?? "";
     else if (arg === "--ref") ref = argv[++i] ?? "";
     else if (arg === "--config") configPath = argv[++i] ?? "";
+    else if (arg === "--write") write = true;
     else {
       console.error(`check-image-inputs: unknown argument ${arg}`);
       printUsage();
@@ -401,27 +479,6 @@ if (import.meta.main) {
     printUsage();
     process.exit(1);
   }
-
-  // The diff base first: a push's previous tip may be gone (a force-push
-  // orphans it), and blaming the config file for that absence named the wrong
-  // cause on every re-run. A recovery still evaluates the gate; only an
-  // unresolvable base fails closed.
-  const requested = base;
-  const resolved = resolveBase(requested, ref, gitQuiet);
-  if ("error" in resolved) {
-    console.error(
-      `::error::image-gate-base-unreachable: ${resolved.error} — pass --base <sha> (the deploy workflow's base_sha input) with a commit this checkout has; treat as unverified, not a pass`,
-    );
-    process.exit(1);
-  }
-  if (resolved.recovered !== undefined) {
-    const how =
-      resolved.recovered === "fetched" ? "fetched from origin" : `the merge base with ${ref}`;
-    console.error(
-      `::warning::image-gate-base-recovered: ${requested} is unreachable in this checkout (a force-push or a garbage-collected commit); diffing from ${resolved.sha}, ${how} — the gate still evaluated`,
-    );
-  }
-  base = resolved.sha;
 
   // The paths come from the config `wrangler` itself reads, so a hand-copied
   // Dockerfile path here can never drift from the files a deploy hashes.
@@ -443,69 +500,110 @@ if (import.meta.main) {
   }
   const dockerfileLabel = dockerfilePaths.join(" / ");
 
-  // The container blocks are read at BOTH revisions: a `build_context` or
-  // Dockerfile repoint changes the image even though no copied path did. The
-  // file itself is not a path family — every other config edit is image-neutral.
-  const headSignature = containerSignature(headConfig);
-  if (headSignature === undefined) {
+  // The container block is part of the input set: a `build_context` or
+  // Dockerfile repoint changes the image even though no copied path did. Every
+  // other config edit (vars, queues, routes, observability) cannot.
+  const headBlock = containerSignature(headConfig);
+  if (headBlock === undefined) {
     console.error(
-      `::error::check-image-inputs: ${configPath} at HEAD declares no readable container blocks — treat as unverified, not a pass`,
+      `::error::check-image-inputs: ${configPath} declares no readable container blocks — treat as unverified, not a pass`,
     );
     process.exit(1);
   }
-  const baseConfig = git(["show", `${base}:${configPath}`]);
-  let containersChanged: boolean;
-  if (baseConfig === undefined) {
-    // Two different facts hide in one failed `git show`. A config absent from
-    // the base revision is this diff's own new containers block — every block
-    // is a change, and the failure must list the actionable families. Anything
-    // else (a path the git side cannot answer for, an unreadable object) is
-    // unknown, never a pass.
-    if (!objectExists(`HEAD:${configPath}`, gitQuiet)) {
-      console.error(
-        `::error::check-image-inputs: ${configPath} is not in HEAD's tree (the path must be repo-relative and committed) — treat as unverified, not a pass`,
-      );
-      process.exit(1);
-    }
-    if (objectExists(`${base}:${configPath}`, gitQuiet)) {
-      console.error(
-        `::error::check-image-inputs: could not read the container blocks of ${configPath} at ${base} — treat as unverified, not a pass`,
-      );
-      process.exit(1);
-    }
-    containersChanged = true;
-  } else {
-    const baseSignature = containerSignature(baseConfig);
-    if (baseSignature === undefined) {
-      console.error(
-        `::error::check-image-inputs: could not read the container blocks of ${configPath} at ${base} — treat as unverified, not a pass`,
-      );
-      process.exit(1);
-    }
-    containersChanged = baseSignature !== headSignature;
-  }
 
-  const range = `${base}...HEAD`;
-  // `--no-renames` keeps both sides of a move, so leaving an input family is
-  // visible as a deletion; `-z` avoids Git's quoting of non-ASCII paths.
-  const nameOnly = git(["diff", "--name-only", "--no-renames", "-z", range]);
-  // Both Dockerfile paths: a marker change in EITHER satisfies the gate.
-  const dockerfileDiff = git(["diff", range, "--", ...dockerfilePaths]);
-  if (nameOnly === undefined || dockerfileDiff === undefined) {
-    console.error("::error::check-image-inputs: could not read the diff — treat as unverified, not a pass");
+  // The tree's own answer: every copied file's path and content, enumerated
+  // from git so ignored trees (node_modules, .wrangler) never enter the hash.
+  const roots = [...new Set(IMAGE_INPUT_FAMILIES.map(familyRoot))];
+  let inputPaths: string[];
+  try {
+    inputPaths = collectImageInputPaths(listImageInputPaths, roots, dockerfilePaths);
+  } catch (error) {
+    console.error(
+      `::error::check-image-inputs: ${error instanceof Error ? error.message : String(error)} — treat as unverified, not a pass`,
+    );
     process.exit(1);
   }
+  const files: { path: string; content: string }[] = [];
+  for (const path of inputPaths) {
+    try {
+      files.push({ path, content: readFileSync(path, "utf8") });
+    } catch {
+      console.error(
+        `::error::check-image-inputs: image input ${path} could not be read — treat as unverified, not a pass`,
+      );
+      process.exit(1);
+    }
+  }
+  const fingerprint = imageInputFingerprint(files, headBlock);
 
-  const paths = parseNameOnly(nameOnly);
-  const verdict = evaluateImageGate(paths, dockerfileDiff, containersChanged, configPath);
-  if (!verdict.ok) {
-    console.error(
-      `::error::${verdict.reason}: this diff changes image inputs but not the rebuild marker in ${dockerfileLabel}.`,
+  // `--write` is the repair: recompute, record it in every configured
+  // Dockerfile, and report what moved. It still fails a tree it could not
+  // fingerprint above, so it can never paper over an unreadable input.
+  if (write) {
+    let changed = 0;
+    for (const path of dockerfilePaths) {
+      let text: string;
+      try {
+        text = readFileSync(path, "utf8");
+      } catch {
+        console.error(`::error::check-image-inputs: ${path} does not exist — nothing to record the fingerprint in`);
+        process.exit(1);
+      }
+      const next = withImageInputsMarker(text, fingerprint);
+      if (next === text) continue;
+      writeFileSync(path, next);
+      changed++;
+    }
+    console.log(
+      `image inputs: ${fingerprint} written to ${dockerfileLabel}${changed === 0 ? " (already current)" : ""}`,
     );
-    console.error("Changed image inputs:");
-    for (const family of verdict.families) console.error(`- ${family}`);
+    process.exit(0);
+  }
+
+  // Every configured Dockerfile records the SAME value: a deploy hashes one of
+  // them, so a stale line in either is a stale image.
+  let verdict: ImageGateVerdict | undefined;
+  for (const path of dockerfilePaths) {
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      console.error(`::error::check-image-inputs: ${path} could not be read — treat as unverified, not a pass`);
+      process.exit(1);
+    }
+    const current = evaluateImageGate(readImageInputsMarker(text), fingerprint);
+    if (!current.ok) verdict = current;
+  }
+  if (verdict !== undefined && !verdict.ok) {
+    // `--base` supplies the MESSAGE only: which families moved since the base
+    // revision. A base that cannot be resolved leaves the list empty rather
+    // than failing a verdict the fingerprint already decided.
+    const resolved = resolveBase(base, ref, gitQuiet);
+    const families = new Set<string>();
+    if (!("error" in resolved)) {
+      if (resolved.recovered !== undefined) {
+        const how = resolved.recovered === "fetched" ? "fetched from origin" : `the merge base with ${ref}`;
+        console.error(
+          `::warning::image-gate-base-recovered: ${base} is unreachable in this checkout (a force-push or a garbage-collected commit); listing families against ${resolved.sha}, ${how}`,
+        );
+      }
+      const nameOnly = git(["diff", "--name-only", "--no-renames", "-z", `${resolved.sha}...HEAD`]);
+      const baseConfig = git(["show", `${resolved.sha}:${configPath}`]);
+      if (nameOnly !== undefined) for (const family of changedFamilies(parseNameOnly(nameOnly))) families.add(family);
+      const baseBlock = baseConfig === undefined ? undefined : containerSignature(baseConfig);
+      if (baseConfig === undefined ? objectExists(`${resolved.sha}:${configPath}`, gitQuiet) : baseBlock !== headBlock) {
+        families.add(`${configPath} containers block`);
+      }
+    }
     console.error(
-      `Repair: add a \`# rebuild: <what changed>\` comment line to ${dockerfileLabel} in this same diff — an added or removed line at the comment start — so the next deploy rebuilds the image.`,
+      `::error::${verdict.reason}: ${dockerfileLabel} records image inputs ${verdict.recorded === undefined ? "(none)" : verdict.recorded} but the tree hashes to ${verdict.fingerprint}.`,
+    );
+    if (families.size > 0) {
+      console.error("Changed image inputs:");
+      for (const family of [...families].sort()) console.error(`- ${family}`);
+    }
+    console.error(
+      `Repair: bun scripts/check-image-inputs.ts --base ${base} --write — it recomputes the fingerprint and rewrites the \`# image-inputs:\` line in ${dockerfileLabel}.`,
     );
     console.error("");
     try {
@@ -517,5 +615,5 @@ if (import.meta.main) {
     }
     process.exit(1);
   }
-  console.log("image inputs: no rebuild marker required");
+  console.log(`image inputs: ${fingerprint} recorded in ${dockerfileLabel}`);
 }
