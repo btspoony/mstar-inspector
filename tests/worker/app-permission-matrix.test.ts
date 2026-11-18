@@ -96,6 +96,7 @@ async function seededWorld(): Promise<TestD1> {
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     createdBy: "mallory",
     workspaceId: "default",
+    maxApps: null,
   });
   // One ledger row: the detail face's 200 side needs a real tuple, and every
   // deny path must still answer before the lookup. Creation writes no target

@@ -18,11 +18,30 @@
  * 500 by class, never by message-sniffing; the message is the user-visible 409
  * body, passed in verbatim.
  *
- * Known limit: the free-slot and member-cap checks are read-then-write, not
- * reservations — two concurrent requests can both read the same count and both
- * pass, admitting a second free membership or a sixth member. A db.batch cannot
- * close this (a batch is atomic within one request, never isolated across
- * requests). Atomic enforcement is required before the first paid plan.
+ * Known limits — every gate below either reads the counter outside the write it
+ * admits, or re-reads it inside that write:
+ *
+ * - `member-slot` (invite creation, invite acceptance): BOUNDED. The route's
+ *   seat read is fast-fail UX only; `createInvite` / `acceptInvite` re-check
+ *   members + live pending invites inside their own inserts, so a concurrent
+ *   pair cannot both land. `seats: null` names that arrangement explicitly.
+ * - `free-workspace-slot` (workspace creation, invite acceptance): BOUNDED.
+ *   Same shape — the route reads the login's live free memberships for UX, and
+ *   `createWorkspace`'s insert (plus the acceptance's membership insert) carries
+ *   the same predicate, so one free workspace per login holds under concurrency.
+ * - `app-count` (manifest App creation): BOUNDED BY THE WRITE. The commit path
+ *   reads `countLiveApps` as fast fail, and `createApp`'s own insert re-counts
+ *   the same live Apps and binds `apps_per_workspace`, so concurrent commits
+ *   never land more Apps than the cap allows; only the loser of a race for the
+ *   LAST slot gets the existing refusal. A cap of N still admits N.
+ * - `review-quota` (review enqueue): OPEN. `usedRp` comes from a month sum read
+ *   before the enqueue and no statement re-checks it, so two concurrent
+ *   deliveries can both pass a month with room for one. This is the one gate a
+ *   later plan must close (a reservation); it is not closed here.
+ *
+ * A single-writer `db.batch` is atomic WITHIN one request but is not isolated
+ * across requests, which is why each bounded gate above re-reads its counter
+ * inside its own INSERT rather than only once before the batch.
  */
 import type { DeploymentMode } from "../worker/env";
 import type { D1Like } from "../store/types";

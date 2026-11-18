@@ -31,11 +31,13 @@
 import { FREE_PLAN_ID } from "../dashboard/entitlement";
 import type { DashboardD1 } from "../dashboard/users";
 import {
-  listQuotaProfiles,
+  decodeQuotaProfiles,
+  pickQuotaProfile,
+  QUOTA_PROFILES_SQL,
   quotaMonth,
   quotaSpent,
   quotaStartsOn,
-  resolveQuotaProfile,
+  type QuotaProfileListRow,
   type QuotaProfileVersion,
   type QuotaSource,
 } from "../store/quota-store";
@@ -88,19 +90,30 @@ export type QuotaVersionsPayload = {
   uncoveredPlanIds: string[];
 };
 
+const PLAN_LIST_SQL = `SELECT id AS id, name AS name FROM plans ORDER BY id ASC`;
+
 /** The plans catalogue, ordered by id (free, pro, unlimited). */
 export async function listPlans(db: DashboardD1): Promise<QuotaPlan[]> {
-  const res = await db.prepare(`SELECT id AS id, name AS name FROM plans ORDER BY id ASC`).all<QuotaPlan>();
+  const res = await db.prepare(PLAN_LIST_SQL).all<QuotaPlan>();
   return res.results;
 }
 
+/**
+ * The operator's version table plus this month's judging marker, in ONE
+ * `batch`: the coverage decision compares the judging profile's plan set with
+ * the catalogue, so both must come from the same snapshot — read separately a
+ * concurrent publish could make the page report a gap that no longer exists.
+ */
 export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<QuotaVersionsPayload> {
   const month = quotaMonth(now);
-  const [profiles, judging, plans] = await Promise.all([
-    listQuotaProfiles(db),
-    resolveQuotaProfile(db, month.startIso),
-    listPlans(db),
+  // D1 returns each statement's rows at its batch position, in one transaction.
+  const [profileResult, planResult] = await db.batch([
+    db.prepare(QUOTA_PROFILES_SQL),
+    db.prepare(PLAN_LIST_SQL),
   ]);
+  const profiles = decodeQuotaProfiles((profileResult?.results ?? []) as QuotaProfileListRow[]);
+  const plans = (planResult?.results ?? []) as QuotaPlan[];
+  const judging = pickQuotaProfile(profiles, month.startIso);
   const versions = profiles.map((profile: QuotaProfileVersion, index) => ({
     id: profile.id,
     version: profile.version,
@@ -120,9 +133,9 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
   }));
   // The JUDGING version is the one that decides today's verdicts, so its plan
   // coverage is what the page must report: a gap in a past or scheduled version
-  // cannot refuse anything this month.
-  const covered = profiles.find((profile) => profile.id === judging.id)?.monthlyRp ?? {};
-  const uncoveredPlanIds = plans.filter((plan) => !Object.hasOwn(covered, plan.id)).map((plan) => plan.id);
+  // cannot refuse anything this month. `judging` comes from the same snapshot,
+  // so a plan it covers can never be reported as uncovered.
+  const uncoveredPlanIds = plans.filter((plan) => !Object.hasOwn(judging.monthlyRp, plan.id)).map((plan) => plan.id);
   return {
     judgingVersion: judging.version,
     nextVersion: profiles.reduce((max, profile) => Math.max(max, profile.version), 0) + 1,

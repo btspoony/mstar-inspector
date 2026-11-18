@@ -7,22 +7,27 @@ Plan catalogue, nullable seat limits, membership-based free slots, and SaaS/self
 ## Current state
 ### 1. Plan catalogue
 
-`plans` rows are the only plan definitions. Code reads two columns:
-`included_members` and the boolean `shared_bot_allowed`. NULL on a quota column
-means unlimited (migration `0031_plans_usage.sql` header, lines 4-11, which
-names `platform_key_limit`, `reviews_included` and `apps_per_workspace`).
-Migration `0032_unlimited_plan.sql` extends that contract to
-`included_members`: the original column is `INTEGER NOT NULL`
-(`0031_plans_usage.sql:56`), so `0032_unlimited_plan.sql` relaxes it to nullable
-first (SQLite table rebuild under `PRAGMA defer_foreign_keys`; the seeded rows
-and the `workspace_subscriptions` FK are preserved) and then inserts the
-`unlimited` row.
+`plans` has eight columns: `id`, `name`, `monthly_price_cents`,
+`included_members`, `extra_member_price_cents`, `apps_per_workspace`,
+`created_at` and `shared_bot_allowed`. This is the schema from
+`0032_unlimited_plan.sql` after `0061_plan_shared_bot_allowed.sql` adds the
+capability and `0063_quota_profiles.sql` drops the two consumption columns.
+Entitlement decisions read three limit/capability columns: `included_members`,
+`apps_per_workspace` and `shared_bot_allowed`.
 
-| id | included_members | shared_bot_allowed | meaning |
-|----|------------------|--------------------|---------|
-| `free` | 5 | 0 | SaaS default for a newly created workspace |
-| `pro` | 5 | 1 | SaaS sellable tier; seeded seat count |
-| `unlimited` | NULL | 1 | no seat cap; assigned to every self-hosted workspace |
+NULL on a nullable limit means unlimited: for example, the `unlimited` row's
+`included_members` and `apps_per_workspace` are NULL. Migration
+`0032_unlimited_plan.sql` makes `included_members` nullable before inserting
+that row. Migration `0063_quota_profiles.sql` drops `platform_key_limit` and
+`reviews_included`; monthly consumption ceilings instead live in
+`quota_profile_plans.monthly_rp`, where a present NULL is unlimited and an
+absent plan row is a configuration error.
+
+| id | included_members | apps_per_workspace | shared_bot_allowed | meaning |
+|----|------------------|--------------------|--------------------|---------|
+| `free` | 5 | 1 | 0 | SaaS default for a newly created workspace |
+| `pro` | 5 | 10 | 1 | SaaS sellable tier; seeded limits |
+| `unlimited` | NULL | NULL | 1 | no seat or App cap; assigned to every self-hosted workspace |
 
 `shared_bot_allowed` (migration `0061_plan_shared_bot_allowed.sql`) is a
 capability, not a quota: the column is `NOT NULL DEFAULT 0`, so NULL is never
@@ -202,16 +207,15 @@ shared-bot row at all, because the console that designates one is not
 registered in that mode — the absence is a property of the deployment, not a
 fourth state of the workspace.
 
-Operational consequence, known and accepted: `entitlement` joins the failure
-vocabulary and deliberately stays OUTSIDE `PAGING_EXCLUDED_STAGES`, so the cron
-sweep counts these rows and its global ops alert — more than
-`SWEEP_FAILURE_THRESHOLD` (7) rows across ALL tenants in 24 h — can fire on the
-8th refusal within a day for a workspace that simply left its plan. A
-workspace-level condition is presented as a platform-wide one. That is the
-intended trade (refusals must stay countable and listable on the dashboard);
-the future lever is a separate alert-only exclusion list, never a change to
-`PAGING_EXCLUDED_STAGES`, which would also hide the rows from the dashboard's
-failure counts and PR history.
+`entitlement` stays outside both `ATTRIBUTION_EXCLUDED_STAGES` and
+`PAGING_EXCLUDED_STAGES`: its rows remain visible on the dashboard and count
+toward the global infrastructure alert. `quota` stays visible too, but joins
+only the paging exclusion set: one tenant's exhausted month is not a platform
+incident. The sweep reads one grouped statement over the trailing 24 hours;
+the returned stage counts supply both the infrastructure total and its
+breakdown, so they describe the same read. Paging requires counted failures
+strictly greater than `SWEEP_FAILURE_THRESHOLD`, derived in `src/worker/sweep.ts`
+as `QUEUE_MAX_ATTEMPTS + 1` from `src/store/failure-store.ts`.
 
 ## RP metering and the monthly ceiling
 
@@ -253,9 +257,10 @@ never disagree.
 - **The refusal.** A workspace whose month has reached its ceiling is refused
   AT ENQUEUE, in the shared-bot gate's shape: the Check is still attached and
   settles `neutral`, one terminal failure row is recorded under the `quota`
-  stage (`QUOTA_STAGE`, outside `PAGING_EXCLUDED_STAGES` — the review did not
-  run, so the row stays paged exactly like `entitlement`), and nothing is sent,
-  claimed or started. The comparison is `used + cost > limit` (`quotaSpent`),
+  stage (`QUOTA_STAGE`, in `PAGING_EXCLUDED_STAGES` but not
+  `ATTRIBUTION_EXCLUDED_STAGES` — visible on the dashboard, excluded from
+  infrastructure paging), and nothing is sent, claimed or started.
+  The comparison is `used + cost > limit` (`quotaSpent`),
   so a review whose cost exactly fills the remaining headroom is admitted and
   everything above it is refused — and a month already AT its ceiling refuses
   every review, because the cheapest one costs 1 RP.
@@ -288,16 +293,24 @@ never disagree.
   charge is reconcilable. This is the module's own rule — count, never refuse —
   and it matters most on `self-hosted`, where no enqueue gate exists to have
   caught the fault first.
-- **`self-hosted` never meters and never refuses.** The mode resolves the
-  unlimited plan constant before its first read, there is no ceiling to compare
-  against, and the enqueue gate skips the branch entirely.
+- **`self-hosted` meters, but never refuses for quota.** Started reviews use
+  the same profile pricing and `usage_events` write as SaaS, including the
+  charge-time `source` (`byok` or `shared`, migration
+  `0065_usage_events_source.sql`). Metering faults follow the non-blocking
+  boundary above. Separately, the mode resolves the unlimited plan constant
+  before any plan read and skips the enqueue quota branch entirely; no monthly
+  ceiling is consulted to admit a self-hosted review.
 
 `apps_per_workspace` (a plan capability, not consumption) is enforced at App
-creation only: `free` 1, `pro` 10, NULL = no cap. The guard runs before any row
-is written, counts live bots of the workspace (`bot_workspaces` joined live
-`review_bots`, so a soft-deleted App frees its slot), and refuses with named
-copy and zero writes. `self-hosted` never reads the limit — the mode resolves
-the unlimited constant before its first read.
+creation only: `free` 1, `pro` 10, NULL = no cap. A pre-check gives an early
+refusal; the authoritative guard is inside the App insert, counting live bots
+of the workspace (`bot_workspaces` joined live `review_bots`, so a soft-deleted
+App frees its slot). The ownership insert is conditional on that App existing
+in the same batch, so concurrent cap refusals leave neither row and retain the
+existing `app_cap_reached` outcome. Both manifest handlers in
+`src/dashboard/index.ts` map that outcome to an HTTP 409 HTML error page.
+`self-hosted` never reads the limit — the mode resolves the unlimited constant
+before its first read.
 
 ## Invariants
 
@@ -329,6 +342,9 @@ the unlimited constant before its first read.
 - `src/store/quota-store.ts`: `resolveQuotaProfile`, `resolveMonthlyQuota`, `rpFor`, `quotaMonth`.
 - `migrations/0031_plans_usage.sql`, `migrations/0032_unlimited_plan.sql`, `migrations/0061_plan_shared_bot_allowed.sql`: catalogue, nullable column, capability.
 - `migrations/0063_quota_profiles.sql`, `migrations/0064_usage_events_rp.sql`: the profile tables, the `apps_per_workspace` seed, and the metered ledger column.
+- `migrations/0065_usage_events_source.sql`: the charge-time source; older NULL sources remain unattributed in the monthly split.
+- `src/dashboard/apps-store.ts`: `createApp` write-time App cap and conditional ownership insert.
+- `src/contracts/failure-stages.ts` + `src/worker/sweep.ts`: separate dashboard/paging exclusions and the grouped infrastructure failure read.
 
 ## Change obligations
 

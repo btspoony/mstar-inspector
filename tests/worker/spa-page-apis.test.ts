@@ -55,6 +55,7 @@ async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
     webhookSecretEnc: enc.webhookSecretEnc,
     createdBy: "mallory",
     workspaceId: "default",
+    maxApps: null,
   });
   return db;
 }

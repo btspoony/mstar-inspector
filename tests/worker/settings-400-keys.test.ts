@@ -40,6 +40,7 @@ async function seededWorld(malloryRole: "owner" | "member" = "owner") {
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     createdBy: "mallory",
     workspaceId: "default",
+    maxApps: null,
   });
   seedTarget(db, id, { name: "mallorys-app" });
   return { db, app };

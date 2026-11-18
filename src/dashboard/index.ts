@@ -63,6 +63,7 @@ import {
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 import { createInstallClaimsStore } from "./install-claims-store";
 import {
+  AppCountExceededError,
   createReviewBotsStore,
   type DeliverySummary,
   type GithubAppRow,
@@ -1824,11 +1825,12 @@ async function commitManifestApp(args: {
     logManifestFailure("commit", "db_error", { error_type: "workspace_gate_unreadable" });
     return { kind: "workspace_gate_unreadable", reason: workspaceFloor.reason };
   }
-  // The plan's App allowance (D8), decided BEFORE any row is written. A NULL
-  // limit is no cap and `self-hosted` answers the unlimited constant, so the
-  // count (a thunk) is only read for a plan that actually has one. Refusing here
-  // (rather than inside createApp) keeps the check beside the other pre-write
-  // verdicts and leaves the store's batch the only writer.
+  // The plan's App allowance (D8). A NULL limit is no cap and `self-hosted`
+  // answers the unlimited constant, so the count (a thunk) is only read for a
+  // plan that actually has one. This read is FAST-FAIL UX: `createApp`'s insert
+  // re-counts the same live Apps in its own statement, so concurrent commits
+  // never land more Apps than the cap allows — the loser of a race for the
+  // last slot gets the refusal.
   const verdict = await checkEntitlement({
     db,
     mode,
@@ -1850,9 +1852,18 @@ async function commitManifestApp(args: {
       webhookSecretEnc,
       createdBy: login,
       workspaceId,
+      // The same plan the verdict above carries: one resolution, so the cap the
+      // insert enforces can never be a different one than the pre-check read.
+      maxApps: verdict.plan.appsPerWorkspace,
     });
     return { kind: "success", row, workspaceId };
   } catch (err) {
+    // The guarded insert wrote no row: the cap this plan carries was reached by
+    // a concurrent commit. Same non-retryable outcome as the pre-check.
+    if (err instanceof AppCountExceededError) {
+      logManifestFailure("commit", "app_cap_reached", { apps_per_workspace: err.limit });
+      return { kind: "app_cap_reached", limit: err.limit };
+    }
     if (isAppsUniqueViolation(err, "github_app_id")) {
       // The same GitHub App is already connected — retrying cannot help.
       logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
