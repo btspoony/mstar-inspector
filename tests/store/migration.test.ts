@@ -2816,6 +2816,8 @@ describe("migrations/0057_review_targets.sql", () => {
     "repo_owner",
     "repo_name",
     "follow_workspace_defaults",
+    // 0070 appends the draft-review gate after the split's columns.
+    "review_drafts",
   ];
 
   /** The bot columns the target inherits, projected the same on both sides. */
