@@ -717,9 +717,13 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
 
   test("a month preceding every version is judged by the earliest profile, and its gap is reported", async () => {
     const db = fixture();
-    // Both profiles start in the future, so nothing covers this month's 1st:
-    // the earliest configured state judges it and its coverage is what the
-    // page reports.
+    const month = quotaMonth(new Date());
+    // Both profiles start after this month's 1st, so the fallback decides. They
+    // cover different plans: only the earlier one judges, otherwise the page
+    // would report the later profile's gaps.
+    const start = new Date(month.startIso);
+    const nearIso = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1)).toISOString();
+    const farIso = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 2, 1)).toISOString();
     seed(db, "DELETE FROM quota_profile_plans");
     seed(db, "DELETE FROM quota_profiles");
     seed(
@@ -727,14 +731,34 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
       `INSERT INTO quota_profiles (
          id, version, effective_from, base_quick, base_standard, base_deep,
          source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-       VALUES ('quota-future', 9, '2030-01-01T00:00:00.000Z', 1, 2, 6, 1, 10, 20, NULL,
-               '2030-01-01T00:00:00.000Z', 'test')`,
+       VALUES ('quota-near', 9, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
+      nearIso,
+      nearIso,
     );
-    seed(db, "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-future', 'free', 1000)");
+    seed(
+      db,
+      `INSERT INTO quota_profiles (
+         id, version, effective_from, base_quick, base_standard, base_deep,
+         source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
+       VALUES ('quota-far', 10, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
+      farIso,
+      farIso,
+    );
+    seed(
+      db,
+      "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-near', 'free', 1000)",
+    );
+    seed(
+      db,
+      "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-near', 'pro', 2000)",
+    );
+    seed(db, "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-far', 'free', 3000)");
     const res = await adminFetch(db, "GET", "/api/quota-versions");
     const body = (await res.json()) as { judgingVersion: number; uncoveredPlanIds: string[] };
+    // The earliest profile (9) judges and its own gap is reported; picking the
+    // later one (10) would answer 10 and ["pro", "unlimited"] instead.
     expect(body.judgingVersion).toBe(9);
-    expect(body.uncoveredPlanIds).toEqual(["pro", "unlimited"]);
+    expect(body.uncoveredPlanIds).toEqual(["unlimited"]);
   });
 
   test("an empty profile table is the missing-migration error, unchanged", async () => {
