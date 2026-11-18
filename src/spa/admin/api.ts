@@ -138,16 +138,6 @@ export type CommentClaimConfig = {
   degraded: boolean;
 };
 
-/** The operator default review depth as the operator API reports it. */
-export type ReviewLevelConfig = {
-  /** The tier Apps without a depth of their own inherit. */
-  value: string;
-  /** The closed vocabulary, in reading order — the console never hardcodes it. */
-  levels: string[];
-  /** The stored level could not be read: `value` is the documented default. */
-  degraded: boolean;
-};
-
 /** The recheck seat's ask budget as the operator API reports it. */
 export type RecheckAssignmentConfig = {
   /** UTF-8 bytes of assignment the seat may be asked with. */
@@ -210,8 +200,6 @@ export type RuntimeConfig = {
    * `checkBudgets` (an older Worker behind a newer bundle).
    */
   commentClaim: CommentClaimConfig | null;
-  /** The default-review-depth surface; `null` under the same older-Worker rule. */
-  reviewLevel: ReviewLevelConfig | null;
   /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
   recheckAssignment: RecheckAssignmentConfig | null;
   /** The maintenance window; `null` under the same older-Worker rule. */
@@ -257,19 +245,6 @@ function parseCommentClaim(row: Json): CommentClaimConfig | null {
     outboxMin: num(claim, "outboxMin"),
     outboxMax: num(claim, "outboxMax"),
     degraded: bool(claim, "degraded"),
-  };
-}
-
-function parseReviewLevel(row: Json): ReviewLevelConfig | null {
-  const raw = row.reviewLevel;
-  if (raw === undefined) return null;
-  const level = map(raw, "runtime reviewLevel");
-  const levels = level.levels;
-  if (!Array.isArray(levels)) throw new Error("admin API: levels is not a list");
-  return {
-    value: text(level, "value"),
-    levels: levels.filter((entry): entry is string => typeof entry === "string"),
-    degraded: bool(level, "degraded"),
   };
 }
 
@@ -344,7 +319,6 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     degraded: bool(body, "degraded"),
     checkBudgets: parseCheckBudgets(body),
     commentClaim: parseCommentClaim(body),
-    reviewLevel: parseReviewLevel(body),
     recheckAssignment: parseRecheckAssignment(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
@@ -427,31 +401,6 @@ export async function setCommentClaimSettings(
     }
   }
   return { ...stored, ...value, degraded: false };
-}
-
-/**
- * Save the operator default review depth, answering the level the server
- * stored. The request carries the same `{ value }` group the GET reports, so a
- * read result is a valid save body; a 2xx with an unreadable body still landed,
- * so the request value stands in — the same rule as `setSystemConcurrency`.
- */
-export async function setDefaultReviewLevel(
-  value: string,
-  stored: ReviewLevelConfig,
-): Promise<ReviewLevelConfig> {
-  const answer = await write("PATCH", "/runtime", { reviewLevel: { value } });
-  if (typeof answer === "object" && answer !== null && "reviewLevel" in answer) {
-    const saved = answer.reviewLevel;
-    if (
-      typeof saved === "object" &&
-      saved !== null &&
-      "value" in saved &&
-      typeof saved.value === "string"
-    ) {
-      return { ...stored, value: saved.value, degraded: false };
-    }
-  }
-  return { ...stored, value, degraded: false };
 }
 
 /**

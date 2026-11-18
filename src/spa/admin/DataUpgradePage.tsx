@@ -102,6 +102,13 @@ function zeroPreflight(counts: Record<string, number>): boolean {
   return entries.length > 0 && entries.every((count) => count === 0);
 }
 
+/** The stamp a group orders by: the run's own finish, else the in-flight claim. */
+function lastRunAt(row: DataUpgradeRow): number {
+  const stamp = row.state.finishedAt ?? row.state.startedAt;
+  const parsed = stamp === null ? Number.NaN : Date.parse(stamp);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
 /** A count map as the item reported it; an empty map is one dash. */
 function Counts({ counts }: { counts: Record<string, number> }) {
   const entries = Object.entries(counts);
@@ -132,6 +139,17 @@ export function DataUpgradeView({
   onReset,
 }: DataUpgradeViewProps) {
   const { upgrades, maintenance } = data;
+  // A completed card's body starts folded: only the operator asking opens it.
+  const [openCompleted, setOpenCompleted] = useState<Record<string, boolean>>({});
+  // Open work first, in the registry's own order; then what is done, newest
+  // run on top. The sort is stable, so equal (or absent) stamps keep the
+  // registry's order.
+  const ordered = [
+    ...upgrades.filter((row) => row.state.status !== "completed"),
+    ...upgrades
+      .filter((row) => row.state.status === "completed")
+      .sort((a, b) => lastRunAt(b) - lastRunAt(a)),
+  ];
   // The item the window is being held for: the one running now, else the one
   // the state row says is mid-flight (a run this tab did not start).
   const current =
@@ -231,13 +249,20 @@ export function DataUpgradeView({
           description={t(locale, "admin.dataUpgrades.emptyDescription")}
         />
       ) : (
-        upgrades.map((row) => {
+        ordered.map((row) => {
           const busy = busyId === row.id;
           const mine = runningId === row.id;
           const state: DataUpgradeState = row.state;
+          const nothingToMigrate = zeroPreflight(row.preflight);
+          // The run control's own condition, so the badge and the button cannot
+          // disagree: downtime is a property of a run, and a card that cannot
+          // take a batch has no window to warn about.
+          const canRun =
+            (state.status === "pending" || state.status === "running") && !nothingToMigrate;
+          const done = state.status === "completed";
+          const open = openCompleted[row.id] === true;
           const verifiable =
             state.status === "running" || state.status === "verifying" || state.status === "failed";
-          const nothingToMigrate = zeroPreflight(row.preflight);
           return (
             <SectionCard key={row.id} tier="secondary" data-upgrade={row.id}>
               <CardHeader>
@@ -246,12 +271,42 @@ export function DataUpgradeView({
                   <StatusBadge tone={TONES[state.status]}>
                     {t(locale, STATUS_LABELS[state.status])}
                   </StatusBadge>
-                  {row.requiresDowntime ? (
+                  {canRun && row.requiresDowntime ? (
                     <StatusBadge tone="warn">{t(locale, "admin.dataUpgrades.downtimeBadge")}</StatusBadge>
                   ) : null}
                   <code className="text-xs text-muted-foreground">{row.id}</code>
+                  {done ? (
+                    <>
+                      {/* Folded, the row still answers what a finished item is
+                          for: how much it moved, and when it last ran. */}
+                      <span className="text-sm text-muted-foreground">
+                        {t(locale, "admin.dataUpgrades.completedSummary", {
+                          count: state.processed,
+                          time: formatRelativeTime(state.finishedAt ?? state.startedAt, locale),
+                        })}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="ml-auto"
+                        aria-expanded={open}
+                        onClick={() =>
+                          setOpenCompleted((previous) => ({ ...previous, [row.id]: !open }))
+                        }
+                      >
+                        {t(
+                          locale,
+                          open
+                            ? "admin.dataUpgrades.hideDetails"
+                            : "admin.dataUpgrades.showDetails",
+                        )}
+                      </Button>
+                    </>
+                  ) : null}
                 </div>
               </CardHeader>
+              {done && !open ? null : (
               <CardContent className="flex flex-col gap-4">
                 <p className="text-sm">{row.impact}</p>
                 <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
@@ -384,6 +439,7 @@ export function DataUpgradeView({
                   ) : null}
                 </div>
               </CardContent>
+              )}
             </SectionCard>
           );
         })
