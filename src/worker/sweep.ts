@@ -21,22 +21,16 @@
  * the alert payload: one grouped read, so the total and its parts always
  * describe the same instant.
  *
- * The alert posts on the breach TRANSITION, not on every breach: the one
- * machine-state row `platform.alert.failure_paging` in
- * `review_runtime_settings` holds a GENERATION — `clear:<n>` or `tripped:<n>`,
- * where n is the integer ticket its writer took from the row it read — and is
- * never deleted. The POST comes FIRST and only a 2xx advances the row to
- * `tripped`; a healthy sweep advances it to `clear`. Both writes are
- * compare-and-set on the generation: only a strictly greater generation lands,
- * and the ticket is read BEFORE the window query, so a sweep that resumes after
- * a recovery cannot close the edge a newer observation owns. No clock orders
- * the row; a lost CAS costs at most a duplicate alert. The row is never a flag
- * that can be set without a delivered alert, which is the whole point:
- * duplicate alerts are acceptable, a missed alert is not. A state read that
- * cannot be trusted counts as unannounced (the post it might suppress is the
- * one that matters) and re-arms the row unconditionally when that post does not
- * land, so a stale `tripped` row cannot silence the retry; storage failure is
- * never sold as exactly-once.
+ * The alert posts AT MOST ONCE PER SWEEP WINDOW, and the de-bounce is an AUDIT
+ * WINDOW rather than stored state: before posting, the sweep reads the most
+ * recent `platform_audit_events` row with action `alert.failure_paging`
+ * (compass D17) and posts nothing while that stamp is inside
+ * `SWEEP_WINDOW_HOURS`; a 2xx POST appends the row. Nothing is ever latched, so
+ * a breaching window with no recent alert always pages — a missed alert is
+ * structurally impossible, and the price is that two sweeps overlapping inside
+ * one window may each post once. A failed read or an unparseable stamp is "no
+ * recent alert" (the post it might suppress is the one that matters); a failed
+ * append is logged and leaves the POST result alone.
  *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
  * - DLQ depth is NOT read: there is no CF API token surface,
@@ -73,12 +67,6 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
-import {
-  compareAndSetFailurePagingState,
-  readFailurePagingState,
-  rearmFailurePagingState,
-  type FailurePagingStatus,
-} from "../dashboard/runtime-config-store";
 import {
   MAINTENANCE_DEFERRED_STAGE,
   PAGING_EXCLUDED_STAGES,
@@ -151,14 +139,12 @@ export type SweepAlertFields = {
 export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
   event:
     | "ops_sweep_alert_webhook_failed"
-    // The breach-transition generation (`platform.alert.failure_paging`): a
-    // state read that could not be trusted, the write that closes a delivered
-    // edge, and the healthy clear (plus its CAS loss, which is a no-op). Each
-    // degrades to a warn — none of them may suppress the post the sweep owes.
-    | "ops_sweep_alert_state_degraded"
-    | "ops_sweep_alert_state_set_failed"
-    | "ops_sweep_alert_state_cas_lost"
-    | "ops_sweep_alert_state_clear_failed"
+    // The audit-window de-bounce (`alert.failure_paging` in
+    // `platform_audit_events`): an unreadable window read, and the append that
+    // records a delivered alert. Both degrade to a warn — neither may suppress
+    // or alter the post the sweep owes.
+    | "ops_sweep_alert_window_unreadable"
+    | "ops_sweep_alert_audit_failed"
     | "ops_sweep_failed"
     | "ops_sweep_db_unbound"
     // §7.11: the scheduled composition's independent catch for the
@@ -260,18 +246,21 @@ export const defaultSweepLog: SweepLog = {
  * literal. Maintenance is the platform's own existence signal, owned by its
  * separate lane (377) and never part of the infrastructure total — so it is
  * excluded here too, by its constant. ONE predicate, so the grouped read and
- * the generation decisions below can never disagree about what a breach is.
+ * the window decision below can never disagree about what a breach is.
  */
 const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
          AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
          AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'`;
 
 /**
- * The breach TRANSITION is a generation, not a flag: `platform.alert.failure_paging`
- * holds `<state>:<n>` where n is the integer ticket this sweep read before its
- * window query, and every write is a compare-and-set on that generation (see
- * `compareAndSetFailurePagingState`). The write lives in the settings store
- * beside the row it owns; only the ticket is the sweep's.
+ * The audit-window de-bounce is ONE read plus ONE append against
+ * `platform_audit_events` (compass D17): `alert.failure_paging` rows record
+ * delivered alerts, and the newest stamp inside `SWEEP_WINDOW_HOURS` suppresses
+ * the POST. There is no stored latch and no generation — a breaching window
+ * with no recent alert always pages, and two concurrent sweeps may each post
+ * once. The ledger (migrations/0033_platform_admin.sql) is append-only and
+ * platform-scoped, which is exactly the shape a "was it already announced"
+ * question needs. The writer is the sweep itself, so the actor is `sweep`.
  */
 export type SweepDeps = {
   /** Alert webhook URL (env `ALERT_WEBHOOK_URL`); absent/empty = log-only. */
@@ -299,20 +288,90 @@ export type SweepResult = {
   invitesExpired: number | null;
   /**
    * Webhook disposition: absent (unset), posted, failed (throw or non-2xx,
-   * warn-logged), or not_attempted (no breach, or a breach already announced
-   * by a previous sweep — only the transition posts).
+   * warn-logged), or not_attempted (no breach, or an alert already recorded
+   * inside the sweep window — at most one post per window).
    */
   webhook: "absent" | "posted" | "failed" | "not_attempted";
 };
 
+/** The audit action that records a delivered paging alert (compass D17). */
+export const ALERT_PAGING_AUDIT_ACTION = "alert.failure_paging";
+
 /**
- * Run one sweep: read the trailing-24h failure rows grouped by stage, and on
- * the breach TRANSITION emit the `ops_sweep_alert` structured event +
- * optionally POST it to `alertUrl` (JSON body, SWEEP_WEBHOOK_TIMEOUT_MS
- * timeout). A webhook failure (network/timeout throw OR a non-2xx response)
- * degrades to a warn log — it NEVER throws (the alert must not take down the
- * cron that produced it). D1 errors DO propagate to the caller (the
- * `scheduled` handler wraps the whole sweep in try/catch).
+ * The newest recorded paging alert, as epoch milliseconds, or `null` when the
+ * ledger holds none. A read that throws or a stamp `Date.parse` cannot read is
+ * "no recent alert": the post it might suppress is the one that matters, so the
+ * caller logs and pages. Never throws.
+ */
+async function readLastAlertAt(db: D1Like, log: SweepLog, alertUrl?: string): Promise<number | null> {
+  try {
+    const row = await db
+      .prepare(`SELECT MAX(created_at) AS at FROM platform_audit_events WHERE action = ?`)
+      .bind(ALERT_PAGING_AUDIT_ACTION)
+      .first<{ at: string | null }>();
+    if (row?.at == null) return null;
+    const at = Date.parse(row.at);
+    if (Number.isNaN(at)) {
+      log.warn(
+        { event: "ops_sweep_alert_window_unreadable", detail: "unparseable alert stamp" },
+        "paging alert window unreadable — treating the alert as unannounced",
+      );
+      return null;
+    }
+    return at;
+  } catch (error) {
+    log.warn(
+      { event: "ops_sweep_alert_window_unreadable", detail: warnDetail(error, alertUrl) },
+      "paging alert window unreadable — treating the alert as unannounced",
+    );
+    return null;
+  }
+}
+
+/**
+ * Record a delivered alert. The POST already succeeded, so a storage failure
+ * here only means the next breaching sweep may post once more: it is logged and
+ * never changes the POST outcome. The detail carries the same numbers the
+ * payload did, which is what makes the ledger row a usable record on its own.
+ */
+async function appendAlertAudit(
+  db: D1Like,
+  alert: SweepAlertFields,
+  log: SweepLog,
+  alertUrl?: string,
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO platform_audit_events
+           (id, actor_login, action, target_type, target_id, detail_json, created_at)
+         VALUES (?, 'sweep', ?, 'sweep', ?, ?, ?)`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        ALERT_PAGING_AUDIT_ACTION,
+        "failure_paging",
+        JSON.stringify({ failures_24h: alert.failures_24h, stages: alert.stages }),
+        new Date().toISOString(),
+      )
+      .run();
+  } catch (error) {
+    log.warn(
+      { event: "ops_sweep_alert_audit_failed", detail: warnDetail(error, alertUrl) },
+      "paging alert audit row not written — the next sweep may alert again",
+    );
+  }
+}
+
+/**
+ * Run one sweep: read the trailing-24h failure rows grouped by stage, and when
+ * that total breaches the threshold AND no alert is recorded inside the sweep
+ * window, emit the `ops_sweep_alert` structured event + optionally POST it to
+ * `alertUrl` (JSON body, SWEEP_WEBHOOK_TIMEOUT_MS timeout). A webhook failure
+ * (network/timeout throw OR a non-2xx response) degrades to a warn log — it
+ * NEVER throws (the alert must not take down the cron that produced it). D1
+ * errors DO propagate to the caller (the `scheduled` handler wraps the whole
+ * sweep in try/catch).
  *
  * The infrastructure decision composes the alert body and sets the webhook
  * disposition; the body is delivered and the function returns once, at the
@@ -452,20 +511,6 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       );
     }
   }
-  // The GENERATION TICKET: the state row is read BEFORE the window query, so
-  // this sweep's generation precedes the observation it is about to make. Two
-  // sweeps that read the same ticket cannot both advance it, so a delayed
-  // sweep's write loses to any observation a recovery landed after its read.
-  const paging = await readFailurePagingState(db);
-  if (paging.degraded !== null) {
-    // A value no writer produced is not evidence the alert was posted, and the
-    // post it might suppress is the one that matters. The line is the
-    // operator's only cue that state is broken.
-    log.warn(
-      { event: "ops_sweep_alert_state_degraded", detail: paging.degraded },
-      "failure paging state unreadable — treating the alert as unannounced",
-    );
-  }
   // ONE grouped read supplies both the total and its breakdown, so a payload
   // can never describe a different instant than its own count.
   const { results: stageRows } = await db
@@ -478,68 +523,41 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   const stages = stageRows.map((row) => ({ stage: row.stage, count: row.count }));
   const failures24h = stages.reduce((sum, row) => sum + row.count, 0);
   const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
-  // One generation per accepted write, derived from the ticket read above: two
-  // sweeps holding the same ticket claim the SAME generation and one of them
-  // loses, which costs a duplicate alert and never a missed one.
-  const nextGen = paging.gen + 1;
   // The infrastructure decision only SETS the disposition and, when it owes a
   // page, composes the alert body; delivery and the single exit are below.
   let webhook: SweepResult["webhook"] = "not_attempted";
-  /** Advance the generation, logging only the outcomes an operator must see. */
-  const advance = async (status: FailurePagingStatus): Promise<void> => {
-    try {
-      if (await compareAndSetFailurePagingState(db, status, nextGen)) return;
-      // The alert was delivered either way; this only means another sweep
-      // claimed this generation first and will not be overwritten.
-      if (status === "tripped") {
-        log.warn(
-          { event: "ops_sweep_alert_state_cas_lost", detail: `generation ${nextGen} already claimed` },
-          "failure paging generation did not advance — a newer observation stands",
-        );
-      }
-    } catch (error) {
-      log.warn(
-        {
-          event: status === "clear" ? "ops_sweep_alert_state_clear_failed" : "ops_sweep_alert_state_set_failed",
-          detail: warnDetail(error, deps.alertUrl),
-        },
-        status === "clear"
-          ? "failure paging state clear failed — the next healthy sweep retries it"
-          : "failure paging state write failed — this alert may post again",
-      );
+  // At most one page per sweep window (compass D17). `let` because the
+  // maintenance lane below may merge its key into the same body.
+  let alert: SweepAlertFields | null = null;
+  if (thresholdBreached) {
+    // Read the window BEFORE the POST: the newest recorded alert suppresses
+    // this one. Nothing is latched, so a window with no recent row always
+    // pages; the cost of overlapping sweeps is one bounded duplicate.
+    const lastAlertAt = await readLastAlertAt(db, log, deps.alertUrl);
+    const announced = lastAlertAt !== null && Date.now() - lastAlertAt < SWEEP_WINDOW_HOURS * 3_600_000;
+    if (!announced) {
+      alert = {
+        event: "ops_sweep_alert",
+        failures_24h: failures24h,
+        dlq_check: "skipped",
+        thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+        stages,
+      };
     }
-  };
-  // A healthy window advances the generation so the next breach is a new edge.
-  // A lost CAS here is the documented no-op: a newer breach owns the row.
-  if (!thresholdBreached) await advance("clear");
-  // Sustained breach already announced (paging.state === "tripped"): no body, no
-  // POST, no state write. A breach on a clear state owes this one. `let` because
-  // the maintenance lane below may merge its key into the same body.
-  let alert: SweepAlertFields | null =
-    thresholdBreached && paging.state !== "tripped"
-      ? {
-          event: "ops_sweep_alert",
-          failures_24h: failures24h,
-          dlq_check: "skipped",
-          thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
-          stages,
-        }
-      : null;
+  }
   // 377's maintenance existence signal joins HERE: it reads its own count and
-  // generation, and when it owes a page it extends this same body with its key,
-  // so both transitions travel in ONE alert. Neither decision may return above
-  // this point — a healthy infrastructure total must not skip that lane.
+  // decides on its own, and when it owes a page it extends this same body with
+  // its key, so both alerts travel in ONE POST. Neither decision may return
+  // above this point — a healthy infrastructure total must not skip that lane.
   if (alert !== null) {
     log.warn(alert, "review failure threshold breached");
     if (!deps.alertUrl) {
       webhook = "absent";
     } else {
-      // POST FIRST, advance the generation only for a delivered alert. A
-      // generation written before the POST would let a terminated invocation
-      // suppress the only alert this breach ever sends; one written after a 2xx
-      // can at worst repeat an alert, which is the trade the contract makes. A
-      // stale sweep that resumes after a recovery loses its CAS instead of
-      // closing the edge.
+      // POST FIRST, append the audit row only for a delivered alert. A row
+      // written before the POST would let a terminated invocation suppress the
+      // only alert this breach ever sends; one written after a 2xx can at worst
+      // repeat an alert next sweep, which is the permitted duplication.
       // An arrow over a globalThis property call, never the bare `fetch` reference:
       // calling a stored reference loses the global receiver and workerd's native
       // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
@@ -558,9 +576,9 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           throw new Error(`alert webhook POST returned HTTP ${response.status}`);
         }
         webhook = "posted";
-        // The alert IS delivered; only now does the edge close. A failed or
-        // losing write costs a duplicate on the next sweep, never a missed one.
-        await advance("tripped");
+        // The alert IS delivered; only now is it recorded. The append never
+        // changes this disposition.
+        await appendAlertAudit(db, alert, log, deps.alertUrl);
       } catch (error) {
         // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
         // request URL into the error message; `warnDetail` redacts and caps it.
@@ -571,26 +589,9 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           },
           "alert webhook POST failed — log-only alert stands",
         );
-        // No generation write for a TRUSTED read: an undelivered alert leaves
-        // the edge open, so the next breaching sweep retries without a
-        // compensating clear.
+        // Nothing is recorded, so the window still counts as unannounced and
+        // the next breaching sweep retries.
         webhook = "failed";
-      }
-    }
-    // An untrusted read plus an undelivered alert. The stored row may still say
-    // `tripped` at a generation this sweep never saw: the compare-and-set cannot
-    // repair that (there is nothing trustworthy to compare against) and the row
-    // would silence every later breach once the read recovers. Overwriting it
-    // unconditionally is the only write that survives that, and it can at worst
-    // repeat an alert.
-    if (paging.degraded !== null && webhook !== "posted") {
-      try {
-        await rearmFailurePagingState(db, nextGen);
-      } catch (error) {
-        log.warn(
-          { event: "ops_sweep_alert_state_clear_failed", detail: warnDetail(error, deps.alertUrl) },
-          "failure paging state clear failed — the next healthy sweep retries it",
-        );
       }
     }
   }

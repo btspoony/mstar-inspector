@@ -2678,7 +2678,7 @@ behave.
   signal). `failures_24h` is the sum of those rows and the SAME ordered rows
   are the alert payload's `stages`, so the total and its breakdown always
   describe one snapshot — never two independently timed counts. Both, and the
-  breach latch of the same sweep, come from ONE predicate
+  breach decision of the same sweep, come from ONE predicate
   (`FAILURE_PAGING_WHERE_SQL` in `src/worker/sweep.ts`) that applies **two**
   exclusions: `stage NOT IN (PAGING_EXCLUDED_STAGES)` and
   `stage <> MAINTENANCE_DEFERRED_STAGE`, both read from
@@ -2691,8 +2691,8 @@ behave.
   throttled while the review itself stood (`rate-limit`) — so they never page
   ops. `quota` is a REAL failure the dashboard counts and lists: it marks one
   workspace that spent this month's RP ceiling, a commercial limit rather than
-  a platform incident, so a single tenant's exhausted month never latches the
-  global pager. All of them stay in `review_failures`.
+  a platform incident, so a single tenant's exhausted month never pages ops.
+  All of them stay in `review_failures`.
 - `maintenance_deferred` is a SECOND, separate exclusion, not part of
   `PAGING_EXCLUDED_STAGES`. The stage is in NEITHER exclusion list in
   `src/contracts/failure-stages.ts`: such a row stays a real stored failure, and
@@ -2716,41 +2716,30 @@ behave.
   exact rows whose counts sum to `failures_24h`, each one a stage an operator
   can act on; `quota`, the attribution stages and `maintenance_deferred` never
   appear in either value, because not one of them passes the predicate above.
-- The alert posts on the breach TRANSITION, not on every sweep that still sees
-  the same breach: the runtime key `platform.alert.failure_paging` in
-  `review_runtime_settings` holds a GENERATION, never a flag and never a
-  deletion. The stored value is `clear:<n>` or `tripped:<n>`, where `n` is the
-  integer ticket the writing sweep derived from the row it read before it
-  queried the window; no clock orders the row. A clear is itself a generation —
-  that is what lets a healthy sweep advance the row and defeat a stale claim.
-  The POST comes FIRST: only a 2xx advances the value to `tripped:<n>`, and a
-  healthy sweep advances it to `clear:<n>` so the next breach is a new edge.
-  Both writes are one compare-and-set on the integer: only a STRICTLY greater
-  generation lands, and at an EQUAL generation `clear` beats `tripped` (two
-  sweeps that took the same ticket and disagree about the window take the armed
-  answer, which costs a duplicate alert where keeping `tripped` could swallow
-  the next breach) — so an older sweep resuming after a recovery cannot close
-  the edge a newer breach owns. A stored value that is not
-  `<state>:<positive integer>` ranks below every real generation, so the next
-  write replaces it rather than the row blocking further writes. A lost
-  `tripped` CAS costs at most a duplicate alert and logs
-  `ops_sweep_alert_state_cas_lost`; a lost `clear` CAS is the documented no-op.
-  Absent sink, timeout, fetch throw or non-2xx never advances the generation,
-  so the edge stays open and the next sweep that observes a breaching window
-  posts again. A state read that cannot be trusted counts as unannounced — the
-  post it might suppress is the one that matters — and when that sweep's own
-  POST then does not land it re-arms the row to `clear:<n>` unconditionally,
-  without the compare-and-set (an untrusted read leaves nothing to compare
-  against), because a stale `tripped` would otherwise silence the retry once
-  the read recovers. Write failures warn and are retried on the next sweep
-  (`ops_sweep_alert_state_*` events). This is machine state, not a tunable — no
-  console control, no audit row.
+- The alert posts at most once per sweep window, and the de-bounce is an AUDIT
+  WINDOW, not a latch. Before posting, the sweep reads the newest
+  `platform_audit_events` row with action `alert.failure_paging`
+  (`SELECT MAX(created_at) …`): while that stamp is inside
+  `SWEEP_WINDOW_HOURS`, the breach posts nothing (`not_attempted`). After a 2xx
+  POST it appends one such row (actor `sweep`, detail
+  `{failures_24h, stages}`). Nothing is ever stored in
+  `review_runtime_settings` — no key, no state, no generation — so there is no
+  edge to close and nothing to clear: a breaching window with no recorded alert
+  always pages, which makes a missed alert structurally impossible. The price
+  is bounded duplication: two sweeps overlapping inside one window may each
+  post once, which the contract permits (a duplicate alert is acceptable, a
+  lost one is not). An absent sink, a timeout, a fetch throw or a non-2xx
+  records nothing, so the next breaching sweep retries. A window read that
+  throws or returns a stamp that is not a valid timestamp counts as "no recent
+  alert" (`ops_sweep_alert_window_unreadable`) and never suppresses the post; a
+  failed audit append is logged (`ops_sweep_alert_audit_failed`) and does not
+  change the POST result — at worst it allows one more post next sweep.
 - DLQ depth is NOT read (no CF API token surface — `dlq_check: "skipped"`);
   guard-leak cleanup stays out of cron (KV guard TTL is the leak upper
   bound).
 - The sweep never edits what it counts: it writes no `review_failures` row and
-  no `reviews` row (AL-6), and no KV guard. Its D1 writes are the paging latch
-  above and the bounded janitor lanes it already ran (delivery/PR-ledger
+  no `reviews` row (AL-6), and no KV guard. Its D1 writes are the paging audit
+  row above and the bounded janitor lanes it already ran (delivery/PR-ledger
   retention, invite lapse, comment-claim recovery); its one queue write is the
   comment-claim lane re-sending an ALREADY stored claim payload — recovery of
   a send that never happened, never a new review. (The composed
@@ -2866,8 +2855,8 @@ never created while paused. The same-name duplicate-run possibility above
 leaves up to 4 rows (1 initial delivery + max_retries = 3 retries), so the
 table grows with every failed attempt. Retention is **runbook-executed** —
 the cron sweep counts this table and must never delete from it (AL-6: counting
-must not edit what it counts); its only D1 writes are the breach-transition
-latch and its own janitor lanes (§ Cron failure sweep).
+must not edit what it counts); its only D1 writes are the paging audit row and
+its own janitor lanes (§ Cron failure sweep).
 
 Monthly (or when the table grows noticeably), delete rows older than 30
 days:
