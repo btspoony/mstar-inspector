@@ -1,4 +1,4 @@
-# image-inputs: f6d0b0d9aac15189e8d61dd2f70dfff7
+# image-inputs: d41c42a2be810b6ccd8b74ff8e590991
 # mstar-inspector review sandbox image (review-runner containerization).
 #
 # IMAGE INPUTS: this Dockerfile COPYs packages/{runner,shared}/src, but the
@@ -125,7 +125,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
     && { echo "bun $(/usr/local/bin/bun --version)"; gh --version | head -1; } > /etc/mstar-image-versions \
     && cat /etc/mstar-image-versions
 
-# mstar-harness plugin, pinned ref cb14eb364c339c07318b4d2ae7ce25f004adb45c (tag v4.7.0, bumped 2026-11-16).
+# mstar-harness plugin, pinned ref 30e6c0844db11583ec5e92d7b03fb0c2c1ec72f0 (tag v4.7.3, bumped 2026-11-18).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -136,7 +136,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin cb14eb364c339c07318b4d2ae7ce25f004adb45c \
+    && git -C /opt/mstar-harness fetch --depth 1 origin 30e6c0844db11583ec5e92d7b03fb0c2c1ec72f0 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
@@ -212,10 +212,10 @@ RUN sh /opt/verify-cli-shim.sh
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
-# lockfile (omp SDK 18.18.1 = packages/runner/package.json). `--omit=optional` is NOT used:
+# lockfile (omp SDK 18.22.2 = packages/runner/package.json). `--omit=optional` is NOT used:
 # pi-natives ships its platform binary as an optional dep, so omitting optionals
 # breaks the runner at load (T4 live smoke). The `rm -rf` below is a DEFENSIVE
-# guard, not something this lock currently materialises: the 18.18.1 frozen lock
+# guard, not something this lock currently materialises: the 18.22.2 frozen lock
 # pulls none of those trees (@oh-my-pi/pi-mnemopi lists fastembed/onnxruntime as
 # optional peers only). It stays so a future SDK resolving them non-optionally
 # cannot silently bloat the image, and it would need revisiting then — the
