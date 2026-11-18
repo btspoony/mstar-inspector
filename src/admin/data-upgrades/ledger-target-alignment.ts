@@ -192,12 +192,19 @@ const homeTarget = `SELECT t.id FROM review_targets t
  * The workspace comes from `bot_workspaces` inside the same statement, so a bot
  * re-homed between planning and commit writes into its current tenant, and a bot
  * that lost its tenant writes nothing at all.
+ *
+ * `follow_workspace_defaults = 1` is the UI-create rule (J4): a repository this
+ * item creates is an ordinary repository, so it inherits the workspace's review
+ * answers exactly as one added through the add-repository dialog does, and the
+ * row's own policy columns stay inert placeholders until an operator overrides
+ * them. Setting 0 here would permanently opt the repository out of the
+ * workspace defaults without anyone choosing that.
  */
 const INSERT_TARGET = `
   INSERT INTO review_targets
     (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
      follow_workspace_defaults, created_by, created_at, updated_at)
-  SELECT ?4, w.workspace_id, ?1, ?5, NULL, ?2, ?3, 0, ?6, datetime('now'), datetime('now')
+  SELECT ?4, w.workspace_id, ?1, ?5, NULL, ?2, ?3, 1, ?6, datetime('now'), datetime('now')
     FROM bot_workspaces w
    WHERE w.bot_id = ?1
      AND NOT EXISTS (${homeTarget})`;

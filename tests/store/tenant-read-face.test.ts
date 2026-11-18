@@ -207,6 +207,10 @@ const MAINTENANCE_SITES: Record<string, number> = {
   "worker/check-reconcile.ts": 3,
   "pipeline/review-threads.ts": 1,
   "store/review-checks.ts": 1,
+  // The data-upgrade runner's binding seam resolves one bot's App credentials by
+  // exact id to mint an installation token; it returns no identity or ownership
+  // column and never runs on a tenant route.
+  "admin/installation-repositories.ts": 1,
 };
 
 /**

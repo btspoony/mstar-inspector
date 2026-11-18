@@ -23,6 +23,10 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import {
+  readEffectiveTargetSettings,
+  type ReviewTargetRow,
+} from "../../src/dashboard/targets-store";
 import { ledgerTargetAlignment } from "../../src/admin/data-upgrades/ledger-target-alignment";
 import {
   DATA_UPGRADES,
@@ -193,6 +197,42 @@ describe("ledger-target-alignment item", () => {
       repo_name: "nexus",
       repo_id: null,
     });
+  });
+
+  test("a created target inherits the workspace's review defaults", async () => {
+    const db = fixture();
+    // The workspace answers `manual` at depth `deep` with an 90 gate: a target
+    // this item creates is an ordinary repository, so those answers are what it
+    // must run with.
+    db.raw
+      .prepare(
+        `UPDATE workspaces SET default_review_trigger_mode = 'manual',
+                               default_review_level = 'deep',
+                               check_min_score = 90,
+                               default_check_pass_verdicts = '["ship it","needs fixes"]'
+          WHERE id = 'default'`,
+      )
+      .run();
+    seedPr(db, "pr-nexus", "42ch-dev", "nexus", "target-harness", 7);
+    await ledgerTargetAlignment.runBatch(db, null, OPERATOR);
+
+    const created = db.raw
+      .prepare("SELECT * FROM review_targets WHERE repo_name = 'nexus'")
+      .get() as ReviewTargetRow;
+    expect(created.follow_workspace_defaults).toBe(1);
+    expect(await readEffectiveTargetSettings(db, created)).toMatchObject({
+      triggerMode: "manual",
+      level: "deep",
+      checkMinScore: 90,
+      checkPassVerdicts: ["ship it", "needs fixes"],
+    });
+
+    // Inheriting, not snapshotted: a later change to the workspace's answers
+    // moves the repository with it.
+    db.raw
+      .prepare("UPDATE workspaces SET default_review_trigger_mode = 'open' WHERE id = 'default'")
+      .run();
+    expect((await readEffectiveTargetSettings(db, created)).triggerMode).toBe("open");
   });
 
   test("running twice changes nothing the second time", async () => {
