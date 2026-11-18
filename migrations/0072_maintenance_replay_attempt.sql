@@ -1,6 +1,6 @@
 -- 0072_maintenance_replay_attempt.sql — a replay attempt is stamped so a
 -- permanently failing pending row rotates behind the requests it would
--- otherwise starve (plan 377 Q2).
+-- otherwise starve.
 --
 -- 0071 leaves an operator's requested-but-unsent row pending until its queue
 -- send resolves. A row whose send or sent-stamp keeps throwing stays pending by

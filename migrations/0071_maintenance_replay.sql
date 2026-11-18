@@ -1,5 +1,5 @@
 -- 0071_maintenance_replay.sql — an operator replay of a lost maintenance-window
--- delivery keeps its own request/sent stamps (plan 377 Q2).
+-- delivery keeps its own request/sent stamps.
 --
 -- A delivery the maintenance window could not hand back to the queue leaves a
 -- `stage = 'maintenance_deferred'` `review_failures` row that nothing replays.

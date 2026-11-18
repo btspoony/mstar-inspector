@@ -1,5 +1,5 @@
 /**
- * The maintenance-deferred replay route (plan 377 Q2) driven through the real
+ * The maintenance-deferred replay route driven through the real
  * admin mount. What is pinned:
  *
  *   - the winner writes the audit row + the request stamp in ONE batch, sends

@@ -1450,7 +1450,7 @@ describe("runSweep — comment-claim outbox", () => {
 });
 
 /**
- * Maintenance-replay outbox (migration 0071, plan 377 Q2): an operator request
+ * Maintenance-replay outbox (migration 0071): an operator request
  * whose send never resolved is retried by the sweep, but ONLY while the
  * maintenance window is readable and open — the same fail-closed predicate the
  * replay route uses. Real migrated DDL, a recording queue double.
@@ -1539,11 +1539,12 @@ describe("runSweep — maintenance replay outbox", () => {
     expect(sent).toHaveLength(1);
   });
 
-  test("the combined budget leaves the replay lane only what the comment outbox did not claim", async () => {
+  test("cap 1 with a pending replay reserves the slot for the replay, and the comment lane is served next sweep", async () => {
     const db = failureDb();
     await seedPendingReplay(db);
-    // One stale comment claim and one cap: the comment lane runs first, so the
-    // replay waits for the next sweep instead of exceeding the sweep's budget.
+    // One stale comment claim and one pending replay under cap 1: the reservation
+    // keeps the replay lane's last slot, so the operator's request is attempted
+    // THIS pass instead of waiting behind a sustained comment backlog.
     db.raw
       .prepare(
         `INSERT INTO comment_trigger_claims
@@ -1561,11 +1562,39 @@ describe("runSweep — maintenance replay outbox", () => {
 
     await runSweep(db, { log: captureLog().log, queue });
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ triggered_by: "issue_comment" });
+    expect(sent[0]).toMatchObject({ action: "maintenance_replay" });
 
+    // Nothing replayable is left, so the comment lane gets the whole cap.
     await runSweep(db, { log: captureLog().log, queue });
     expect(sent).toHaveLength(2);
-    expect(sent[1]).toMatchObject({ action: "maintenance_replay" });
+    expect(sent[1]).toMatchObject({ triggered_by: "issue_comment" });
+  });
+
+  test("cap 2 gives a pending replay one slot and the comment lane the other", async () => {
+    const db = failureDb();
+    await seedPendingReplay(db);
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (123, 'acme', 'widgets', 42, 9001, 'queued', ?, 0, 0, 0)`,
+      )
+      .run(JSON.stringify({ ...BASE, head_sha: null, action: "created", triggered_by: "issue_comment" }));
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '2', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const { queue, sent } = fakeQueue();
+
+    await runSweep(db, { log: captureLog().log, queue });
+
+    // Both lanes recovered in ONE pass, exactly one send each — no starvation,
+    // no double spending.
+    expect(sent).toHaveLength(2);
+    expect(sent.some((message) => JSON.stringify(message).includes('"issue_comment"'))).toBe(true);
+    expect(sent.some((message) => JSON.stringify(message).includes('"maintenance_replay"'))).toBe(true);
   });
 
   test("nothing is sent while maintenance is active", async () => {
@@ -1595,7 +1624,46 @@ describe("runSweep — maintenance replay outbox", () => {
       .run("2026-11-02T00:00:00.000Z", deadTarget);
     const dead = await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-01T00:00:00.000Z" });
     const live = await seedPendingReplay(db, { requestedAt: "2026-11-05T00:00:00.000Z" });
-    // Cap 1: the strictest budget, where the dead row used to consume the pass.
+    // Cap 2: one slot for the dead row's attempt, one for the live request.
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '2', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: "maintenance_replay", targetId: BASE.target_id });
+    expect(replayRow(db, live).maintenance_replay_sent_at).not.toBeNull();
+    // The dead request is never sent — an unavailable target cannot be
+    // resurrected — but its attempt IS stamped so it rotates behind the rest.
+    expect(replayRow(db, dead)).toMatchObject({
+      maintenance_replay_requested_at: "2026-11-01T00:00:00.000Z",
+      maintenance_replay_sent_at: null,
+    });
+    expect(replayRow(db, dead).maintenance_replay_last_attempt_at).not.toBeNull();
+    const outboxLog = calls.find((call) => call.fields.event === "maintenance_replay_outbox");
+    expect(outboxLog?.fields).toEqual({ event: "maintenance_replay_outbox", sent: 1, failed: 0, target_unavailable: 1 });
+  });
+
+  test("a dead backlog is bounded per pass: cap 1 touches one row and the next sweep moves on", async () => {
+    const db = failureDb();
+    // Three requests whose target is gone. They stay pending forever by
+    // contract, so the ONLY thing keeping the sweep bounded is that each touched
+    // row spends the shared budget and stamps its attempt.
+    const deadTarget = seedTarget(db, "bot-sweep", { id: "target-dead" });
+    db.raw
+      .prepare("UPDATE review_targets SET deleted_at = ? WHERE id = ?")
+      .run("2026-11-02T00:00:00.000Z", deadTarget);
+    const dead = [
+      await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-01T00:00:00.000Z" }),
+      await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-02T00:00:00.000Z" }),
+      await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-03T00:00:00.000Z" }),
+    ];
     db.raw
       .prepare(
         `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
@@ -1607,16 +1675,23 @@ describe("runSweep — maintenance replay outbox", () => {
 
     await runSweep(db, { log, queue });
 
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ action: "maintenance_replay", targetId: BASE.target_id });
-    expect(replayRow(db, live).maintenance_replay_sent_at).not.toBeNull();
-    // The dead request is untouched: an unavailable target never stamps sent.
-    expect(replayRow(db, dead)).toMatchObject({
-      maintenance_replay_requested_at: "2026-11-01T00:00:00.000Z",
-      maintenance_replay_sent_at: null,
+    // Cap 1 = at most ONE row touched this pass, and no queue write at all.
+    expect(sent).toHaveLength(0);
+    expect(calls.find((call) => call.fields.event === "maintenance_replay_outbox")?.fields).toEqual({
+      event: "maintenance_replay_outbox",
+      sent: 0,
+      failed: 0,
+      target_unavailable: 1,
     });
-    const outboxLog = calls.find((call) => call.fields.event === "maintenance_replay_outbox");
-    expect(outboxLog?.fields).toEqual({ event: "maintenance_replay_outbox", sent: 1, failed: 0, target_unavailable: 1 });
+    const touched = () => dead.filter((id) => replayRow(db, id).maintenance_replay_last_attempt_at !== null);
+    expect(touched()).toHaveLength(1);
+
+    await runSweep(db, { log, queue });
+
+    // The stamped row rotates back, so the next sweep touches a DIFFERENT one
+    // instead of walking the same dead prefix again.
+    expect(touched()).toHaveLength(2);
+    expect(sent).toHaveLength(0);
   });
 
   test("a replay whose send keeps failing rotates behind the next pending request on the next sweep", async () => {
@@ -1658,7 +1733,7 @@ describe("runSweep — maintenance replay outbox", () => {
     expect(replayRow(db, stuck).maintenance_replay_sent_at).toBeNull();
   });
 
-  test("a comment attempt whose DB write fails still spends the shared budget", async () => {
+  test("a comment attempt whose DB write fails still spends the comment lane's share", async () => {
     const db = failureDb();
     await seedPendingReplay(db);
     db.raw
@@ -1668,14 +1743,15 @@ describe("runSweep — maintenance replay outbox", () => {
          VALUES (123, 'acme', 'widgets', 42, 9001, 'queued', ?, 0, 0, 0)`,
       )
       .run(JSON.stringify({ ...BASE, head_sha: null, action: "created", triggered_by: "issue_comment" }));
+    // Cap 2 = one slot per lane while a replay is pending.
     db.raw
       .prepare(
         `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
-         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+         VALUES ('review.comment_claim.outbox_cap', '2', '2026-11-05T00:00:00.000Z', 'fixture')`,
       )
       .run();
     // The send succeeds, then the claim's own attempts update throws — the
-    // path where the attempt used to be refunded to the replay lane.
+    // attempt is still spent, so the replay lane gets only its own reserved slot.
     const lockedUpdate: D1StatementLike = {
       bind: () => lockedUpdate,
       first: async () => null,
@@ -1697,8 +1773,62 @@ describe("runSweep — maintenance replay outbox", () => {
 
     await runSweep(brokenWrites, { log, queue });
 
-    // ONE attempt against a cap of 1: the replay waits for the next sweep.
+    // Exactly the cap: the comment attempt happened, and the replay still got
+    // the slot reserved for it — no attempt was refunded.
+    expect(sent).toHaveLength(2);
+    expect(sent.some((message) => JSON.stringify(message).includes('"issue_comment"'))).toBe(true);
+    expect(sent.some((message) => JSON.stringify(message).includes('"maintenance_replay"'))).toBe(true);
+  });
+
+  test("a queue send that resolves but a sent stamp that fails leaves the row pending for the next sweep", async () => {
+    const db = failureDb();
+    const id = await seedPendingReplay(db);
+    // Cap 1: one attempt this pass, so the pending state is observed without a
+    // second in-pass retry.
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    // The queue accepts the job; only the sent stamp throws. The row must stay
+    // pending (a send whose stamp never landed is not proof of delivery), and
+    // the next open sweep must retry it — at-least-once, never a lost recovery.
+    const lockedStamp: D1StatementLike = {
+      bind: () => lockedStamp,
+      first: async () => null,
+      all: async () => ({ results: [] }),
+      async run() {
+        throw new Error("review_failures locked");
+      },
+    };
+    let failStamp = true;
+    const flaky: D1Like = {
+      prepare(query: string): D1StatementLike {
+        return failStamp && query.includes("SET maintenance_replay_sent_at")
+          ? lockedStamp
+          : db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(flaky, { log, queue });
+
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ triggered_by: "issue_comment" });
+    expect(replayRow(db, id).maintenance_replay_sent_at).toBeNull();
+    // The attempt is stamped before the send, so the row rotates back instead of
+    // owning the next sweep's budget.
+    expect(replayRow(db, id).maintenance_replay_last_attempt_at).not.toBeNull();
+    expect(calls.some((call) => call.fields.event === "maintenance_replay_outbox_send_failed")).toBe(true);
+
+    failStamp = false;
+    await runSweep(flaky, { log, queue });
+
+    // The retry lands the stamp and the row leaves the outbox.
+    expect(replayRow(db, id).maintenance_replay_sent_at).not.toBeNull();
+    await runSweep(flaky, { log, queue });
+    expect(sent).toHaveLength(2);
   });
 });

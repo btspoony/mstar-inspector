@@ -954,7 +954,7 @@ async function dataUpgradeAction(c: AdminContext): Promise<Response> {
 
 /**
  * Replay one maintenance-deferred delivery (`POST
- * /api/maintenance-deferred/:failureId/replay`, plan 377 Q2).
+ * /api/maintenance-deferred/:failureId/replay`).
  *
  * The state machine and the one queue send live in `./maintenance-replay`; this
  * handler only gates (the same admin gate every row here uses) and maps each

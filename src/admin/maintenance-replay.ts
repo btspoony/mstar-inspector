@@ -1,5 +1,5 @@
 /**
- * Operator replay of a maintenance-deferred delivery (plan 377 Q2).
+ * Operator replay of a maintenance-deferred delivery.
  *
  * A delivery the maintenance window outlived records a
  * `stage = 'maintenance_deferred'` `review_failures` row and nothing ever
@@ -250,14 +250,16 @@ export async function requestMaintenanceReplay(
 export type MaintenanceReplayRetry = "sent" | "target_unavailable";
 
 /**
- * Retry ONE pending replay from the sweep's outbox scan (plan 377 Q2): rebuild
- * the frozen payload from the row's CURRENT live target, send, and stamp sent
- * only once the send resolves. A send or stamp failure throws, so the caller
- * warns and the row stays pending for the next sweep. The row is never deleted.
+ * Retry ONE pending replay from the sweep's outbox scan: rebuild the frozen
+ * payload from the row's CURRENT live target, send, and stamp sent only once the
+ * send resolves. A send or stamp failure throws, so the caller warns and the row
+ * stays pending for the next sweep. The row is never deleted.
  *
- * The attempt is stamped BEFORE the send: the scan orders never-tried and
- * least-recently-tried first, so a row that keeps failing still rotates behind
- * the other pending requests instead of owning the cap on every sweep.
+ * The attempt is stamped BEFORE the target is resolved — dead target included.
+ * The scan orders never-tried and least-recently-tried first and every row it
+ * touches spends one unit of the shared budget, so an unstamped dead row would
+ * be handed the whole budget on every sweep and the requests behind it would
+ * never be attempted.
  */
 export async function retryMaintenanceReplay(
   db: DashboardD1,
@@ -268,9 +270,9 @@ export async function retryMaintenanceReplay(
   const failure = await readFailure(db, failureId);
   // A row that vanished between the scan and this read has no replayable target.
   if (failure === null) return "target_unavailable";
+  await stampAttempt(db, failure.id, now);
   const target = await readLiveTarget(db, failure.id);
   if (target === null) return "target_unavailable";
-  await stampAttempt(db, failure.id, now);
   await queue.send(maintenanceReplayPayload(failure, target));
   await stampSent(db, failure.id, now);
   return "sent";

@@ -73,7 +73,7 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
-import { getMaintenanceMode } from "../dashboard/runtime-config-store";
+import { getMaintenanceMode, maintenanceClosed } from "../dashboard/runtime-config-store";
 import { retryMaintenanceReplay } from "../admin/maintenance-replay";
 import {
   MAINTENANCE_DEFERRED_STAGE,
@@ -97,21 +97,19 @@ export const COMMENT_CLAIM_OUTBOX_SQL = `SELECT installation_id, owner, repo, pr
             LIMIT ?`;
 
 /**
- * The maintenance-replay outbox scan (migrations 0071/0072, plan 377 Q2): rows
- * an operator requested whose send never resolved. Its only bound is the shared
- * per-sweep cap — there is no attempt cap, so an operator's recovery is never
- * silently dropped.
+ * The maintenance-replay outbox scan: rows an operator requested whose send
+ * never resolved. `limit` is the sweep's REMAINING shared budget, and every row
+ * it returns spends one unit — so one pass touches at most that many rows.
  *
  * The ordering is a ROTATION, not oldest-request-first: a row that keeps failing
- * stays pending (contract), so ordering by request time alone would hand it the
- * whole cap on every open sweep and later requests would never be attempted.
- * `maintenance_replay_last_attempt_at` is stamped on every attempt, so a
- * never-tried row (`COALESCE(..., '')` sorts before any ISO-8601 stamp) and then
- * the least-recently-tried go first; request time and id only break ties.
+ * (or whose target is gone) stays pending, so ordering by request time alone
+ * would hand it the whole cap on every open sweep and later requests would never
+ * be attempted. `maintenance_replay_last_attempt_at` is stamped on every attempt,
+ * dead target included, so a never-tried row (`COALESCE(..., '')` sorts before
+ * any ISO-8601 stamp) and then the least-recently-tried go first; request time
+ * and id only break ties. A dead backlog therefore costs at most one attempt per
+ * sweep per free slot instead of being walked in full before the alert lanes.
  *
- * `tried` is the id set THIS pass already took (a JSON array; `[]` on the first
- * chunk). Excluding it keeps one row from being attempted twice inside a pass,
- * e.g. when two attempts share the same stamp.
  * Binds: `tried` (JSON array of ids), `limit`.
  */
 export const MAINTENANCE_REPLAY_OUTBOX_SQL = `SELECT id FROM review_failures
@@ -123,6 +121,17 @@ export const MAINTENANCE_REPLAY_OUTBOX_SQL = `SELECT id FROM review_failures
                      maintenance_replay_requested_at ASC,
                      id ASC
             LIMIT ?`;
+
+/**
+ * Is ANY replay request pending and unsent? The comment lane asks this before it
+ * spends the shared budget, so it can leave the replay lane one slot. Served by
+ * the pending partial index; one row is all the answer needs.
+ */
+const MAINTENANCE_REPLAY_PENDING_SQL = `SELECT 1 AS pending FROM review_failures
+            WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'
+              AND maintenance_replay_requested_at IS NOT NULL
+              AND maintenance_replay_sent_at IS NULL
+            LIMIT 1`;
 
 /**
  * Breach when `failures_24h > SWEEP_FAILURE_THRESHOLD` (AL-6): one row above a
@@ -254,7 +263,8 @@ export type SweepCommentClaimFields =
 export type SweepMaintenanceReplayFields =
   | { event: "maintenance_replay_outbox"; sent: number; failed: number; target_unavailable: number }
   | { event: "maintenance_replay_outbox_send_failed"; failure_id: string; detail: string }
-  | { event: "maintenance_replay_outbox_failed"; detail: string };
+  | { event: "maintenance_replay_outbox_failed"; detail: string }
+  | { event: "maintenance_replay_pending_unreadable"; detail: string };
 
 /**
  * The sweep only ever warns: a quiet system logs nothing. A warn-only view
@@ -530,11 +540,30 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     // answers the documented defaults with one structured warn and never
     // throws, so a broken settings row cannot stop recovery.
     const settings = await readCommentClaimSettings(db, log);
-    // The ONE combined recovery budget (plan 377 Q2): two de-bounded lanes, one
-    // cap. The maintenance-replay lane below gets whatever this lane did not
-    // claim in this pass, so a comment backlog cannot starve an operator's
-    // replay and neither lane can double the sweep's queue writes.
+    // The maintenance window is read ONCE, before the lanes split the budget:
+    // the replay lane's reservation and the lane itself must agree on it. Only
+    // an OPEN window may write the queue, so an unreadable window is closed —
+    // the same fail-closed predicate as the route.
+    const replayOpen = !maintenanceClosed(await getMaintenanceMode(db));
+    // The ONE combined recovery budget: two de-bounded lanes, one cap, so
+    // neither lane can double the sweep's queue writes. The split is fair by
+    // construction: while an operator's replay is pending AND the window is
+    // open, the comment lane may claim at most cap-1 and the replay lane keeps
+    // the last unit; with nothing waiting (or a closed window) the comment lane
+    // keeps the whole cap.
+    let replayWaiting = false;
+    if (replayOpen) {
+      try {
+        replayWaiting = (await db.prepare(MAINTENANCE_REPLAY_PENDING_SQL).first()) !== null;
+      } catch (error) {
+        log.warn(
+          { event: "maintenance_replay_pending_unreadable", detail: warnDetail(error, deps.alertUrl) },
+          "maintenance replay outbox unreadable — comment lane keeps the full cap",
+        );
+      }
+    }
     let outboxRemaining = settings.outboxCap;
+    const commentBudget = replayWaiting ? settings.outboxCap - 1 : settings.outboxCap;
     try {
       const nowMs = Date.now();
       // Rows at the cap have exhausted every re-send: flip them to `expired`
@@ -551,7 +580,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         .run();
       const stale = await db
         .prepare(COMMENT_CLAIM_OUTBOX_SQL)
-        .bind(settings.maxAttempts, nowMs - settings.retryMs, outboxRemaining)
+        .bind(settings.maxAttempts, nowMs - settings.retryMs, commentBudget)
         .all<{
           installation_id: number;
           owner: string;
@@ -602,70 +631,58 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         "comment trigger outbox sweep failed — continuing",
       );
     }
-    // Maintenance-replay outbox (migrations 0071/0072, plan 377 Q2): an
-    // operator's request can outlive its send — the isolate died between the
-    // request batch and `queue.send`, or the send/its sent-stamp failed. Only an
-    // OPEN window may write the queue, so the lane runs under the SAME
-    // fail-closed predicate as the route: unreadable is closed.
-    if (outboxRemaining > 0) {
+    // Maintenance-replay outbox (migrations 0071/0072): an operator's request
+    // can outlive its send — the isolate died between the request batch and
+    // `queue.send`, or the send/its sent-stamp failed. Only an OPEN window may
+    // write the queue, so the lane runs under the SAME fail-closed predicate as
+    // the route (`replayOpen`, read above): unreadable is closed.
+    if (outboxRemaining > 0 && replayOpen) {
       try {
-        const maintenance = await getMaintenanceMode(db);
-        if (!maintenance.unreadable && !maintenance.enabled) {
-          const now = new Date().toISOString();
-          // The ids THIS pass already took: one row is attempted at most once
-          // per sweep. Nothing else is persisted here.
-          const tried: string[] = [];
-          let sent = 0;
-          let failed = 0;
-          let unavailable = 0;
-          // Walk the pending rows in ROTATION order (never-tried first, then
-          // least-recently-tried): a row whose target is gone (or that vanished)
-          // is skipped and the next pending request is tried in the same sweep,
-          // and a row whose send keeps failing is stamped by the attempt itself,
-          // so it moves behind the requests it would otherwise starve. Only an
-          // actual send spends the shared budget — an unavailable target writes
-          // no queue message — and a send/stamp that throws spends it too,
-          // because that attempt happened.
-          while (outboxRemaining > 0) {
-            const pending = await db
-              .prepare(MAINTENANCE_REPLAY_OUTBOX_SQL)
-              .bind(JSON.stringify(tried), outboxRemaining)
-              .all<{ id: string }>();
-            if (pending.results.length === 0) break;
-            for (const row of pending.results) {
-              tried.push(row.id);
-              try {
-                const outcome = await retryMaintenanceReplay(db, queue, row.id, now);
-                if (outcome === "sent") {
-                  sent += 1;
-                  outboxRemaining -= 1;
-                } else {
-                  unavailable += 1;
-                }
-              } catch (error) {
-                // A send/stamp failure leaves the row pending: no attempt cap, so
-                // the next open sweep retries it — behind the rows this sweep did
-                // not reach, because the attempt stamp moved it back.
-                failed += 1;
-                outboxRemaining -= 1;
-                log.warn(
-                  {
-                    event: "maintenance_replay_outbox_send_failed",
-                    failure_id: row.id,
-                    detail: warnDetail(error, deps.alertUrl),
-                  },
-                  "maintenance replay send failed — row stays pending",
-                );
-              }
-              if (outboxRemaining <= 0) break;
-            }
-          }
-          if (sent > 0 || failed > 0 || unavailable > 0) {
+        const now = new Date().toISOString();
+        // The ids THIS pass already took: one row is attempted at most once per
+        // sweep. It can hold no more than the starting budget.
+        const tried: string[] = [];
+        let sent = 0;
+        let failed = 0;
+        let unavailable = 0;
+        // Every row this pass TOUCHES spends one unit of the shared budget,
+        // including a row whose target is gone — the scan can therefore never
+        // outgrow the budget. The per-attempt stamp (written for dead targets
+        // too) rotates the rows this pass did not reach to the front of the
+        // next one, so a dead backlog costs one attempt per free slot per sweep
+        // instead of being walked in full before the alert lanes run.
+        while (outboxRemaining > 0) {
+          const row = await db
+            .prepare(MAINTENANCE_REPLAY_OUTBOX_SQL)
+            .bind(JSON.stringify(tried), outboxRemaining)
+            .first<{ id: string }>();
+          if (row === null) break;
+          tried.push(row.id);
+          outboxRemaining -= 1;
+          try {
+            const outcome = await retryMaintenanceReplay(db, queue, row.id, now);
+            if (outcome === "sent") sent += 1;
+            else unavailable += 1;
+          } catch (error) {
+            // A send/stamp failure leaves the row pending: no attempt cap, so
+            // the next open sweep retries it — behind the rows this sweep did
+            // not reach, because the attempt stamp moved it back.
+            failed += 1;
             log.warn(
-              { event: "maintenance_replay_outbox", sent, failed, target_unavailable: unavailable },
-              "maintenance replay outbox recovery",
+              {
+                event: "maintenance_replay_outbox_send_failed",
+                failure_id: row.id,
+                detail: warnDetail(error, deps.alertUrl),
+              },
+              "maintenance replay send failed — row stays pending",
             );
           }
+        }
+        if (sent > 0 || failed > 0 || unavailable > 0) {
+          log.warn(
+            { event: "maintenance_replay_outbox", sent, failed, target_unavailable: unavailable },
+            "maintenance replay outbox recovery",
+          );
         }
       } catch (error) {
         log.warn(
