@@ -1491,7 +1491,10 @@ describe("/dashboard manifest routes", () => {
     expect(body).toContain(CONVERSION.name);
     expect(body).toContain(`Slug: ${CONVERSION.slug}`);
     expect(body).toContain(`https://worker.local/webhook/default/${startAppId}`);
-    expect(body).toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
+    // A committed App holds no review target yet, so the CTA opens the
+    // repository overview — an address a detail read can always resolve.
+    expect(body).toContain('href="/dashboard/default/repos"');
+    expect(body).not.toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
     expect(body).toContain(">Open Settings</a>");
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
@@ -2633,7 +2636,8 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const html = await landing.text();
     expect(html).toContain(`Slug: ${CONVERSION.slug}`);
     expect(html).toContain(startUrl);
-    expect(html).toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
+    expect(html).toContain('href="/dashboard/default/repos"');
+    expect(html).not.toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
     // …and re-running the whole flow lands a SECOND App row with its OWN
     // identity, never one row twice.
     stubGitHubConversionOnly({ ...CONVERSION, id: CONVERSION.id + 1, name: `${CONVERSION.name}-2` });
@@ -3273,7 +3277,10 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     expect(body).toContain(`Slug: ${CONVERSION.slug}`);
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(body).toContain(`https://worker.local/webhook/default/${app.id}`);
-    expect(body).toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
+    // A committed App holds no review target yet, so the CTA opens the
+    // repository overview — an address a detail read can always resolve.
+    expect(body).toContain('href="/dashboard/default/repos"');
+    expect(body).not.toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
     expect(body).toContain(">Open Settings</a>");
     expect(body).toContain("Next: open Settings and configure a provider");
     expect(body).not.toContain("BEGIN");
@@ -3299,9 +3306,9 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     await seedApp(env, { createdBy: "someone-else" });
     const res = await worker.fetch(await onboardingRequest(CONVERSION.id), env);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain(
-      `href="/dashboard/default/repos/${CONVERSION.id}"`,
-    );
+    const body = await res.text();
+    expect(body).toContain('href="/dashboard/default/repos"');
+    expect(body).not.toContain(`href="/dashboard/default/repos/${CONVERSION.id}"`);
   });
 
   test("Accept-Language zh renders the onboarding page in zh_CN", async () => {
