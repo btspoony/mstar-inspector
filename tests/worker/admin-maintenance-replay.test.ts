@@ -154,6 +154,30 @@ describe("the maintenance replay route", () => {
     expect(auditCount(db)).toBe(1);
   });
 
+  test("a repeated request answers 200 from the row while maintenance is active or unreadable", async () => {
+    const sent: Sent = { payloads: [] };
+
+    // Sent, then the window closes: the recorded state stays observable.
+    const active = fixture();
+    expect((await replay(active, sent)).status).toBe(202);
+    await setMaintenanceMode(active, { enabled: true, reason: "upgrade", actor: OPERATOR }, "2026-11-18T02:00:00.000Z");
+    const whileActive = await replay(active, sent);
+    expect(whileActive.status).toBe(200);
+    expect(await whileActive.json()).toEqual({ failureId: FAILURE_ID, state: "sent" });
+
+    // Requested-but-unsent, then the setting is unreadable: same answer.
+    const unreadable = fixture();
+    expect((await replay(unreadable, sent, { failSend: true })).status).toBe(202);
+    unreadable.raw.exec("DROP TABLE review_runtime_settings");
+    const whileUnreadable = await replay(unreadable, sent);
+    expect(whileUnreadable.status).toBe(200);
+    expect(await whileUnreadable.json()).toEqual({ failureId: FAILURE_ID, state: "requested" });
+
+    expect(sent.payloads).toHaveLength(1);
+    expect(auditCount(active)).toBe(1);
+    expect(auditCount(unreadable)).toBe(1);
+  });
+
   test("a send failure keeps durable pending state and answers 202 requested", async () => {
     const db = fixture();
     const sent: Sent = { payloads: [] };

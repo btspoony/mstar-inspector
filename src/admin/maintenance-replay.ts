@@ -138,9 +138,11 @@ async function stampSent(db: DashboardD1, id: string, now: string): Promise<void
  * Request (or observe) one replay. The caller has already authorized the
  * operator; this function owns the state machine and the one send.
  *
- * Ordering is the contract: an unreadable or closed window refuses before any
- * state, a already-requested row is answered from its own stamps, and a target
- * or queue that cannot carry the job refuses before the batch writes anything.
+ * Ordering is the contract: an already-requested row is answered from its own
+ * stamps before any window gate, because a recorded request is operator-visible
+ * durable state, not a new send; an unreadable or closed window then refuses a
+ * NEW request before any state is written, and a target or queue that cannot
+ * carry the job refuses before the batch writes anything.
  */
 export async function requestMaintenanceReplay(
   db: DashboardD1,
@@ -152,17 +154,20 @@ export async function requestMaintenanceReplay(
   if (failure.stage !== MAINTENANCE_DEFERRED_STAGE) {
     return { kind: "refused", error: "not_maintenance_deferred", status: 409 };
   }
-  // Fail closed like every traffic gate: an unreadable window is a closed one,
-  // and replay writes the queue, which only an OPEN window allows.
-  const maintenance = await getMaintenanceMode(db);
-  if (maintenance.unreadable) return { kind: "refused", error: "maintenance_unreadable", status: 503 };
-  if (maintenance.enabled) return { kind: "refused", error: "maintenance_active", status: 409 };
+  // A recorded request is answered from the row before any window gate: the
+  // operator must be able to observe an existing recovery precisely while a
+  // maintenance window or a settings failure is in progress.
   if (failure.maintenance_replay_requested_at !== null) {
     return {
       kind: "repeat",
       state: failure.maintenance_replay_sent_at === null ? "requested" : "sent",
     };
   }
+  // A NEW request fail-closes like every traffic gate: an unreadable window is
+  // a closed one, and replay writes the queue, which only an OPEN window allows.
+  const maintenance = await getMaintenanceMode(db);
+  if (maintenance.unreadable) return { kind: "refused", error: "maintenance_unreadable", status: 503 };
+  if (maintenance.enabled) return { kind: "refused", error: "maintenance_active", status: 409 };
   const target = await readLiveTarget(db, failure.id);
   if (target === null) return { kind: "refused", error: "target_unavailable", status: 409 };
   if (queue === undefined) return { kind: "refused", error: "queue_unavailable", status: 503 };
