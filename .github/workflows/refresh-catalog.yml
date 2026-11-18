@@ -73,7 +73,7 @@ jobs:
         id: before
         run: |
           {
-            echo "snapshot=$(git ls-files 'scripts/provider-catalog/models.dev-*.json')"
+            echo "snapshot=$(git ls-files 'scripts/provider-catalog/inputs/models.dev-*.json')"
             echo "omp=$(jq -r '.dependencies["@oh-my-pi/pi-coding-agent"]' package.json)"
             echo "engine=$(jq -r '.dependencies["@mstar-harness/engine"]' package.json)"
           } >> "$GITHUB_OUTPUT"
@@ -252,7 +252,7 @@ jobs:
             "${RUNNER_TEMP}/catalog-before.ts" \
             src/contracts/provider-catalog.generated.ts > "${RUNNER_TEMP}/removals.md"
 
-          AFTER_SNAPSHOT=$(git ls-files 'scripts/provider-catalog/models.dev-*.json')
+          AFTER_SNAPSHOT=$(git ls-files 'scripts/provider-catalog/inputs/models.dev-*.json')
           # One module decides green or red, from BOTH the step outcome and the
           # log — a step that lost its exit status to a pipeline cannot claim
           # green over a log that recorded failures.

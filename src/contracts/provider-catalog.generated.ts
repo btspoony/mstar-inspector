@@ -4,11 +4,11 @@
  * an explicit, reviewable regeneration commit.
  *
  * Source: pinned models.dev snapshot
- * `scripts/provider-catalog/models.dev-2026-11-13.json` (fetched 2026-11-13
+ * `scripts/provider-catalog/inputs/models.dev-2026-11-13.json` (fetched 2026-11-13
  * from https://models.dev/api.json; the `api` field carries the base URL)
  * + the omp-facing override table in the generator (labels / env-name
  * contract / workers-ai template) + the vendored omp provider snapshot
- * `scripts/provider-catalog/omp-api-key-providers.json` (omp 18.22.2,
+ * `scripts/provider-catalog/generated/omp-api-key-providers.json` (omp 18.22.2,
  * extracted 2026-11-18). Runtime is fully static: zero network,
  * zero ai-sdk runtime dependencies — the Worker, the dashboard, and the
  * sandbox image only import this module. PURE DATA + pure derivations:
@@ -66,7 +66,7 @@
  *   - sizes for such a row come from the models.dev key its id names, over the
  *     union of every protocol's vocabulary; an id the directory does not carry
  *     stays unsized
- * MEASURED OVERRIDES (`scripts/provider-catalog/overrides.json`, applied over the
+ * MEASURED OVERRIDES (`scripts/provider-catalog/inputs/overrides.json`, applied over the
  * package's own vocabulary and authoritative for these buckets — a package bump
  * does not change them; re-measure and update the `fetched` date):
  *   - commandcode openai-completions (commandcode-completions): 92 ids, measured 2026-11-18 from https://api.commandcode.ai/provider/v1/models

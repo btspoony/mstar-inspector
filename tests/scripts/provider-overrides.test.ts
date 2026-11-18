@@ -1,5 +1,5 @@
 /**
- * `scripts/provider-catalog/overrides.ts` — the hand-measured override layer.
+ * `scripts/provider-catalog/lib/overrides.ts` — the hand-measured override layer.
  *
  * The vendored snapshot used to be the package's vocabulary verbatim. That made
  * the generated catalog wrong whenever the package and the vendor's live
@@ -14,7 +14,7 @@
  * normalizing either direction publishes a vocabulary it cannot serve.
  */
 import { describe, expect, test } from "bun:test";
-import { applyOverrides, type Override } from "../../scripts/provider-catalog/overrides";
+import { applyOverrides, type Override } from "../../scripts/provider-catalog/lib/overrides";
 
 type Row = { id: string; api: string; models: string[] };
 

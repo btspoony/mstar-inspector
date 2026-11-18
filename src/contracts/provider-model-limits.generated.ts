@@ -3,7 +3,7 @@
  * provider catalog. DO NOT EDIT BY HAND — regenerate with
  * `bun run scripts/generate-provider-catalog.ts`.
  *
- * Source: `scripts/provider-catalog/models.dev-2026-11-13.json` (fetched
+ * Source: `scripts/provider-catalog/inputs/models.dev-2026-11-13.json` (fetched
  * 2026-11-13 from https://models.dev/api.json; each model carries
  * `limit: { context, output }`). Only providers and model ids that the
  * generated provider catalog lists are carried here — the table exists to fill

@@ -20,18 +20,26 @@
  * tag cannot yield a commit, so `--harness-ref` supplies the dereferenced sha;
  * without one the version literals still move and the run says the ref did not.
  *
- * The script owns the locks too, so its own documented invocation leaves a tree
- * `bun install --frozen-lockfile` accepts. Each lock is regenerated from the
- * COMMITTED one (`--lockfile-only`), so only the pin's rows move — resolving
- * from the manifest alone would also lift the caret-ranged transitives the
- * committed lock already fixed. The runner lock is regenerated in a temp copy,
- * because a nested `packages/runner/node_modules` would shadow the root
- * resolution the repo's typecheck and tests use.
+ * INSTALL, not just relock. A lockfile-only regeneration would leave the OLD
+ * package on disk while the manifests claim the new one, and the refresh would
+ * then extract from — and validate — a tree it does not describe. That is the
+ * Worker/image divergence this repo has already been bitten by twice, so the
+ * bump runs a real `bun install` for the root and for the runner copy, then
+ * checks the INSTALLED tree's version against the manifest pin (a lock row is
+ * not evidence an install happened), and finally proves the committed lock is
+ * self-consistent with `bun install --frozen-lockfile`. Any failure aborts the
+ * bump — no fallback.
+ *
+ * Each lock is regenerated from the COMMITTED one, so only the pin's rows move;
+ * resolving from the manifest alone would also lift the caret-ranged
+ * transitives the committed lock already fixed. The runner install runs in a
+ * temp copy, because a nested `packages/runner/node_modules` would shadow the
+ * root resolution the repo's typecheck and tests use.
  *
  * Every rewrite is anchored on the current pin, so a surface that already moved
  * by hand fails the run instead of silently doing nothing.
  */
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -82,6 +90,64 @@ async function currentPins(): Promise<Pins> {
   };
 }
 
+/** The version actually present on disk for `packageName`, or null when the
+ *  package is not installed. This — not a lock row — is what the extractor and
+ *  the typechecker will read. */
+export function installedVersion(dir: string, packageName: string): string | null {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(path.join(dir, "node_modules", ...packageName.split("/"), "package.json"), "utf8"),
+    ) as { version?: unknown };
+    return typeof manifest.version === "string" ? manifest.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One package the bumped tree must actually install. `caret` — the root
+ *  manifest keeps a `^` range, so there the installed version may exceed the
+ *  pin; the runner's pin is exact. */
+export type Expected = { name: string; version: string; caret: boolean };
+
+/** `[major, minor, patch]`, or null when the string is not a version. */
+function versionTriple(value: string): number[] | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(value);
+  return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function atLeast(actual: string, pinned: string): boolean {
+  const a = versionTriple(actual);
+  const p = versionTriple(pinned);
+  if (a === null || p === null) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== p[index]) return a[index]! > p[index]!;
+  }
+  return true;
+}
+
+/** Run `bun install` in `dir` with each mode in turn, then prove the INSTALLED
+ *  tree matches the pin. Throws — never falls back — when an install fails or
+ *  the on-disk version disagrees: the whole point of the bump is that the
+ *  extraction and the checks after it run against the NEW SDK. */
+export function installAndVerify(dir: string, expected: Expected[], modes: string[][] = [[]]): void {
+  for (const args of modes) {
+    const install = Bun.spawnSync(["bun", "install", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+    if (install.exitCode !== 0) {
+      throw new Error(`bun install ${args.join(" ")} failed in ${dir}: ${install.stderr.toString().trim()}`);
+    }
+  }
+  for (const { name, version, caret } of expected) {
+    const actual = installedVersion(dir, name);
+    const ok = actual !== null && (caret ? atLeast(actual, version) : actual === version);
+    if (!ok) {
+      throw new Error(
+        `${name} is ${JSON.stringify(actual)} on disk in ${dir} but the pin says ${JSON.stringify(version)} — the bump did not install`,
+      );
+    }
+    console.log(`verified ${name}@${actual} installed in ${dir} (pin ${caret ? "^" : ""}${version})`);
+  }
+}
+
 /** Regenerate `dir`'s bun.lock from the committed lock + manifest beside it.
  *  `path.resolve`, not `path.join`: the runner's lock is built in an absolute
  *  temp directory, and `join` would nest it under the repo root instead. */
@@ -97,8 +163,8 @@ function regenerateLock(dir: string): void {
 }
 
 /** The edits that move every surface from the committed pins to the requested
- *  ones. Exported for `tests/scripts/provider-catalog-refresh-guards.test.ts`,
- *  which pins the surface list so a new pin cannot land un-updated. */
+ *  ones. Exported for `tests/scripts/provider-catalog-refresh.test.ts`, which
+ *  drives the surface list so a new pin cannot land un-updated. */
 export function planEdits(
   from: Pins,
   to: { omp?: string; engine?: string; harnessRef?: string },
@@ -160,8 +226,27 @@ export function planEdits(
   return edits;
 }
 
+/** The versions ONE manifest's bumped tree must actually install, with the
+ *  range shape that manifest now carries (the root keeps `^` on the engine, the
+ *  runner pins exactly) — so each directory is verified against its own file. */
+export function expectedInstalls(edits: PinEdit[], manifest: string): Expected[] {
+  const expected: Expected[] = [];
+  for (const edit of edits) {
+    if (edit.file !== manifest) continue;
+    const touched = /"(@[^"]+)": "([^"]+)"/.exec(edit.to);
+    if (touched === null) continue;
+    expected.push({
+      name: touched[1]!,
+      version: touched[2]!.replace(/^\^/, ""),
+      caret: touched[2]!.startsWith("^"),
+    });
+  }
+  return expected;
+}
+
 if (import.meta.main) {
-  const edits = planEdits(await currentPins(), parseArgs(process.argv.slice(2)));
+  const options = parseArgs(process.argv.slice(2));
+  const edits = planEdits(await currentPins(), options);
   if (edits.length === 0) {
     console.log("pins already current — nothing to do");
   } else {
@@ -176,21 +261,36 @@ if (import.meta.main) {
       await writeFile(path.join(ROOT, file), text, "utf8");
       console.log(`updated ${file} (${fileEdits.length} pin${fileEdits.length === 1 ? "" : "s"})`);
     }
-    // Locks: one per manifest that moved. The root and CLI locks regenerate in
-    // place from their committed state; the runner's is built in a temp copy so
-    // no nested node_modules lands inside the tree.
-    for (const dir of ["", "sandbox-image/cli-global"]) {
-      if (!edits.some((edit) => edit.file === path.join(dir, "package.json"))) continue;
-      regenerateLock(dir);
-      console.log(`regenerated ${path.join(dir, "bun.lock")}`);
+
+    // Root: relock from the committed lock, install for real, then prove a
+    // clean checkout would get the same tree. The install is what makes the
+    // extractor below read the NEW SDK; `--frozen-lockfile` is the second check.
+    regenerateLock("");
+    installAndVerify(ROOT, expectedInstalls(edits, "package.json"), [[], ["--frozen-lockfile"]]);
+
+    // CLI pin: its own manifest + lock (no source imports the CLI, so a lock is
+    // the whole artifact).
+    if (edits.some((edit) => edit.file === "sandbox-image/cli-global/package.json")) {
+      regenerateLock("sandbox-image/cli-global");
+      console.log("regenerated sandbox-image/cli-global/bun.lock");
     }
+
+    // Runner: relock + install in a temp copy (a nested node_modules here would
+    // shadow the root resolution), then copy the resulting lock back. The
+    // install is real so the copy proves the lock resolves to the pinned tree.
     if (edits.some((edit) => edit.file === "packages/runner/package.json")) {
       const tmp = mkdtempSync(path.join(tmpdir(), "runner-lock-"));
       try {
-        for (const name of ["package.json", "bun.lock"]) {
-          copyFileSync(path.join(ROOT, "packages/runner", name), path.join(tmp, name));
-        }
+        cpSync(path.join(ROOT, "packages/runner/package.json"), path.join(tmp, "package.json"));
+        // A committed lock is seeded when present so only the pin's rows move;
+        // absent, `regenerateLock` resolves the whole tree instead.
+        const committedLock = path.join(ROOT, "packages/runner/bun.lock");
+        if (existsSync(committedLock)) cpSync(committedLock, path.join(tmp, "bun.lock"));
         regenerateLock(tmp);
+        installAndVerify(tmp, expectedInstalls(edits, "packages/runner/package.json"), [
+          [],
+          ["--frozen-lockfile"],
+        ]);
         copyFileSync(path.join(tmp, "bun.lock"), path.join(ROOT, "packages/runner/bun.lock"));
       } finally {
         rmSync(tmp, { recursive: true, force: true });

@@ -10,7 +10,8 @@
  * env, api, doc, model_ids, limits } }` — this script is the ONLY converter, so
  * the format has one producer and one consumer (`generate-provider-catalog.ts`).
  *
- * Rule for dated files: exactly ONE snapshot is kept in git. The payload is
+ * Rule for dated files: exactly ONE snapshot is kept in git, under `inputs/`
+ * (the only directory a human or an external service writes). The payload is
  * rendered first and compared byte-for-byte with the newest committed
  * snapshot, so unchanged upstream data writes nothing and keeps the existing
  * file (whose date is the date the data last changed — the generator reports
@@ -29,7 +30,7 @@
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { CATALOG_DIR, SNAPSHOT_NAME } from "./snapshot";
+import { INPUTS_DIR, SNAPSHOT_NAME } from "./lib/snapshot";
 
 const UPSTREAM_URL = "https://models.dev/api.json";
 const FETCH_TIMEOUT_MS = 120_000;
@@ -169,7 +170,7 @@ async function main(): Promise<void> {
   } catch {
     throw new Error(`${UPSTREAM_URL} did not return JSON (${text.length} bytes)`);
   }
-  const written = await refresh(CATALOG_DIR, body);
+  const written = await refresh(INPUTS_DIR, body);
   console.log(
     written.changed
       ? `wrote ${written.file} (${written.bytes} bytes), pruned ${written.pruned} older snapshot(s)`

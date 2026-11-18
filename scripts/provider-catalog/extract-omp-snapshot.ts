@@ -1,7 +1,7 @@
 /**
  * Author-time extractor for the two vendored omp snapshots:
- *   `scripts/provider-catalog/omp-api-key-providers.json`
- *   `scripts/provider-catalog/omp-provider-verify.json`
+ *   `scripts/provider-catalog/generated/omp-api-key-providers.json`
+ *   `scripts/provider-catalog/generated/omp-provider-verify.json`
  *
  * Run against the INSTALLED `@oh-my-pi/pi-catalog` (the same SDK the runner
  * ships), so the model ids are the ones the runtime actually knows:
@@ -40,26 +40,27 @@
  *      rejects. Overrides are data, not code: the file records its `source` and
  *      `fetched` date, and a run logs every bucket it replaced.
  */
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { createRequire } from "node:module";
-import { applyOverrides, PROTOCOL_SUFFIX, type Override } from "./overrides";
-import { CATALOG_DIR, newestSnapshot } from "./snapshot";
+import { applyOverrides, PROTOCOL_SUFFIX, type Override } from "./lib/overrides";
+import { declarationBaseUrl } from "./lib/base-url";
+import { GENERATED_DIR, INPUTS_DIR, pickNewestSnapshot } from "./lib/snapshot";
 
 const PI_CATALOG_DIR = path.dirname(
   createRequire(import.meta.url).resolve("@oh-my-pi/pi-catalog/package.json"),
 );
 const RULES_PATH = path.join(PI_CATALOG_DIR, "src/compat/rules.json");
 /** The newest committed models.dev snapshot (the generator reads the same one). */
-const MODELS_DEV_PATH = path.join(CATALOG_DIR, newestSnapshot().file);
-const OUT_PROVIDERS_PATH = path.resolve("scripts/provider-catalog/omp-api-key-providers.json");
-const OUT_VERIFY_PATH = path.resolve("scripts/provider-catalog/omp-provider-verify.json");
+const MODELS_DEV_PATH = path.join(INPUTS_DIR, pickNewestSnapshot(await readdir(INPUTS_DIR)).file);
+const OUT_PROVIDERS_PATH = path.join(GENERATED_DIR, "omp-api-key-providers.json");
+const OUT_VERIFY_PATH = path.join(GENERATED_DIR, "omp-provider-verify.json");
 /**
  * Hand-measured, vendor-authoritative vocabularies. Read-only input: this
  * script never writes it, so the file survives every regeneration.
  */
-const OVERRIDES_PATH = path.resolve("scripts/provider-catalog/overrides.json");
+const OVERRIDES_PATH = path.join(INPUTS_DIR, "overrides.json");
 
 type Rule = {
   id: string;
@@ -224,24 +225,6 @@ function modelRows(id: string, rule: Rule | undefined) {
   return [...bundled, ...seeded];
 }
 
-/** A URL a custom-provider declaration can actually store: https, no loopback
- *  host. Everything else is treated as absent (`null`), which the save flow
- *  already models as "the operator supplies it" — the rule this script publishes
- *  in `source.rules`, enforced here instead of only written down. */
-function declarationBaseUrl(url: string | null | undefined): string | null {
-  if (typeof url !== "string") return null;
-  let host: string;
-  try {
-    host = new URL(url).hostname;
-  } catch {
-    return null;
-  }
-  return url.startsWith("https://") && !LOOPBACK_HOSTS.test(host) ? url : null;
-}
-
-/** Hosts only the local machine can reach (`localhost`, `127.0.0.0/8`, `::1`). */
-const LOOPBACK_HOSTS = /^(localhost|127\.\d+\.\d+\.\d+|\[?::1\]?)$/i;
-
 function mostCommon<T>(values: T[]): T | undefined {
   const counts = new Map<T, number>();
   for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
@@ -310,12 +293,12 @@ for (const auth of rules.auth.providers) {
     const recordId = api === primary ? id : `${id}-${PROTOCOL_SUFFIX[api] ?? api}`;
     // `seed.api` is the protocol dialect (see `modelRows`), NOT a URL: using it
     // as a base-URL fallback would prefill a template row with
-    // "openai-completions". Only real URLs enter the chain, and each candidate
-    // must survive the declaration store's https rule.
-    const baseUrl = declarationBaseUrl(
-      mostCommon(group.map((r) => r.baseUrl).filter((b): b is string => typeof b === "string")) ??
-        rule?.seed?.baseUrl,
-    );
+    // "openai-completions". Only real URLs enter the chain, each tried in turn
+    // against the declaration store's https rule.
+    const baseUrl = declarationBaseUrl([
+      mostCommon(group.map((r) => r.baseUrl).filter((b): b is string => typeof b === "string")),
+      rule?.seed?.baseUrl,
+    ]);
     const placeholders = [...(baseUrl ?? "").matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!);
     const unusable =
       !ID_PATTERN.test(recordId)
@@ -453,6 +436,9 @@ async function stableExtracted<T extends { source: { extracted: string } }>(
   return next;
 }
 
+// `generated/` is disposable by contract: deleting it and re-running must
+// reproduce every byte, so the directory is created rather than assumed.
+await mkdir(GENERATED_DIR, { recursive: true });
 await writeFile(
   OUT_PROVIDERS_PATH,
   `${JSON.stringify(await stableExtracted(OUT_PROVIDERS_PATH, providersOut), null, 2)}\n`,

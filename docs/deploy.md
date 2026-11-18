@@ -2251,7 +2251,10 @@ against — is refreshed by
 daily at **04:17 UTC** (plus a manual `workflow_dispatch`).
 
 It re-fetches `https://models.dev/api.json` through
-`scripts/provider-catalog/fetch-models-dev.ts`, regenerates both contracts
+`scripts/provider-catalog/fetch-models-dev.ts` (writing the trimmed snapshot into
+`scripts/provider-catalog/inputs/`; the directory's ownership contract is
+[`scripts/provider-catalog/README.md`](../scripts/provider-catalog/README.md)),
+regenerates both contracts
 with `bun run provider:catalog`, and moves the omp SDK / harness-engine pins
 first when npm publishes a newer release — a refresh that skipped the SDK bump
 would validate the catalog against a registry the image no longer ships. The
