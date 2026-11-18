@@ -31,6 +31,7 @@ import {
   type SweepDeps,
   type SweepInviteLapseFields,
   type SweepLog,
+  type SweepMaintenanceReplayFields,
   type SweepRetentionFields,
   type SweepLedgerRetentionFields,
   type SweepWarnFields,
@@ -71,6 +72,7 @@ type WarnCall = {
     | SweepLedgerRetentionFields
     | SweepInviteLapseFields
     | SweepCommentClaimFields
+    | SweepMaintenanceReplayFields
     | CommentClaimSettingsLogFields;
   msg?: string;
 };
@@ -1385,6 +1387,133 @@ describe("runSweep — comment-claim outbox", () => {
       retry_ms: COMMENT_CLAIM_RETRY_DEFAULT,
       max_attempts: COMMENT_CLAIM_ATTEMPTS_DEFAULT,
       outbox_cap: COMMENT_CLAIM_OUTBOX_DEFAULT,
+    });
+  });
+});
+
+/**
+ * Maintenance-replay outbox (migration 0071, plan 377 Q2): an operator request
+ * whose send never resolved is retried by the sweep, but ONLY while the
+ * maintenance window is readable and open — the same fail-closed predicate the
+ * replay route uses. Real migrated DDL, a recording queue double.
+ */
+describe("runSweep — maintenance replay outbox", () => {
+  /** One requested-but-unsent deferred row (the operator's durable request). */
+  async function seedPendingReplay(db: TestD1): Promise<string> {
+    const id = crypto.randomUUID();
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures
+           (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error,
+            maintenance_replay_requested_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'maintenance_deferred', 'maintenance_window',
+                 '2026-11-01T00:00:00.000Z')`,
+      )
+      .run(id, BASE.target_id, BASE.installation_id, BASE.owner, BASE.repo, BASE.pr_number, BASE.head_sha);
+    return id;
+  }
+
+  function replayRow(db: TestD1, id: string) {
+    return db.raw
+      .query("SELECT maintenance_replay_requested_at, maintenance_replay_sent_at FROM review_failures WHERE id = ?")
+      .get(id) as { maintenance_replay_requested_at: string | null; maintenance_replay_sent_at: string | null };
+  }
+
+  function setMaintenance(db: TestD1, enabled: boolean): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('platform.maintenance.enabled', ?, '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run(enabled ? "1" : "0");
+  }
+
+  function fakeQueue(): { queue: SweepDeps["queue"]; sent: unknown[] } {
+    const sent: unknown[] = [];
+    return {
+      sent,
+      queue: {
+        send: async (message: unknown) => {
+          sent.push(message);
+        },
+      } as never,
+    };
+  }
+
+  test("a pending replay is sent once with the frozen payload while maintenance is off", async () => {
+    const db = failureDb();
+    const id = await seedPendingReplay(db);
+    setMaintenance(db, false);
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(1);
+    // The frozen replay payload: live target/bot, authoritative head left to
+    // the consumer, no comment id and no old webhook body.
+    expect(sent[0]).toEqual({
+      installation_id: BASE.installation_id,
+      owner: BASE.owner,
+      repo: BASE.repo,
+      pr_number: BASE.pr_number,
+      head_sha: null,
+      action: "maintenance_replay",
+      triggered_by: "pull_request",
+      botRef: { appId: "bot-sweep" },
+      targetId: BASE.target_id,
+    });
+    expect(replayRow(db, id).maintenance_replay_sent_at).not.toBeNull();
+    expect(calls.some((call) => call.fields.event === "maintenance_replay_outbox")).toBe(true);
+
+    // The sent stamp is the outbox's only exit: the next sweep sends nothing.
+    await runSweep(db, { log, queue });
+    expect(sent).toHaveLength(1);
+  });
+
+  test("the combined budget leaves the replay lane only what the comment outbox did not claim", async () => {
+    const db = failureDb();
+    await seedPendingReplay(db);
+    // One stale comment claim and one cap: the comment lane runs first, so the
+    // replay waits for the next sweep instead of exceeding the sweep's budget.
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (123, 'acme', 'widgets', 42, 9001, 'queued', ?, 0, 0, 0)`,
+      )
+      .run(JSON.stringify({ ...BASE, head_sha: null, action: "created", triggered_by: "issue_comment" }));
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const { queue, sent } = fakeQueue();
+
+    await runSweep(db, { log: captureLog().log, queue });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ triggered_by: "issue_comment" });
+
+    await runSweep(db, { log: captureLog().log, queue });
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({ action: "maintenance_replay" });
+  });
+
+  test("nothing is sent while maintenance is active", async () => {
+    const db = failureDb();
+    const id = await seedPendingReplay(db);
+    setMaintenance(db, true);
+    const { queue, sent } = fakeQueue();
+    const { log } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(0);
+    // The request stands, unsent, for the first open sweep.
+    expect(replayRow(db, id)).toMatchObject({
+      maintenance_replay_requested_at: "2026-11-01T00:00:00.000Z",
+      maintenance_replay_sent_at: null,
     });
   });
 });

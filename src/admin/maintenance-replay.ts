@@ -231,3 +231,28 @@ export async function requestMaintenanceReplay(
     return { kind: "ok", state: "requested" };
   }
 }
+
+/** What one sweep retry did: the send resolved, or there is no live target left. */
+export type MaintenanceReplayRetry = "sent" | "target_unavailable";
+
+/**
+ * Retry ONE pending replay from the sweep's outbox scan (plan 377 Q2): rebuild
+ * the frozen payload from the row's CURRENT live target, send, and stamp sent
+ * only once the send resolves. A send or stamp failure throws, so the caller
+ * warns and the row stays pending for the next sweep. The row is never deleted.
+ */
+export async function retryMaintenanceReplay(
+  db: DashboardD1,
+  queue: Queue<ReviewJobPayload>,
+  failureId: string,
+  now: string,
+): Promise<MaintenanceReplayRetry> {
+  const failure = await readFailure(db, failureId);
+  // A row that vanished between the scan and this read has no replayable target.
+  if (failure === null) return "target_unavailable";
+  const target = await readLiveTarget(db, failure.id);
+  if (target === null) return "target_unavailable";
+  await queue.send(maintenanceReplayPayload(failure, target));
+  await stampSent(db, failure.id, now);
+  return "sent";
+}

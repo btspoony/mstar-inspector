@@ -42,10 +42,14 @@
  *   upper bound (a wrong delete of a live guard is worse than a TTL leak).
  * - Bounded janitor writes ride along (webhook_deliveries retention, the
  *   invite lapse flip) beside one optional webhook POST; the rest is reads and
- *   logs. The ONE queue write is the comment-claim outbox (migration 0048): a
- *   `queued` claim older than the retry window has its stored payload re-sent,
- *   which is what makes "claim before send" survive an isolate dying between
- *   the two. It NEVER mutates KV keys.
+ *   logs. The queue writes are the two recovery outboxes, sharing ONE
+ *   per-sweep cap taken from `review.comment_claim.outbox_cap`: the
+ *   comment-claim outbox (migration 0048), where a `queued` claim older than
+ *   the retry window has its stored payload re-sent — what makes "claim before
+ *   send" survive an isolate dying between the two — and the maintenance-replay
+ *   outbox (migration 0071), which retries an operator's requested-but-unsent
+ *   replay while the maintenance window is readable and open. It NEVER mutates
+ *   KV keys.
  *
  * Threshold semantics: PER-ATTEMPT rows — a DLQ'd message leaves up to
  * QUEUE_MAX_ATTEMPTS rows (one per delivery: 1 initial + the queue's
@@ -69,6 +73,8 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
+import { getMaintenanceMode } from "../dashboard/runtime-config-store";
+import { retryMaintenanceReplay } from "../admin/maintenance-replay";
 import {
   MAINTENANCE_DEFERRED_STAGE,
   PAGING_EXCLUDED_STAGES,
@@ -88,6 +94,19 @@ export const COMMENT_CLAIM_OUTBOX_SQL = `SELECT installation_id, owner, repo, pr
              FROM comment_trigger_claims
             WHERE state = 'queued' AND attempts < ? AND queued_ms <= ?
             ORDER BY queued_ms
+            LIMIT ?`;
+
+/**
+ * The maintenance-replay outbox scan (migration 0071, plan 377 Q2): rows an
+ * operator requested whose send never resolved. Ordered oldest-request first,
+ * and its only bound is the shared per-sweep cap — there is no attempt cap, so
+ * an operator's recovery is never silently dropped.
+ */
+export const MAINTENANCE_REPLAY_OUTBOX_SQL = `SELECT id FROM review_failures
+            WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'
+              AND maintenance_replay_requested_at IS NOT NULL
+              AND maintenance_replay_sent_at IS NULL
+            ORDER BY maintenance_replay_requested_at ASC, id ASC
             LIMIT ?`;
 
 /**
@@ -204,6 +223,17 @@ export type SweepCommentClaimFields =
   | { event: "comment_claim_outbox_failed"; detail: string };
 
 /**
+ * Maintenance replay outbox fields (migration 0071): the sweep retrying a
+ * pending operator request while the window is open. A row that never finds a
+ * live target stays pending forever (no attempt cap drops an operator's
+ * recovery), so its count rides every sweep that sees one.
+ */
+export type SweepMaintenanceReplayFields =
+  | { event: "maintenance_replay_outbox"; sent: number; failed: number; target_unavailable: number }
+  | { event: "maintenance_replay_outbox_send_failed"; failure_id: string; detail: string }
+  | { event: "maintenance_replay_outbox_failed"; detail: string };
+
+/**
  * The sweep only ever warns: a quiet system logs nothing. A warn-only view
  * of the consumer log channel — the `msg` parameter type is derived from
  * `ConsumerLog["warn"]` so the call shape cannot drift; the field union is
@@ -219,6 +249,7 @@ export type SweepLog = {
       | SweepLedgerRetentionFields
       | SweepInviteLapseFields
       | SweepCommentClaimFields
+      | SweepMaintenanceReplayFields
       // The comment-claim settings reader owns its own degraded warn shape.
       | CommentClaimSettingsLogFields,
     msg?: Parameters<ConsumerLog["warn"]>[1],
@@ -469,13 +500,19 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // consume keeps execution at-most-once. Best-effort in the same shape as
   // every janitor above: a failure warns and never breaks the failure sweep.
   if (deps.queue !== undefined) {
+    const queue = deps.queue;
+    // The three budgets are operator settings on the global runtime-config
+    // surface (`review.comment_claim.*`, AGENTS.md 「Configuration surfaces」):
+    // read once per sweep, shared by both recovery lanes. A degraded read
+    // answers the documented defaults with one structured warn and never
+    // throws, so a broken settings row cannot stop recovery.
+    const settings = await readCommentClaimSettings(db, log);
+    // The ONE combined recovery budget (plan 377 Q2): two de-bounded lanes, one
+    // cap. The maintenance-replay lane below gets whatever this lane did not
+    // claim in this pass, so a comment backlog cannot starve an operator's
+    // replay and neither lane can double the sweep's queue writes.
+    let outboxRemaining = settings.outboxCap;
     try {
-      // The three budgets are operator settings on the global runtime-config
-      // surface (`review.comment_claim.*`, AGENTS.md 「Configuration surfaces」):
-      // read once per sweep. A degraded read answers the documented defaults
-      // with one structured warn and never throws, so a broken settings row
-      // cannot stop claim recovery.
-      const settings = await readCommentClaimSettings(db, log);
       const nowMs = Date.now();
       // Rows at the cap have exhausted every re-send: flip them to `expired`
       // FIRST, so the selection below can never pick them again. The payload is
@@ -491,7 +528,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         .run();
       const stale = await db
         .prepare(COMMENT_CLAIM_OUTBOX_SQL)
-        .bind(settings.maxAttempts, nowMs - settings.retryMs, settings.outboxCap)
+        .bind(settings.maxAttempts, nowMs - settings.retryMs, outboxRemaining)
         .all<{
           installation_id: number;
           owner: string;
@@ -507,7 +544,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         // starve the rest of the batch, which is ordered oldest-first.
         let delivered = false;
         try {
-          await deps.queue.send(JSON.parse(claim.payload_json) as ReviewJobPayload);
+          await queue.send(JSON.parse(claim.payload_json) as ReviewJobPayload);
           delivered = true;
           resent += 1;
         } catch {
@@ -525,6 +562,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           .bind(nowMs, claim.installation_id, claim.owner, claim.repo, claim.pr_number, claim.comment_id)
           .run();
       }
+      outboxRemaining -= stale.results.length;
       if (resent > 0 || expired.meta.changes > 0 || resendFailed > 0) {
         log.warn(
           { event: "comment_claim_outbox", resent, expired: expired.meta.changes, failed: resendFailed },
@@ -536,6 +574,56 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         { event: "comment_claim_outbox_failed", detail: warnDetail(error, deps.alertUrl) },
         "comment trigger outbox sweep failed — continuing",
       );
+    }
+    // Maintenance-replay outbox (migration 0071, plan 377 Q2): an operator's
+    // request can outlive its send — the isolate died between the request batch
+    // and `queue.send`, or the send/its sent-stamp failed. Only an OPEN window
+    // may write the queue, so the lane runs under the SAME fail-closed
+    // predicate as the route: unreadable is closed.
+    if (outboxRemaining > 0) {
+      try {
+        const maintenance = await getMaintenanceMode(db);
+        if (!maintenance.unreadable && !maintenance.enabled) {
+          const pending = await db
+            .prepare(MAINTENANCE_REPLAY_OUTBOX_SQL)
+            .bind(outboxRemaining)
+            .all<{ id: string }>();
+          const now = new Date().toISOString();
+          let sent = 0;
+          let failed = 0;
+          let unavailable = 0;
+          for (const row of pending.results) {
+            try {
+              const outcome = await retryMaintenanceReplay(db, queue, row.id, now);
+              if (outcome === "sent") sent += 1;
+              else unavailable += 1;
+            } catch (error) {
+              // A send/stamp failure leaves the row pending: no attempt cap, so
+              // the next open sweep retries it. One bad row never starves the rest.
+              failed += 1;
+              log.warn(
+                {
+                  event: "maintenance_replay_outbox_send_failed",
+                  failure_id: row.id,
+                  detail: warnDetail(error, deps.alertUrl),
+                },
+                "maintenance replay send failed — row stays pending",
+              );
+            }
+          }
+          if (sent > 0 || failed > 0 || unavailable > 0) {
+            log.warn(
+              { event: "maintenance_replay_outbox", sent, failed, target_unavailable: unavailable },
+              "maintenance replay outbox recovery",
+            );
+          }
+        }
+      } catch (error) {
+        log.warn(
+          { event: "maintenance_replay_outbox_failed", detail: warnDetail(error, deps.alertUrl) },
+          "maintenance replay outbox sweep failed — continuing",
+        );
+      }
     }
   }
   // ONE grouped read supplies both the total and its breakdown, so a payload
