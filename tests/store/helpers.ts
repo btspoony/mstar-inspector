@@ -367,10 +367,17 @@ export function seedTarget(
     repoId?: number;
     repoOwner?: string;
     repoName?: string;
+    /**
+     * The row's `created_at` / `updated_at`. Defaults to one shared stamp, so a
+     * suite that asserts on ordering must pass distinct values — otherwise a
+     * creation-order read resolves its ties by UUID and the assertion cannot
+     * discriminate the ordering it names.
+     */
+    createdAt?: string;
   } = {},
 ): string {
   const id = opts.id ?? crypto.randomUUID();
-  const now = "2026-01-01T00:00:00.000Z";
+  const now = opts.createdAt ?? "2026-01-01T00:00:00.000Z";
   // A stable 31-bit id from the row id: the workspace/repository UNIQUE index
   // needs a distinct integer per live row, and fixtures never care which.
   let hash = 0x811c9dc5;

@@ -68,6 +68,7 @@ import {
   parseTargets,
   targetDetailTabQuery,
   type AppDetailSearch,
+  type InstallationRepository,
   type InstallationRepositoryOption,
   type PendingInstallation,
   type ReadScope,
@@ -369,7 +370,7 @@ export const REPOSITORY_LIST_CAP = 40;
 export type RepositoryOptionsState =
   | { state: "loading" }
   | { state: "error" }
-  | { state: "ok"; repositories: InstallationRepositoryOption[]; degraded: boolean };
+  | { state: "ok"; repositories: InstallationRepository[]; degraded: boolean };
 
 /** The chosen App's live installations (`GET /api/apps/:appId/settings`). */
 export type InstallationsState =
@@ -404,7 +405,9 @@ export function AddRepositoryDialogBody({
   appId: string;
   installations: InstallationsState;
   repositories: RepositoryOptionsState;
+  /** This workspace's own repositories — added, so checked and tagged. */
   existingRepoIds: ReadonlySet<number>;
+  /** Repositories the operator has ticked; a claimed row is never selectable. */
   selectedRepoIds: ReadonlySet<number>;
   notice: { kind: NoticeKind; message: string } | null;
   busy: boolean;
@@ -588,7 +591,14 @@ export function AddRepositoryDialogBody({
                     </p>
                     <ul className="flex flex-col gap-1.5">
                       {visible.map((repository) => {
+                        // Two distinct reasons a row is not offerable, and only
+                        // the server can tell them apart:
+                        // - `existingRepoIds` — this workspace already reviews it;
+                        // - `claimed` — a live target of the same BOT holds it,
+                        //   possibly in a sibling workspace, so the insert would
+                        //   refuse it. Either way it is never selectable.
                         const added = existingRepoIds.has(repository.repo_id);
+                        const taken = added || repository.claimed;
                         const label = `${repository.owner}/${repository.name}`;
                         return (
                           <li key={repository.repo_id} className="flex items-center gap-2">
@@ -596,13 +606,15 @@ export function AddRepositoryDialogBody({
                               <input
                                 type="checkbox"
                                 checked={added || selectedRepoIds.has(repository.repo_id)}
-                                disabled={added || busy}
+                                disabled={taken || busy}
                                 onChange={() => onToggleRepo?.(repository.repo_id)}
                               />
                               <span>{label}</span>
                             </label>
                             {added ? (
                               <StatusBadge tone="neutral">{t(locale, "targets.addDialog.alreadyAdded")}</StatusBadge>
+                            ) : repository.claimed ? (
+                              <StatusBadge tone="warn">{t(locale, "targets.addDialog.claimedElsewhere")}</StatusBadge>
                             ) : null}
                           </li>
                         );
@@ -658,6 +670,17 @@ export function AddRepositoryDialog({
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * A closed dialog holds no work. Without this the selection outlives
+   * `if (!open) return null`, so reopening after a successful add offered a
+   * Confirm whose every row was disabled — and pressing it re-posted a
+   * repository the operator never chose. The duplicates path resets it itself
+   * instead (below), so a refused batch keeps what it could not write.
+   */
+  const resetDialog = useCallback((): void => {
+    setSelected(new Set());
+    setNotice(null);
+  }, []);
   // Every read is stamped. A response lands only while its stamp is still the
   // newest one, so a slow walk for the App the user switched AWAY from can
   // never overwrite the state of the App now selected (a boolean reset by the
@@ -767,6 +790,10 @@ export function AddRepositoryDialog({
         onAdded();
         return;
       }
+      // Everything selected landed: nothing is left to submit, so the next
+      // open starts clean (the close itself also resets; this keeps the two
+      // paths identical whether or not the caller honours it).
+      resetDialog();
       onAdded();
       onClose();
     } catch {
@@ -777,7 +804,15 @@ export function AddRepositoryDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={(next) => (next ? undefined : onClose())}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) return;
+        // Esc / overlay / the X button: the same reset the Cancel button runs.
+        resetDialog();
+        onClose();
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t(locale, "targets.addDialog.title")}</DialogTitle>
@@ -809,7 +844,10 @@ export function AddRepositoryDialog({
           }}
           onRetryRepositories={() => void loadRepositories(appId)}
           onSubmit={() => void submit()}
-          onCancel={onClose}
+          onCancel={() => {
+            resetDialog();
+            onClose();
+          }}
         />
       </DialogContent>
     </Dialog>
@@ -830,6 +868,7 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
   const base = apiBase();
   const [targets, setTargets] = useState<TargetListRow[] | null>(null);
   const [apps, setApps] = useState<RepositoryAppOption[]>([]);
+  const [appsFailed, setAppsFailed] = useState(false);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -844,21 +883,38 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
   const load = useCallback(async ({ background = false }: { background?: boolean } = {}): Promise<void> => {
     const stamp = ++requestRef.current;
     if (!background) setState("loading");
+    let loaded: TargetListRow[] | null;
     try {
-      const loaded = await loadTargets(base);
-      if (stamp !== requestRef.current) return;
-      if (loaded === null) {
-        if (!background) setState("error");
-        return;
-      }
-      const apps = (await loadRepositoryApps(base)) ?? [];
-      if (stamp !== requestRef.current) return;
-      setTargets(loaded);
-      setApps(apps);
-      setState("ok");
+      loaded = await loadTargets(base);
     } catch {
       if (stamp !== requestRef.current) return;
       if (!background) setState("error");
+      return;
+    }
+    if (stamp !== requestRef.current) return;
+    if (loaded === null) {
+      if (!background) setState("error");
+      return;
+    }
+    // The list is settled FIRST, and the secondary App read cannot take it
+    // down: `apps` feeds only the add dialog, so a transient `/api/apps`
+    // failure must not replace a successfully read list with the page error
+    // face. An empty App list disables the dialog — the same face a workspace
+    // with no App gets — and `appsFailed` says why, so the panel degrades
+    // instead of lying.
+    setTargets(loaded);
+    setState("ok");
+    try {
+      const apps = await loadRepositoryApps(base);
+      if (stamp !== requestRef.current) return;
+      // `null` is a shape failure and `[]` a real "no App": both block the
+      // dialog, but only the former is a read failure worth naming.
+      setApps(apps ?? []);
+      setAppsFailed(apps === null);
+    } catch {
+      if (stamp !== requestRef.current) return;
+      setApps([]);
+      setAppsFailed(true);
     }
   }, [base]);
 
@@ -890,6 +946,14 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
             <Button type="button" onClick={() => setDialogOpen(true)}>
               {t(locale, "targets.add")}
             </Button>
+            {appsFailed ? (
+              <div className="flex items-center gap-2">
+                <p className="text-sm text-(--tone-warn-fg)">{t(locale, "targets.appsReadFailed")}</p>
+                <Button type="button" variant="outline" onClick={() => void load({ background: true })}>
+                  {t(locale, "common.retry")}
+                </Button>
+              </div>
+            ) : null}
             <AddRepositoryDialog
               locale={locale}
               open={dialogOpen}

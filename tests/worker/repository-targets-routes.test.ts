@@ -327,28 +327,36 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
 
   test("the list is review-descending, with never-reviewed rows last", async () => {
     const { db, botId } = await seededWorld({});
-    const webId = seedTarget(db, botId, {
-      workspaceId: "default",
-      repoId: 555002,
-      repoOwner: "acme",
-      repoName: "web",
-    });
-    const docsId = seedTarget(db, botId, {
-      workspaceId: "default",
-      repoId: 555003,
-      repoOwner: "acme",
-      repoName: "docs",
-    });
+    // Distinct creation stamps, newest LAST (api < web < docs): a creation-order
+    // read would answer docs, web, api — the exact reverse of this assertion —
+    // so a regression to `created_at DESC` fails deterministically instead of
+    // resolving a three-way tie by UUID.
     const apiId = (
       db.raw
         .query("SELECT id FROM review_targets WHERE bot_id = ? AND repo_id = 555001")
         .get(botId) as { id: string }
     ).id;
-    // Creation order is api → web → docs, so created_at DESC alone would answer
-    // docs, web, api and fail this assertion.
+    db.raw
+      .prepare("UPDATE review_targets SET created_at = '2026-01-01T00:00:00.000Z' WHERE id = ?")
+      .run(apiId);
+    const webId = seedTarget(db, botId, {
+      workspaceId: "default",
+      repoId: 555002,
+      repoOwner: "acme",
+      repoName: "web",
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+    seedTarget(db, botId, {
+      workspaceId: "default",
+      repoId: 555003,
+      repoOwner: "acme",
+      repoName: "docs",
+      createdAt: "2026-01-03T00:00:00.000Z",
+    });
+    // web was reviewed most recently; api older; docs never reviewed — the
+    // never-reviewed row sorts last even though it is the NEWEST row.
     seedReview(db, { id: "r-api", targetId: apiId, botId, reviewedAt: "2025-01-01 00:00:00" });
     seedReview(db, { id: "r-web", targetId: webId, botId, reviewedAt: null });
-    void docsId;
 
     const res = await get(db, "/dashboard/default/api/targets", "trudy");
 
@@ -377,10 +385,12 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
+      // `claimed` is the bot-wide duplicate predicate: this bot's one seeded
+      // target holds repo 555001, so none of these is taken.
       repositories: [
-        { repo_id: 501, owner: "acme", name: "api" },
-        { repo_id: 502, owner: "acme", name: "web" },
-        { repo_id: 503, owner: "other", name: "docs" },
+        { repo_id: 501, owner: "acme", name: "api", claimed: false },
+        { repo_id: 502, owner: "acme", name: "web", claimed: false },
+        { repo_id: 503, owner: "other", name: "docs", claimed: false },
       ],
       degraded: false,
     });
@@ -412,7 +422,7 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      repositories: [{ repo_id: 611, owner: "acme", name: "api" }],
+      repositories: [{ repo_id: 611, owner: "acme", name: "api", claimed: false }],
       degraded: true,
     });
     // The failed installation never reached its listing.
@@ -431,7 +441,7 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      repositories: [{ repo_id: 802, owner: "acme", name: "web" }],
+      repositories: [{ repo_id: 802, owner: "acme", name: "web", claimed: false }],
       degraded: true,
     });
     // A failed listing is not an empty grant: both installations were listed.
@@ -453,6 +463,72 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
     expect(calls.filter((call) => call.url.includes("/installation/repositories"))).toHaveLength(2);
   });
 
+  test("a repository a SIBLING workspace already holds on this bot is marked claimed", async () => {
+    // The duplicate predicate is the BOT's (store DUPLICATE_REPO), so the walk
+    // must mark a sibling workspace's claim too — otherwise the dialog offers a
+    // row whose only possible POST outcome is `duplicates` (I-000642 follow-up).
+    const { db, botId } = await seededWorld({ installations: [11] });
+    // 777001 is already a live target of bot-foreign in the OTHER workspace.
+    stubRepositories({
+      11: [
+        { id: 777001, owner: "foreign", name: "repo" },
+        { id: 555001, owner: "acme", name: "api" },
+        { id: 556001, owner: "acme", name: "free" },
+      ],
+    });
+    // Put the sibling claim on THIS bot: same bot, different workspace.
+    seedTarget(db, botId, {
+      workspaceId: OTHER_WS,
+      repoId: 777001,
+      repoOwner: "foreign",
+      repoName: "repo",
+    });
+
+    const res = await get(db, `/dashboard/default/api/apps/${APP_ID}/installation-repositories`, "mallory");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      repositories: Array<{ repo_id: number; claimed: boolean }>;
+    };
+    const byId = new Map(body.repositories.map((row) => [row.repo_id, row.claimed]));
+    // This bot's own target in `default`.
+    expect(byId.get(555001)).toBe(true);
+    // The sibling workspace's row on the same bot — the finding's case.
+    expect(byId.get(777001)).toBe(true);
+    // A repository no live target of the bot holds stays selectable.
+    expect(byId.get(556001)).toBe(false);
+  });
+
+  test("an unclaimed migrated row claims its repository by owner/name too", async () => {
+    // The predicate's second arm: a live row still holding NULL for repo_id but
+    // naming owner/name is the SAME repository, so the walk must mark it.
+    const { db, botId } = await seededWorld({ target: false, installations: [11] });
+    seedTarget(db, botId, {
+      workspaceId: "default",
+      repoId: undefined,
+      repoOwner: "acme",
+      repoName: "migrated",
+    });
+    db.raw
+      .prepare(
+        "UPDATE review_targets SET repo_id = NULL, repo_owner = 'acme', repo_name = 'migrated' WHERE bot_id = ?",
+      )
+      .run(botId);
+    stubRepositories({
+      11: [
+        { id: 900001, owner: "acme", name: "migrated" },
+        { id: 900002, owner: "acme", name: "fresh" },
+      ],
+    });
+
+    const res = await get(db, `/dashboard/default/api/apps/${APP_ID}/installation-repositories`, "mallory");
+
+    const body = (await res.json()) as { repositories: Array<{ repo_id: number; claimed: boolean }> };
+    const byId = new Map(body.repositories.map((row) => [row.repo_id, row.claimed]));
+    expect(byId.get(900001)).toBe(true);
+    expect(byId.get(900002)).toBe(false);
+  });
+
   test("an installation with zero repositories answers 200 [] rather than an error", async () => {
     const { db } = await seededWorld({ installations: [21] });
     stubRepositories({ 21: [] });
@@ -472,7 +548,7 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      repositories: [{ repo_id: 601, owner: "acme", name: "api" }],
+      repositories: [{ repo_id: 601, owner: "acme", name: "api", claimed: false }],
       degraded: true,
     });
   });

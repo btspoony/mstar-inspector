@@ -2050,6 +2050,14 @@ export type RepositoryAppOption = {
 /** One repository an installation grants — the dialog's multi-select option. */
 export type InstallationRepositoryOption = { repo_id: number; owner: string; name: string };
 
+/**
+ * One option of the installation-repositories walk: the repository plus
+ * whether a live target of this BOT already holds it. The claim is bot-wide
+ * (a sibling workspace's row on the same bot refuses the insert), so a claimed
+ * row is never selectable.
+ */
+export type InstallationRepository = InstallationRepositoryOption & { claimed: boolean };
+
 function parseTargetListRow(value: unknown): TargetListRow | null {
   if (!isRecord(value)) return null;
   const { target_id, bot_id, app_name } = value;
@@ -2113,17 +2121,20 @@ export function parseAppInstallations(data: unknown): PendingInstallation[] | nu
 /**
  * The installation-repositories face. `degraded` says some installation failed
  * while the rest answered, so the dialog can offer what it has and say so.
+ * `claimed` is the bot-wide duplicate predicate the insert will apply: a row
+ * without it would be offered as selectable and could only fail.
  */
 export function parseInstallationRepositories(
   data: unknown,
-): { repositories: InstallationRepositoryOption[]; degraded: boolean } | null {
+): { repositories: InstallationRepository[]; degraded: boolean } | null {
   if (!isRecord(data) || !Array.isArray(data.repositories)) return null;
-  const repositories: InstallationRepositoryOption[] = [];
+  const repositories: InstallationRepository[] = [];
   for (const value of data.repositories) {
     if (!isRecord(value)) return null;
-    const { repo_id, owner, name } = value;
+    const { repo_id, owner, name, claimed } = value;
     if (typeof repo_id !== "number" || typeof owner !== "string" || typeof name !== "string") return null;
-    repositories.push({ repo_id, owner, name });
+    if (typeof claimed !== "boolean") return null;
+    repositories.push({ repo_id, owner, name, claimed });
   }
   return { repositories, degraded: data.degraded === true };
 }

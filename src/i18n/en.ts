@@ -287,12 +287,16 @@ export const en = {
       loadingRepos: "Searching repositories…",
       loadReposFailed: "Could not load this App's repositories.",
       alreadyAdded: "Added",
+      /** A repository another workspace already reviews under this App. */
+      claimedElsewhere: "Taken by another workspace",
       degraded: "Some installations could not be read — this list may be incomplete.",
       duplicates: "Already added: {names}",
       confirm: "Add",
     },
     /** The 待安装 filter's own empty face (rows exist, none are awaiting install). */
     filterEmpty: "No repository is awaiting its install.",
+    /** The App list (the add dialog's source) failed while the list itself read. */
+    appsReadFailed: "Could not read this workspace's applications — adding a repository is unavailable for now.",
   },
   /**
    * The bot-owned configuration the App detail's 应用设置 tab composes under

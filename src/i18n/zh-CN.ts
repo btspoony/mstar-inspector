@@ -249,12 +249,16 @@ export const zhCN: Dictionary = {
       loadingRepos: "正在搜索仓库…",
       loadReposFailed: "无法加载该应用的仓库。",
       alreadyAdded: "已添加",
+      /** 另一个工作区已在这个应用下评审该仓库。 */
+      claimedElsewhere: "已被其他工作区占用",
       degraded: "部分安装无法读取 — 此列表可能不完整。",
       duplicates: "以下仓库已存在：{names}",
       confirm: "添加",
     },
     /** 待安装筛选自身的空状态（有行，但没有待安装的）。 */
     filterEmpty: "没有等待安装的仓库。",
+    /** 应用列表（添加对话框的数据源）读取失败，列表本身读取成功。 */
+    appsReadFailed: "无法读取本工作区的应用 — 暂时无法添加仓库。",
   },
   /** 机器人自身拥有的配置，由 App 详情页的“应用设置”标签组合在身份头下。target 级文案沿用 `settings.*`。 */
   botSettings: {
