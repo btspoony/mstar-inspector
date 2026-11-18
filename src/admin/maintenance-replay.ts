@@ -123,6 +123,18 @@ async function readLiveTarget(db: DashboardD1, failureId: string): Promise<Maint
   return row === null ? null : { targetId: row.target_id, botId: row.bot_id };
 }
 
+/**
+ * Stamp the attempt time. Written BEFORE the send, so a send or sent-stamp that
+ * throws still leaves the row's rotation position behind it — the ordering only
+ * reads this column, and an unstamped failed attempt would own the next sweep.
+ */
+async function stampAttempt(db: DashboardD1, id: string, now: string): Promise<void> {
+  await db
+    .prepare("UPDATE review_failures SET maintenance_replay_last_attempt_at = ? WHERE id = ?")
+    .bind(now, id)
+    .run();
+}
+
 /** Stamp the sent time; guarded so a concurrent stamp is never overwritten. */
 async function stampSent(db: DashboardD1, id: string, now: string): Promise<void> {
   await db
@@ -214,6 +226,8 @@ export async function requestMaintenanceReplay(
   }
 
   try {
+    // Every attempt stamps, so the sweep's rotation sees this one too.
+    await stampAttempt(db, failure.id, input.now);
     await queue.send(maintenanceReplayPayload(failure, target));
     await stampSent(db, failure.id, input.now);
     return { kind: "ok", state: "sent" };
@@ -240,6 +254,10 @@ export type MaintenanceReplayRetry = "sent" | "target_unavailable";
  * the frozen payload from the row's CURRENT live target, send, and stamp sent
  * only once the send resolves. A send or stamp failure throws, so the caller
  * warns and the row stays pending for the next sweep. The row is never deleted.
+ *
+ * The attempt is stamped BEFORE the send: the scan orders never-tried and
+ * least-recently-tried first, so a row that keeps failing still rotates behind
+ * the other pending requests instead of owning the cap on every sweep.
  */
 export async function retryMaintenanceReplay(
   db: DashboardD1,
@@ -252,6 +270,7 @@ export async function retryMaintenanceReplay(
   if (failure === null) return "target_unavailable";
   const target = await readLiveTarget(db, failure.id);
   if (target === null) return "target_unavailable";
+  await stampAttempt(db, failure.id, now);
   await queue.send(maintenanceReplayPayload(failure, target));
   await stampSent(db, failure.id, now);
   return "sent";

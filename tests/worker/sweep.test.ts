@@ -1476,8 +1476,15 @@ describe("runSweep — maintenance replay outbox", () => {
 
   function replayRow(db: TestD1, id: string) {
     return db.raw
-      .query("SELECT maintenance_replay_requested_at, maintenance_replay_sent_at FROM review_failures WHERE id = ?")
-      .get(id) as { maintenance_replay_requested_at: string | null; maintenance_replay_sent_at: string | null };
+      .query(
+        `SELECT maintenance_replay_requested_at, maintenance_replay_sent_at, maintenance_replay_last_attempt_at
+           FROM review_failures WHERE id = ?`,
+      )
+      .get(id) as {
+      maintenance_replay_requested_at: string | null;
+      maintenance_replay_sent_at: string | null;
+      maintenance_replay_last_attempt_at: string | null;
+    };
   }
 
   function setMaintenance(db: TestD1, enabled: boolean): void {
@@ -1610,6 +1617,45 @@ describe("runSweep — maintenance replay outbox", () => {
     });
     const outboxLog = calls.find((call) => call.fields.event === "maintenance_replay_outbox");
     expect(outboxLog?.fields).toEqual({ event: "maintenance_replay_outbox", sent: 1, failed: 0, target_unavailable: 1 });
+  });
+
+  test("a replay whose send keeps failing rotates behind the next pending request on the next sweep", async () => {
+    const db = failureDb();
+    // Two live targets: only the OLDEST request's send throws, so it stays
+    // pending forever while a later request waits behind it.
+    const stuckTarget = seedTarget(db, "bot-sweep", { id: "target-stuck" });
+    const stuck = await seedPendingReplay(db, { targetId: stuckTarget, requestedAt: "2026-11-01T00:00:00.000Z" });
+    const later = await seedPendingReplay(db, { requestedAt: "2026-11-05T00:00:00.000Z" });
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const sent: unknown[] = [];
+    const queue = {
+      send: async (message: { targetId?: string }) => {
+        if (message.targetId === stuckTarget) throw new Error("queue is down");
+        sent.push(message);
+      },
+    } as unknown as SweepDeps["queue"];
+    const { log } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    // Cap 1: the oldest request got the only attempt and failed. The attempt
+    // stamp is what moves it back — no attempt cap, no persisted counter.
+    expect(sent).toHaveLength(0);
+    expect(replayRow(db, stuck).maintenance_replay_sent_at).toBeNull();
+    expect(replayRow(db, stuck).maintenance_replay_last_attempt_at).not.toBeNull();
+
+    await runSweep(db, { log, queue });
+
+    // The later request is attempted instead of the same failing row again.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: "maintenance_replay", targetId: BASE.target_id });
+    expect(replayRow(db, later).maintenance_replay_sent_at).not.toBeNull();
+    expect(replayRow(db, stuck).maintenance_replay_sent_at).toBeNull();
   });
 
   test("a comment attempt whose DB write fails still spends the shared budget", async () => {

@@ -1,0 +1,24 @@
+-- 0072_maintenance_replay_attempt.sql — a replay attempt is stamped so a
+-- permanently failing pending row rotates behind the requests it would
+-- otherwise starve (plan 377 Q2).
+--
+-- 0071 leaves an operator's requested-but-unsent row pending until its queue
+-- send resolves. A row whose send or sent-stamp keeps throwing stays pending by
+-- contract (no attempt cap, never deleted), so ordering it by request time
+-- alone would hand it the whole cap on every sweep and later requests would
+-- never be attempted. Recording WHEN it was last attempted turns the scan into
+-- a rotation: never-tried rows first, then the least-recently-tried.
+--
+--   maintenance_replay_last_attempt_at  when the newest send attempt started
+--
+-- Nullable UTC ISO-8601 text and absent on every existing row. It is written
+-- before the send, on success AND failure, so a throwing row is stamped too.
+-- It is not an attempt cap: it never excludes a row, only orders it.
+--
+-- The 0071 partial index still narrows the scan to the pending set (only
+-- operator-requested, unsent rows), which is small enough that the ordering
+-- happens over that set; no second index.
+--
+-- Metadata-only: one nullable column add, no row rewrite. Forward-only.
+
+ALTER TABLE review_failures ADD COLUMN maintenance_replay_last_attempt_at TEXT;

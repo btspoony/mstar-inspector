@@ -97,14 +97,21 @@ export const COMMENT_CLAIM_OUTBOX_SQL = `SELECT installation_id, owner, repo, pr
             LIMIT ?`;
 
 /**
- * The maintenance-replay outbox scan (migration 0071, plan 377 Q2): rows an
- * operator requested whose send never resolved. Ordered oldest-request first,
- * and its only bound is the shared per-sweep cap — there is no attempt cap, so
- * an operator's recovery is never silently dropped.
+ * The maintenance-replay outbox scan (migrations 0071/0072, plan 377 Q2): rows
+ * an operator requested whose send never resolved. Its only bound is the shared
+ * per-sweep cap — there is no attempt cap, so an operator's recovery is never
+ * silently dropped.
+ *
+ * The ordering is a ROTATION, not oldest-request-first: a row that keeps failing
+ * stays pending (contract), so ordering by request time alone would hand it the
+ * whole cap on every open sweep and later requests would never be attempted.
+ * `maintenance_replay_last_attempt_at` is stamped on every attempt, so a
+ * never-tried row (`COALESCE(..., '')` sorts before any ISO-8601 stamp) and then
+ * the least-recently-tried go first; request time and id only break ties.
  *
  * `tried` is the id set THIS pass already took (a JSON array; `[]` on the first
- * chunk). Excluding it is what lets the scan walk past a row that cannot be
- * sent — a dead target never owns the batch forever, and nothing is persisted.
+ * chunk). Excluding it keeps one row from being attempted twice inside a pass,
+ * e.g. when two attempts share the same stamp.
  * Binds: `tried` (JSON array of ids), `limit`.
  */
 export const MAINTENANCE_REPLAY_OUTBOX_SQL = `SELECT id FROM review_failures
@@ -112,7 +119,9 @@ export const MAINTENANCE_REPLAY_OUTBOX_SQL = `SELECT id FROM review_failures
               AND maintenance_replay_requested_at IS NOT NULL
               AND maintenance_replay_sent_at IS NULL
               AND id NOT IN (SELECT value FROM json_each(?))
-            ORDER BY maintenance_replay_requested_at ASC, id ASC
+            ORDER BY COALESCE(maintenance_replay_last_attempt_at, '') ASC,
+                     maintenance_replay_requested_at ASC,
+                     id ASC
             LIMIT ?`;
 
 /**
@@ -593,29 +602,30 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         "comment trigger outbox sweep failed — continuing",
       );
     }
-    // Maintenance-replay outbox (migration 0071, plan 377 Q2): an operator's
-    // request can outlive its send — the isolate died between the request batch
-    // and `queue.send`, or the send/its sent-stamp failed. Only an OPEN window
-    // may write the queue, so the lane runs under the SAME fail-closed
-    // predicate as the route: unreadable is closed.
+    // Maintenance-replay outbox (migrations 0071/0072, plan 377 Q2): an
+    // operator's request can outlive its send — the isolate died between the
+    // request batch and `queue.send`, or the send/its sent-stamp failed. Only an
+    // OPEN window may write the queue, so the lane runs under the SAME
+    // fail-closed predicate as the route: unreadable is closed.
     if (outboxRemaining > 0) {
       try {
         const maintenance = await getMaintenanceMode(db);
         if (!maintenance.unreadable && !maintenance.enabled) {
           const now = new Date().toISOString();
-          // The ids THIS pass already took. Nothing is persisted: the next
-          // sweep starts from the true oldest request again.
+          // The ids THIS pass already took: one row is attempted at most once
+          // per sweep. Nothing else is persisted here.
           const tried: string[] = [];
           let sent = 0;
           let failed = 0;
           let unavailable = 0;
-          // Walk the pending rows oldest-first instead of letting the first
-          // `outboxRemaining` rows own the batch: a row whose target is gone
-          // (or that vanished) is skipped and the next pending request is
-          // tried in the same sweep, so one dead request never starves the
-          // operators behind it. Only an actual send spends the shared budget
-          // — an unavailable target writes no queue message — and a send/stamp
-          // that throws spends it too, because that attempt happened.
+          // Walk the pending rows in ROTATION order (never-tried first, then
+          // least-recently-tried): a row whose target is gone (or that vanished)
+          // is skipped and the next pending request is tried in the same sweep,
+          // and a row whose send keeps failing is stamped by the attempt itself,
+          // so it moves behind the requests it would otherwise starve. Only an
+          // actual send spends the shared budget — an unavailable target writes
+          // no queue message — and a send/stamp that throws spends it too,
+          // because that attempt happened.
           while (outboxRemaining > 0) {
             const pending = await db
               .prepare(MAINTENANCE_REPLAY_OUTBOX_SQL)
@@ -634,7 +644,8 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
                 }
               } catch (error) {
                 // A send/stamp failure leaves the row pending: no attempt cap, so
-                // the next open sweep retries it. One bad row never starves the rest.
+                // the next open sweep retries it — behind the rows this sweep did
+                // not reach, because the attempt stamp moved it back.
                 failed += 1;
                 outboxRemaining -= 1;
                 log.warn(
