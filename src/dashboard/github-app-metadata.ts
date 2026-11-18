@@ -410,7 +410,12 @@ export type InstallationRepository = { repo_id: number; owner: string; name: str
  */
 export type FetchInstallationRepositoriesResult = InstallationRepository[] | null;
 
-const GITHUB_INSTALLATION_REPOSITORIES_SUFFIX = "/repositories";
+/**
+ * The installation-token face of the repository listing: an installation
+ * access token is what `GET /installation/repositories` accepts — the App JWT
+ * only authenticates the `/app*` mint.
+ */
+const GITHUB_INSTALLATION_REPOSITORIES_URL = "https://api.github.com/installation/repositories";
 /**
  * Page bound for ONE installation's repository list (100 per page): 5 pages /
  * 500 repositories, the contract's cap. Reaching it with a next page still
@@ -420,25 +425,62 @@ const GITHUB_INSTALLATION_REPOSITORIES_SUFFIX = "/repositories";
 const MAX_REPOSITORY_PAGES = 5;
 
 /**
+ * Mint one installation's access token — `POST
+ * /app/installations/{id}/access_tokens` with the App JWT. That token, not the
+ * App JWT, is what the repository listing accepts.
+ *
+ * `null` is "no usable token": non-2xx, a body that is not an object, a
+ * missing/blank `token`, network failure or timeout. Zero retries, nothing
+ * thrown — the caller counts it as that installation's failure.
+ */
+export async function mintInstallationAccessToken(
+  installationId: number,
+  appJwt: string,
+): Promise<string | null> {
+  try {
+    const res = await fetch(`${GITHUB_APP_INSTALLATIONS_URL}/${installationId}/access_tokens`, {
+      method: "POST",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers: {
+        Authorization: `Bearer ${appJwt}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "mstar-inspector",
+      },
+    });
+    if (!res.ok) {
+      await res.body?.cancel();
+      return null;
+    }
+    const data = (await res.json().catch(() => null)) as unknown;
+    if (typeof data !== "object" || data === null || !("token" in data)) return null;
+    const token = data.token;
+    if (typeof token !== "string" || token.trim() === "") return null;
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch one installation's repositories — `GET
- * /app/installations/{id}/repositories?per_page=100` with an App JWT, walking
- * `Link rel="next"` within this module's budgets.
+ * /installation/repositories?per_page=100` with that installation's access
+ * token, walking `Link rel="next"` within this module's budgets.
  *
  * `[]` is a real answer (the installation grants no repository); `null` is
- * "no usable answer" — bad key, network failure, non-200, a payload that is
- * not an array, a foreign next link, or the page cap. Callers count nulls to
- * report `degraded`, so this function never invents an empty list on failure.
- * Same failure discipline as the other fetches here: zero retries, a total
- * catch-all, nothing thrown.
+ * "no usable answer" — bad token, network failure, non-200, a payload that is
+ * not a repository list, a foreign next link, or the page cap. Callers count
+ * nulls to report `degraded`, so this function never invents an empty list on
+ * failure. Same failure discipline as the other fetches here: zero retries, a
+ * total catch-all, nothing thrown.
  */
 export async function fetchInstallationRepositories(
-  installationId: number,
-  jwt: string,
+  installationToken: string,
 ): Promise<FetchInstallationRepositoriesResult> {
-  const base = `${GITHUB_APP_INSTALLATIONS_URL}/${installationId}${GITHUB_INSTALLATION_REPOSITORIES_SUFFIX}`;
+  const base = GITHUB_INSTALLATION_REPOSITORIES_URL;
   try {
     const headers = {
-      Authorization: `Bearer ${jwt}`,
+      Authorization: `Bearer ${installationToken}`,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "mstar-inspector",
@@ -463,8 +505,12 @@ export async function fetchInstallationRepositories(
         return null;
       }
       const data = (await res.json().catch(() => null)) as unknown;
-      if (!Array.isArray(data)) return null;
-      for (const entry of data) {
+      // `GET /installation/repositories` answers an envelope, not a bare array
+      // ({ total_count, repositories }) — anything else is not this endpoint.
+      if (typeof data !== "object" || data === null || !("repositories" in data)) return null;
+      const pageRepositories = data.repositories;
+      if (!Array.isArray(pageRepositories)) return null;
+      for (const entry of pageRepositories) {
         const row = entry as { id?: unknown; name?: unknown; owner?: { login?: unknown } } | null;
         const repoId = row?.id;
         const name = row?.name;
