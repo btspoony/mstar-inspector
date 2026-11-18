@@ -244,7 +244,7 @@ export const defaultSweepLog: SweepLog = {
  * are reviews that continued, and `quota` is one tenant's spent month (see the
  * header). The list comes from the contract's written partition, never a local
  * literal. Maintenance is the platform's own existence signal, owned by its
- * separate lane (377) and never part of the infrastructure total — so it is
+ * separate lane and never part of the infrastructure total — so it is
  * excluded here too, by its constant. ONE predicate, so the grouped read and
  * the window decision below can never disagree about what a breach is.
  */
@@ -551,10 +551,10 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       };
     }
   }
-  // 377's maintenance existence signal joins HERE: it reads its own count and
-  // decides on its own, and when it owes a page it extends this same body with
-  // its key, so both alerts travel in ONE POST. Neither decision may return
-  // above this point — a healthy infrastructure total must not skip that lane.
+  // The maintenance existence signal joins HERE: it reads its own count and
+  // decides on its own; when it owes a page it extends this same body with its
+  // key, so both alerts travel in ONE POST. Neither decision may return above
+  // this point — a healthy infrastructure total must not skip that lane.
   if (alert !== null) {
     log.warn(alert, "review failure threshold breached");
     if (!deps.alertUrl) {

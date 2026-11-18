@@ -2724,16 +2724,20 @@ behave.
   POST it appends one such row (actor `sweep`, detail
   `{failures_24h, stages}`). Nothing is ever stored in
   `review_runtime_settings` — no key, no state, no generation — so there is no
-  edge to close and nothing to clear: a breaching window with no recorded alert
-  always pages, which makes a missed alert structurally impossible. The price
-  is bounded duplication: two sweeps overlapping inside one window may each
-  post once, which the contract permits (a duplicate alert is acceptable, a
-  lost one is not). An absent sink, a timeout, a fetch throw or a non-2xx
-  records nothing, so the next breaching sweep retries. A window read that
-  throws or returns a stamp that is not a valid timestamp counts as "no recent
-  alert" (`ops_sweep_alert_window_unreadable`) and never suppresses the post; a
-  failed audit append is logged (`ops_sweep_alert_audit_failed`) and does not
-  change the POST result — at worst it allows one more post next sweep.
+  edge to close and nothing to clear: nothing is latched, so no stale state can
+  suppress an alert. The only thing that suppresses a post is a delivered alert
+  already recorded inside the window — that is what the de-bounce is for. Treat
+  the ledger as append-only, sweep-written data: a row is trusted because the
+  sweep wrote it after a 2xx, and a hand-edited or clock-ahead stamp is not
+  evidence of a delivered alert. The price is bounded duplication: two sweeps
+  overlapping inside one window may each post once, which the contract permits
+  (a duplicate alert is acceptable, a lost one is not). An absent sink, a
+  timeout, a fetch throw or a non-2xx records nothing, so the next breaching
+  sweep retries. A window read that throws or returns a stamp that is not a
+  valid timestamp counts as "no recent alert"
+  (`ops_sweep_alert_window_unreadable`) and never suppresses the post; a failed
+  audit append is logged (`ops_sweep_alert_audit_failed`) and does not change
+  the POST result — at worst it allows one more post next sweep.
 - DLQ depth is NOT read (no CF API token surface — `dlq_check: "skipped"`);
   guard-leak cleanup stays out of cron (KV guard TTL is the leak upper
   bound).

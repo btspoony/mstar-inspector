@@ -150,10 +150,6 @@ describe("runSweep", () => {
     expect(captured[2]).toContain("UPDATE workspace_invites");
     const countAt = captured.findIndex((query) => query.includes("FROM review_failures"));
     expect(captured[countAt]).toContain("created_at > datetime('now', '-24 hours')");
-    // ONE grouped read: the same result supplies the total and the payload's
-    // per-stage breakdown, so neither can describe a different instant.
-    expect(captured[countAt]).toContain("SELECT stage, COUNT(*) AS count");
-    expect(captured[countAt]).toContain("GROUP BY stage ORDER BY stage");
     // A healthy window has no page to de-bounce, so nothing follows the read:
     // no state write, no audit append.
     expect(captured).toHaveLength(countAt + 1);
@@ -586,6 +582,30 @@ describe("runSweep", () => {
     const alert = breachCalls[0]!.fields as SweepAlertFields;
     expect(alert.failures_24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
     expect(alert.stages).toEqual([{ stage: "sandbox", count: SWEEP_FAILURE_THRESHOLD + 1 }]);
+  });
+
+  test("the payload's stages preserve the query's ordered, non-empty stage groups", async () => {
+    const db = failureDb();
+    const store = createFailureStore(db);
+    // Two included stages with unequal counts, inserted biggest-first: the
+    // payload must follow the query's stage order, not the insertion order, and
+    // must carry no empty group for an excluded stage.
+    for (let i = 0; i < 5; i++) {
+      await store.record({ ...BASE, stage: "sandbox", error: `sandbox-${i}` });
+    }
+    for (let i = 0; i < 3; i++) {
+      await store.record({ ...BASE, stage: "parse", error: `parse-${i}` });
+    }
+    await store.record({ ...BASE, stage: "quota", error: "quota exceeded" });
+
+    const { log, calls } = captureLog();
+    await runSweep(db, { log });
+    const alert = calls[0]!.fields as SweepAlertFields;
+    expect(alert.failures_24h).toBe(8);
+    expect(alert.stages).toEqual([
+      { stage: "parse", count: 3 },
+      { stage: "sandbox", count: 5 },
+    ]);
   });
 
   test("a maintenance_deferred row is a separate existence signal, never part of the infrastructure total", async () => {
