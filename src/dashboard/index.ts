@@ -6087,6 +6087,10 @@ type TargetListRow = {
   review_enabled: number;
   follow_workspace_defaults: number;
   last_reviewed_at: string | null;
+  /** Every review this target ran — the row's total column. */
+  reviews_total: number;
+  /** The reviews of the last 7 days. */
+  reviews_7d: number;
 };
 
 /**
@@ -6109,6 +6113,8 @@ const targetListRoute = async (c: DashboardContext): Promise<Response> => {
     review_enabled: target.review_enabled,
     follow_workspace_defaults: target.follow_workspace_defaults,
     last_reviewed_at: target.last_reviewed_at,
+    reviews_total: target.reviews_total,
+    reviews_7d: target.reviews_7d,
   }));
   return c.json({ targets: rows });
 };

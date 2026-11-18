@@ -198,6 +198,32 @@ const post = (db: TestD1, path: string, login: string, body: unknown): Promise<R
 // --- GET /api/targets ------------------------------------------------------
 
 describe("GET /dashboard/:workspaceRef/api/targets", () => {
+  /**
+   * One review row for a target. `reviewedAt` is either a literal stamp or
+   * `null`, which asks SQLite for `datetime('now')` — the 7-day window is
+   * evaluated in SQL, so a relative fixture is the only honest one.
+   */
+  function seedReview(
+    db: TestD1,
+    row: { id: string; targetId: string; botId: string; reviewedAt: string | null },
+  ): void {
+    db.raw
+      .prepare(
+        `INSERT INTO reviews
+           (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, bot_id, target_id)
+         VALUES (?, 1, 'acme', 'api', ?, ?, ?, 'pass', ?, ?)`,
+      )
+      .run(
+        row.id,
+        // One PR number per row keeps the unique key clear.
+        Number(row.id.replace(/\D/g, "")) || 1,
+        row.id,
+        row.reviewedAt ?? new Date().toISOString().slice(0, 19).replace("T", " "),
+        row.botId,
+        row.targetId,
+      );
+  }
+
   test("a live target carries its repository identity, its App name and no foreign row", async () => {
     const { db, botId } = await seededWorld({});
     db.raw
@@ -255,6 +281,79 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
     expect(body.targets).toHaveLength(1);
     expect(body.targets[0]!.repo_id).toBeNull();
     expect(body.targets[0]!.app_name).toBe("repo-bot");
+  });
+
+  test("each row carries its review total and its last-7-day count", async () => {
+    const { db, botId } = await seededWorld({});
+    // A second and third repository of the same bot (0088's claim is per repo).
+    const webId = seedTarget(db, botId, {
+      workspaceId: "default",
+      repoId: 555002,
+      repoOwner: "acme",
+      repoName: "web",
+    });
+    const docsId = seedTarget(db, botId, {
+      workspaceId: "default",
+      repoId: 555003,
+      repoOwner: "acme",
+      repoName: "docs",
+    });
+    const apiId = (
+      db.raw
+        .query("SELECT id FROM review_targets WHERE bot_id = ? AND repo_id = 555001")
+        .get(botId) as { id: string }
+    ).id;
+    seedReview(db, { id: "r-old-1", targetId: apiId, botId, reviewedAt: "2025-01-01 00:00:00" });
+    seedReview(db, { id: "r-old-2", targetId: apiId, botId, reviewedAt: "2025-02-01 00:00:00" });
+    seedReview(db, { id: "r-now-1", targetId: webId, botId, reviewedAt: null });
+    void docsId;
+
+    const res = await get(db, "/dashboard/default/api/targets", "trudy");
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      targets: Array<{ repo_name: string; reviews_total: number; reviews_7d: number; last_reviewed_at: string | null }>;
+    };
+    const byName = new Map(body.targets.map((row) => [row.repo_name, row]));
+    expect(byName.get("api")?.reviews_total).toBe(2);
+    expect(byName.get("api")?.reviews_7d).toBe(0);
+    expect(byName.get("api")?.last_reviewed_at).toBe("2025-02-01 00:00:00");
+    expect(byName.get("web")?.reviews_total).toBe(1);
+    expect(byName.get("web")?.reviews_7d).toBe(1);
+    // A never-reviewed repository answers zeros, not nulls.
+    expect(byName.get("docs")?.reviews_total).toBe(0);
+    expect(byName.get("docs")?.reviews_7d).toBe(0);
+  });
+
+  test("the list is review-descending, with never-reviewed rows last", async () => {
+    const { db, botId } = await seededWorld({});
+    const webId = seedTarget(db, botId, {
+      workspaceId: "default",
+      repoId: 555002,
+      repoOwner: "acme",
+      repoName: "web",
+    });
+    const docsId = seedTarget(db, botId, {
+      workspaceId: "default",
+      repoId: 555003,
+      repoOwner: "acme",
+      repoName: "docs",
+    });
+    const apiId = (
+      db.raw
+        .query("SELECT id FROM review_targets WHERE bot_id = ? AND repo_id = 555001")
+        .get(botId) as { id: string }
+    ).id;
+    // Creation order is api → web → docs, so created_at DESC alone would answer
+    // docs, web, api and fail this assertion.
+    seedReview(db, { id: "r-api", targetId: apiId, botId, reviewedAt: "2025-01-01 00:00:00" });
+    seedReview(db, { id: "r-web", targetId: webId, botId, reviewedAt: null });
+    void docsId;
+
+    const res = await get(db, "/dashboard/default/api/targets", "trudy");
+
+    const body = (await res.json()) as { targets: Array<{ repo_name: string }> };
+    expect(body.targets.map((row) => row.repo_name)).toEqual(["web", "api", "docs"]);
   });
 });
 
