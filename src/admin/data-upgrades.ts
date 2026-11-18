@@ -54,6 +54,12 @@ export type DataUpgradeItem = {
   /** Stable slug; the state row's primary key. */
   id: string;
   title: string;
+  /**
+   * One or two sentences the console renders on the item's card: which rows it
+   * changes and what it never touches. Server-owned like `title` — the item's
+   * own words, so the card holds no per-item copy.
+   */
+  impact: string;
   /** Refuses `step` while the maintenance window is off (after its first step). */
   requiresDowntime: boolean;
   /** Run order in the console's list. */
@@ -204,6 +210,7 @@ async function readDataUpgradeState(db: DashboardD1, id: string): Promise<DataUp
 export type DataUpgradeListing = {
   id: string;
   title: string;
+  impact: string;
   requiresDowntime: boolean;
   order: number;
   state: DataUpgradeState;
@@ -226,6 +233,7 @@ export async function listDataUpgrades(db: DashboardD1): Promise<DataUpgradeList
       .map(async (item) => ({
         id: item.id,
         title: item.title,
+        impact: item.impact,
         requiresDowntime: item.requiresDowntime,
         order: item.order,
         state: stored.get(item.id) ?? pendingState(item.id),

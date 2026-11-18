@@ -230,6 +230,8 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
 export const orphanLedgerAttribution: DataUpgradeItem = {
   id: "orphan-ledger-attribution",
   title: "Orphan ledger attribution",
+  impact:
+    "Attributes ledger rows that have no target, creating a target when their repository has none. Never rewrites a row that already has one.",
   requiresDowntime: false,
   order: 20,
 

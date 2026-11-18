@@ -46,6 +46,7 @@ function fixtureItem(overrides: Partial<DataUpgradeItem> = {}): DataUpgradeItem 
   return {
     id: ITEM_ID,
     title: "fixture upgrade",
+    impact: "Flips fixture flag rows. Never deletes a flag.",
     requiresDowntime: false,
     order: 1,
     async preflight(db: DashboardD1) {
@@ -691,7 +692,12 @@ describe("the data-upgrade routes", () => {
     const res = await api(db, "GET", "/api/data-upgrades");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      upgrades: Array<{ id: string; state: { status: string }; preflight: Record<string, number> }>;
+      upgrades: Array<{
+        id: string;
+        impact: string;
+        state: { status: string };
+        preflight: Record<string, number>;
+      }>;
     };
     // The shipped registry renders beside the fixture item: both shipped items.
     expect(body.upgrades.map((item) => item.id).sort()).toEqual([
@@ -702,6 +708,15 @@ describe("the data-upgrade routes", () => {
     const listed = body.upgrades.find((item) => item.id === ITEM_ID)!;
     expect(listed.state.status).toBe("pending");
     expect(listed.preflight).toEqual({ pending: 2 });
+    // The card's impact line comes from the item, never from the console.
+    expect(listed.impact).toBe("Flips fixture flag rows. Never deletes a flag.");
+    // Both shipped items state what they change AND what they never touch.
+    expect(body.upgrades.find((item) => item.id === "repo-backfill")!.impact).toContain(
+      "Never deletes a ledger row.",
+    );
+    expect(body.upgrades.find((item) => item.id === "orphan-ledger-attribution")!.impact).toContain(
+      "Never rewrites a row that already has one.",
+    );
   });
 
   test("an unknown id is a 404 and a non-operator sees the namespace 404", async () => {

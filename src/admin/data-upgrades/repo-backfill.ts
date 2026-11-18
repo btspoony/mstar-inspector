@@ -468,6 +468,8 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
 export const repoBackfill: DataUpgradeItem = {
   id: "repo-backfill",
   title: "Repository identity backfill",
+  impact:
+    "Merges duplicate review targets into one per repository and repoints their pull requests, reviews, findings and failures onto it. Never deletes a ledger row.",
   requiresDowntime: true,
   order: 10,
 

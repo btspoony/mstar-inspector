@@ -1669,12 +1669,18 @@ export const en = {
       verifyAction: "Verify",
       /** Only live during a run: it lands after the batch in flight. */
       stopAction: "Stop",
-      resetAction: "Reset",
+      /** An in-flight run's only exit: the state row returns to pending. */
+      resetAction: "Return to pending",
+      /** A failed item's one recovery, and what that recovery does not undo. */
+      restartAction: "Restart upgrade",
+      restartConsequence: "Rows already migrated are not rolled back.",
+      /** Every preflight counter is zero: a run would move nothing. */
+      nothingToMigrate: "Nothing to migrate — this upgrade has no work left.",
       /** {title} = the item's title; the server's refusal rides as detail. */
       preflightFailed: "Could not run the preflight for {title}.",
       stepFailed: "The batch for {title} was refused.",
       verifyFailed: "Could not verify {title}.",
-      resetFailed: "Could not reset {title}.",
+      resetFailed: "Could not move {title} back to pending.",
       emptyTitle: "No data upgrades",
       emptyDescription: "This deployment registers no data migration.",
     },

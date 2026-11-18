@@ -92,6 +92,16 @@ export type DataUpgradeViewProps = {
   onReset: (row: DataUpgradeRow) => void;
 };
 
+/**
+ * Every preflight counter is zero: the item's own worklist is empty, so a run
+ * could move nothing. An EMPTY map is not zero — it is an item that reports no
+ * counts at all, and the console must not invent an answer for it.
+ */
+function zeroPreflight(counts: Record<string, number>): boolean {
+  const entries = Object.values(counts);
+  return entries.length > 0 && entries.every((count) => count === 0);
+}
+
 /** A count map as the item reported it; an empty map is one dash. */
 function Counts({ counts }: { counts: Record<string, number> }) {
   const entries = Object.entries(counts);
@@ -227,6 +237,7 @@ export function DataUpgradeView({
           const state: DataUpgradeState = row.state;
           const verifiable =
             state.status === "running" || state.status === "verifying" || state.status === "failed";
+          const nothingToMigrate = zeroPreflight(row.preflight);
           return (
             <SectionCard key={row.id} tier="secondary" data-upgrade={row.id}>
               <CardHeader>
@@ -242,6 +253,7 @@ export function DataUpgradeView({
                 </div>
               </CardHeader>
               <CardContent className="flex flex-col gap-4">
+                <p className="text-sm">{row.impact}</p>
                 <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
                   <div className="flex flex-col gap-1">
                     <dt className="text-muted-foreground">
@@ -265,6 +277,11 @@ export function DataUpgradeView({
                   </span>
                   <Counts counts={row.preflight} />
                 </div>
+                {/* Zero counts are the whole answer: without this line the card
+                    reads like a run that finished and moved nothing. */}
+                {nothingToMigrate ? (
+                  <p className="text-sm">{t(locale, "admin.dataUpgrades.nothingToMigrate")}</p>
+                ) : null}
                 {state.lastError === null ? null : (
                   <PageNotice kind="error" message={state.lastError} />
                 )}
@@ -295,12 +312,22 @@ export function DataUpgradeView({
                     {t(locale, "admin.dataUpgrades.preflightAction")}
                   </Button>
                   {state.status === "pending" ? (
-                    <Button type="button" size="sm" disabled={busy} onClick={() => onStep(row)}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={busy || nothingToMigrate}
+                      onClick={() => onStep(row)}
+                    >
                       {t(locale, "admin.dataUpgrades.startAction")}
                     </Button>
                   ) : null}
                   {state.status === "running" ? (
-                    <Button type="button" size="sm" disabled={busy} onClick={() => onStep(row)}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={busy || nothingToMigrate}
+                      onClick={() => onStep(row)}
+                    >
                       {t(locale, "admin.dataUpgrades.continueAction")}
                     </Button>
                   ) : null}
@@ -322,15 +349,39 @@ export function DataUpgradeView({
                       {t(locale, "admin.dataUpgrades.stopAction")}
                     </Button>
                   ) : null}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => onReset(row)}
-                  >
-                    {t(locale, "admin.dataUpgrades.resetAction")}
-                  </Button>
+                  {/* A failed run's one recovery, named for what it does, with the
+                      one thing it does NOT do beside it: the rows the earlier
+                      batches moved are not rolled back. No other face offers it —
+                      a pending item never started and a finished one has nothing
+                      left to redo. */}
+                  {state.status === "failed" ? (
+                    <>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => onReset(row)}
+                      >
+                        {t(locale, "admin.dataUpgrades.restartAction")}
+                      </Button>
+                      <span className="self-center text-xs text-muted-foreground">
+                        {t(locale, "admin.dataUpgrades.restartConsequence")}
+                      </span>
+                    </>
+                  ) : null}
+                  {/* An in-flight run may be abandoned; nothing moved is undone. */}
+                  {state.status === "running" || state.status === "verifying" ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => onReset(row)}
+                    >
+                      {t(locale, "admin.dataUpgrades.resetAction")}
+                    </Button>
+                  ) : null}
                 </div>
               </CardContent>
             </SectionCard>
