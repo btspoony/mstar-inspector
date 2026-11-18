@@ -128,7 +128,7 @@ describe("data upgrade screen — static faces", () => {
         maintenance: RUNTIME.maintenance,
       },
     });
-    expect(done).toContain(t("en", "admin.dataUpgrades.lastRunLabel"));
+    // Folded, the card's summary carries the same stamp its body column would.
     expect(done).toContain(formatRelativeTime("2026-11-16T09:00:00.000Z", "en"));
     expect(done).not.toContain(formatRelativeTime("2026-11-09T08:00:00.000Z", "en"));
     // The two single-stamp columns are gone: one run time, not a start and a finish.
@@ -137,6 +137,7 @@ describe("data upgrade screen — static faces", () => {
 
     // No finish yet: the in-flight claim is the closest thing to a run time.
     const running = viewOf(1);
+    expect(running).toContain(t("en", "admin.dataUpgrades.lastRunLabel"));
     expect(running).toContain(formatRelativeTime("2026-11-16T08:00:00.000Z", "en"));
   });
 
@@ -186,18 +187,93 @@ describe("data upgrade screen — static faces", () => {
     expect(zh).toContain("已迁移的行不会回滚");
   });
 
-  test("a completed item offers no batch, no verify and no destructive-looking control", () => {
+  test("a completed item is folded to a summary and offers no batch or verify", () => {
     const done = UPGRADES.map((row) => ({
       ...row,
       state: state({ status: "completed" as const, processed: 12, finishedAt: "2026-11-16T09:00:00.000Z" }),
     }));
     const markup = view({ data: { upgrades: done, maintenance: RUNTIME.maintenance } });
     expect(markup).toContain(t("en", "admin.dataUpgrades.statusCompleted"));
+    expect(markup).toContain(
+      t("en", "admin.dataUpgrades.completedSummary", {
+        count: 12,
+        time: formatRelativeTime("2026-11-16T09:00:00.000Z", "en"),
+      }),
+    );
+    expect(markup).toContain(t("en", "admin.dataUpgrades.showDetails"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.verifyAction"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.continueAction"));
+    expect(markup).not.toContain(t("en", "admin.dataUpgrades.startAction"));
     // Nothing to reset a finished run to, and no retry for a run that succeeded.
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.resetAction"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.restartAction"));
+  });
+
+  test("a completed card starts collapsed: the body is not rendered until asked", () => {
+    const markup = view({
+      data: {
+        upgrades: [
+          {
+            ...UPGRADES[1]!,
+            state: state({ status: "completed", processed: 40, finishedAt: "2026-11-16T09:00:00.000Z" }),
+          },
+        ],
+        maintenance: RUNTIME.maintenance,
+      },
+    });
+    // The header still states what the item did and when — the body does not.
+    expect(markup).toContain(
+      t("en", "admin.dataUpgrades.completedSummary", {
+        count: 40,
+        time: formatRelativeTime("2026-11-16T09:00:00.000Z", "en"),
+      }),
+    );
+    expect(markup).not.toContain(t("en", "admin.dataUpgrades.preflightLabel"));
+    expect(markup).not.toContain(t("en", "admin.dataUpgrades.processedLabel"));
+  });
+
+  test("completed items sort after the open ones, newest run first inside the group", () => {
+    const at = (finishedAt: string) =>
+      state({ status: "completed" as const, processed: 3, finishedAt });
+    const markup = view({
+      data: {
+        upgrades: [
+          { ...UPGRADES[2]!, id: "done-old", state: at("2026-11-10T09:00:00.000Z") },
+          UPGRADES[0]!,
+          { ...UPGRADES[1]!, id: "done-new", state: at("2026-11-17T09:00:00.000Z") },
+          { ...UPGRADES[2]!, id: "done-mid", state: at("2026-11-14T09:00:00.000Z") },
+        ],
+        maintenance: RUNTIME.maintenance,
+      },
+    });
+    const order = [...markup.matchAll(/data-upgrade="([^"]+)"/g)].map((match) => match[1]);
+    expect(order).toEqual(["repo-backfill", "done-new", "done-mid", "done-old"]);
+  });
+
+  test("the downtime badge marks a runnable item, never a finished one", () => {
+    // Downtime is a property of a run: an item with nothing left to run has no
+    // window to warn the operator about.
+    const badge = t("en", "admin.dataUpgrades.downtimeBadge");
+    const pending = { ...UPGRADES[0]!, requiresDowntime: true };
+    const view1 = (row: DataUpgradeRow) =>
+      view({ data: { upgrades: [row], maintenance: RUNTIME.maintenance } });
+    expect(view1(pending)).toContain(badge);
+
+    const completed = {
+      ...pending,
+      state: state({ status: "completed" as const, processed: 5, finishedAt: "2026-11-16T09:00:00.000Z" }),
+    };
+    expect(view1(completed)).not.toContain(badge);
+    // Same for a failed item: it takes no new batch until a restart.
+    expect(
+      view1({
+        ...pending,
+        state: state({ status: "failed" as const, processed: 5, lastError: "boom" }),
+      }),
+    ).not.toContain(badge);
+    // And for an empty worklist: the run control is disabled, so no window is
+    // needed either.
+    expect(view1({ ...pending, preflight: { unidentified_targets: 0 } })).not.toContain(badge);
   });
 
   test("zero preflight disables the run control and states there is nothing to migrate", () => {
@@ -490,6 +566,42 @@ describe("data upgrade screen — mounted", () => {
     const text = card(surface.container, "repo-backfill")?.textContent ?? "";
     expect(text).toContain("unidentified_targets 9");
     expect(text).toContain("ledger_pairs 30");
+    await surface.close();
+  });
+
+  test("a completed card folds and unfolds its body on the same control", async () => {
+    const done: DataUpgradeRow[] = [
+      {
+        ...UPGRADES[1]!,
+        state: state({ status: "completed", processed: 40, finishedAt: "2026-11-16T09:00:00.000Z" }),
+      },
+    ];
+    const surface = await mount(readStub(done));
+
+    // Folded: the summary is there, the body's own columns are not.
+    const folded = card(surface.container, "quota-reprice")?.textContent ?? "";
+    expect(folded).toContain(
+      t("en", "admin.dataUpgrades.completedSummary", {
+        count: 40,
+        time: formatRelativeTime("2026-11-16T09:00:00.000Z", "en"),
+      }),
+    );
+    expect(folded).not.toContain(t("en", "admin.dataUpgrades.preflightLabel"));
+
+    const toggle = () =>
+      control(surface.container, "quota-reprice", t("en", "admin.dataUpgrades.showDetails")) ??
+      control(surface.container, "quota-reprice", t("en", "admin.dataUpgrades.hideDetails"));
+
+    expect(toggle()?.textContent).toBe(t("en", "admin.dataUpgrades.showDetails"));
+    await surface.click(toggle());
+    const opened = card(surface.container, "quota-reprice")?.textContent ?? "";
+    expect(opened).toContain(t("en", "admin.dataUpgrades.preflightLabel"));
+    expect(toggle()?.textContent).toBe(t("en", "admin.dataUpgrades.hideDetails"));
+
+    await surface.click(toggle());
+    expect(card(surface.container, "quota-reprice")?.textContent).not.toContain(
+      t("en", "admin.dataUpgrades.preflightLabel"),
+    );
     await surface.close();
   });
 });

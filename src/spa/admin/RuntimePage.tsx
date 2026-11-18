@@ -1,9 +1,8 @@
 /**
  * Runtime parameters — the non-secret values an operator changes without a
  * redeploy (iteration spec §1.1, §2.4): the system review-concurrency cap,
- * the §7.10 Check budgets, the recheck seat's assignment budget (UTF-8 bytes of
- * ask the prior-findings seat may receive) and the default review depth Apps
- * without their own depth inherit.
+ * the §7.10 Check budgets and the recheck seat's assignment budget (UTF-8
+ * bytes of ask the prior-findings seat may receive).
  *
  * One save writes ONE `PATCH /api/runtime`; the server pairs the write with its
  * audit row, so this screen owns no ledger logic. Each field is a local draft
@@ -15,11 +14,6 @@ import {
   CardContent,
   CardHeader,
   Input,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
   Toggle,
 } from "@design-system";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
@@ -35,7 +29,6 @@ import {
   readRuntime,
   setCheckBudgets,
   setCommentClaimSettings,
-  setDefaultReviewLevel,
   setMaintenance,
   setRecheckAssignmentMaxBytes,
   setSystemConcurrency,
@@ -46,17 +39,8 @@ import {
   type MaintenanceConfig,
   type QueueBacklog,
   type RecheckAssignmentConfig,
-  type ReviewLevelConfig,
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
-
-/** The operator's label for a stored tier; an unknown id stays untranslated. */
-function levelLabel(locale: Locale, level: string): string {
-  if (level === "quick") return t(locale, "admin.runtime.reviewLevelQuick");
-  if (level === "deep") return t(locale, "admin.runtime.reviewLevelDeep");
-  if (level === "default") return t(locale, "admin.runtime.reviewLevelStandard");
-  return level;
-}
 
 /** The admission-drop card's fixed reason order and its label per reason. */
 const ADMISSION_DROP_FIELDS = [
@@ -112,7 +96,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [retryDraft, setRetryDraft] = useState<string | null>(null);
   const [attemptsDraft, setAttemptsDraft] = useState<string | null>(null);
   const [outboxDraft, setOutboxDraft] = useState<string | null>(null);
-  const [levelDraft, setLevelDraft] = useState<string | null>(null);
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
   /** The window's pending state: `null` = untouched, so the stored one shows. */
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
@@ -124,7 +107,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const concurrencySignal = useSaveSignal();
   const checkBudgetsSignal = useSaveSignal();
   const commentClaimSignal = useSaveSignal();
-  const reviewLevelSignal = useSaveSignal();
   const recheckAssignmentSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
@@ -137,7 +119,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       | "concurrency"
       | "checkBudgets"
       | "commentClaim"
-      | "reviewLevel"
       | "recheckAssignment"
       | "maintenance";
   } | null>(null);
@@ -283,42 +264,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
-  async function onSaveLevel(
-    event: FormEvent<HTMLFormElement>,
-    stored: ReviewLevelConfig,
-  ): Promise<void> {
-    event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
-    setBusy(true);
-    setNotice(null);
-    reviewLevelSignal.start();
-    try {
-      const saved = await setDefaultReviewLevel(levelDraft ?? stored.value, stored);
-      // A 2xx rewrote the row, so it reads as trusted again.
-      update((data) => ({ ...data, reviewLevel: saved }));
-      setLevelDraft(null);
-      setNotice({
-        kind: "success",
-        message: t(locale, "admin.runtime.reviewLevelSaved"),
-        source: "reviewLevel",
-      });
-      reviewLevelSignal.succeed();
-    } catch (error) {
-      const generic = t(locale, "admin.runtime.reviewLevelFailed");
-      setNotice({
-        kind: "error",
-        message:
-          error instanceof AdminWriteError
-            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
-            : generic,
-        source: "reviewLevel",
-      });
-      reviewLevelSignal.fail();
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function onSaveRecheck(
     event: FormEvent<HTMLFormElement>,
     stored: RecheckAssignmentConfig,
@@ -421,8 +366,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           // Same absence rule for the migration-0048 card: an older Worker
           // behind this bundle reports no group, so the card is hidden.
           const claim = data.commentClaim;
-          // Same older-Worker rule for the default review depth.
-          const level = data.reviewLevel;
           // And for the recheck seat's ask budget.
           const recheck = data.recheckAssignment;
           // And for the admission-drop counts.
@@ -779,73 +722,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     })}
                   </p>
                 )}
-              </CardContent>
-            </SectionCard>
-            )}
-
-            {level === null ? null : (
-            <SectionCard tier="secondary">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "admin.runtime.reviewLevelTitle")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  {t(locale, "admin.runtime.reviewLevelDescription")}
-                </p>
-                {notice?.source === "reviewLevel" ? (
-                  <CardOutcome notice={notice} status={reviewLevelSignal.status} />
-                ) : null}
-                {level.degraded ? (
-                  // The stored row is unreadable, so the tier shown is the
-                  // documented default — the same tier a review already runs.
-                  <div className="mt-4">
-                    <PageNotice
-                      kind="warn"
-                      message={t(locale, "admin.runtime.reviewLevelUnreadable")}
-                    />
-                  </div>
-                ) : null}
-                <form
-                  className="mt-4 flex flex-wrap items-end gap-2"
-                  onSubmit={(event) => void onSaveLevel(event, level)}
-                >
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-sm font-medium" htmlFor="default-review-level">
-                      {t(locale, "admin.runtime.reviewLevelLabel")}
-                    </label>
-                    <div className="w-64">
-                      <Select
-                        value={levelDraft ?? level.value}
-                        onValueChange={setLevelDraft}
-                        disabled={busy}
-                      >
-                        <SelectTrigger id="default-review-level">
-                          <SelectValue>{levelLabel(locale, levelDraft ?? level.value)}</SelectValue>
-                        </SelectTrigger>
-                        <SelectContent>
-                          {level.levels.map((option) => (
-                            <SelectItem key={option} value={option}>
-                              {levelLabel(locale, option)}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <Button
-                    type="submit"
-                    disabled={busy}
-                    status={reviewLevelSignal.status === "idle" ? undefined : reviewLevelSignal.status}
-                  >
-                    {t(locale, "admin.runtime.reviewLevelSave")}
-                  </Button>
-                  <SaveInFlight show={reviewLevelSignal.status === "loading"} locale={locale} />
-                  {level.degraded ? (
-                    <Button type="button" variant="secondary" onClick={reload}>
-                      {t(locale, "common.retry")}
-                    </Button>
-                  ) : null}
-                </form>
               </CardContent>
             </SectionCard>
             )}

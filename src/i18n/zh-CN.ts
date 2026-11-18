@@ -1163,20 +1163,6 @@ export const zhCN: Dictionary = {
       /** 所有已存储设置都无法读取——数字只是文档默认值。 */
       claimUnreadable:
         "无法读取已存储的评论触发恢复设置，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
-      /** App 未自行选择深度时继承的平台默认。 */
-      reviewLevelTitle: "评审深度",
-      reviewLevelDescription: "适用于尚未自行选择评审深度的 App。",
-      reviewLevelLabel: "默认评审深度",
-      reviewLevelQuick: "快速 — 单轮快速评审",
-      reviewLevelStandard: "标准 — 均衡深度（推荐）",
-      reviewLevelDeep: "深入 — 最彻底，耗时更长",
-      reviewLevelSave: "保存",
-      reviewLevelSaved: "已保存。",
-      /** 写入失败且错误无法识别时的兜底文案。 */
-      reviewLevelFailed: "修改默认评审深度失败。",
-      /** 已存储的档位无法读取——显示的档位是文档默认值。 */
-      reviewLevelUnreadable:
-        "无法读取已存储的默认评审深度，因此未自行选择评审深度的 App 正在使用「标准」。选择档位可保存为新值，重新读取会重新检查该行。",
       /** 历史发现重审席位的提问预算。 */
       recheckTitle: "重审提问预算",
       recheckDescription:
@@ -1394,6 +1380,10 @@ export const zhCN: Dictionary = {
       statusCompleted: "已完成",
       statusFailed: "已失败",
       downtimeBadge: "需要停机",
+      /** 折叠后的已完成行：处理行数与最近运行时间。 */
+      completedSummary: "{count} 行 · 最近运行 {time}",
+      showDetails: "展开详情",
+      hideDetails: "收起详情",
       processedLabel: "已处理行数",
       /** 一列：最近一次运行自己的完成时间；运行中退回进行中的声明时间。 */
       lastRunLabel: "最近运行",
