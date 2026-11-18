@@ -31,7 +31,9 @@
  *
  * Owner and repository compare `COLLATE NOCASE` on every side — the store's
  * own add path and `resolveByRepo` are case-insensitive, so a case variant
- * spelling must join its group rather than create a second live target.
+ * spelling must join its group rather than create a second live target. The
+ * JS side of that comparison folds ASCII `A-Z` only, exactly like `NOCASE`:
+ * `toLowerCase()` would collapse `Ä` onto `ä`, which SQL keeps apart.
  *
  * One step is capped by GROUPS, not by worklist rows: a single target can name
  * hundreds of repositories, and a row cap would both wedge the cursor and fan
@@ -278,17 +280,24 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
   // the worklist (`EXISTS (ledger)` is what finds a row), so this batch
   // must retire it — otherwise it strands as a live all-NULL ghost.
   for (const row of rows) {
+    // `COLLATE NOCASE` inside DISTINCT: the pair set folds exactly as the
+    // grouping below does — ASCII only, so `Ä` and `ä` stay two identities.
     const pairs = await db
-      .prepare(`SELECT DISTINCT owner, repo FROM (${LEDGER_IDENTITIES}) x WHERE x.target_id = ?1`)
+      .prepare(
+        `SELECT DISTINCT owner COLLATE NOCASE AS owner, repo COLLATE NOCASE AS repo
+           FROM (${LEDGER_IDENTITIES}) x WHERE x.target_id = ?1`,
+      )
       .bind(row.id)
       .all<{ owner: string; repo: string }>();
     let drained = true;
     for (const pair of pairs.results) {
       const group = { botId: row.bot_id, owner: pair.owner, repo: pair.repo };
+      // Same fold as the SQL above: ASCII `A-Z` only. `Ä` and `ä` are two
+      // identities to `NOCASE`, so they must stay two groups here.
       const key = JSON.stringify([
         group.botId,
-        group.owner.toLowerCase(),
-        group.repo.toLowerCase(),
+        group.owner.replace(/[A-Z]/g, (char) => char.toLowerCase()),
+        group.repo.replace(/[A-Z]/g, (char) => char.toLowerCase()),
       ]);
       if (seen.has(key)) continue;
       if (groups.length === GROUPS_PER_BATCH) {

@@ -506,6 +506,31 @@ describe("repo-backfill item", () => {
     expect((await repoBackfill.verify(db, { runStartedAt: null })).duplicate_repository_groups).toBe(0);
   });
 
+  test("a non-ASCII case variant stays a separate identity: NOCASE folds ASCII only", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-old");
+    seedPr(db, "pr-upper", "target-old", "Ä", "alpha", 1, "2026-01-01T00:00:00.000Z");
+    seedPr(db, "pr-lower", "target-old", "ä", "alpha", 2, "2026-02-01T00:00:00.000Z");
+
+    const batch = await repoBackfill.runBatch(db, null);
+    expect(batch.log).toMatchObject({ created: 2, consumed: 1 });
+
+    const live = liveTargets(db);
+    expect(live.map((target) => target.repo_owner).sort()).toEqual(["Ä", "ä"]);
+    const prs = db.raw.query("SELECT target_id FROM pull_requests ORDER BY id").all() as Array<{
+      target_id: string;
+    }>;
+    expect(new Set(prs.map((row) => row.target_id)).size).toBe(2);
+    expect(await repoBackfill.verify(db, { runStartedAt: RUN_1_START })).toEqual({
+      unidentified_targets_with_ledger: 0,
+      unrepointed_ledger_rows: 0,
+      historical_rows: 0,
+      duplicate_repository_groups: 0,
+      ledger_rows_without_pr: 0,
+    });
+  });
+
   test("a target naming many repositories migrates without overrunning the bind list", async () => {
     const db = createMigratedTestD1();
     seedBot(db, BOT, 7001);
