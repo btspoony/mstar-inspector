@@ -734,6 +734,8 @@ export const en = {
     noProviderMatch: 'No providers match "{query}".',
     modelChainField: "Model chain",
     saveChain: "Save model chain",
+    moveChainUp: "Move this selector up",
+    moveChainDown: "Move this selector down",
     providerId: "Provider id",
     baseUrl: "Base URL",
     api: "API",
@@ -842,6 +844,10 @@ export const en = {
       customProviderDeclRejected: "The custom provider was rejected — nothing was stored.",
       customProviderUndeclared:
         "{provider} is not a declared custom provider for this App — declare it before adding keys. Nothing was stored.",
+      providerModelsEmpty:
+        "{provider} answered but listed no model this declaration's protocol can run — the stored model list is unchanged.",
+      providerModelsKeyRequired:
+        "{provider}'s model endpoint requires a key and this App holds none for it — add a key, then sync again. The stored model list is unchanged.",
       providerEndpointLocked:
         "{provider} already stores keys for its current endpoint — remove them before changing its base URL or API protocol. Nothing was stored.",
       templateUnknown: "Unknown provider template — nothing was stored.",
@@ -955,6 +961,31 @@ export const en = {
       verifiedAt: "verified {time}",
       modelCount: "{count} models",
       modelCountOne: "{count} model",
+      /**
+       * I-000644: a provider the App has NOT declared yet shows the catalog
+       * snapshot's vocabulary as a prefill. It is labelled as such — the card
+       * must never pass a third-party snapshot off as what the App runs.
+       */
+      catalogVocabulary: "catalog vocabulary",
+      /**
+       * I-000644: the sync flow — ask the provider's own /models endpoint for the
+       * vocabulary it really serves and replace the stored list with it. The
+       * counts are the confirmation: a stale snapshot shows up as the ids it
+       * drops and the ids it never had.
+       */
+      sync: {
+        trigger: "Sync models",
+        title: "Sync {label}'s models from its endpoint",
+        body: "This asks {provider} for the model list it currently serves and replaces this App's stored list with it. Models you stated sizes for keep those sizes; ids the provider no longer lists are dropped.",
+        action: "Fetch the provider's list",
+        refetch: "Fetch again",
+        notFetched: "Not fetched yet — the count below is your stored list, not the provider's.",
+        summary:
+          "The provider lists {fetched} models for this protocol — {kept} already stored, {added} new, {dropped} stored ids it no longer lists.",
+        confirm: "Replace the stored list",
+        saved: "Synced {count} models for {provider} from its endpoint.",
+        fetchFailed: "That request failed before it reached the server — nothing was fetched, and nothing was stored.",
+      },
       /**
        * The model picker: the meta-line trigger, the dialog faces, and the
        * model-id cap stated in the counter. `common` has no save key — the
