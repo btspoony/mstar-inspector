@@ -343,6 +343,7 @@ describe("configuration sections (providers / chains / seats)", () => {
           notice: null,
           removeOutcome: null,
           onOutcome: () => {},
+          onReload: async () => {},
         }),
       ),
     ).toContain(

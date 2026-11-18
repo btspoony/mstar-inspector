@@ -10,6 +10,7 @@ import { modelsForProtocol, type CatalogProvider, type BotConfigSections } from 
 import { NoticeRegion, type OpNotice } from "./PageNotice";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { ProviderModelsDialog } from "./provider-models-dialog";
+import { ProviderSyncDialog } from "./provider-sync-dialog";
 import { providerGroups, type ProviderGroup } from "./providers-groups";
 import type { PendingAction } from "./SettingsPage";
 import { UsagePanel } from "./usage-panel";
@@ -56,6 +57,7 @@ export function ProvidersSection({
   notice,
   removeOutcome,
   onOutcome,
+  onReload,
 }: {
   locale: SpaBoot["locale"];
   payload: BotConfigSections;
@@ -68,6 +70,8 @@ export function ProvidersSection({
   removeOutcome: { notice: OpNotice; slot: number } | null;
   /** Where the dialogs' completed flow reports its outcome. */
   onOutcome: (notice: OpNotice) => void;
+  /** Re-reads the settings face after a model-list write (the sync flow's count). */
+  onReload: () => Promise<unknown>;
 }) {
   const [addOpen, setAddOpen] = useState(false);
   // The group whose Add key dialog is open; null = no add-key flow.
@@ -140,6 +144,7 @@ export function ProvidersSection({
               }
               onSettings={onSettings}
               onOutcome={onOutcome}
+              onReload={onReload}
             />
           ))
         )}
@@ -174,24 +179,34 @@ export function ProvidersSection({
  * declaration first (it is what the pool is actually bound to), the catalog
  * entry as the prefill otherwise. A provider with no declaration and no
  * catalog endpoint (a key-only fallback id) has nothing to state.
+ *
+ * The DECLARATION is the authority for the disclosure list and its count
+ * (I-000644): it is the vocabulary the App actually runs, and the same list the
+ * 编辑模型 dialog seeds from. The catalog's per-protocol bucket is the prefill
+ * for a provider with no declaration yet — it is a third-party snapshot, may be
+ * stale, and may spell ids in a dialect the provider no longer accepts, so it is
+ * reported as the CATALOG's vocabulary rather than handed over as the App's.
+ * Making the catalog override a stored declaration is how the card came to
+ * report 50 models for a provider serving 104.
  */
 function groupMeta(
   group: ProviderGroup,
   catalog: CatalogProvider | undefined,
-): { api: string; baseUrl: string; modelIds: readonly string[] } | null {
+): {
+  api: string;
+  baseUrl: string;
+  modelIds: readonly string[];
+  /** Whose list this is — the two are never presented as the same claim. */
+  source: "declaration" | "catalog";
+} | null {
   if (group.kind === "builtin") return null;
   const api = group.declaration?.api ?? catalog?.api ?? null;
   const baseUrl = group.declaration?.base_url ?? catalog?.base_url ?? null;
   if (api === null || baseUrl === null) return null;
-  // The disclosure states the provider's CATALOG vocabulary (its real model
-  // directory) for the protocol this declaration materialized; the stored
-  // declaration is what the model picker edits.
-  const catalogModels = modelsForProtocol(catalog, group.declaration?.api);
-  return {
-    api,
-    baseUrl,
-    modelIds: catalogModels.length > 0 ? catalogModels : (group.declaration?.model_ids ?? []),
-  };
+  if (group.declaration !== null) {
+    return { api, baseUrl, modelIds: group.declaration.model_ids, source: "declaration" };
+  }
+  return { api, baseUrl, modelIds: modelsForProtocol(catalog, api), source: "catalog" };
 }
 
 /**
@@ -211,6 +226,7 @@ function ProviderGroupCard({
   onAddKey,
   onSettings,
   onOutcome,
+  onReload,
 }: {
   locale: SpaBoot["locale"];
   /** The numeric GitHub App id — the usage probe posts under `/api/apps/:appId`. */
@@ -229,10 +245,15 @@ function ProviderGroupCard({
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   /** Where the model picker's completed flow reports its outcome. */
   onOutcome: (notice: OpNotice) => void;
+  /** Re-reads the settings face after a write that changes the stored list. */
+  onReload: () => Promise<unknown>;
 }) {
   const [modelsOpen, setModelsOpen] = useState(false);
   // The model picker is a declaration-only flow: no declaration, no trigger.
   const [modelsEditOpen, setModelsEditOpen] = useState(false);
+  // I-000644: the sync flow is a declaration-only flow too — it replaces a
+  // stored model list, so a provider with none has nothing to sync into.
+  const [syncOpen, setSyncOpen] = useState(false);
   // The key row whose usage panel is open, with its probe generation (the
   // re-click bumps the nonce, remounting the panel = re-probe). At most one
   // panel per group: another key's usage action closes this one. Every key
@@ -380,6 +401,10 @@ function ProviderGroupCard({
                 meta.modelIds.length === 1 ? "settings.providers.modelCountOne" : "settings.providers.modelCount",
                 { count: meta.modelIds.length },
               )}
+              {/* The vocabulary belongs to the App only when a declaration states
+                  it. A catalog prefill says so, in the same line, so the two
+                  claims can never be read as one (I-000644). */}
+              {meta.source === "catalog" ? ` (${t(locale, "settings.providers.catalogVocabulary")})` : null}
             </span>
             <button
               type="button"
@@ -400,6 +425,16 @@ function ProviderGroupCard({
                 onClick={() => setModelsEditOpen(true)}
               >
                 {t(locale, "settings.providers.models.trigger")}
+              </button>
+            ) : null}
+            {group.declaration !== null ? (
+              <button
+                type="button"
+                className="text-(--tone-accent-fg)"
+                aria-haspopup="dialog"
+                onClick={() => setSyncOpen(true)}
+              >
+                {t(locale, "settings.providers.sync.trigger")}
               </button>
             ) : null}
           </div>
@@ -438,6 +473,18 @@ function ProviderGroupCard({
           limitsSnapshot={limitsSnapshot}
           onSettings={onSettings}
           onOutcome={onOutcome}
+        />
+      )}
+      {group.declaration === null ? null : (
+        <ProviderSyncDialog
+          locale={locale}
+          open={syncOpen}
+          onOpenChange={setSyncOpen}
+          appId={appId}
+          provider={group.providerId}
+          label={group.label}
+          onOutcome={onOutcome}
+          onReload={onReload}
         />
       )}
     </GroupCard>

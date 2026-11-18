@@ -153,6 +153,7 @@ async function mount(payload: SettingsManagePayload, loc: SpaBoot["locale"] = lo
     notice: null,
     removeOutcome: null,
     onOutcome: () => {},
+    onReload: async () => {},
   });
   await act(async () => root.render(element));
   await act(async () => {});

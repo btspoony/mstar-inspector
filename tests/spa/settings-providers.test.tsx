@@ -100,6 +100,7 @@ function render(payload: SettingsManagePayload, locale: Locale = "en"): string {
       notice: null,
       removeOutcome: null,
       onOutcome: () => {},
+      onReload: async () => {},
     }),
   );
 }
@@ -299,6 +300,7 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
             notice: null,
             removeOutcome: null,
             onOutcome: () => {},
+            onReload: async () => {},
           }),
         );
       });
@@ -361,6 +363,7 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
             notice: null,
             removeOutcome: null,
             onOutcome: () => {},
+            onReload: async () => {},
           }),
         );
       });
@@ -389,10 +392,14 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
     }
   });
 
-  test("the disclosure states the provider's catalog vocabulary, not the stored declaration", async () => {
-    // "Which models does this provider offer" is a catalog fact; the stored
-    // declaration (what the App exposes) is edited in the picker. A stale
-    // declaration must not make the provider look like it offers two models.
+  test("the declaration is the authority for both the count and the disclosure list (I-000644)", async () => {
+    // The stored declaration is what the App actually runs — and the same list
+    // the model picker seeds from. The catalog's per-protocol bucket is a
+    // third-party snapshot: it may be stale, and its ids may be spelled in a
+    // dialect the provider stopped accepting. Letting it override a stored
+    // declaration is how the card came to report 50 models for a provider
+    // serving 104.
+    const stored = ["decl-a", "decl-b", "decl-c", "decl-d", "decl-e"];
     const { win, cleanup } = installDom("http://localhost/dashboard/ws/settings");
     try {
       const container = win.document.createElement("div");
@@ -407,7 +414,7 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
                 catalogEntry("workers-ai", "template", {
                   base_url: "https://api.test",
                   api: "openai-completions",
-                  models: ["catalog-a", "catalog-b", "catalog-c"],
+                  models: ["catalog-a", "catalog-b"],
                 }),
               ],
               keys: [keyRow("workers-ai", "solo")],
@@ -416,7 +423,7 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
                   provider_id: "workers-ai",
                   base_url: "https://api.test",
                   api: "openai-completions",
-                  model_ids: ["stale-a", "stale-b"],
+                  model_ids: stored,
                 },
               ],
             }),
@@ -426,9 +433,14 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
             notice: null,
             removeOutcome: null,
             onOutcome: () => {},
+            onReload: async () => {},
           }),
         );
       });
+
+      // The card's count follows the DECLARATION, not the smaller catalog bucket.
+      expect(container.textContent).toContain(t("en", "settings.providers.modelCount", { count: stored.length }));
+      expect(container.textContent).not.toContain(t("en", "settings.providers.modelCount", { count: 2 }));
 
       const toggle = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "settings.providers.expand"),
@@ -440,8 +452,9 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
 
       const region = container.querySelector("#provider-models-workers-ai");
       if (!(region instanceof win.HTMLElement)) throw new Error("the model-id region is missing");
-      const rendered = [...region.querySelectorAll("li")].map((li) => li.textContent);
-      expect(rendered).toEqual(["catalog-a", "catalog-b", "catalog-c"]);
+      // The disclosure and the picker's seed are the SAME list — no silent
+      // disagreement between the card and the dialog.
+      expect([...region.querySelectorAll("li")].map((li) => li.textContent)).toEqual(stored);
 
       await act(async () => {
         root.unmount();
@@ -449,6 +462,26 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
     } finally {
       cleanup();
     }
+  });
+
+  test("a provider with no declaration reports the catalog's vocabulary AS the catalog's", async () => {
+    // The catalog bucket is the prefill for a provider the App has not declared
+    // yet; the card must not pass it off as the App's own list.
+    const html = render(
+      managePayload({
+        provider_catalog: [
+          catalogEntry("workers-ai", "template", {
+            base_url: "https://api.test",
+            api: "openai-completions",
+            models: ["catalog-a", "catalog-b"],
+          }),
+        ],
+        keys: [keyRow("workers-ai", "solo")],
+      }),
+    );
+    const group = groupOf(html, "workers-ai label");
+    expect(group).toContain(t("en", "settings.providers.modelCount", { count: 2 }));
+    expect(group).toContain(t("en", "settings.providers.catalogVocabulary"));
   });
 });
 
@@ -536,6 +569,7 @@ async function mountSection(payload: SettingsManagePayload) {
         notice: null,
         removeOutcome: null,
         onOutcome: () => {},
+        onReload: async () => {},
       }),
     );
   });
@@ -608,5 +642,23 @@ describe("a declaration stored under a collapsed per-protocol id", () => {
     } finally {
       await view.cleanup();
     }
+  });
+});
+
+describe("sync trigger (I-000644)", () => {
+  test("a declaration group offers 同步模型 beside 编辑模型; a provider with no declaration offers neither", () => {
+    const html = render(
+      managePayload({
+        provider_catalog: [
+          catalogEntry("workers-ai", "template", { base_url: "https://api.test", api: "openai-completions", models: ["a"] }),
+        ],
+        keys: [keyRow("workers-ai", "solo")],
+        custom_providers: [{ provider_id: "my-gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: ["m1"] }],
+      }),
+    );
+    const sync = `>${t("en", "settings.providers.sync.trigger")}</button>`;
+    expect(groupOf(html, "my-gateway")).toContain(sync);
+    // A key-only template group has no stored model list to replace.
+    expect(groupOf(html, "workers-ai label")).not.toContain(sync);
   });
 });
