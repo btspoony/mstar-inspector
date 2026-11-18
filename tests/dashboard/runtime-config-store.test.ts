@@ -33,10 +33,13 @@ import {
   RECHECK_ASSIGNMENT_KEY,
   REVIEW_LEVEL_KEY,
   RUNTIME_SETTING_DOMAINS,
+  FAILURE_PAGING_STATE_KEY,
   SYSTEM_CONCURRENCY_KEY,
   UnknownWorkspaceError,
+  compareAndSetFailurePagingState,
   getMaintenanceMode,
   isRuntimeSettingKey,
+  readFailurePagingState,
   readOfficialWorkspaceId,
   setMaintenanceMode,
   setOfficialWorkspace,
@@ -331,6 +334,53 @@ describe("maintenance mode (delivery-compass D20)", () => {
       unreadable: false,
     });
     expect(audits(db)).toHaveLength(3);
+  });
+});
+
+describe("failure paging generation (sweep machine state)", () => {
+  const stored = (db: TestD1): string | null =>
+    (db.raw.query("SELECT value FROM review_runtime_settings WHERE key = ?").get(FAILURE_PAGING_STATE_KEY) as {
+      value: string;
+    } | null)?.value ?? null;
+
+  function seed(db: TestD1, value: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES (?, ?, '2026-01-01T00:00:00.000Z', 'sweep')`,
+      )
+      .run(FAILURE_PAGING_STATE_KEY, value);
+  }
+
+  test("an absent row is clear, and each state round-trips through its stamp", async () => {
+    const db = createMigratedTestD1();
+    expect(await readFailurePagingState(db)).toEqual({ tripped: false, degraded: null });
+
+    expect(await compareAndSetFailurePagingState(db, "tripped", NOW)).toBe(true);
+    expect(stored(db)).toBe(`tripped:${NOW}`);
+    expect(await readFailurePagingState(db)).toEqual({ tripped: true, degraded: null });
+
+    expect(await compareAndSetFailurePagingState(db, "clear", LATER)).toBe(true);
+    expect(stored(db)).toBe(`clear:${LATER}`);
+    expect(await readFailurePagingState(db)).toEqual({ tripped: false, degraded: null });
+  });
+
+  test("an older stamp never overwrites a newer generation", async () => {
+    const db = createMigratedTestD1();
+    await compareAndSetFailurePagingState(db, "clear", LATER);
+    expect(await compareAndSetFailurePagingState(db, "tripped", NOW)).toBe(false);
+    expect(stored(db)).toBe(`clear:${LATER}`);
+  });
+
+  test("a value no writer produced is clear plus malformed, and the next write replaces it", async () => {
+    const db = createMigratedTestD1();
+    for (const junk of ["tripped", "maybe", "tripped:", "tripped:not-a-date", "latched:" + NOW]) {
+      db.raw.exec("DELETE FROM review_runtime_settings");
+      seed(db, junk);
+      expect(await readFailurePagingState(db), junk).toEqual({ tripped: false, degraded: "malformed" });
+      // A corrupt stamp ranks below every real one, so it cannot block a write.
+      expect(await compareAndSetFailurePagingState(db, "clear", NOW), junk).toBe(true);
+    }
   });
 });
 

@@ -72,7 +72,7 @@ import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
 import {
   compareAndSetFailurePagingState,
-  getFailurePagingState,
+  readFailurePagingState,
   type FailurePagingStatus,
 } from "../dashboard/runtime-config-store";
 import {
@@ -256,7 +256,7 @@ export const defaultSweepLog: SweepLog = {
  * literal. Maintenance is the platform's own existence signal, owned by its
  * separate lane (377) and never part of the infrastructure total — so it is
  * excluded here too, by its constant. ONE predicate, so the grouped read and
- * the guarded latch below can never disagree about what a breach is.
+ * the generation decisions below can never disagree about what a breach is.
  */
 const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
          AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
@@ -468,7 +468,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // healthy window still advances the generation, which is what defeats a
   // stale post that resolves after a recovery.
   const observedAt = new Date().toISOString();
-  const state = await getFailurePagingState(db);
+  const state = await readFailurePagingState(db);
   if (state.degraded !== null) {
     // A value no writer produced is not evidence the alert was posted, and the
     // post it might suppress is the one that matters. The line is the
@@ -522,8 +522,8 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         }
       : null;
   // 377's maintenance existence signal joins HERE: it reads its own count and
-  // latch, and when it owes a page it extends this same body with its key, so
-  // both transitions travel in ONE alert. Neither decision may return above
+  // generation, and when it owes a page it extends this same body with its key,
+  // so both transitions travel in ONE alert. Neither decision may return above
   // this point — a healthy infrastructure total must not skip that lane.
   if (alert !== null) {
     log.warn(alert, "review failure threshold breached");
