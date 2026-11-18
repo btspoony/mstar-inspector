@@ -102,11 +102,12 @@ jobs:
           bun-version: 1.4.0
 
       # `wrangler` hashes the Dockerfile alone, so an image input change that
-      # skips the `# rebuild:` marker would deploy the Worker while the
-      # container keeps the previous build — silently. CI runs this gate on the
-      # push that lands a SHA, but the deploy executes it again against the
-      # revision it builds on: the script imports no dependencies, so it runs
-      # before `Install dependencies` and before any version-creating step.
+      # leaves its `# image-inputs:` fingerprint stale would deploy the Worker
+      # while the container keeps the previous build — silently. CI runs this
+      # gate on the push that lands a SHA, but the deploy executes it again
+      # against the revision it builds on: the script imports no dependencies,
+      # so it runs before `Install dependencies` and before any
+      # version-creating step.
       # `push` diffs against the ref's previous tip (`github.event.before`);
       # the all-zeros first-push sha has nothing to diff and is a printed skip.
       # A force-push orphans that tip — the script recovers a usable base and

@@ -28,10 +28,11 @@ jobs:
           bun-version: 1.4.0
 
       # `wrangler` hashes `sandbox-image/Dockerfile` alone, so an image input
-      # change that skips the `# rebuild:` marker would deploy the Worker while
-      # the container keeps the previous build. `deploy.yml` ships on push, so
-      # this gate must cover push as well: a pull request diffs against its base
-      # commit, a push against `github.event.before` (the ref's previous tip).
+      # change that leaves the Dockerfile's `# image-inputs:` fingerprint stale
+      # would deploy the Worker while the container keeps the previous build.
+      # `deploy.yml` ships on push, so this gate must cover push as well: a
+      # pull request diffs against its base commit, a push against
+      # `github.event.before` (the ref's previous tip).
       # A branch's first push reports the all-zeros sha, which has nothing to
       # diff against — that is a skip, never a failure. Event values arrive as
       # environment variables, so none of them is spliced into the script text.

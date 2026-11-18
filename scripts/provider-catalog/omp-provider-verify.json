@@ -1,8 +1,8 @@
 {
   "source": {
     "package": "@oh-my-pi/pi-catalog",
-    "version": "18.18.1",
-    "extracted": "2026-11-08",
+    "version": "18.22.2",
+    "extracted": "2026-11-18",
     "upstream": [
       "src/compat/rules/auth/*.kdl — every `login \"api-key\"` block carrying a `validate \"models-endpoint\"` entry",
       "src/compat/rules.json — the compiled auth rules (login kind + validate entry)"
@@ -33,6 +33,10 @@
     {
       "id": "charm-hyper",
       "url": "https://hyper.charm.land/v1/credits"
+    },
+    {
+      "id": "chutes",
+      "url": "https://llm.chutes.ai/v1/models"
     },
     {
       "id": "cline-pass",
@@ -69,8 +73,16 @@
       "url": "https://api.helmcode.com/v1/models"
     },
     {
+      "id": "liquid",
+      "url": "https://api.liquid.ai/decisions/v1/models"
+    },
+    {
       "id": "meta",
       "url": "https://api.meta.ai/v1/models"
+    },
+    {
+      "id": "modal",
+      "url": "https://inference.us-west.modal.direct/v1/models"
     },
     {
       "id": "modular",
@@ -81,8 +93,16 @@
       "url": "https://api.moonshot.ai/v1/models"
     },
     {
+      "id": "nace",
+      "url": "https://console.nace.ai/v1/models"
+    },
+    {
       "id": "nanogpt",
       "url": "https://nano-gpt.com/api/v1/models"
+    },
+    {
+      "id": "otari",
+      "url": "https://api.otari.ai/api/v1/models"
     },
     {
       "id": "sakana",

@@ -38,7 +38,7 @@
  *      is re-validated with validateMstarReviewV1, and a turn whose TERMINAL
  *      end arrives without one (the SDK's agent_end carries the gathered
  *      messages) is synthesized into an `incomplete` envelope instead of
- *      failing the whole review — a non-terminal end is a scheduling pause
+ *      failing the whole review — a paused loop is a scheduling pause
  *      whose resumed continuation is awaited first (spec Architect locks
  *      L1/L2).
  *   6. recheck (spec §7.8): when the input carries a typed
@@ -1210,8 +1210,8 @@ const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (msta
  * end arrives without one (the SDK's `agent_end` carries the gathered
  * messages) is a STOPPED run, not an exception: its gathered text and its
  * declared cause/scope are synthesized into an `incomplete` envelope. A
- * non-terminal end is a scheduling pause, not a stop — the queued delivery
- * resumes the session, and the continuation is awaited (bounded) for its yield
+ * `agent_pause` is a scheduling pause, not a stop: the SDK queued the resume,
+ * and the continuation is awaited (bounded) for its yield
  * or its own terminal end. A turn that never ended, and a yield the engine
  * vocabulary rejects, still throw — nothing is posted or stored short of an
  * engine-validated envelope.
@@ -1353,7 +1353,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         let yieldError: string | undefined;
         // The turn's TERMINAL account of itself (`gathered`, see the end-event
         // branch) plus the two pieces the bounded wait below needs: whether a
-        // NON-terminal end parked the session on a queued delivery that resumes
+        // `agent_pause` parked the session on a delivery that resumes
         // it, and the promise that settles the wait when that continuation
         // ends for real — its yields only replace the captured payload, so a
         // corrected re-yield is still observed.
@@ -1364,17 +1364,17 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           outcomeKnown = resolve;
         });
         const unsubscribe = parentSession.subscribe((event) => {
+          // A paused model loop is a scheduling pause, NOT the turn's stop: the
+          // SDK resumes the run from the work that paused it (a steer, a
+          // follow-up, a background wake, a child agent or a peer message), so
+          // its `agent_end` — or a yield — is still to come. Recording the
+          // pause as the stop would publish a stopped review and dispose a
+          // session that was still going to deliver.
+          if (event.type === "agent_pause") {
+            if (event.yielded || event.awaiting) resuming = true;
+            return;
+          }
           if (event.type === "agent_end") {
-            // A non-terminal end is a scheduling pause, NOT the turn's stop:
-            // the SDK has already queued the delivery that resumes this session
-            // (a steer, a follow-up or a background wake), so its terminal end
-            // — or a yield — is still to come. Recording it as the stop would
-            // publish a stopped review and dispose a session that was still
-            // going to deliver.
-            if (event.isTerminal === false) {
-              resuming = true;
-              return;
-            }
             // The terminal assistant entry is the turn's own last word, and
             // `errorMessage` rides IT — the stop the SDK recorded when it
             // reported one (a deadline or a cancelled turn; a boundary exit
@@ -1432,7 +1432,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           turnError = error;
         } finally {
           // The prompt settling is NOT the turn's end when the SDK reported a
-          // non-terminal end: the queued delivery resumes this session on a
+          // pause: the queued delivery resumes this session on a
           // later tick, and this listener is what observes the continuation's
           // yield or terminal end. Wait for it here, bounded by the run's own
           // remaining allowance (never the tail held clear for merge/synthesis/

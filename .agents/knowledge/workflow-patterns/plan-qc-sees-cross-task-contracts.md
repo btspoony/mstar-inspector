@@ -18,11 +18,13 @@ applies_when:
 A plan was split into four tasks, each with its own acceptance sentence, its own
 implementer round and its own reviewer. Every task review approved. The plan-level
 QC then found the merge blocked: the combined diff touched image inputs
-(`packages/runner/src/**`, `sandbox-image/**`) but its Dockerfile edit landed on a
-*continuation* line of an existing `# rebuild:` marker, and the CI gate accepts only
-a changed line that **starts with** `# rebuild:`. Nothing in any task's acceptance
-mentioned the marker, because no single task owned the Dockerfile — one task only
-wrote a sentence into a marker block that another task's scope had created.
+(`packages/runner/src/**`, `sandbox-image/**`) but no task re-recorded the image-input
+fingerprint, and the CI gate compares that recorded value with what the tree hashes to.
+Nothing in any task's acceptance mentioned the fingerprint, because no single task owned
+the Dockerfile — the inputs moved in one task and the file that records them stayed out
+of every task's scope. (The convention has since moved from a human-written `# rebuild:`
+comment to the machine-maintained `# image-inputs:` line; the failure shape is unchanged:
+the one file whose bytes decide whether the image rebuilds belongs to no task.)
 
 The same shape hid a second defect class: a changelog fragment claimed a character
 count that is false for supplementary code points. It was written by the task that
