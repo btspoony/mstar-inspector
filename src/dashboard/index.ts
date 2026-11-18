@@ -6884,11 +6884,14 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/deliveries", handler: appDeliveriesRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
+  // `write`-classified like every App JSON read: the preview spends the App's
+  // stored credential on an outbound request, which is not an operator-grant
+  // read.
   {
     method: "get",
     path: "/api/apps/:appId/provider-models/preview",
     handler: appProviderModelsPreviewRoute,
-    access: "read",
+    access: "write",
   },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/claim", handler: appClaimRoute, access: "write" },
