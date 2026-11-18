@@ -23,6 +23,7 @@ import type { SpaBoot } from "../../src/spa/boot";
 import {
   AddRepositoryDialogBody,
   AddRepositoryDialog,
+  REPOSITORY_LIST_CAP,
   repositoryCountLabel,
   TargetDetailPage,
   TargetsPage,
@@ -287,6 +288,22 @@ describe("add-repository dialog (static SSR)", () => {
     });
     expect(markup).toContain(t("en", "targets.addDialog.degraded"));
   });
+
+  test("a short list offers the labelled filter but states no cap", () => {
+    const markup = renderBody({
+      apps: [app()],
+      repos: repositories(
+        { repo_id: 501, owner: "acme", name: "api" },
+        { repo_id: 502, owner: "acme", name: "web" },
+      ),
+    });
+    // The input is labelled by its own <label>, not by a placeholder alone.
+    expect(markup).toContain('for="add-repository-search"');
+    expect(markup).toContain('id="add-repository-search"');
+    expect(markup).toContain(t("en", "targets.addDialog.searchLabel"));
+    expect(markup).not.toContain("— showing the first");
+    expect(markup).toContain("acme/web");
+  });
 });
 
 // --- mounted (stateful dialog + page) --------------------------------------
@@ -489,6 +506,190 @@ describe("add-repository dialog (mounted)", () => {
         t("en", "targets.addDialog.duplicates").replace("{names}", "acme/api"),
       );
       expect(view.win.document.querySelector('[data-slot="page-skeleton"]')).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  /** Type into the dialog's filter input the way a user's keystroke arrives. */
+  const filter = async (win: DomWindow, value: string) => {
+    const input = win.document.querySelector("#add-repository-search");
+    const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+      setValue?.call(input, value);
+      input?.dispatchEvent(new win.Event("input", { bubbles: true }));
+    });
+  };
+
+  /** `count` repositories named `repo-0`…`repo-<count-1>` under one owner. */
+  const many = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      repo_id: 500 + index,
+      owner: "acme",
+      name: `repo-${index}`,
+    }));
+
+  const listed = (win: DomWindow): string[] =>
+    [...win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
+      (node) => node.parentElement?.textContent ?? "",
+    );
+
+  test("a query narrows to its matches and clearing restores the capped list", async () => {
+    const view = await mountTargets(
+      createElement(AddRepositoryDialog, {
+        locale: "en",
+        open: true,
+        apps: [app()],
+        existingRepoIds: new Set<number>(),
+        onAdded: () => {},
+        onClose: () => {},
+      }),
+      (wire) => (wire.url.endsWith("/installation-repositories") ? listing(many(45)) : wireJson({})),
+    );
+    try {
+      // 45 rows, 40 mounted, and the totals say why the list stops there.
+      expect(listed(view.win)).toHaveLength(REPOSITORY_LIST_CAP);
+      expect(view.dialog()?.textContent ?? "").toContain(
+        t("en", "targets.addDialog.capped").replace("{total}", "45").replace("{cap}", "40"),
+      );
+
+      await filter(view.win, "  repo-4  ");
+      const narrowed = listed(view.win);
+      // repo-4 and repo-40…repo-44 — trimmed and case-insensitive.
+      expect(narrowed).toHaveLength(6);
+      expect(narrowed.some((label) => label.includes("acme/repo-44"))).toBe(true);
+      expect(narrowed.some((label) => label.includes("acme/repo-3"))).toBe(false);
+      expect(view.dialog()?.textContent ?? "").toContain(
+        t("en", "targets.addDialog.matchCount").replace("{count}", "6").replace("{total}", "45"),
+      );
+
+      // Upper case is the same query: one case fold, not two code paths.
+      await filter(view.win, "REPO-4");
+      expect(listed(view.win)).toEqual(narrowed);
+
+      await filter(view.win, "");
+      expect(listed(view.win)).toHaveLength(REPOSITORY_LIST_CAP);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a broad query renders every match; the cap bounds only the empty list", async () => {
+    const view = await mountTargets(
+      createElement(AddRepositoryDialog, {
+        locale: "en",
+        open: true,
+        apps: [app()],
+        existingRepoIds: new Set<number>(),
+        onAdded: () => {},
+        onClose: () => {},
+      }),
+      (wire) => (wire.url.endsWith("/installation-repositories") ? listing(many(45)) : wireJson({})),
+    );
+    try {
+      // "repo-" matches all 45 rows — past the 40-row cap, and all of them mount.
+      await filter(view.win, "repo-");
+      expect(listed(view.win)).toHaveLength(45);
+      expect(view.dialog()?.textContent ?? "").toContain(
+        t("en", "targets.addDialog.matchCount").replace("{count}", "45").replace("{total}", "45"),
+      );
+      expect(view.dialog()?.textContent ?? "").not.toContain(
+        t("en", "targets.addDialog.capped").replace("{total}", "45").replace("{cap}", "40"),
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a row hidden by a later query still reaches the submitted payload", async () => {
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/targets") && wire.method === "POST") {
+        return wireJson({ created: [], duplicates: [] }, 201);
+      }
+      if (wire.url.endsWith("/api/targets")) return wireJson({ targets: [] });
+      if (wire.url.endsWith("/api/apps")) {
+        return wireJson({
+          viewer: { login: "mallory", role: "admin" },
+          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector" }],
+          shared_bots: [],
+        });
+      }
+      if (wire.url.endsWith("/installation-repositories")) return listing(many(45));
+      return wireJson({});
+    });
+    try {
+      const addButton = [...view.win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      await view.click(addButton);
+      // Tick the first row, then filter it out of sight.
+      await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
+      await filter(view.win, "repo-44");
+      expect(listed(view.win)).toHaveLength(1);
+      expect(view.dialog()?.textContent ?? "").toContain(
+        t("en", "targets.addDialog.matchCount").replace("{count}", "1").replace("{total}", "45"),
+      );
+
+      await view.click(confirmButton(view.win));
+      const post = view.sent.find((wire) => wire.method === "POST");
+      expect(JSON.parse(post?.body ?? "null")).toEqual({
+        bot_id: "bot-1",
+        repositories: [{ repo_id: 500, owner: "acme", name: "repo-0" }],
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a query matching nothing states it and leaves the controls usable", async () => {
+    const view = await mountTargets(
+      createElement(AddRepositoryDialog, {
+        locale: "en",
+        open: true,
+        apps: [app()],
+        existingRepoIds: new Set<number>(),
+        onAdded: () => {},
+        onClose: () => {},
+      }),
+      (wire) => (wire.url.endsWith("/installation-repositories") ? listing(many(45)) : wireJson({})),
+    );
+    try {
+      await filter(view.win, "no-such-repository");
+      expect(listed(view.win)).toHaveLength(0);
+      expect(view.dialog()?.textContent ?? "").toContain(
+        t("en", "targets.addDialog.noMatch").replace("{query}", "no-such-repository"),
+      );
+      const cancel = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent === t("en", "common.cancel"),
+      );
+      expect(cancel?.hasAttribute("disabled")).toBe(false);
+      expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an already-added row stays checked and disabled under a query", async () => {
+    const view = await mountTargets(
+      createElement(AddRepositoryDialog, {
+        locale: "en",
+        open: true,
+        apps: [app()],
+        existingRepoIds: new Set<number>([541]),
+        onAdded: () => {},
+        onClose: () => {},
+      }),
+      (wire) => (wire.url.endsWith("/installation-repositories") ? listing(many(45)) : wireJson({})),
+    );
+    try {
+      // repo-41 sits past the 40-row cap, so the filter is what brings it back.
+      await filter(view.win, "repo-41");
+      const boxes = [...view.win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
+        (node) => node as unknown as HTMLInputElement,
+      );
+      expect(boxes).toHaveLength(1);
+      expect(boxes[0]?.checked).toBe(true);
+      expect(boxes[0]?.disabled).toBe(true);
     } finally {
       await view.unmount();
     }

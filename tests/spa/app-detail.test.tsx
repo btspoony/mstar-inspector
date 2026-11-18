@@ -89,8 +89,6 @@ const managePayload = {
     github_visibility: "unknown" as const,
   },
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
-  allowlist: { enabled: false, owners: [] },
-  owner_overlap: false,
   keys: [],
   model_chain: null,
   model_limits_snapshot: "2026-01-01",
@@ -109,8 +107,8 @@ const managePayload = {
 /**
  * The manager face of an App the workspace has added no repository under yet:
  * the bot's sections are the whole payload, and every target-owned fact —
- * `target_id`, the pause state, the review policy, the gate, the allowlist —
- * is ABSENT rather than defaulted.
+ * `target_id`, the pause state, the review policy and the gate — is ABSENT
+ * rather than defaulted.
  */
 const untargetedPayload: SettingsUntargetedPayload = {
   can_manage: true,
@@ -342,7 +340,7 @@ describe("tab shell rendering (static SSR)", () => {
     expect(settings).not.toContain("Review health");
   });
 
-  test("已安装 keeps the install block; the allowlist and the installations table are gone", () => {
+  test("已安装 keeps the install block; the installations table stays gone", () => {
     const installed = renderDetail(
       {
         ...managePayload,
@@ -363,8 +361,8 @@ describe("tab shell rendering (static SSR)", () => {
     );
     expect(installed).toContain(">Installed</button>");
     expect(installed).toContain(t("en", "settings.install"));
-    // The owner allowlist surface and the bot's installations table both moved
-    // off this page entirely (bot health reports deliveries, not rows).
+    // The bot's installations table moved off this page entirely (bot health
+    // reports deliveries, not rows).
     expect(installed).not.toContain(t("en", "settings.installationsAccount"));
   });
 
@@ -415,22 +413,6 @@ describe("tab shell rendering (static SSR)", () => {
       expect(markup, label).toContain(`href="${apiBase()}/apps/1/bot"`);
       expect(markup, label).toContain(t("en", "appDetail.botSettingsLink"));
     }
-  });
-
-  test("the App settings body renders no park action even when the owner claim overlaps", () => {
-    // Park is the repository surface's repair for an overlapping owner claim;
-    // the App settings body is the identity card alone, so no payload state
-    // can bring the action here. Its copy stays in the dictionary for the
-    // dialog the repository surface opens.
-    const parked = renderToStaticMarkup(
-      createElement(SettingsView, {
-        locale: "en",
-        payload: { ...managePayload, owner_overlap: true },
-      }),
-    );
-    expect(parked).not.toContain(t("en", "settings.opsParkTitle"));
-    expect(t("en", "settings.confirmParkTitle", { name: "Demo" })).toContain("Demo");
-    expect(t("zh_CN", "settings.opsParkTitle").length).toBeGreaterThan(0);
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {
@@ -920,8 +902,6 @@ describe("Blocked and pending installations (static SSR)", () => {
     },
     installation: null,
     check_gate: managePayload.check_gate,
-    allowlist: managePayload.allowlist,
-    owner_overlap: false,
   });
 
   const sharedPayload = (): SettingsManagePayload => ({
@@ -1010,7 +990,6 @@ describe("Blocked and pending installations (static SSR)", () => {
     for (const broken of [
       { ...blockedPayload(), blocked: false },
       { ...blockedPayload(), blocked_reason: "other" },
-      { ...blockedPayload(), owner_overlap: "no" },
       { ...blockedPayload(), app: { ...blockedPayload().app, review_trigger_mode: "sometimes" } },
       { ...blockedPayload(), installation: { id: "1", account_login: null, removed: false } },
     ]) {

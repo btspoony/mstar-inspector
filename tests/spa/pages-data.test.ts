@@ -22,6 +22,7 @@ import {
   parseInvites,
   parseInsightsSearch,
   parseMembers,
+  parseReviewUsage,
   parseSettings,
   parseSharedBots,
   PR_VERDICTS as SPA_PR_VERDICTS,
@@ -333,8 +334,6 @@ describe("members/apps/settings parsers", () => {
         github_visibility: "unknown",
       },
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
-      allowlist: { enabled: false, owners: [] },
-      owner_overlap: false,
       keys: [],
       model_chain: null,
       model_limits_snapshot: "2026-01-01",
@@ -391,8 +390,6 @@ describe("members/apps/settings parsers", () => {
         github_visibility: "unknown",
       },
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
-      allowlist: { enabled: false, owners: [] },
-      owner_overlap: false,
       keys: [],
       model_chain: null,
       model_limits_snapshot: "2026-01-01",
@@ -447,8 +444,6 @@ describe("members/apps/settings parsers", () => {
         github_visibility: "unknown",
       },
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
-      allowlist: { enabled: false, owners: [] },
-      owner_overlap: false,
       keys: [],
       model_chain: null,
       model_limits_snapshot: "2026-01-01",
@@ -495,7 +490,7 @@ describe("members/apps/settings parsers", () => {
     expect(inherit !== null && hasTargetFacts(inherit) && inherit.app.review_level).toBeNull();
   });
 
-  test("parseSettings requires the review gate, allowlist and visibility on the manage face; malformed values fail the parse", () => {
+  test("parseSettings requires the review gate and visibility on the manage face; malformed values fail the parse", () => {
     const base = {
       can_manage: true,
       installation: null,
@@ -520,8 +515,6 @@ describe("members/apps/settings parsers", () => {
         github_visibility: "public",
       },
       check_gate: { min_score: 90, pass_verdicts: ["ship it", "needs fixes"] },
-      allowlist: { enabled: true, owners: ["acme"] },
-      owner_overlap: false,
       keys: [],
       model_chain: null,
       model_limits_snapshot: "2026-01-01",
@@ -538,13 +531,10 @@ describe("members/apps/settings parsers", () => {
     };
     const ok = parseSettings(base);
     expect(ok && ok.can_manage && !ok.blocked && ok.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it", "needs fixes"] });
-    expect(ok && ok.can_manage && !ok.blocked && ok.allowlist).toEqual({ enabled: true, owners: ["acme"] });
     expect(ok && ok.can_manage && !ok.blocked && ok.app.github_visibility).toBe("public");
     // Each new field is REQUIRED on the manage face.
     const { check_gate: _noGate, ...withoutGate } = base;
     expect(parseSettings(withoutGate)).toBeNull();
-    const { allowlist: _noAllowlist, ...withoutAllowlist } = base;
-    expect(parseSettings(withoutAllowlist)).toBeNull();
     const { github_visibility: _noVisibility, ...withoutVisibility } = base.app;
     expect(parseSettings({ ...base, app: withoutVisibility })).toBeNull();
     // Malformed values never reach a control.
@@ -564,8 +554,6 @@ describe("members/apps/settings parsers", () => {
     // render its read-only notice instead of failing the whole face.
     const unreadable = parseSettings({ ...base, check_gate: null });
     expect(unreadable && unreadable.can_manage && !unreadable.blocked && unreadable.check_gate).toBeNull();
-    expect(parseSettings({ ...base, allowlist: { ...base.allowlist, enabled: "yes" } })).toBeNull();
-    expect(parseSettings({ ...base, allowlist: { ...base.allowlist, owners: [7] } })).toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "hidden" } })).toBeNull();
     // Every verdict the SPA renders round-trips through this parse: the
     // settings control submits exactly these strings back on save.
@@ -576,6 +564,90 @@ describe("members/apps/settings parsers", () => {
     // A never-probed App reads as 'unknown' and a failed read as null — both parse.
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "unknown" } })).not.toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: null } })).not.toBeNull();
+  });
+
+  test("parseSettings accepts the manager payloads the worker sends: no allowlist, no owner_overlap", () => {
+    // Live staging shape (2026-11-18): the owner allowlist and its overlap
+    // flag left with the repository surface, so the wire carries neither. The
+    // parse must not require a requirement the server retired.
+    const manager = {
+      can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
+      targets_many: false,
+      installation: null,
+      pending_installations: [],
+      blocked: false,
+      blocked_reason: null,
+      target_id: "rt-501",
+      app: {
+        github_app_id: 1,
+        id: "app-demo",
+        status: "active",
+        created_by: "mallory",
+        last_webhook_at: null,
+        sandbox_image_id: "omp",
+        scope: "owned",
+        github_name: "Demo",
+        github_slug: "demo",
+        github_description: null,
+        github_html_url: "https://github.com/apps/demo",
+        github_avatar_url: null,
+        github_metadata_synced_at: "2026-01-01 00:00:00",
+        github_visibility: "unknown",
+        review_enabled: true,
+        review_trigger_mode: "every_push",
+        review_level: null,
+        default_review_level: "default",
+      },
+      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+      keys: [],
+      model_chain: null,
+      model_roles: {},
+      model_chains: [],
+      custom_providers: [],
+      configured_providers: [],
+      provider_catalog: [],
+      model_limits_snapshot: "2026-01-01",
+      model_role_ids: [],
+      custom_provider_api_ids: [],
+      sandbox_images: [{ id: "omp", enabled: true }],
+      installations: [],
+      deliveries: [],
+    };
+    expect(parseSettings(manager)).toMatchObject({ target_id: "rt-501", check_gate: { min_score: 80 } });
+    // The Blocked branch reads the same target-owned slice and had the same
+    // two retired requirements.
+    const blocked = { ...manager, blocked: true, blocked_reason: "bot_not_shared" };
+    expect(parseSettings(blocked)).toMatchObject({ blocked: true, target_id: "rt-501" });
+    // Genuine drift still fails: the flag and its reason are one invariant.
+    expect(parseSettings({ ...blocked, blocked_reason: null })).toBeNull();
+  });
+
+  test("parseReviewUsage accepts the quota block the worker sends: no month inside quota", () => {
+    // Live staging shape (2026-11-18): the quota block carries the RP figures,
+    // the judging profile and the reset instant; the window label is the
+    // payload's top-level `month` and never repeats inside `quota`.
+    const usage = {
+      month: "2026-11",
+      sharedReviews: 12,
+      ownReviews: 3,
+      sharedBot: "available",
+      quota: {
+        usedRp: 750,
+        limitRp: 2000,
+        sharedRp: 620,
+        byokRp: 130,
+        rpPerCredit: 20,
+        profileVersion: 2,
+        profileFrom: "2026-11-01",
+        resetOn: "2026-12-01",
+      },
+    };
+    expect(parseReviewUsage(usage)?.quota).toEqual(usage.quota);
+    // The no-limit face: a null ceiling is a real answer, not drift.
+    expect(parseReviewUsage({ ...usage, quota: { ...usage.quota, limitRp: null } })?.quota?.limitRp).toBeNull();
+    // Genuine drift still fails on a field the card renders.
+    expect(parseReviewUsage({ ...usage, quota: { ...usage.quota, resetOn: undefined } })).toBeNull();
   });
 
   test("parseSettings (identity-only face) requires the D4 identity set — created_at joins the required keys", () => {
@@ -640,8 +712,6 @@ describe("members/apps/settings parsers", () => {
         github_visibility: "unknown",
       },
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
-      allowlist: { enabled: false, owners: [] },
-      owner_overlap: false,
       keys: [],
       model_chain: null,
       model_limits_snapshot: "2026-01-01",
@@ -898,8 +968,6 @@ describe("provider catalog rows + add selection", () => {
       github_visibility: "unknown",
     },
     check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
-    allowlist: { enabled: false, owners: [] },
-    owner_overlap: false,
     keys: [],
     model_chain: null,
     model_limits_snapshot: "2026-01-01",
