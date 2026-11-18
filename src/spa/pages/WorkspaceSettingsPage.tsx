@@ -58,8 +58,16 @@ export function WorkspaceSettingsPage({ boot }: { boot: SpaBoot }) {
             refusal stays readable after the reader looks at the other tab. */}
         <TabsContent value="quota" forceMount>
           {/* Read-only usage of the addressed workspace — every member sees it,
-              because it is not a setting. */}
-          <ReviewUsageCard locale={boot.locale} deploymentMode={boot.deploymentMode} />
+              because it is not a setting. Keyed by the workspace for the same
+              reason the configuration cards are: the card holds that
+              workspace's loaded month while its read resolves the URL, so an
+              in-app switch must remount it or A's spend would stay on screen
+              for B. */}
+          <ReviewUsageCard
+            key={ref ?? ""}
+            locale={boot.locale}
+            deploymentMode={boot.deploymentMode}
+          />
         </TabsContent>
         <TabsContent value="configuration" forceMount>
           {/* Keyed by the workspace: the cards hold that workspace's loaded value

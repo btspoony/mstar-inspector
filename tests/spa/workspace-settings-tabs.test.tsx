@@ -146,4 +146,82 @@ describe("workspace settings tabs", () => {
     expect(panels().map((node) => node.getAttribute("data-state"))).toEqual(["active", "inactive"]);
     await page.close();
   });
+
+  test("switching the workspace reloads the quota face with the new workspace's spend", async () => {
+    // A's month and B's month differ in every figure, so a card left mounted
+    // from A shows up as A's numbers rather than as a missing card.
+    const betaQuota = {
+      ...QUOTA,
+      usedRp: 400,
+      limitRp: 1000,
+      sharedRp: 300,
+      byokRp: 100,
+      rpPerCredit: 10,
+    };
+    const { win, cleanup } = installDom(`http://localhost${PATH}`);
+    const realFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/api/settings/review-usage")) {
+        const beta = url.startsWith("/dashboard/ws_beta/");
+        return json({
+          month: "2026-11",
+          sharedReviews: beta ? 3 : 12,
+          ownReviews: 0,
+          sharedBot: "available",
+          quota: beta ? betaQuota : QUOTA,
+        });
+      }
+      if (url.endsWith("/api/settings/concurrency")) {
+        return json({ concurrency: 8, min: 1, max: 32, degraded: false });
+      }
+      if (url.endsWith("/api/settings/check-min-score")) {
+        return json({ min_score: 60, min: 3, max: 100, degraded: false });
+      }
+      return json({ grants: [] });
+    }) as unknown as typeof fetch;
+
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const text = () => container.textContent ?? "";
+    try {
+      await act(async () =>
+        root.render(
+          createElement(WorkspaceSettingsPage, {
+            boot: {
+              ...boot,
+              memberships: [
+                ...(boot.memberships ?? []),
+                { id: "ws_beta", slug: "beta", name: "Beta", role: "owner", plan: "Free" },
+              ],
+            },
+          }),
+        ),
+      );
+      await act(async () => {});
+      expect(text()).toContain("37.50 / 100.00");
+      expect(text()).toContain("31.00");
+
+      await act(async () => {
+        win.history.pushState(null, "", "/dashboard/ws_beta/settings");
+        win.dispatchEvent(new win.Event("popstate"));
+      });
+      await act(async () => {});
+
+      // B's read landed on B's own base, and B's figures replaced A's.
+      expect(calls).toContain("/dashboard/ws_beta/api/settings/review-usage");
+      expect(text()).toContain("40.00 / 100.00");
+      expect(text()).toContain("30.00");
+      expect(text()).not.toContain("37.50 / 100.00");
+      expect(text()).not.toContain("31.00");
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
 });
