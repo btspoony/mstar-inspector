@@ -138,6 +138,7 @@ import {
   fetchAppVisibility,
   fetchInstallationRepositories,
   isGithubMetadataStale,
+  mintInstallationAccessToken,
   mintInstallationJwt,
   type InstallationRepository,
 } from "./github-app-metadata";
@@ -6011,7 +6012,15 @@ async function walkInstallationRepositories(
   const byRepoId = new Map<number, InstallationRepository>();
   let failures = 0;
   for (const installation of installations) {
-    const repositories = await fetchInstallationRepositories(installation.installation_id, jwt);
+    // The App JWT authenticates only the `/app/*` mint; the listing itself
+    // needs this installation's own access token. A failed mint is that
+    // installation's failure, not the walk's.
+    const token = await mintInstallationAccessToken(installation.installation_id, jwt);
+    if (token === null) {
+      failures += 1;
+      continue;
+    }
+    const repositories = await fetchInstallationRepositories(token);
     if (repositories === null) {
       failures += 1;
       continue;
@@ -6026,9 +6035,9 @@ async function walkInstallationRepositories(
 /**
  * `GET /api/apps/:appId/installation-repositories` — the repositories the App's
  * live installations grant, deduped by `repo_id` across installations. One App
- * JWT serves every installation; a failed installation leaves `degraded: true`
- * on an otherwise usable list, and every installation failing is `502` (the
- * dialog cannot offer anything to add).
+ * JWT mints every installation's access token; a failed mint or listing leaves
+ * `degraded: true` on an otherwise usable list, and every installation failing
+ * is `502` (the dialog cannot offer anything to add).
  */
 const appInstallationRepositoriesRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
