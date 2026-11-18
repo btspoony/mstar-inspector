@@ -861,6 +861,32 @@ describe("runSweep — paging audit window", () => {
     expect(alertRows(db)).toHaveLength(1);
   });
 
+  test("an ordinary in-window stamp suppresses the post", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    seedAlert(db, new Date(Date.now() - 3_600_000).toISOString());
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "not_attempted" });
+    expect(calls()).toBe(0);
+  });
+
+  test("a future-dated stamp is no recent alert, so the breach still posts", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // A clock-ahead row must not silence paging until the wall clock catches up.
+    seedAlert(db, new Date(Date.now() + 24 * 3_600_000).toISOString());
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+    expect(calls()).toBe(1);
+    expect(alertRows(db)).toHaveLength(2);
+  });
+
   test("an unreadable window read logs and still pages the breach", async () => {
     const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
