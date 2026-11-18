@@ -115,6 +115,7 @@ async function seededWorld(opts: { installations?: number[]; target?: boolean } 
     webhookSecretEnc: await box.encryptSecret("test-webhook", `github_apps.webhook_secret_enc:${id}`),
     createdBy: "mallory",
     workspaceId: "default",
+    maxApps: null,
   });
   db.raw
     .prepare(
