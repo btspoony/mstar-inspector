@@ -784,7 +784,8 @@ function classifyPullRequest(
   // Whichever source supplied it, a review delivery is INFERRED for the store.
   const installationAccount = installationAccountOf(installation, owner);
   // §2.1 matrix: the mode gates the auto face (manual never auto-triggers;
-  // open is opened-only). The bot-mention comment face is orthogonal.
+  // open admits `opened` and `ready_for_review`). The bot-mention comment face
+  // is orthogonal.
   if (!autoTriggerAllows(mode, action)) {
     return { kind: "ignore", reason: `pull_request action ${action} does not auto-trigger in ${mode} mode` };
   }
