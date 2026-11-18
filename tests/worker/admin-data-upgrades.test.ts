@@ -699,9 +699,10 @@ describe("the data-upgrade routes", () => {
         preflight: Record<string, number>;
       }>;
     };
-    // The shipped registry renders beside the fixture item: both shipped items.
+    // The shipped registry renders beside the fixture item: every shipped item.
     expect(body.upgrades.map((item) => item.id).sort()).toEqual([
       "fixture-upgrade",
+      "ledger-target-alignment",
       "orphan-ledger-attribution",
       "repo-backfill",
     ]);
@@ -710,7 +711,7 @@ describe("the data-upgrade routes", () => {
     expect(listed.preflight).toEqual({ pending: 2 });
     // The card's impact line comes from the item, never from the console.
     expect(listed.impact).toBe("Flips fixture flag rows. Never deletes a flag.");
-    // Both shipped items state what they change AND what they never touch.
+    // Every shipped item states what it changes AND what it never touches.
     // The backfill DOES drop duplicate `pull_requests` rows, so its card may
     // never claim it deletes no ledger row (spec B13).
     const backfill = body.upgrades.find((item) => item.id === "repo-backfill")!.impact;
@@ -718,6 +719,11 @@ describe("the data-upgrade routes", () => {
     expect(backfill).toContain("Never deletes reviews, findings or failures.");
     expect(body.upgrades.find((item) => item.id === "orphan-ledger-attribution")!.impact).toContain(
       "Never rewrites a row that already has one.",
+    );
+    // The alignment item re-points rows onto their own repository's target; it
+    // deletes nothing either.
+    expect(body.upgrades.find((item) => item.id === "ledger-target-alignment")!.impact).toContain(
+      "Never deletes a ledger row",
     );
   });
 

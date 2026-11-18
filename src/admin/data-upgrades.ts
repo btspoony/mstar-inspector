@@ -24,11 +24,35 @@
  */
 import { getMaintenanceMode, setMaintenanceMode } from "../dashboard/runtime-config-store";
 import type { DashboardD1, DashboardD1Statement } from "../dashboard/users";
+import { ledgerTargetAlignment } from "./data-upgrades/ledger-target-alignment";
 import { orphanLedgerAttribution } from "./data-upgrades/orphan-ledger-attribution";
 import { repoBackfill } from "./data-upgrades/repo-backfill";
 
 /** Where an item resumes. Opaque to the runner; the item owns its shape. */
 export type UpgradeCursor = Record<string, unknown>;
+
+/** What asking GitHub for a repository's numeric id answered. */
+export type RepoLookupOutcome =
+  | { kind: "found"; repoId: number }
+  /** The installation was listed and does not grant the repository. */
+  | { kind: "absent" }
+  /** No usable answer: no key, an undecryptable key, a rejected mint, a bad listing. */
+  | { kind: "failed" };
+
+/** One installation's repository lookup; the caller caches per installation, not per group. */
+export type RepoLookup = (
+  botId: string,
+  installationId: number,
+  owner: string,
+  repo: string,
+) => Promise<RepoLookupOutcome>;
+
+/**
+ * What a running step knows that an item does not: the GitHub face a batch may
+ * ask. Omitted (tests, a deployment with no key), an item that binds `repo_id`
+ * reports the affected groups instead of calling.
+ */
+export type UpgradeRunContext = { repoLookup?: RepoLookup };
 
 /** Counts an item reports. `verify` fails on any NON-ZERO entry. */
 export type UpgradeCounts = Record<string, number>;
@@ -80,6 +104,7 @@ export type DataUpgradeItem = {
     db: DashboardD1,
     cursor: UpgradeCursor | null,
     actor?: string,
+    context?: UpgradeRunContext,
   ): Promise<UpgradeBatch>;
   /**
    * Read-only checks; every entry must read `0` for the item to complete,
@@ -128,7 +153,11 @@ export type DataUpgradeState = {
  * runner, the table and the routes are item-agnostic, so registering an item
  * is the only change a new upgrade needs.
  */
-export const DATA_UPGRADES: DataUpgradeItem[] = [repoBackfill, orphanLedgerAttribution];
+export const DATA_UPGRADES: DataUpgradeItem[] = [
+  repoBackfill,
+  orphanLedgerAttribution,
+  ledgerTargetAlignment,
+];
 
 /** Resolve a registered item; `null` is the route layer's 404. */
 export function findDataUpgrade(id: string): DataUpgradeItem | null {
@@ -579,6 +608,7 @@ export async function stepDataUpgrade(
   item: DataUpgradeItem,
   actor: string,
   now: string,
+  context?: UpgradeRunContext,
 ): Promise<UpgradeStepOutcome> {
   const before = await readDataUpgradeState(db, item.id);
   if (before.status !== "pending" && before.status !== "running") {
@@ -606,7 +636,7 @@ export async function stepDataUpgrade(
   if (opensWindow) {
     await setMaintenanceMode(db, { enabled: true, reason: `data upgrade: ${item.title}`, actor }, now);
   }
-  const batch = await item.runBatch(db, before.cursor, actor).catch(async (err: unknown) => {
+  const batch = await item.runBatch(db, before.cursor, actor, context).catch(async (err: unknown) => {
     // The batch is ONE transaction, so a throw moved nothing: release the claim
     // (a hard process death leaves it to expire instead) and surface the real error.
     await releaseClaim(db, item.id, now, token);
