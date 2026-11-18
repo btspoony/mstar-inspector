@@ -24,6 +24,7 @@
  */
 import { getMaintenanceMode, setMaintenanceMode } from "../dashboard/runtime-config-store";
 import type { DashboardD1, DashboardD1Statement } from "../dashboard/users";
+import { orphanLedgerAttribution } from "./data-upgrades/orphan-ledger-attribution";
 import { repoBackfill } from "./data-upgrades/repo-backfill";
 
 /** Where an item resumes. Opaque to the runner; the item owns its shape. */
@@ -101,11 +102,14 @@ export type DataUpgradeState = {
 
 /**
  * Every registered upgrade, in run order — the registry's single source.
- * `repo-backfill` is the historical-identity item; the
+ * `repo-backfill` is the historical-identity item, and
+ * `orphan-ledger-attribution` follows it: it gives rows written before
+ * `review_targets` existed the target its `(owner, repo)` group resolves to,
+ * which the backfill cannot see. The
  * runner, the table and the routes are item-agnostic, so registering an item
  * is the only change a new upgrade needs.
  */
-export const DATA_UPGRADES: DataUpgradeItem[] = [repoBackfill];
+export const DATA_UPGRADES: DataUpgradeItem[] = [repoBackfill, orphanLedgerAttribution];
 
 /** Resolve a registered item; `null` is the route layer's 404. */
 export function findDataUpgrade(id: string): DataUpgradeItem | null {

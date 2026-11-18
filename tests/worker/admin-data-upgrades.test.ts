@@ -693,8 +693,12 @@ describe("the data-upgrade routes", () => {
     const body = (await res.json()) as {
       upgrades: Array<{ id: string; state: { status: string }; preflight: Record<string, number> }>;
     };
-    // The shipped registry renders beside the fixture item: `repo-backfill`.
-    expect(body.upgrades.map((item) => item.id).sort()).toEqual(["fixture-upgrade", "repo-backfill"]);
+    // The shipped registry renders beside the fixture item: both shipped items.
+    expect(body.upgrades.map((item) => item.id).sort()).toEqual([
+      "fixture-upgrade",
+      "orphan-ledger-attribution",
+      "repo-backfill",
+    ]);
     const listed = body.upgrades.find((item) => item.id === ITEM_ID)!;
     expect(listed.state.status).toBe("pending");
     expect(listed.preflight).toEqual({ pending: 2 });
