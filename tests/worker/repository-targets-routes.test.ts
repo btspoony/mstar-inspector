@@ -5,10 +5,10 @@
  *     `repo_id: null` for a 待安装 row, the bot name and the newest review
  *     stamp. Another workspace's targets never appear;
  *   - `GET  /dashboard/:ref/api/apps/:appId/installation-repositories` — the
- *     add dialog's options: one App JWT, one request per live installation,
- *     deduped by `repo_id`. A failed installation answers a 502, a partial one
- *     answers `degraded: true` on a usable list, and zero repositories is a
- *     real `200 []`;
+ *     add dialog's options: one App JWT, one token mint plus one listing per
+ *     live installation, deduped by `repo_id`. A failed installation answers a
+ *     502, a partial one answers `degraded: true` on a usable list, and zero
+ *     repositories is a real `200 []`;
  *   - `POST /dashboard/:ref/api/targets` — one target per selected repository,
  *     `201` with `created` + `duplicates`. A duplicate refuses only its own
  *     row: the rows created in the same batch stay written.
@@ -57,28 +57,48 @@ async function session(login: string): Promise<Record<string, string>> {
 
 // --- GitHub stubbing -------------------------------------------------------
 
-type FetchCall = { url: string };
+type FetchCall = { url: string; method: string; authorization: string | null };
 
 /**
- * Stub the installation-repositories face. `answers` maps an installation id to
- * the repositories GitHub would return for it; an id absent from the map
- * answers 500, which is the "this installation failed" case.
+ * Stub the installation-repositories face: the token mint
+ * (`POST /app/installations/{id}/access_tokens`) plus the listing
+ * (`GET /installation/repositories`). `answers` maps an installation id to the
+ * repositories GitHub would return for it; an id absent from the map answers
+ * 500 on its mint, which is the "this installation failed" case.
+ *
+ * The minted token embeds the installation id (`tok-<id>`) so the listing can
+ * resolve which installation's grant to answer, exactly as GitHub resolves an
+ * installation token.
  */
-function stubRepositories(answers: Record<number, Array<{ id: number; name: string; owner: string }>>): FetchCall[] {
+function stubRepositories(
+  answers: Record<number, Array<{ id: number; name: string; owner: string }>>,
+): FetchCall[] {
   const calls: FetchCall[] = [];
-  globalThis.fetch = (async (input: unknown) => {
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
-    calls.push({ url });
-    const match = /\/app\/installations\/(\d+)\/repositories\?/.exec(url);
-    if (!match) throw new Error(`unexpected fetch: ${url}`);
-    const rows = answers[Number(match[1])];
-    if (rows === undefined) return new Response("upstream boom", { status: 500 });
-    // GitHub's shape: the account is an object, not a bare login.
-    const payload = rows.map((row) => ({ id: row.id, name: row.name, owner: { login: row.owner } }));
-    return new Response(JSON.stringify(payload), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    const authorization = new Headers(init?.headers).get("authorization");
+    calls.push({ url, method: init?.method ?? "GET", authorization });
+    const mint = /\/app\/installations\/(\d+)\/access_tokens$/.exec(url);
+    if (mint) {
+      const installationId = Number(mint[1]);
+      if (answers[installationId] === undefined) return new Response("upstream boom", { status: 500 });
+      return new Response(JSON.stringify({ token: `tok-${installationId}` }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.startsWith("https://api.github.com/installation/repositories?")) {
+      const installationId = Number(/^tok-(\d+)$/.exec(authorization?.replace(/^Bearer /, "") ?? "")?.[1]);
+      const rows = answers[installationId];
+      if (rows === undefined) return new Response("upstream boom", { status: 500 });
+      // GitHub's shape: an envelope whose account is an object, not a bare login.
+      const payload = rows.map((row) => ({ id: row.id, name: row.name, owner: { login: row.owner } }));
+      return new Response(JSON.stringify({ total_count: payload.length, repositories: payload }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
   }) as typeof fetch;
   return calls;
 }
@@ -261,7 +281,39 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
       ],
       degraded: false,
     });
-    expect(calls).toHaveLength(2);
+    // One mint + one listing per installation, and the credentials never swap:
+    // the mint carries the App JWT, the listing the installation token.
+    expect(calls).toHaveLength(4);
+    const mints = calls.filter((call) => call.url.endsWith("/access_tokens"));
+    expect(mints.map((call) => call.url)).toEqual([
+      "https://api.github.com/app/installations/11/access_tokens",
+      "https://api.github.com/app/installations/12/access_tokens",
+    ]);
+    expect(mints.map((call) => call.method)).toEqual(["POST", "POST"]);
+    // An App JWT is a signed JWS: three dot-separated segments, never a token.
+    expect(mints.every((call) => /^Bearer [\w-]+\.[\w-]+\.[\w-]+$/.test(call.authorization ?? ""))).toBe(true);
+    const listings = calls.filter((call) => !call.url.endsWith("/access_tokens"));
+    expect(listings.map((call) => call.url)).toEqual([
+      "https://api.github.com/installation/repositories?per_page=100",
+      "https://api.github.com/installation/repositories?per_page=100",
+    ]);
+    expect(listings.map((call) => call.authorization)).toEqual(["Bearer tok-11", "Bearer tok-12"]);
+  });
+
+  test("a failed token mint degrades that installation only", async () => {
+    const { db } = await seededWorld({ installations: [61, 62] });
+    // 61's mint is absent from the answers map → 500; 62 still lists.
+    const calls = stubRepositories({ 62: [{ id: 611, name: "api", owner: "acme" }] });
+
+    const res = await get(db, `/dashboard/default/api/apps/${APP_ID}/installation-repositories`, "mallory");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      repositories: [{ repo_id: 611, owner: "acme", name: "api" }],
+      degraded: true,
+    });
+    // The failed installation never reached its listing.
+    expect(calls.filter((call) => call.url.includes("/installation/repositories"))).toHaveLength(1);
   });
 
   test("an installation with zero repositories answers 200 [] rather than an error", async () => {
