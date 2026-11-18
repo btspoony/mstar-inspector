@@ -32,11 +32,18 @@
  *   5. The verify snapshot keeps only `login "api-key"` rules that validate a
  *      pasted key against a GET models/identity endpoint — never an inference
  *      call. `headersHook` is carried verbatim.
+ *   6. `overrides.json` is applied LAST and wins: a provider's protocol bucket
+ *      it names replaces that bucket's vocabulary wholesale. The package and
+ *      the vendor's live endpoint disagree about id dialects (one prefixes a
+ *      namespace, the other does not), so a union would emit ids the provider
+ *      rejects. Overrides are data, not code: the file records its `source` and
+ *      `fetched` date, and a run logs every bucket it replaced.
  */
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { createRequire } from "node:module";
+import { applyOverrides, PROTOCOL_SUFFIX, type Override } from "./overrides";
 
 const PI_CATALOG_DIR = path.dirname(
   createRequire(import.meta.url).resolve("@oh-my-pi/pi-catalog/package.json"),
@@ -45,6 +52,11 @@ const RULES_PATH = path.join(PI_CATALOG_DIR, "src/compat/rules.json");
 const MODELS_DEV_PATH = path.resolve("scripts/provider-catalog/models.dev-2026-11-13.json");
 const OUT_PROVIDERS_PATH = path.resolve("scripts/provider-catalog/omp-api-key-providers.json");
 const OUT_VERIFY_PATH = path.resolve("scripts/provider-catalog/omp-provider-verify.json");
+/**
+ * Hand-measured, vendor-authoritative vocabularies. Read-only input: this
+ * script never writes it, so the file survives every regeneration.
+ */
+const OVERRIDES_PATH = path.resolve("scripts/provider-catalog/overrides.json");
 
 type Rule = {
   id: string;
@@ -165,17 +177,16 @@ const ALLOWED_URL_PLACEHOLDERS: Record<string, true> = { account_id: true };
  *  TEMPLATE_DEDUPE_SNAPSHOT_KEYS). */
 const TEMPLATE_DEDUPE_SNAPSHOT_KEYS: Record<string, true> = { "cloudflare-workers-ai": true };
 
-const PROTOCOL_SUFFIX: Record<string, string> = {
-  "anthropic-messages": "anthropic",
-  "openai-responses": "responses",
-  "openai-completions": "completions",
-  typesafe: "typesafe",
-  "google-generative-ai": "gemini",
-};
-
 const pkg = JSON.parse(await readFile(path.join(PI_CATALOG_DIR, "package.json"), "utf8")) as { version: string };
 const rules = JSON.parse(await readFile(RULES_PATH, "utf8")) as Rules;
 const modelsDev = JSON.parse(await readFile(MODELS_DEV_PATH, "utf8")) as Record<string, unknown>;
+/** Absent file = no overrides; a malformed one stops the run instead of being ignored. */
+const overrides = await readFile(OVERRIDES_PATH, "utf8")
+  .then((text) => JSON.parse(text) as Record<string, Override>)
+  .catch((error: unknown) => {
+    if ((error as { code?: string }).code === "ENOENT") return {};
+    throw error;
+  });
 const version = pkg.version;
 const extracted = new Date().toISOString().slice(0, 10);
 
@@ -315,6 +326,19 @@ for (const auth of rules.auth.providers) {
   records.push(...built);
 }
 
+// The hand-measured layer wins over the package, and says so on every run.
+const overridden = applyOverrides(records, overrides);
+if (overridden.applied.length > 0) {
+  for (const entry of overridden.applied) {
+    console.log(
+      `override ${entry.provider} ${entry.bucket} → ${entry.recordId}: ${entry.models} ids (measured ${entry.fetched} from ${entry.source})`,
+    );
+  }
+}
+for (const missing of overridden.unmatched) {
+  console.warn(`override ${missing}: no extracted record for that protocol — left unapplied`);
+}
+
 // Verify snapshot: only api-key logins that validate against a GET endpoint.
 const endpoints: VerifyRecord[] = [];
 for (const auth of rules.auth.providers) {
@@ -326,7 +350,7 @@ for (const auth of rules.auth.providers) {
   endpoints.push(entry);
 }
 
-records.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+overridden.records.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 endpoints.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
 const providersOut = {
@@ -346,9 +370,18 @@ const providersOut = {
       "`baseUrl` is the record's most common model base URL, else the authored seed base URL or factory default; null when omp ships none, or when omp's default is a loopback http:// endpoint (the declaration store requires https), so the operator supplies it at save time.",
       "`models` is the provider's FULL seed/bundled vocabulary — no cap.",
       "A mixed-protocol provider contributes one record per protocol; `sourceProviderId` names the omp provider where a record id differs from it.",
+      "`overrides.json` is applied last and wins: a named protocol bucket replaces that record's vocabulary wholesale instead of unioning, because the package and the vendor's live endpoint use different id dialects. The bucket carries the vendor's ids verbatim.",
     ],
+    overrides: overridden.applied.map((entry) => ({
+      provider: entry.provider,
+      bucket: entry.bucket,
+      record: entry.recordId,
+      models: entry.models,
+      source: entry.source,
+      fetched: entry.fetched,
+    })),
   },
-  providers: records,
+  providers: overridden.records,
   ompProviderIds,
   ownsSnapshotKeys,
   excluded: {
@@ -382,6 +415,6 @@ await writeFile(OUT_PROVIDERS_PATH, `${JSON.stringify(providersOut, null, 2)}\n`
 await writeFile(OUT_VERIFY_PATH, `${JSON.stringify(verifyOut, null, 2)}\n`);
 
 console.log(
-  `omp ${version}: ${records.length} provider records, ${endpoints.length} verify endpoints, ` +
+  `omp ${version}: ${overridden.records.length} provider records, ${endpoints.length} verify endpoints, ` +
     `${nonModel.length} non-model, ${oauthOrDeviceCode.length} oauth/device-code — extracted ${extracted}`,
 );

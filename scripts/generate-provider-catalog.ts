@@ -90,7 +90,19 @@ type ModelLimit = { contextWindow: number; maxTokens: number };
 
 /** The vendored omp provider union input (`omp-api-key-providers.json`). */
 type OmpSnapshot = {
-  source: { version: string; extracted: string };
+  source: {
+    version: string;
+    extracted: string;
+    /** Buckets measured from the vendor's live endpoint, applied over the package. */
+    overrides?: {
+      provider: string;
+      bucket: string;
+      record: string;
+      models: number;
+      source: string;
+      fetched: string;
+    }[];
+  };
   providers: {
     id: string;
     label: string;
@@ -633,6 +645,22 @@ async function main(): Promise<void> {
   const builtinIdsLiteral = JSON.stringify(BUILTIN_ORDER.map((spec) => spec.id), null, 2);
   const commonIdsLiteral = JSON.stringify(COMMON_PROVIDER_IDS, null, 2);
   const wrapList = (items: string[]): string => (items.length === 0 ? "(none)" : items.join(", "));
+  // The measured layer is the one fact a reader cannot derive from the package:
+  // say where each overridden bucket came from, and when it was measured.
+  const overrides = omp.source.overrides ?? [];
+  const overrideLines =
+    overrides.length === 0
+      ? ""
+      : `
+ * MEASURED OVERRIDES (\`scripts/provider-catalog/overrides.json\`, applied over the
+ * package's own vocabulary and authoritative for these buckets — a package bump
+ * does not change them; re-measure and update the \`fetched\` date):
+${overrides
+  .map(
+    (entry) =>
+      ` *   - ${entry.provider} ${entry.bucket} (${entry.record}): ${entry.models} ids, measured ${entry.fetched} from ${entry.source}`,
+  )
+  .join("\n")}`;
 
   // The auditComment/moduleSource template literals stay at column 0 — their
   // line-leading whitespace is generated-file content, and the regeneration
@@ -668,7 +696,7 @@ async function main(): Promise<void> {
  *     already stored under one of them
  *   - sizes for such a row come from the models.dev key its id names, over the
  *     union of every protocol's vocabulary; an id the directory does not carry
- *     stays unsized`;
+ *     stays unsized${overrideLines}`;
 
   const moduleSource = `/**
  * GENERATED FILE — provider catalog (spec §5). DO NOT EDIT BY HAND — regenerate with

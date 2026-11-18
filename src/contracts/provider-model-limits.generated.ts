@@ -34721,9 +34721,29 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     }
   },
   "commandcode": {
+    "MiniMaxAI/MiniMax-M2.5": {
+      "contextWindow": 200000,
+      "maxTokens": 131072
+    },
+    "MiniMaxAI/MiniMax-M2.7": {
+      "contextWindow": 200000,
+      "maxTokens": 131072
+    },
     "MiniMaxAI/MiniMax-M3": {
       "contextWindow": 1000000,
       "maxTokens": 512000
+    },
+    "Qwen/Qwen3.8-27B": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
+    },
+    "Qwen/Qwen3.8-Max": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "Qwen/Qwen3.8-Omni-Flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
     },
     "deepseek/deepseek-v4-flash": {
       "contextWindow": 1000000,
@@ -34762,6 +34782,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 65536
     },
     "google/gemini-3.8-flash": {
+      "contextWindow": 1000000,
+      "maxTokens": 65536
+    },
+    "google/gemini-4-argon": {
       "contextWindow": 1000000,
       "maxTokens": 65536
     },
@@ -34841,15 +34865,47 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 524288,
       "maxTokens": 262144
     },
+    "moonshotai/Kimi-K2.7-Code": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "moonshotai/Kimi-K2.7-Code-Highspeed": {
+      "contextWindow": 262000,
+      "maxTokens": 262000
+    },
     "moonshotai/Kimi-K3": {
       "contextWindow": 1000000,
       "maxTokens": 131072
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
     },
     "sakana/fugu-ultra": {
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
+    "stepfun/Step-3.5-Flash": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "stepfun/Step-3.7-Flash": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
     "stepfun/Step-5-Preview": {
+      "contextWindow": 1000000,
+      "maxTokens": 1000000
+    },
+    "tencent/hy3-paid": {
+      "contextWindow": 256000,
+      "maxTokens": 128000
+    },
+    "thinkingmachines/inkling": {
+      "contextWindow": 256000,
+      "maxTokens": 256000
+    },
+    "thinkingmachines/inkling-small": {
       "contextWindow": 1000000,
       "maxTokens": 1000000
     },
@@ -34870,6 +34926,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 131072
     },
     "zai-org/GLM-5.2": {
+      "contextWindow": 1000000,
+      "maxTokens": 131072
+    },
+    "zai-org/GLM-5.2-Fast": {
       "contextWindow": 1000000,
       "maxTokens": 131072
     },
@@ -34921,31 +34981,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
-    "MiniMaxAI/MiniMax-M2.5": {
-      "contextWindow": 200000,
-      "maxTokens": 131072
-    },
-    "MiniMaxAI/MiniMax-M2.7": {
-      "contextWindow": 200000,
-      "maxTokens": 131072
-    },
-    "Qwen/Qwen3.8-27B": {
-      "contextWindow": 262144,
-      "maxTokens": 32768
-    },
     "Qwen/Qwen3.8-Flash": {
       "contextWindow": 1000000,
       "maxTokens": 131072
     },
-    "Qwen/Qwen3.8-Max": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
-    },
     "Qwen/Qwen3.8-Max-0902": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
-    },
-    "Qwen/Qwen3.8-Omni-Flash": {
       "contextWindow": 1000000,
       "maxTokens": 131072
     },
@@ -34957,51 +34997,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 65536
     },
-    "google/gemini-4-argon": {
-      "contextWindow": 1000000,
-      "maxTokens": 65536
-    },
-    "moonshotai/Kimi-K2.7-Code": {
-      "contextWindow": 256000,
-      "maxTokens": 256000
-    },
-    "moonshotai/Kimi-K2.7-Code-Highspeed": {
-      "contextWindow": 262000,
-      "maxTokens": 262000
-    },
-    "nvidia/nemotron-3-ultra-550b-a55b": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "stepfun/Step-3.5-Flash": {
-      "contextWindow": 256000,
-      "maxTokens": 256000
-    },
-    "stepfun/Step-3.7-Flash": {
-      "contextWindow": 256000,
-      "maxTokens": 256000
-    },
-    "tencent/hy3-paid": {
-      "contextWindow": 256000,
-      "maxTokens": 128000
-    },
     "tencent/hy4-preview": {
       "contextWindow": 1024000,
       "maxTokens": 64000
     },
-    "thinkingmachines/inkling": {
-      "contextWindow": 256000,
-      "maxTokens": 256000
-    },
-    "thinkingmachines/inkling-small": {
-      "contextWindow": 1000000,
-      "maxTokens": 1000000
-    },
     "z-ai/glm-5.3-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
-    },
-    "zai-org/GLM-5.2-Fast": {
       "contextWindow": 1000000,
       "maxTokens": 131072
     }
