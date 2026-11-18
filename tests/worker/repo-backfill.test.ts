@@ -570,6 +570,23 @@ const NON_PR_LEDGER: ReadonlyArray<readonly [string, (db: TestD1, id: string, ta
  * worklist, preflight, group and verify.
  */
 describe("repo-backfill over non-PR ledger rows", () => {
+  test.each([0, 1])("copies the winning target's draft policy (%i) without PR rows", async (reviewDrafts) => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT, 7001);
+    seedLeftoverTarget(db, "target-older");
+    seedLeftoverTarget(db, "target-newer");
+    db.raw.prepare("UPDATE review_targets SET review_drafts = ? WHERE id = ?").run(1 - reviewDrafts, "target-older");
+    db.raw.prepare("UPDATE review_targets SET review_drafts = ? WHERE id = ?").run(reviewDrafts, "target-newer");
+    seedReview(db, "rv-older", "target-older", "acme", "alpha", 1, "2026-01-01T00:00:00.000Z");
+    seedReview(db, "rv-newer", "target-newer", "acme", "alpha", 2, "2026-02-01T00:00:00.000Z");
+
+    await repoBackfill.runBatch(db, null);
+
+    expect(db.raw.query("SELECT review_drafts FROM review_targets WHERE deleted_at IS NULL").all()).toEqual([
+      { review_drafts: reviewDrafts },
+    ]);
+  });
+
   for (const [table, seed] of NON_PR_LEDGER) {
     test(`a target whose only ledger row is in ${table} still reaches the worklist`, async () => {
       const db = createMigratedTestD1();

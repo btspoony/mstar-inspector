@@ -371,9 +371,9 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
         .prepare(
           `INSERT INTO review_targets
              (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
-              follow_workspace_defaults, review_enabled, review_trigger_mode, review_level,
+              follow_workspace_defaults, review_enabled, review_drafts, review_trigger_mode, review_level,
               check_min_score, check_pass_verdicts, created_by, created_at, updated_at)
-           VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12,
+           VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                    datetime('now'), datetime('now'))`,
         )
         .bind(
@@ -385,6 +385,7 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
           group.owner,
           group.repo,
           source!.review_enabled,
+          source!.review_drafts,
           source!.review_trigger_mode,
           source!.review_level,
           source!.check_min_score,
