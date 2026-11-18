@@ -3003,16 +3003,31 @@ If a row stays `requested` across several sweeps, diagnose in this order:
    owning the sweep — a healthy backlog therefore progresses one slot per sweep.
 
 Repair for a stuck pending row: fix the named cause (close the window, restore
-the target, restore the queue binding), then wait for the sweep. If the cause is
-gone and the row is still pending, clear its request explicitly to hand it back
-to the operator queue — the row is never deleted, only its pending stamp:
+the target, restore the queue binding), then wait for the sweep. That is the
+normal exit — the request stays durable and the sweep retries it, and the row
+keeps its own place in the rotation, so nobody has to touch the row by hand.
+
+Clearing the request stamp is **not** a repair step: it abandons that accepted
+recovery. The stamp is the only thing that keeps the row in the sweep's outbox
+and the only thing that protects it from § Maintenance retention, so a cleared,
+unsent row is neither retried nor preserved. There are exactly two exits, and
+neither one is "clear the stamp":
+
+- **Keep it pending** — the default whenever the target can still come back.
+  Change nothing: the request stays durable and the sweep retries it. The row
+  rotates to the back of the queue on its own — every attempt stamps
+  `maintenance_replay_last_attempt_at`, dead targets included — so it never
+  blocks other replays and never ages out while unsent.
+- **Delete it** — only after confirming the target cannot be restored and the
+  recovery is being withdrawn. This drops the failure record itself along with
+  the request; that loss is the point, so state it before running it:
 
 ```bash
 wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
-  "UPDATE review_failures SET maintenance_replay_requested_at = NULL,
-          maintenance_replay_last_attempt_at = NULL
-    WHERE id = '<failureId>' AND maintenance_replay_sent_at IS NULL"
+  "DELETE FROM review_failures WHERE id = '<failureId>' AND maintenance_replay_sent_at IS NULL"
 ```
 
-After that, POST the replay again. There is deliberately no "replay all" action:
-replay is one failure row, one request, one send.
+Do not clear only `maintenance_replay_requested_at`: that leaves the failure row
+behind, unprotected and unscheduled, and a repeat POST then has to be requested
+from scratch. There is deliberately no "replay all" action: replay is one
+failure row, one request, one send.

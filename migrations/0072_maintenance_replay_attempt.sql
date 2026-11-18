@@ -15,9 +15,10 @@
 -- before the send, on success AND failure, so a throwing row is stamped too.
 -- It is not an attempt cap: it never excludes a row, only orders it.
 --
--- The 0071 partial index still narrows the scan to the pending set (only
--- operator-requested, unsent rows), which is small enough that the ordering
--- happens over that set; no second index.
+-- The 0071 partial index narrows the scan to the pending set (only
+-- operator-requested, unsent rows), but it orders (requested_at, id) and so
+-- cannot serve this rotation's ORDER BY; 0073 adds the index that carries that
+-- expression and order.
 --
 -- Metadata-only: one nullable column add, no row rewrite. Forward-only.
 

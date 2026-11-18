@@ -7,7 +7,8 @@
  *   - a repeated request answers 200 from the row's own stamps with no second
  *     send and no second audit row;
  *   - a send that fails leaves durable pending state and answers 202
- *     `requested`;
+ *     `requested`, and the sweep — not another operator press — later sends and
+ *     stamps that same row once the queue recovers;
  *   - every refusal happens before the request batch, so it writes no state
  *     and no audit row, and uses its declared status.
  */
@@ -17,6 +18,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { setMaintenanceMode } from "../../src/dashboard/runtime-config-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Env } from "../../src/worker/env";
+import { runSweep } from "../../src/worker/sweep";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "maintenance", "replay", "secret", "32-bytes!"].join("-");
@@ -190,11 +192,28 @@ describe("the maintenance replay route", () => {
     expect(state.sent).toBeNull();
     expect(auditCount(db)).toBe(1);
 
-    // The retry (the sweep, here a second operator press after the send heals)
-    // is answered from the pending state: no new audit, no new request.
-    const retry = await replay(db, sent);
-    expect(retry.status).toBe(200);
-    expect(await retry.json()).toEqual({ failureId: FAILURE_ID, state: "requested" });
+    // The retry is the SWEEP, not another operator press: the window is off and
+    // the queue works again, so the row the route left pending must be sent and
+    // stamped by the sweep on the SAME row it produced.
+    const queue = { send: async (payload: ReviewJobPayload) => void sent.payloads.push(payload) };
+    await runSweep(db, { log: { warn: () => {} }, queue: queue as never });
+    expect(sent.payloads).toHaveLength(1);
+    expect(sent.payloads[0]).toMatchObject({ action: "maintenance_replay", pr_number: 42, head_sha: null });
+    const recovered = failureState(db);
+    // The operator's request survives its send, and the send is stamped.
+    expect(recovered.requested).toBe(state.requested);
+    expect(recovered.sent).not.toBeNull();
+    expect(auditCount(db)).toBe(1);
+
+    // The sent stamp is the outbox's only exit: no further enqueue.
+    await runSweep(db, { log: { warn: () => {} }, queue: queue as never });
+    expect(sent.payloads).toHaveLength(1);
+
+    // A later operator press now answers from the sent stamp — no second send.
+    const repeat = await replay(db, sent);
+    expect(repeat.status).toBe(200);
+    expect(await repeat.json()).toEqual({ failureId: FAILURE_ID, state: "sent" });
+    expect(sent.payloads).toHaveLength(1);
     expect(auditCount(db)).toBe(1);
   });
 

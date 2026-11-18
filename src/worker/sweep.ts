@@ -110,6 +110,10 @@ export const COMMENT_CLAIM_OUTBOX_SQL = `SELECT installation_id, owner, repo, pr
  * and id only break ties. A dead backlog therefore costs at most one attempt per
  * sweep per free slot instead of being walked in full before the alert lanes.
  *
+ * That ORDER BY is served by `idx_review_failures_maintenance_replay_rotation`
+ * (migration 0073): same predicate, same key order, so `LIMIT` stops the scan
+ * instead of the backlog being read and sorted on every selection.
+ *
  * Binds: `tried` (JSON array of ids), `limit`.
  */
 export const MAINTENANCE_REPLAY_OUTBOX_SQL = `SELECT id FROM review_failures
