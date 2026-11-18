@@ -128,6 +128,12 @@ export type SweepAlertFields = {
   dlq_check: "skipped";
   thresholds: { failures_24h: number; window_hours: number };
   stages: Array<{ stage: string; count: number }>;
+  /**
+   * Maintenance-deferred rows in the same trailing window, present only when
+   * nonzero: the platform's own existence signal, beside (never inside) the
+   * infrastructure total above.
+   */
+  maintenanceDeferred?: number;
 };
 
 /**
@@ -251,6 +257,15 @@ export const defaultSweepLog: SweepLog = {
 const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
          AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
          AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'`;
+
+/**
+ * The maintenance-deferred existence signal: rows the platform deferred in the
+ * same trailing window. Its own count, never a `stages` group — maintenance is
+ * not an infrastructure failure, so it stays out of `failures_24h`.
+ */
+const MAINTENANCE_DEFERRED_COUNT_SQL = `SELECT COUNT(*) AS count FROM review_failures
+       WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'
+         AND created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')`;
 
 /**
  * The audit-window de-bounce is ONE read plus ONE append against
@@ -523,6 +538,13 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   const stages = stageRows.map((row) => ({ stage: row.stage, count: row.count }));
   const failures24h = stages.reduce((sum, row) => sum + row.count, 0);
   const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
+  // The maintenance existence signal: its own trailing-window count, read before
+  // the paging decision consumes it, so a healthy infrastructure total still
+  // runs this lane and a deferral can never hide a breach or vice versa.
+  const maintenanceRow = await db
+    .prepare(MAINTENANCE_DEFERRED_COUNT_SQL)
+    .first<{ count: number }>();
+  const maintenanceDeferred = maintenanceRow?.count ?? 0;
   // The infrastructure decision only SETS the disposition and, when it owes a
   // page, composes the alert body; delivery and the single exit are below.
   let webhook: SweepResult["webhook"] = "not_attempted";
@@ -551,10 +573,13 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       };
     }
   }
-  // The maintenance existence signal joins HERE: it reads its own count and
-  // decides on its own; when it owes a page it extends this same body with its
-  // key, so both alerts travel in ONE POST. Neither decision may return above
-  // this point — a healthy infrastructure total must not skip that lane.
+  // The maintenance existence signal joins HERE: it extends an infrastructure
+  // body with its own key so both alerts travel in ONE POST, and it never adds
+  // to `failures_24h` or the paging decision — a deferral is the platform's own
+  // state, not an infra incident. Neither decision may return above this point.
+  if (alert !== null && maintenanceDeferred > 0) {
+    alert = { ...alert, maintenanceDeferred };
+  }
   if (alert !== null) {
     log.warn(alert, "review failure threshold breached");
     if (!deps.alertUrl) {

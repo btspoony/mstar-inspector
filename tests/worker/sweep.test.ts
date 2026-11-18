@@ -150,9 +150,13 @@ describe("runSweep", () => {
     expect(captured[2]).toContain("UPDATE workspace_invites");
     const countAt = captured.findIndex((query) => query.includes("FROM review_failures"));
     expect(captured[countAt]).toContain("created_at > datetime('now', '-24 hours')");
-    // A healthy window has no page to de-bounce, so nothing follows the read:
+    // The maintenance signal is its own trailing-window read, in the same
+    // window, right after the grouped one.
+    expect(captured[countAt + 1]).toContain("stage = 'maintenance_deferred'");
+    expect(captured[countAt + 1]).toContain("created_at > datetime('now', '-24 hours')");
+    // A healthy window has no page to de-bounce, so nothing follows the reads:
     // no state write, no audit append.
-    expect(captured).toHaveLength(countAt + 1);
+    expect(captured).toHaveLength(countAt + 2);
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,
@@ -619,6 +623,24 @@ describe("runSweep", () => {
     expect(result.failures24h).toBe(1);
     expect(calls).toHaveLength(0);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
+  });
+
+  test("a maintenance_deferred row rides the breach payload under its own key, leaving the total alone", async () => {
+    const db = failureDb();
+    const store = createFailureStore(db);
+    await store.record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+
+    const { log, calls } = captureLog();
+    const result = await runSweep(db, { log });
+    // The deferral is not infrastructure: the total, the breach decision and the
+    // breakdown are the same as without it.
+    expect(result.failures24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
+    expect(result.thresholdBreached).toBe(true);
+    const alert = calls[0]!.fields as SweepAlertFields;
+    expect(alert.maintenanceDeferred).toBe(1);
+    expect(alert.failures_24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
+    expect(alert.stages).toEqual([{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }]);
   });
 
   test("threshold boundary: ONE fully-failed message's rows do not alert", async () => {
