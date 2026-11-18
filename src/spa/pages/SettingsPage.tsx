@@ -1607,28 +1607,43 @@ export function SeatsSection({
           void submit();
         }}
       >
-        {payload.model_role_ids.map((role) => (
-          <label key={role} className="flex w-fit flex-col gap-1.5 text-sm font-medium">
-            {role} — {roleHint(role)}
-            <Select
-              value={seatSelectValue(tabs, seats[role])}
-              onValueChange={(value) => setSeats((current) => ({ ...current, [role]: value }))}
+        {/* (I-000648) One row per seat: the seat's identity and the chain it
+            runs on read together, so five seats are five scannable lines
+            instead of five stacked blocks. The split is the ops-row idiom
+            (identity left, control on the trailing edge) and it wraps as whole
+            parts at narrow widths. Each row IS the label element, so the
+            select keeps the implicit name the stacked version had. */}
+        <div className="flex flex-col divide-y divide-(--border-subtle)">
+          {payload.model_role_ids.map((role) => (
+            <label
+              key={role}
+              className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-3 pb-3 text-sm font-medium first:pt-0 last:pb-0"
             >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={DEFAULT_CHAIN_NAME}>{t(locale, "settings.useDefaultChain")}</SelectItem>
-                {namedTabs.map((tab) => (
-                  <SelectItem key={tab.id} value={tab.id}>
-                    {tab.id}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </label>
-        ))}
-        <div>
+              <span>
+                {role} — {roleHint(role)}
+              </span>
+              <Select
+                value={seatSelectValue(tabs, seats[role])}
+                onValueChange={(value) => setSeats((current) => ({ ...current, [role]: value }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEFAULT_CHAIN_NAME}>{t(locale, "settings.useDefaultChain")}</SelectItem>
+                  {namedTabs.map((tab) => (
+                    <SelectItem key={tab.id} value={tab.id}>
+                      {tab.id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+          ))}
+        </div>
+        {/* The save is the section's, not the last seat's: its own trailing
+            row after the list, on the section's action edge. */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
             {t(locale, "settings.saveRoleModels")}
           </Button>
@@ -1894,13 +1909,18 @@ function ChainEditor({
       )}
       {/* One control row (the RuntimeHarnessEditor shape): the picker keeps
           its content-adaptive shell — no reserved slot — and the add, save and
-          caller actions sit beside it at their intrinsic widths, wrapping
-          below cleanly on narrow screens. */}
-      <div className="flex flex-wrap items-center gap-2">
+          caller actions sit beside it at their intrinsic widths. The row hangs
+          off the panel's trailing edge (I-000647) so it can never run past the
+          container's edge, and it still wraps whole controls below on narrow
+          screens with every wrapped line right-aligned. `min-w-0` lets the
+          picker compress rather than overflow when its longest selector is
+          wider than the panel; the trigger's line-clamp then shortens the
+          value. 保存模型链 stays the primary face of the row. */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <span className="text-sm font-medium">{t(locale, "settings.modelChainField")}</span>
-        <div className="w-fit max-w-xs">
+        <div className="w-fit max-w-xs min-w-0">
           <Select value={pick} onValueChange={setPick}>
-            <SelectTrigger aria-label={t(locale, "settings.modelChainField")}>
+            <SelectTrigger className="max-w-full" aria-label={t(locale, "settings.modelChainField")}>
               <SelectValue placeholder={t(locale, "settings.pickModel")} />
             </SelectTrigger>
             <SelectContent>
