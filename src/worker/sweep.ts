@@ -17,6 +17,14 @@
  * They stay in `review_failures` — only the paging signal ignores them, and
  * the dashboard still counts `quota` as a failure.
  *
+ * `quota` is excluded on a premise — ONE tenant's month — and the premise is
+ * checked: when the same window refuses deliveries in more than one workspace,
+ * the ceiling itself is wrong at the platform level (a published profile with
+ * no allowance stops every shared-bot delivery) and those rows RE-ENTER the
+ * total through their own predicate term. The readmission is derived from the
+ * same window as everything else, so one tenant's spent month never pages and
+ * a platform-wide refusal always does.
+ *
  * The same query returns the per-stage breakdown (`stages`) that travels in
  * the alert payload: one grouped read, so the total and its parts always
  * describe the same instant.
@@ -81,6 +89,7 @@ import {
   QUEUE_MAX_ATTEMPTS,
   sqlStageList,
 } from "../store/failure-store";
+import { QUOTA_STAGE } from "../contracts/failure-stages";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
@@ -319,13 +328,23 @@ export const defaultSweepLog: SweepLog = {
  * `stage NOT IN (<paging stages>)` is the paging exclusion: attribution rows
  * are reviews that continued, and `quota` is one tenant's spent month (see the
  * header). The list comes from the contract's written partition, never a local
- * literal. Maintenance is the platform's own existence signal, owned by its
- * separate lane and never part of the infrastructure total — so it is
- * excluded here too, by its constant. ONE predicate, so the grouped read and
- * the window decision below can never disagree about what a breach is.
+ * literal. `quota` re-enters when the SAME window shows it in more than one
+ * workspace — the premise "one tenant" is what the exclusion rests on, so a
+ * platform-wide ceiling fault must page. Maintenance is the platform's own
+ * existence signal, owned by its separate lane and never part of the
+ * infrastructure total — so it is excluded here too, by its constant. ONE
+ * predicate, so the grouped read and the window decision below can never
+ * disagree about what a breach is.
  */
+const QUOTA_SPREAD_SQL = `(SELECT COUNT(DISTINCT t.workspace_id)
+              FROM review_failures q
+              JOIN review_targets t ON t.id = q.target_id
+             WHERE q.stage = '${QUOTA_STAGE}'
+               AND q.created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')) > 1`;
+
 const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
-         AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+         AND (stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+              OR (stage = '${QUOTA_STAGE}' AND ${QUOTA_SPREAD_SQL}))
          AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'`;
 
 /**

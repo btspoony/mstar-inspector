@@ -34,9 +34,12 @@ export const ATTRIBUTION_EXCLUDED_STAGES = Object.freeze(["recheck", "usage", "r
  * Stages the cron sweep's infrastructure alert ignores: the attribution set
  * plus `quota`. A quota refusal is a REAL failure — the dashboard counts and
  * lists it — but it is one tenant's exhausted month, so a global ops page
- * would announce a platform incident for a commercial ceiling. Maintenance
- * stays OUT of both lists: the sweep is what turns a closed platform into an
- * alert instead of a silent dead-letter.
+ * would announce a platform incident for a commercial ceiling. That premise is
+ * checked by the sweep itself: when the same trailing window refuses
+ * deliveries in more than one workspace, the ceiling is wrong at the platform
+ * level and the stage RE-ENTERS the paging total (`src/worker/sweep.ts`,
+ * `QUOTA_SPREAD_SQL`). Maintenance stays OUT of both lists: the sweep is what
+ * turns a closed platform into an alert instead of a silent dead-letter.
  */
 export const PAGING_EXCLUDED_STAGES = Object.freeze([
   ...ATTRIBUTION_EXCLUDED_STAGES,
@@ -73,7 +76,9 @@ export const SHARED_BOT_ENTITLEMENT_SKIP_REASON =
  * RP ceiling. Unlike `entitlement` it IS in `PAGING_EXCLUDED_STAGES` and NOT in
  * `ATTRIBUTION_EXCLUDED_STAGES`: visible as a failure on the dashboard, excluded
  * from infrastructure paging — one tenant's spent month is a commercial
- * ceiling, not a platform incident.
+ * ceiling, not a platform incident. The sweep re-admits the stage when the
+ * window shows it in more than one workspace, because then the ceiling itself
+ * is the incident.
  */
 export const QUOTA_STAGE = "quota";
 

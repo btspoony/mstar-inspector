@@ -591,6 +591,40 @@ describe("runSweep", () => {
     expect(alert.stages).toEqual([{ stage: "sandbox", count: SWEEP_FAILURE_THRESHOLD + 1 }]);
   });
 
+  test("quota rows re-enter the pager when the window refuses more than one workspace", async () => {
+    const db = failureDb();
+    // The exclusion's premise is "ONE tenant's month"; a mis-published ceiling
+    // refuses every workspace, and that must page instead of staying silent.
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+         VALUES ('ws-two', 'ws-two', 'Second', NULL, datetime('now'), NULL)`,
+      )
+      .run();
+    seedTarget(db, "bot-sweep", { id: "target-sweep-two", workspaceId: "ws-two" });
+    const store = createFailureStore(db);
+    for (let i = 0; i < 4; i++) {
+      await store.record({ ...BASE, stage: "quota", error: `quota-a-${i}` });
+      await store.record({
+        ...BASE,
+        target_id: "target-sweep-two",
+        stage: "quota",
+        error: `quota-b-${i}`,
+      });
+    }
+
+    const { log, calls } = captureLog();
+    const result = await runSweep(db, { log });
+    expect(result.failures24h).toBe(8);
+    expect(result.thresholdBreached).toBe(true);
+    // Readmitted rows are ordinary infrastructure rows: same total, same
+    // breakdown, same lane.
+    const alert = calls[0]!.fields as SweepAlertFields;
+    expect(alert.failures_24h).toBe(8);
+    expect(alert.stages).toEqual([{ stage: "quota", count: 8 }]);
+    expect(alert.due).toEqual(["infrastructure"]);
+  });
+
   test("the payload's stages preserve the query's ordered, non-empty stage groups", async () => {
     const db = failureDb();
     const store = createFailureStore(db);

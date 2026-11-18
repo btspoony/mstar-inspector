@@ -211,7 +211,11 @@ fourth state of the workspace.
 `PAGING_EXCLUDED_STAGES`: its rows remain visible on the dashboard and count
 toward the global infrastructure alert. `quota` stays visible too, but joins
 only the paging exclusion set: one tenant's exhausted month is not a platform
-incident. The sweep reads one grouped statement over the trailing 24 hours;
+incident. That exclusion is conditional on its premise: when the same trailing
+window refuses `quota` in more than one workspace, the published ceiling itself
+is wrong and those rows re-enter the paging total (`QUOTA_SPREAD_SQL` in
+`src/worker/sweep.ts`). The sweep reads one grouped statement over the trailing
+24 hours;
 the returned stage counts supply both the infrastructure total and its
 breakdown, so they describe the same read. Paging requires counted failures
 strictly greater than `SWEEP_FAILURE_THRESHOLD`, derived in `src/worker/sweep.ts`

@@ -2584,7 +2584,9 @@ Two more fields ride that same runtime read, and the same page renders both:
   `recheck` and `usage` rows — a throttled cleanup is not a failed review.
   Paging excludes those three AND `quota`, so this paragraph's "every failure
   count" means the dashboard's counts; the pager drops one more stage than
-  they do.
+  they do — except when the window shows `quota` refusals in more than one
+  workspace, which is a platform-wide ceiling fault and pages (§ Cron failure
+  sweep).
 
 ### Review concurrency caps (runtime configuration)
 
@@ -2679,10 +2681,13 @@ behave.
   are the alert payload's `stages`, so the total and its breakdown always
   describe one snapshot — never two independently timed counts. Both, and the
   breach decision of the same sweep, come from ONE predicate
-  (`FAILURE_PAGING_WHERE_SQL` in `src/worker/sweep.ts`) that applies **two**
-  exclusions: `stage NOT IN (PAGING_EXCLUDED_STAGES)` and
-  `stage <> MAINTENANCE_DEFERRED_STAGE`, both read from
-  `src/contracts/failure-stages.ts` — no query writes a stage literal by hand.
+  (`FAILURE_PAGING_WHERE_SQL` in `src/worker/sweep.ts`): a stage is paged when
+  it is outside `PAGING_EXCLUDED_STAGES`, plus exactly one conditional
+  readmission — `quota` rows count when the same window refuses deliveries in
+  more than one workspace (`QUOTA_SPREAD_SQL`) — and `maintenance_deferred` is
+  kept out of the total by its own `stage <> MAINTENANCE_DEFERRED_STAGE` term.
+  Both lists come from `src/contracts/failure-stages.ts` — no query writes a
+  stage literal by hand.
 - The paging exclusion is the attribution set plus `quota`. The attribution
   stages (`ATTRIBUTION_EXCLUDED_STAGES`) are rows written for a review that
   kept going — a recheck round that budget-skipped, lost its seat or produced
@@ -2692,7 +2697,11 @@ behave.
   ops. `quota` is a REAL failure the dashboard counts and lists: it marks one
   workspace that spent this month's RP ceiling, a commercial limit rather than
   a platform incident, so a single tenant's exhausted month never pages ops.
-  All of them stay in `review_failures`.
+  The exclusion is conditional because its premise is: when the same window
+  shows `quota` refusals in MORE THAN ONE workspace, the published ceiling
+  itself is wrong (a profile with no allowance stops every workspace's shared
+  bot), so those rows re-enter the total and can breach the threshold like any
+  incident. All of them stay in `review_failures`.
 - `maintenance_deferred` is a SECOND, separate exclusion, not part of
   `PAGING_EXCLUDED_STAGES`. The stage is in NEITHER exclusion list in
   `src/contracts/failure-stages.ts`: such a row stays a real stored failure, and
@@ -2709,9 +2718,10 @@ behave.
   stages, so the tab's number and the history under it agree. The pager is the
   only reader that adds `quota`, so extending the paging set never hides a row
   from the dashboard. The stage lists are written once.
-- Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
-  leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
-  Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,
+- Threshold: `failures_24h > 7`, derived in `src/worker/sweep.ts` as
+  `SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1` (per-attempt semantics — a
+  DLQ'd message leaves up to 6 rows: 1 initial delivery + `max_retries: 5` = 5
+  retries). Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,
   `SWEEP_WINDOW_HOURS`, `SWEEP_WEBHOOK_TIMEOUT_MS`).
 - Alert transport: structured `ops_sweep_alert` log event
   (`{event, failures_24h, dlq_check: "skipped", thresholds, stages}`) +
@@ -2719,8 +2729,10 @@ behave.
   degrades to a warn log, never throws). Absent `ALERT_WEBHOOK_URL` =
   log-only alerting. `stages` is `[{stage, count}, …]` in stage order — the
   exact rows whose counts sum to `failures_24h`, each one a stage an operator
-  can act on; `quota`, the attribution stages and `maintenance_deferred` never
-  appear in either value, because not one of them passes the predicate above.
+  can act on; the attribution stages and `maintenance_deferred` never appear in
+  either value, because not one of them passes the predicate above. `quota`
+  appears only when it passed the cross-tenant readmission, i.e. the rows are a
+  platform-wide ceiling fault rather than one tenant's month.
 - The alert posts at most once per sweep window, and the de-bounce is an AUDIT
   WINDOW, not a latch. Before posting, the sweep reads the newest
   `platform_audit_events` row with action `alert.failure_paging`
@@ -2874,7 +2886,7 @@ never created while paused. The same-name duplicate-run possibility above
 ## Maintenance (DEBT-01)
 
 `review_failures` is an append-only per-attempt event log: a DLQ'd message
-leaves up to 4 rows (1 initial delivery + max_retries = 3 retries), so the
+leaves up to 6 rows (1 initial delivery + `max_retries: 5` = 5 retries), so the
 table grows with every failed attempt. Retention is **runbook-executed** —
 the cron sweep counts this table and must never delete from it (AL-6: counting
 must not edit what it counts); its only D1 writes are the paging audit row and
