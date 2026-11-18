@@ -34,7 +34,7 @@ import { buildCatalog } from "../../scripts/generate-provider-catalog";
 const REPO_ROOT = join(import.meta.dir, "../..");
 /** The vendored omp provider union input (the generator's third input). */
 const OMP_SNAPSHOT = JSON.parse(
-  readFileSync(join(REPO_ROOT, "scripts/provider-catalog/omp-api-key-providers.json"), "utf8"),
+  readFileSync(join(REPO_ROOT, "scripts/provider-catalog/generated/omp-api-key-providers.json"), "utf8"),
 ) as {
   source: { version: string; extracted: string };
   ownsSnapshotKeys?: string[];
@@ -60,13 +60,12 @@ const OMP_SNAPSHOT = JSON.parse(
  *  `sourceProviderId ?? id`). Order follows the vendored file. */
 const OMP_ROW_IDS = [...new Set(OMP_SNAPSHOT.providers.map((record) => record.sourceProviderId ?? record.id))];
 
-/** The pinned models.dev snapshot the generator reads (the provenance pin).
- *  The date is derived, never restated: exactly one snapshot lives beside the
- *  generator input and the generator must name that same date. */
-const CATALOG_DIR = join(REPO_ROOT, "scripts/provider-catalog");
-const SNAPSHOT_FILE = readdirSync(CATALOG_DIR)
-  .filter((name) => /^models\.dev-\d{4}-\d{2}-\d{2}\.json$/.test(name))
-  .sort()[0]!;
+/** The models.dev snapshot the generator reads: the NEWEST dated file in
+ *  `inputs/`, since the generator discovers it exactly that way (an ISO date
+ *  sorts as a date). Exactly one file lives there (the fetch prunes older ones). */
+const CATALOG_DIR = join(REPO_ROOT, "scripts/provider-catalog/inputs");
+const SNAPSHOT_FILES = readdirSync(CATALOG_DIR).filter((name) => /^models\.dev-\d{4}-\d{2}-\d{2}\.json$/.test(name));
+const SNAPSHOT_FILE = [...SNAPSHOT_FILES].sort().at(-1)!;
 const SNAPSHOT_PATH = join(CATALOG_DIR, SNAPSHOT_FILE);
 const GENERATOR_SOURCE = readFileSync(join(REPO_ROOT, "scripts/generate-provider-catalog.ts"), "utf8");
 /** The builtin sourceKeys, extracted from the generator's BUILTIN_ORDER
@@ -306,12 +305,15 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
     expect(Object.keys(snapshot).length).toBeGreaterThan(0);
     const generator = readFileSync(generatorPath, "utf8");
     // The pin is the committed snapshot file — provenance is the vendored
-    // JSON, never a network source. The generator's date constant and the one
-    // committed snapshot must agree (no second, stale snapshot).
-    const pinnedDate = generator.match(/const SNAPSHOT_DATE = "(\d{4}-\d{2}-\d{2})"/)?.[1];
-    expect(pinnedDate).toBeDefined();
-    expect(SNAPSHOT_FILE).toBe(`models.dev-${pinnedDate}.json`);
-    expect(readdirSync(CATALOG_DIR).filter((name) => /^models\.dev-\d{4}-\d{2}-\d{2}\.json$/.test(name))).toHaveLength(1);
+    // JSON, never a network source. The date is discovered, never restated in
+    // code: exactly one snapshot lives here and it must be the newest match.
+    expect(SNAPSHOT_FILES).toHaveLength(1);
+    const pinnedDate = SNAPSHOT_FILE.replace(/^models\.dev-/, "").replace(/\.json$/, "");
+    expect(pinnedDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // The generator has no date constant; it asks the shared discovery module
+    // for the newest snapshot, so a new file needs no code edit.
+    expect(generator).not.toMatch(/const SNAPSHOT_DATE =/);
+    expect(generator).toContain('from "./provider-catalog/lib/snapshot"');
     // Zero authoring-time network: the generator reads only the snapshot.
     expect(generator).not.toMatch(/\bfetch\s*\(/);
   });
@@ -599,7 +601,7 @@ describe("omp provider union (third generator input)", () => {
         providers: [],
       }),
     ).toThrow(
-      'omp provider "moonshot" aliases "moonshot-ai-retired", which is not a catalog row — fix scripts/provider-catalog/omp-api-key-providers.json',
+      'omp provider "moonshot" aliases "moonshot-ai-retired", which is not a catalog row — fix scripts/provider-catalog/generated/omp-api-key-providers.json',
     );
     // The same alias with a resolvable target is an ordinary rule-(b) skip.
     const { catalog, audit } = buildCatalog(snapshotOnly, {

@@ -14,14 +14,15 @@
  * packages/{shared,runner}/src).
  *
  * Inputs (three pinned):
- *   1. `scripts/provider-catalog/models.dev-2026-11-13.json` — a trimmed
- *      snapshot of the ai-sdk ecosystem directory dataset (models.dev,
- *      fetched 2026-11-13 from https://models.dev/api.json; trimmed to the
- *      fields this generator consumes: id / name / env / api / doc /
- *      model_ids / limits). The snapshot date is the pin — regeneration
- *      against a newer snapshot is a deliberate, reviewed act. In this
- *      snapshot the `api` field carries the provider's default base URL and
- *      `limits` carries every model's `{context, output}` token sizes.
+ *   1. `scripts/provider-catalog/inputs/models.dev-<date>.json` — a trimmed snapshot
+ *      of the ai-sdk ecosystem directory dataset (models.dev, fetched from
+ *      https://models.dev/api.json by `scripts/provider-catalog/fetch-models-dev.ts`
+ *      and trimmed to the fields this generator consumes: id / name / env /
+ *      api / doc / model_ids / limits). The newest dated file is the one read
+ *      (ISO names sort lexicographically; exactly one is committed), and the
+ *      fetch date it carries is the pin regeneration reports. In this snapshot
+ *      the `api` field carries the provider's default base URL and `limits`
+ *      carries every model's `{context, output}` token sizes.
  *   2. The omp-facing override table below — the SSOT for the runner
  *      contract: the 19 builtin ids in mapping order, their labels (the
  *      existing picker labels) and their env-name injection names (omp's
@@ -32,7 +33,7 @@
  *      ids it lacks (cursor) get local metadata.
  *   3. The hand-curated `workers-ai` template — preserved verbatim; the
  *      snapshot's `cloudflare-workers-ai` row is deduped into it.
- *   4. `scripts/provider-catalog/omp-api-key-providers.json` — a vendored
+ *   4. `scripts/provider-catalog/generated/omp-api-key-providers.json` — a vendored
  *      snapshot of the omp SDK's API-key LLM providers (version, extraction
  *      date and extraction rules in its own header). It supplies provider
  *      breadth the models.dev snapshot lacks; every surviving record lands
@@ -65,10 +66,10 @@
  */
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { readdir } from "node:fs/promises";
+import { INPUTS_DIR, pickNewestSnapshot } from "./provider-catalog/lib/snapshot";
 
-const SNAPSHOT_DATE = "2026-11-13";
-const SNAPSHOT_PATH = path.resolve(`scripts/provider-catalog/models.dev-${SNAPSHOT_DATE}.json`);
-const OMP_SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/omp-api-key-providers.json");
+const OMP_SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/generated/omp-api-key-providers.json");
 const OUT_PATH = path.resolve("src/contracts/provider-catalog.generated.ts");
 const OUT_LIMITS_PATH = path.resolve("src/contracts/provider-model-limits.generated.ts");
 
@@ -436,7 +437,7 @@ export function buildCatalog(
       // silently overwrite the first as "already present".
       if (recordIds.has(record.id)) {
         throw new Error(
-          `vendored omp snapshot carries duplicate record id ${JSON.stringify(record.id)} — fix scripts/provider-catalog/omp-api-key-providers.json`,
+          `vendored omp snapshot carries duplicate record id ${JSON.stringify(record.id)} — fix scripts/provider-catalog/generated/omp-api-key-providers.json`,
         );
       }
       recordIds.add(record.id);
@@ -449,7 +450,7 @@ export function buildCatalog(
     for (const providerId of Object.keys(recordsByProvider)) {
       if (!ompProviderIdSet.has(providerId)) {
         throw new Error(
-          `vendored omp record ${JSON.stringify(providerId)} is absent from ompProviderIds — list it in scripts/provider-catalog/omp-api-key-providers.json`,
+          `vendored omp record ${JSON.stringify(providerId)} is absent from ompProviderIds — list it in scripts/provider-catalog/generated/omp-api-key-providers.json`,
         );
       }
     }
@@ -467,7 +468,7 @@ export function buildCatalog(
           const target = omp.excluded.alias[providerId]!;
           if (!Object.hasOwn(catalogBeforeUnion, target)) {
             throw new Error(
-              `omp provider ${JSON.stringify(providerId)} aliases ${JSON.stringify(target)}, which is not a catalog row — fix scripts/provider-catalog/omp-api-key-providers.json`,
+              `omp provider ${JSON.stringify(providerId)} aliases ${JSON.stringify(target)}, which is not a catalog row — fix scripts/provider-catalog/generated/omp-api-key-providers.json`,
             );
           }
           audit.ompAliasSkips.push(`${providerId} → ${target}`);
@@ -480,7 +481,7 @@ export function buildCatalog(
           );
         } else {
           throw new Error(
-            `omp provider ${JSON.stringify(providerId)} has no vendored record and no exclusion rule — classify it in scripts/provider-catalog/omp-api-key-providers.json`,
+            `omp provider ${JSON.stringify(providerId)} has no vendored record and no exclusion rule — classify it in scripts/provider-catalog/generated/omp-api-key-providers.json`,
           );
         }
         continue;
@@ -634,7 +635,11 @@ function buildModelLimits(
 }
 
 async function main(): Promise<void> {
-  const snapshot = JSON.parse(await readFile(SNAPSHOT_PATH, "utf8")) as Record<string, SnapshotProvider>;
+  // The newest dated snapshot is the input — ISO names sort lexicographically,
+  // so discovery needs no date constant (the provenance header names the file).
+  const snapshotFile = pickNewestSnapshot(await readdir(INPUTS_DIR));
+  const snapshotPath = path.join(INPUTS_DIR, snapshotFile.file);
+  const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<string, SnapshotProvider>;
   const omp = JSON.parse(await readFile(OMP_SNAPSHOT_PATH, "utf8")) as OmpSnapshot;
   const { catalog, audit, sources, legacy } = buildCatalog(snapshot, omp);
   const { limits, skipped } = buildModelLimits(catalog, sources, snapshot);
@@ -652,7 +657,7 @@ async function main(): Promise<void> {
     overrides.length === 0
       ? ""
       : `
- * MEASURED OVERRIDES (\`scripts/provider-catalog/overrides.json\`, applied over the
+ * MEASURED OVERRIDES (\`scripts/provider-catalog/inputs/overrides.json\`, applied over the
  * package's own vocabulary and authoritative for these buckets — a package bump
  * does not change them; re-measure and update the \`fetched\` date):
 ${overrides
@@ -704,11 +709,11 @@ ${overrides
  * an explicit, reviewable regeneration commit.
  *
  * Source: pinned models.dev snapshot
- * \`scripts/provider-catalog/models.dev-${SNAPSHOT_DATE}.json\` (fetched ${SNAPSHOT_DATE}
+ * \`scripts/provider-catalog/inputs/${snapshotFile.file}\` (fetched ${snapshotFile.date}
  * from https://models.dev/api.json; the \`api\` field carries the base URL)
  * + the omp-facing override table in the generator (labels / env-name
  * contract / workers-ai template) + the vendored omp provider snapshot
- * \`scripts/provider-catalog/omp-api-key-providers.json\` (omp ${omp.source.version},
+ * \`scripts/provider-catalog/generated/omp-api-key-providers.json\` (omp ${omp.source.version},
  * extracted ${omp.source.extracted}). Runtime is fully static: zero network,
  * zero ai-sdk runtime dependencies — the Worker, the dashboard, and the
  * sandbox image only import this module. PURE DATA + pure derivations:
@@ -838,8 +843,8 @@ export const TEMPLATE_PROVIDERS: Record<string, ProviderCatalogEntry> = Object.f
  * provider catalog. DO NOT EDIT BY HAND — regenerate with
  * \`bun run scripts/generate-provider-catalog.ts\`.
  *
- * Source: \`scripts/provider-catalog/models.dev-${SNAPSHOT_DATE}.json\` (fetched
- * ${SNAPSHOT_DATE} from https://models.dev/api.json; each model carries
+ * Source: \`scripts/provider-catalog/inputs/${snapshotFile.file}\` (fetched
+ * ${snapshotFile.date} from https://models.dev/api.json; each model carries
  * \`limit: { context, output }\`). Only providers and model ids that the
  * generated provider catalog lists are carried here — the table exists to fill
  * an operator's blank size fields, not to mirror the whole directory.
@@ -859,7 +864,7 @@ export const TEMPLATE_PROVIDERS: Record<string, ProviderCatalogEntry> = Object.f
 export type ModelLimit = { contextWindow: number; maxTokens: number };
 
 /** The snapshot date the table was generated from (shown as the value's source). */
-export const MODEL_LIMITS_SNAPSHOT = ${JSON.stringify(SNAPSHOT_DATE)};
+export const MODEL_LIMITS_SNAPSHOT = ${JSON.stringify(snapshotFile.date)};
 
 /** provider id → model id → sizes. */
 export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, ModelLimit>>>> = Object.freeze(${limitsLiteral});

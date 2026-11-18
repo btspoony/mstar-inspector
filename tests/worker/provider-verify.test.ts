@@ -49,8 +49,8 @@ import {
   type VerifyDeps,
 } from "../../src/dashboard/provider-verify";
 import type { DashboardD1 } from "../../src/dashboard/users";
-import ompApiKeyProviders from "../../scripts/provider-catalog/omp-api-key-providers.json";
-import ompProviderVerify from "../../scripts/provider-catalog/omp-provider-verify.json";
+import ompApiKeyProviders from "../../scripts/provider-catalog/generated/omp-api-key-providers.json";
+import ompProviderVerify from "../../scripts/provider-catalog/generated/omp-provider-verify.json";
 import { sk } from "../helpers/fake-secrets";
 
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */

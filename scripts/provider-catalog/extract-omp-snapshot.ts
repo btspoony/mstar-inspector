@@ -1,7 +1,7 @@
 /**
  * Author-time extractor for the two vendored omp snapshots:
- *   `scripts/provider-catalog/omp-api-key-providers.json`
- *   `scripts/provider-catalog/omp-provider-verify.json`
+ *   `scripts/provider-catalog/generated/omp-api-key-providers.json`
+ *   `scripts/provider-catalog/generated/omp-provider-verify.json`
  *
  * Run against the INSTALLED `@oh-my-pi/pi-catalog` (the same SDK the runner
  * ships), so the model ids are the ones the runtime actually knows:
@@ -27,8 +27,9 @@
  *   3. `models` is the FULL vocabulary — no cap. The store's own bound applies
  *      at declaration time, not here.
  *   4. `baseUrl` is the most common model `baseUrl` in the record, else the
- *      seed api/base-url; null when omp ships none or only a loopback http://
- *      host (the declaration store requires https).
+ *      authored seed base URL; null when omp ships none, or when every candidate
+ *      is a loopback/plain-http host the declaration store rejects (it requires
+ *      https) — the operator supplies the URL at save time.
  *   5. The verify snapshot keeps only `login "api-key"` rules that validate a
  *      pasted key against a GET models/identity endpoint — never an inference
  *      call. `headersHook` is carried verbatim.
@@ -39,24 +40,27 @@
  *      rejects. Overrides are data, not code: the file records its `source` and
  *      `fetched` date, and a run logs every bucket it replaced.
  */
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { createRequire } from "node:module";
-import { applyOverrides, PROTOCOL_SUFFIX, type Override } from "./overrides";
+import { applyOverrides, PROTOCOL_SUFFIX, type Override } from "./lib/overrides";
+import { declarationBaseUrl } from "./lib/base-url";
+import { GENERATED_DIR, INPUTS_DIR, pickNewestSnapshot } from "./lib/snapshot";
 
 const PI_CATALOG_DIR = path.dirname(
   createRequire(import.meta.url).resolve("@oh-my-pi/pi-catalog/package.json"),
 );
 const RULES_PATH = path.join(PI_CATALOG_DIR, "src/compat/rules.json");
-const MODELS_DEV_PATH = path.resolve("scripts/provider-catalog/models.dev-2026-11-13.json");
-const OUT_PROVIDERS_PATH = path.resolve("scripts/provider-catalog/omp-api-key-providers.json");
-const OUT_VERIFY_PATH = path.resolve("scripts/provider-catalog/omp-provider-verify.json");
+/** The newest committed models.dev snapshot (the generator reads the same one). */
+const MODELS_DEV_PATH = path.join(INPUTS_DIR, pickNewestSnapshot(await readdir(INPUTS_DIR)).file);
+const OUT_PROVIDERS_PATH = path.join(GENERATED_DIR, "omp-api-key-providers.json");
+const OUT_VERIFY_PATH = path.join(GENERATED_DIR, "omp-provider-verify.json");
 /**
  * Hand-measured, vendor-authoritative vocabularies. Read-only input: this
  * script never writes it, so the file survives every regeneration.
  */
-const OVERRIDES_PATH = path.resolve("scripts/provider-catalog/overrides.json");
+const OVERRIDES_PATH = path.join(INPUTS_DIR, "overrides.json");
 
 type Rule = {
   id: string;
@@ -287,11 +291,14 @@ for (const auth of rules.auth.providers) {
   for (const api of apis) {
     const group = byApi.get(api)!;
     const recordId = api === primary ? id : `${id}-${PROTOCOL_SUFFIX[api] ?? api}`;
-    const baseUrl =
-      mostCommon(group.map((r) => r.baseUrl).filter((b): b is string => typeof b === "string")) ??
-      rule?.seed?.baseUrl ??
-      rule?.seed?.api ??
-      null;
+    // `seed.api` is the protocol dialect (see `modelRows`), NOT a URL: using it
+    // as a base-URL fallback would prefill a template row with
+    // "openai-completions". Only real URLs enter the chain, each tried in turn
+    // against the declaration store's https rule.
+    const baseUrl = declarationBaseUrl([
+      mostCommon(group.map((r) => r.baseUrl).filter((b): b is string => typeof b === "string")),
+      rule?.seed?.baseUrl,
+    ]);
     const placeholders = [...(baseUrl ?? "").matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!);
     const unusable =
       !ID_PATTERN.test(recordId)
@@ -367,7 +374,7 @@ const providersOut = {
     rules: [
       "One record per omp API-key LLM provider that the models.dev snapshot lacks. Not materialized: ids already in the catalog, naming aliases of a catalog row, non-model providers (search / local-inference / no env key), and OAuth- or device-code-only logins.",
       "`api` is the provider's materializable protocol (anthropic-messages / openai-completions / openai-responses / typesafe). A mixed-protocol provider gets one record per protocol — a custom-provider declaration carries exactly one `api`.",
-      "`baseUrl` is the record's most common model base URL, else the authored seed base URL or factory default; null when omp ships none, or when omp's default is a loopback http:// endpoint (the declaration store requires https), so the operator supplies it at save time.",
+      "`baseUrl` is the record's most common model base URL, else the authored seed base URL; null when omp ships none, or when every candidate is a loopback/plain-http host (the declaration store requires https), so the operator supplies it at save time.",
       "`models` is the provider's FULL seed/bundled vocabulary — no cap.",
       "A mixed-protocol provider contributes one record per protocol; `sourceProviderId` names the omp provider where a record id differs from it.",
       "`overrides.json` is applied last and wins: a named protocol bucket replaces that record's vocabulary wholesale instead of unioning, because the package and the vendor's live endpoint use different id dialects. The bucket carries the vendor's ids verbatim.",
@@ -411,8 +418,35 @@ const verifyOut = {
   endpoints,
 };
 
-await writeFile(OUT_PROVIDERS_PATH, `${JSON.stringify(providersOut, null, 2)}\n`);
-await writeFile(OUT_VERIFY_PATH, `${JSON.stringify(verifyOut, null, 2)}\n`);
+/** Keep the committed extraction date when the extraction itself is unchanged:
+ *  the refresh workflow runs this daily, and a date-only diff would open a PR
+ *  for data that did not move. */
+async function stableExtracted<T extends { source: { extracted: string } }>(
+  outPath: string,
+  next: T,
+): Promise<T> {
+  const previous = await readFile(outPath, "utf8").then(
+    (text) => JSON.parse(text) as T,
+    () => undefined,
+  );
+  if (previous?.source.extracted === undefined) return next;
+  const withoutStamp = (doc: T): string =>
+    JSON.stringify({ ...doc, source: { ...doc.source, extracted: "" } });
+  if (withoutStamp(previous) === withoutStamp(next)) next.source.extracted = previous.source.extracted;
+  return next;
+}
+
+// `generated/` is disposable by contract: deleting it and re-running must
+// reproduce every byte, so the directory is created rather than assumed.
+await mkdir(GENERATED_DIR, { recursive: true });
+await writeFile(
+  OUT_PROVIDERS_PATH,
+  `${JSON.stringify(await stableExtracted(OUT_PROVIDERS_PATH, providersOut), null, 2)}\n`,
+);
+await writeFile(
+  OUT_VERIFY_PATH,
+  `${JSON.stringify(await stableExtracted(OUT_VERIFY_PATH, verifyOut), null, 2)}\n`,
+);
 
 console.log(
   `omp ${version}: ${overridden.records.length} provider records, ${endpoints.length} verify endpoints, ` +

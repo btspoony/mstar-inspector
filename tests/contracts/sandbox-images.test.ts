@@ -57,7 +57,7 @@ describe("Dockerfile harness clone ref mirrors the registry pin", () => {
   // checkout contained. Both the anchor comment and the fetch line are locked
   // here so a missing anchor fails instead of passing vacuously.
   const dockerfile = readFileSync(join(REPO_ROOT, OMP_IMAGE.dockerfilePath), "utf8");
-  const ANCHOR = /#\s*mstar-harness plugin, pinned ref ([0-9a-f]{40})/;
+  const ANCHOR = /#\s*mstar-harness plugin, pinned ref ([0-9a-f]{40}) \(tag v([^,]+), bumped (\d{4}-\d{2}-\d{2})\)/;
   const FETCH = /git -C \/opt\/mstar-harness fetch --depth 1 origin ([0-9a-f]{40})/;
 
   test("the anchor comment names the pinned ref", () => {
@@ -70,6 +70,21 @@ describe("Dockerfile harness clone ref mirrors the registry pin", () => {
     const match = FETCH.exec(dockerfile);
     expect(match).not.toBeNull();
     expect(match![1]).toBe(OMP_SANDBOX_IMAGE_PINS.harnessRef);
+  });
+
+  test("the anchor's TAG and the registry's harnessVersion name one release", () => {
+    // The four image-facing pins describe a single harness release:
+    // HARNESS_VERSION, harnessCliVersion, the clone ref, and the tag the anchor
+    // comment records. A version-only bump moved the first two while leaving the
+    // tag and the ref on the previous release; nothing compared them, so the
+    // inconsistent pair shipped and then wedged every later ref bump (the next
+    // run built its match string from the assumed tag). This is that comparison.
+    const match = ANCHOR.exec(dockerfile);
+    expect(match, "the anchor comment must carry its tag").not.toBeNull();
+    expect(match![2]).toBe(OMP_SANDBOX_IMAGE_PINS.harnessVersion);
+    expect(OMP_SANDBOX_IMAGE_PINS.harnessCliVersion).toBe(OMP_SANDBOX_IMAGE_PINS.harnessVersion);
+    // And the record of when it moved is a real date, not a placeholder.
+    expect(match![3]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
 

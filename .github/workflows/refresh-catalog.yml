@@ -1,0 +1,341 @@
+name: Catalog refresh
+
+# Daily refresh of the provider catalog (models.dev snapshot → generated
+# contracts) behind one idempotent PR. The catalog is what an App's model chain
+# resolves against, so a silently vanished model id breaks a stored chain at
+# request time, not at save time — this workflow is the place that notices.
+#
+# Shape:
+#   1. Move the omp SDK / harness-engine pins when npm has a newer release (a
+#      catalog refresh that skips the SDK bump would test the wrong registry).
+#   2. Re-fetch the snapshot, regenerate both contracts, repair the image-input
+#      fingerprint if the pin bump moved an image input.
+#   3. Nothing changed → stop, no branch, no PR.
+#   4. Something changed → typecheck + the full suite FIRST. Only a green run
+#      force-updates the fixed branch and opens / updates ITS ONE PR; a red run
+#      publishes nothing (no commit, no push, no PR create or update) and fails
+#      visibly in Actions. An already-open PR is left untouched, so yesterday's
+#      green result stands until new data passes. A channel that ships red PRs
+#      teaches everyone to ignore the red.
+#
+# Never pushes to main: the only push target is the literal branch below, and a
+# guard test (`tests/scripts/provider-catalog-refresh-guards.test.ts`) fails if
+# that stops being true.
+#
+# AD-5 note (same as release-prep): a pull request opened or pushed by the
+# workflow token does NOT trigger ci.yml, so the typecheck + test gate above IS
+# that PR's verification face — and it ran on exactly the tree being published.
+
+on:
+  schedule:
+    # 04:17 UTC — off-peak for both the npm registry and GitHub's runner pool,
+    # and offset from the hour so it does not queue behind the other crons.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write        # force-update chore/catalog-refresh
+  pull-requests: write   # open / update that branch's PR
+
+concurrency:
+  group: catalog-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BRANCH: chore/catalog-refresh
+      OMP_PACKAGE: "@oh-my-pi/pi-coding-agent"
+      ENGINE_PACKAGE: "@mstar-harness/engine"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Always the default branch, whatever the trigger: a `workflow_dispatch`
+          # can be run from any branch, and building the refresh branch off that
+          # HEAD would publish unmerged work under a body that diffs origin/main.
+          ref: ${{ github.event.repository.default_branch }}
+          # The image gate diffs against origin/main, and the removals report
+          # extracts the base revision's generated module.
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The refresh has to know what it replaced: the snapshot file name (the
+      # generator's provenance line) and the two registry pins.
+      - name: Record the starting state
+        id: before
+        run: |
+          {
+            echo "snapshot=$(git ls-files 'scripts/provider-catalog/inputs/models.dev-*.json')"
+            echo "omp=$(jq -r '.dependencies["@oh-my-pi/pi-coding-agent"]' package.json)"
+            echo "engine=$(jq -r '.dependencies["@mstar-harness/engine"]' package.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the newest published SDK versions
+        id: latest
+        # An unreachable registry is not a failed refresh: the catalog data can
+        # still be current. Each lookup reports `unknown` and the pin step skips
+        # only that package. The CLI is asked about for the SAME version the
+        # engine reports: the image installs it from a frozen lock at
+        # HARNESS_VERSION, so a harness release whose CLI is not published yet is
+        # a version the image cannot build.
+        run: |
+          set +e
+          OMP=$(npm view "$OMP_PACKAGE" version 2>/dev/null)
+          ENGINE=$(npm view "$ENGINE_PACKAGE" version 2>/dev/null)
+          CLI=""
+          if [ -n "$ENGINE" ]; then CLI=$(npm view "@mstar-harness/cli@${ENGINE}" version 2>/dev/null); fi
+          CLI_STATE=missing
+          if [ -n "$CLI" ]; then CLI_STATE=available; fi
+          {
+            echo "omp=${OMP:-unknown}"
+            echo "engine=${ENGINE:-unknown}"
+            echo "cli=${CLI_STATE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "omp=${OMP:-unknown} engine=${ENGINE:-unknown} cli=${CLI_STATE}"
+
+      - name: Move the SDK / engine pins when a newer release exists
+        id: pins
+        env:
+          OMP_NOW: ${{ steps.before.outputs.omp }}
+          ENGINE_NOW: ${{ steps.before.outputs.engine }}
+          OMP_LATEST: ${{ steps.latest.outputs.omp }}
+          ENGINE_LATEST: ${{ steps.latest.outputs.engine }}
+          CLI_STATE: ${{ steps.latest.outputs.cli }}
+        # The engine version IS the harness release (the image clones that tag
+        # and installs its CLI at that number), so a newer engine moves the
+        # image pins too — its commit is not derivable from a tag, so the tag is
+        # dereferenced here. `sort -V` keeps this a real version comparison: a
+        # plain string compare would call 4.7.10 older than 4.7.9.
+        run: |
+          set -euo pipefail
+          NEWER=$(printf '%s\n%s\n' "$ENGINE_NOW" "$ENGINE_LATEST" | sed 's/^\^//' | sort -V | tail -1)
+          OMP_NEWER=$(printf '%s\n%s\n' "$OMP_NOW" "$OMP_LATEST" | sed 's/^\^//' | sort -V | tail -1)
+
+          OMP_ARG=""
+          ENGINE_ARG=""
+          REF_ARG=""
+          if [ "$OMP_NEWER" != "${OMP_NOW#^}" ] && [ "$OMP_LATEST" != "unknown" ]; then
+            OMP_ARG="$OMP_LATEST"
+          fi
+          # `$OMP_LATEST`/`$ENGINE_LATEST` may be the literal "unknown" (registry
+          # unreachable); the comparison above then keeps the committed pin.
+          if [ "$NEWER" != "${ENGINE_NOW#^}" ] && [ "$ENGINE_LATEST" != "unknown" ]; then
+            # HARNESS_VERSION, the CLI pin, harnessRef and the Dockerfile's
+            # tag anchor describe ONE release, so they move together or not at
+            # all. That makes two prerequisites, and either one missing means
+            # this run holds the engine pin:
+            #   - the CLI for that version must be published (the image installs
+            #     it from a frozen lock at HARNESS_VERSION);
+            #   - the annotated tag must exist and dereference to a commit (a tag
+            #     cannot yield a sha). A version-only move would leave the image
+            #     tag and the ref describing the previous release.
+            if [ "$CLI_STATE" != "available" ]; then
+              echo "::warning::engine ${ENGINE_LATEST} has no published @mstar-harness/cli — holding the pins until the release ships both"
+            else
+              REF=$(git ls-remote --tags https://github.com/btspoony/mstar-harness "refs/tags/v${ENGINE_LATEST}^{}" | cut -f1 || true)
+              if [ -z "$REF" ]; then
+                echo "::warning::no annotated tag v${ENGINE_LATEST} on origin yet — holding the pins; the next run picks the release up once the tag exists"
+              else
+                ENGINE_ARG="$ENGINE_LATEST"
+                REF_ARG="$REF"
+              fi
+            fi
+          fi
+
+          if [ -z "$OMP_ARG" ] && [ -z "$ENGINE_ARG" ]; then
+            {
+              echo "changed=false"
+              echo "note=pins unchanged (omp ${OMP_NOW}, engine ${ENGINE_NOW})"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Explicit ifs, not `[ ... ] && args+=(...)`: under `set -e` a false
+          # `[ ... ]` as the last command of an && list exits the step.
+          ARGS=()
+          if [ -n "$OMP_ARG" ]; then ARGS+=(--omp "$OMP_ARG"); fi
+          if [ -n "$ENGINE_ARG" ]; then ARGS+=(--engine "$ENGINE_ARG"); fi
+          if [ -n "$REF_ARG" ]; then ARGS+=(--harness-ref "$REF_ARG"); fi
+
+          # A version npm lists but cannot resolve (a yanked tarball, a registry
+          # mirror lag) must not take the catalog refresh down with it: the bump
+          # is attempted on the pin surfaces only, and a resolution failure
+          # restores them and continues. The catalog is the job's reason to run;
+          # the SDK bump is a rider.
+          PINS=(
+            package.json bun.lock
+            packages/runner/package.json packages/runner/bun.lock
+            src/contracts/sandbox-images.ts
+            sandbox-image/cli-global/package.json sandbox-image/cli-global/bun.lock
+            sandbox-image/Dockerfile
+          )
+          # `bump-pins.ts` owns the manifests AND every lock beside them, so this
+          # step is one call; its own documented local invocation leaves the same
+          # tree. (`set -e` is off inside an `if` condition, so the script's
+          # non-zero exit is what carries the failure — hence the explicit `if`.)
+          if bun run scripts/provider-catalog/bump-pins.ts "${ARGS[@]}"; then
+            {
+              echo "changed=true"
+              echo "note=pins moved: omp ${OMP_NOW} → ${OMP_ARG:-unchanged}, engine ${ENGINE_NOW} → ${ENGINE_ARG:-unchanged}${REF_ARG:+, harness ref moved}"
+            } >> "$GITHUB_OUTPUT"
+          else
+            # ATOMIC restore. The bump installs for real, so an abort AFTER the
+            # root install (the runner copy, the CLI relock, the frozen proof)
+            # leaves node_modules carrying the attempted version. Restoring the
+            # manifests alone would then make the NEXT step extract from a tree
+            # the held pins do not describe — the Worker/image divergence the
+            # install exists to prevent. Restore the files, then re-install so the
+            # installed tree matches the held pins again.
+            git checkout -- "${PINS[@]}"
+            bun install --frozen-lockfile
+            echo "::warning::pins held at omp ${OMP_NOW} / engine ${ENGINE_NOW} — the newer release does not install; the catalog refresh continues"
+            {
+              echo "changed=false"
+              echo "note=pins held (omp ${OMP_NOW}, engine ${ENGINE_NOW}): the newer release does not install"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch the models.dev snapshot
+        run: bun run scripts/provider-catalog/fetch-models-dev.ts
+
+      - name: Regenerate the catalog
+        run: bun run provider:catalog
+
+      # A pin bump moves packages/runner/package.json, an image input family, so
+      # the Dockerfile's recorded fingerprint must move in the same commit — the
+      # same repair CI's gate demands, done here instead of failing the PR.
+      - name: Repair the image-input fingerprint
+        run: bun scripts/check-image-inputs.ts --base origin/main --write
+
+      - name: Decide whether anything changed
+        id: diff
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "catalog and pins are current — nothing to open a PR for"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --cached --stat
+          fi
+
+      # ---- The gate. Nothing below this point runs unless the tree is green.
+      # Verification runs BEFORE any push: a failing run publishes nothing —
+      # no commit, no force-push, no PR create or update. The Actions page is the
+      # signal, and it is the right one because nothing reached a reviewer. A
+      # channel that periodically ships red PRs teaches everyone to ignore the
+      # red, so there is deliberately no "label it and publish" path.
+      - name: Typecheck
+        id: typecheck
+        if: steps.diff.outputs.changed == 'true'
+        run: bun run typecheck
+
+      - name: Test
+        id: test
+        if: steps.diff.outputs.changed == 'true'
+        # `set -o pipefail`, NOT a bare `bun test | tee`: the default `bash -e`
+        # reports `tee`'s status. The log lives OUTSIDE the tree so it never
+        # lands in the commit; the verdict below reads it as a second witness.
+        run: |
+          set -o pipefail
+          bun test tests 2>&1 | tee "${RUNNER_TEMP}/test.log"
+
+      - name: Decide whether this run may publish
+        id: gate
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        # The gate itself. `pr-verdict.ts` exits non-zero on any red signal —
+        # including a log that records failures while the step lost its exit
+        # status — so this step aborts the job and every publishing step is
+        # skipped.
+        run: |
+          bun run scripts/provider-catalog/pr-verdict.ts \
+            --typecheck "$TYPECHECK_OUTCOME" --test "$TEST_OUTCOME" \
+            --log "${RUNNER_TEMP}/test.log"
+
+      - name: Build the PR body
+        id: body
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          BEFORE_SNAPSHOT: ${{ steps.before.outputs.snapshot }}
+          PIN_NOTE: ${{ steps.pins.outputs.note }}
+        # Removals are the part that bites: a chain naming a vanished id fails at
+        # request time, and nothing else in this run would say so. The base
+        # revision's generated module is extracted and imported, so the list is
+        # a real diff of the committed catalogs rather than a re-derivation.
+        run: |
+          set -euo pipefail
+          git show "origin/main:src/contracts/provider-catalog.generated.ts" > "${RUNNER_TEMP}/catalog-before.ts"
+          bun run scripts/provider-catalog/catalog-changes.ts \
+            "${RUNNER_TEMP}/catalog-before.ts" \
+            src/contracts/provider-catalog.generated.ts > "${RUNNER_TEMP}/removals.md"
+
+          AFTER_SNAPSHOT=$(git ls-files 'scripts/provider-catalog/inputs/models.dev-*.json')
+          {
+            echo "Generated by the **Catalog refresh** workflow (schedule: daily 04:17 UTC)."
+            echo
+            echo "Regenerate locally with \`bun run provider:catalog\`; the committed snapshot is the pinned input."
+            echo
+            echo "## Snapshot"
+            echo
+            echo "- before: \`${BEFORE_SNAPSHOT:-none}\`"
+            echo "- after: \`${AFTER_SNAPSHOT:-none}\`"
+            echo
+            echo "## SDK pins"
+            echo
+            echo "${PIN_NOTE:-pins unchanged}"
+            echo
+            echo "## Catalog removals"
+            echo
+            cat "${RUNNER_TEMP}/removals.md"
+          } > "${RUNNER_TEMP}/pr-body.md"
+
+      - name: Commit and force-update the refresh branch
+        if: steps.diff.outputs.changed == 'true'
+        # One fixed branch, always rebuilt from origin/main: a refresh describes
+        # the CURRENT upstream state, so stacking days on top would publish a
+        # body that no longer matches the diff. `--force` is safe because the
+        # concurrency group serializes runs, and the branch is never main.
+        run: |
+          set -euo pipefail
+          if [ "$BRANCH" = "main" ]; then
+            echo "::error::refusing to push to main"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add -A
+          git commit -m "chore(catalog): refresh the provider catalog"
+          git push --force origin "$BRANCH"
+
+      - name: Open or update the refresh PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Idempotent: the branch's OWN open PR is updated in place. A second PR
+        # from the same head can never be created, and a closed one is not
+        # resurrected (the pull request is the review surface; re-opening it
+        # would bypass that review).
+        run: |
+          set -euo pipefail
+          TITLE="chore(catalog): refresh the provider catalog"
+          OPEN=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$OPEN" ]; then
+            gh pr edit "$OPEN" --title "$TITLE" --body-file "${RUNNER_TEMP}/pr-body.md"
+            echo "updated existing catalog refresh PR #$OPEN"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file "${RUNNER_TEMP}/pr-body.md"
+          fi
