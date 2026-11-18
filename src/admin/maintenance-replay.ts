@@ -109,18 +109,31 @@ async function readFailure(db: DashboardD1, id: string): Promise<MaintenanceRepl
  * unresolvable: the record stays visible and is never resurrected.
  */
 async function readLiveTarget(db: DashboardD1, failureId: string): Promise<MaintenanceReplayTarget | null> {
+  // The workspace liveness check is its own statement: it reads review_targets and
+  // workspaces only, so this lane's one review_bots read stays off ownership columns.
   const row = await db
+    // shortcut: tenant-bypass — operator-authenticated maintenance read; it returns no
+    // identity or ownership column, and the workspace gate below is the tenant check.
     .prepare(
       `SELECT t.id AS target_id, t.bot_id AS bot_id
          FROM review_failures f
          JOIN review_targets t ON t.id = f.target_id AND t.deleted_at IS NULL
          JOIN review_bots b ON b.id = t.bot_id AND b.deleted_at IS NULL AND b.status = 'active'
-         JOIN workspaces w ON w.id = t.workspace_id AND w.deleted_at IS NULL
         WHERE f.id = ?`,
     )
     .bind(failureId)
     .first<{ target_id: string; bot_id: string }>();
-  return row === null ? null : { targetId: row.target_id, botId: row.bot_id };
+  if (row === null) return null;
+  const live = await db
+    .prepare(
+      `SELECT 1 AS ok
+         FROM review_targets t
+         JOIN workspaces w ON w.id = t.workspace_id AND w.deleted_at IS NULL
+        WHERE t.id = ?`,
+    )
+    .bind(row.target_id)
+    .first<{ ok: number }>();
+  return live === null ? null : { targetId: row.target_id, botId: row.bot_id };
 }
 
 /**

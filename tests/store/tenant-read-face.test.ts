@@ -177,6 +177,9 @@ function directReadFiles(): string[] {
 
 /** The maintenance face: every direct `review_bots` read outside apps-store. */
 const MAINTENANCE_SITES: Record<string, number> = {
+  // The operator replay lane resolves a failure's live target/bot/workspace; it is a
+  // maintenance read gated by the caller's operator auth, never a tenant read.
+  "admin/maintenance-replay.ts": 1,
   "worker/lifecycle-reconcile.ts": 1,
   "worker/check-reconcile.ts": 3,
   "pipeline/review-threads.ts": 1,
