@@ -2375,6 +2375,16 @@ describe("createReviewConsumer", () => {
     h.kvState.getValue = "done";
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    // A `done` mark is only proof together with the D1 row it was written
+    // after: the confirmed duplicate acks on both.
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: VALID_OUTPUT,
+      appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
+    });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await consumer(h.makeBatch(makePayload()));
@@ -2386,11 +2396,37 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
     ]);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
-    expect(reviewCount(db)).toBe(0);
+    expect(reviewCount(db)).toBe(1); // untouched
     expect(h.kvPuts).toHaveLength(0);
     expect(h.sandbox.destroyCalls).toBe(1);
     const infoLine = h.logLines.find((l) => l.level === "info" && l.msg.includes("KV idempotency hit"));
     expect(infoLine).toBeDefined();
+  });
+
+  test("KV done-state hit with NO D1 record → warns and reviews instead of acking", async () => {
+    h.kvState.getValue = "done"; // an orphan mark: no `reviews` row backs it
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // The run proceeds past the dedup: the review is posted, the row lands and
+    // the normal completion path rewrites the mark.
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.kvPuts).toEqual([
+      {
+        key: `idem:123:acme/widgets:42:${SHA}`,
+        value: "done",
+        options: { expirationTtl: 86400 },
+      },
+    ]);
+    const warnLine = h.logLines.find(
+      (l) => l.level === "warn" && l.msg.includes("KV marked done but D1 has no record"),
+    );
+    expect(warnLine).toBeDefined();
+    expect(h.logLines.some((l) => l.msg.includes("KV idempotency hit"))).toBe(false);
   });
 
   test("lifecycle apply failure after a successful post → one comment, proof + KV done, warn + ack, no rethrow", async () => {
@@ -6735,6 +6771,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.kvState.getValue = "done"; // the CHECKOUT sha already has a completed review
     const db = await createSeededTestD1();
+    // `done` acks only together with its D1 row, so the duplicate is seeded as
+    // the confirmed pair it is in production.
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: checkoutSha }),
+      schema: "mstar.review/v1",
+      payload: VALID_OUTPUT,
+      appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
+    });
     const adapter = checksAdapterFor(db);
     const payload = makePayload(); // payload head_sha = SHA
     const attached = await attachCheckAtAcceptance(

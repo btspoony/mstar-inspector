@@ -5116,8 +5116,16 @@ async function processMessage(
     // checked-out sha → ack (no post, no insert). KV done-state first (B3),
     // then D1. Keyed off the checkout, so a force-push between delivery and
     // processing is never mis-deduped against the stale payload sha.
+    //
+    // The KV mark alone is not proof: a mark written before (or without) the
+    // D1 row — a lost insert, a deleted row — would suppress every later
+    // delivery for this head forever, with no failure row to show for it. So
+    // a `done` claim acks only when the same D1 row the non-KV path reads
+    // backs it; otherwise the mark is left alone and the run proceeds (its
+    // own completion rewrites the mark).
     const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
-    if (done) {
+    const existing = await deps.store.findByIdempotencyKey(key);
+    if (done && existing) {
       deps.log.info(fields, "KV idempotency hit — ack");
       // The claim now precedes this read, so the run it created must be closed
       // — and it must carry THIS head's existing result (inherited like an
@@ -5129,7 +5137,12 @@ async function processMessage(
       await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
       return { kind: "ok" };
     }
-    const existing = await deps.store.findByIdempotencyKey(key);
+    if (done) {
+      deps.log.warn(
+        fields,
+        "idempotency KV marked done but D1 has no record — proceeding with the review",
+      );
+    }
     if (existing) {
       deps.log.info(fields, "idempotency hit — ack");
       await terminalizeCheck(null, "skipped", headSha);
