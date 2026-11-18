@@ -898,7 +898,7 @@ describe("runSweep — failure paging latch", () => {
     expect(pagingRow(db)).toBeNull();
   });
 
-  test("a failed latch write after a successful POST logs and still reports the post", async () => {
+  test("a latch write that throws logs and never stops the post", async () => {
     const db = failureDb();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { fetchImpl, calls } = okSink();
@@ -955,6 +955,44 @@ describe("runSweep — failure paging latch", () => {
 
     // A real new breach still pages: the recovery was not overwritten.
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const next = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(next.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+  });
+
+  test("a newer breach's alert survives an older breach's POST resolving late", async () => {
+    const db = failureDb();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // Breach A pauses inside its POST. A recovery then lands and failures cross
+    // the threshold again for breach B, whose sweep has NOT run yet when A
+    // finally resolves: that late 2xx must not close the edge B owns.
+    let release: () => void = () => {};
+    let enteredPost: () => void = () => {};
+    const paused = new Promise<void>((resolve) => (release = resolve));
+    const posting = new Promise<void>((resolve) => (enteredPost = resolve));
+    const pausedFetch = (async () => {
+      enteredPost();
+      await paused;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    const breaching = runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl: pausedFetch, log });
+
+    await posting;
+    clearFailures(db);
+    const recovery = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl: okSink().fetchImpl, log });
+    expect(recovery).toMatchObject({ thresholdBreached: false, webhook: "not_attempted" });
+    expect(pagingRow(db)).toBeNull();
+
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    release();
+    expect((await breaching).webhook).toBe("posted");
+    // Latch-before-post is what makes this hold: A claimed the edge before its
+    // POST, the recovery opened it again, and A's late return writes nothing.
+    expect(pagingRow(db)).toBeNull();
+
+    // Breach B still pages — the older breach did not swallow its alert.
     const { fetchImpl, calls } = okSink();
     const next = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
     expect(next.webhook).toBe("posted");

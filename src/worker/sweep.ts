@@ -23,12 +23,15 @@
  *
  * The alert posts on the breach TRANSITION, not on every breach: the one
  * machine-state row `platform.alert.failure_paging` in
- * `review_runtime_settings` latches after the sink accepts a post and is
- * DELETEd on the first healthy sweep, so a sustained breach is one alert and
- * a recovery rearms the next one. A state read that cannot be trusted counts
- * as unannounced (the post it might suppress is the one that matters) and a
- * failed state write only costs a duplicate — the state can never suppress a
- * post the sweep owes it, and storage failure is never sold as exactly-once.
+ * `review_runtime_settings` latches BEFORE the post and is DELETEd on the
+ * first healthy sweep, so a sustained breach is one alert and a recovery
+ * rearms the next one. Latching first is what keeps an older breach's slow
+ * post from closing the edge a newer breach already owns — a guarded write
+ * refuses a value another sweep changed. The price is duplication: a failed
+ * post clears the latch again and the next breaching sweep may page twice.
+ * Duplicate alerts are acceptable, a missed alert is not. A state read that
+ * cannot be trusted counts as unannounced (the post it might suppress is the
+ * one that matters), and storage failure is never sold as exactly-once.
  *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
  * - DLQ depth is NOT read: there is no CF API token surface,
@@ -261,16 +264,18 @@ const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_
 
 /**
  * The breach TRANSITION write — why it lives here beside the predicate that
- * defines a breach rather than in the generic settings store. It lands only
- * when BOTH still hold at write time, in ONE statement:
+ * defines a breach rather than in the generic settings store. It runs BEFORE
+ * the alert POST and lands only when BOTH still hold at write time, in ONE
+ * statement:
  *
  * - the breach: the same trailing-window total is still above the threshold.
- *   A recovery that landed while this sweep waited in its POST then cannot be
- *   re-latched into a stale `tripped` row that swallows the next breach. A
- *   value compare alone cannot see that race: a recovery's DELETE and an
- *   already-clear sweep both leave the key absent.
+ *   A recovery that landed between this sweep's count read and this write
+ *   cannot be re-latched into a stale `tripped` row that swallows the next
+ *   breach. A value compare alone cannot see that race: a recovery's DELETE
+ *   and an already-clear sweep both leave the key absent.
  * - the state this sweep read (`?6`, `null` = key absent): a newer latch or a
- *   concurrent rearm leaves that newer state standing.
+ *   concurrent rearm leaves that newer state standing. Losing this compare
+ *   means another sweep owns the generation and posts its own alert.
  *
  * Answers whether it wrote. Binds: key, `tripped`, now, actor, threshold,
  * observed value.
@@ -551,57 +556,66 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     if (!deps.alertUrl) {
       webhook = "absent";
     } else {
-      // An arrow over a globalThis property call, never the bare `fetch` reference:
-      // calling a stored reference loses the global receiver and workerd's native
-      // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
-      const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
+      // Latch BEFORE the POST. The write that marks this breach announced
+      // happens while this sweep still owns the state it observed, so a slower
+      // sweep from an older breach cannot latch over a newer breach's alert.
+      // The trade-off is deliberate: a failed POST clears the latch again and
+      // the next breaching sweep may page a second time — duplicate alerts are
+      // acceptable, a missed alert is not.
+      let claimed = true;
       try {
-        const response = await fetchImpl(deps.alertUrl, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(alert),
-          signal: AbortSignal.timeout(SWEEP_WEBHOOK_TIMEOUT_MS),
-        });
-        if (!response.ok) {
-          // Non-2xx = NOT posted: the sink rejected the alert. Throw a synthetic
-          // status-only error (never the URL or body) so the shared catch path
-          // below emits the warn and the "failed" disposition.
-          throw new Error(`alert webhook POST returned HTTP ${response.status}`);
-        }
-        // Latch ONLY after the sink accepted the alert: an absent sink, a
-        // timeout, a throw or a non-2xx must stay retryable on the next sweep,
-        // so a failed post never rearms the edge. A successful post whose latch
-        // write fails logs and may post again next sweep — that bounded
-        // duplicate is the price of never losing the alert. The write is
-        // guarded: it re-checks the breach and the value this sweep read
-        // (`observed`), so a recovery that landed while the POST was in flight
-        // is not re-latched into a stale `tripped` row that would swallow the
-        // next breach.
-        try {
-          if (!(await latchFailurePagingBreach(db, observed))) {
-            log.warn(
-              { event: "ops_sweep_alert_state_cas_lost", detail: "state moved during the alert POST" },
-              "failure paging latch did not land — kept the newer state",
-            );
-          }
-        } catch (error) {
+        claimed = await latchFailurePagingBreach(db, observed);
+        if (!claimed) {
           log.warn(
-            { event: "ops_sweep_alert_state_set_failed", detail: warnDetail(error, deps.alertUrl) },
-            "failure paging state write failed — this alert may post again",
+            { event: "ops_sweep_alert_state_cas_lost", detail: "state moved before the alert POST" },
+            "failure paging latch did not land — another sweep owns this breach",
           );
         }
-        webhook = "posted";
       } catch (error) {
-        // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
-        // request URL into the error message; `warnDetail` redacts and caps it.
+        // The write may or may not have landed, so posting anyway can only
+        // duplicate — the same bounded cost the whole ordering accepts.
         log.warn(
-          {
-            event: "ops_sweep_alert_webhook_failed",
-            detail: warnDetail(error, deps.alertUrl),
-          },
-          "alert webhook POST failed — log-only alert stands",
+          { event: "ops_sweep_alert_state_set_failed", detail: warnDetail(error, deps.alertUrl) },
+          "failure paging state write failed — this alert may post again",
         );
-        webhook = "failed";
+      }
+      if (!claimed) {
+        webhook = "not_attempted";
+      } else {
+        // An arrow over a globalThis property call, never the bare `fetch` reference:
+        // calling a stored reference loses the global receiver and workerd's native
+        // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
+        const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
+        try {
+          const response = await fetchImpl(deps.alertUrl, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(alert),
+            signal: AbortSignal.timeout(SWEEP_WEBHOOK_TIMEOUT_MS),
+          });
+          if (!response.ok) {
+            // Non-2xx = NOT posted: the sink rejected the alert. Throw a synthetic
+            // status-only error (never the URL or body) so the shared catch path
+            // below emits the warn and the "failed" disposition.
+            throw new Error(`alert webhook POST returned HTTP ${response.status}`);
+          }
+          webhook = "posted";
+        } catch (error) {
+          // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
+          // request URL into the error message; `warnDetail` redacts and caps it.
+          log.warn(
+            {
+              event: "ops_sweep_alert_webhook_failed",
+              detail: warnDetail(error, deps.alertUrl),
+            },
+            "alert webhook POST failed — log-only alert stands",
+          );
+          // Reopen the edge this sweep just closed so the next breaching sweep
+          // retries. A failed clear keeps the latch and stays retried each
+          // healthy sweep, which is the same bound the clear path always had.
+          await rearm();
+          webhook = "failed";
+        }
       }
     }
   }
