@@ -31,9 +31,9 @@
  *   the same predicate, so one free workspace per login holds under concurrency.
  * - `app-count` (manifest App creation): BOUNDED BY THE WRITE. The commit path
  *   reads `countLiveApps` as fast fail, and `createApp`'s own insert re-counts
- *   the same live Apps and binds `apps_per_workspace`, so two concurrent
- *   commits on a capped plan create exactly one App and the loser gets the
- *   existing refusal.
+ *   the same live Apps and binds `apps_per_workspace`, so concurrent commits
+ *   never land more Apps than the cap allows; only the loser of a race for the
+ *   LAST slot gets the existing refusal. A cap of N still admits N.
  * - `review-quota` (review enqueue): OPEN. `usedRp` comes from a month sum read
  *   before the enqueue and no statement re-checks it, so two concurrent
  *   deliveries can both pass a month with room for one. This is the one gate a

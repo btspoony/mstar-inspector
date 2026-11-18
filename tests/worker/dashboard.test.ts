@@ -2277,19 +2277,20 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expectHoldExpired(refused);
   });
 
-  test("saas: the insert's own count refuses when the fast-path read saw zero", async () => {
-    const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
-    await seedApps(env, 1);
+  /**
+   * A commit env whose `countLiveApps` read answers zero — the stale answer a
+   * racing request sees, so only the guarded insert can refuse. Matched on the
+   * counter's own projection: the insert's cap subquery joins the same tables.
+   */
+  function staleCountEnv(env: Env): Env {
     const db = dbOf(env);
-    // The pre-check's fast path is stubbed to the stale answer a racing request
-    // reads; only the guarded insert can refuse from here.
-    const staleCountEnv = {
+    return {
       ...env,
       DB: {
         ...db,
         prepare(query: string): DashboardD1Statement {
           const stmt = db.prepare(query);
-          if (!query.includes("JOIN review_bots b ON b.id = w.bot_id")) return stmt;
+          if (!query.includes("COUNT(*) AS n")) return stmt;
           const zero: DashboardD1Statement = {
             bind: () => zero,
             first: async <T = Record<string, unknown>>() => ({ n: 0 }) as T,
@@ -2300,8 +2301,39 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
         },
       },
     } as unknown as Env;
+  }
 
-    const refused = await doCommit({ env: staleCountEnv, holdValue: await freshHold() });
+  test("saas: a same-hold resubmit racing for the last slot is refused, never a mapping fault", async () => {
+    const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
+    // The free plan caps the workspace at ONE App and it owns none. Both commits
+    // present the SAME signed hold, so both carry the same caller-supplied App
+    // id — the winner inserts that id, and the loser's guarded insert changes no
+    // row while its id lookup would still find the winner's bot. A mapping
+    // insert keyed by id alone would collide on bot_workspaces' primary key and
+    // surface a retryable 500 instead of the cap's 409.
+    const holdValue = await freshHold();
+    const [a, b] = await Promise.all([
+      doCommit({ env: staleCountEnv(env), holdValue }),
+      doCommit({ env: staleCountEnv(env), holdValue }),
+    ]);
+
+    expect([a.status, b.status].sort()).toEqual([302, 409]);
+    expect(appRowCount(env)).toBe(1);
+    expect(relatedRowCount(env, "bot_workspaces")).toBe(1);
+    const refused = a.status === 409 ? a : b;
+    expect(await refused.text()).toContain(appCapCopy(1));
+    // The cap outcome, not a database rejection: non-retryable, hold burned.
+    expectHoldExpired(refused);
+  });
+
+  test("saas: the insert's own count refuses when the fast-path read saw zero", async () => {
+    const env = commitEnv({ DEPLOYMENT_MODE: "saas" });
+    await seedApps(env, 1);
+    // The pre-check's fast path is stubbed to the stale answer a racing request
+    // reads; only the guarded insert can refuse from here.
+    const staleCount = staleCountEnv(env);
+
+    const refused = await doCommit({ env: staleCount, holdValue: await freshHold() });
 
     expect(refused.status).toBe(409);
     expect(appRowCount(env)).toBe(1);

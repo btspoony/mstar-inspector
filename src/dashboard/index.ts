@@ -1828,8 +1828,9 @@ async function commitManifestApp(args: {
   // The plan's App allowance (D8). A NULL limit is no cap and `self-hosted`
   // answers the unlimited constant, so the count (a thunk) is only read for a
   // plan that actually has one. This read is FAST-FAIL UX: `createApp`'s insert
-  // re-counts the same live Apps in its own statement, which is what makes two
-  // concurrent commits land one App and one refusal.
+  // re-counts the same live Apps in its own statement, so concurrent commits
+  // never land more Apps than the cap allows — the loser of a race for the
+  // last slot gets the refusal.
   const verdict = await checkEntitlement({
     db,
     mode,

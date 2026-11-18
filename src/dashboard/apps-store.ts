@@ -903,8 +903,9 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * commit path turns it into `already_connected` (409).
      *
      * `maxApps` is enforced by the insert itself, not by a read before it: the
-     * batch re-counts the workspace's live Apps, so two concurrent creations
-     * on a capped plan land exactly one row and the loser gets
+     * batch re-counts the workspace's live Apps, so concurrent creations can
+     * never land more rows than the cap allows. When exactly one slot is left
+     * the loser's guarded insert changes no row and it gets
      * {@link AppCountExceededError}.
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
@@ -951,13 +952,16 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             input.workspaceId,
             ...(input.maxApps === null ? [] : [input.maxApps]),
           ),
-        // Conditional too: the bot's row is the only source of the mapping's
-        // `bot_id`, so a refused insert leaves this one matching nothing. An
-        // unconditional insert here would turn the refusal into a foreign-key
-        // fault.
+        // Conditional too, and bound to THIS batch's insert: `changes()` is the
+        // row count of the statement above in this same transaction. A refused
+        // (zero-row) insert therefore leaves this one matching nothing — while
+        // an id lookup alone would find a CONCURRENT winner's bot under the
+        // same caller-supplied id and turn the refusal into a mapping
+        // primary-key fault.
         db
           .prepare(
-            `INSERT INTO bot_workspaces (bot_id, workspace_id) SELECT id, ?2 FROM review_bots WHERE id = ?1`,
+            `INSERT INTO bot_workspaces (bot_id, workspace_id)
+             SELECT id, ?2 FROM review_bots WHERE id = ?1 AND changes() > 0`,
           )
           .bind(id, input.workspaceId),
       ]);
