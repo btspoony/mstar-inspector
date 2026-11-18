@@ -186,7 +186,8 @@ retry charges again; a review that never publishes is never counted as one. So
 the credits and the review counts are never equal and no copy may imply they
 are. The card states this on the surface (`workspace.quotaBasis`) and the labels
 keep the words apart: the review rows say `reviews`, the members meter says
-attempts, and the credit block says credits with the RP detail beside it.
+attempts, and the credit block speaks credits throughout — the internal unit
+never reaches an operator-visible string.
 
 Counters are not unified, and no report may substitute one for another: a
 workspace at its ceiling is refused by the credits (the RP ceiling), not by the
@@ -216,8 +217,10 @@ costs at least 1 RP it refuses exactly the months the card banners, plus the one
 one review would tip over. `self-hosted` resolves no ceiling and renders no
 credit block at all.
 
-The block's "where it went" rows split the month's RP into the shared bot's and
-the workspace's own Apps'. `usage_events.source` records which one paid, written
+The block's "where it went" rows split the month's spend into the shared bot's and
+the workspace's own Apps', each rendered on the same credit scale as the pair
+above (the same `rp_per_credit` division, so no second unit appears).
+`usage_events.source` records which one paid, written
 in the same statement that records the price (migration
 `0065_usage_events_source.sql`) — the price alone is not invertible, because
 `rp = base × source` and a profile chooses its own multipliers. Rows written

@@ -114,27 +114,17 @@ export function ReviewUsageCard({
                         })}
                   </dd>
                 </div>
-                <div className="flex items-baseline justify-between gap-3">
-                  <dt className="text-muted-foreground">
-                    {t(locale, "workspace.quotaRpLabel", { rpPerCredit: quota.rpPerCredit })}
-                  </dt>
-                  <dd className="font-medium tabular-nums">
-                    {quota.limitRp === null
-                      ? t(locale, "workspace.quotaRpNoLimit", { used: quota.usedRp })
-                      : t(locale, "workspace.quotaRp", { used: quota.usedRp, limit: quota.limitRp })}
-                  </dd>
-                </div>
               </dl>
               <div className="flex flex-col gap-1">
                 <p className="text-xs text-muted-foreground">{t(locale, "workspace.quotaSplitLabel")}</p>
                 <dl className="flex flex-col gap-1 text-xs">
                   <div className="flex items-baseline justify-between gap-3">
                     <dt className="text-muted-foreground">{t(locale, "workspace.quotaSharedBot")}</dt>
-                    <dd className="tabular-nums">{quota.sharedRp} RP</dd>
+                    <dd className="tabular-nums">{credits(quota.sharedRp, quota.rpPerCredit)}</dd>
                   </div>
                   <div className="flex items-baseline justify-between gap-3">
                     <dt className="text-muted-foreground">{t(locale, "workspace.quotaByok")}</dt>
-                    <dd className="tabular-nums">{quota.byokRp} RP</dd>
+                    <dd className="tabular-nums">{credits(quota.byokRp, quota.rpPerCredit)}</dd>
                   </div>
                 </dl>
               </div>
