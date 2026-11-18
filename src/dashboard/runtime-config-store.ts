@@ -1325,6 +1325,12 @@ const FAILURE_PAGING_RANK_SQL = `CAST(CASE
  *
  * A malformed stored value ranks 0, so the next write replaces it.
  *
+ * At an EQUAL generation `clear` wins and `tripped` loses: two sweeps read the
+ * same ticket and disagree about the window, so the armed answer is the safe
+ * one — it costs a duplicate alert, where keeping `tripped` could swallow the
+ * next breach. The reverse (a delayed `tripped` landing on a recovery's
+ * generation) stays refused, which is what the ticket ordering buys.
+ *
  * `updated_at` is bookkeeping; no wall-clock value participates in the
  * ordering. Binds: key, state, next generation, actor.
  */
@@ -1335,7 +1341,8 @@ const FAILURE_PAGING_CAS_SQL = `
     value = excluded.value,
     updated_at = excluded.updated_at,
     updated_by = excluded.updated_by
-   WHERE ${FAILURE_PAGING_RANK_SQL} < ?3`;
+   WHERE ${FAILURE_PAGING_RANK_SQL} < ?3
+      OR (${FAILURE_PAGING_RANK_SQL} = ?3 AND ?2 IS 'clear')`;
 
 export async function readFailurePagingState(db: DashboardD1): Promise<FailurePagingRead> {
   try {

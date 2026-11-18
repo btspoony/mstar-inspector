@@ -366,7 +366,7 @@ describe("failure paging generation (sweep machine state)", () => {
     expect(await readFailurePagingState(db)).toEqual({ state: "clear", gen: 2, degraded: null });
   });
 
-  test("only a strictly greater generation lands", async () => {
+  test("an older generation never lands, and a clear at the same generation re-arms", async () => {
     const db = createMigratedTestD1();
     await compareAndSetFailurePagingState(db, "clear", 2);
     // An older sweep resuming late.
@@ -377,6 +377,10 @@ describe("failure paging generation (sweep machine state)", () => {
     expect(stored(db)).toBe("clear:2");
     expect(await compareAndSetFailurePagingState(db, "tripped", 3)).toBe(true);
     expect(stored(db)).toBe("tripped:3");
+    // Same generation, differing states: the armed answer wins, so a healthy
+    // sweep that read the same ticket can still re-arm the edge.
+    expect(await compareAndSetFailurePagingState(db, "clear", 3)).toBe(true);
+    expect(stored(db)).toBe("clear:3");
   });
 
   test("a value no writer produced is clear at generation 0, and the next write repairs it", async () => {
