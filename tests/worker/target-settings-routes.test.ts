@@ -107,6 +107,7 @@ async function seededWorld(): Promise<World> {
     webhookSecretEnc: await box.encryptSecret("w", `github_apps.webhook_secret_enc:${id}`),
     createdBy: "mallory",
     workspaceId: "default",
+    maxApps: null,
   });
   db.raw
     .prepare(
