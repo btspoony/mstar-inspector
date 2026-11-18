@@ -74,6 +74,13 @@
  * blanking them, so an absent companion is the one "no reason" / "not running"
  * shape there is.
  *
+ * `platform.alert.failure_paging` is the sweep's own breach-transition latch
+ * and the one key here that is MACHINE state, not an operator tunable: absent
+ * means the alert is armed, the exact value `"tripped"` means a breach is
+ * already announced. It therefore has narrow read/set/clear functions, no
+ * generic key-write API, no admin control and no audit row — a human actor on
+ * it would be a fiction, and the sweep is the only writer.
+ *
  * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
  * (the platform-wide quota; Cloudflare Queues delivers at most 250 of it at
  * once); the workspace value is an integer in 1..WORKSPACE_CONCURRENCY_MAX.
@@ -1246,4 +1253,47 @@ export async function setMaintenanceMode(
     put(MAINTENANCE_SINCE_KEY, enabled ? now : null),
     put(MAINTENANCE_REASON_KEY, reason),
   ]);
+}
+
+/** PK of the sweep's breach-transition latch; see the module header. */
+export const FAILURE_PAGING_STATE_KEY = "platform.alert.failure_paging";
+/** The one latched value. Anything else stored under the key is malformed. */
+export const FAILURE_PAGING_TRIPPED = "tripped";
+/** The system actor on the latch's writes — the sweep, never a human. */
+const FAILURE_PAGING_ACTOR = "sweep";
+
+/**
+ * Whether the last breach has already been announced. `degraded` names why a
+ * value could not be trusted: an unreadable row or a present value that is not
+ * exactly `"tripped"` is CLEAR — a state no writer produced is not evidence the
+ * alert was posted, and the alert it might suppress is the one that matters.
+ * Never throws; the caller logs the degrade.
+ */
+export type FailurePagingRead = { tripped: boolean; degraded: DegradedReason | null };
+
+const FAILURE_PAGING_READ_SQL = "SELECT value FROM review_runtime_settings WHERE key = ?1";
+const FAILURE_PAGING_CLEAR_SQL = "DELETE FROM review_runtime_settings WHERE key = ?1";
+
+export async function getFailurePagingState(db: DashboardD1): Promise<FailurePagingRead> {
+  try {
+    const row = await db.prepare(FAILURE_PAGING_READ_SQL).bind(FAILURE_PAGING_STATE_KEY).first<RuntimeSettingRow>();
+    if (row === null) return { tripped: false, degraded: null };
+    if (row.value === FAILURE_PAGING_TRIPPED) return { tripped: true, degraded: null };
+    return { tripped: false, degraded: "malformed" };
+  } catch {
+    return { tripped: false, degraded: "read-failed" };
+  }
+}
+
+/** Latch the breach. The sweep calls this ONLY after a 2xx POST. Throws on a write failure. */
+export async function setFailurePagingTripped(db: DashboardD1, now: string): Promise<void> {
+  await db
+    .prepare(SYSTEM_UPSERT_SQL)
+    .bind(FAILURE_PAGING_STATE_KEY, FAILURE_PAGING_TRIPPED, now, FAILURE_PAGING_ACTOR)
+    .run();
+}
+
+/** Rearm the alert. Idempotent (a DELETE of an absent key changes nothing); throws on failure. */
+export async function clearFailurePagingState(db: DashboardD1): Promise<void> {
+  await db.prepare(FAILURE_PAGING_CLEAR_SQL).bind(FAILURE_PAGING_STATE_KEY).run();
 }

@@ -40,6 +40,7 @@ import {
   type CommentClaimSettingsLogFields,
 } from "../../src/pipeline/comment-claim-settings-reader";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { FAILURE_PAGING_STATE_KEY } from "../../src/dashboard/runtime-config-store";
 
 /**
  * A migrated DB carrying the target every recorded row names (its FK parent).
@@ -106,7 +107,9 @@ function recordingDb(captured: string[]): D1Like {
           return stmt;
         },
         async first<T = Record<string, unknown>>(): Promise<T | null> {
-          return { n: 0 } as T;
+          // The only `first()` the sweep issues is the paging-latch read: an
+          // absent row is the armed state.
+          return null;
         },
         async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
           return { results: [] as T[] };
@@ -140,18 +143,21 @@ describe("runSweep", () => {
   test("counts review_failures with the trailing-24h window SQL", async () => {
     const captured: string[] = [];
     const result = await runSweep(recordingDb(captured));
-    expect(captured).toHaveLength(4);
     expect(captured[0]).toContain("DELETE FROM webhook_deliveries");
     // Migration 0039: the ledger's own bounded retention, terminal rows only.
     expect(captured[1]).toContain("DELETE FROM pull_requests");
     expect(captured[1]).toContain("state IN ('closed', 'merged')");
     expect(captured[2]).toContain("UPDATE workspace_invites");
-    expect(captured[3]).toContain("FROM review_failures");
-    expect(captured[3]).toContain("created_at > datetime('now', '-24 hours')");
+    const countAt = captured.findIndex((query) => query.includes("FROM review_failures"));
+    expect(captured[countAt]).toContain("created_at > datetime('now', '-24 hours')");
     // ONE grouped read: the same result supplies the total and the payload's
     // per-stage breakdown, so neither can describe a different instant.
-    expect(captured[3]).toContain("SELECT stage, COUNT(*) AS count");
-    expect(captured[3]).toContain("GROUP BY stage ORDER BY stage");
+    expect(captured[countAt]).toContain("SELECT stage, COUNT(*) AS count");
+    expect(captured[countAt]).toContain("GROUP BY stage ORDER BY stage");
+    // The paging latch is read once and, on a healthy window, cleared once.
+    expect(captured[countAt + 1]).toContain("SELECT value FROM review_runtime_settings");
+    expect(captured[countAt + 2]).toContain("DELETE FROM review_runtime_settings");
+    expect(captured).toHaveLength(countAt + 3);
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,
@@ -372,7 +378,8 @@ describe("runSweep", () => {
             return stmt;
           },
           async first<T = Record<string, unknown>>(): Promise<T | null> {
-            return { n: 0 } as T;
+            // The sweep's only `first()` is the paging-latch read: absent = armed.
+            return null;
           },
           async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
             return { results: [] as T[] };
@@ -394,11 +401,13 @@ describe("runSweep", () => {
     const result = await runSweep(db, { log });
     // The retention DELETE is parameter-free — no `?` placeholders to bind.
     expect(captured[0]).not.toContain("?");
-    // The only bound statement in the run is the invite-lapse flip: its ISO
-    // clock plus the per-run row cap.
-    expect(binds).toHaveLength(1);
-    expect(binds[0]).toHaveLength(2);
-    expect(binds[0]![1]).toBe(SWEEP_INVITE_LAPSE_CAP);
+    // The only TWO-placeholder statement in the run is the invite-lapse flip:
+    // its ISO clock plus the per-run row cap. Every other bound statement (the
+    // paging latch's read and clear) binds the single state key.
+    const inviteBound = binds.find((values) => values.length === 2);
+    expect(inviteBound).toBeDefined();
+    expect(inviteBound![1]).toBe(SWEEP_INVITE_LAPSE_CAP);
+    expect(binds.filter((values) => values.length !== 2).every((values) => values.length === 1)).toBe(true);
     // The fake reports changes: 3 for EVERY statement, so both janitors log;
     // the delivery sweep's line comes first.
     expect(calls).toHaveLength(2);
@@ -714,6 +723,204 @@ describe("runSweep", () => {
       },
     };
     await expect(runSweep(broken, { log: captureLog().log })).rejects.toThrow("d1 down");
+  });
+});
+
+/**
+ * The breach-transition latch (`platform.alert.failure_paging`): the alert is
+ * posted on the EDGE — a sustained breach is one alert, a recovery rearms it,
+ * and no storage failure may ever suppress a post the sweep owes.
+ */
+describe("runSweep — failure paging latch", () => {
+  /** The stored latch row, straight from the runtime-config table. */
+  function pagingRow(db: TestD1): { value: string; updated_by: string } | null {
+    return db.raw
+      .query("SELECT value, updated_by FROM review_runtime_settings WHERE key = ?")
+      .get(FAILURE_PAGING_STATE_KEY) as { value: string; updated_by: string } | null;
+  }
+
+  /** Remove the seeded failures so the next sweep sees a healthy window. */
+  function clearFailures(db: TestD1): void {
+    db.raw.exec("DELETE FROM review_failures");
+  }
+
+  /** A sink that accepts every POST and counts the calls. */
+  function okSink(): { fetchImpl: typeof fetch; calls: () => number } {
+    let n = 0;
+    const fetchImpl = (async () => {
+      n += 1;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    return { fetchImpl, calls: () => n };
+  }
+
+  test("breach → breach → recovery → breach posts twice", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+
+    const first = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(first.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+    expect(pagingRow(db)).toMatchObject({ value: "tripped", updated_by: "sweep" });
+
+    // Same breach, fresh sweep instance: the stored latch survives, so nothing
+    // is posted and no state is rewritten.
+    const second = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(second).toMatchObject({ thresholdBreached: true, webhook: "not_attempted" });
+    expect(calls()).toBe(1);
+
+    clearFailures(db);
+    const recovery = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(recovery).toMatchObject({ thresholdBreached: false, webhook: "not_attempted" });
+    expect(pagingRow(db)).toBeNull();
+    expect(calls()).toBe(1);
+
+    // Armed again: the next breach pages.
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const third = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(third.webhook).toBe("posted");
+    expect(calls()).toBe(2);
+  });
+
+  test("an absent sink does not latch, so the alert stays retryable", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+
+    const logOnly = await runSweep(db, { log });
+    expect(logOnly.webhook).toBe("absent");
+    expect(pagingRow(db)).toBeNull();
+
+    const posted = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(posted.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+  });
+
+  test("a failed POST does not latch, so the next sweep retries", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    const rejecting = (async () => new Response("sink degraded", { status: 503 })) as unknown as typeof fetch;
+
+    const failed = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl: rejecting, log });
+    expect(failed.webhook).toBe("failed");
+    expect(pagingRow(db)).toBeNull();
+
+    const retried = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(retried.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+    expect(pagingRow(db)).toMatchObject({ value: "tripped" });
+  });
+
+  test("a state read failure alerts instead of silencing the breach", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const { log, calls: warns } = captureLog();
+    const wrapped: D1Like = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("SELECT value FROM review_runtime_settings")) throw new Error("settings locked");
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+
+    const result = await runSweep(wrapped, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+    expect(warns[0]!.fields).toMatchObject({ event: "ops_sweep_alert_state_degraded", detail: "read-failed" });
+    // The latch write still landed: the next sweep sees a tripped state.
+    expect(pagingRow(db)).toMatchObject({ value: "tripped" });
+
+    // A healthy sweep rearms even though its own read still fails, so the
+    // stale latch cannot swallow the next breach.
+    clearFailures(db);
+    const healthy = await runSweep(wrapped, { log: captureLog().log });
+    expect(healthy.thresholdBreached).toBe(false);
+    expect(pagingRow(db)).toBeNull();
+  });
+
+  test("a malformed stored value reads as clear, logs, and is replaced on the next breach", async () => {
+    const db = failureDb();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES (?, 'maybe', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run(FAILURE_PAGING_STATE_KEY);
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const { log, calls: warns } = captureLog();
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result.webhook).toBe("posted");
+    expect(calls()).toBe(1);
+    expect(warns[0]!.fields).toMatchObject({ event: "ops_sweep_alert_state_degraded", detail: "malformed" });
+    expect(pagingRow(db)).toMatchObject({ value: "tripped" });
+  });
+
+  test("a failed clear logs, and the next healthy sweep retries it", async () => {
+    const db = failureDb();
+    const { log, calls: warns } = captureLog();
+    const logOnly = await runSweep(db, { log }); // healthy: nothing latched
+    expect(logOnly.thresholdBreached).toBe(false);
+    expect(warns).toHaveLength(0);
+
+    // Latch, then try to recover with a broken DELETE.
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES (?, 'tripped', '2026-11-05T00:00:00.000Z', 'sweep')`,
+      )
+      .run(FAILURE_PAGING_STATE_KEY);
+    const blockedClear: D1Like = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("DELETE FROM review_runtime_settings")) throw new Error("settings locked");
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const { log: blockedLog, calls: blockedWarns } = captureLog();
+    const stillLatched = await runSweep(blockedClear, { log: blockedLog });
+    expect(stillLatched.thresholdBreached).toBe(false);
+    expect(blockedWarns[0]!.fields).toMatchObject({
+      event: "ops_sweep_alert_state_clear_failed",
+      detail: "settings locked",
+    });
+    expect(pagingRow(db)).toMatchObject({ value: "tripped" });
+
+    // The failure was not rearming: the retry on the next healthy sweep is.
+    await runSweep(db, { log });
+    expect(pagingRow(db)).toBeNull();
+  });
+
+  test("a failed latch write after a successful POST logs and still reports the post", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { fetchImpl, calls } = okSink();
+    const { log, calls: warns } = captureLog();
+    const blockedSet: D1Like = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("INSERT INTO review_runtime_settings")) throw new Error("settings locked");
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+
+    const result = await runSweep(blockedSet, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result.webhook).toBe("posted");
+    expect(warns.some((call) => call.fields.event === "ops_sweep_alert_state_set_failed")).toBe(true);
+    expect(pagingRow(db)).toBeNull();
+
+    // Nothing latched, so an accepted post is repeated — the documented
+    // duplicate a failed write may cause.
+    const again = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(again.webhook).toBe("posted");
+    expect(calls()).toBe(2);
   });
 });
 

@@ -21,6 +21,15 @@
  * the alert payload: one grouped read, so the total and its parts always
  * describe the same instant.
  *
+ * The alert posts on the breach TRANSITION, not on every breach: the one
+ * machine-state row `platform.alert.failure_paging` in
+ * `review_runtime_settings` latches after the sink accepts a post and is
+ * DELETEd on the first healthy sweep, so a sustained breach is one alert and
+ * a recovery rearms the next one. A state read that cannot be trusted counts
+ * as unannounced (the post it might suppress is the one that matters) and a
+ * failed state write only costs a duplicate — the state can never suppress a
+ * post the sweep owes it, and storage failure is never sold as exactly-once.
+ *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
  * - DLQ depth is NOT read: there is no CF API token surface,
  *   so every alert payload carries `dlq_check: "skipped"` — the failure
@@ -56,6 +65,11 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
+import {
+  clearFailurePagingState,
+  getFailurePagingState,
+  setFailurePagingTripped,
+} from "../dashboard/runtime-config-store";
 import {
   MAINTENANCE_DEFERRED_STAGE,
   PAGING_EXCLUDED_STAGES,
@@ -128,6 +142,13 @@ export type SweepAlertFields = {
 export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
   event:
     | "ops_sweep_alert_webhook_failed"
+    // The breach-transition latch (`platform.alert.failure_paging`): a state
+    // read that could not be trusted, and the two writes either side of a
+    // transition. Each one degrades to a warn — none of them may suppress the
+    // post the sweep still owes.
+    | "ops_sweep_alert_state_degraded"
+    | "ops_sweep_alert_state_set_failed"
+    | "ops_sweep_alert_state_clear_failed"
     | "ops_sweep_failed"
     | "ops_sweep_db_unbound"
     // §7.11: the scheduled composition's independent catch for the
@@ -200,6 +221,18 @@ export type SweepLog = {
   ) => void;
 };
 
+/**
+ * One warn `detail`: redact BEFORE truncate (repo convention — a secret
+ * straddling the cut would leak a partial token), then cap the line. The
+ * configured alert URL is exact-string-replaced because a URL-shaped value
+ * evades the shape patterns (SEC-02).
+ */
+function warnDetail(error: unknown, alertUrl?: string): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const detail = redactExactSecrets(redactSecrets(raw), alertUrl ? [alertUrl] : []);
+  return detail.length <= SWEEP_LOG_DETAIL_MAX ? detail : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`;
+}
+
 /** Default sink: structured JSON lines on stderr. No secrets are logged. */
 export const defaultSweepLog: SweepLog = {
   warn: (fields, msg) => console.warn(JSON.stringify({ ...fields, msg: msg ?? "" })),
@@ -231,7 +264,8 @@ export type SweepResult = {
   invitesExpired: number | null;
   /**
    * Webhook disposition: absent (unset), posted, failed (throw or non-2xx,
-   * warn-logged), or not_attempted (no breach).
+   * warn-logged), or not_attempted (no breach, or a breach already announced
+   * by a previous sweep — only the transition posts).
    */
   webhook: "absent" | "posted" | "failed" | "not_attempted";
 };
@@ -263,18 +297,8 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       log.warn({ event: "retention_swept", deleted: retention.meta.changes }, "webhook_deliveries retention sweep");
     }
   } catch (error) {
-    // Redact before truncate (repo convention: a secret straddling the cut
-    // would leak a partial token) — same posture as the webhook-failure path.
-    const raw = error instanceof Error ? error.message : String(error);
-    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
     log.warn(
-      {
-        event: "retention_swept_failed",
-        detail:
-          detail.length <= SWEEP_LOG_DETAIL_MAX
-            ? detail
-            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
-      },
+      { event: "retention_swept_failed", detail: warnDetail(error, deps.alertUrl) },
       "webhook_deliveries retention sweep failed — continuing",
     );
   }
@@ -289,16 +313,8 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       log.warn({ event: "pull_request_retention_swept", deleted }, "pull_requests retention sweep");
     }
   } catch (error) {
-    const raw = error instanceof Error ? error.message : String(error);
-    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
     log.warn(
-      {
-        event: "pull_request_retention_swept_failed",
-        detail:
-          detail.length <= SWEEP_LOG_DETAIL_MAX
-            ? detail
-            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
-      },
+      { event: "pull_request_retention_swept_failed", detail: warnDetail(error, deps.alertUrl) },
       "pull_requests retention sweep failed — continuing",
     );
   }
@@ -313,16 +329,8 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   try {
     invitesExpired = await expireLapsedInvites(db, new Date().toISOString(), SWEEP_INVITE_LAPSE_CAP);
   } catch (error) {
-    const raw = error instanceof Error ? error.message : String(error);
-    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
     log.warn(
-      {
-        event: "invite_lapse_swept_failed",
-        detail:
-          detail.length <= SWEEP_LOG_DETAIL_MAX
-            ? detail
-            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
-      },
+      { event: "invite_lapse_swept_failed", detail: warnDetail(error, deps.alertUrl) },
       "workspace invite lapse sweep failed — continuing",
     );
   }
@@ -397,16 +405,8 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         );
       }
     } catch (error) {
-      const raw = error instanceof Error ? error.message : String(error);
-      const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
       log.warn(
-        {
-          event: "comment_claim_outbox_failed",
-          detail:
-            detail.length <= SWEEP_LOG_DETAIL_MAX
-              ? detail
-              : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
-        },
+        { event: "comment_claim_outbox_failed", detail: warnDetail(error, deps.alertUrl) },
         "comment trigger outbox sweep failed — continuing",
       );
     }
@@ -435,7 +435,38 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   const stages = stageRows.map((row) => ({ stage: row.stage, count: row.count }));
   const failures24h = stages.reduce((sum, row) => sum + row.count, 0);
   const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
+  // The breach-transition latch: the alert is posted on the EDGE, not on every
+  // sweep that still sees the same breach. A healthy sweep always rearms, even
+  // when its own read failed — a stale latch would otherwise swallow the next
+  // breach, and only a successful DELETE actually rearms.
+  const state = await getFailurePagingState(db);
+  if (state.degraded !== null) {
+    // An untrusted state is CLEAR: a value no writer produced is not evidence
+    // the alert was posted, and the post it might suppress is the one that
+    // matters. The line is the operator's only cue that state is broken.
+    log.warn(
+      { event: "ops_sweep_alert_state_degraded", detail: state.degraded },
+      "failure paging state unreadable — treating the alert as unannounced",
+    );
+  }
   if (!thresholdBreached) {
+    // Always attempted, even when the read above failed: a stale latch would
+    // swallow the next breach, and only a successful DELETE actually rearms.
+    // Idempotent — an absent row changes nothing and logs nothing.
+    try {
+      await clearFailurePagingState(db);
+    } catch (error) {
+      // Retried on every healthy sweep; until it lands the latch survives and
+      // a later breach stays silent, so the line has to say so.
+      log.warn(
+        { event: "ops_sweep_alert_state_clear_failed", detail: warnDetail(error, deps.alertUrl) },
+        "failure paging state clear failed — the latch may suppress the next breach",
+      );
+    }
+    return { failures24h, thresholdBreached, invitesExpired, webhook: "not_attempted" };
+  }
+  if (state.tripped) {
+    // Sustained breach already announced: no POST, no state write.
     return { failures24h, thresholdBreached, invitesExpired, webhook: "not_attempted" };
   }
 
@@ -468,22 +499,27 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       // below emits the warn and the "failed" disposition.
       throw new Error(`alert webhook POST returned HTTP ${response.status}`);
     }
+    // Latch ONLY after the sink accepted the alert: an absent sink, a timeout,
+    // a throw or a non-2xx must stay retryable on the next sweep, so a failed
+    // post never rearms the edge. A successful post whose latch write fails
+    // logs and may post again next sweep — that bounded duplicate is the price
+    // of never losing the alert.
+    try {
+      await setFailurePagingTripped(db, new Date().toISOString());
+    } catch (error) {
+      log.warn(
+        { event: "ops_sweep_alert_state_set_failed", detail: warnDetail(error, deps.alertUrl) },
+        "failure paging state write failed — this alert may post again",
+      );
+    }
     return { failures24h, thresholdBreached, invitesExpired, webhook: "posted" };
   } catch (error) {
-    // Redact BEFORE truncate (repo convention: a secret straddling the cut
-    // would leak a partial token) — ALERT_WEBHOOK_URL is secret-class and a
-    // runtime may interpolate the request URL into the error message.
-    // SEC-02: additionally exact-string-replace the configured alertUrl
-    // itself (a URL-shaped value evades the shape patterns) when present.
-    const raw = error instanceof Error ? error.message : String(error);
-    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
+    // ALERT_WEBHOOK_URL is secret-class and a runtime may interpolate the
+    // request URL into the error message; `warnDetail` redacts and caps it.
     log.warn(
       {
         event: "ops_sweep_alert_webhook_failed",
-        detail:
-          detail.length <= SWEEP_LOG_DETAIL_MAX
-            ? detail
-            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
+        detail: warnDetail(error, deps.alertUrl),
       },
       "alert webhook POST failed — log-only alert stands",
     );
