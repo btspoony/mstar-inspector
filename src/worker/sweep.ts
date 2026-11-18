@@ -540,7 +540,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     const nowMs = Date.now();
     const windowMs = SWEEP_WINDOW_HOURS * 3_600_000;
     const announced =
-      lastAlertAt !== null && lastAlertAt <= nowMs && nowMs - lastAlertAt < windowMs;
+      lastAlertAt !== null && lastAlertAt < nowMs && nowMs - lastAlertAt < windowMs;
     if (!announced) {
       alert = {
         event: "ops_sweep_alert",

@@ -11,7 +11,7 @@
  * absent = log-only, webhook failure = warn log only (never throws).
  */
 
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, jest, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
@@ -769,23 +769,34 @@ describe("runSweep — paging audit window", () => {
     const log = captureLog().log;
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
 
-    const first = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
-    expect(first.webhook).toBe("posted");
-    expect(calls()).toBe(1);
-    // Only a delivered alert is recorded, and the row names the sweep.
-    expect(alertRows(db)).toHaveLength(1);
-    expect(alertRows(db)[0]!.actor_login).toBe("sweep");
-    expect(JSON.parse(alertRows(db)[0]!.detail_json)).toEqual({
-      failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
-      stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
-    });
+    // Pinned clock: the suppression is "stamp strictly earlier than the
+    // reading clock", so the second sweep must read a later millisecond than
+    // the row the first one wrote.
+    const start = Date.parse("2026-01-01T00:00:00.000Z");
+    jest.useFakeTimers();
+    jest.setSystemTime(start);
+    try {
+      const first = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(first.webhook).toBe("posted");
+      expect(calls()).toBe(1);
+      // Only a delivered alert is recorded, and the row names the sweep.
+      expect(alertRows(db)).toHaveLength(1);
+      expect(alertRows(db)[0]!.actor_login).toBe("sweep");
+      expect(JSON.parse(alertRows(db)[0]!.detail_json)).toEqual({
+        failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
+        stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
+      });
 
-    // Same breach, fresh sweep instance: the recorded alert is inside the
-    // window, so nothing is posted and nothing is appended.
-    const second = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
-    expect(second).toMatchObject({ thresholdBreached: true, webhook: "not_attempted" });
-    expect(calls()).toBe(1);
-    expect(alertRows(db)).toHaveLength(1);
+      // Same breach, fresh sweep instance: the recorded alert is inside the
+      // window, so nothing is posted and nothing is appended.
+      jest.setSystemTime(start + 1_000);
+      const second = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(second).toMatchObject({ thresholdBreached: true, webhook: "not_attempted" });
+      expect(calls()).toBe(1);
+      expect(alertRows(db)).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test("once the recorded alert slides out of the window, a new breach posts again", async () => {
@@ -899,6 +910,27 @@ describe("runSweep — paging audit window", () => {
     expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
     expect(calls()).toBe(1);
     expect(alertRows(db)).toHaveLength(2);
+  });
+
+  test("a stamp equal to the reading clock is not a past alert, so the breach posts", async () => {
+    const db = failureDb();
+    const { fetchImpl, calls } = okSink();
+    const log = captureLog().log;
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    // Same-millisecond stamp: only a STRICTLY past alert proves a delivered
+    // page, so an equality cannot suppress the alert owed by this window.
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    seedAlert(db, now.toISOString());
+    jest.useFakeTimers();
+    jest.setSystemTime(now);
+    try {
+      const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+      expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
+      expect(calls()).toBe(1);
+      expect(alertRows(db)).toHaveLength(2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test("an unreadable window read logs and still pages the breach", async () => {
