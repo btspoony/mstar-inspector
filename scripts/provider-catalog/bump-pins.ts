@@ -66,17 +66,17 @@ function parseArgs(argv: string[]): { omp?: string; engine?: string; harnessRef?
   return options;
 }
 
-async function currentPins(): Promise<Pins> {
-  const root = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8")) as {
+async function currentPins(dir: string = ROOT): Promise<Pins> {
+  const root = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8")) as {
     dependencies: Record<string, string>;
   };
-  const images = await readFile(path.join(ROOT, "src/contracts/sandbox-images.ts"), "utf8");
+  const images = await readFile(path.join(dir, "src/contracts/sandbox-images.ts"), "utf8");
   const harness = /export const HARNESS_VERSION = "([^"]+)"/.exec(images)?.[1];
   const harnessRef = /harnessRef: "([0-9a-f]{40})"/.exec(images)?.[1];
   if (harness === undefined || harnessRef === undefined) {
     throw new Error("src/contracts/sandbox-images.ts does not declare HARNESS_VERSION and harnessRef");
   }
-  const dockerfile = await readFile(path.join(ROOT, "sandbox-image/Dockerfile"), "utf8");
+  const dockerfile = await readFile(path.join(dir, "sandbox-image/Dockerfile"), "utf8");
   const bumped = /# mstar-harness plugin, pinned ref [0-9a-f]{40} \(tag v[^,]+, bumped (\d{4}-\d{2}-\d{2})\)/.exec(
     dockerfile,
   )?.[1];
@@ -151,9 +151,9 @@ export function installAndVerify(dir: string, expected: Expected[], modes: strin
 /** Regenerate `dir`'s bun.lock from the committed lock + manifest beside it.
  *  `path.resolve`, not `path.join`: the runner's lock is built in an absolute
  *  temp directory, and `join` would nest it under the repo root instead. */
-function regenerateLock(dir: string): void {
+function regenerateLock(dir: string, root: string = ROOT): void {
   const install = Bun.spawnSync(["bun", "install", "--lockfile-only"], {
-    cwd: path.resolve(ROOT, dir),
+    cwd: path.resolve(root, dir),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -244,58 +244,76 @@ export function expectedInstalls(edits: PinEdit[], manifest: string): Expected[]
   return expected;
 }
 
-if (import.meta.main) {
-  const options = parseArgs(process.argv.slice(2));
-  const edits = planEdits(await currentPins(), options);
+/** A throw injected between the root install and the remaining surfaces. The
+ *  production path passes none; `tests/scripts/bump-pins-install.test.ts` uses it
+ *  to abort a bump exactly where the workflow can abort one, which is after the
+ *  real install and before the tree is consistent again. */
+export type BumpHooks = { afterRootInstall?: () => void };
+
+/** Move the pins and make the installed tree match them. Throws on any failure —
+ *  the caller owns the restore, and must restore the INSTALLED tree, not just
+ *  the manifests (see the workflow's `git checkout … && bun install` pair). */export async function runBump(
+  root: string,
+  options: { omp?: string; engine?: string; harnessRef?: string },
+  hooks: BumpHooks = {},
+): Promise<PinEdit[]> {
+  const edits = planEdits(await currentPins(root), options);
   if (edits.length === 0) {
     console.log("pins already current — nothing to do");
-  } else {
-    const byFile = new Map<string, PinEdit[]>();
-    for (const edit of edits) byFile.set(edit.file, [...(byFile.get(edit.file) ?? []), edit]);
-    for (const [file, fileEdits] of byFile) {
-      let text = await readFile(path.join(ROOT, file), "utf8");
-      for (const edit of fileEdits) {
-        if (!text.includes(edit.from)) throw new Error(`${file} does not carry ${JSON.stringify(edit.from)}`);
-        text = text.replace(edit.from, edit.to);
-      }
-      await writeFile(path.join(ROOT, file), text, "utf8");
-      console.log(`updated ${file} (${fileEdits.length} pin${fileEdits.length === 1 ? "" : "s"})`);
-    }
-
-    // Root: relock from the committed lock, install for real, then prove a
-    // clean checkout would get the same tree. The install is what makes the
-    // extractor below read the NEW SDK; `--frozen-lockfile` is the second check.
-    regenerateLock("");
-    installAndVerify(ROOT, expectedInstalls(edits, "package.json"), [[], ["--frozen-lockfile"]]);
-
-    // CLI pin: its own manifest + lock (no source imports the CLI, so a lock is
-    // the whole artifact).
-    if (edits.some((edit) => edit.file === "sandbox-image/cli-global/package.json")) {
-      regenerateLock("sandbox-image/cli-global");
-      console.log("regenerated sandbox-image/cli-global/bun.lock");
-    }
-
-    // Runner: relock + install in a temp copy (a nested node_modules here would
-    // shadow the root resolution), then copy the resulting lock back. The
-    // install is real so the copy proves the lock resolves to the pinned tree.
-    if (edits.some((edit) => edit.file === "packages/runner/package.json")) {
-      const tmp = mkdtempSync(path.join(tmpdir(), "runner-lock-"));
-      try {
-        cpSync(path.join(ROOT, "packages/runner/package.json"), path.join(tmp, "package.json"));
-        // A committed lock is seeded when present so only the pin's rows move;
-        // absent, `regenerateLock` resolves the whole tree instead.
-        const committedLock = path.join(ROOT, "packages/runner/bun.lock");
-        if (existsSync(committedLock)) cpSync(committedLock, path.join(tmp, "bun.lock"));
-        regenerateLock(tmp);
-        installAndVerify(tmp, expectedInstalls(edits, "packages/runner/package.json"), [
-          [],
-          ["--frozen-lockfile"],
-        ]);
-        copyFileSync(path.join(tmp, "bun.lock"), path.join(ROOT, "packages/runner/bun.lock"));
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
-      }
-      console.log("regenerated packages/runner/bun.lock");
-    }
+    return edits;
   }
+
+  const byFile = new Map<string, PinEdit[]>();
+  for (const edit of edits) byFile.set(edit.file, [...(byFile.get(edit.file) ?? []), edit]);
+  for (const [file, fileEdits] of byFile) {
+    let text = await readFile(path.join(root, file), "utf8");
+    for (const edit of fileEdits) {
+      if (!text.includes(edit.from)) throw new Error(`${file} does not carry ${JSON.stringify(edit.from)}`);
+      text = text.replace(edit.from, edit.to);
+    }
+    await writeFile(path.join(root, file), text, "utf8");
+    console.log(`updated ${file} (${fileEdits.length} pin${fileEdits.length === 1 ? "" : "s"})`);
+  }
+
+  // Root: relock from the committed lock, install for real, then prove a clean
+  // checkout would get the same tree. The install is what makes the extractor
+  // read the NEW SDK; `--frozen-lockfile` is the second check.
+  regenerateLock("", root);
+  installAndVerify(root, expectedInstalls(edits, "package.json"), [[], ["--frozen-lockfile"]]);
+  hooks.afterRootInstall?.();
+
+  // CLI pin: its own manifest + lock (no source imports the CLI, so a lock is
+  // the whole artifact).
+  if (edits.some((edit) => edit.file === "sandbox-image/cli-global/package.json")) {
+    regenerateLock("sandbox-image/cli-global", root);
+    console.log("regenerated sandbox-image/cli-global/bun.lock");
+  }
+
+  // Runner: relock + install in a temp copy (a nested node_modules here would
+  // shadow the root resolution), then copy the resulting lock back. The install
+  // is real so the copy proves the lock resolves to the pinned tree.
+  if (edits.some((edit) => edit.file === "packages/runner/package.json")) {
+    const tmp = mkdtempSync(path.join(tmpdir(), "runner-lock-"));
+    try {
+      cpSync(path.join(root, "packages/runner/package.json"), path.join(tmp, "package.json"));
+      // A committed lock is seeded when present so only the pin's rows move;
+      // absent, `regenerateLock` resolves the whole tree instead.
+      const committedLock = path.join(root, "packages/runner/bun.lock");
+      if (existsSync(committedLock)) cpSync(committedLock, path.join(tmp, "bun.lock"));
+      regenerateLock(tmp, root);
+      installAndVerify(tmp, expectedInstalls(edits, "packages/runner/package.json"), [
+        [],
+        ["--frozen-lockfile"],
+      ]);
+      copyFileSync(path.join(tmp, "bun.lock"), path.join(root, "packages/runner/bun.lock"));
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+    console.log("regenerated packages/runner/bun.lock");
+  }
+  return edits;
+}
+
+if (import.meta.main) {
+  await runBump(".", parseArgs(process.argv.slice(2)));
 }

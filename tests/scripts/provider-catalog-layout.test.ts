@@ -52,20 +52,45 @@ function tablePaths(): string[] {
   return [...README.matchAll(/^\| `([^`]+)` \|/gm)].map((match) => match[1]!);
 }
 
+/**
+ * A dated snapshot's date is its provenance, so a refresh that moves data also
+ * moves this file name. The contract therefore names the FAMILY — the table row
+ * reads `inputs/models.dev-<date>.json` — and comparison normalises the date on
+ * both sides. Without this, the first real refresh's layout test goes red — and
+ * under the publication gate that means the refresh publishes NOTHING, forever.
+ */
+function asFamily(path: string): string {
+  return path.replace(/models\.dev-\d{4}-\d{2}-\d{2}\.json/g, "models.dev-<date>.json");
+}
+
 describe("provider-catalog directory contract", () => {
   const files = trackedFiles();
 
   test("every tracked file is named in the README", () => {
     for (const file of files) {
-      expect(README, `${file} is tracked but the README does not name it`).toContain(file);
+      // The dated snapshot is named by its family row, so it is checked there.
+      expect(README, `${file} is tracked but the README does not name it`).toContain(asFamily(file));
     }
   });
 
   test("the README's table is exactly `git ls-files` — no stale row, no undocumented file", () => {
     // Set equality, not one-way containment: this is what makes the table the
     // contract. A new file must gain a row, and a rename must move its row, in
-    // the same commit that changes the layout.
-    expect(tablePaths().sort()).toEqual(files.sort());
+    // the same commit that changes the layout. The dated snapshot compares as a
+    // family — see `asFamily`.
+    expect(tablePaths().map(asFamily).sort()).toEqual(files.map(asFamily).sort());
+  });
+
+  test("a refresh that renames the snapshot keeps the contract green", () => {
+    // The refresh workflow commits the new dated file BEFORE running the tests,
+    // so this is the state every data-changing refresh PR is in. Simulate it by
+    // comparing the committed table against a listing whose snapshot has moved.
+    const moved = files.map((file) => file.replace(/models\.dev-\d{4}-\d{2}-\d{2}\.json/, "models.dev-2999-12-31.json"));
+    expect(moved).not.toEqual(files);
+    expect(tablePaths().map(asFamily).sort()).toEqual(moved.map(asFamily).sort());
+    // And the row really is a family, not a literal: a literal would pin one day.
+    expect(tablePaths()).toContain("inputs/models.dev-<date>.json");
+    expect(tablePaths().some((path) => /models\.dev-\d{4}-\d{2}-\d{2}\.json/.test(path))).toBe(false);
   });
 
   test("the layout is exactly the four documented owners", () => {

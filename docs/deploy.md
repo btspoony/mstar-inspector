@@ -2270,11 +2270,16 @@ disappeared and every model id dropped from a provider that survived — because
 that is the failure that bites: a chain still naming a vanished id fails at
 request time, not at save time. It also states whether the pins moved.
 
-Red is a signal, not a merge. A run whose typecheck or tests fail still pushes
-the branch and opens the PR, with `⚠ tests red` in the title and the failing
-step named in the body — so a red PR is the SDK change asking to be looked at,
-never a green one that would ship a broken chain. There is no auto-merge, and
-the workflow never pushes to `main`.
+**Green is the only path to a PR.** Typecheck and the full test suite run
+*before* anything is published; any failure aborts the run with no commit, no
+push and no PR create or update. The signal is the failed run on the Actions
+page — which is the right one, because nothing reached a reviewer: a channel that
+periodically publishes red PRs teaches everyone to ignore the red, and the one
+time it matters nobody looks. An already-open PR is left untouched by a red run,
+so yesterday's green result stands until new data passes. The gate also refuses a
+run whose test log records failures even when the step's exit status was lost to
+a shell pipeline. There is no auto-merge, and the workflow never pushes to
+`main`.
 
 ## Image pins and digest record
 

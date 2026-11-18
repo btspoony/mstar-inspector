@@ -18,7 +18,7 @@ move the row in the same commit).
 | File | Is | Produced by | Changes when | Consumed by |
 | --- | --- | --- | --- | --- |
 | `README.md` | This contract | — | The layout changes | Humans, and `tests/scripts/provider-catalog-layout.test.ts` |
-| `inputs/models.dev-2026-11-13.json` | Trimmed snapshot of `models.dev/api.json` in `{ id, name, env, api, doc, model_ids, limits }` form. The dated name is its provenance: the date is when the data last moved | `fetch-models-dev.ts` (network) | models.dev's provider/model data changes | `generate-provider-catalog.ts`, `extract-omp-snapshot.ts` |
+| `inputs/models.dev-<date>.json` | Trimmed snapshot of `models.dev/api.json` in `{ id, name, env, api, doc, model_ids, limits }` form. The dated name is its provenance: the date is when the data last moved | `fetch-models-dev.ts` (network) | models.dev's provider/model data changes | `generate-provider-catalog.ts`, `extract-omp-snapshot.ts` |
 | `inputs/overrides.json` | Hand-measured, vendor-authoritative model vocabularies, one per protocol bucket | A human, after probing the vendor endpoint | A measurement is re-taken (`fetched` moves) | `lib/overrides.ts` → `extract-omp-snapshot.ts` |
 | `generated/omp-api-key-providers.json` | The omp SDK's API-key provider vocabulary + the exclusion/alias rules | `extract-omp-snapshot.ts` (installed `@oh-my-pi/pi-catalog`) | The installed omp version changes, or an override moves | `generate-provider-catalog.ts` |
 | `generated/omp-provider-verify.json` | The omp `validate "models-endpoint"` entries behind the built-in verify table | `extract-omp-snapshot.ts` (same package) | The installed omp version changes | **`src/dashboard/provider-verify.ts`** (product code), `tests/worker/provider-verify.test.ts` |

@@ -17,9 +17,10 @@ import { describe, expect, test } from "bun:test";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planEdits, expectedInstalls } from "../../scripts/provider-catalog/bump-pins";
+import { expectedInstalls, planEdits, runBump } from "../../scripts/provider-catalog/bump-pins";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
+const OMP = "@oh-my-pi/pi-coding-agent";
 const SCRIPT = join(REPO_ROOT, "scripts/provider-catalog/bump-pins.ts");
 /** The committed harness ref — the anchor comment carries it verbatim. */
 const REF = /harnessRef: "([0-9a-f]{40})"/.exec(
@@ -109,7 +110,7 @@ function publish(root: string, version: string): void {
   }
 }
 
-function runBump(root: string, args: string[]): { code: number; out: string } {
+function runBumpCli(root: string, args: string[]): { code: number; out: string } {
   const proc = Bun.spawnSync(["bun", "run", "scripts/provider-catalog/bump-pins.ts", ...args], {
     cwd: root,
     stdout: "pipe",
@@ -130,7 +131,7 @@ describe("bump-pins installs the bumped SDK (not just relocks)", () => {
       expect(JSON.parse(readFileSync(before, "utf8")).version).toBe("18.22.1");
 
       publish(root, "18.22.2");
-      const result = runBump(root, ["--omp", "18.22.2"]);
+      const result = runBumpCli(root, ["--omp", "18.22.2"]);
       expect(result.code, result.out).toBe(0);
       expect(result.out).toContain("verified @oh-my-pi/pi-coding-agent@18.22.2 installed in");
 
@@ -156,7 +157,7 @@ describe("bump-pins installs the bumped SDK (not just relocks)", () => {
     const root = scratchRepo("18.22.1");
     try {
       // Only the OLD tarball exists, so 18.22.2 cannot install.
-      const result = runBump(root, ["--omp", "18.22.2"]);
+      const result = runBumpCli(root, ["--omp", "18.22.2"]);
       expect(result.code).not.toBe(0);
       expect(result.out).toContain("the bump did not install");
     } finally {
@@ -214,5 +215,88 @@ describe("bump-pins edit plan", () => {
     // install, and `--lockfile-only` may only appear where a lock is generated.
     expect(source).toContain('Bun.spawnSync(["bun", "install", ...args]');
     expect(source).toContain("--frozen-lockfile");
+  });
+});
+
+
+describe("an aborted bump leaves the tree consistent with the HELD pins", () => {
+  /** Read the version actually installed in `root`. */
+  function installed(root: string, name: string): string | null {
+    try {
+      return (JSON.parse(readFileSync(join(root, "node_modules", ...name.split("/"), "package.json"), "utf8")) as {
+        version: string;
+      }).version;
+    } catch {
+      return null;
+    }
+  }
+
+  test("the restore pair (files + reinstall) returns the installed tree to the held pin", async () => {
+    const root = scratchRepo("18.22.1");
+    try {
+      expect(Bun.spawnSync(["bun", "install"], { cwd: root, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+      expect(installed(root, OMP)).toBe("18.22.1");
+
+      // The bump would succeed as far as the ROOT install — the SDK release is
+      // published — and then abort on a later surface, exactly where the
+      // workflow's `else` branch is reachable.
+      publish(root, "18.22.2");
+      await expect(
+        runBump(
+          root,
+          { omp: "18.22.2" },
+          {
+            afterRootInstall: () => {
+              throw new Error("the runner copy could not resolve the release");
+            },
+          },
+        ),
+      ).rejects.toThrow(/runner copy/);
+
+      // Mid-failure state: the manifests and the INSTALLED tree both carry the
+      // attempted version. This is the state the workflow used to continue from.
+      expect(installed(root, OMP)).toBe("18.22.2");
+      expect((JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { dependencies: Record<string, string> })
+        .dependencies[OMP]).toBe("18.22.2");
+
+      // The restore the workflow now performs: files back, then reinstall so the
+      // installed tree matches the held pin again. Without the reinstall the
+      // extractor would keep reading 18.22.2 under a 18.22.1 manifest.
+      for (const rel of ["package.json", "packages/runner/package.json", "bun.lock", "packages/runner/bun.lock"]) {
+        const committed = Bun.spawnSync(["git", "checkout", "--", rel], { cwd: root, stdout: "pipe", stderr: "pipe" });
+        // The scratch repo is not a git checkout; emulate the restore by writing
+        // the held manifest back, which is what `git checkout --` does.
+        void committed;
+      }
+      publish(root, "18.22.1");
+      for (const rel of ["package.json", "packages/runner/package.json"]) {
+        const file = join(root, rel);
+        const manifest = JSON.parse(readFileSync(file, "utf8")) as {
+          dependencies: Record<string, string>;
+          overrides: Record<string, string>;
+        };
+        manifest.dependencies[OMP] = "18.22.1";
+        writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
+      }
+      const reinstall = Bun.spawnSync(["bun", "install"], { cwd: root, stdout: "pipe", stderr: "pipe" });
+      expect(reinstall.exitCode, reinstall.stderr.toString()).toBe(0);
+      expect(installed(root, OMP)).toBe("18.22.1");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the workflow's restore branch reinstalls after restoring the pin files", () => {
+    // The failure branch must not stop at `git checkout --`: the bump installs
+    // for real, so the installed tree carries the attempted version until an
+    // install puts it back. Asserted on the workflow text because the ordering is
+    // the guarantee; the test above proves the mechanism.
+    const workflow = readFileSync(join(REPO_ROOT, ".github/workflows/refresh-catalog.yml"), "utf8");
+    const restore = workflow.indexOf('git checkout -- "${PINS[@]}"');
+    expect(restore).toBeGreaterThan(-1);
+    const after = workflow.slice(restore);
+    expect(after).toMatch(/bun install --frozen-lockfile/);
+    // …and it happens before the note that lets the refresh continue.
+    expect(after.indexOf("bun install --frozen-lockfile")).toBeLessThan(after.indexOf("pins held at"));
   });
 });

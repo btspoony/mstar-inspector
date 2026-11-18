@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { convertModelsDev, refresh, renderSnapshot } from "../../scripts/provider-catalog/fetch-models-dev";
 import { catalogRemovals, renderRemovals } from "../../scripts/provider-catalog/catalog-changes";
 import { planEdits } from "../../scripts/provider-catalog/bump-pins";
-import { passCount, verificationMarks } from "../../scripts/provider-catalog/pr-verdict";
+import { failCount, passCount, verdict } from "../../scripts/provider-catalog/pr-verdict";
 import { pickNewestSnapshot } from "../../scripts/provider-catalog/lib/snapshot";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
@@ -205,38 +205,44 @@ describe("catalog removals report", () => {
   });
 });
 
-describe("PR verdict (the red/green claim)", () => {
+describe("PR verdict (the publication gate)", () => {
   const GREEN_LOG = " 5679 pass\n 0 fail\nRan 5679 tests across 235 files.\n";
   const RED_LOG = " 5600 pass\n 79 fail\nRan 5679 tests across 235 files.\n";
 
-  test("both green checks produce ✅ marks and no red flag", () => {
-    const marks = verificationMarks("success", "success", GREEN_LOG);
-    expect(marks.red).toBe(false);
-    expect(marks.lines).toEqual(["- ✅ typecheck", "- ✅ bun test tests (5679)"]);
+  test("both green checks allow publication", () => {
+    const result = verdict("success", "success", GREEN_LOG);
+    expect(result.green).toBe(true);
+    expect(result.reason).toContain("5679");
   });
 
-  test("a failing test step produces ❌ and red", () => {
-    const marks = verificationMarks("success", "failure", RED_LOG);
-    expect(marks.red).toBe(true);
-    expect(marks.lines[1]).toBe("- ❌ bun test tests FAILED (5600)");
+  test("a failing typecheck refuses publication", () => {
+    expect(verdict("failure", "success", GREEN_LOG)).toMatchObject({ green: false });
+    expect(verdict("failure", "success", GREEN_LOG).reason).toContain("typecheck");
   });
 
-  test("a green STEP outcome over a log recording failures is still red", () => {
-    // This is the regression the review caught: `bun test | tee` reports tee's
-    // 0, so the step says success while the log says 79 fail. The log is the
-    // second witness precisely so this cannot print ✅ again.
-    const marks = verificationMarks("success", "success", RED_LOG);
-    expect(marks.red).toBe(true);
-    expect(marks.lines[1]).toContain("FAILED");
+  test("a failing test step refuses publication", () => {
+    expect(verdict("success", "failure", RED_LOG).green).toBe(false);
+  });
+
+  test("a green STEP outcome over a log recording failures still refuses", () => {
+    // Round 1's bug: `bun test | tee` reports tee's 0, so the step says success
+    // while the log says 79 fail. The log is the second witness; a red run must
+    // publish nothing.
+    const result = verdict("success", "success", RED_LOG);
+    expect(result.green).toBe(false);
+    expect(result.reason).toContain("79");
   });
 
   test("an empty log cannot claim green when the outcome is red", () => {
-    expect(verificationMarks("failure", "failure", "").red).toBe(true);
+    expect(verdict("success", "failure", "").green).toBe(false);
   });
 
-  test("the pass count comes from the last summary line, else 'unknown'", () => {
+  test("counts come from the log's own summary lines", () => {
     expect(passCount(GREEN_LOG)).toBe("5679");
     expect(passCount("")).toBe("unknown");
+    expect(failCount(RED_LOG)).toBe(79);
+    expect(failCount(GREEN_LOG)).toBe(0);
+    expect(failCount("")).toBe(0);
   });
 });
 

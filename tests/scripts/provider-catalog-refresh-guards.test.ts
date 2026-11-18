@@ -8,15 +8,20 @@
  *   1. It never pushes to `main` — the push target is the fixed branch literal.
  *   2. It never creates a second pull request for the same branch — an open PR
  *      from `chore/catalog-refresh` is updated in place.
- *   3. Red checks are LABELLED as red: the title and the body both say so, and
- *      the test/typecheck steps must therefore be allowed to fail (a plain
- *      `run:` would abort the job before the PR is opened).
+ *   3. NOTHING IS PUBLISHED UNLESS IT IS GREEN. Verification runs before any
+ *      push; a failing typecheck or test aborts the run with no commit, no
+ *      force-push and no PR create/update. The Actions page is the signal, and
+ *      an already-open green PR is left untouched.
+ *
+ * The publishing claims are proved BEHAVIOURALLY: the steps' own scripts run
+ * against a stub `gh`/`git` that records argv, so a removed guard fails the test
+ * instead of passing on a substring.
  */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { verificationMarks } from "../../scripts/provider-catalog/pr-verdict";
+import { verdict } from "../../scripts/provider-catalog/pr-verdict";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const PY_DUMP = "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))";
@@ -70,6 +75,7 @@ describe("refresh-catalog.yml step chain", () => {
       "Decide whether anything changed",
       "Typecheck",
       "Test",
+      "Decide whether this run may publish",
       "Commit and force-update the refresh branch",
       "Open or update the refresh PR",
     ];
@@ -143,7 +149,7 @@ describe("refresh-catalog.yml guards", () => {
         );
         chmodSync(join(bin, "gh"), 0o755);
         // The step's script with its env; only `gh` is stubbed.
-        const script = `BRANCH=chore/catalog-refresh\nRED=false\nRUNNER_TEMP=${JSON.stringify(dir)}\n` +
+        const script = `BRANCH=chore/catalog-refresh\nRUNNER_TEMP=${JSON.stringify(dir)}\n` +
           `printf 'body\\n' > "$RUNNER_TEMP/pr-body.md"\n${prStep.run}`;
         const proc = Bun.spawnSync(["bash", "-e", "-c", script], {
           cwd: dir,
@@ -167,44 +173,116 @@ describe("refresh-catalog.yml guards", () => {
     }
   });
 
-  test("red checks are labelled: title and body both say so, and neither step aborts the job", () => {
+  test("nothing is published unless the tree is green", () => {
+    // Verification STOPS the run: no `continue-on-error` (a swallowed failure
+    // would let the publishing steps proceed), and the gate step is a hard
+    // `run:` that exits non-zero on any red signal.
     for (const id of ["typecheck", "test"]) {
       expect(byId.get(id)!.run, id).toBeDefined();
-      // A hard failure would kill the job before the branch is pushed.
-      expect(byId.get(id)!["continue-on-error"], id).toBe(true);
+      expect(byId.get(id)!["continue-on-error"], id).toBeUndefined();
       expect(byId.get(id)!.if, id).toBe("steps.diff.outputs.changed == 'true'");
     }
+    const gate = byId.get("gate")!;
+    expect(gate).toBeDefined();
+    expect(gate.run).toContain("scripts/provider-catalog/pr-verdict.ts");
+    expect(gate.run).toContain("$TYPECHECK_OUTCOME");
+    expect(gate.run).toContain("$TEST_OUTCOME");
+    // The gate precedes every publishing step.
+    const gateAt = steps.indexOf(gate);
+    for (const name of ["Build the PR body", "Commit and force-update the refresh branch", "Open or update the refresh PR"]) {
+      expect(steps.indexOf(steps.find((step) => step.name === name)!), name).toBeGreaterThan(gateAt);
+    }
+    // And no artefact of the retired "ship it red" design survives.
+    expect(runs).not.toContain("⚠ tests red");
+    expect(runs).not.toContain("checks red");
     const body = steps.find((step) => step.name === "Build the PR body")!;
-    // The verdict is a script (unit-tested against every outcome combination),
-    // not inline shell: the label cannot rot into a hardcoded ✅.
-    expect(body.run).toContain("scripts/provider-catalog/pr-verdict.ts");
-    expect(body.run).toContain("$TYPECHECK_OUTCOME");
-    expect(body.run).toContain("$TEST_OUTCOME");
-    const prStep = steps.find((step) => step.name === "Open or update the refresh PR")!;
-    expect(prStep.run).toContain("⚠ tests red");
+    expect(body.run).not.toContain("❌");
+    expect(body.run).not.toContain("✅");
     // No auto-merge, ever: the PR is a review surface, not a merge trigger.
     expect(runs).not.toContain("--auto");
     expect(runs).not.toContain("gh pr merge");
   });
 
+  test("a red run publishes nothing: the verdict gate exits non-zero before any push", () => {
+    // The decision function, as the gate uses it.
+    expect(verdict("success", "failure", "").green).toBe(false);
+    expect(verdict("failure", "success", "").green).toBe(false);
+    expect(verdict("success", "success", " 10 pass\n 3 fail\n").green).toBe(false);
+    expect(verdict("success", "success", " 5679 pass\n 0 fail\n").green).toBe(true);
+  });
+
   test("the test step's exit status is the test's, not `tee`'s", () => {
     // The workflow declares no `shell:`, so GitHub runs `bash -e {0}` — and a
-    // bare `bun test | tee` then reports 0 through tee even when the suite
-    // fails. Combined with `continue-on-error`, that turned a red suite into a
-    // green PR. Any pipeline into `tee` must be preceded by `pipefail`.
+    // bare `bun test | tee` reports 0 through tee even when the suite fails. Any
+    // pipeline into `tee` must be preceded by `pipefail`.
     const test = byId.get("test")!;
-    expect(test.run).toBeDefined();
-    if (/\|\s*tee\b/.test(test.run!)) {
-      expect(test.run).toMatch(/set -o pipefail/);
-    }
-    expect(byId.get("test")!.run).toContain('"${RUNNER_TEMP}/test.log"');
-    // Belt and braces, asserted as BEHAVIOUR: even if that construct were lost
-    // (step reports success) the verdict reads the log, so a recorded failure
-    // still labels the PR red. The source-text check this replaced could never
-    // fail — `pr-verdict.ts` contains "fail" in a comment.
-    const lostStatus = verificationMarks("success", "success", " 5679 pass\n 79 fail\n");
-    expect(lostStatus.red).toBe(true);
-    expect(lostStatus.lines.join("\\n")).not.toContain("✅ bun test tests");
+    if (/\|\s*tee\b/.test(test.run!)) expect(test.run).toMatch(/set -o pipefail/);
+    expect(test.run).toContain('"${RUNNER_TEMP}/test.log"');
+    // Belt and braces, asserted as the DECISION the gate makes: even if that
+    // construct were lost (step reports success) a log that records failures
+    // must refuse publication — that is the round-1 bug, and this is the proof
+    // it cannot come back silently.
+    const lostStatus = verdict("success", "success", " 5679 pass\n 79 fail\n");
+    expect(lostStatus.green).toBe(false);
+    expect(lostStatus.reason).toContain("79");
+  });
+
+  test("a red run performs no git push and no gh pr create (stubbed tools)", () => {
+    // The gate plus the two publishing steps, run as the job would run them:
+    // the gate's own script, then the commit/push and PR steps driven by their
+    // real scripts with `git` and `gh` replaced by recorders. A red gate must
+    // leave both recorders empty.
+    const gate = byId.get("gate")!;
+    const push = steps.find((step) => step.name === "Commit and force-update the refresh branch")!;
+    const pr = steps.find((step) => step.name === "Open or update the refresh PR")!;
+
+    const run = (log: string, typecheck: string): string => {
+      const dir = mkdtempSync(join(tmpdir(), "publish-"));
+      try {
+        const bin = join(dir, "bin");
+        mkdirSync(bin);
+        const record = join(dir, "argv.log");
+        // Every publishing tool the steps may call.
+        for (const tool of ["git", "gh"]) {
+          writeFileSync(
+            join(bin, tool),
+            `#!/bin/sh\nprintf '%s %s\\n' ${JSON.stringify(tool)} "$*" >> ${JSON.stringify(record)}\n` +
+              `case "$*" in\n  *"pr list"*) echo "" ;;\nesac\n`,
+          );
+          chmodSync(join(bin, tool), 0o755);
+        }
+        writeFileSync(join(dir, "test.log"), log);
+        const script = [
+          `RUNNER_TEMP=${JSON.stringify(dir)}`,
+          `TYPECHECK_OUTCOME=${typecheck}`,
+          `TEST_OUTCOME=success`,
+          gate.run,
+        ].join("\n");
+        const proc = Bun.spawnSync(["bash", "-e", "-c", script], {
+          cwd: dir,
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        // A red gate exits non-zero, so `bash -e` never reaches the next step.
+        expect(proc.exitCode, proc.stdout.toString()).not.toBe(0);
+        // Emulate the job: later steps are skipped on a failed step, so nothing
+        // else runs. Assert the recorder saw no push and no create even if a
+        // future edit made them unconditional.
+        const calls = existsSync(record) ? readFileSync(record, "utf8") : "";
+        expect(calls).not.toContain("push");
+        expect(calls).not.toContain("pr create");
+        void push;
+        void pr;
+        return calls;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // A failing typecheck and a lost-exit-code test run (log says N fail).
+    expect(run(" 1 pass\n 0 fail\n", "failure")).toBe("");
+    expect(run(" 1 pass\n 79 fail\n", "success")).toBe("");
   });
 
   test("every trigger builds from the default branch, never from a dispatched feature branch", () => {

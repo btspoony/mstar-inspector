@@ -11,18 +11,20 @@ name: Catalog refresh
 #   2. Re-fetch the snapshot, regenerate both contracts, repair the image-input
 #      fingerprint if the pin bump moved an image input.
 #   3. Nothing changed → stop, no branch, no PR.
-#   4. Something changed → typecheck + tests, then force-update the fixed
-#      branch and open / update ITS ONE PR. Red checks still ship the branch and
-#      the PR: the title and the body say so, so a red run can never read as
-#      green.
+#   4. Something changed → typecheck + the full suite FIRST. Only a green run
+#      force-updates the fixed branch and opens / updates ITS ONE PR; a red run
+#      publishes nothing (no commit, no push, no PR create or update) and fails
+#      visibly in Actions. An already-open PR is left untouched, so yesterday's
+#      green result stands until new data passes. A channel that ships red PRs
+#      teaches everyone to ignore the red.
 #
 # Never pushes to main: the only push target is the literal branch below, and a
 # guard test (`tests/scripts/provider-catalog-refresh-guards.test.ts`) fails if
 # that stops being true.
 #
 # AD-5 note (same as release-prep): a pull request opened or pushed by the
-# workflow token does NOT trigger ci.yml. The typecheck + test steps in this job
-# are that PR's verification face.
+# workflow token does NOT trigger ci.yml, so the typecheck + test gate above IS
+# that PR's verification face — and it ran on exactly the tree being published.
 
 on:
   schedule:
@@ -180,7 +182,15 @@ jobs:
               echo "note=pins moved: omp ${OMP_NOW} → ${OMP_ARG:-unchanged}, engine ${ENGINE_NOW} → ${ENGINE_ARG:-unchanged}${REF_ARG:+, harness ref moved}"
             } >> "$GITHUB_OUTPUT"
           else
+            # ATOMIC restore. The bump installs for real, so an abort AFTER the
+            # root install (the runner copy, the CLI relock, the frozen proof)
+            # leaves node_modules carrying the attempted version. Restoring the
+            # manifests alone would then make the NEXT step extract from a tree
+            # the held pins do not describe — the Worker/image divergence the
+            # install exists to prevent. Restore the files, then re-install so the
+            # installed tree matches the held pins again.
             git checkout -- "${PINS[@]}"
+            bun install --frozen-lockfile
             echo "::warning::pins held at omp ${OMP_NOW} / engine ${ENGINE_NOW} — the newer release does not install; the catalog refresh continues"
             {
               echo "changed=false"
@@ -212,26 +222,41 @@ jobs:
             git diff --cached --stat
           fi
 
-      # Verification only runs on a diff: an unchanged day costs no test run.
+      # ---- The gate. Nothing below this point runs unless the tree is green.
+      # Verification runs BEFORE any push: a failing run publishes nothing —
+      # no commit, no force-push, no PR create or update. The Actions page is the
+      # signal, and it is the right one because nothing reached a reviewer. A
+      # channel that periodically ships red PRs teaches everyone to ignore the
+      # red, so there is deliberately no "label it and publish" path.
       - name: Typecheck
         id: typecheck
         if: steps.diff.outputs.changed == 'true'
-        continue-on-error: true
         run: bun run typecheck
 
       - name: Test
         id: test
         if: steps.diff.outputs.changed == 'true'
-        continue-on-error: true
         # `set -o pipefail`, NOT a bare `bun test | tee`: the default `bash -e`
-        # reports `tee`'s status, so a failing suite would read as a green step
-        # and the PR would claim green — the exact failure this workflow exists
-        # to prevent. (`pr-verdict.ts` also reads the log, so the label survives
-        # even if this line is ever lost again; a guard test pins both.)
-        # The log lives OUTSIDE the tree so it never lands in the commit.
+        # reports `tee`'s status. The log lives OUTSIDE the tree so it never
+        # lands in the commit; the verdict below reads it as a second witness.
         run: |
           set -o pipefail
           bun test tests 2>&1 | tee "${RUNNER_TEMP}/test.log"
+
+      - name: Decide whether this run may publish
+        id: gate
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        # The gate itself. `pr-verdict.ts` exits non-zero on any red signal —
+        # including a log that records failures while the step lost its exit
+        # status — so this step aborts the job and every publishing step is
+        # skipped.
+        run: |
+          bun run scripts/provider-catalog/pr-verdict.ts \
+            --typecheck "$TYPECHECK_OUTCOME" --test "$TEST_OUTCOME" \
+            --log "${RUNNER_TEMP}/test.log"
 
       - name: Build the PR body
         id: body
@@ -239,8 +264,6 @@ jobs:
         env:
           BEFORE_SNAPSHOT: ${{ steps.before.outputs.snapshot }}
           PIN_NOTE: ${{ steps.pins.outputs.note }}
-          TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
-          TEST_OUTCOME: ${{ steps.test.outcome }}
         # Removals are the part that bites: a chain naming a vanished id fails at
         # request time, and nothing else in this run would say so. The base
         # revision's generated module is extracted and imported, so the list is
@@ -253,13 +276,6 @@ jobs:
             src/contracts/provider-catalog.generated.ts > "${RUNNER_TEMP}/removals.md"
 
           AFTER_SNAPSHOT=$(git ls-files 'scripts/provider-catalog/inputs/models.dev-*.json')
-          # One module decides green or red, from BOTH the step outcome and the
-          # log — a step that lost its exit status to a pipeline cannot claim
-          # green over a log that recorded failures.
-          VERIFICATION=$(bun run scripts/provider-catalog/pr-verdict.ts \
-            --typecheck "$TYPECHECK_OUTCOME" --test "$TEST_OUTCOME" \
-            --log "${RUNNER_TEMP}/test.log" --github-output "$GITHUB_OUTPUT")
-
           {
             echo "Generated by the **Catalog refresh** workflow (schedule: daily 04:17 UTC)."
             echo
@@ -277,17 +293,10 @@ jobs:
             echo "## Catalog removals"
             echo
             cat "${RUNNER_TEMP}/removals.md"
-            echo
-            echo "## Verification"
-            echo
-            echo "${VERIFICATION}"
           } > "${RUNNER_TEMP}/pr-body.md"
-          echo "${VERIFICATION}"
 
       - name: Commit and force-update the refresh branch
         if: steps.diff.outputs.changed == 'true'
-        env:
-          RED: ${{ steps.body.outputs.red }}
         # One fixed branch, always rebuilt from origin/main: a refresh describes
         # the CURRENT upstream state, so stacking days on top would publish a
         # body that no longer matches the diff. `--force` is safe because the
@@ -302,30 +311,20 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
           git add -A
-          if [ "$RED" = "true" ]; then
-            SUBJECT="chore(catalog): refresh the provider catalog (⚠ checks red)"
-          else
-            SUBJECT="chore(catalog): refresh the provider catalog"
-          fi
-          git commit -m "$SUBJECT"
+          git commit -m "chore(catalog): refresh the provider catalog"
           git push --force origin "$BRANCH"
 
       - name: Open or update the refresh PR
         if: steps.diff.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RED: ${{ steps.body.outputs.red }}
         # Idempotent: the branch's OWN open PR is updated in place. A second PR
         # from the same head can never be created, and a closed one is not
         # resurrected (the pull request is the review surface; re-opening it
         # would bypass that review).
         run: |
           set -euo pipefail
-          if [ "$RED" = "true" ]; then
-            TITLE="chore(catalog): refresh the provider catalog ⚠ tests red"
-          else
-            TITLE="chore(catalog): refresh the provider catalog"
-          fi
+          TITLE="chore(catalog): refresh the provider catalog"
           OPEN=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -n "$OPEN" ]; then
             gh pr edit "$OPEN" --title "$TITLE" --body-file "${RUNNER_TEMP}/pr-body.md"
