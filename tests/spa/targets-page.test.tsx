@@ -2,13 +2,15 @@
  * The repository surface's rendered faces (product spec J1/J2).
  *
  * Static SSR pins what the page shows, not how it wires:
- *   - the fixed 所有仓库 row first, with the live count and the per-repository
- *     rows behind it; the empty workspace still carries the fixed row plus the
- *     empty state;
- *   - the add dialog's five faces: zero App (guidance + jump link, confirm
- *     disabled), one App (fixed binding, select omitted), several Apps
- *     (dropdown), an installation with no repository (guidance + jump link), and
- *     a duplicate refusal (notice, confirm still enabled for the rest).
+ *   - the fixed 所有仓库 aggregate row first, with the live count and the
+ *     per-repository rows behind it; the empty workspace still carries the
+ *     fixed row plus the empty state;
+ *   - the list's review vocabulary: total reviews, last-7-day reviews and last
+ *     review per row, and the band summing the same aggregates;
+ *   - 待安装 as a FILTER with its count, never a band metric;
+ *   - the stepped add dialog: the App step always rendered (no implicit
+ *     apps[0]), the installation check, and a repository scan that shows
+ *     nothing before a query.
  *
  * The stateful dialog owns the fetches; `AddRepositoryDialogBody` is the body
  * with every state as a prop, which is what a DOM-less runner can render.
@@ -31,7 +33,7 @@ import {
   TargetsView,
   targetStatusPill,
 } from "../../src/spa/pages/TargetsPage";
-import type { RepositoryOptionsState } from "../../src/spa/pages/TargetsPage";
+import type { InstallationsState, RepositoryOptionsState } from "../../src/spa/pages/TargetsPage";
 import { parseTargetCreate, parseTargetDetailTab, targetDetailTabQuery } from "../../src/spa/pages/data";
 import { TargetSettingsTab } from "../../src/spa/pages/TargetSettingsTab";
 import type { InstallationRepositoryOption, RepositoryAppOption, TargetListRow } from "../../src/spa/pages/data";
@@ -48,6 +50,8 @@ const row = (overrides: Partial<TargetListRow> = {}): TargetListRow => ({
   review_enabled: 1,
   follow_workspace_defaults: 1,
   last_reviewed_at: null,
+  reviews_total: 0,
+  reviews_7d: 0,
   ...overrides,
 });
 
@@ -55,8 +59,15 @@ const app = (overrides: Partial<RepositoryAppOption> = {}): RepositoryAppOption 
   app_id: 9401,
   bot_id: "bot-1",
   name: "Acme Inspector",
+  slug: "acme-inspector",
   ...overrides,
 });
+
+const installations = (
+  rows: Array<{ installation_id: number; account_login: string | null; seen_at: string }> = [
+    { installation_id: 901, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+  ],
+): InstallationsState => ({ state: "ok", installations: rows });
 
 const repositories = (...rows: InstallationRepositoryOption[]): RepositoryOptionsState => ({
   state: "ok",
@@ -67,6 +78,7 @@ const repositories = (...rows: InstallationRepositoryOption[]): RepositoryOption
 function renderBody(props: {
   apps: RepositoryAppOption[];
   appId?: string;
+  installs?: InstallationsState;
   repos?: RepositoryOptionsState;
   existing?: number[];
   selected?: number[];
@@ -78,6 +90,7 @@ function renderBody(props: {
         locale: "en",
         apps: props.apps,
         appId: props.appId ?? (props.apps[0] ? String(props.apps[0].app_id) : ""),
+        installations: props.installs ?? installations(),
         repositories: props.repos ?? repositories(),
         existingRepoIds: new Set(props.existing ?? []),
         selectedRepoIds: new Set(props.selected ?? []),
@@ -85,6 +98,7 @@ function renderBody(props: {
         busy: false,
         onSelectApp: () => {},
         onToggleRepo: () => {},
+        onRetryInstallations: () => {},
         onRetryRepositories: () => {},
         onSubmit: () => {},
         onCancel: () => {},
@@ -94,15 +108,20 @@ function renderBody(props: {
 }
 
 /**
- * One row's own markup, cut at the next row so a string the metric band also
- * renders (the 待安装 label is a metric key too) cannot satisfy an assertion
- * about that row.
+ * One table row's own markup, cut at the next row so a string the band or the
+ * header band also renders (待安装 is a filter label too) cannot satisfy an
+ * assertion about that row.
  */
 function rowMarkup(markup: string, identity: string): string {
-  const rows = markup.split('data-slot="list-row"').slice(1);
-  const row = rows.find((part) => part.includes(identity));
-  if (row === undefined) throw new Error(`no row names ${identity}`);
-  return row;
+  const rows = markup.split("<tr ").slice(1);
+  const found = rows.find((part) => part.includes(identity));
+  if (found === undefined) throw new Error(`no row names ${identity}`);
+  return found;
+}
+
+/** The table's header labels, in order. */
+function headers(markup: string): string[] {
+  return [...markup.matchAll(/<th [^>]*>([\s\S]*?)<\/th>/g)].map((cell) => (cell[1] ?? "").trim());
 }
 
 /** The metric band as `{ key: value }`, read off the rendered markup. */
@@ -127,24 +146,21 @@ function confirmDisabled(markup: string): boolean {
 }
 
 describe("repository list (static SSR)", () => {
-  test("the fixed 所有仓库 row leads, and each live target gets one row", () => {
-    const markup = withLocation("/dashboard/acme/repos", () =>
+  /** The loaded list under the page's own base, with the rows as given. */
+  const renderView = (targets: TargetListRow[]): string =>
+    withLocation("/dashboard/acme/repos", () =>
       renderToStaticMarkup(
-        createElement(TargetsView, {
-          locale: "en",
-          state: "ok",
-          targets: [
-            row({ target_id: "t-1", repo_name: "api", last_reviewed_at: "2026-01-01 00:00:00" }),
-            row({ target_id: "t-2", repo_id: 502, repo_name: "web", review_enabled: 0 }),
-          ],
-          onRetry: () => {},
-        }),
+        createElement(TargetsView, { locale: "en", state: "ok", targets, onRetry: () => {} }),
       ),
     );
+
+  test("the fixed 所有仓库 aggregate row leads, and each live target gets one row", () => {
+    const markup = renderView([
+      row({ target_id: "t-1", repo_name: "api", last_reviewed_at: "2026-01-01 00:00:00" }),
+      row({ target_id: "t-2", repo_id: 502, repo_name: "web", review_enabled: 0 }),
+    ]);
     // The fixed row comes first, then the repositories in payload order.
-    expect(markup.indexOf(t("en", "targets.allRepositories"))).toBeLessThan(
-      markup.indexOf("acme/api"),
-    );
+    expect(markup.indexOf(t("en", "targets.allRepositories"))).toBeLessThan(markup.indexOf("acme/api"));
     expect(markup).toContain(t("en", "targets.allRepositoriesMeta"));
     expect(markup).toContain("2 repositories");
     expect(markup).toContain('href="/dashboard/acme/repos/all"');
@@ -153,14 +169,29 @@ describe("repository list (static SSR)", () => {
     // Status pills: reviewing and paused.
     expect(markup).toContain(t("en", "targets.status.reviewing"));
     expect(markup).toContain(t("en", "targets.status.paused"));
+    // The row is the destination, as on the Apps table.
+    expect(markup).toContain("cursor-pointer");
+  });
+
+  test("the table speaks the review vocabulary: repository, state, totals, 7 days, last review", () => {
+    const markup = renderView([row({ reviews_total: 7, reviews_7d: 2 })]);
+    expect(headers(markup)).toEqual([
+      t("en", "targets.columnRepository"),
+      t("en", "targets.columnState"),
+      t("en", "targets.columnReviews"),
+      t("en", "targets.columnReviews7d"),
+      t("en", "targets.columnLastReview"),
+    ]);
+    // The App name is the composite cell's secondary line, as on the Apps list.
+    const targetRow = rowMarkup(markup, "acme/api");
+    expect(targetRow).toContain("acme/api");
+    expect(targetRow).toContain("Acme Inspector");
+    expect(targetRow).toContain(">7<");
+    expect(targetRow).toContain(">2<");
   });
 
   test("an empty workspace keeps the fixed row and states the empty case", () => {
-    const markup = withLocation("/dashboard/acme/repos", () =>
-      renderToStaticMarkup(
-        createElement(TargetsView, { locale: "en", state: "ok", targets: [], onRetry: () => {} }),
-      ),
-    );
+    const markup = renderView([]);
     expect(markup).toContain(t("en", "targets.allRepositories"));
     expect(markup).toContain("0 repositories");
     expect(markup).toContain(t("en", "targets.emptyTitle"));
@@ -168,18 +199,8 @@ describe("repository list (static SSR)", () => {
   });
 
   test("a 待安装 row reports the discriminator instead of an invented name", () => {
-    const markup = withLocation("/dashboard/acme/repos", () =>
-      renderToStaticMarkup(
-        createElement(TargetsView, {
-          locale: "en",
-          state: "ok",
-          targets: [row({ repo_id: null, repo_owner: null, repo_name: null })],
-          onRetry: () => {},
-        }),
-      ),
-    );
+    const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
     expect(markup).toContain(t("en", "targets.status.uninstalled"));
-    expect(markup).toContain(t("en", "targets.metaUninstalled"));
     // `null`/`null` must not render as a repository named "null/null".
     expect(markup).not.toContain("null/null");
   });
@@ -188,20 +209,10 @@ describe("repository list (static SSR)", () => {
     // The staging shape: a target that lost its installation still names the
     // repository it was reviewed under. `repo_id` stays the 待安装 badge's key,
     // but it must not erase the identity.
-    const markup = withLocation("/dashboard/acme/repos", () =>
-      renderToStaticMarkup(
-        createElement(TargetsView, {
-          locale: "en",
-          state: "ok",
-          targets: [row({ repo_id: null, repo_owner: "42ch-dev", repo_name: "nexus" })],
-          onRetry: () => {},
-        }),
-      ),
-    );
+    const markup = renderView([row({ repo_id: null, repo_owner: "42ch-dev", repo_name: "nexus" })]);
     expect(markup).toContain("42ch-dev/nexus");
-    // The badge is asserted on the ROW's own subtree: the metric band renders
-    // the same label as a key, so a page-wide `toContain` would pass even if
-    // the row carried no badge at all.
+    // The badge is asserted on the ROW's own subtree: the filter renders the
+    // same label, so a page-wide `toContain` would pass even without a badge.
     const targetRow = rowMarkup(markup, "42ch-dev/nexus");
     expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
     expect(targetRow).toContain('data-tone="warn"');
@@ -210,65 +221,48 @@ describe("repository list (static SSR)", () => {
   });
 
   test("a target with neither an id nor a name still falls back to the dash", () => {
-    const markup = withLocation("/dashboard/acme/repos", () =>
-      renderToStaticMarkup(
-        createElement(TargetsView, {
-          locale: "en",
-          state: "ok",
-          targets: [row({ repo_id: null, repo_owner: null, repo_name: null })],
-          onRetry: () => {},
-        }),
-      ),
-    );
+    const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
     const targetRow = rowMarkup(markup, "—</a>");
     expect(targetRow).toContain(">—</a>");
-    expect(targetRow).toContain(t("en", "targets.metaUninstalled"));
     // The same installation axis: no repo_id means the 待安装 pill.
     expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
   });
 
-  test("the overview states what repositories are and the figures the list proves", () => {
-    const markup = withLocation("/dashboard/acme/repos", () =>
-      renderToStaticMarkup(
-        createElement(TargetsView, {
-          locale: "en",
-          state: "ok",
-          targets: [
-            row({ target_id: "t-1", last_reviewed_at: "2026-01-01 00:00:00" }),
-            row({ target_id: "t-2", repo_id: null, repo_owner: "acme", repo_name: "web", last_reviewed_at: "2026-01-03 00:00:00" }),
-            row({ target_id: "t-3", repo_id: null, repo_owner: null, repo_name: null }),
-          ],
-          onRetry: () => {},
-        }),
-      ),
-    );
+  test("the overview band reports review volume summed from the row aggregates", () => {
+    const markup = renderView([
+      row({ target_id: "t-1", reviews_total: 10, reviews_7d: 4 }),
+      row({
+        target_id: "t-2",
+        repo_id: null,
+        repo_owner: "acme",
+        repo_name: "web",
+        reviews_total: 3,
+        reviews_7d: 1,
+        last_reviewed_at: "2026-01-03 00:00:00",
+      }),
+      row({ target_id: "t-3", repo_id: null, repo_owner: null, repo_name: null }),
+    ]);
     // The one explanatory block — no second endpoint, no second paragraph.
     expect(markup).toContain(t("en", "targets.headingDescription"));
     // The figure and the pill are the SAME axis: t-2 names a repository but
     // carries no repo_id, and both read it as 待安装.
     expect(rowMarkup(markup, "acme/web")).toContain(t("en", "targets.status.uninstalled"));
-    expect(rowMarkup(markup, "acme/web")).toContain("acme/");
-    // Three figures from the loaded payload: count, unbound rows, newest review.
+    // Three figures, all summed from the loaded payload.
     expect(metricValues(markup)).toEqual({
       [t("en", "targets.metricRepositories")]: "3",
-      // The badge axis: t-2 and t-3 carry no repo_id (both read 待安装 above).
-      [t("en", "targets.metricUninstalled")]: "2",
-      // …and the newest stamp is t-2's, a named-but-unbound row: losing the
-      // installation does not erase the history, so it still sets this figure.
-      [t("en", "targets.metricLastReview")]: formatRelativeTime("2026-01-03 00:00:00", "en"),
+      [t("en", "targets.metricReviews")]: "13",
+      [t("en", "targets.metricReviews7d")]: "5",
     });
+    // 待安装 is no longer a metric key (I-000640).
+    expect(Object.keys(metricValues(markup))).not.toContain(t("en", "targets.filterUninstalled", { count: 2 }));
   });
 
-  test("an empty workspace reports never reviewed rather than a bogus date", () => {
-    const markup = withLocation("/dashboard/acme/repos", () =>
-      renderToStaticMarkup(
-        createElement(TargetsView, { locale: "en", state: "ok", targets: [], onRetry: () => {} }),
-      ),
-    );
+  test("an empty workspace bands zeros rather than blanks", () => {
+    const markup = renderView([]);
     expect(metricValues(markup)).toEqual({
       [t("en", "targets.metricRepositories")]: "0",
-      [t("en", "targets.metricUninstalled")]: "0",
-      [t("en", "targets.metricLastReview")]: t("en", "common.time.never"),
+      [t("en", "targets.metricReviews")]: "0",
+      [t("en", "targets.metricReviews7d")]: "0",
     });
   });
 
@@ -280,6 +274,54 @@ describe("repository list (static SSR)", () => {
     );
     expect(markup).toContain(t("en", "common.loadFailed"));
     expect(markup).toContain(t("en", "common.retry"));
+  });
+});
+
+describe("the 待安装 filter (mounted)", () => {
+  test("the filter carries the count, narrows the table, and keeps the payload order", async () => {
+    const targets = [
+      row({ target_id: "t-1", repo_name: "api", reviews_total: 5 }),
+      row({ target_id: "t-2", repo_id: null, repo_name: "web", reviews_total: 3 }),
+      row({ target_id: "t-3", repo_name: "docs", reviews_total: 1 }),
+    ];
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/repos");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () =>
+      root.render(createElement(TargetsView, { locale: "en", state: "ok", targets, onRetry: () => {} })),
+    );
+    try {
+      // The filter control names the count — it is a filter, not a metric.
+      const segment = [...container.querySelectorAll("button")].find(
+        (node) => node.textContent === t("en", "targets.filterUninstalled", { count: 1 }),
+      );
+      expect(segment).toBeDefined();
+
+      await act(async () => {
+        segment?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      // Only the unbound row survives, and the aggregate row stays first.
+      const text = container.textContent ?? "";
+      expect(text).toContain("acme/web");
+      expect(text).not.toContain("acme/api");
+      expect(text).not.toContain("acme/docs");
+      expect(text.indexOf(t("en", "targets.allRepositories"))).toBeLessThan(text.indexOf("acme/web"));
+
+      // Clearing restores every row in the payload's order.
+      const all = [...container.querySelectorAll("button")].find(
+        (node) => node.textContent === t("en", "targets.filterAll"),
+      );
+      await act(async () => {
+        all?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      const restored = container.textContent ?? "";
+      expect(restored.indexOf("acme/api")).toBeLessThan(restored.indexOf("acme/web"));
+      expect(restored.indexOf("acme/web")).toBeLessThan(restored.indexOf("acme/docs"));
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
   });
 });
 
@@ -301,85 +343,111 @@ describe("list helpers", () => {
 });
 
 describe("add-repository dialog (static SSR)", () => {
-  test("zero Apps: guidance and a jump link, no select, confirm disabled", () => {
+  /** The three step headings, in order — the flow's own skeleton. */
+  const steps = (markup: string): number[] =>
+    [t("en", "targets.addDialog.stepApp"), t("en", "targets.addDialog.stepInstall"), t("en", "targets.addDialog.stepRepos")].map(
+      (step) => markup.indexOf(step),
+    );
+
+  test("zero Apps: guidance and a jump link, no steps, confirm disabled", () => {
     const markup = renderBody({ apps: [] });
     expect(markup).toContain(t("en", "targets.addDialog.noApps"));
     expect(markup).toContain(t("en", "targets.addDialog.goToApps"));
     expect(markup).toContain('href="/dashboard/acme/apps"');
-    // No select: there is nothing to choose, and no way to proceed.
-    expect(markup).not.toContain(t("en", "targets.addDialog.appLabel"));
+    // No steps: there is nothing to choose, and no way to proceed.
+    expect(markup).not.toContain(t("en", "targets.addDialog.stepApp"));
     expect(confirmDisabled(markup)).toBe(true);
   });
 
-  test("exactly one App states the binding instead of a select", () => {
-    const markup = renderBody({ apps: [app()], repos: repositories({ repo_id: 501, owner: "acme", name: "api" }) });
-    expect(markup).toContain(t("en", "targets.addDialog.binding").replace("{app}", "Acme Inspector"));
-    expect(markup).not.toContain(t("en", "targets.addDialog.appLabel"));
+  test("the App step is ALWAYS rendered, even with exactly one App", () => {
+    // I-000642: a single App used to bind silently to apps[0]. The choice is
+    // now explicit — the combobox names the one App instead of a sentence
+    // standing in for it.
+    const single = renderBody({ apps: [app()] });
+    expect(single).toContain(t("en", "targets.addDialog.stepApp"));
+    expect(single).toContain(t("en", "targets.addDialog.appLabel"));
+    expect(single).toContain('role="combobox"');
+    const [appStep, installStep, repoStep] = steps(single);
+    expect(appStep).toBeGreaterThanOrEqual(0);
+    expect(appStep).toBeLessThan(installStep!);
+    expect(installStep!).toBeLessThan(repoStep!);
   });
 
-  test("several Apps render the dropdown instead of a fixed binding", () => {
+  test("several Apps render the same always-present dropdown", () => {
     const markup = renderBody({
       apps: [app(), app({ app_id: 9402, bot_id: "bot-2", name: "Second App" })],
-      repos: repositories({ repo_id: 501, owner: "acme", name: "api" }),
     });
-    expect(markup).toContain(t("en", "targets.addDialog.appLabel"));
-    // The choice is a control here, not stated copy: that is the whole
-    // difference from the single-App face (whose items only mount on open, so
-    // the combobox itself is the assertion that matters).
+    expect(markup).toContain(t("en", "targets.addDialog.stepApp"));
     expect(markup).toContain('role="combobox"');
-    expect(markup).not.toContain(t("en", "targets.addDialog.binding").replace("{app}", "Acme Inspector"));
+    // The coming shared scope is stated, not built.
+    expect(markup).toContain(t("en", "targets.addDialog.sharedScopeComing"));
   });
 
-  test("an installation with no repositories explains the dead end and disables confirm", () => {
+  test("the installation step lists account, id and last seen", () => {
+    const markup = renderBody({ apps: [app()] });
+    expect(markup).toContain(t("en", "targets.addDialog.stepInstall"));
+    expect(markup).toContain(
+      t("en", "targets.addDialog.installationRow", {
+        account: "acme",
+        id: 901,
+        time: formatRelativeTime("2026-01-01 00:00:00", "en"),
+      }),
+    );
+  });
+
+  test("no installation: the GitHub install link plus a re-check, confirm disabled", () => {
+    const markup = renderBody({ apps: [app()], installs: installations([]) });
+    expect(markup).toContain(t("en", "targets.addDialog.noInstallations"));
+    expect(markup).toContain('href="https://github.com/apps/acme-inspector/installations/new"');
+    expect(markup).toContain(t("en", "targets.addDialog.recheck"));
+    expect(confirmDisabled(markup)).toBe(true);
+    // The repository step is not offered: there is nothing to search.
+    expect(markup).not.toContain('id="add-repository-search"');
+  });
+
+  test("a failed installation read offers its own retry", () => {
+    const markup = renderBody({ apps: [app()], installs: { state: "error" } });
+    // The copy's apostrophe is HTML-escaped in static markup; the prefix is
+    // the assertion that matters.
+    expect(markup).toContain("Could not read this App");
+    expect(markup).toContain(t("en", "common.retry"));
+    expect(confirmDisabled(markup)).toBe(true);
+  });
+
+  test("nothing repository-wise renders before a query", () => {
+    // I-000642: the dialog used to dump 40 rows before anyone typed. The
+    // search box is there; the results are not.
+    const markup = renderBody({
+      apps: [app()],
+      repos: repositories(
+        { repo_id: 501, owner: "acme", name: "api" },
+        { repo_id: 502, owner: "acme", name: "web" },
+      ),
+    });
+    expect(markup).toContain('id="add-repository-search"');
+    expect(markup).toContain(t("en", "targets.addDialog.stepRepos"));
+    expect(markup).not.toContain("acme/api");
+    expect(markup).not.toContain("acme/web");
+    expect(markup.match(/<input type="checkbox"/g) ?? []).toHaveLength(0);
+  });
+
+  test("an App that grants no repository explains the dead end and disables confirm", () => {
     const markup = renderBody({ apps: [app()], repos: repositories() });
     expect(markup).toContain(t("en", "targets.addDialog.noInstallationRepos"));
-    // The label's apostrophe is HTML-escaped in static markup; the destination
-    // is the assertion that matters.
-    expect(markup).toContain("installed tab");
     expect(markup).toContain('href="/dashboard/acme/apps/9401?tab=installations"');
     expect(confirmDisabled(markup)).toBe(true);
   });
 
   test("a repository fetch failure offers a retry and disables confirm", () => {
     const markup = renderBody({ apps: [app()], repos: { state: "error" } });
-    // Same escaping note: assert the prefix before the apostrophe.
     expect(markup).toContain("Could not load this App");
     expect(markup).toContain(t("en", "common.retry"));
-    expect(confirmDisabled(markup)).toBe(true);
-  });
-
-  test("already-added repositories are visible, disabled and tagged", () => {
-    const markup = renderBody({
-      apps: [app()],
-      repos: repositories(
-        { repo_id: 501, owner: "acme", name: "api" },
-        { repo_id: 502, owner: "acme", name: "web" },
-      ),
-      existing: [501],
-    });
-    expect(markup).toContain("acme/api");
-    expect(markup).toContain(t("en", "targets.addDialog.alreadyAdded"));
-    const inputs = markup.match(/<input type="checkbox"[^>]*>/g) ?? [];
-    expect(inputs).toHaveLength(2);
-    expect(inputs[0]).toContain("disabled");
-    expect(inputs[1]).not.toContain("disabled");
-  });
-
-  test("a zero selection keeps confirm disabled even with repositories offered", () => {
-    const markup = renderBody({
-      apps: [app()],
-      repos: repositories({ repo_id: 501, owner: "acme", name: "api" }),
-    });
     expect(confirmDisabled(markup)).toBe(true);
   });
 
   test("a duplicate refusal reports what existed and keeps confirm usable for the rest", () => {
     const markup = renderBody({
       apps: [app()],
-      repos: repositories(
-        { repo_id: 501, owner: "acme", name: "api" },
-        { repo_id: 502, owner: "acme", name: "web" },
-      ),
       selected: [502],
       notice: {
         kind: "warn",
@@ -396,22 +464,6 @@ describe("add-repository dialog (static SSR)", () => {
       repos: { state: "ok", repositories: [{ repo_id: 501, owner: "acme", name: "api" }], degraded: true },
     });
     expect(markup).toContain(t("en", "targets.addDialog.degraded"));
-  });
-
-  test("a short list offers the labelled filter but states no cap", () => {
-    const markup = renderBody({
-      apps: [app()],
-      repos: repositories(
-        { repo_id: 501, owner: "acme", name: "api" },
-        { repo_id: 502, owner: "acme", name: "web" },
-      ),
-    });
-    // The input is labelled by its own <label>, not by a placeholder alone.
-    expect(markup).toContain('for="add-repository-search"');
-    expect(markup).toContain('id="add-repository-search"');
-    expect(markup).toContain(t("en", "targets.addDialog.searchLabel"));
-    expect(markup).not.toContain("— showing the first");
-    expect(markup).toContain("acme/web");
   });
 });
 
@@ -522,6 +574,38 @@ const confirmButton = (win: DomWindow): DomElement | null => {
   return buttons.find((button) => button.textContent === t("en", "targets.addDialog.confirm")) ?? null;
 };
 
+/** The settings payload's installation section — the dialog's step 2 read. */
+const settingsWith = (
+  rows: Array<{ installation_id: number; account_login: string | null; seen_at: string }>,
+) => wireJson({ can_manage: true, installations: rows });
+
+const INSTALLED = [{ installation_id: 901, account_login: "acme", seen_at: "2026-01-01 00:00:00" }];
+
+/** Type into the dialog's search input the way a user's keystroke arrives. */
+async function filter(win: DomWindow, value: string): Promise<void> {
+  const input = win.document.querySelector("#add-repository-search");
+  const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+  await act(async () => {
+    setValue?.call(input, value);
+    input?.dispatchEvent(new win.Event("input", { bubbles: true }));
+  });
+  for (let flush = 0; flush < 2; flush += 1) await act(async () => {});
+}
+
+/** `count` repositories named `repo-0`…`repo-<count-1>` under one owner. */
+const many = (count: number) =>
+  Array.from({ length: count }, (_, index) => ({
+    repo_id: 500 + index,
+    owner: "acme",
+    name: `repo-${index}`,
+  }));
+
+/** The dialog's rendered repository rows, read off their checkbox labels. */
+const listed = (win: DomWindow): string[] =>
+  [...win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
+    (node) => node.parentElement?.textContent ?? "",
+  );
+
 describe("add-repository dialog (mounted)", () => {
   test("a stale repository read cannot overwrite the App now selected", async () => {
     let releaseFirst: () => void = () => {};
@@ -538,6 +622,7 @@ describe("add-repository dialog (mounted)", () => {
         onClose: () => {},
       }),
       (wire) => {
+        if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
         if (wire.url.endsWith("/api/apps/9401/installation-repositories")) return firstAnswer;
         if (wire.url.endsWith("/api/apps/9402/installation-repositories")) {
           return listing([{ repo_id: 502, owner: "acme", name: "web" }]);
@@ -548,13 +633,14 @@ describe("add-repository dialog (mounted)", () => {
     try {
       // Switch to the second App while the first App's walk is still in flight.
       await view.pickApp("Second App");
+      await filter(view.win, "web");
       expect(view.dialog()?.textContent ?? "").toContain("acme/web");
 
       // The slow answer for the App the user left lands last and must be dropped.
       releaseFirst();
       for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+      await filter(view.win, "api");
       const text = view.dialog()?.textContent ?? "";
-      expect(text).toContain("acme/web");
       expect(text).not.toContain("acme/api");
     } finally {
       await view.unmount();
@@ -580,10 +666,11 @@ describe("add-repository dialog (mounted)", () => {
       if (wire.url.endsWith("/api/apps")) {
         return wireJson({
           viewer: { login: "mallory", role: "admin" },
-          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector" }],
+          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector", github_slug: "acme-inspector" }],
           shared_bots: [],
         });
       }
+      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
       if (wire.url.endsWith("/installation-repositories")) {
         return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
       }
@@ -594,7 +681,8 @@ describe("add-repository dialog (mounted)", () => {
         (button) => button.textContent === t("en", "targets.add"),
       );
       await view.click(addButton);
-      await view.click(view.win.document.querySelector('input[type="checkbox"]') as unknown as DomElement | null);
+      await filter(view.win, "api");
+      await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]') as unknown as DomElement | null);
       await view.click(confirmButton(view.win));
 
       // While the list refresh is still in flight the dialog is still mounted
@@ -620,30 +708,7 @@ describe("add-repository dialog (mounted)", () => {
     }
   });
 
-  /** Type into the dialog's filter input the way a user's keystroke arrives. */
-  const filter = async (win: DomWindow, value: string) => {
-    const input = win.document.querySelector("#add-repository-search");
-    const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
-    await act(async () => {
-      setValue?.call(input, value);
-      input?.dispatchEvent(new win.Event("input", { bubbles: true }));
-    });
-  };
-
-  /** `count` repositories named `repo-0`…`repo-<count-1>` under one owner. */
-  const many = (count: number) =>
-    Array.from({ length: count }, (_, index) => ({
-      repo_id: 500 + index,
-      owner: "acme",
-      name: `repo-${index}`,
-    }));
-
-  const listed = (win: DomWindow): string[] =>
-    [...win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
-      (node) => node.parentElement?.textContent ?? "",
-    );
-
-  test("a query narrows to its matches and clearing restores the capped list", async () => {
+  test("nothing is listed until the operator types, and the count says how many matched", async () => {
     const view = await mountTargets(
       createElement(AddRepositoryDialog, {
         locale: "en",
@@ -653,14 +718,17 @@ describe("add-repository dialog (mounted)", () => {
         onAdded: () => {},
         onClose: () => {},
       }),
-      (wire) => (wire.url.endsWith("/installation-repositories") ? listing(many(45)) : wireJson({})),
+      (wire) =>
+        wire.url.endsWith("/settings")
+          ? settingsWith(INSTALLED)
+          : wire.url.endsWith("/installation-repositories")
+            ? listing(many(45))
+            : wireJson({}),
     );
     try {
-      // 45 rows, 40 mounted, and the totals say why the list stops there.
-      expect(listed(view.win)).toHaveLength(REPOSITORY_LIST_CAP);
-      expect(view.dialog()?.textContent ?? "").toContain(
-        t("en", "targets.addDialog.capped").replace("{total}", "45").replace("{cap}", "40"),
-      );
+      // Query-first: the search box exists, the 45 grants do not render.
+      expect(view.win.document.querySelector("#add-repository-search")).not.toBeNull();
+      expect(listed(view.win)).toHaveLength(0);
 
       await filter(view.win, "  repo-4  ");
       const narrowed = listed(view.win);
@@ -669,7 +737,7 @@ describe("add-repository dialog (mounted)", () => {
       expect(narrowed.some((label) => label.includes("acme/repo-44"))).toBe(true);
       expect(narrowed.some((label) => label.includes("acme/repo-3"))).toBe(false);
       expect(view.dialog()?.textContent ?? "").toContain(
-        t("en", "targets.addDialog.matchCount").replace("{count}", "6").replace("{total}", "45"),
+        t("en", "targets.addDialog.resultsCount").replace("{count}", "6"),
       );
 
       // Upper case is the same query: one case fold, not two code paths.
@@ -677,13 +745,13 @@ describe("add-repository dialog (mounted)", () => {
       expect(listed(view.win)).toEqual(narrowed);
 
       await filter(view.win, "");
-      expect(listed(view.win)).toHaveLength(REPOSITORY_LIST_CAP);
+      expect(listed(view.win)).toHaveLength(0);
     } finally {
       await view.unmount();
     }
   });
 
-  test("a broad query renders every match; the cap bounds only the empty list", async () => {
+  test("a broad query states the cap it applied and how many matched", async () => {
     const view = await mountTargets(
       createElement(AddRepositoryDialog, {
         locale: "en",
@@ -693,17 +761,21 @@ describe("add-repository dialog (mounted)", () => {
         onAdded: () => {},
         onClose: () => {},
       }),
-      (wire) => (wire.url.endsWith("/installation-repositories") ? listing(many(45)) : wireJson({})),
+      (wire) =>
+        wire.url.endsWith("/settings")
+          ? settingsWith(INSTALLED)
+          : wire.url.endsWith("/installation-repositories")
+            ? listing(many(45))
+            : wireJson({}),
     );
     try {
-      // "repo-" matches all 45 rows — past the 40-row cap, and all of them mount.
+      // "repo-" matches all 45 rows; the dialog mounts 40 and says so.
       await filter(view.win, "repo-");
-      expect(listed(view.win)).toHaveLength(45);
+      expect(listed(view.win)).toHaveLength(REPOSITORY_LIST_CAP);
       expect(view.dialog()?.textContent ?? "").toContain(
-        t("en", "targets.addDialog.matchCount").replace("{count}", "45").replace("{total}", "45"),
-      );
-      expect(view.dialog()?.textContent ?? "").not.toContain(
-        t("en", "targets.addDialog.capped").replace("{total}", "45").replace("{cap}", "40"),
+        t("en", "targets.addDialog.resultsTruncated")
+          .replace("{cap}", String(REPOSITORY_LIST_CAP))
+          .replace("{count}", "45"),
       );
     } finally {
       await view.unmount();
@@ -719,10 +791,11 @@ describe("add-repository dialog (mounted)", () => {
       if (wire.url.endsWith("/api/apps")) {
         return wireJson({
           viewer: { login: "mallory", role: "admin" },
-          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector" }],
+          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector", github_slug: "acme-inspector" }],
           shared_bots: [],
         });
       }
+      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
       if (wire.url.endsWith("/installation-repositories")) return listing(many(45));
       return wireJson({});
     });
@@ -731,13 +804,11 @@ describe("add-repository dialog (mounted)", () => {
         (button) => button.textContent === t("en", "targets.add"),
       );
       await view.click(addButton);
-      // Tick the first row, then filter it out of sight.
+      await filter(view.win, "repo-0");
+      // Tick the first row, then narrow it out of sight.
       await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
       await filter(view.win, "repo-44");
       expect(listed(view.win)).toHaveLength(1);
-      expect(view.dialog()?.textContent ?? "").toContain(
-        t("en", "targets.addDialog.matchCount").replace("{count}", "1").replace("{total}", "45"),
-      );
 
       await view.click(confirmButton(view.win));
       const post = view.sent.find((wire) => wire.method === "POST");
@@ -760,7 +831,12 @@ describe("add-repository dialog (mounted)", () => {
         onAdded: () => {},
         onClose: () => {},
       }),
-      (wire) => (wire.url.endsWith("/installation-repositories") ? listing(many(45)) : wireJson({})),
+      (wire) =>
+        wire.url.endsWith("/settings")
+          ? settingsWith(INSTALLED)
+          : wire.url.endsWith("/installation-repositories")
+            ? listing(many(45))
+            : wireJson({}),
     );
     try {
       await filter(view.win, "no-such-repository");
@@ -788,10 +864,15 @@ describe("add-repository dialog (mounted)", () => {
         onAdded: () => {},
         onClose: () => {},
       }),
-      (wire) => (wire.url.endsWith("/installation-repositories") ? listing(many(45)) : wireJson({})),
+      (wire) =>
+        wire.url.endsWith("/settings")
+          ? settingsWith(INSTALLED)
+          : wire.url.endsWith("/installation-repositories")
+            ? listing(many(45))
+            : wireJson({}),
     );
     try {
-      // repo-41 sits past the 40-row cap, so the filter is what brings it back.
+      // repo-41 sits past the 40-row cap, so the query is what brings it back.
       await filter(view.win, "repo-41");
       const boxes = [...view.win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
         (node) => node as unknown as HTMLInputElement,
@@ -799,6 +880,46 @@ describe("add-repository dialog (mounted)", () => {
       expect(boxes).toHaveLength(1);
       expect(boxes[0]?.checked).toBe(true);
       expect(boxes[0]?.disabled).toBe(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("re-check refetches the installation payload and unlocks the repository step", async () => {
+    let installed = false;
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/targets")) return wireJson({ targets: [] });
+      if (wire.url.endsWith("/api/apps")) {
+        return wireJson({
+          viewer: { login: "mallory", role: "admin" },
+          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector", github_slug: "acme-inspector" }],
+          shared_bots: [],
+        });
+      }
+      if (wire.url.endsWith("/settings")) return settingsWith(installed ? INSTALLED : []);
+      if (wire.url.endsWith("/installation-repositories")) {
+        return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
+      }
+      return wireJson({});
+    });
+    try {
+      const addButton = [...view.win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      await view.click(addButton);
+      expect(view.dialog()?.textContent ?? "").toContain(t("en", "targets.addDialog.noInstallations"));
+      expect(view.win.document.querySelector("#add-repository-search")).toBeNull();
+      const before = view.sent.filter((wire) => wire.url.endsWith("/settings")).length;
+
+      installed = true;
+      const recheck = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent === t("en", "targets.addDialog.recheck"),
+      );
+      await view.click(recheck as unknown as DomElement | undefined);
+
+      expect(view.sent.filter((wire) => wire.url.endsWith("/settings")).length).toBe(before + 1);
+      expect(view.win.document.querySelector("#add-repository-search")).not.toBeNull();
+      expect(view.dialog()?.textContent ?? "").not.toContain(t("en", "targets.addDialog.noInstallations"));
     } finally {
       await view.unmount();
     }
@@ -955,6 +1076,17 @@ describe("target settings tab (static SSR)", () => {
     expect(disabledInputs(markup)).toBe(0);
     expect(markup).not.toContain("Following the workspace defaults");
     expect(markup).toContain("Every push");
+  });
+
+  test("the tab names the bound App and says rebinding is not supported yet", () => {
+    // I-000642: the user asked for the bot binding to be visible here. It is a
+    // labelled row plus one informational line — never a rebind control.
+    const markup = renderSettingsTab(1);
+    expect(markup).toContain(t("en", "targets.settings.boundApp"));
+    expect(markup).toContain("Acme Inspector");
+    expect(markup).toContain(t("en", "targets.settings.boundAppPlanned"));
+    // No control offers the change: the row is copy.
+    expect(markup).not.toContain('aria-label="' + t("en", "targets.settings.boundApp") + '"');
   });
 
   test("the pause switch reflects review_enabled", () => {

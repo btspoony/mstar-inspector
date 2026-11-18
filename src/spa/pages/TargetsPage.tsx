@@ -38,10 +38,12 @@ import {
   TabsContent,
   TabsList,
   TabsTrigger,
+  ToggleGroup,
+  ToggleGroupItem,
 } from "@design-system";
 import { MetricBand, type Metric } from "@/components/MetricBand";
 import { PageHeader } from "@/components/PageHeader";
-import { ListRow, ListRowGroup } from "@/components/ListRow";
+import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -59,6 +61,7 @@ import {
   type TargetPolicyPayload,
 } from "./TargetSettingsTab";
 import {
+  parseAppInstallations,
   parseInstallationRepositories,
   parseTargetCreate,
   parseTargetDetailTab,
@@ -66,6 +69,7 @@ import {
   targetDetailTabQuery,
   type AppDetailSearch,
   type InstallationRepositoryOption,
+  type PendingInstallation,
   type ReadScope,
   type RepositoryAppOption,
   type TargetDetailTab,
@@ -135,7 +139,12 @@ export async function loadRepositoryApps(base: string): Promise<RepositoryAppOpt
         : typeof row.github_slug === "string" && row.github_slug !== ""
           ? row.github_slug
           : String(row.github_app_id);
-    options.push({ app_id: row.github_app_id, bot_id: row.bot_id, name });
+    options.push({
+      app_id: row.github_app_id,
+      bot_id: row.bot_id,
+      name,
+      slug: typeof row.github_slug === "string" && row.github_slug !== "" ? row.github_slug : null,
+    });
   }
   return options;
 }
@@ -168,18 +177,19 @@ export function targetRepositoryName(target: RepositoryIdentity): string {
   return `${target.repo_owner}/${target.repo_name}`;
 }
 
-/**
- * The row names no repository at all — no id and no name, so nothing was ever
- * bound and no review can exist. A row whose installation was removed keeps its
- * `owner/name` and therefore its history; `repo_id` alone is not this test.
- */
-export function targetIsUnbound(target: TargetListRow): boolean {
-  return target.repo_id === null && targetRepositoryName(target) === "";
-}
+/** The rows a table shows: the workspace's fixed aggregate row, or one target. */
+type RepositoryTableRow =
+  | { kind: "all" }
+  | { kind: "target"; target: TargetListRow };
 
 /**
  * The loaded face of the list — exported so SSR pins the fixed first row, the
  * per-repository rows, the count pill and the empty state without a DOM runner.
+ *
+ * The table speaks the Apps list's vocabulary (name composite cell, status
+ * badge, right-aligned figures). Its ORDER is the server's: review-descending
+ * with never-reviewed rows last, so the filter only ever hides rows and never
+ * reorders the ones it keeps.
  */
 export function TargetsView({
   locale,
@@ -194,15 +204,20 @@ export function TargetsView({
   onRetry: () => void;
   addControl?: ReactNode;
 }) {
-  const rows = targets ?? [];
+  const all = targets ?? [];
   const base = apiBase();
   const allHref = `${base}/repos/all`;
-  // Payload arithmetic only: the list already carries every figure the band
-  // shows, so the overview needs no second read. `last_reviewed_at` is a sortable
-  // UTC stamp, so the newest one is the last review the workspace ran — and it
-  // counts EVERY row, named-but-unbound ones included: such a row lost its
-  // installation, not its history.
-  const latestReview = rows.reduce<string | null>(
+  // 待安装 is a FILTER, not a metric: it counts the rows the same repo_id axis
+  // already decides, and narrows the list to them.
+  const [uninstalledOnly, setUninstalledOnly] = useState(false);
+  const uninstalledCount = all.filter((target) => target.repo_id === null).length;
+  const rows = uninstalledOnly ? all.filter((target) => target.repo_id === null) : all;
+  // Payload arithmetic only: every figure is the row aggregates summed, so the
+  // band costs no extra query. A named-but-unbound row keeps its history, so it
+  // still counts here.
+  const reviewsTotal = all.reduce((sum, target) => sum + target.reviews_total, 0);
+  const reviews7d = all.reduce((sum, target) => sum + target.reviews_7d, 0);
+  const latestReview = all.reduce<string | null>(
     (latest, target) =>
       target.last_reviewed_at !== null && (latest === null || target.last_reviewed_at > latest)
         ? target.last_reviewed_at
@@ -212,15 +227,81 @@ export function TargetsView({
   const metrics: Metric[] =
     state === "ok"
       ? [
-          { key: t(locale, "targets.metricRepositories"), value: rows.length },
-          // The same axis the row badges use, so the figure and the pills agree.
-          {
-            key: t(locale, "targets.metricUninstalled"),
-            value: rows.filter((target) => target.repo_id === null).length,
-          },
-          { key: t(locale, "targets.metricLastReview"), value: formatRelativeTime(latestReview, locale) },
+          { key: t(locale, "targets.metricRepositories"), value: all.length },
+          { key: t(locale, "targets.metricReviews"), value: reviewsTotal },
+          { key: t(locale, "targets.metricReviews7d"), value: reviews7d },
         ]
       : [];
+
+  const columns: DataTableColumn<RepositoryTableRow>[] = [
+    {
+      header: t(locale, "targets.columnRepository"),
+      cell: (row) => {
+        if (row.kind === "all") {
+          return (
+            <a
+              className="text-sm font-semibold text-foreground no-underline hover:underline"
+              href={allHref}
+              onClick={(event) => spaClick(allHref, event)}
+            >
+              {t(locale, "targets.allRepositories")}
+            </a>
+          );
+        }
+        const href = `${base}/repos/${row.target.target_id}`;
+        return (
+          <a
+            className="text-sm font-semibold text-foreground no-underline hover:underline"
+            href={href}
+            onClick={(event) => spaClick(href, event)}
+          >
+            {targetRepositoryName(row.target) || "—"}
+          </a>
+        );
+      },
+      // The App a repository is bound to — the secondary line, as today.
+      meta: (row) =>
+        row.kind === "all" ? t(locale, "targets.allRepositoriesMeta") : row.target.app_name,
+    },
+    {
+      header: t(locale, "targets.columnState"),
+      cell: (row) => {
+        if (row.kind === "all") {
+          return <StatusBadge tone="accent">{repositoryCountLabel(locale, all.length)}</StatusBadge>;
+        }
+        const pill = targetStatusPill(locale, row.target);
+        return <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>;
+      },
+    },
+    {
+      header: t(locale, "targets.columnReviews"),
+      align: "right",
+      cell: (row) => (
+        <span className="tabular-nums">{row.kind === "all" ? reviewsTotal : row.target.reviews_total}</span>
+      ),
+    },
+    {
+      header: t(locale, "targets.columnReviews7d"),
+      align: "right",
+      cell: (row) => (
+        <span className="tabular-nums">{row.kind === "all" ? reviews7d : row.target.reviews_7d}</span>
+      ),
+    },
+    {
+      header: t(locale, "targets.columnLastReview"),
+      cell: (row) => (
+        <span className="text-muted-foreground tabular-nums">
+          {formatRelativeTime(row.kind === "all" ? latestReview : row.target.last_reviewed_at, locale)}
+        </span>
+      ),
+    },
+  ];
+
+  const tableRows: RepositoryTableRow[] = [
+    { kind: "all" },
+    ...rows.map((target): RepositoryTableRow => ({ kind: "target", target })),
+  ];
+
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
@@ -232,52 +313,44 @@ export function TargetsView({
       {state === "error" ? <ErrorState locale={locale} onRetry={onRetry} /> : null}
       {state === "ok" ? (
         <div className="flex flex-col gap-4">
-          <ListRowGroup>
-            <ListRow
-              identity={
-                <a
-                  className="text-foreground no-underline hover:underline"
-                  href={allHref}
-                  onClick={(event) => spaClick(allHref, event)}
-                >
-                  {t(locale, "targets.allRepositories")}
-                </a>
-              }
-              status={<StatusBadge tone="accent">{repositoryCountLabel(locale, rows.length)}</StatusBadge>}
-              meta={t(locale, "targets.allRepositoriesMeta")}
-            />
-            {rows.map((target) => {
-              const href = `${base}/repos/${target.target_id}`;
-              const pill = targetStatusPill(locale, target);
-              return (
-                <ListRow
-                  key={target.target_id}
-                  identity={
-                    <a
-                      className="text-foreground no-underline hover:underline"
-                      href={href}
-                      onClick={(event) => spaClick(href, event)}
-                    >
-                      {targetRepositoryName(target) || "—"}
-                    </a>
-                  }
-                  status={<StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>}
-                  meta={
-                    targetIsUnbound(target)
-                      ? t(locale, "targets.metaUninstalled")
-                      : target.last_reviewed_at === null
-                        ? t(locale, "targets.metaNever", { app: target.app_name })
-                        : t(locale, "targets.meta", {
-                            app: target.app_name,
-                            time: formatRelativeTime(target.last_reviewed_at, locale),
-                          })
-                  }
-                />
-              );
-            })}
-          </ListRowGroup>
-          {rows.length === 0 ? (
+          {uninstalledCount > 0 ? (
+            <div className="flex justify-end">
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                size="sm"
+                value={uninstalledOnly ? "uninstalled" : "all"}
+                onValueChange={(next) => {
+                  // A second click on the active segment is a no-op, never a
+                  // cleared filter — the list always shows something.
+                  if (next !== "") setUninstalledOnly(next === "uninstalled");
+                }}
+                aria-label={t(locale, "targets.filterLabel")}
+              >
+                <ToggleGroupItem value="all">{t(locale, "targets.filterAll")}</ToggleGroupItem>
+                <ToggleGroupItem value="uninstalled">
+                  {t(locale, "targets.filterUninstalled", { count: uninstalledCount })}
+                </ToggleGroupItem>
+              </ToggleGroup>
+            </div>
+          ) : null}
+          <DataTable
+            columns={columns}
+            rows={tableRows}
+            rowKey={(row) => (row.kind === "all" ? "all" : row.target.target_id)}
+            rowProps={(row) => {
+              const href = row.kind === "all" ? allHref : `${base}/repos/${row.target.target_id}`;
+              return {
+                className: "cursor-pointer",
+                onClick: (event) => spaClick(href, event),
+              };
+            }}
+          />
+          {all.length === 0 ? (
             <EmptyState title={t(locale, "targets.emptyTitle")} description={t(locale, "targets.emptyDescription")} />
+          ) : null}
+          {all.length > 0 && rows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">{t(locale, "targets.filterEmpty")}</p>
           ) : null}
         </div>
       ) : null}
@@ -286,9 +359,9 @@ export function TargetsView({
 }
 
 /**
- * How many rows the unfiltered list renders. An App installed on "All
+ * How many matching rows the dialog mounts. An App installed on "All
  * repositories" grants hundreds; the dialog has no virtualizer, so it caps the
- * rows it mounts and states the totals above them.
+ * rows it renders and states the match count above them.
  */
 export const REPOSITORY_LIST_CAP = 40;
 
@@ -297,6 +370,12 @@ export type RepositoryOptionsState =
   | { state: "loading" }
   | { state: "error" }
   | { state: "ok"; repositories: InstallationRepositoryOption[]; degraded: boolean };
+
+/** The chosen App's live installations (`GET /api/apps/:appId/settings`). */
+export type InstallationsState =
+  | { state: "loading" }
+  | { state: "error" }
+  | { state: "ok"; installations: PendingInstallation[] };
 
 /**
  * The add-repository dialog's BODY — every state as props, so SSR can pin the
@@ -307,6 +386,7 @@ export function AddRepositoryDialogBody({
   locale,
   apps,
   appId,
+  installations,
   repositories,
   existingRepoIds,
   selectedRepoIds,
@@ -314,6 +394,7 @@ export function AddRepositoryDialogBody({
   busy,
   onSelectApp,
   onToggleRepo,
+  onRetryInstallations,
   onRetryRepositories,
   onSubmit,
   onCancel,
@@ -321,6 +402,7 @@ export function AddRepositoryDialogBody({
   locale: SpaBoot["locale"];
   apps: readonly RepositoryAppOption[];
   appId: string;
+  installations: InstallationsState;
   repositories: RepositoryOptionsState;
   existingRepoIds: ReadonlySet<number>;
   selectedRepoIds: ReadonlySet<number>;
@@ -328,6 +410,7 @@ export function AddRepositoryDialogBody({
   busy: boolean;
   onSelectApp?: (next: string) => void;
   onToggleRepo?: (repoId: number) => void;
+  onRetryInstallations?: () => void;
   onRetryRepositories?: () => void;
   onSubmit?: () => void;
   onCancel?: () => void;
@@ -335,18 +418,25 @@ export function AddRepositoryDialogBody({
   const base = apiBase();
   const appsHref = `${base}/apps`;
   const selectedApp = apps.find((app) => String(app.app_id) === appId) ?? null;
+  const installed = installations.state === "ok" && installations.installations.length > 0;
   const confirmDisabled =
     apps.length === 0 ||
+    !installed ||
     repositories.state !== "ok" ||
     selectedRepoIds.size === 0 ||
     busy;
   const [query, setQuery] = useState("");
   const all = repositories.state === "ok" ? repositories.repositories : [];
   const needle = query.trim().toLowerCase();
+  // Query-first: nothing is offered before the operator types. An empty query
+  // is an empty answer, never a dump of everything the App can see.
   const matches =
-    needle === "" ? all : all.filter((repository) => `${repository.owner}/${repository.name}`.toLowerCase().includes(needle));
-  // A query answers with every match; an empty one keeps the list bounded.
-  const visible = needle === "" ? matches.slice(0, REPOSITORY_LIST_CAP) : matches;
+    needle === "" ? [] : all.filter((repository) => `${repository.owner}/${repository.name}`.toLowerCase().includes(needle));
+  const visible = matches.slice(0, REPOSITORY_LIST_CAP);
+  const installHref =
+    selectedApp?.slug == null
+      ? null
+      : `https://github.com/apps/${encodeURIComponent(selectedApp.slug)}/installations/new`;
 
   return (
     <div className="flex flex-col gap-4" data-slot="add-repository-body">
@@ -363,60 +453,82 @@ export function AddRepositoryDialogBody({
         </>
       ) : (
         <>
-          {apps.length === 1 ? (
-            // One App leaves nothing to choose: the binding is stated, not selectable.
-            <p className="text-sm text-muted-foreground">
-              {t(locale, "targets.addDialog.binding", { app: apps[0]!.name })}
-            </p>
-          ) : (
-            <div className="flex flex-col gap-1.5">
-              <span className="text-sm font-medium">{t(locale, "targets.addDialog.appLabel")}</span>
-              <Select value={appId} onValueChange={(next) => onSelectApp?.(next)}>
-                <SelectTrigger aria-label={t(locale, "targets.addDialog.appLabel")}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {apps.map((app) => (
-                    <SelectItem key={app.app_id} value={String(app.app_id)}>
-                      {app.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium">{t(locale, "targets.addDialog.repoLabel")}</span>
-            {repositories.state === "loading" ? (
-              <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.loadingRepos")}</p>
+          {/* Step 1 — the App is ALWAYS shown, even when there is only one:
+              binding is an explicit choice, never an implicit apps[0]. */}
+          <section className="flex flex-col gap-1.5" data-slot="add-step-app">
+            <span className="text-sm font-medium">{t(locale, "targets.addDialog.stepApp")}</span>
+            <Select value={appId} onValueChange={(next) => onSelectApp?.(next)}>
+              <SelectTrigger aria-label={t(locale, "targets.addDialog.appLabel")}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {apps.map((app) => (
+                  <SelectItem key={app.app_id} value={String(app.app_id)}>
+                    {app.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.sharedScopeComing")}</p>
+          </section>
+
+          {/* Step 2 — the chosen App's live installations. */}
+          <section className="flex flex-col gap-1.5" data-slot="add-step-installations">
+            <span className="text-sm font-medium">{t(locale, "targets.addDialog.stepInstall")}</span>
+            {installations.state === "loading" ? (
+              <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.loadingInstallations")}</p>
             ) : null}
-            {repositories.state === "error" ? (
+            {installations.state === "error" ? (
               <ErrorState
                 locale={locale}
-                message={t(locale, "targets.addDialog.loadReposFailed")}
-                onRetry={onRetryRepositories}
+                message={t(locale, "targets.addDialog.loadInstallationsFailed")}
+                onRetry={onRetryInstallations}
               />
             ) : null}
-            {repositories.state === "ok" && repositories.repositories.length === 0 ? (
+            {installations.state === "ok" && installations.installations.length === 0 ? (
               <>
-                <p className="text-sm text-muted-foreground">
-                  {t(locale, "targets.addDialog.noInstallationRepos")}
-                </p>
-                {selectedApp === null ? null : (
+                <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.noInstallations")}</p>
+                {installHref === null ? null : (
                   <a
                     className="text-sm text-primary underline-offset-4 hover:underline"
-                    href={`${base}/apps/${selectedApp.app_id}?tab=installations`}
-                    onClick={(event) => spaClick(`${base}/apps/${selectedApp.app_id}?tab=installations`, event)}
+                    href={installHref}
+                    target="_blank"
+                    rel="noreferrer"
                   >
-                    {t(locale, "targets.addDialog.goToInstalled")}
+                    {t(locale, "targets.addDialog.installNow")}
                   </a>
                 )}
+                <Button type="button" variant="outline" onClick={() => onRetryInstallations?.()}>
+                  {t(locale, "targets.addDialog.recheck")}
+                </Button>
               </>
             ) : null}
-            {repositories.state === "ok" && repositories.degraded ? (
-              <p className="text-sm text-(--tone-warn-fg)">{t(locale, "targets.addDialog.degraded")}</p>
+            {installations.state === "ok" && installations.installations.length > 0 ? (
+              <>
+                <ul className="flex flex-col gap-1 text-sm text-muted-foreground">
+                  {installations.installations.map((row) => (
+                    <li key={row.installation_id}>
+                      {t(locale, "targets.addDialog.installationRow", {
+                        account: row.account_login ?? t(locale, "targets.addDialog.installationNoAccount"),
+                        id: row.installation_id,
+                        time: formatRelativeTime(row.seen_at, locale),
+                      })}
+                    </li>
+                  ))}
+                </ul>
+                <Button type="button" variant="outline" onClick={() => onRetryInstallations?.()}>
+                  {t(locale, "targets.addDialog.recheck")}
+                </Button>
+              </>
             ) : null}
-            {repositories.state === "ok" && all.length > 0 ? (
+          </section>
+
+          {/* Step 3 — query-first repository scan. */}
+          <section className="flex flex-col gap-2" data-slot="add-step-repositories">
+            <span className="text-sm font-medium">{t(locale, "targets.addDialog.stepRepos")}</span>
+            {!installed ? (
+              <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.searchHint")}</p>
+            ) : (
               <>
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium" htmlFor="add-repository-search">
@@ -426,52 +538,81 @@ export function AddRepositoryDialogBody({
                     id="add-repository-search"
                     type="search"
                     autoComplete="off"
+                    placeholder={t(locale, "targets.addDialog.searchHint")}
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                   />
                 </div>
-                {needle === "" ? (
-                  all.length > REPOSITORY_LIST_CAP ? (
-                    <p className="text-sm text-muted-foreground">
-                      {t(locale, "targets.addDialog.capped", { total: all.length, cap: REPOSITORY_LIST_CAP })}
-                    </p>
-                  ) : null
-                ) : matches.length > 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    {t(locale, "targets.addDialog.matchCount", { count: matches.length, total: all.length })}
-                  </p>
+                {repositories.state === "loading" ? (
+                  <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.loadingRepos")}</p>
                 ) : null}
-                {matches.length === 0 ? (
+                {repositories.state === "error" ? (
+                  <ErrorState
+                    locale={locale}
+                    message={t(locale, "targets.addDialog.loadReposFailed")}
+                    onRetry={onRetryRepositories}
+                  />
+                ) : null}
+                {repositories.state === "ok" && repositories.repositories.length === 0 ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      {t(locale, "targets.addDialog.noInstallationRepos")}
+                    </p>
+                    {selectedApp === null ? null : (
+                      <a
+                        className="text-sm text-primary underline-offset-4 hover:underline"
+                        href={`${base}/apps/${selectedApp.app_id}?tab=installations`}
+                        onClick={(event) => spaClick(`${base}/apps/${selectedApp.app_id}?tab=installations`, event)}
+                      >
+                        {t(locale, "targets.addDialog.goToInstalled")}
+                      </a>
+                    )}
+                  </>
+                ) : null}
+                {repositories.state === "ok" && repositories.degraded ? (
+                  <p className="text-sm text-(--tone-warn-fg)">{t(locale, "targets.addDialog.degraded")}</p>
+                ) : null}
+                {needle === "" ? null : matches.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
                     {t(locale, "targets.addDialog.noMatch", { query })}
                   </p>
                 ) : (
-                  <ul className="flex flex-col gap-1.5">
-                    {visible.map((repository) => {
-                      const added = existingRepoIds.has(repository.repo_id);
-                      const label = `${repository.owner}/${repository.name}`;
-                      return (
-                        <li key={repository.repo_id} className="flex items-center gap-2">
-                          <label className="flex items-center gap-2 text-sm">
-                            <input
-                              type="checkbox"
-                              checked={added || selectedRepoIds.has(repository.repo_id)}
-                              disabled={added || busy}
-                              onChange={() => onToggleRepo?.(repository.repo_id)}
-                            />
-                            <span>{label}</span>
-                          </label>
-                          {added ? (
-                            <StatusBadge tone="neutral">{t(locale, "targets.addDialog.alreadyAdded")}</StatusBadge>
-                          ) : null}
-                        </li>
-                      );
-                    })}
-                  </ul>
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      {matches.length > REPOSITORY_LIST_CAP
+                        ? t(locale, "targets.addDialog.resultsTruncated", {
+                            cap: REPOSITORY_LIST_CAP,
+                            count: matches.length,
+                          })
+                        : t(locale, "targets.addDialog.resultsCount", { count: matches.length })}
+                    </p>
+                    <ul className="flex flex-col gap-1.5">
+                      {visible.map((repository) => {
+                        const added = existingRepoIds.has(repository.repo_id);
+                        const label = `${repository.owner}/${repository.name}`;
+                        return (
+                          <li key={repository.repo_id} className="flex items-center gap-2">
+                            <label className="flex items-center gap-2 text-sm">
+                              <input
+                                type="checkbox"
+                                checked={added || selectedRepoIds.has(repository.repo_id)}
+                                disabled={added || busy}
+                                onChange={() => onToggleRepo?.(repository.repo_id)}
+                              />
+                              <span>{label}</span>
+                            </label>
+                            {added ? (
+                              <StatusBadge tone="neutral">{t(locale, "targets.addDialog.alreadyAdded")}</StatusBadge>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </>
                 )}
               </>
-            ) : null}
-          </div>
+            )}
+          </section>
         </>
       )}
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
@@ -512,15 +653,18 @@ export function AddRepositoryDialog({
 }) {
   const base = apiBase();
   const [appId, setAppId] = useState<string>(apps.length > 0 ? String(apps[0]!.app_id) : "");
+  const [installations, setInstallations] = useState<InstallationsState>({ state: "loading" });
   const [repositories, setRepositories] = useState<RepositoryOptionsState>({ state: "loading" });
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
   // Every read is stamped. A response lands only while its stamp is still the
   // newest one, so a slow walk for the App the user switched AWAY from can
-  // never overwrite the list of the App now selected (a boolean reset by the
-  // next effect body would always pass that check).
+  // never overwrite the state of the App now selected (a boolean reset by the
+  // next effect body would always pass that check). One stamp per read family,
+  // because the two are refetched independently.
   const requestRef = useRef(0);
+  const installationsRef = useRef(0);
 
   const loadRepositories = useCallback(
     async (targetAppId: string): Promise<void> => {
@@ -547,14 +691,39 @@ export function AddRepositoryDialog({
     [base],
   );
 
+  // The install check rides the EXISTING settings payload (its `installations[]`
+  // is the bot's live `bot_installations` rows) — no new endpoint.
+  const loadInstallations = useCallback(
+    async (targetAppId: string): Promise<void> => {
+      const request = ++installationsRef.current;
+      if (targetAppId === "") {
+        setInstallations({ state: "loading" });
+        return;
+      }
+      setInstallations({ state: "loading" });
+      try {
+        const parsed = parseAppInstallations(
+          await fetchJson(`${base}/api/apps/${targetAppId}/settings`),
+        );
+        if (installationsRef.current !== request) return;
+        setInstallations(parsed === null ? { state: "error" } : { state: "ok", installations: parsed });
+      } catch {
+        if (installationsRef.current === request) setInstallations({ state: "error" });
+      }
+    },
+    [base],
+  );
+
   useEffect(() => {
     if (!open) return;
     void loadRepositories(appId);
+    void loadInstallations(appId);
     // Closing (or another App) retires whatever is still in flight.
     return () => {
       requestRef.current += 1;
+      installationsRef.current += 1;
     };
-  }, [open, appId, loadRepositories]);
+  }, [open, appId, loadRepositories, loadInstallations]);
 
   if (!open) return null;
 
@@ -618,6 +787,7 @@ export function AddRepositoryDialog({
           locale={locale}
           apps={apps}
           appId={appId}
+          installations={installations}
           repositories={repositories}
           existingRepoIds={existingRepoIds}
           selectedRepoIds={selected}
@@ -628,6 +798,7 @@ export function AddRepositoryDialog({
             setSelected(new Set());
             setNotice(null);
           }}
+          onRetryInstallations={() => void loadInstallations(appId)}
           onToggleRepo={(repoId) => {
             setSelected((current) => {
               const next = new Set(current);

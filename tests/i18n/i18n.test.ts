@@ -247,9 +247,31 @@ describe("App detail IA copy", () => {
     expect(t("en", "targets.allRepositories")).toBe("All repositories");
     expect(t("zh_CN", "targets.allRepositories")).toBe("所有仓库");
     expect(t("en", "targets.addDialog.noInstallationRepos")).toBe(
-      "This App is not installed on any repository.",
+      "This App is installed, but grants no repository.",
     );
     expect(t("zh_CN", "targets.addDialog.duplicates").length).toBeGreaterThan(0);
+    // The stepped add flow's own three headings, and the two figures the list
+    // now bands (I-000640 / I-000642).
+    for (const locale of ["en", "zh_CN"] as const) {
+      for (const key of [
+        "targets.addDialog.stepApp",
+        "targets.addDialog.stepInstall",
+        "targets.addDialog.stepRepos",
+        "targets.addDialog.installNow",
+        "targets.addDialog.recheck",
+        "targets.addDialog.resultsCount",
+        "targets.addDialog.resultsTruncated",
+        "targets.metricReviews",
+        "targets.metricReviews7d",
+        "targets.filterUninstalled",
+        "targets.columnReviews",
+        "targets.columnReviews7d",
+        "targets.settings.boundApp",
+        "targets.settings.boundAppPlanned",
+      ]) {
+        expect(t(locale, key as Parameters<typeof t>[1]).length, `${locale} ${key}`).toBeGreaterThan(0);
+      }
+    }
     // The three detail tabs and the 评审配置 tab's own copy.
     expect(t("en", "targets.tabInsights")).toBe("Insights");
     expect(t("zh_CN", "targets.tabPullRequests")).toBe("拉取请求");
