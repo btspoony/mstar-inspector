@@ -303,13 +303,6 @@ describe("members/apps/settings parsers", () => {
   });
 
   test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
-    const delivery = {
-      event_name: "pull_request",
-      outcome: "ok",
-      status_code: null,
-      repository_full_name: "acme/web",
-      created_at: "2026-01-01 00:00:00",
-    };
     const ok = parseSettings({
       can_manage: true,
       installation: null,
@@ -341,9 +334,6 @@ describe("members/apps/settings parsers", () => {
       model_chains: [],
       custom_providers: [],
       installations: [],
-      // The delivery rows carry the source repository (migration 0043); the
-      // parse stays array-level and keeps the rows verbatim.
-      deliveries: [delivery],
       configured_providers: [],
       provider_catalog: [],
       model_role_ids: ["mstar-review-seat"],
@@ -352,7 +342,7 @@ describe("members/apps/settings parsers", () => {
     });
     expect(ok?.app.id).toBe("app-demo");
     expect(ok?.can_manage).toBe(true);
-    expect(ok && ok.can_manage && !ok.blocked && ok.deliveries).toEqual([delivery]);
+    expect(ok && ok.can_manage && !ok.blocked && ok.delivery_summary).toBeUndefined();
     expect(
       parseSettings({
         app: { github_slug: "demo", id: "app-demo", status: "active", review_enabled: 1, last_webhook_at: null },
@@ -397,7 +387,6 @@ describe("members/apps/settings parsers", () => {
       model_chains: [],
       custom_providers: [],
       installations: [],
-      deliveries: [],
       configured_providers: [],
       provider_catalog: [],
       model_role_ids: [],
@@ -456,7 +445,6 @@ describe("members/apps/settings parsers", () => {
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
       installations: [],
-      deliveries: [],
     };
     // Missing mode is a contract breach on the MANAGE face — the control
     // would render without a current value, so the whole payload fails the
@@ -522,7 +510,6 @@ describe("members/apps/settings parsers", () => {
       model_chains: [],
       custom_providers: [],
       installations: [],
-      deliveries: [],
       configured_providers: [],
       provider_catalog: [],
       model_role_ids: [],
@@ -612,7 +599,6 @@ describe("members/apps/settings parsers", () => {
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
       installations: [],
-      deliveries: [],
     };
     expect(parseSettings(manager)).toMatchObject({ target_id: "rt-501", check_gate: { min_score: 80 } });
     // The Blocked branch reads the same target-owned slice and had the same
@@ -719,7 +705,6 @@ describe("members/apps/settings parsers", () => {
       model_chains: [],
       custom_providers: [],
       installations: [],
-      deliveries: [],
       configured_providers: [],
       provider_catalog: [],
       model_role_ids: [],
@@ -879,7 +864,6 @@ describe("members/apps/settings parsers", () => {
           default_review_level: "default",
         },
         installations: [],
-        deliveries: [],
       }),
     ).toBeNull();
   });
@@ -975,7 +959,6 @@ describe("provider catalog rows + add selection", () => {
     model_chains: [],
     custom_providers: [],
     installations: [],
-    deliveries: [],
     configured_providers: [],
     provider_catalog: [],
     model_role_ids: [],

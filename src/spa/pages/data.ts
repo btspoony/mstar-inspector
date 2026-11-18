@@ -465,9 +465,9 @@ export function isReviewLevel(value: unknown): value is ReviewLevel {
  * The D4 identity set — the fields the GET /api/apps list rows expose
  * (github_app_id, status, review_enabled, created_by) plus created_at and
  * the cached public GitHub profile. This is the NON-MANAGER detail face's
- * whole app shape: everything from the ops stores (installations,
- * deliveries, sandbox_image_id, review-trigger runtime config) stays behind
- * the manager face (the server keys the split on `can_manage`).
+ * whole app shape: everything from the ops stores (installations, the delivery
+ * log, sandbox_image_id, review-trigger runtime config) stays behind the
+ * manager face (the server keys the split on `can_manage`).
  */
 export type SettingsIdentityAppMeta = {
   github_app_id: number;
@@ -684,19 +684,50 @@ export type SettingsAppMeta = BotSettingsAppMeta & {
 
 type SettingsHealth = {
   installations: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
-  deliveries: Array<{
-    event_name: string | null;
-    outcome: string;
-    status_code: number | null;
-    /** `owner/name` of the source repo (migration 0043); NULL = unknown source. */
-    repository_full_name: string | null;
-    created_at: string;
-  }>;
   delivery_summary?: {
     latest: { event_name: string | null; outcome: string; status_code: number | null; created_at: string } | null;
     rejected24h: number;
   };
 };
+
+/**
+ * One row of the delivery-status face. `reason` is the classifier's refusal
+ * sentence (migration 0074) and is present only on a `rejected` row written
+ * after that migration; the table renders it as the outcome's explanation.
+ */
+export type DeliveryStatusRow = {
+  event_name: string | null;
+  outcome: string;
+  status_code: number | null;
+  repository_full_name: string | null;
+  reason: string | null;
+  created_at: string;
+};
+
+/**
+ * One filtered page of deliveries. `repos` and `types` are the App's WHOLE
+ * option sets (not narrowed by the filters), so a filter whose next value sits
+ * outside the current result stays selectable. `total` counts the filtered set
+ * — it is what the pager walks, not the unfiltered table.
+ */
+export type DeliveryStatusPage = {
+  rows: DeliveryStatusRow[];
+  total: number;
+  repos: string[];
+  types: string[];
+};
+
+/** The delivery-status filters, one vocabulary for the URL and the read. */
+export type DeliveryFilters = {
+  /** `owner/name`, or "" for every repository. */
+  repo: string;
+  /** A window segment in whole days, "" for the whole retained history. */
+  since: string;
+  /** The delivery type (the `x-github-event` name), "" for every type. */
+  type: string;
+};
+
+export const DELIVERY_PAGE_SIZE = 20;
 
 /**
  * The bot's identity as the bot settings face serves it: the cached GitHub
@@ -862,7 +893,7 @@ export type SettingsUntargetedPayload = SettingsManageBase & {
 /**
  * The Blocked manager face: this workspace's target on another workspace's
  * bot. It carries the target's own review configuration and the identity the
- * page needs, and NOTHING the bot owns — no installations, deliveries, keys,
+ * page needs, and NOTHING the bot owns — no installations, delivery log, keys,
  * chains, custom providers, sandbox image or metadata. Those belong to the
  * owning workspace, so their absence is the contract, not a degradation.
  */
@@ -1584,6 +1615,61 @@ export function scopedPullRequestsUrl(base: string, scope: ReadScope, repo?: str
 }
 
 /**
+ * The delivery-status read URL. Filters and paging are REQUEST parameters, so
+ * the server narrows and pages BEFORE the response exists — the tab never
+ * hides rows it already holds. An unset filter is simply absent from the query.
+ */
+export function appDeliveriesUrl(
+  base: string,
+  appId: string,
+  filters: DeliveryFilters,
+  offset: number,
+): string {
+  const params = new URLSearchParams();
+  if (filters.repo !== "") params.set("repo", filters.repo);
+  if (filters.since !== "") params.set("since", filters.since);
+  if (filters.type !== "") params.set("type", filters.type);
+  if (offset > 0) params.set("offset", String(offset));
+  const query = params.toString();
+  const path = `${base}/api/apps/${encodeURIComponent(appId)}/deliveries`;
+  return query === "" ? path : `${path}?${query}`;
+}
+
+/**
+ * The delivery page payload: `{ deliveries: [...], total, repos, types }`.
+ * The envelope is strict on `total` (a page without it cannot page), while the
+ * rows parse per entry — a drifted row is dropped rather than failing the whole
+ * table, and the pager still walks the server's total.
+ */
+export function parseDeliveryPage(data: unknown): DeliveryStatusPage | null {
+  if (!isRecord(data) || !Array.isArray(data.deliveries)) return null;
+  const total = finiteCount(data.total);
+  if (total === null) return null;
+  const names = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  return {
+    rows: data.deliveries.map(parseDeliveryRow).filter(present),
+    total,
+    repos: names(data.repos),
+    types: names(data.types),
+  };
+}
+
+/** One delivery row; a row without an outcome or a stamp cannot be shown. */
+function parseDeliveryRow(value: unknown): DeliveryStatusRow | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.outcome !== "string" || typeof value.created_at !== "string") return null;
+  return {
+    event_name: typeof value.event_name === "string" ? value.event_name : null,
+    outcome: value.outcome,
+    status_code: typeof value.status_code === "number" ? value.status_code : null,
+    repository_full_name: typeof value.repository_full_name === "string" ? value.repository_full_name : null,
+    reason: typeof value.reason === "string" ? value.reason : null,
+    created_at: value.created_at,
+  };
+}
+
+/**
  * The detail read URL, built from the ROW's owner/repo/number — never the
  * number alone. owner/repo are passed through `encodeURIComponent` so a
  * value carrying a segment boundary (`/`, `?`, `#`) cannot escape the
@@ -1664,11 +1750,12 @@ export function pullRequestStatePill(
 }
 
 /**
- * The App detail page's two faces: 应用设置 (the App's own configuration, the
- * default) and 已安装. The data faces — 洞察 and Pull requests — belong to the
- * repository detail, so they are not values a URL can open here.
+ * The App detail page's faces: 应用设置 (the App's own configuration, the
+ * default), 投递状态 (the bot's webhook deliveries, filtered and paged) and
+ * 已安装. The data faces — 洞察 and Pull requests — belong to the repository
+ * detail, so they are not values a URL can open here.
  */
-export type AppDetailTab = "settings" | "installations";
+export type AppDetailTab = "settings" | "delivery" | "installations";
 
 /**
  * URL-derived detail state: the App detail's active tab. `window`/`repo`/`pr`
@@ -1709,7 +1796,9 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
 export function parseAppDetailSearch(search: string): AppDetailSearch {
   const insights = parseInsightsSearch(search);
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  const tab: AppDetailTab = params.get("tab") === "installations" ? "installations" : "settings";
+  const rawTab = params.get("tab");
+  const tab: AppDetailTab =
+    rawTab === "installations" || rawTab === "delivery" ? rawTab : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
@@ -2393,7 +2482,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!data.can_manage) {
     // Identity-only non-manager face (App detail IA): the D4
     // identity set — created_at joins the required keys; everything from
-    // the ops stores (installations/deliveries/sandbox image/trigger mode)
+    // the ops stores (installations / delivery log / sandbox image / trigger mode)
     // is NOT part of this face and is not required. The cached GitHub
     // profile is required presence, nullable per field (NULL = never
     // synced) — the identity face has nothing else to render.
@@ -2456,7 +2545,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isBotScope(data.app.scope)) return null;
   if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
   if (!isPendingInstallationList(data.pending_installations)) return null;
-  if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
+  if (!Array.isArray(data.installations)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
@@ -2527,7 +2616,7 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   ) {
     return null;
   }
-  if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
+  if (!Array.isArray(data.installations)) return null;
   if (!isProviderKeyRowList(data.keys)) return null;
   if (data.model_chain !== null && typeof data.model_chain !== "string") return null;
   if (!isRecord(data.model_roles) || !Array.isArray(data.model_chains)) return null;

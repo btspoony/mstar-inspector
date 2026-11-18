@@ -128,13 +128,41 @@ export const zhCN: Dictionary = {
     backToApps: "返回应用",
     /** 从 App 详情与目标详情指向机器人自身设置的链接。 */
     botSettingsLink: "机器人设置",
-    /** App 详情页的两个面：应用自身的配置，然后安装块。 */
+    /** App 详情页的三个面：应用自身的配置、投递状态，然后安装块。 */
     tabSettings: "应用设置",
+    tabDelivery: "投递状态",
     tabInstallations: "已安装",
-    /** App 尚无仓库：没有任何评审，入口在仓库页面（`targets.add` 即该链接）。 */
+    /** App 尚无仓库：没有任何评审。 */
     noRepository: "该应用还没有对应仓库，因此不会进行任何评审。",
-    /** App 有多个仓库：没有单独的评审策略可供本页编辑（`targets.heading` 指向仓库页）。 */
+    /** App 有多个仓库：没有单独的评审策略可供本页编辑。 */
     targetsMany: "该应用审查多个仓库，各仓库的评审配置在仓库页中编辑。",
+    /** 投递状态标签：机器人的 webhook 投递记录，筛选与分页都在服务端完成。 */
+    delivery: {
+      copy: "该机器人收到的每一次 webhook 投递 —— 来自哪个仓库、何种类型，以及处理结果。",
+      /** 被阻断的面没有机器人数据，标签页只陈述这一点。 */
+      unavailable: "共享被撤销期间，该机器人的投递属于另一个工作区。",
+      columnRepo: "仓库",
+      columnType: "类型",
+      columnTime: "时间",
+      columnOutcome: "结果",
+      columnReason: "原因",
+      /** 载荷没有仓库的投递（安装事件、旁路事件）。 */
+      unknownRepo: "未知仓库",
+      /** 请求没有 x-github-event 头的投递。 */
+      unknownType: "未知类型",
+      filterRepo: "仓库",
+      filterWindow: "时间范围",
+      filterWindowAll: "全部时间",
+      filterType: "投递类型",
+      filterAll: "全部",
+      emptyTitle: "没有投递",
+      emptyDescription: "该机器人还没有符合这些筛选条件的 webhook 投递。",
+      pagePrev: "上一页",
+      pageNext: "下一页",
+      /** {from}–{to} 是筛选后总数中的区间，不是整份日志。 */
+      pageRange: "{from}–{to} / {total}",
+      refreshAria: "刷新投递列表",
+    },
     blockedBotNotShared:
       "该机器人已不再共享给本工作区，因此此目标不会进行任何评审。请联系平台运营者重新共享。",
   },
@@ -631,12 +659,6 @@ export const zhCN: Dictionary = {
     installationsLastSync: "最近同步",
     /** App 详情页指标带中 provider 密钥数的标签。 */
     metricKeys: "密钥",
-    recentDeliveries: "最近投递",
-    recentDeliveriesCopy: "最多 10 次 webhook 投递 — 带结论的（正常 / 已暂停 / 已拒绝）排在前，其余按时间从新到旧。",
-    noDeliveries: "还没有投递。",
-    unknownEvent: "未知事件",
-    unknownSource: "未知仓库",
-    status: "状态 {code}",
     addToChain: "加入模型链",
     noAutoDiscovery: "此 provider 不列出模型 — 请从其他已验证 provider 中选择。",
     noVerifiedModels: "验证 provider 密钥后即可填充模型选项。",

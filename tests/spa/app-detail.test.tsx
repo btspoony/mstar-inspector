@@ -22,8 +22,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { type Element as DomElement, type HTMLElement as DomHTMLElement, type Window } from "happy-dom";
 import { t } from "../../src/i18n";
 import {
+  appDeliveriesUrl,
   appDetailSearchQuery,
   appStatusPill,
+  parseDeliveryPage,
   parseAppDetailSearch,
   parseSettings,
   pullRequestRefOf,
@@ -36,6 +38,7 @@ import {
   type SettingsUntargetedPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailPage, AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
+import { DeliveryStatusView } from "../../src/spa/pages/AppDeliveryTab";
 import { SettingsView } from "../../src/spa/pages/SettingsPage";
 import { apiBase } from "../../src/spa/workspace-base";
 import { APP_VERSION } from "../../src/version";
@@ -101,7 +104,6 @@ const managePayload = {
   custom_provider_api_ids: [],
   sandbox_images: [{ id: "omp", enabled: true }],
   installations: [],
-  deliveries: [],
 };
 
 /**
@@ -145,7 +147,6 @@ const untargetedPayload: SettingsUntargetedPayload = {
   custom_provider_api_ids: [],
   sandbox_images: [{ id: "omp", enabled: true }],
   installations: [],
-  deliveries: [],
 };
 
 const search = { tab: "settings" as const, window: "30" as const, repo: "", pr: "" };
@@ -295,12 +296,13 @@ describe("tab shell rendering (static SSR)", () => {
       (tab) => tab.textContent ?? "",
     );
 
-  test("the manager's tab bar is the App's own two faces, settings first", async () => {
+  test("the manager's tab bar is the App's own three faces, settings first", async () => {
     const manage = renderDetail(managePayload);
     // The triggers read by role and name, the way an assistive technology
     // finds them — never by serialized tag adjacency.
     expect(await withMarkup(manage, pageTabs)).toEqual([
       t("en", "appDetail.tabSettings"),
+      t("en", "appDetail.tabDelivery"),
       t("en", "appDetail.tabInstallations"),
     ]);
     // The identity header serves every tab — the GitHub display name (D6).
@@ -324,12 +326,11 @@ describe("tab shell rendering (static SSR)", () => {
     expect(settings).toContain(t("en", "settings.ops"));
     expect(settings).not.toContain(t("en", "settings.pauseReviews"));
     expect(settings).not.toContain(t("en", "settings.resumeReviews"));
-    // The bot-owned configuration the plan moves onto this tab.
+    // The bot-owned configuration this tab composes (deliveries have their own tab).
     for (const key of [
       "settings.providers.title",
       "settings.modelChains",
       "settings.seats",
-      "botSettings.health",
     ] as const) {
       expect(settings).toContain(t("en", key));
     }
@@ -347,15 +348,6 @@ describe("tab shell rendering (static SSR)", () => {
         installations: [
           { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
         ],
-        deliveries: [
-          {
-            event_name: "pull_request",
-            outcome: "ok",
-            status_code: null,
-            repository_full_name: "acme/web",
-            created_at: "2026-01-01 00:00:00",
-          },
-        ],
       },
       "installations",
     );
@@ -366,17 +358,15 @@ describe("tab shell rendering (static SSR)", () => {
     expect(installed).not.toContain(t("en", "settings.installationsAccount"));
   });
 
-  test("an App with no repository yet states it and points at the repository surface", () => {
+  test("an App with no repository yet states it, with no reverse link to the repository surface", () => {
     // The read is accepted: a manager payload with no `target_id` and no
     // `review_*` fact is the zero-repository contract, not a malformed read.
     expect(parseSettings(untargetedPayload)).not.toBeNull();
     expect(parseSettings(untargetedPayload)?.target_id).toBeUndefined();
 
     const markup = renderDetail(untargetedPayload);
-    // The App is visible; the zero-repository state is a notice, not an error.
+    // The App is visible; the zero-repository state is a sentence, not an error.
     expect(markup).toContain(t("en", "appDetail.noRepository"));
-    expect(markup).toContain(`href="${apiBase()}/targets"`);
-    expect(markup).toContain(t("en", "targets.add"));
     // No target-owned control renders: there is no target to write to.
     expect(markup).not.toContain(t("en", "settings.ops"));
     for (const key of ["settings.reviewTrigger", "settings.reviewDepth", "settings.reviewGate"] as const) {
@@ -384,17 +374,14 @@ describe("tab shell rendering (static SSR)", () => {
     }
     // The bot's own sections are the whole settings face.
     expect(markup).toContain(t("en", "settings.providers.title"));
-    expect(markup).toContain(t("en", "botSettings.health"));
   });
 
-  test("an App with several repositories says so and links to them, not to the zero-repository state", () => {
+  test("an App with several repositories says so, not the zero-repository state", () => {
     const many = { ...untargetedPayload, targets_many: true };
     // The flag is a plain optional boolean on the parsed face.
     expect(parseSettings(many)?.targets_many).toBe(true);
     const markup = renderDetail(many);
     expect(markup).toContain(t("en", "appDetail.targetsMany"));
-    expect(markup).toContain(`href="${apiBase()}/targets"`);
-    expect(markup).toContain(t("en", "targets.heading"));
     // The zero-repository copy would be a lie here: at least two exist.
     expect(markup).not.toContain(t("en", "appDetail.noRepository"));
     // No single repository's policy is this page's to edit.
@@ -548,28 +535,24 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     const root = createRoot(container as unknown as Element);
     try {
       await act(async () => root.render(createElement(ShellHarness)));
-      // Two faces, settings active: the other one is mounted and hidden.
-      expect(shellPanels(container).map((panel) => panel.getAttribute("data-state"))).toEqual([
-        "active",
-        "inactive",
-      ]);
+      // 应用设置 active, every other face mounted and hidden.
       const settingsPanel = shellPanels(container)[0]!;
+      expect(settingsPanel.getAttribute("data-state")).toBe("active");
+      expect(
+        shellPanels(container)
+          .slice(1)
+          .every((panel) => panel.getAttribute("data-state") === "inactive"),
+      ).toBe(true);
 
       // Switch to 已安装: the settings panel stays mounted (same node) and hides.
       await click(win, tabTrigger(container, t("en", "appDetail.tabInstallations")));
       expect(shellPanels(container)[0]).toBe(settingsPanel);
-      expect(shellPanels(container).map((panel) => panel.getAttribute("data-state"))).toEqual([
-        "inactive",
-        "active",
-      ]);
+      expect(settingsPanel.getAttribute("data-state")).toBe("inactive");
 
       // …and back: the same node, active again — nothing was remounted.
       await click(win, tabTrigger(container, t("en", "appDetail.tabSettings")));
       expect(shellPanels(container)[0]).toBe(settingsPanel);
-      expect(shellPanels(container).map((panel) => panel.getAttribute("data-state"))).toEqual([
-        "active",
-        "inactive",
-      ]);
+      expect(settingsPanel.getAttribute("data-state")).toBe("active");
     } finally {
       await act(async () => root.unmount());
       cleanup();
@@ -1058,5 +1041,154 @@ describe("Blocked and pending installations (static SSR)", () => {
     ).toBeNull();
     const { pending_installations: _pending, ...withoutPending } = managePayload;
     expect(parseSettings(withoutPending)).toBeNull();
+  });
+});
+
+/**
+ * The 投递状态 tab: the delivery table, its filters and the pager. Static SSR
+ * over the pure view (so the columns and the filter controls are assertable by
+ * their accessible names), plus the URL builder/parser pair the tab reads
+ * through.
+ */
+describe("投递状态 tab", () => {
+  const summary = { last_webhook_at: null, rejected24h: 0 };
+  /** The wire payload (the route's own keys). */
+  const deliveryResponse = {
+    deliveries: [
+      {
+        event_name: "pull_request",
+        outcome: "rejected",
+        status_code: 401,
+        repository_full_name: "acme/web",
+        reason: "signature verification failed",
+        created_at: "2026-01-01 00:00:00",
+      },
+      {
+        event_name: "check_run",
+        outcome: "ignored",
+        status_code: null,
+        repository_full_name: null,
+        reason: null,
+        created_at: "2026-01-01 00:00:00",
+      },
+    ],
+    total: 42,
+    repos: ["acme/web", "acme/api"],
+    types: ["check_run", "pull_request"],
+  };
+  const deliveryPage = parseDeliveryPage(deliveryResponse)!;
+
+  const renderTab = (page: typeof deliveryPage | null) =>
+    createElement(DeliveryStatusView, {
+      locale: "en",
+      summary,
+      page,
+      filters: { repo: "", since: "", type: "" },
+      offset: 0,
+      loading: false,
+      onFilter: () => {},
+      onPage: () => {},
+      onReload: () => {},
+    });
+  const markupOf = (page: typeof deliveryPage | null) =>
+    renderToStaticMarkup(renderTab(page));
+
+  test("renders every column the task asks for, and the refusal reason on a rejected row", () => {
+    const markup = markupOf(deliveryPage);
+    for (const key of [
+      "appDetail.delivery.columnRepo",
+      "appDetail.delivery.columnType",
+      "appDetail.delivery.columnTime",
+      "appDetail.delivery.columnOutcome",
+      "appDetail.delivery.columnReason",
+    ] as const) {
+      expect(markup, key).toContain(t("en", key));
+    }
+    // The values, not only the headers: a table that renders empty cells under
+    // correct headers would pass a header-only assertion.
+    expect(markup).toContain("acme/web");
+    expect(markup).toContain("pull_request");
+    expect(markup).toContain("signature verification failed");
+    // A row without a repository says so rather than rendering a blank cell.
+    expect(markup).toContain(t("en", "appDetail.delivery.unknownRepo"));
+  });
+
+  test("offers the three named filters plus the pager", async () => {
+    const markup = markupOf(deliveryPage);
+    // Each filter is a named control, read the way an assistive technology
+    // finds it.
+    expect(await withMarkup(markup, (container) => [
+      ...container.querySelectorAll("[aria-label]"),
+    ].map((node) => node.getAttribute("aria-label")))).toEqual(
+      expect.arrayContaining([
+        t("en", "appDetail.delivery.filterRepo"),
+        t("en", "appDetail.delivery.filterWindow"),
+        t("en", "appDetail.delivery.filterType"),
+      ]),
+    );
+    // The pager names the FILTERED total over the loaded window, and both page
+    // actions exist.
+    expect(markup).toContain(t("en", "appDetail.delivery.pageRange", { from: 1, to: 20, total: 42 }));
+    expect(markup).toContain(t("en", "appDetail.delivery.pagePrev"));
+    expect(markup).toContain(t("en", "appDetail.delivery.pageNext"));
+  });
+
+  test("an empty page states it rather than rendering a bare header band", () => {
+    const markup = markupOf({ rows: [], total: 0, repos: [], types: [] });
+    expect(markup).toContain(t("en", "appDetail.delivery.emptyTitle"));
+    expect(markup).toContain(t("en", "appDetail.delivery.emptyDescription"));
+    expect(markup).not.toContain(t("en", "appDetail.delivery.columnReason"));
+  });
+
+  test("the read URL carries every filter and the offset; an unset filter is absent", () => {
+    expect(appDeliveriesUrl("/dashboard", "1", { repo: "", since: "", type: "" }, 0)).toBe(
+      "/dashboard/api/apps/1/deliveries",
+    );
+    expect(
+      appDeliveriesUrl("/dashboard", "1", { repo: "acme/web", since: "7", type: "pull_request" }, 40),
+    ).toBe(
+      "/dashboard/api/apps/1/deliveries?repo=acme%2Fweb&since=7&type=pull_request&offset=40",
+    );
+  });
+
+  test("the page parser is strict on total, lenient per row", () => {
+    expect(parseDeliveryPage(deliveryResponse)).not.toBeNull();
+    expect(deliveryPage.total).toBe(42);
+    expect(deliveryPage.repos).toEqual(["acme/web", "acme/api"]);
+    // A page without a total cannot page.
+    const { total: _total, ...withoutTotal } = deliveryResponse;
+    expect(parseDeliveryPage(withoutTotal)).toBeNull();
+    expect(parseDeliveryPage({ deliveries: [] })).toBeNull();
+    // A drifted row is dropped, not fatal: the rest of the page still renders.
+    const drifted = parseDeliveryPage({
+      ...deliveryResponse,
+      deliveries: [...deliveryResponse.deliveries, { outcome: "ok" }],
+    });
+    expect(drifted?.rows).toHaveLength(2);
+    expect(drifted?.total).toBe(42);
+  });
+
+  test("?tab=delivery opens the tab, and its inverse round-trips", () => {
+    expect(parseAppDetailSearch("?tab=delivery").tab).toBe("delivery");
+    expect(appDetailSearchQuery({ tab: "delivery", window: "30", repo: "", pr: "" })).toBe(
+      "?tab=delivery",
+    );
+  });
+
+  test("the reverse 仓库 link is gone from every repository-count state", async () => {
+    // The page states the fact; it no longer points back at the repository
+    // surface. Both states are covered, and the probe is the ANCHOR — the
+    // sentences legitimately name the repository surface in prose.
+    for (const payload of [
+      untargetedPayload,
+      { ...untargetedPayload, targets_many: true },
+    ] as const) {
+      const markup = renderDetail(payload as SettingsPayload);
+      expect(
+        await withMarkup(markup, (container) => [
+          ...container.querySelectorAll("a"),
+        ].map((node) => node.getAttribute("href"))),
+      ).not.toContain(`${apiBase()}/targets`);
+    }
   });
 });

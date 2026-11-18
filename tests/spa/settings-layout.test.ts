@@ -118,7 +118,6 @@ const detailPayload = (): SettingsManagePayload => ({
   custom_provider_api_ids: [],
   sandbox_images: [{ id: "omp", enabled: true }],
   installations: [],
-  deliveries: [],
 });
 
 describe("settings layout", () => {
@@ -132,7 +131,6 @@ describe("settings layout", () => {
     expect(source).toContain('kind: "disable"');
     expect(source).toContain('kind: "delete"');
     expect(appPage).toContain("${action.kind}");
-    expect(source).toContain("settings.recentDeliveries");
     expect(source).toContain("settings.providers");
     expect(source).toContain("settings.customEntry");
     expect(source).toContain("add-template-provider");
@@ -1625,10 +1623,13 @@ describe("App workflow boundaries", () => {
 
   test("configuration section headings are described and unlabeled selects are named", () => {
     const source = readSettingsSource();
-    // SUPERSEDE (App detail IA): the standalone install-health card retired
-    // with the identity-only non-manager face — the health body now renders
-    // only inside the manager OpsSection, which keeps its section descriptions.
-    expect(source).toContain('t(locale, "settings.recentDeliveriesCopy")');
+    // The delivery panel is the 投递状态 tab now; its labels ride the tab's own
+    // section (AppDeliveryTab), which keeps them beside the controls they name.
+    const deliveryTab = readFileSync(
+      join(import.meta.dir, "../../src/spa/pages/AppDeliveryTab.tsx"),
+      "utf8",
+    );
+    expect(deliveryTab).toContain('aria-label={t(locale, "appDetail.delivery.filterRepo")}');
     // Selects without a visible label get an accessible name (DESIGN.md L2
     // label audit) — the runtime-image selector and the chain model picker.
     expect(source).toContain('aria-label={t(locale, "settings.runtimeHarness")}');
@@ -1695,9 +1696,7 @@ describe("section-scoped op feedback", () => {
     // notices (AppInfoSection's own `setNotice({ … })` outcome region) are that
     // card's channel and are excluded here.
     expect(detail.match(/setNotice\(\{/g)?.length).toBe(2);
-    const outsideInfoCard = source
-      .slice(0, source.indexOf("export function AppInfoSection"))
-      .concat(source.slice(source.indexOf("export function BotHealthSection")));
+    const outsideInfoCard = source.slice(0, source.indexOf("export function AppInfoSection"));
     expect(outsideInfoCard).not.toContain("setNotice({");
     // Bugbot fix: a successful load() — foreground or background —
     // clears the page banner, so a recovered reload never leaves a stale

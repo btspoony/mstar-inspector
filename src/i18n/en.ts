@@ -152,21 +152,46 @@ export const en = {
     backToApps: "Back to Apps",
     /** The link from the App detail and the target detail to the bot's own settings page. */
     botSettingsLink: "Bot settings",
-    /** The App detail's two faces: its own configuration, then the install block. */
+    /** The App detail's three faces: its own configuration, deliveries, then installs. */
     tabSettings: "App settings",
+    tabDelivery: "Deliveries",
     tabInstallations: "Installed",
-    /**
-     * The App's zero-repository state: nothing under the App is reviewed yet,
-     * and the way there is the repository surface (`targets.add` is its link).
-     */
+    /** The App's zero-repository state: nothing under the App is reviewed yet. */
     noRepository: "This App has no repository yet, so it reviews nothing.",
-    /**
-     * The App's several-repository state: it reviews more than one, so no
-     * single review policy is this page's to edit (`targets.heading` links
-     * to the repository surface).
-     */
+    /** The App's several-repository state: no single review policy is this page's to edit. */
     targetsMany:
       "This App reviews several repositories, so its review settings live on the Repositories page.",
+    /**
+     * The delivery tab: the bot's webhook log, filtered and paged on the
+     * server. One entry per column of the table, plus the filter and pager
+     * copy the tab's own controls read.
+     */
+    delivery: {
+      copy: "Every webhook delivery this bot received — what arrived, from which repository, and what happened to it.",
+      /** The Blocked face has no bot-owned data, so the tab states that instead. */
+      unavailable: "This bot's deliveries belong to another workspace while its share is revoked.",
+      columnRepo: "Repository",
+      columnType: "Type",
+      columnTime: "Time",
+      columnOutcome: "Outcome",
+      columnReason: "Reason",
+      /** A delivery whose payload carried no repository (install / bypass events). */
+      unknownRepo: "unknown repository",
+      /** A delivery whose request carried no x-github-event header. */
+      unknownType: "unknown type",
+      filterRepo: "Repository",
+      filterWindow: "Time window",
+      filterWindowAll: "All time",
+      filterType: "Delivery type",
+      filterAll: "All",
+      emptyTitle: "No deliveries",
+      emptyDescription: "This bot has received no webhook delivery matching these filters.",
+      pagePrev: "Previous",
+      pageNext: "Next",
+      /** {from}–{to} of the filtered total, never of the whole log. */
+      pageRange: "{from}–{to} / {total}",
+      refreshAria: "Refresh deliveries",
+    },
     // The derived Blocked banner: the server reads the bot's scope and the
     // target's workspace on every read, so the copy names the one cause.
     blockedBotNotShared:
@@ -732,13 +757,6 @@ export const en = {
     installationsLastSync: "Last sync",
     /** Metric-band label for the provider-key count on the App detail face. */
     metricKeys: "Keys",
-    recentDeliveries: "Recent deliveries",
-    recentDeliveriesCopy:
-      "Up to 10 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",
-    noDeliveries: "No deliveries yet.",
-    unknownEvent: "unknown event",
-    unknownSource: "unknown repo",
-    status: "status {code}",
     addToChain: "Add to chain",
     noAutoDiscovery: "This provider does not list models — pick from another verified provider.",
     noVerifiedModels: "Verify a provider key to populate model options.",

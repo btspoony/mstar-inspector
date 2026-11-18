@@ -23,7 +23,8 @@ import { SectionCard } from "../../src/spa/components/SectionCard";
 import { PageNotice, type OpNotice } from "../../src/spa/pages/PageNotice";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import type { BotConfigSections, BotSettingsPayload, SettingsManagePayload } from "../../src/spa/pages/data";
-import { BotHealthSection, BotSettingsView } from "../../src/spa/pages/BotSettingsPage";
+import { BotSettingsView } from "../../src/spa/pages/BotSettingsPage";
+import { DeliveryStatusView } from "../../src/spa/pages/AppDeliveryTab";
 import { ProvidersSection } from "../../src/spa/pages/settings-providers";
 import { alertSegments } from "../helpers/token-colour";
 import { withLocation } from "./browser-stub";
@@ -85,7 +86,6 @@ const detailPayload = (): SettingsManagePayload => ({
   custom_provider_api_ids: [],
   sandbox_images: [{ id: "omp", enabled: true }],
   installations: [],
-  deliveries: [],
 });
 
 /**
@@ -491,17 +491,19 @@ describe("section description wording (A8)", () => {
   });
 });
 
-describe("bot credentials-health line (I-000251)", () => {
+describe("delivery-status summary line (I-000251)", () => {
   const render = (rejected24h: number): string =>
     renderToStaticMarkup(
-      createElement(BotHealthSection, {
+      createElement(DeliveryStatusView, {
         locale: "en",
-        payload: {
-          app: { last_webhook_at: null },
-          installations: [],
-          deliveries: [],
-          delivery_summary: { latest: null, rejected24h },
-        } as unknown as BotConfigSections,
+        summary: { last_webhook_at: null, rejected24h },
+        page: null,
+        filters: { repo: "", since: "", type: "" },
+        offset: 0,
+        loading: false,
+        onFilter: () => {},
+        onPage: () => {},
+        onReload: () => {},
       }),
     );
 
@@ -575,10 +577,9 @@ describe("the bot page carries the moved sections", () => {
     custom_provider_api_ids: [],
     sandbox_images: [{ id: "omp", enabled: true }],
     installations: [{ installation_id: 987654, account_login: "acme", seen_at: "2026-01-01 00:00:00" }],
-    deliveries: [],
   });
 
-  test("a manager's bot sections render credentials health, providers, chains, seats and the sandbox image", () => {
+  test("a manager's bot sections render providers, chains, seats and the sandbox image", () => {
     const markup = renderToStaticMarkup(
       createElement(BotSettingsView, {
         locale: "en",
@@ -588,7 +589,6 @@ describe("the bot page carries the moved sections", () => {
         onReload: async () => true,
       }),
     );
-    expect(markup).toContain(t("en", "botSettings.health"));
     // Providers: a stored key's masked tail is the value the section renders.
     expect(markup).toContain(t("en", "settings.providers.title"));
     expect(markup).toContain("wxyz");

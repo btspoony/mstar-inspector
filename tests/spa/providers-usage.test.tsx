@@ -108,7 +108,6 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
     custom_provider_api_ids: [],
     sandbox_images: [{ id: "omp", enabled: true }],
     installations: [],
-    deliveries: [],
     ...overrides,
   };
 }

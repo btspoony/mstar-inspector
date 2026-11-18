@@ -158,6 +158,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
       status_code: null,
       created_at: "2026-01-01 00:00:00",
       repository_full_name: "acme/widgets",
+      reason: null,
     };
     // Every column carries a valid value here, so a refusal below can only
     // come from the NULL under test.
@@ -291,7 +292,7 @@ describe("webhookRepositoryFullName (delivery source repo, migration 0043)", () 
   });
 });
 
-describe("apps-store delivery face (recordDelivery / deliverySummary / listRecentDeliveries)", () => {
+describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliveries)", () => {
   /** Raw-insert one review_bots row (dummy envelopes — no decryption here). */
   function seedAppRow(db: ReturnType<typeof createTestD1>, id = "app-1"): void {
     const appNum = Number(id.replace(/\D/g, "")) || 1;
@@ -310,8 +311,8 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     seedAppRow(db);
     const store = createReviewBotsStore(db);
 
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
-    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "rejected", statusCode: 401, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
+    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "rejected", statusCode: 401, repositoryFullName: null, reason: null });
 
     const rows = db.raw.query("SELECT * FROM webhook_deliveries ORDER BY rowid").all() as Array<{
       id: string;
@@ -347,6 +348,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
         outcome: "not-an-outcome" as DeliveryOutcome,
         statusCode: null,
         repositoryFullName: null,
+        reason: null,
       }),
     ).rejects.toThrow(/not on the producer vocabulary/);
     const count = db.raw.query("SELECT COUNT(*) AS n FROM webhook_deliveries").get() as { n: number };
@@ -364,10 +366,10 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     const store = createReviewBotsStore(db);
     // Backdate every row but the newest so the order is observable
     // (datetime('now') has second resolution).
-    await store.recordDelivery({ appId: "app-1", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "paused", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null, reason: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "paused", statusCode: null, repositoryFullName: null, reason: null });
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
@@ -385,9 +387,9 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     const db = createMigratedTestD1();
     seedAppRow(db);
     const store = createReviewBotsStore(db);
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 500, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null, reason: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 500, repositoryFullName: null, reason: null });
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
@@ -409,15 +411,15 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     expect(summary.rejected24h).toBe(0);
   });
 
-  test("listRecentDeliveries returns THIS App's rows, newest first, bounded by N", async () => {
+  test("listDeliveries returns THIS App's rows, newest first inside its tier, bounded by the caller's window", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db, "app-1");
     seedAppRow(db, "app-2");
     const store = createReviewBotsStore(db);
     for (let i = 1; i <= 7; i++) {
-      await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+      await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
     }
-    await store.recordDelivery({ appId: "app-2", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-2", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
     // Backdate the first six so the newest-first order is observable.
     db.raw
       .prepare(
@@ -426,29 +428,151 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
       )
       .run();
 
-    const recent = await store.listRecentDeliveries("app-1", 5);
+    const page = await store.listDeliveries("app-1", {
+      repo: null,
+      sinceDays: null,
+      eventName: null,
+      limit: 5,
+      offset: 0,
+    });
 
-    expect(recent).toHaveLength(5); // bounded by N
-    expect(recent.every((r) => r.bot_id === "app-1")).toBe(true); // sibling bot never included
-    expect(recent[0]!.created_at >= recent[4]!.created_at).toBe(true); // newest first
-    expect(await store.listRecentDeliveries("no-such-app", 5)).toEqual([]);
+    expect(page.rows).toHaveLength(5); // bounded by the caller's window
+    expect(page.total).toBe(7); // the UNPAGED, unfiltered count for this App
+    expect(page.rows.every((r) => r.bot_id === "app-1")).toBe(true); // sibling bot never included
+    expect(page.rows[0]!.created_at >= page.rows[4]!.created_at).toBe(true); // newest first
+
+    const empty = await store.listDeliveries("no-such-app", {
+      repo: null,
+      sinceDays: null,
+      eventName: null,
+      limit: 5,
+      offset: 0,
+    });
+    expect(empty.rows).toEqual([]);
+    expect(empty.total).toBe(0);
+    expect(empty.repos).toEqual([]);
+    expect(empty.types).toEqual([]);
   });
 
-  test("listRecentDeliveries defaults to 10 rows when the caller passes no limit", async () => {
+  test("listDeliveries pages by OFFSET: the next window is disjoint and total stays the filtered size", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
     const store = createReviewBotsStore(db);
-    for (let i = 1; i <= 12; i++) {
+    for (let i = 1; i <= 5; i++) {
       await store.recordDelivery({
         appId: "app-1",
         eventName: "pull_request",
         outcome: "ok",
         statusCode: null,
         repositoryFullName: null,
+        reason: null,
       });
+      // One second apart keeps created_at strictly ordered, so the windows are
+      // decided by time rather than by the rowid tiebreak alone.
+      db.raw.prepare("UPDATE webhook_deliveries SET created_at = datetime('now', ?) WHERE id = (SELECT id FROM webhook_deliveries ORDER BY rowid DESC LIMIT 1)").run(`-${10 - i} seconds`);
     }
 
-    expect(await store.listRecentDeliveries("app-1")).toHaveLength(10);
+    const filters = { repo: null, sinceDays: null, eventName: null, limit: 2, offset: 0 } as const;
+    const first = await store.listDeliveries("app-1", { ...filters, offset: 0 });
+    const second = await store.listDeliveries("app-1", { ...filters, offset: 2 });
+
+    expect(first.rows).toHaveLength(2);
+    expect(second.rows).toHaveLength(2);
+    expect(first.total).toBe(5);
+    expect(second.total).toBe(5);
+    // No row appears in both windows: the ORDER BY ends in rowid, so the page
+    // boundary is total even where created_at ties.
+    const ids = new Set(first.rows.map((row) => row.id));
+    expect(second.rows.every((row) => !ids.has(row.id))).toBe(true);
+    // The third page is the tail, and the fourth is past the end: an empty page
+    // still reports the real total.
+    expect((await store.listDeliveries("app-1", { ...filters, offset: 4 })).rows).toHaveLength(1);
+    const past = await store.listDeliveries("app-1", { ...filters, offset: 6 });
+    expect(past.rows).toEqual([]);
+    expect(past.total).toBe(5);
+  });
+
+  test("listDeliveries filters narrow the page AND the total; the option sets stay unnarrowed", async () => {
+    const db = createMigratedTestD1();
+    seedAppRow(db);
+    const store = createReviewBotsStore(db);
+    const record = (eventName: string, repositoryFullName: string | null) =>
+      store.recordDelivery({
+        appId: "app-1",
+        eventName,
+        outcome: "ok",
+        statusCode: null,
+        repositoryFullName,
+        reason: null,
+      });
+    await record("pull_request", "acme/web");
+    await record("check_run", "acme/web");
+    await record("pull_request", "acme/api");
+    // Old enough to fall outside a 7-day window but inside the retained history.
+    await record("pull_request", "acme/web");
+    db.raw
+      .prepare(
+        `UPDATE webhook_deliveries SET created_at = datetime('now', '-30 days')
+         WHERE id = (SELECT id FROM webhook_deliveries WHERE repository_full_name = 'acme/web' ORDER BY rowid DESC LIMIT 1)`,
+      )
+      .run();
+
+    const base = { limit: 50, offset: 0 } as const;
+    const all = await store.listDeliveries("app-1", { repo: null, sinceDays: null, eventName: null, ...base });
+    const byRepo = await store.listDeliveries("app-1", { repo: "acme/web", sinceDays: null, eventName: null, ...base });
+    const byType = await store.listDeliveries("app-1", { repo: null, sinceDays: null, eventName: "check_run", ...base });
+    const byWindow = await store.listDeliveries("app-1", { repo: null, sinceDays: 7, eventName: null, ...base });
+
+    expect(all.total).toBe(4);
+    // Every filter narrows both the rows and the total the pager walks.
+    expect(byRepo.total).toBe(3);
+    expect(byRepo.rows.every((row) => row.repository_full_name === "acme/web")).toBe(true);
+    expect(byType.total).toBe(1);
+    expect(byType.rows.every((row) => row.event_name === "check_run")).toBe(true);
+    expect(byWindow.total).toBe(3);
+    // The option sets are the App's WHOLE history: a filter whose next value is
+    // outside the current result must stay selectable.
+    expect(byType.repos).toEqual(["acme/api", "acme/web"]);
+    expect(byType.types).toEqual(["check_run", "pull_request"]);
+    // An unknown filter value is an empty page, never an error and never an
+    // unfiltered one.
+    const missing = await store.listDeliveries("app-1", { repo: "nobody/nothing", sinceDays: null, eventName: null, ...base });
+    expect(missing.rows).toEqual([]);
+    expect(missing.total).toBe(0);
+  });
+
+  test("listDeliveries persists and returns the refusal reason; a non-reject row carries none", async () => {
+    const db = createMigratedTestD1();
+    seedAppRow(db);
+    const store = createReviewBotsStore(db);
+    await store.recordDelivery({
+      appId: "app-1",
+      eventName: "pull_request",
+      outcome: "rejected",
+      statusCode: 401,
+      repositoryFullName: "acme/web",
+      reason: "signature verification failed",
+    });
+    await store.recordDelivery({
+      appId: "app-1",
+      eventName: "pull_request",
+      outcome: "ok",
+      statusCode: null,
+      repositoryFullName: "acme/web",
+      reason: null,
+    });
+
+    const page = await store.listDeliveries("app-1", {
+      repo: null,
+      sinceDays: null,
+      eventName: null,
+      limit: 10,
+      offset: 0,
+    });
+    const rejected = page.rows.find((row) => row.outcome === "rejected");
+    const ok = page.rows.find((row) => row.outcome === "ok");
+    expect(rejected?.reason).toBe("signature verification failed");
+    expect(ok?.reason).toBeNull();
   });
 
   test("recordDelivery caps event_name at 64 chars and repository_full_name at 160 at persist time", async () => {
@@ -466,6 +590,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
       outcome: "ok",
       statusCode: null,
       repositoryFullName: "y".repeat(2000),
+      reason: null,
     });
     // A non-BMP character STRADDLING the bound must not leave half a surrogate
     // pair in D1 (a lone surrogate cannot round-trip as valid UTF-8): the cut
@@ -476,8 +601,9 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
       outcome: "ok",
       statusCode: null,
       repositoryFullName: `${"y".repeat(159)}😀`,
+      reason: null,
     });
-    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "ignored", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
 
     const rows = db.raw
       .query("SELECT event_name, repository_full_name FROM webhook_deliveries ORDER BY rowid")

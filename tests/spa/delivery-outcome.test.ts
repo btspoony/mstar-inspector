@@ -12,7 +12,9 @@ import { join } from "node:path";
 import { deliveryOutcomeLabel } from "../../src/spa/delivery-outcome";
 
 const appsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx"), "utf8");
-const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/BotSettingsPage.tsx"), "utf8");
+// The delivery log moved off the bot settings page into the App detail's
+// 投递状态 tab, so the tab is the second reader that must label through the map.
+const deliveryTab = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDeliveryTab.tsx"), "utf8");
 
 describe("deliveryOutcomeLabel", () => {
   test("the producer-vocabulary outcomes resolve in both locales", () => {
@@ -42,9 +44,9 @@ describe("outcome surfaces (F-05)", () => {
     expect(appsPage).toContain('../delivery-outcome');
   });
 
-  test("the bot page labels recent-delivery outcomes through the shared map", () => {
-    expect(settingsPage).toContain("deliveryOutcomeLabel(delivery.outcome, locale)");
-    expect(settingsPage).not.toContain("{delivery.outcome}");
-    expect(settingsPage).toContain('../delivery-outcome');
+  test("the delivery tab labels every row's outcome through the shared map", () => {
+    expect(deliveryTab).toContain("deliveryOutcomeLabel(row.outcome, locale)");
+    expect(deliveryTab).not.toContain("{row.outcome}");
+    expect(deliveryTab).toContain('../delivery-outcome');
   });
 });
