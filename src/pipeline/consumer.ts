@@ -102,6 +102,7 @@ import { providerEnvName } from "./provider-catalog";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
+import type { ReviewRow } from "../store/types";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
 import {
   hasUsageEventForExecutionToken,
@@ -5123,31 +5124,46 @@ async function processMessage(
     // a `done` claim acks only when the same D1 row the non-KV path reads
     // backs it; otherwise the mark is left alone and the run proceeds (its
     // own completion rewrites the mark).
-    const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
-    const existing = await deps.store.findByIdempotencyKey(key);
-    if (done && existing) {
-      deps.log.info(fields, "KV idempotency hit — ack");
-      // The claim now precedes this read, so the run it created must be closed
-      // — and it must carry THIS head's existing result (inherited like an
-      // empty increment), never a `neutral` that would mask a failing gate.
-      await terminalizeCheck(null, "skipped", headSha);
-      // §7.9: with no handle (the adoption refused) the attached run would
-      // otherwise wait out the attach window and close red. The settlement is
-      // keyed on the PAYLOAD SHA — what the attach used — not this checkout SHA.
-      await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
-      return { kind: "ok" };
-    }
-    if (done) {
-      deps.log.warn(
-        fields,
-        "idempotency KV marked done but D1 has no record — proceeding with the review",
-      );
-    }
-    if (existing) {
-      deps.log.info(fields, "idempotency hit — ack");
-      await terminalizeCheck(null, "skipped", headSha);
-      await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
-      return { kind: "ok" };
+    // A D1 read fault is not evidence of a completed review: it must never
+    // terminalize the run, so it is caught here and treated as "unconfirmed".
+    const kvMarked = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
+    if (kvMarked) {
+      let confirmed: ReviewRow | null | undefined;
+      try {
+        confirmed = await deps.store.findByIdempotencyKey(key);
+      } catch (err) {
+        deps.log.warn(
+          fields,
+          `idempotency confirmation read failed — proceeding without ack: ${String(err)}`,
+        );
+        confirmed = undefined;
+      }
+      if (confirmed) {
+        deps.log.info(fields, "KV idempotency hit — ack");
+        // The claim now precedes this read, so the run it created must be closed
+        // — and it must carry THIS head's existing result (inherited like an
+        // empty increment), never a `neutral` that would mask a failing gate.
+        await terminalizeCheck(null, "skipped", headSha);
+        // §7.9: with no handle (the adoption refused) the attached run would
+        // otherwise wait out the attach window and close red. The settlement is
+        // keyed on the PAYLOAD SHA — what the attach used — not this checkout SHA.
+        await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
+        return { kind: "ok" };
+      }
+      if (confirmed === null) {
+        deps.log.warn(
+          fields,
+          "idempotency KV marked done but D1 has no record — proceeding with the review",
+        );
+      }
+    } else {
+      const existing = await deps.store.findByIdempotencyKey(key);
+      if (existing) {
+        deps.log.info(fields, "idempotency hit — ack");
+        await terminalizeCheck(null, "skipped", headSha);
+        await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
+        return { kind: "ok" };
+      }
     }
     // §7.7 step 2 (second half) — the publication journal: an existing
     // prepared/sending/unknown/confirmed row for this exact scope/SHA hands

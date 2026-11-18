@@ -2429,6 +2429,35 @@ describe("createReviewConsumer", () => {
     expect(h.logLines.some((l) => l.msg.includes("KV idempotency hit"))).toBe(false);
   });
 
+  test("KV done-state hit where the D1 confirmation read throws → proceeds, never acks", async () => {
+    h.kvState.getValue = "done";
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const real = createArtifactStore(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      // Only the dedup's confirmation read faults; every other store call
+      // stays real, so the run's own writes still land.
+      store: {
+        ...real,
+        findByIdempotencyKey: async () => {
+          throw new Error("d1 read down");
+        },
+      },
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // A fault is not proof of a completed review: the review runs.
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1);
+    const warnLine = h.logLines.find(
+      (l) => l.level === "warn" && l.msg.includes("idempotency confirmation read failed"),
+    );
+    expect(warnLine).toBeDefined();
+    expect(h.logLines.some((l) => l.msg.includes("KV idempotency hit"))).toBe(false);
+  });
+
   test("lifecycle apply failure after a successful post → one comment, proof + KV done, warn + ack, no rethrow", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
