@@ -2719,22 +2719,30 @@ behave.
 - The alert posts on the breach TRANSITION, not on every sweep that still sees
   the same breach: the runtime key `platform.alert.failure_paging` in
   `review_runtime_settings` holds a GENERATION, never a flag and never a
-  deletion. The stored value is `clear:<ISO>` or `tripped:<ISO>`, stamped with
-  the instant the writing sweep observed the failure window, so a clear is
-  itself a generation — that is what lets a healthy sweep advance the row and
-  defeat a stale claim. The POST comes FIRST: only a 2xx advances the value to
-  `tripped:<ISO>`, and a healthy sweep advances it to `clear:<ISO>` so the next
-  breach is a new edge. Both writes are compare-and-set on that stamp — the
-  newer stamp wins, and at an EQUAL stamp `clear` beats `tripped` (two sweeps
-  that observed the same instant and disagree about the window take the armed
+  deletion. The stored value is `clear:<n>` or `tripped:<n>`, where `n` is the
+  integer ticket the writing sweep derived from the row it read before it
+  queried the window; no clock orders the row. A clear is itself a generation —
+  that is what lets a healthy sweep advance the row and defeat a stale claim.
+  The POST comes FIRST: only a 2xx advances the value to `tripped:<n>`, and a
+  healthy sweep advances it to `clear:<n>` so the next breach is a new edge.
+  Both writes are one compare-and-set on the integer: only a STRICTLY greater
+  generation lands, and at an EQUAL generation `clear` beats `tripped` (two
+  sweeps that took the same ticket and disagree about the window take the armed
   answer, which costs a duplicate alert where keeping `tripped` could swallow
   the next breach) — so an older sweep resuming after a recovery cannot close
-  the edge a newer breach owns. A lost `tripped` CAS costs at most a duplicate
-  alert and logs `ops_sweep_alert_state_cas_lost`; a lost `clear` CAS is the
-  documented no-op. Absent sink, timeout, fetch throw or non-2xx never advances
-  the generation and stays retryable on the next sweep. A state read that
-  cannot be trusted counts as unannounced — the post it might suppress is the
-  one that matters — and a failed write warns and is retried on the next sweep
+  the edge a newer breach owns. A stored value that is not
+  `<state>:<positive integer>` ranks below every real generation, so the next
+  write replaces it rather than the row blocking further writes. A lost
+  `tripped` CAS costs at most a duplicate alert and logs
+  `ops_sweep_alert_state_cas_lost`; a lost `clear` CAS is the documented no-op.
+  Absent sink, timeout, fetch throw or non-2xx never advances the generation,
+  so the edge stays open and the next sweep that observes a breaching window
+  posts again. A state read that cannot be trusted counts as unannounced — the
+  post it might suppress is the one that matters — and when that sweep's own
+  POST then does not land it re-arms the row to `clear:<n>` unconditionally,
+  without the compare-and-set (an untrusted read leaves nothing to compare
+  against), because a stale `tripped` would otherwise silence the retry once
+  the read recovers. Write failures warn and are retried on the next sweep
   (`ops_sweep_alert_state_*` events). This is machine state, not a tunable — no
   console control, no audit row.
 - DLQ depth is NOT read (no CF API token surface — `dlq_check: "skipped"`);
