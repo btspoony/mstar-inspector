@@ -64,7 +64,9 @@ type FetchCall = { url: string; method: string; authorization: string | null };
  * (`POST /app/installations/{id}/access_tokens`) plus the listing
  * (`GET /installation/repositories`). `answers` maps an installation id to the
  * repositories GitHub would return for it; an id absent from the map answers
- * 500 on its mint, which is the "this installation failed" case.
+ * 500 on its mint, which is the "this installation failed to mint" case.
+ * `failingListings` names installations whose mint still succeeds but whose
+ * listing answers 500 — the "this installation failed to list" case.
  *
  * The minted token embeds the installation id (`tok-<id>`) so the listing can
  * resolve which installation's grant to answer, exactly as GitHub resolves an
@@ -72,6 +74,7 @@ type FetchCall = { url: string; method: string; authorization: string | null };
  */
 function stubRepositories(
   answers: Record<number, Array<{ id: number; name: string; owner: string }>>,
+  failingListings: readonly number[] = [],
 ): FetchCall[] {
   const calls: FetchCall[] = [];
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
@@ -89,7 +92,7 @@ function stubRepositories(
     }
     if (url.startsWith("https://api.github.com/installation/repositories?")) {
       const installationId = Number(/^tok-(\d+)$/.exec(authorization?.replace(/^Bearer /, "") ?? "")?.[1]);
-      const rows = answers[installationId];
+      const rows = failingListings.includes(installationId) ? undefined : answers[installationId];
       if (rows === undefined) return new Response("upstream boom", { status: 500 });
       // GitHub's shape: an envelope whose account is an object, not a bare login.
       const payload = rows.map((row) => ({ id: row.id, name: row.name, owner: { login: row.owner } }));
@@ -314,6 +317,40 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
     });
     // The failed installation never reached its listing.
     expect(calls.filter((call) => call.url.includes("/installation/repositories"))).toHaveLength(1);
+  });
+
+  test("a failed listing degrades that installation only", async () => {
+    const { db } = await seededWorld({ installations: [71, 72] });
+    // Both mints succeed; 71's listing answers 500.
+    const calls = stubRepositories(
+      { 71: [{ id: 801, name: "api", owner: "acme" }], 72: [{ id: 802, name: "web", owner: "acme" }] },
+      [71],
+    );
+
+    const res = await get(db, `/dashboard/default/api/apps/${APP_ID}/installation-repositories`, "mallory");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      repositories: [{ repo_id: 802, owner: "acme", name: "web" }],
+      degraded: true,
+    });
+    // A failed listing is not an empty grant: both installations were listed.
+    expect(calls.filter((call) => call.url.includes("/installation/repositories"))).toHaveLength(2);
+  });
+
+  test("every installation failing to list is a 502", async () => {
+    const { db } = await seededWorld({ installations: [81, 82] });
+    // Both mints succeed; both listings answer 500.
+    const calls = stubRepositories(
+      { 81: [{ id: 901, name: "api", owner: "acme" }], 82: [{ id: 902, name: "web", owner: "acme" }] },
+      [81, 82],
+    );
+
+    const res = await get(db, `/dashboard/default/api/apps/${APP_ID}/installation-repositories`, "mallory");
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "installation_repositories_unavailable" });
+    expect(calls.filter((call) => call.url.includes("/installation/repositories"))).toHaveLength(2);
   });
 
   test("an installation with zero repositories answers 200 [] rather than an error", async () => {
