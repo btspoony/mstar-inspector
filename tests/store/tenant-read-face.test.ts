@@ -155,6 +155,17 @@ function readSites(src: string): { line: number; sql: string }[] {
 }
 
 /**
+ * The statement's selected columns: the text between `select` and its first
+ * `from`. A column name in a JOIN predicate is a filter on another table's row,
+ * not a tenant-facing field of the read, so only the projection is scanned.
+ */
+function projection(sql: string): string {
+  const selectAt = sql.indexOf("select");
+  const fromAt = sql.indexOf(" from ");
+  return fromAt < 0 ? sql : sql.slice(selectAt < 0 ? 0 : selectAt, fromAt);
+}
+
+/**
  * True when the `.prepare(` line is IMMEDIATELY preceded by a contiguous
  * `//` comment block carrying the marker. A blank line or any code line
  * between the comment and the call means unannotated. Two calls on one line
@@ -260,13 +271,16 @@ describe("tenant read face allowlist", () => {
    * columns (`private_key_enc` is frozen plan-scope maintenance credential
    * routing, not a response field). The scan is the read's own statement, not
    * every statement in the file: a mixed file (a store that also serves tenant
-   * faces of `review_targets`) selects those columns for its own rows.
+   * faces of `review_targets`) selects those columns for its own rows. Within
+   * the statement only the projection is scanned: a column named in a JOIN
+   * predicate filters another table's row and is never returned, so it is not a
+   * tenant-facing field of the read.
    */
   test("a maintenance read selects no identity or ownership column", () => {
     const TENANT_FACING = /\b(?:github_slug|name|workspace_id)\b/i;
     for (const rel of Object.keys(MAINTENANCE_SITES)) {
       for (const site of readSites(readFileSync(join(SRC_DIR, rel), "utf8"))) {
-        expect({ file: rel, line: site.line + 1, tenantFacing: TENANT_FACING.test(site.sql) }).toEqual({
+        expect({ file: rel, line: site.line + 1, tenantFacing: TENANT_FACING.test(projection(site.sql)) }).toEqual({
           file: rel,
           line: site.line + 1,
           tenantFacing: false,
