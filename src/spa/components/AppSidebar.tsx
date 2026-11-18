@@ -14,7 +14,7 @@ import type { SidebarModel } from "../shell";
 import { spaClick } from "../spa-click";
 
 /** Keyed by the nav page segment — a workspace-scoped href carries a slug prefix. */
-const NAV_ICONS = { apps: LayoutGrid, targets: FolderGit2, members: Users, settings: Settings } as const;
+const NAV_ICONS = { repos: FolderGit2, apps: LayoutGrid, members: Users, settings: Settings } as const;
 
 /**
  * Brand mark: the sidebar wordmark mark is the single source —
