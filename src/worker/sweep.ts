@@ -101,11 +101,17 @@ export const COMMENT_CLAIM_OUTBOX_SQL = `SELECT installation_id, owner, repo, pr
  * operator requested whose send never resolved. Ordered oldest-request first,
  * and its only bound is the shared per-sweep cap — there is no attempt cap, so
  * an operator's recovery is never silently dropped.
+ *
+ * `tried` is the id set THIS pass already took (a JSON array; `[]` on the first
+ * chunk). Excluding it is what lets the scan walk past a row that cannot be
+ * sent — a dead target never owns the batch forever, and nothing is persisted.
+ * Binds: `tried` (JSON array of ids), `limit`.
  */
 export const MAINTENANCE_REPLAY_OUTBOX_SQL = `SELECT id FROM review_failures
             WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'
               AND maintenance_replay_requested_at IS NOT NULL
               AND maintenance_replay_sent_at IS NULL
+              AND id NOT IN (SELECT value FROM json_each(?))
             ORDER BY maintenance_replay_requested_at ASC, id ASC
             LIMIT ?`;
 
@@ -549,7 +555,12 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       let resendFailed = 0;
       for (const claim of stale.results) {
         // Per row: one poisoned claim (a send that keeps failing) must not
-        // starve the rest of the batch, which is ordered oldest-first.
+        // starve the rest of the batch, which is ordered oldest-first. The
+        // budget is spent HERE, before the send: an attempt is what the cap
+        // counts, so a send that succeeds and then throws on its own
+        // attempts update can never hand the replay lane a budget it already
+        // spent.
+        outboxRemaining -= 1;
         let delivered = false;
         try {
           await queue.send(JSON.parse(claim.payload_json) as ReviewJobPayload);
@@ -570,7 +581,6 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           .bind(nowMs, claim.installation_id, claim.owner, claim.repo, claim.pr_number, claim.comment_id)
           .run();
       }
-      outboxRemaining -= stale.results.length;
       if (resent > 0 || expired.meta.changes > 0 || resendFailed > 0) {
         log.warn(
           { event: "comment_claim_outbox", resent, expired: expired.meta.changes, failed: resendFailed },
@@ -592,31 +602,51 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       try {
         const maintenance = await getMaintenanceMode(db);
         if (!maintenance.unreadable && !maintenance.enabled) {
-          const pending = await db
-            .prepare(MAINTENANCE_REPLAY_OUTBOX_SQL)
-            .bind(outboxRemaining)
-            .all<{ id: string }>();
           const now = new Date().toISOString();
+          // The ids THIS pass already took. Nothing is persisted: the next
+          // sweep starts from the true oldest request again.
+          const tried: string[] = [];
           let sent = 0;
           let failed = 0;
           let unavailable = 0;
-          for (const row of pending.results) {
-            try {
-              const outcome = await retryMaintenanceReplay(db, queue, row.id, now);
-              if (outcome === "sent") sent += 1;
-              else unavailable += 1;
-            } catch (error) {
-              // A send/stamp failure leaves the row pending: no attempt cap, so
-              // the next open sweep retries it. One bad row never starves the rest.
-              failed += 1;
-              log.warn(
-                {
-                  event: "maintenance_replay_outbox_send_failed",
-                  failure_id: row.id,
-                  detail: warnDetail(error, deps.alertUrl),
-                },
-                "maintenance replay send failed — row stays pending",
-              );
+          // Walk the pending rows oldest-first instead of letting the first
+          // `outboxRemaining` rows own the batch: a row whose target is gone
+          // (or that vanished) is skipped and the next pending request is
+          // tried in the same sweep, so one dead request never starves the
+          // operators behind it. Only an actual send spends the shared budget
+          // — an unavailable target writes no queue message — and a send/stamp
+          // that throws spends it too, because that attempt happened.
+          while (outboxRemaining > 0) {
+            const pending = await db
+              .prepare(MAINTENANCE_REPLAY_OUTBOX_SQL)
+              .bind(JSON.stringify(tried), outboxRemaining)
+              .all<{ id: string }>();
+            if (pending.results.length === 0) break;
+            for (const row of pending.results) {
+              tried.push(row.id);
+              try {
+                const outcome = await retryMaintenanceReplay(db, queue, row.id, now);
+                if (outcome === "sent") {
+                  sent += 1;
+                  outboxRemaining -= 1;
+                } else {
+                  unavailable += 1;
+                }
+              } catch (error) {
+                // A send/stamp failure leaves the row pending: no attempt cap, so
+                // the next open sweep retries it. One bad row never starves the rest.
+                failed += 1;
+                outboxRemaining -= 1;
+                log.warn(
+                  {
+                    event: "maintenance_replay_outbox_send_failed",
+                    failure_id: row.id,
+                    detail: warnDetail(error, deps.alertUrl),
+                  },
+                  "maintenance replay send failed — row stays pending",
+                );
+              }
+              if (outboxRemaining <= 0) break;
             }
           }
           if (sent > 0 || failed > 0 || unavailable > 0) {

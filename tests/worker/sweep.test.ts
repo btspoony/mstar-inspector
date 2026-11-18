@@ -1457,17 +1457,20 @@ describe("runSweep — comment-claim outbox", () => {
  */
 describe("runSweep — maintenance replay outbox", () => {
   /** One requested-but-unsent deferred row (the operator's durable request). */
-  async function seedPendingReplay(db: TestD1): Promise<string> {
+  async function seedPendingReplay(
+    db: TestD1,
+    overrides: { targetId?: string; requestedAt?: string } = {},
+  ): Promise<string> {
     const id = crypto.randomUUID();
+    const { targetId = BASE.target_id, requestedAt = "2026-11-01T00:00:00.000Z" } = overrides;
     db.raw
       .prepare(
         `INSERT INTO review_failures
            (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error,
             maintenance_replay_requested_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'maintenance_deferred', 'maintenance_window',
-                 '2026-11-01T00:00:00.000Z')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'maintenance_deferred', 'maintenance_window', ?)`,
       )
-      .run(id, BASE.target_id, BASE.installation_id, BASE.owner, BASE.repo, BASE.pr_number, BASE.head_sha);
+      .run(id, targetId, BASE.installation_id, BASE.owner, BASE.repo, BASE.pr_number, BASE.head_sha, requestedAt);
     return id;
   }
 
@@ -1573,5 +1576,83 @@ describe("runSweep — maintenance replay outbox", () => {
       maintenance_replay_requested_at: "2026-11-01T00:00:00.000Z",
       maintenance_replay_sent_at: null,
     });
+  });
+
+  test("a dead oldest target does not starve the next pending request in the same sweep", async () => {
+    const db = failureDb();
+    // The oldest request names a target that is now soft-deleted: it stays
+    // pending (never resurrected), but it must not own the batch.
+    const deadTarget = seedTarget(db, "bot-sweep", { id: "target-dead" });
+    db.raw
+      .prepare("UPDATE review_targets SET deleted_at = ? WHERE id = ?")
+      .run("2026-11-02T00:00:00.000Z", deadTarget);
+    const dead = await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-01T00:00:00.000Z" });
+    const live = await seedPendingReplay(db, { requestedAt: "2026-11-05T00:00:00.000Z" });
+    // Cap 1: the strictest budget, where the dead row used to consume the pass.
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    const { queue, sent } = fakeQueue();
+    const { log, calls } = captureLog();
+
+    await runSweep(db, { log, queue });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: "maintenance_replay", targetId: BASE.target_id });
+    expect(replayRow(db, live).maintenance_replay_sent_at).not.toBeNull();
+    // The dead request is untouched: an unavailable target never stamps sent.
+    expect(replayRow(db, dead)).toMatchObject({
+      maintenance_replay_requested_at: "2026-11-01T00:00:00.000Z",
+      maintenance_replay_sent_at: null,
+    });
+    const outboxLog = calls.find((call) => call.fields.event === "maintenance_replay_outbox");
+    expect(outboxLog?.fields).toEqual({ event: "maintenance_replay_outbox", sent: 1, failed: 0, target_unavailable: 1 });
+  });
+
+  test("a comment attempt whose DB write fails still spends the shared budget", async () => {
+    const db = failureDb();
+    await seedPendingReplay(db);
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+         VALUES (123, 'acme', 'widgets', 42, 9001, 'queued', ?, 0, 0, 0)`,
+      )
+      .run(JSON.stringify({ ...BASE, head_sha: null, action: "created", triggered_by: "issue_comment" }));
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
+      )
+      .run();
+    // The send succeeds, then the claim's own attempts update throws — the
+    // path where the attempt used to be refunded to the replay lane.
+    const lockedUpdate: D1StatementLike = {
+      bind: () => lockedUpdate,
+      first: async () => null,
+      all: async () => ({ results: [] }),
+      async run() {
+        throw new Error("claim row locked");
+      },
+    };
+    const brokenWrites: D1Like = {
+      prepare(query: string): D1StatementLike {
+        return query.includes("UPDATE comment_trigger_claims SET attempts")
+          ? lockedUpdate
+          : db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const { queue, sent } = fakeQueue();
+    const { log } = captureLog();
+
+    await runSweep(brokenWrites, { log, queue });
+
+    // ONE attempt against a cap of 1: the replay waits for the next sweep.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ triggered_by: "issue_comment" });
   });
 });
