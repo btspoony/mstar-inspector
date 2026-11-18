@@ -664,7 +664,19 @@ export function AddRepositoryDialog({
   onAdded: () => void;
 }) {
   const base = apiBase();
-  const [appId, setAppId] = useState<string>(apps.length > 0 ? String(apps[0]!.app_id) : "");
+  /**
+   * The operator's PICK, not the resolved App: `null` = nothing chosen yet, so
+   * the choice always reads off the list this render sees. The list arrives
+   * AFTER the first `ok` paint (the page settles the repository list first and
+   * reads the Apps independently), so a lazy `useState` initialiser would
+   * freeze `""` in that first render and never adopt the arriving list — a
+   * blank App step, both reads parked in loading, Confirm disabled for the
+   * page's life. Holding the pick instead lets a late list adopt the first App
+   * and lets a vanished App fall back rather than freeze.
+   */
+  const [pickedAppId, setPickedAppId] = useState<number | null>(null);
+  const selectedApp = apps.find((app) => app.app_id === pickedAppId) ?? apps[0] ?? null;
+  const appId = selectedApp === null ? "" : String(selectedApp.app_id);
   const [installations, setInstallations] = useState<InstallationsState>({ state: "loading" });
   const [repositories, setRepositories] = useState<RepositoryOptionsState>({ state: "loading" });
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
@@ -751,8 +763,8 @@ export function AddRepositoryDialog({
   if (!open) return null;
 
   const submit = async (): Promise<void> => {
-    const app = apps.find((candidate) => String(candidate.app_id) === appId);
-    if (app === undefined || selected.size === 0) return;
+    const app = selectedApp;
+    if (app === null || selected.size === 0) return;
     const chosen =
       repositories.state === "ok"
         ? repositories.repositories.filter((repository) => selected.has(repository.repo_id))
@@ -829,7 +841,8 @@ export function AddRepositoryDialog({
           notice={notice}
           busy={busy}
           onSelectApp={(next) => {
-            setAppId(next);
+            // The body hands back the App's address as a string; store the pick.
+            setPickedAppId(Number(next));
             setSelected(new Set());
             setNotice(null);
           }}
@@ -937,10 +950,13 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
       targets={targets}
       onRetry={() => void load()}
       addControl={
-        // The dialog is only reachable once the list and the App list have been
-        // read: on the error face `apps` is empty, so mounting it would invite
-        // the user to "add" against "no application yet" for what is actually a
-        // transient read failure.
+        // The trigger needs only the LIST: the page settles `/api/targets`
+        // first and reads `/api/apps` independently, so the control mounts while
+        // the App list may still be in flight or failed. The dialog owns both
+        // remaining faces — a read still pending, and the App list that came
+        // back empty — and the panel beside the button names a failure. Mounting
+        // the control on the error face would invite "add" against a transient
+        // list failure, which is why `state === "ok"` stays the gate.
         state === "ok" && canManageHere(boot) ? (
           <div className="flex flex-col items-end gap-2">
             <Button type="button" onClick={() => setDialogOpen(true)}>

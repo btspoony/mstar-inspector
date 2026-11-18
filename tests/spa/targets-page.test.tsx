@@ -1184,6 +1184,100 @@ describe("the list failure face", () => {
     }
   });
 
+  test("a late-arriving App list adopts: the App step preselects it, never blank", async () => {
+    // BUG-01 regression: the page settles the target list BEFORE reading apps,
+    // so the dialog first mounts against `apps === []`. The selection must
+    // derive from the list, not a lazy initialiser that freezes `""`.
+    let releaseApps: () => void = () => {};
+    const heldApps = new Promise<Response>((resolve) => {
+      releaseApps = () =>
+        resolve(
+          wireJson({
+            viewer: { login: "mallory", role: "admin" },
+            apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector", github_slug: "acme-inspector" }],
+            shared_bots: [],
+          }),
+        );
+    });
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/apps")) return heldApps;
+      if (wire.url.endsWith("/api/targets")) return wireJson({ targets: [] });
+      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/installation-repositories")) {
+        return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
+      }
+      return wireJson({});
+    });
+    try {
+      // The list painted while the App list is still in flight.
+      expect(view.text()).not.toContain(t("en", "common.loadFailed"));
+      const addButton = [...view.win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      expect(addButton).toBeDefined();
+
+      // Open BEFORE the App list lands: the empty-application face, not a blank
+      // select stuck in loading.
+      await view.click(addButton as unknown as DomElement | undefined);
+      expect(view.dialog()?.textContent ?? "").toContain(t("en", "targets.addDialog.noApps"));
+
+      releaseApps();
+      for (let flush = 0; flush < 6; flush += 1) await act(async () => {});
+
+      // The arriving list adopts: the combobox names it and both reads ran.
+      const text = view.dialog()?.textContent ?? "";
+      expect(text).not.toContain(t("en", "targets.addDialog.noApps"));
+      const combobox = view.win.document.querySelector('[role="dialog"] [role="combobox"]');
+      expect(combobox?.textContent ?? "").toContain("Acme Inspector");
+      expect(view.sent.some((wire) => wire.url.endsWith("/settings"))).toBe(true);
+      expect(view.sent.some((wire) => wire.url.endsWith("/installation-repositories"))).toBe(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an ordinary load preselects the first App and enables Confirm once a row is chosen", async () => {
+    // The same ordering, without holding the read: this is the everyday path the
+    // regression broke — blank select, both reads parked, Confirm dead forever.
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/apps")) {
+        return wireJson({
+          viewer: { login: "mallory", role: "admin" },
+          apps: [
+            { github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector", github_slug: "acme-inspector" },
+            { github_app_id: 9402, bot_id: "bot-2", github_name: "Second App", github_slug: "second-app" },
+          ],
+          shared_bots: [],
+        });
+      }
+      if (wire.url.endsWith("/api/targets")) return wireJson({ targets: [] });
+      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/installation-repositories")) {
+        return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
+      }
+      return wireJson({});
+    });
+    try {
+      const addButton = [...view.win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      await view.click(addButton as unknown as DomElement | undefined);
+
+      // The first App is preselected and the installation step resolved.
+      const combobox = view.win.document.querySelector('[role="dialog"] [role="combobox"]');
+      expect(combobox?.textContent ?? "").toContain("Acme Inspector");
+      await filter(view.win, "api");
+      expect(listed(view.win)).toHaveLength(1);
+
+      // Choosing a row is all Confirm needs — no second click on the App step.
+      expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(true);
+      await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
+      expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a failed Apps read degrades the add panel instead of blanking the list", async () => {
     // `/api/apps` feeds only the add dialog: a transient failure there must not
     // replace a successfully read repository list with the page error face.
