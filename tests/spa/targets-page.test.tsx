@@ -36,7 +36,12 @@ import {
 import type { InstallationsState, RepositoryOptionsState } from "../../src/spa/pages/TargetsPage";
 import { parseTargetCreate, parseTargetDetailTab, targetDetailTabQuery } from "../../src/spa/pages/data";
 import { TargetSettingsTab } from "../../src/spa/pages/TargetSettingsTab";
-import type { InstallationRepositoryOption, RepositoryAppOption, TargetListRow } from "../../src/spa/pages/data";
+import type {
+  InstallationRepository,
+  InstallationRepositoryOption,
+  RepositoryAppOption,
+  TargetListRow,
+} from "../../src/spa/pages/data";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
 
@@ -69,7 +74,13 @@ const installations = (
   ],
 ): InstallationsState => ({ state: "ok", installations: rows });
 
-const repositories = (...rows: InstallationRepositoryOption[]): RepositoryOptionsState => ({
+/** An offered repository row; `claimed` defaults to the common free case. */
+const offered = (
+  row: InstallationRepositoryOption,
+  claimed = false,
+): InstallationRepository => ({ ...row, claimed });
+
+const repositories = (...rows: InstallationRepository[]): RepositoryOptionsState => ({
   state: "ok",
   repositories: rows,
   degraded: false,
@@ -253,8 +264,16 @@ describe("repository list (static SSR)", () => {
       [t("en", "targets.metricReviews")]: "13",
       [t("en", "targets.metricReviews7d")]: "5",
     });
-    // 待安装 is no longer a metric key (I-000640).
-    expect(Object.keys(metricValues(markup))).not.toContain(t("en", "targets.filterUninstalled", { count: 2 }));
+    // 待安装 is no longer a metric (I-000640): read the band's OWN key list, so a
+    // future band that re-adds it under any label fails here. The band renders
+    // exactly the three review-volume figures and nothing else.
+    expect(Object.keys(metricValues(markup))).toEqual([
+      t("en", "targets.metricRepositories"),
+      t("en", "targets.metricReviews"),
+      t("en", "targets.metricReviews7d"),
+    ]);
+    // The count of unbound rows survives only as the filter's label.
+    expect(markup).toContain(t("en", "targets.filterUninstalled", { count: 2 }));
   });
 
   test("an empty workspace bands zeros rather than blanks", () => {
@@ -420,8 +439,8 @@ describe("add-repository dialog (static SSR)", () => {
     const markup = renderBody({
       apps: [app()],
       repos: repositories(
-        { repo_id: 501, owner: "acme", name: "api" },
-        { repo_id: 502, owner: "acme", name: "web" },
+        offered({ repo_id: 501, owner: "acme", name: "api" }),
+        offered({ repo_id: 502, owner: "acme", name: "web" }),
       ),
     });
     expect(markup).toContain('id="add-repository-search"');
@@ -461,7 +480,11 @@ describe("add-repository dialog (static SSR)", () => {
   test("a degraded answer says the list may be incomplete", () => {
     const markup = renderBody({
       apps: [app()],
-      repos: { state: "ok", repositories: [{ repo_id: 501, owner: "acme", name: "api" }], degraded: true },
+      repos: {
+        state: "ok",
+        repositories: [offered({ repo_id: 501, owner: "acme", name: "api" })],
+        degraded: true,
+      },
     });
     expect(markup).toContain(t("en", "targets.addDialog.degraded"));
   });
@@ -475,8 +498,12 @@ const wireJson = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 /** One installation listing, as the dialog's read consumes it. */
-const listing = (rows: Array<{ repo_id: number; owner: string; name: string }>) =>
-  wireJson({ repositories: rows, degraded: false });
+/** One installation listing; `claimed` defaults to the free case. */
+const listing = (rows: Array<{ repo_id: number; owner: string; name: string; claimed?: boolean }>) =>
+  wireJson({
+    repositories: rows.map((row) => ({ claimed: false, ...row })),
+    degraded: false,
+  });
 
 const BOOT: SpaBoot = {
   locale: "en",
@@ -885,6 +912,193 @@ describe("add-repository dialog (mounted)", () => {
     }
   });
 
+  test("a repository the bot already holds elsewhere renders claimed, never selectable", async () => {
+    // I-000642 follow-up: the duplicate predicate is the BOT's, so a row a
+    // sibling workspace holds can only fail the POST. The server marks it and
+    // the dialog must not offer it as a choice — while the free row stays open.
+    const view = await mountTargets(
+      createElement(AddRepositoryDialog, {
+        locale: "en",
+        open: true,
+        apps: [app()],
+        existingRepoIds: new Set<number>(),
+        onAdded: () => {},
+        onClose: () => {},
+      }),
+      (wire) =>
+        wire.url.endsWith("/settings")
+          ? settingsWith(INSTALLED)
+          : wire.url.endsWith("/installation-repositories")
+            ? listing([
+                { repo_id: 501, owner: "acme", name: "api", claimed: true },
+                { repo_id: 502, owner: "acme", name: "web" },
+              ])
+            : wireJson({}),
+    );
+    try {
+      await filter(view.win, "acme/");
+      const boxes = [...view.win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
+        (node) => node as unknown as HTMLInputElement,
+      );
+      expect(boxes).toHaveLength(2);
+      expect(boxes[0]?.disabled).toBe(true);
+      expect(boxes[1]?.disabled).toBe(false);
+      expect(view.dialog()?.textContent ?? "").toContain(t("en", "targets.addDialog.claimedElsewhere"));
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("this workspace's own repository is tagged Added, a foreign claim Taken", async () => {
+    const view = await mountTargets(
+      createElement(AddRepositoryDialog, {
+        locale: "en",
+        open: true,
+        apps: [app()],
+        existingRepoIds: new Set<number>([501]),
+        onAdded: () => {},
+        onClose: () => {},
+      }),
+      (wire) =>
+        wire.url.endsWith("/settings")
+          ? settingsWith(INSTALLED)
+          : wire.url.endsWith("/installation-repositories")
+            ? listing([
+                { repo_id: 501, owner: "acme", name: "api" },
+                { repo_id: 502, owner: "acme", name: "web", claimed: true },
+              ])
+            : wireJson({}),
+    );
+    try {
+      await filter(view.win, "acme/");
+      const text = view.dialog()?.textContent ?? "";
+      // Two reasons, two labels — "already existed" must not stand for
+      // "another workspace reviews it".
+      expect(text).toContain(t("en", "targets.addDialog.alreadyAdded"));
+      expect(text).toContain(t("en", "targets.addDialog.claimedElsewhere"));
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a successful add leaves nothing selected for the next open", async () => {
+    // The created repository is checked+disabled on the next open, so a
+    // surviving selection would keep Confirm enabled over a row that cannot be
+    // submitted — and pressing it would report "already existed" for an add the
+    // operator never made.
+    let added = false;
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/targets") && wire.method === "POST") {
+        added = true;
+        return wireJson({ created: [{ target_id: "t-new", repo_id: 501, repo_owner: "acme", repo_name: "api" }], duplicates: [] }, 201);
+      }
+      // After the add the list carries the new target, so a stale selection
+      // would line up with a disabled row.
+      if (wire.url.endsWith("/api/targets")) {
+        return wireJson({ targets: added ? [row({ repo_id: 501, repo_name: "api" })] : [] });
+      }
+      if (wire.url.endsWith("/api/apps")) {
+        return wireJson({
+          viewer: { login: "mallory", role: "admin" },
+          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector", github_slug: "acme-inspector" }],
+          shared_bots: [],
+        });
+      }
+      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/installation-repositories")) {
+        return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
+      }
+      return wireJson({});
+    });
+    const openDialog = async (): Promise<void> => {
+      const addButton = [...view.win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      await view.click(addButton as unknown as DomElement | undefined);
+    };
+    try {
+      await openDialog();
+      await filter(view.win, "api");
+      await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
+      expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(false);
+      await view.click(confirmButton(view.win));
+      // The all-created path closed the dialog.
+      expect(view.dialog()).toBeNull();
+
+      await openDialog();
+      // Reopened with the repository now taken by this workspace: no row can be
+      // selected, so Confirm must be disabled rather than carry the old tick.
+      await filter(view.win, "api");
+      const boxes = [...view.win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
+        (node) => node as unknown as HTMLInputElement,
+      );
+      expect(boxes).toHaveLength(1);
+      expect(boxes[0]?.checked).toBe(true); // the Added face
+      expect(boxes[0]?.disabled).toBe(true);
+      expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("closing and reopening drops the selection; a partial refusal keeps it", async () => {
+    let duplicates = false;
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/targets") && wire.method === "POST") {
+        duplicates = true;
+        return wireJson({ created: [], duplicates: [{ repo_id: 501, owner: "acme", name: "api" }] }, 201);
+      }
+      if (wire.url.endsWith("/api/targets")) return wireJson({ targets: [] });
+      if (wire.url.endsWith("/api/apps")) {
+        return wireJson({
+          viewer: { login: "mallory", role: "admin" },
+          apps: [{ github_app_id: 9401, bot_id: "bot-1", github_name: "Acme Inspector", github_slug: "acme-inspector" }],
+          shared_bots: [],
+        });
+      }
+      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/installation-repositories")) {
+        return listing([
+          { repo_id: 501, owner: "acme", name: "api" },
+          { repo_id: 502, owner: "acme", name: "web" },
+        ]);
+      }
+      return wireJson({});
+    });
+    const openDialog = async (): Promise<void> => {
+      const addButton = [...view.win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      await view.click(addButton as unknown as DomElement | undefined);
+    };
+    try {
+      await openDialog();
+      await filter(view.win, "api");
+      await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
+      // Cancel: the selection must not survive into the next open.
+      const cancel = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent === t("en", "common.cancel"),
+      );
+      await view.click(cancel as unknown as DomElement | undefined);
+      await openDialog();
+      await filter(view.win, "api");
+      expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(true);
+
+      // A refused batch, on the other hand, keeps what the server did not
+      // write so the operator can see it.
+      await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
+      await view.click(confirmButton(view.win));
+      expect(duplicates).toBe(true);
+      expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(false);
+      const checked = [...view.win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
+        (node) => (node as unknown as HTMLInputElement).checked,
+      );
+      expect(checked).toContain(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("re-check refetches the installation payload and unlocks the repository step", async () => {
     let installed = false;
     const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
@@ -965,6 +1179,39 @@ describe("the list failure face", () => {
       for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
       expect(view.text()).toContain("beta/site");
       expect(view.text()).not.toContain("acme/api");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a failed Apps read degrades the add panel instead of blanking the list", async () => {
+    // `/api/apps` feeds only the add dialog: a transient failure there must not
+    // replace a successfully read repository list with the page error face.
+    const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
+      if (wire.url.endsWith("/api/apps")) return wireJson({ error: "boom" }, 500);
+      if (wire.url.endsWith("/api/targets")) {
+        return wireJson({ targets: [row({ repo_id: 501, repo_name: "api" })] });
+      }
+      return wireJson({});
+    });
+    try {
+      // The list rendered: the row is there and the load error is not.
+      expect(view.text()).toContain("acme/api");
+      expect(view.text()).not.toContain(t("en", "common.loadFailed"));
+      // The panel says what is unavailable and offers a retry.
+      expect(view.text()).toContain(t("en", "targets.appsReadFailed"));
+      expect(
+        [...view.win.document.querySelectorAll("button")].some(
+          (button) => button.textContent === t("en", "common.retry"),
+        ),
+      ).toBe(true);
+      // The dialog is still reachable; it explains the missing App list itself.
+      const addButton = [...view.win.document.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "targets.add"),
+      );
+      expect(addButton).toBeDefined();
+      await view.click(addButton as unknown as DomElement | undefined);
+      expect(view.dialog()?.textContent ?? "").toContain(t("en", "targets.addDialog.noApps"));
     } finally {
       await view.unmount();
     }

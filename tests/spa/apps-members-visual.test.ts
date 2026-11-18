@@ -234,12 +234,17 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(scoped).not.toContain("/settings");
     // The row still navigates: the click handler rides the row.
     expect(scoped).toContain("cursor-pointer");
-    // The header band carries no 详情 cell any more.
+    // The column set is exactly the four payload-proved facts — asserted as
+    // equality, so a reappearing trailing column fails whatever it is labelled.
     const headers = [...scoped.matchAll(/<th [^>]*>([\s\S]*?)<\/th>/g)].map((cell) =>
       (cell[1] ?? "").trim(),
     );
-    expect(headers).not.toContain("Detail");
-    expect(headers).not.toContain("详情");
+    expect(headers).toEqual([
+      t("en", "apps.tableName"),
+      t("en", "apps.tableStatus"),
+      t("en", "apps.tableHealth"),
+      t("en", "apps.tableCreator"),
+    ]);
   });
 
   test("the status pill carries the semantic tone through its data-tone attribute", () => {

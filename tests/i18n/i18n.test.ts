@@ -252,26 +252,43 @@ describe("App detail IA copy", () => {
     expect(t("zh_CN", "targets.addDialog.duplicates").length).toBeGreaterThan(0);
     // The stepped add flow's own three headings, and the two figures the list
     // now bands (I-000640 / I-000642).
-    for (const locale of ["en", "zh_CN"] as const) {
-      for (const key of [
-        "targets.addDialog.stepApp",
-        "targets.addDialog.stepInstall",
-        "targets.addDialog.stepRepos",
-        "targets.addDialog.installNow",
-        "targets.addDialog.recheck",
-        "targets.addDialog.resultsCount",
-        "targets.addDialog.resultsTruncated",
-        "targets.metricReviews",
-        "targets.metricReviews7d",
-        "targets.filterUninstalled",
-        "targets.columnReviews",
-        "targets.columnReviews7d",
-        "targets.settings.boundApp",
-        "targets.settings.boundAppPlanned",
-      ]) {
-        expect(t(locale, key as Parameters<typeof t>[1]).length, `${locale} ${key}`).toBeGreaterThan(0);
+    // `satisfies readonly DictionaryKey[]` is the compile-time half of the
+    // check: a typo, a renamed key or a deleted one is a type error at THIS
+    // line, which is what the old `key as Parameters<typeof t>[1]` cast erased.
+    // The runtime half proves each key RESOLVES — `lookup()` returns the key
+    // itself on a miss, so a value equal to its key is the failure signal.
+    const steppedFlowKeys = [
+      "targets.addDialog.stepApp",
+      "targets.addDialog.stepInstall",
+      "targets.addDialog.stepRepos",
+      "targets.addDialog.installNow",
+      "targets.addDialog.recheck",
+      "targets.addDialog.resultsCount",
+      "targets.addDialog.resultsTruncated",
+      "targets.metricReviews",
+      "targets.metricReviews7d",
+      "targets.filterUninstalled",
+      "targets.columnReviews",
+      "targets.columnReviews7d",
+      "targets.settings.boundApp",
+      "targets.settings.boundAppPlanned",
+    ] as const satisfies readonly DictionaryKey[];
+    for (const key of steppedFlowKeys) {
+      // Membership first (the SPA's own guard), then resolution per locale.
+      expect(isDictionaryKey(key), key).toBe(true);
+      for (const locale of LOCALES) {
+        const value = t(locale, key);
+        expect(value, `${locale} ${key} resolved to its own key`).not.toBe(key);
+        expect(value.length, `${locale} ${key}`).toBeGreaterThan(0);
       }
     }
+    // The stepped flow's load-bearing copy, pinned the way the neighbouring
+    // assertions pin theirs — so a swapped sentence fails here, not only in the
+    // rendered-surface suite.
+    expect(t("en", "targets.addDialog.stepApp")).toBe("1 · App (bot)");
+    expect(t("zh_CN", "targets.addDialog.stepRepos")).toBe("3 · 仓库");
+    expect(t("en", "targets.filterUninstalled", { count: 3 })).toBe("Awaiting install (3)");
+    expect(t("zh_CN", "targets.filterUninstalled", { count: 3 })).toBe("待安装（3）");
     // The three detail tabs and the 评审配置 tab's own copy.
     expect(t("en", "targets.tabInsights")).toBe("Insights");
     expect(t("zh_CN", "targets.tabPullRequests")).toBe("拉取请求");
