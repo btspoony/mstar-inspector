@@ -121,7 +121,7 @@ let parentRejectedYields: unknown[] = [];
 let parentPromptThrow: string | null = null;
 /** When set, the fake parent turn ends with this `agent_end` payload (the SDK's gathered transcript). */
 let parentAgentEnd: unknown[] | null = null;
-/** When set, the fake turn parks on this NON-terminal `agent_end` and resumes on a later tick. */
+/** When set, the fake turn parks on this `agent_pause` and resumes on a later tick. */
 let parentParkedEnd: unknown[] | null = null;
 /** Yields the resumed continuation emits, in order, once the parked prompt has settled. */
 let parentResumeYields: unknown[] = [];
@@ -129,7 +129,7 @@ let parentResumeYields: unknown[] = [];
 let parentResumeEnd: unknown[] | null = null;
 /** Session disposals seen when the resumed continuation fired (0 = the parking pause did not tear the session down). */
 let disposeCallsAtResume: number | null = null;
-/** Test barrier: called as soon as the fake emits the NON-terminal (parked) `agent_end`. */
+/** Test barrier: called as soon as the fake emits the parked `agent_pause`. */
 let parentParkedEndObserved: (() => void) | null = null;
 /** Session event listeners registered by the runtime (one per deep run). */
 const yieldListeners: Array<(event: unknown) => void> = [];
@@ -285,13 +285,14 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
           });
           // The SDK's scheduling pause: the session is parked on a delivery it
           // already queued (a steer, a follow-up, a background wake), so it
-          // emits a NON-terminal end now and runs the continuation after this
+          // emits `agent_pause` now and runs the continuation after this
           // prompt unwinds — a later tick, never inline.
           if (parentParkedEnd !== null) {
             listener?.({
-              type: "agent_end",
+              type: "agent_pause",
               messages: parentParkedEnd,
-              isTerminal: false,
+              yielded: true,
+              awaiting: false,
             });
             // The parked end is delivered; the continuation below rides a later
             // tick, so a test can gate on the pause having arrived.
@@ -320,7 +321,6 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
                 listener?.({
                   type: "agent_end",
                   messages: resumedEnd,
-                  isTerminal: true,
                 });
               });
             }
@@ -341,7 +341,6 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
             listener?.({
               type: "agent_end",
               messages: parentAgentEnd,
-              isTerminal: true,
             });
           }
           if (parentPromptThrow !== null) {
