@@ -1,0 +1,186 @@
+/**
+ * Migration 0070: a repository chooses whether a DRAFT pull request is
+ * reviewed.
+ *
+ * The column is target-owned, like the business pause: it has a DDL default of
+ * 1 (today's behaviour — drafts ARE reviewed), it is never backfilled, and no
+ * workspace column answers it. The store therefore exposes it from the row in
+ * BOTH effective-settings branches, and a draft-only save changes nothing else
+ * — above all not `follow_workspace_defaults`.
+ */
+import { describe, expect, test } from "bun:test";
+import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter, seedBot, type TestD1 } from "./helpers";
+import { applyMigrations } from "../helpers/migration-shapes";
+import {
+  createTargetsStore,
+  effectiveTargetSettings,
+  getWorkspaceReviewDefaults,
+  readEffectiveTargetSettings,
+  setInheritance,
+} from "../../src/dashboard/targets-store";
+
+const MIGRATION = "0070_draft_review_gate.sql";
+const PREVIOUS = "0069_operator_data_upgrades.sql";
+
+/** Every migration up to and including 0069 — the shape the file applies over. */
+const BEFORE = migrationsAfter(2).filter((name) => migrationNumber(name) <= migrationNumber(PREVIOUS));
+
+const WS = "default";
+
+/** A 0069-shaped database holding one live target in the shape that file leaves. */
+function dbAt0069(): TestD1 {
+  const db = createTestD1();
+  applyMigrations(db, BEFORE);
+  seedBot(db, "bot-1", 7001);
+  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-1', 'default')").run();
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+          follow_workspace_defaults, review_trigger_mode, check_min_score,
+          check_pass_verdicts, created_by, created_at, updated_at)
+       VALUES ('target-1', 'default', 'bot-1', 'acme/widgets', 501, 'acme', 'widgets',
+               1, 'open', 45, '["ship it"]',
+               'acme', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+    )
+    .run();
+  return db;
+}
+
+function reviewDraftsColumn(db: TestD1): { type: string; notnull: number; dflt_value: string | null } {
+  const column = (
+    db.raw.query("PRAGMA table_info(review_targets)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>
+  ).find((entry) => entry.name === "review_drafts");
+  if (column === undefined) throw new Error("review_targets.review_drafts is missing");
+  return { type: column.type, notnull: column.notnull, dflt_value: column.dflt_value };
+}
+
+describe("migration 0070: the draft review gate", () => {
+  test("adds a NOT NULL default-1 column; an existing target keeps reviewing drafts", () => {
+    const db = dbAt0069();
+    applyMigrations(db, [MIGRATION]);
+
+    // The contract's shape: INTEGER NOT NULL DEFAULT 1, and no backfill — the
+    // default is the column's, not a value the migration wrote.
+    expect(reviewDraftsColumn(db)).toEqual({ type: "INTEGER", notnull: 1, dflt_value: "1" });
+    expect(db.raw.query("SELECT review_drafts FROM review_targets WHERE id = 'target-1'").get()).toEqual({
+      review_drafts: 1,
+    });
+    // No workspace column answers it: there is nothing to inherit from.
+    const workspaceColumns = (db.raw.query("PRAGMA table_info(workspaces)").all() as Array<{ name: string }>).map(
+      (column) => column.name,
+    );
+    expect(workspaceColumns.some((name) => name.includes("draft"))).toBe(false);
+  });
+
+  test("a target created after the migration also starts at 1, and only 0/1 are storable", () => {
+    const db = dbAt0069();
+    applyMigrations(db, [MIGRATION]);
+
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets
+           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name, created_by, created_at, updated_at)
+         VALUES ('target-new', 'default', 'bot-1', 'acme/gadgets', 502, 'acme', 'gadgets',
+                 'acme', '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z')`,
+      )
+      .run();
+    expect(db.raw.query("SELECT review_drafts FROM review_targets WHERE id = 'target-new'").get()).toEqual({
+      review_drafts: 1,
+    });
+
+    expect(() =>
+      db.raw.prepare("UPDATE review_targets SET review_drafts = 2 WHERE id = 'target-1'").run(),
+    ).toThrow();
+    expect(() =>
+      db.raw.prepare("UPDATE review_targets SET review_drafts = NULL WHERE id = 'target-1'").run(),
+    ).toThrow();
+  });
+});
+
+/** One live target of the workspace, in the shape the store reads. */
+function seedStoreTarget(db: TestD1, id: string, repoId: number, follow: 0 | 1): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+          follow_workspace_defaults, review_trigger_mode, review_level, check_min_score,
+          check_pass_verdicts, created_by, created_at, updated_at)
+       VALUES (?, 'default', 'bot-store', ?, ?, 'acme', ?, ?, 'manual', 'deep', 70,
+               '["ship it"]', 'acme', datetime('now'), datetime('now'))`,
+    )
+    .run(id, `acme/${id}`, repoId, id, follow);
+}
+
+describe("the store exposes the target-owned draft switch", () => {
+  function db(): TestD1 {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-store", 7009);
+    return db;
+  }
+
+  test("a draft-only save writes review_drafts and leaves follow and every other column alone", async () => {
+    const d = db();
+    seedStoreTarget(d, "t-follow", 11001, 1);
+    seedStoreTarget(d, "t-own", 11002, 0);
+    const store = createTargetsStore(d);
+
+    expect(await store.setReviewConfig(WS, "t-follow", { reviewDrafts: false })).toBe(true);
+    // A repository that follows the workspace defaults still owns this switch:
+    // the save changes it without flipping `follow` or snapshotting anything.
+    expect(
+      d.raw
+        .query(
+          `SELECT review_drafts, follow_workspace_defaults, review_trigger_mode, review_level,
+                  check_min_score, check_pass_verdicts
+             FROM review_targets WHERE id = 't-follow'`,
+        )
+        .get(),
+    ).toEqual({
+      review_drafts: 0,
+      follow_workspace_defaults: 1,
+      review_trigger_mode: "manual",
+      review_level: "deep",
+      check_min_score: 70,
+      check_pass_verdicts: '["ship it"]',
+    });
+
+    // Effective settings answer the row's value in BOTH branches.
+    expect((await readEffectiveTargetSettings(d, (await store.getInWorkspace(WS, "t-follow"))!)).reviewDrafts).toBe(
+      false,
+    );
+    expect((await readEffectiveTargetSettings(d, (await store.getInWorkspace(WS, "t-own"))!)).reviewDrafts).toBe(true);
+
+    expect(await store.setReviewConfig(WS, "t-own", { reviewDrafts: true })).toBe(true);
+    expect((await readEffectiveTargetSettings(d, (await store.getInWorkspace(WS, "t-own"))!)).reviewDrafts).toBe(true);
+  });
+
+  test("toggling inheritance, or saving a policy column, never rewrites the switch", async () => {
+    const d = db();
+    seedStoreTarget(d, "t-keep", 11003, 1);
+    const store = createTargetsStore(d);
+    expect(await store.setReviewConfig(WS, "t-keep", { reviewDrafts: false })).toBe(true);
+
+    // Toggle off (snapshots the policy answers) and back on.
+    await setInheritance(d, WS, "t-keep", 0);
+    expect(d.raw.query("SELECT review_drafts FROM review_targets WHERE id = 't-keep'").get()).toEqual({
+      review_drafts: 0,
+    });
+    await setInheritance(d, WS, "t-keep", 1);
+    expect(d.raw.query("SELECT review_drafts FROM review_targets WHERE id = 't-keep'").get()).toEqual({
+      review_drafts: 0,
+    });
+
+    // A policy save in the same row leaves it off.
+    expect(await store.setReviewConfig(WS, "t-keep", { triggerMode: "open", follow: 0 })).toBe(true);
+    expect(
+      effectiveTargetSettings((await store.getInWorkspace(WS, "t-keep"))!, await getWorkspaceReviewDefaults(d, WS))
+        .reviewDrafts,
+    ).toBe(false);
+  });
+});

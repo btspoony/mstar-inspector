@@ -16,6 +16,7 @@ import { Webhooks } from "@octokit/webhooks";
 import {
   classifyEvent,
   classifyWebhook,
+  DRAFT_PULL_REQUEST_REASON,
   NO_TARGET_REASON,
   payloadMentionsALogin,
   PULL_REQUEST_ACTIONS,
@@ -390,9 +391,9 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
   const MODES = ["open", "every_push", "manual"] as const;
   /** The §2.1 matrix cell: does mode × action enqueue the auto face? */
   const MATRIX: Record<(typeof MODES)[number], Record<string, boolean>> = {
-    open: { opened: true, synchronize: false, reopened: false },
-    every_push: { opened: true, synchronize: true, reopened: true },
-    manual: { opened: false, synchronize: false, reopened: false },
+    open: { opened: true, synchronize: false, reopened: false, ready_for_review: true },
+    every_push: { opened: true, synchronize: true, reopened: true, ready_for_review: true },
+    manual: { opened: false, synchronize: false, reopened: false, ready_for_review: false },
   };
 
   for (const mode of MODES) {
@@ -491,6 +492,122 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
       expect(outcome).toEqual({ kind: "ignore", reason: "comment body does not mention the App bot" });
     });
   }
+});
+
+describe("classifyEvent — draft pull request gate (migration 0070)", () => {
+  /** A pull_request body with an explicit draft flag (or none when omitted). */
+  function draftBody(action: string, draft?: unknown, overrides: Record<string, unknown> = {}): string {
+    const pr: Record<string, unknown> = { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" } };
+    if (draft !== undefined) pr.draft = draft;
+    return pullRequestBody(action, { pull_request: pr, ...overrides });
+  }
+
+  const triggerOf = (mode: ReviewTriggerContext["mode"], switchOn: boolean): ReviewTriggerContext => ({
+    mode,
+    appSlug: APP_SLUG,
+    reviewDrafts: switchOn,
+  });
+
+  // The gate's own cell: switch OFF holds a draft back, switch ON (or an
+  // absent policy) reviews it exactly as before.
+  for (const switchOn of [true, false]) {
+    for (const action of ["opened", "synchronize", "reopened"] as const) {
+      test(`draft × ${action} × reviewDrafts=${switchOn} → ${switchOn ? "job" : "ignore"}`, () => {
+        const outcome = classifyEvent("pull_request", draftBody(action, true), undefined, triggerOf("every_push", switchOn));
+        if (switchOn) {
+          expect(outcome.kind).toBe("job");
+        } else {
+          expect(outcome).toEqual({ kind: "ignore", reason: DRAFT_PULL_REQUEST_REASON });
+        }
+      });
+    }
+  }
+
+  // `ready_for_review` bypasses the draft gate in both switch states — and
+  // then obeys the mode gate like every other action.
+  for (const switchOn of [true, false]) {
+    for (const mode of ["open", "every_push", "manual"] as const) {
+      const admitted = mode !== "manual";
+      test(`draft × ready_for_review × reviewDrafts=${switchOn} × ${mode} → ${admitted ? "job" : "mode ignore"}`, () => {
+        const outcome = classifyEvent("pull_request", draftBody("ready_for_review", true), undefined, triggerOf(mode, switchOn));
+        if (admitted) {
+          expect(outcome.kind).toBe("job");
+          if (outcome.kind === "job") expect(outcome.payload.action).toBe("ready_for_review");
+        } else {
+          // Not the draft reason: the draft gate was bypassed, the mode gate
+          // refused.
+          expect(outcome).toEqual({
+            kind: "ignore",
+            reason: "pull_request action ready_for_review does not auto-trigger in manual mode",
+          });
+        }
+      });
+    }
+  }
+
+  // Absent or false draft is not a draft in either switch state.
+  for (const switchOn of [true, false]) {
+    for (const draft of [undefined, false]) {
+      test(`draft=${String(draft)} with reviewDrafts=${switchOn} still yields a job`, () => {
+        const outcome = classifyEvent(
+          "pull_request",
+          draftBody("synchronize", draft),
+          undefined,
+          triggerOf("every_push", switchOn),
+        );
+        expect(outcome.kind).toBe("job");
+      });
+    }
+  }
+
+  test("a non-boolean draft keeps the existing 400 validation result", () => {
+    for (const draft of ["true", 1, {}, null]) {
+      const outcome = classifyEvent("pull_request", draftBody("opened", draft), undefined, triggerOf("every_push", false));
+      expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload failed validation" });
+    }
+  });
+
+  // The gate sits after the author gate and after identity validation, so
+  // those keep their own outcome for a draft delivery.
+  test("a draft by a [bot] author keeps the bot reason (author gate runs first)", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      draftBody("synchronize", true, {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" }, draft: true },
+      }),
+      undefined,
+      triggerOf("every_push", false),
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+  });
+
+  test("a draft with no author login keeps the missing-author reason", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      draftBody("opened", true, { pull_request: { number: 42, head: { sha: HEAD_SHA }, draft: true } }),
+      undefined,
+      triggerOf("every_push", false),
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "payload carried no PR author login" });
+  });
+
+  test("a draft with missing identity still rejects 400 (reject outranks the draft gate)", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      draftBody("synchronize", true, { installation: null }),
+      undefined,
+      triggerOf("every_push", false),
+    );
+    expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
+  });
+
+  test("an absent reviewDrafts keeps today's behaviour (a draft is reviewed)", () => {
+    const outcome = classifyEvent("pull_request", draftBody("synchronize", true), undefined, {
+      mode: "every_push",
+      appSlug: APP_SLUG,
+    });
+    expect(outcome.kind).toBe("job");
+  });
 });
 
 describe("classifyEvent — every_push default reproduces current classification (diff-to-current pin)", () => {

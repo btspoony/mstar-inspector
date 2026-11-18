@@ -113,6 +113,8 @@ export type ReviewTargetRow = {
   follow_workspace_defaults: number;
   /** Business pause: 1 = the workspace lets this target review, 0 = paused. */
   review_enabled: number;
+  /** 1 = a draft pull request is reviewed like any other, 0 = held until ready (0070). */
+  review_drafts: number;
   review_trigger_mode: ReviewTriggerMode;
   review_level: string | null;
   check_min_score: number;
@@ -159,6 +161,17 @@ export type EffectiveTargetSettings = {
   checkMinScore: number;
   checkPassVerdicts: readonly PrVerdict[];
   checkPassVerdictsReadable: boolean;
+};
+
+/**
+ * A TARGET's settings: the inheritable policy answers plus the target-owned
+ * facts. `reviewDrafts` is answered from the row in BOTH inheritance branches
+ * (D12) — the workspace defaults carry no such answer, so this stays off
+ * `WorkspaceReviewDefaults` and off the workspace-defaults payload.
+ */
+export type EffectiveReviewTargetSettings = EffectiveTargetSettings & {
+  /** False = a draft pull request is held until it is marked ready. */
+  reviewDrafts: boolean;
 };
 
 /**
@@ -222,6 +235,12 @@ export type TargetReviewConfig = {
   level?: ReviewLevel | null;
   checkMinScore?: number;
   checkPassVerdicts?: readonly PrVerdict[];
+  /**
+   * The target-owned draft switch (0070): false holds a draft pull request
+   * until it is ready. Written like any other named column — it changes neither
+   * `follow_workspace_defaults` nor the inherited policy columns.
+   */
+  reviewDrafts?: boolean;
   /**
    * `0` = this row answers with these columns, not the workspace defaults. An
    * explicit save must say so in the SAME statement: a settings control that
@@ -431,11 +450,12 @@ export async function setWorkspaceReviewDefaults(
 }
 
 /**
- * The four policy columns a non-inheriting row answers with. Split out because
- * `readEffectiveTargetSettings` decides the inheritance branch BEFORE the
- * defaults read, and must not need a defaults object to say so.
+ * The four policy columns a non-inheriting row answers with, plus the
+ * target-owned draft switch. Split out because `readEffectiveTargetSettings`
+ * decides the inheritance branch BEFORE the defaults read, and must not need a
+ * defaults object to say so.
  */
-function ownTargetSettings(target: ReviewTargetRow): EffectiveTargetSettings {
+function ownTargetSettings(target: ReviewTargetRow): EffectiveReviewTargetSettings {
   const verdicts = storedPassVerdicts(target.check_pass_verdicts);
   return {
     triggerMode: target.review_trigger_mode,
@@ -447,6 +467,7 @@ function ownTargetSettings(target: ReviewTargetRow): EffectiveTargetSettings {
     // workspace side; `checkPassVerdictsReadable` keeps the two apart.
     checkPassVerdicts: [...(verdicts ?? [])],
     checkPassVerdictsReadable: verdicts !== null,
+    reviewDrafts: target.review_drafts !== 0,
   };
 }
 
@@ -454,11 +475,15 @@ function ownTargetSettings(target: ReviewTargetRow): EffectiveTargetSettings {
  * What the target runs with (D16). `follow_workspace_defaults = 1` answers the
  * workspace defaults — computed here, every read, never copied into the row
  * while inheriting. `= 0` answers the row's own four columns.
+ *
+ * `reviewDrafts` is answered from the ROW in both branches: it is a
+ * target-owned admission fact like the pause, and the workspace defaults carry
+ * no such answer (D12).
  */
 export function effectiveTargetSettings(
   target: ReviewTargetRow,
   defaults: WorkspaceReviewDefaults,
-): EffectiveTargetSettings {
+): EffectiveReviewTargetSettings {
   if (target.follow_workspace_defaults !== 1) return ownTargetSettings(target);
   return {
     triggerMode: defaults.triggerMode,
@@ -466,6 +491,7 @@ export function effectiveTargetSettings(
     checkMinScore: defaults.checkMinScore,
     checkPassVerdicts: [...defaults.checkPassVerdicts],
     checkPassVerdictsReadable: defaults.checkPassVerdictsReadable,
+    reviewDrafts: target.review_drafts !== 0,
   };
 }
 
@@ -478,7 +504,7 @@ export function effectiveTargetSettings(
 export async function readEffectiveTargetSettings(
   db: TargetsStoreD1,
   target: ReviewTargetRow,
-): Promise<EffectiveTargetSettings> {
+): Promise<EffectiveReviewTargetSettings> {
   return target.follow_workspace_defaults === 1
     ? effectiveTargetSettings(target, await getWorkspaceReviewDefaults(db, target.workspace_id))
     : ownTargetSettings(target);
@@ -844,6 +870,12 @@ export function createTargetsStore(db: TargetsStoreD1) {
         }
         assignments.push("check_pass_verdicts = ?");
         values.push(JSON.stringify(config.checkPassVerdicts));
+      }
+      // A target-owned column beside the four policy answers: naming it never
+      // touches `follow_workspace_defaults` and never snapshots a default.
+      if (config.reviewDrafts !== undefined) {
+        assignments.push("review_drafts = ?");
+        values.push(config.reviewDrafts ? 1 : 0);
       }
       // First, so the row's own columns are the ones the caller just wrote —
       // one statement, no second write and no window where the save is inert.

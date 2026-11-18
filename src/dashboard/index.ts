@@ -6153,6 +6153,14 @@ type ReviewSettingsPayload = {
   check_pass_verdicts_readable: boolean;
 };
 
+/**
+ * A TARGET's effective settings: the four policy answers plus the draft switch,
+ * which is a target-owned admission fact (D12). The workspace defaults answer
+ * no such question, so `reviewSettingsPayload` stays shared and this field
+ * rides only the per-target face.
+ */
+type TargetEffectivePayload = ReviewSettingsPayload & { reviewDrafts: boolean };
+
 function reviewSettingsPayload(settings: EffectiveTargetSettings): ReviewSettingsPayload {
   return {
     trigger_mode: settings.triggerMode,
@@ -6183,13 +6191,16 @@ type TargetSettingsPayload = {
   app_name: string;
   review_enabled: number;
   follow_workspace_defaults: number;
+  /** The target-owned draft switch (0070): 0 = hold drafts until ready. */
+  review_drafts: 0 | 1;
 };
 
 async function targetSettingsPayload(
   db: DashboardDb,
   target: ReviewTargetRow,
-): Promise<{ target: TargetSettingsPayload; effective: ReviewSettingsPayload }> {
+): Promise<{ target: TargetSettingsPayload; effective: TargetEffectivePayload }> {
   const app = await createReviewBotsStore(db).getAppById(target.bot_id);
+  const effective = await readEffectiveTargetSettings(db, target);
   return {
     target: {
       target_id: target.id,
@@ -6200,8 +6211,9 @@ async function targetSettingsPayload(
       app_name: app === null ? "" : appDisplayName(app),
       review_enabled: target.review_enabled,
       follow_workspace_defaults: target.follow_workspace_defaults,
+      review_drafts: target.review_drafts === 0 ? 0 : 1,
     },
-    effective: reviewSettingsPayload(await readEffectiveTargetSettings(db, target)),
+    effective: { ...reviewSettingsPayload(effective), reviewDrafts: effective.reviewDrafts },
   };
 }
 
@@ -6246,6 +6258,8 @@ type ReviewSettingsPatch = {
   checkPassVerdicts?: PrVerdict[];
   follow?: 0 | 1;
   reviewEnabled?: boolean;
+  /** The target-owned draft switch (0070); target route only. */
+  reviewDrafts?: boolean;
 };
 
 type ReviewSettingsParse =
@@ -6316,6 +6330,14 @@ function parseReviewSettingsBody(raw: unknown, withSwitch: boolean): ReviewSetti
     patch.checkPassVerdicts = [...new Set(list as PrVerdict[])];
   }
   if (!withSwitch) return { ok: true, patch };
+  if ("review_drafts" in body) {
+    // A strict boolean: the contract names the toggle as `boolean` only, so a
+    // `0`/`"1"`-shaped value is refused rather than coerced.
+    if (typeof body.review_drafts !== "boolean") {
+      return { ok: false, error: "invalid review_drafts" };
+    }
+    patch.reviewDrafts = body.review_drafts;
+  }
   if ("follow" in body) {
     if (body.follow !== 0 && body.follow !== 1) return { ok: false, error: "invalid follow" };
     patch.follow = body.follow;
@@ -6396,6 +6418,9 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
     level: follow === 1 ? undefined : patch.level,
     checkMinScore: follow === 1 ? undefined : patch.checkMinScore,
     checkPassVerdicts: follow === 1 ? undefined : patch.checkPassVerdicts,
+    // Target-owned (D12): written in the same statement whatever `follow` says,
+    // because inheritance never answered this question.
+    reviewDrafts: patch.reviewDrafts,
     follow,
   };
   if (follow === 0 && current !== null) {

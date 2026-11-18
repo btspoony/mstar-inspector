@@ -8840,6 +8840,47 @@ describe("usage ledger (migration 0031)", () => {
     expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(charged);
   });
 
+  test("a duplicate delivery after a completed review with the KV claim absent or faulting still runs no second review", async () => {
+    // §7.7 step 2: the KV done claim is only the FAST dedup — D1 is the durable
+    // backstop. Both states that make the claim unreadable are covered, because
+    // "KV says done" is exactly what neither of these has.
+    for (const kv of ["absent", "faulting"] as const) {
+      h = createConsumerHarness();
+      freshChecks();
+      h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      const db = await createSeededTestD1();
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+      // The first delivery completes the review for this sha: one row, one
+      // charge, one posted review, one model run.
+      await consumer(h.makeBatch(makePayload()));
+      expect(reviewCount(db)).toBe(1);
+      expect(usageRows(db)).toHaveLength(1);
+      expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+      expect(h.sandbox.calls.filter((c) => c.cmd.includes("bun run"))).toHaveLength(1);
+
+      // GitHub redelivers the same commit with no readable done claim: the
+      // key is absent, or every read throws.
+      h.kvState.entries.clear();
+      h.kvState.getValue = null;
+      if (kv === "faulting") h.kvState.getError = new Error("kv down");
+
+      await consumer(h.makeBatch(makePayload()));
+
+      // The D1 row for this exact head is what answers "already reviewed":
+      // no second completed review, no second charge, no second post, and no
+      // second paid model run.
+      expect(reviewCount(db)).toBe(1);
+      expect(usageRows(db)).toHaveLength(1);
+      expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+      expect(h.sandbox.calls.filter((c) => c.cmd.includes("bun run"))).toHaveLength(1);
+      expect(h.logLines.filter((l) => l.msg === "idempotency hit — ack")).toHaveLength(1);
+      if (kv === "faulting") {
+        expect(h.logLines.filter((l) => l.msg.includes("idempotency KV read failed"))).not.toHaveLength(0);
+      }
+    }
+  });
+
   test("an unreadable quota profile does not abort the review: it posts, and one usage row records the lost charge", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
