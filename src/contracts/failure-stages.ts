@@ -1,9 +1,10 @@
 /**
- * The `review_failures.stage` ATTRIBUTION partition — single source of truth
- * (compass contracts B). The cron sweep and the dashboard both ask the same
- * question ("is this row a failure of the review?"), so the list is written
- * once here and interpolated into each query by `sqlStageList`; a hand-written
- * stage literal is what let the count/history asymmetry drift.
+ * The `review_failures.stage` EXCLUSION partitions — single source of truth
+ * (compass contracts B). The dashboard asks "is this row a failure of the
+ * review?" and the cron sweep asks "is this row a platform incident?", so the
+ * lists are written once here and interpolated into each query by
+ * `sqlStageList`; a hand-written stage literal is what let the count/history
+ * asymmetry drift.
  *
  * Zero imports: `src/dashboard/**` may import this module but never
  * `store/pipeline/review` code (architect decision Q2, the same admission
@@ -13,17 +14,34 @@
 
 /**
  * Stages whose rows record a review that CONTINUED — per-round attribution,
- * never a failure of the review itself. Every COUNT and every list that pages
- * these rows excludes the whole set: the cron sweep's paging count, the
- * dashboard's failure count (list aggregate, detail `counts.failures`) and the
- * per-PR failure history. One rule on both faces, so a tab number never
- * disagrees with the pager below it. The rows stay in `review_failures` —
- * `usage` is the only record of a dropped metered attempt, `recheck` of a
- * round that produced no usable document, and `rate-limit` of a degraded-
- * comment sweep GitHub throttled while the review itself stood — they are just
- * not failures.
+ * never a failure of the review itself. The dashboard's failure count (list
+ * aggregate, detail `counts.failures`) and the per-PR failure history exclude
+ * the whole set, so a tab number never disagrees with the pager below it. The
+ * rows stay in `review_failures` — `usage` is the only record of a dropped
+ * metered attempt, `recheck` of a round that produced no usable document, and
+ * `rate-limit` of a degraded-comment sweep GitHub throttled while the review
+ * itself stood — they are just not failures.
+ *
+ * Paging is a STRICT SUPERSET of this set ({@link PAGING_EXCLUDED_STAGES}):
+ * a row can be a real failure the dashboard must show and still be kept out
+ * of the global ops alert. The two questions are asked separately for exactly
+ * that reason — extending the paging set must never hide a row from the
+ * dashboard.
  */
-export const PAGING_EXCLUDED_STAGES = Object.freeze(["recheck", "usage", "rate-limit"] as const);
+export const ATTRIBUTION_EXCLUDED_STAGES = Object.freeze(["recheck", "usage", "rate-limit"] as const);
+
+/**
+ * Stages the cron sweep's infrastructure alert ignores: the attribution set
+ * plus `quota`. A quota refusal is a REAL failure — the dashboard counts and
+ * lists it — but it is one tenant's exhausted month, so a global ops page
+ * would announce a platform incident for a commercial ceiling. Maintenance
+ * stays OUT of both lists: the sweep is what turns a closed platform into an
+ * alert instead of a silent dead-letter.
+ */
+export const PAGING_EXCLUDED_STAGES = Object.freeze([
+  ...ATTRIBUTION_EXCLUDED_STAGES,
+  "quota",
+] as const);
 
 /**
  * The `review_failures.stage` a shared-bot entitlement refusal is recorded
@@ -52,8 +70,10 @@ export const SHARED_BOT_ENTITLEMENT_SKIP_REASON =
  * The `review_failures.stage` a quota refusal is recorded under. It is a
  * SEPARATE stage from `entitlement` because the two name different causes: the
  * plan lacks the capability versus this month's consumption reached the plan's
- * RP ceiling. Like `entitlement` it is NOT in `PAGING_EXCLUDED_STAGES` — the
- * delivery ran no review at all, so it stays paged.
+ * RP ceiling. Unlike `entitlement` it IS in `PAGING_EXCLUDED_STAGES` and NOT in
+ * `ATTRIBUTION_EXCLUDED_STAGES`: visible as a failure on the dashboard, excluded
+ * from infrastructure paging — one tenant's spent month is a commercial
+ * ceiling, not a platform incident.
  */
 export const QUOTA_STAGE = "quota";
 
@@ -61,10 +81,11 @@ export const QUOTA_STAGE = "quota";
  * The `review_failures.stage` a delivery the maintenance window could not defer
  * is recorded under: the platform was closed and the queue had no redelivery
  * left (a runtime without `message.retry`, or a message already on its last
- * platform delivery). Like `entitlement` and `quota` it is NOT in
- * `PAGING_EXCLUDED_STAGES` — no review ran, so the row stays counted and the
- * 15-min failure sweep alerts on it instead of the delivery vanishing into the
- * DLQ. Its `error` text carries the one reason token `maintenance_window`.
+ * platform delivery). It is in NEITHER exclusion list — the row stays a stored
+ * failure — but the sweep's infrastructure total filters it with its own
+ * predicate: "platform closed" is a separate existence signal with its own
+ * lane, never part of the incident count. Its `error` text carries the one
+ * reason token `maintenance_window`.
  */
 export const MAINTENANCE_DEFERRED_STAGE = "maintenance_deferred";
 

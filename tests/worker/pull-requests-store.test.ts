@@ -238,6 +238,34 @@ describe("listPullRequests", () => {
     });
   }
 
+  // Paging and dashboard attribution are separate questions: `quota` is in
+  // the paging exclusion only, because one tenant's spent month must not latch
+  // the global ops alert — but it IS a failure the dashboard shows.
+  test("quota rows stay visible on every dashboard failure face", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
+    db.raw
+      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .run(APP_ID);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES ('f-quota', 77, 'acme', 'widgets', 131, 'sha-1', 'quota', 'quota exceeded', 'target-app-pr-ledger')`,
+      )
+      .run();
+
+    const store = createReviewBotsStore(db);
+    expect((await store.listPullRequests(SCOPE)).rows[0]!.failure_count).toBe(1);
+    expect((await store.countPullRequestRecords(SCOPE, "acme", "widgets", 131)).failures).toBe(1);
+    const history = await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, {
+      offset: 0,
+      limit: 10,
+    });
+    expect(history!.total).toBe(1);
+    expect(history!.items.map((item) => item.stage)).toEqual(["quota"]);
+  });
+
   test("the failure count and the failures section total agree when both an attribution row and an ordinary one exist", async () => {
     // The second face of the same rule: the recheck row is counted and paged
     // out on BOTH sides, so the tab's number is the pager's denominator.

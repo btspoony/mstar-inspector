@@ -126,7 +126,7 @@
  *     (bot_id, installation_id) pairs, and unknown app references are
  *     caller-visible errors, never swallowed.
  */
-import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
+import { ATTRIBUTION_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
@@ -1754,7 +1754,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * cannot attribute carries NULL and is invisible here — the migration's
      * guards refuse to leave one behind.
      *
-     * `PAGING_EXCLUDED_STAGES` rows are NOT failures of the review —
+     * `ATTRIBUTION_EXCLUDED_STAGES` rows are NOT failures of the review —
      * each is per-round attribution written for rounds that continued
      * (`recheck` a budget skip / dead seat / invalid document, `usage` a
      * failed `usage_events` insert, `rate-limit` a GitHub-throttled
@@ -1811,7 +1811,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
               `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
                FROM review_failures f
                WHERE ${ledgerScopeSql("f", scope)}
-                 AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+                 AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
                  AND (f.owner, f.repo, f.pr_number) IN (${window})
                GROUP BY f.owner, f.repo, f.pr_number`,
             )
@@ -1893,7 +1893,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     /**
      * The record totals — the head payload's `counts`. Every failure count on
      * this face (this one, the list's `failure_count`, the failures section's
-     * `total`) carries ONE rule: `PAGING_EXCLUDED_STAGES` rows are per-round
+     * `total`) carries ONE rule: `ATTRIBUTION_EXCLUDED_STAGES` rows are per-round
      * ATTRIBUTION for reviews that continued (`recheck` a budget skip / dead
      * seat / invalid document, `usage` a failed `usage_events` insert), not
      * failures of the review ledger this face pages, so a clean PR never
@@ -1934,7 +1934,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT COUNT(*) AS n FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
-               AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
           .bind(...scopeBinds, owner, repo, prNumber),
@@ -2118,7 +2118,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     /**
      * One page of a PR's review failures, newest first — the diagnostic
      * payload this face exists for. COUNT and SELECT carry the SAME
-     * `PAGING_EXCLUDED_STAGES` predicate `countPullRequestRecords` applies, so
+     * `ATTRIBUTION_EXCLUDED_STAGES` predicate `countPullRequestRecords` applies, so
      * the tab's number, this `total` and the pager agree with the rendered
      * rows. `null` = the App's ledger does not hold this PR.
      */
@@ -2137,7 +2137,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             `SELECT COUNT(*) AS n
              FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
-               AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
           .bind(...scopeBinds, owner, repo, prNumber),
@@ -2146,7 +2146,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
-               AND f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC
              LIMIT ? OFFSET ?`,
