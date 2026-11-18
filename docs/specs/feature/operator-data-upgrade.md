@@ -2,7 +2,7 @@
 
 ## Scope
 
-The operator-owned machinery for data migrations too large to run as a schema change: the maintenance window, the upgrade registry and its state machine, and the repository backfill item that gives historical targets their repository identity. It also fixes how this machinery couples to the ordinary schema migrations that ship beside it.
+The operator-owned machinery for data migrations too large to run as a schema change: the maintenance window, the upgrade registry and its state machine, repository identity backfill, and attribution of ledger rows that never had a target. It also fixes how this machinery couples to the ordinary schema migrations that ship beside it.
 
 Ordinary schema migrations stay forward-only SQL files and are never upgrade items. The product-facing wording shown during the window is part of the repository surface page; this page fixes the technical contract. Out of scope: per-workspace maintenance, an ETA promise, and any user-visible surface of the upgrade state beyond the operator console.
 
@@ -26,7 +26,7 @@ Ordinary schema migrations stay forward-only SQL files and are never upgrade ite
 
 | ID | Contract |
 |----|----------|
-| U1 | An upgrade item is `{ id, title, requiresDowntime, order, preflight(db) → counts, runBatch(db, cursor) → ONE transaction, verify(db, { runStartedAt }) → read-only checks, advisoryChecks? }`. `preflight` and `verify` write nothing. A count named in `advisoryChecks` is reported and never fails the item. The registry is one ordered list; an unregistered id is the operator API's 404. |
+| U1 | An upgrade item is `{ id, title, impact, requiresDowntime, order, preflight(db) → counts, runBatch(db, cursor) → ONE transaction, verify(db, { runStartedAt }) → read-only checks, advisoryChecks? }`. `preflight` and `verify` write nothing. A count named in `advisoryChecks` is reported and never fails the item. The registry lists two items in order: `repo-backfill` (10), then `orphan-ledger-attribution` (20). An unregistered id is the operator API's 404. |
 | U2 | State lives in `operator_data_upgrades`: `id` (primary key), `status` (`pending` \| `running` \| `verifying` \| `completed` \| `failed`, enforced by CHECK), `cursor_json`, `processed`, `maintenance_owned` (0/1), `started_at` (the per-phase claim), `run_started_at` (when the current run began), `finished_at`, `last_error`, `log_json`. An absent row is `pending`: the item was never started. |
 | U3 | The console reads `GET /_internal_admin/api/data-upgrades` — every registered item with its state and preflight counts, one state read for the whole list — and writes `POST /_internal_admin/api/data-upgrades/:id/preflight \| step \| verify \| reset`. These routes are operator-only. |
 | U4 | `step` runs from `pending` or `running` and leaves the item `running`: the item's batch is one transaction (its statements commit or roll back together), then the progress write records the new cursor, the processed count and an appended log entry. A worker that dies between the two leaves the previous cursor, and the next step re-plans from it — safe because every item's worklist excludes finished work. An empty batch answers `done: true` and the item still stays `running` until an explicit verify. |
@@ -34,6 +34,8 @@ Ordinary schema migrations stay forward-only SQL files and are never upgrade ite
 | U6 | `verify` runs from `running`, `verifying` or `failed` (a verify interrupted mid-flight is retryable), touches no migrated data — only the item's own state row — and settles the item: any non-zero blocking check makes it `failed` with `last_error` naming the failing checks, all blocking zero makes it `completed` with `finished_at`. It reads `run_started_at` and passes it to `verify` as `{ runStartedAt }`, so the item can date what this run touched. An advisory check is reported in `checks` and the ledger row and never fails the item. Only a successful verify closes a window the runner owns, and it flips `maintenance_owned` back to 0 so a later pass cannot re-close an operator window. |
 | U7 | `reset` moves any state to `pending`, clears the cursor, the processed count and the timestamps, the last error and the ownership flag, and never undoes migrated rows — replay is a no-op pass because the worklist excludes finished work. It KEEPS `run_started_at`: that stamp is the item's lifetime boundary, not a per-attempt value, so rows retired by an earlier attempt of the same item still block verify while only deletions predating the item count as history. It closes a window the runner owned and leaves an operator-enabled window open. The batch log survives, as the only record of what earlier batches discarded. |
 | U8 | Every mutating phase is single-flight per item. `step`, `verify` and `reset` each claim the row with one conditional upsert (`status` set plus a five-minute `started_at` lease); a caller that loses the claim is refused with `409 upgrade_running` and the unchanged state, never a second batch. The claim is cleared in the same statement set that writes the phase outcome, and a thrown phase releases it before rethrowing. Two operators, or two tabs, therefore cannot plan the same worklist and insert one target per repository each. |
+| U9 | Every card renders the item's `impact` sentence from the registry. When preflight reports at least one count and all counts are zero, the card states “Nothing to migrate — this upgrade has no work left” and disables Start or Continue; zero is not a completed run. |
+| U10 | Pending and completed cards offer no reset. A running or verifying card offers “Return to pending” (`回到待开始`); a failed card instead offers “Restart upgrade” (`重新开始升级`) with “Rows already migrated are not rolled back” (`已迁移的行不会回滚。`). Both use the same reset route. |
 
 ### Repository backfill item (`repo-backfill`)
 
@@ -51,6 +53,18 @@ Ordinary schema migrations stay forward-only SQL files and are never upgrade ite
 | B10 | Preflight, with no writes: `unidentified_targets` (live rows of the leftover shape), `ledger_pairs` (the `(target, repository)` pairs a run moves), `conflicting_groups` (repositories covered by more than one live row) and `leftover_without_ledger` (rows of the leftover shape awaiting their first delivery). |
 | B11 | Verify, read-only: `unidentified_targets_with_ledger` (a live row holding ledger rows but naming no repository) and `duplicate_repository_groups` (one bot naming the same repository twice among rows holding ledger rows, across its workspaces) must reach zero. Ledger rows still naming a retired target while a live target of the same bot already covers that repository are SPLIT by `run_started_at`: rows whose target was deleted at or after it are this run's crash residual and BLOCK (`unrepointed_ledger_rows` must reach zero); rows on a target deleted earlier are reported as the advisory `historical_rows` and never fail the item. With no `run_started_at` every such row is historical. |
 | B12 | Replay is idempotent: the worklist predicate is the leftover shape, and every row a batch creates or adopts names its repository, so a second pass over finished work moves nothing. |
+| B13 | The item never attributes a ledger row whose `target_id` is null and never rewrites an adopted target's configuration. It deletes only the duplicate `pull_requests` rows that lose the merge; it does not delete reviews, findings or failures. |
+
+### Orphan ledger attribution item (`orphan-ledger-attribution`)
+
+| ID | Contract |
+|----|----------|
+| O1 | The second item (`order` 20) requires no downtime. It groups rows with `target_id IS NULL` across `pull_requests`, `reviews`, `review_findings` and `review_failures` by case-insensitive `(owner, repo)`. A live delivery already writes with a target and is not in the worklist. |
+| O2 | A group's bot candidates come from the rows' own `bot_id` and from `bot_installations` by `installation_id`, including removed mappings. Both sources count: if they disagree, neither takes precedence. Exactly one distinct candidate identifies the bot; with no candidates the item uses the deployment's only bot if `bot_workspaces` names exactly one distinct bot. Multiple candidates, no fallback, or no workspace for the resolved bot leave the group unattributable. |
+| O3 | The item uses a live target of that bot matching the repository name case-insensitively (oldest `created_at`, then lowest id, if more than one matches). Otherwise it creates a target in the bot's workspace with `repo_id` null, for the first matching delivery carrying the numeric id to claim. It fills only null `target_id` values, never rewrites a non-null one, never deletes a row and never changes an existing target. |
+| O4 | A step walks at most 20 groups in case-folded owner/name order, resuming after `{ "last_group": string }`. It advances past unattributable groups without writing them. Target inserts and ledger updates for the batch commit together; a replay cannot pick up rows already attributed. The processed count is groups attributed, not ledger rows. |
+| O5 | Preflight, with no writes: `orphan_rows` (all ledger rows with no target), `groups` (distinct repositories), `groups_with_target` (groups that match a live target), `groups_needing_target` (groups with a bot and workspace but no matching target) and `unattributable_groups` (groups without a resolved bot or workspace). |
+| O6 | Verify, read-only: `unattributed_ledger_rows` counts remaining null-target rows whose group resolves to a bot and workspace, and must reach zero. `unattributable_groups` is advisory: unresolved groups stay untouched and do not block completion. |
 
 ### Release-window coupling
 
@@ -58,7 +72,7 @@ Ordinary schema migrations stay forward-only SQL files and are never upgrade ite
 |----|----------|
 | X1 | Migration `0068` installs the bot-level repository claim (`review_targets(bot_id, repo_id)` unique over live, identified rows). It is a schema migration, not an upgrade item: a live duplicate that predates it fails the deploy loudly instead of a winner being picked silently. |
 | X2 | Migration `0069` creates `operator_data_upgrades` — the upgrade machinery's only new table. The maintenance keys need no migration: they live in the existing platform parameter store under its registered `platform.` domain. |
-| X3 | Migration `0067` drops the allowlist and the installation binding, and no upgrade item exists for the allowlist: its rows are deleted with the table and migrate nowhere. The only historical data the upgrade machinery moves is repository identity and the ledger repointing. |
+| X3 | Migration `0067` drops the allowlist and the installation binding, and no upgrade item exists for the allowlist: its rows are deleted with the table and migrate nowhere. The upgrade items move repository identity and repoint or attribute historical ledger rows. |
 | X4 | The surface and the backfill ship in one release window and the backfill runs after it: until the item completes, historical rows stay 待安装 and are claimed by their first delivery, so no repository goes unreviewed while the operator decides when to run it. |
 
 ## AuthZ matrix
@@ -78,12 +92,12 @@ Ordinary schema migrations stay forward-only SQL files and are never upgrade ite
 - A run's start is stamped once by its first step and kept across reset — it is the item's lifetime boundary, so verify always dates the item's own retirements.
 - Verify refuses `completed` on any non-zero blocking check; an advisory count is reported and never fails the item. Verify and preflight write nothing.
 - Ledger rows are repointed or deleted, never orphaned, and no upgrade item rebuilds a parent table.
-- `repo_id` stays null exactly for historical rows: the backfill does not invent an id, and the resolver or the backfill are its only two writers.
+- Neither upgrade invents a numeric `repo_id`: a newly created target names the repository, and the resolver claims its numeric id from a matching delivery.
 
 ## Where it lives
 
 - `src/dashboard/runtime-config-store.ts` (`getMaintenanceMode`, `setMaintenanceMode`, the `platform.maintenance.*` keys, the `platform.` domain registry)
-- `src/admin/index.ts` (the runtime `maintenance` body, the data-upgrade routes), `src/admin/data-upgrades.ts` (registry, state machine), `src/admin/data-upgrades/repo-backfill.ts` (the item)
+- `src/admin/index.ts` (the runtime `maintenance` body, the data-upgrade routes), `src/admin/data-upgrades.ts` (registry, state machine), `src/admin/data-upgrades/repo-backfill.ts` and `src/admin/data-upgrades/orphan-ledger-attribution.ts` (the items)
 - `src/worker/index.ts` (webhook and cron gates), `src/dashboard/index.ts` (dashboard middleware gate), `src/pipeline/consumer.ts` (the queue's deferral)
 - `src/spa/admin/DataUpgradePage.tsx`, `src/spa/admin/pages.ts`, `src/spa/admin/api.ts`, `src/i18n/en.ts`, `src/i18n/zh-CN.ts`
 - `migrations/0069_operator_data_upgrades.sql`
