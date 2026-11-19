@@ -90,10 +90,6 @@ export const repoIdClaim: DataUpgradeItem = {
     let unbound = 0;
     let bindingFailed = 0;
     for (const row of rows) {
-      if (row.bot_id === null) {
-        unbound += 1;
-        continue;
-      }
       const outcome = await bindRepository(
         db,
         { botId: row.bot_id, owner: row.owner, repo: row.repo },

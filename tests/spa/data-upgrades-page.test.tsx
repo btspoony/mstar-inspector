@@ -409,6 +409,31 @@ const control = (container: DomElement, id: string, label: string): DomElement |
   button(card(container, id) ?? container, label);
 
 describe("data upgrade screen — mounted", () => {
+  test("an empty worklist keeps its start control disabled behind the disclosure", async () => {
+    const zero: DataUpgradeRow[] = [
+      {
+        ...UPGRADES[0]!,
+        state: state({ status: "pending" }),
+        preflight: { unidentified_targets: 0, ledger_pairs: 0 },
+      },
+    ];
+    const surface = await mount(readStub(zero));
+    // Folded, the card offers no run control at all.
+    expect(
+      control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.startAction")),
+    ).toBeNull();
+    await surface.click(
+      control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.showDetails")),
+    );
+    await surface.settle();
+    // `disabled` is the only thing keeping a zero-worklist run from opening the
+    // maintenance window a downtime item would own; pin it, not just the copy.
+    const start = control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.startAction"));
+    expect(start).not.toBeNull();
+    expect(start!.hasAttribute("disabled")).toBe(true);
+    await surface.close();
+  });
+
   test("start runs one batch per request until done, then re-reads the list", async () => {
     let steps = 0;
     const surface = await mount((request) => {

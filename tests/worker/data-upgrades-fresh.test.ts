@@ -13,6 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { DATA_UPGRADES } from "../../src/admin/data-upgrades";
+import { getMaintenanceMode } from "../../src/dashboard/runtime-config-store";
 
 /** Every table an upgrade can touch. */
 const TOUCHED = ["review_targets", "pull_requests", "reviews", "review_findings", "review_failures"];
@@ -59,6 +60,24 @@ describe("data upgrades on a fresh deployment", () => {
       expect(batch.processed, item.id).toBe(0);
       expect(batch.done, item.id).toBe(true);
     }
+    expect(snapshot(db)).toEqual(before);
+  });
+
+  test("an empty run claims no state row and touches no other table", async () => {
+    const db = createMigratedTestD1();
+    const before = snapshot(db);
+    for (const item of DATA_UPGRADES) {
+      const batch = await item.runBatch(db, null, "operator", undefined);
+      expect(batch.processed, item.id).toBe(0);
+      expect(batch.done, item.id).toBe(true);
+    }
+    // `runBatch` is the batch step, not the runner: it never claims a state row.
+    // The console is what keeps a click off a zero-worklist card (the disabled
+    // start control, pinned in the page suite), so nothing here opens the
+    // maintenance window a downtime item would own.
+    const states = db.raw.prepare("SELECT COUNT(*) AS n FROM operator_data_upgrades").get() as { n: number };
+    expect(states.n).toBe(0);
+    expect((await getMaintenanceMode(db)).enabled).toBe(false);
     expect(snapshot(db)).toEqual(before);
   });
 
