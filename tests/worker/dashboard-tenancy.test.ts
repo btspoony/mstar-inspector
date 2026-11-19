@@ -368,7 +368,7 @@ describe("the pre-workspace App face is retired", () => {
       envFor(observed),
     );
     expect(res.status).toBe(302);
-    expect(statements).toHaveLength(1);
+    expect(statements).toEqual([expect.stringMatching(/\bFROM\s+review_runtime_settings\b/i)]);
   });
 });
 
@@ -1734,6 +1734,10 @@ describe("the route-local member gate", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { targets: Array<{ target_id: string }> };
     expect(body.targets.map((target) => target.target_id)).toEqual(["target-app-acme"]);
+    const userReads = statements.filter((sql) => /\b(?:FROM|JOIN)\s+users\b/i.test(sql));
+    expect(userReads).toEqual([
+      expect.stringMatching(/\bJOIN\s+workspaces\b[\s\S]*\bJOIN\s+workspace_members\b/i),
+    ]);
     expect(statements).toHaveLength(3);
   });
 
