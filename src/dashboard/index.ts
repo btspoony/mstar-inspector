@@ -89,15 +89,14 @@ import {
   countFreeMembershipsForLogin,
   countLiveWorkspaces,
   countMembersAndPendingInvites,
-  countMembershipsForLogin,
   createWorkspace,
   deleteWorkspace,
-  getMembership,
   getSoleWorkspaceAccess,
   getWorkspaceAccessById,
   getWorkspaceAccessByRef,
   getWorkspaceByRef,
   getWorkspaceMember,
+  getWorkspaceRequestAccess,
   listWorkspaceMembers,
   listWorkspaceMembershipOptions,
   setWorkspaceName,
@@ -290,6 +289,10 @@ export type DashboardVariables = {
   };
   /** The users row the session guard resolved; absent on exempt routes. */
   authUser?: DashboardUserRow;
+  /** Verified by the session guard; never reused across requests. */
+  authSession?: SessionPayload;
+  /** The live ref and membership role resolved alongside the active user. */
+  authWorkspace?: { workspace: WorkspaceRow; role: WorkspaceRole | null };
   /**
    * The workspace-scope resolution of one request (ordering-contract step 3):
    * `undefined` = not classified yet, `null` = the caller is not a member.
@@ -378,6 +381,7 @@ export type WorkspaceBoot = {
    * resolved (unknown ref, several workspaces, unbound store).
    */
   access: WorkspaceAccess | null;
+  memberships: WorkspaceMembershipOption[];
 };
 
 /**
@@ -407,19 +411,20 @@ export async function workspaceBoot(
   requestedRef?: string,
 ): Promise<WorkspaceBoot> {
   const db = dashboardD1(env);
-  if (db === null) return { access: null };
+  if (db === null) return { access: null, memberships: [] };
   const [access, memberships] = await Promise.all([
     requestedRef === undefined
       ? getSoleWorkspaceAccess(db, login)
       : getWorkspaceAccessByRef(db, requestedRef, login),
-    countMembershipsForLogin(db, login),
+    listWorkspaceMembershipOptions(db, login),
   ]);
+  const boot = { access, memberships };
   // No live membership → no workspace to name: every workspace path 404s this
   // login, so the shell must offer creation instead.
-  if (memberships === 0) return { access, canCreateApp: false, needsWorkspace: true };
+  if (memberships.length === 0) return { ...boot, canCreateApp: false, needsWorkspace: true };
   if (access !== null) {
     return {
-      access,
+      ...boot,
       workspaceRef: access.id,
       // A new App lands in the addressed workspace, where a plain member has
       // no manage rights — so creation is owner/admin there.
@@ -430,11 +435,11 @@ export async function workspaceBoot(
   // boot names none, and the page's own guard has already answered (or will
   // answer) the outsider 404. Only the ref-less path can reach the "several
   // workspaces" state below.
-  if (requestedRef !== undefined) return { access: null, canCreateApp: false };
+  if (requestedRef !== undefined) return { ...boot, canCreateApp: false };
   if ((await countLiveWorkspaces(db)) > 1) {
-    return { access: null, workspaceRequired: true, canCreateApp: false };
+    return { ...boot, workspaceRequired: true, canCreateApp: false };
   }
-  return { access: null, canCreateApp: false };
+  return { ...boot, canCreateApp: false };
 }
 
 /**
@@ -452,13 +457,12 @@ export async function workspaceBoot(
  * so the switcher costs one subscription read however many workspaces it names;
  * resolving row by row would repeat that read per row.
  */
-export async function workspaceMembershipsForLogin(
+export async function workspaceMembershipsWithPlans(
   env: Env,
-  login: string,
+  rows: WorkspaceMembershipOption[],
 ): Promise<Array<WorkspaceMembershipOption & { plan: string }>> {
   const db = dashboardD1(env);
   if (db === null) return [];
-  const rows = await listWorkspaceMembershipOptions(db, login);
   const mode = deploymentModeOf(env.DEPLOYMENT_MODE);
   const plans = await resolveWorkspacePlans(
     db,
@@ -645,8 +649,7 @@ export async function signedInLanding(
   const extras = boot ?? (await workspaceBoot(env, login));
   if (extras.workspaceRef !== undefined) return reposHomePath(extras.workspaceRef);
   if (extras.needsWorkspace === true) return DASHBOARD_MOUNT;
-  const memberships = await workspaceMembershipsForLogin(env, login);
-  const first = memberships[0];
+  const first = extras.memberships[0];
   if (first !== undefined) return reposHomePath(first.id);
   // A login that belongs to no workspace is the EXPECTED landing on the
   // creation surface, not a configuration fault; only a member the deployment
@@ -901,8 +904,8 @@ export const dashboardMaintenanceGate: Handler<{
  * `/dashboard/*` BEFORE SPA dispatch (so a retired App HTML request cannot be
  * served by the SPA shell before the 404 decision) and by `dashboardApp` ahead
  * of its routes. It only CLASSIFIES: it issues no D1 read, and the workspace
- * row plus the caller's membership are resolved by `requireMember` after the
- * session and user read. The first run wins — the second returns on the
+ * row plus the caller's membership are resolved by the session guard after
+ * cookie verification. The first run wins — the second returns on the
  * `tenant` it already set.
  */
 export const dashboardTenantGate: Handler<{
@@ -916,7 +919,7 @@ export const dashboardTenantGate: Handler<{
   const target = classifyDashboardPath(c.req.path);
   if (target.kind !== "workspace") return next();
   // CLASSIFY ONLY — no D1 read. The workspace row and the caller's membership
-  // are resolved by the member gate AFTER the session and user row are known,
+  // are resolved with the user's row AFTER the session is verified,
   // so an anonymous request neither pays a pre-auth round trip nor learns from
   // the response whether the slug exists (both cases 302 to login).
   c.set("tenant", {
@@ -997,7 +1000,9 @@ dashboardApp.use("*", async (c, next) => {
     }
     return c.text("dashboard storage is not configured", 500);
   }
-  const user = await getUserByLogin(db, session.login);
+  const tenant = c.get("tenant");
+  const access = tenant ? await getWorkspaceRequestAccess(db, session.login, tenant.ref) : null;
+  const user = tenant ? access?.user : await getUserByLogin(db, session.login);
   if (!user) {
     // Same structured-log convention as logOAuthFailure / logManifestFailure;
     // the login is public identity (it renders on the denial page).
@@ -1020,6 +1025,8 @@ dashboardApp.use("*", async (c, next) => {
   }
   // The resolved users row is a per-request fact every later gate reuses.
   c.set("authUser", user);
+  c.set("authSession", session);
+  if (access?.workspace) c.set("authWorkspace", { workspace: access.workspace, role: access.role });
   return next();
 });
 
@@ -1031,10 +1038,6 @@ dashboardApp.use("*", async (c, next) => {
  * then the operator allowlist — so an operator who is a member (or holds an
  * invite here) keeps that ordinary standing (AC1), and the shell can never
  * hand a listed operator an invitee's landing page.
- *
- * `knownRole` is the caller's membership role when a caller already holds it
- * (the boot's access join), so the member test costs no second read; the gate
- * passes nothing and reads it here.
  */
 async function classifyWorkspacePrincipal(
   env: Env,
@@ -1042,9 +1045,8 @@ async function classifyWorkspacePrincipal(
   workspace: { id: string },
   user: { id: string; github_login: string },
   now: string,
-  knownRole?: WorkspaceRole | null,
+  role: WorkspaceRole | null,
 ): Promise<{ principal: WorkspacePrincipal; role: WorkspaceRole | null }> {
-  const role = knownRole === undefined ? await getMembership(db, workspace.id, user.id) : knownRole;
   if (role !== null) return { principal: "member", role };
   const invited = await getPendingInviteByLogin(db, workspace.id, user.github_login, now);
   if (invited !== null) return { principal: "invitee", role: null };
@@ -1095,26 +1097,21 @@ dashboardApp.use("*", async (c, next) => {
   if (c.get("workspaceScope") !== undefined) return next();
   const tenant = c.get("tenant");
   const db = dashboardD1(c.env);
-  if (!tenant || !db) {
-    c.set("workspaceScope", null);
-    return next();
-  }
-  const workspace = await getWorkspaceByRef(db, tenant.ref);
-  if (!workspace) {
-    c.set("workspaceScope", null);
-    return next();
-  }
+  const access = c.get("authWorkspace");
   const user = c.get("authUser");
+  if (!tenant || !db || !access || !user) {
+    c.set("workspaceScope", null);
+    return next();
+  }
+  const { workspace } = access;
   const now = new Date().toISOString();
-  const { principal, role } = user
-    ? await classifyWorkspacePrincipal(c.env, db, workspace, user, now)
-    : { principal: "outsider" as const, role: null };
-  if (role !== null && user) {
+  const { principal, role } = await classifyWorkspacePrincipal(c.env, db, workspace, user, now, access.role);
+  if (role !== null) {
     c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, workspaceRow: workspace, role, principal });
     c.set("workspaceScope", { workspaceId: workspace.id, role });
     return next();
   }
-  if (principal === "operator-denied" && user) {
+  if (principal === "operator-denied") {
     // Expired and absent grants are the same answer — the outsider 404 — so
     // the response never reveals the grant state.
     await insertAuditEvent(db, {
@@ -1127,7 +1124,7 @@ dashboardApp.use("*", async (c, next) => {
     c.set("workspaceScope", null);
     return await tenantNotFound(c);
   }
-  if (principal === "operator-granted" && user) {
+  if (principal === "operator-granted") {
     // The audit row records the ATTEMPT, before dispatch: it is written here,
     // so no route handler can skip it and none can change what was decided.
     const read = isOperatorReadPath(c.req.path, c.req.method);
@@ -2784,7 +2781,8 @@ export async function requireMember(c: DashboardContext): Promise<
 > {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return { ok: false, response: c.text("dashboard OAuth is not configured", 500) };
-  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  const session =
+    c.get("authSession") ?? (await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret));
   if (!session) return { ok: false, response: c.redirect("/dashboard/login", 302) };
   const db = dashboardD1(c.env);
   if (!db) return { ok: false, response: c.text("dashboard storage is not configured", 500) };

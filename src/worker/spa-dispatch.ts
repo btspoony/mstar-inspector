@@ -29,7 +29,7 @@ import {
   signedInLanding,
   workspaceBoot,
   pendingInvitesForLogin,
-  workspaceMembershipsForLogin,
+  workspaceMembershipsWithPlans,
   type WorkspaceBoot,
 } from "../dashboard/index";
 import { checkEntitlement } from "../dashboard/entitlement";
@@ -138,6 +138,24 @@ async function readShellAuth(c: SpaContext): Promise<ShellAuth> {
   };
 }
 
+/** Boot copy only: the write route re-checks both creation gates. */
+async function workspaceCreationBlock(
+  db: DashboardD1,
+  login: string,
+  mode: DeploymentMode,
+): Promise<SpaBoot["createWorkspaceBlockedReason"]> {
+  if (!(await isFlagEnabled(db, "workspace_creation_open"))) return "flag";
+  if (mode === "self-hosted") return null;
+  const verdict = await checkEntitlement({
+    db,
+    mode,
+    workspaceId: null,
+    kind: "free-workspace-slot",
+    freeMembershipCount: () => countFreeMembershipsForLogin(db, login),
+  });
+  return verdict.ok ? null : "free_slot";
+}
+
 export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   const assets = c.env.ASSETS;
   if (!assets) return new Response("SPA assets unbound", { status: 500 });
@@ -194,31 +212,22 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // The signed-in login of a sidebar-bearing shell; null on the login page and
   // for an anonymous boot (those take no workspace read at all).
   const login = auth.boot.login !== null && route?.page !== "login" ? auth.boot.login : null;
-  const extras: WorkspaceBoot =
-    login === null ? { access: null } : await workspaceBoot(c.env, login, routeRef);
+  const workspace: Promise<WorkspaceBoot> =
+    login === null
+      ? Promise.resolve({ access: null, memberships: [] })
+      : workspaceBoot(c.env, login, routeRef);
   // The operator's landing must name the workspace too: the support face reads
   // `/api/support/workspace` off the pathname's workspace segment, and the bare
   // `/dashboard` carries none (root route unregistered → 404). The SAME
   // classifier the workspace gate uses answers it, so the shell cannot call an
   // invitee (or a member) a support visitor. It reads the boot's own resolution
   // — one sole-vs-ref lookup serves both.
-  const supportRef = extras.access === null ? null : await operatorSupportWorkspace(c.env, extras);
-  // Two independent lists behind the same login gate, so they share ONE round
-  // trip — neither reads the other and both key on the login alone.
-  // The invitee's discovery surface: every live pending invitation for this
-  // login, so an invited outsider sees a path to accept without knowing the
-  // workspace's ref (they are not a member yet, so no member list names it).
-  // The switcher's list: the same login's live memberships.
-  const lists =
-    login === null
-      ? null
-      : await Promise.all([pendingInvitesForLogin(c.env, login), workspaceMembershipsForLogin(c.env, login)]);
-  const pendingInvites = lists?.[0] ?? [];
-  const memberships = lists?.[1] ?? [];
+  const support = workspace.then((extras) => operatorSupportWorkspace(c.env, extras));
   // Both dashboard roots — `/dashboard` and the retired `/dashboard/apps`
   // spelling — answer one redirect to the repository overview: the overview is
   // the dashboard default, and only this request knows the workspace ref.
   if (DASHBOARD_ROOT_PATHS.has(c.req.path) && login !== null) {
+    const [extras, supportRef] = await Promise.all([workspace, support]);
     if (supportRef !== null) return c.redirect(`/dashboard/${supportRef}/repos`, 302);
     // A login with no workspace of its own still needs a path into the
     // workspace UI; a newcomer (needsWorkspace) keeps the creation surface
@@ -233,34 +242,18 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     const landing = await signedInLanding(c.env, login, extras);
     if (landing !== "/dashboard") return c.redirect(landing, 302);
   }
-  // The create-workspace capability the shell's top-bar menu mirrors. The
-  // operator's `workspace_creation_open` flag wins over the per-login free
-  // slot — it closes creation for EVERYONE, so the slot read is skipped while
-  // it is off — and `self-hosted` resolves every workspace to `unlimited`, so
-  // creation is otherwise always allowed there and the free-membership count is
-  // never read (spec §4). The creation route re-checks both, so this is copy,
-  // not authority. A signed-in shell always has a store: `readShellAuth` denied
-  // otherwise (hence the same narrow face it reads through).
   const db = (c.env as Env & { DB?: DashboardD1 }).DB;
-  let createBlockedReason: SpaBoot["createWorkspaceBlockedReason"] = null;
-  if (login !== null && db !== undefined) {
-    if (!(await isFlagEnabled(db, "workspace_creation_open"))) {
-      createBlockedReason = "flag";
-    } else if (deploymentMode === "saas") {
-      // The same one entry the creation route asks, so the menu cannot disagree
-      // with it. `free-workspace-slot` is per LOGIN, not per plan: the empty
-      // workspace id is a sentinel for a question that names no workspace, and
-      // the plan the verdict carries is unused by this branch.
-      const verdict = await checkEntitlement({
-        db,
-        mode: deploymentMode,
-        workspaceId: null,
-        kind: "free-workspace-slot",
-        freeMembershipCount: () => countFreeMembershipsForLogin(db, login),
-      });
-      if (!verdict.ok) createBlockedReason = "free_slot";
-    }
-  }
+  // Discovery, eligibility and the public template are independent after
+  // authentication. Redirects above do not need them.
+  const [extras, supportRef, memberships, pendingInvites, createBlockedReason, assetResponse] =
+    await Promise.all([
+      workspace,
+      support,
+      workspace.then(({ memberships }) => workspaceMembershipsWithPlans(c.env, memberships)),
+      login === null ? [] : pendingInvitesForLogin(c.env, login),
+      login === null || !db ? null : workspaceCreationBlock(db, login, deploymentMode),
+      assets.fetch(new URL("/index.html", c.req.url)),
+    ]);
   // The shell's Apps/brand links need the active workspace, and the shell
   // outlives the URL: a client-side navigation (spaClick → pushState) to a page
   // whose pathname names no workspace changes the pathname but not the boot, so
@@ -312,7 +305,6 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     ...(pendingInvites.length === 0 ? {} : { pendingInvites }),
     ...(memberships.length === 0 ? {} : { memberships }),
   };
-  const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   // Only the document below delivers the boot, so only it spends the marker.
   // HEAD and an asset failure carry no boot: expiring there would drop the
   // guidance before it ever reached a screen.

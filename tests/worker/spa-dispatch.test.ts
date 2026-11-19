@@ -89,14 +89,8 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
 }
 
 
-/**
- * D1 double whose two BOOT LIST reads (pending invites, memberships) each wait
- * for the other to be in flight. A sequential boot deadlocks into the barrier's
- * timeout → 500; only a boot that issues both reads together returns the shell.
- * Everything else the boot resolves (users row, sole workspace, membership
- * count) answers inline.
- */
-function concurrentBootDbStub(): Env["DB"] {
+/** The independent shell reads must all be in flight before any can finish. */
+function concurrentBootReads() {
   const arrived = new Set<string>();
   let release: (() => void) | null = null;
   const bothInFlight = new Promise<void>((resolve) => {
@@ -104,32 +98,37 @@ function concurrentBootDbStub(): Env["DB"] {
   });
   const arrive = async (kind: string): Promise<void> => {
     arrived.add(kind);
-    if (arrived.size === 2) release?.();
-    // A sequential boot never reaches the second read: fail loudly instead of
-    // hanging the suite.
-    await Promise.race([
-      bothInFlight,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`boot list reads ran sequentially (${kind} first)`)), 1000),
-      ),
-    ]);
+    if (arrived.size === 5) release?.();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        bothInFlight,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`boot reads did not overlap: ${[...arrived]}`)), 1000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   };
   const respond = (query: string) => {
     if (query.includes("workspace_invites i JOIN workspaces w")) return { all: async () => { await arrive("invites"); return { results: [] }; } };
     // The switcher's list carries `w.name`; the boot's workspace-access read does not.
     if (query.includes("w.name AS name")) return { all: async () => { await arrive("memberships"); return { results: [] }; } };
+    if (query.includes("wm.role AS role")) return { all: async () => { await arrive("workspace"); return { results: [] }; } };
+    if (query.includes("FROM server_flags")) return { first: async () => { await arrive("flag"); return null; } };
     if (query.includes("SELECT * FROM users WHERE github_login")) {
       return { first: async () => ({ id: "u-test", github_login: "octocat", role: "admin", created_at: new Date().toISOString(), invited_by: null }) };
     }
-    if (query.includes("COUNT(*) AS n")) return { first: async () => ({ n: 1 }) };
     return { all: async () => ({ results: [] }), first: async () => null };
   };
-  return {
+  const db = {
     prepare: (query: string) => ({
       ...respond(query),
       bind: () => ({ ...respond(query), run: async () => ({ meta: { changes: 0 } }) }),
     }),
   } as unknown as Env["DB"];
+  return { db, arrive };
 }
 
 describe("SPA dispatch", () => {
@@ -461,10 +460,16 @@ describe("SPA dispatch", () => {
     expect(body).toContain("<title>Sign in — Morning Star Inspector</title>");
   });
 
-  test("the two boot list reads share one round trip (neither waits for the other)", async () => {
-    // L2: the pending-invite and membership lists both key on the login alone,
-    // so they overlap. The stub only answers once BOTH are in flight.
-    const { env, calls } = makeEnv({ DB: concurrentBootDbStub() });
+  test("access, discovery, eligibility, and the HTML asset load overlap after authentication", async () => {
+    const { db, arrive } = concurrentBootReads();
+    const { env, calls } = makeEnv({ DB: db });
+    const assets = env.ASSETS!;
+    env.ASSETS = {
+      async fetch(url: URL) {
+        await arrive("asset");
+        return assets.fetch(url);
+      },
+    } as unknown as Fetcher;
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       htmlGetRequest("/dashboard/acme/apps", { Cookie: `${SESSION_COOKIE}=${session}` }),

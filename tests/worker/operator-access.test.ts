@@ -743,7 +743,7 @@ describe("the shell boot reads the workspace facts once", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { workspace: { id: string; slug: string; name: string; created_at: string } };
     expect(body.workspace.id).toBe("ws-acme");
-    // The scope middleware resolved this row; the route must not query it again.
-    expect(count(statements, WORKSPACE_REREAD)).toBe(1);
+    // The authorization join supplied the row; a separate ref lookup would repeat it.
+    expect(count(statements, WORKSPACE_REREAD)).toBe(0);
   });
 });

@@ -14,9 +14,10 @@ import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createInvite } from "../../src/dashboard/invite-store";
 import { signInDashboardUser } from "../../src/dashboard/users";
-import { workspaceMembershipsForLogin } from "../../src/dashboard/index";
+import type { SpaBoot } from "../../src/spa/boot";
 import type { DeploymentMode, Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { htmlGetRequest, withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const WORKSPACE = "ws-acme";
@@ -1169,10 +1170,22 @@ describe("the switcher resolves each plan once", () => {
     } as unknown as Env;
   }
 
+  async function switcherRows(env: Env, login: string): Promise<NonNullable<SpaBoot["memberships"]>> {
+    const session = await createSessionValue(login, null, SESSION_SECRET);
+    const response = await worker.fetch(
+      htmlGetRequest("/dashboard/ws-a/repos", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      withSpaAssets(env),
+    );
+    expect(response.status).toBe(200);
+    const json = (await response.text()).match(/window\.__BOOT__=(\{[^\n]+\});/)?.[1];
+    if (!json) throw new Error("expected a boot payload");
+    return (JSON.parse(json) as SpaBoot).memberships ?? [];
+  }
+
   test("two workspaces on one plan cost ONE subscription read", async () => {
     const { db, login } = mixedPlanWorld();
     const { observed, statements } = recording(db);
-    const rows = await workspaceMembershipsForLogin(envIn(observed, "saas"), login);
+    const rows = await switcherRows(envIn(observed, "saas"), login);
     // Reinstating the per-row resolve raises this to one read per membership.
     expect(countReads(statements, SUBSCRIPTION_READ)).toBe(1);
     expect(rows.map((row) => [row.id, row.plan])).toEqual([
@@ -1185,7 +1198,7 @@ describe("the switcher resolves each plan once", () => {
   test("self-hosted reads no subscription at all and names Unlimited everywhere", async () => {
     const { db, login } = mixedPlanWorld();
     const { observed, statements } = recording(db);
-    const rows = await workspaceMembershipsForLogin(envIn(observed, "self-hosted"), login);
+    const rows = await switcherRows(envIn(observed, "self-hosted"), login);
     // The mode answers before any read: a subscription or catalogue query here
     // would mean precedence slipped below the stored rows.
     expect(countReads(statements, SUBSCRIPTION_READ)).toBe(0);
@@ -1193,18 +1206,13 @@ describe("the switcher resolves each plan once", () => {
     expect(rows.map((row) => row.plan)).toEqual(["Unlimited", "Unlimited", "Unlimited"]);
   });
 
-  test("the payload is byte-identical to the per-row resolve it replaced", async () => {
+  test("the boot payload names the switcher's live memberships and their plans in order", async () => {
     const { db, login } = mixedPlanWorld();
-    const rows = await workspaceMembershipsForLogin(envIn(db, "saas"), login);
-    // The exact payload the per-row resolve emitted: same rows, same order, same
-    // four fields plus the plan NAME (never the plan id). Written out rather
-    // than recomputed, so a resolver change that leaks into the payload fails.
-    expect(JSON.stringify(rows)).toBe(
-      JSON.stringify([
-        { id: "ws-a", slug: "ws-a", name: "ws-a", role: "member", plan: "Pro" },
-        { id: "ws-b", slug: "ws-b", name: "ws-b", role: "member", plan: "Pro" },
-        { id: "ws-c", slug: "ws-c", name: "ws-c", role: "member", plan: "Free" },
-      ]),
-    );
+    const rows = await switcherRows(envIn(db, "saas"), login);
+    expect(rows).toEqual([
+      { id: "ws-a", slug: "ws-a", name: "ws-a", role: "member", plan: "Pro" },
+      { id: "ws-b", slug: "ws-b", name: "ws-b", role: "member", plan: "Pro" },
+      { id: "ws-c", slug: "ws-c", name: "ws-c", role: "member", plan: "Free" },
+    ]);
   });
 });
