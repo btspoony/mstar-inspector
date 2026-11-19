@@ -77,6 +77,45 @@ function seedBot(
   }
 }
 
+/** One GitHub installation for `botId`; `removed` stamps `removed_at`. */
+function seedInstallation(db: TestD1, botId: string, installationId: number, removed = false): void {
+  db.raw
+    .prepare(
+      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+       VALUES (?, ?, ?, ?, '2026-01-01T00:00:00.000Z', ${removed ? "'2026-01-03T00:00:00.000Z'" : "NULL"})`,
+    )
+    .run(crypto.randomUUID(), botId, installationId, `acct-${installationId}`);
+}
+
+/** One review target for `botId`; `deleted` stamps `deleted_at`. */
+function seedTarget(db: TestD1, botId: string, workspaceId: string, name: string, deleted = false): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_targets
+         (id, workspace_id, bot_id, name, created_by, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, 'acme', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+               ${deleted ? "'2026-01-04T00:00:00.000Z'" : "NULL"})`,
+    )
+    .run(crypto.randomUUID(), workspaceId, botId, name);
+}
+
+/**
+ * A D1 double that counts `prepare` calls. The console's bot list must cost
+ * the SAME number of statements for one bot and for many; a per-row count
+ * read would make the two differ.
+ */
+function countingDb(db: TestD1): { db: TestD1; prepared: () => number } {
+  let prepared = 0;
+  const counting: TestD1 = {
+    ...db,
+    prepare(query: string) {
+      prepared += 1;
+      return db.prepare(query);
+    },
+  };
+  return { db: counting, prepared: () => prepared };
+}
+
 function seedOfficialWorkspace(db: TestD1, workspaceId: string): void {
   db.raw
     .prepare(
@@ -438,6 +477,7 @@ describe("GET /_internal_admin/api/bots", () => {
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);
     seedWorkspace(db, "other");
+    seedOfficialWorkspace(db, "default");
     // The names order OPPOSITE to the ids, so dropping the `name` sort key
     // answers ["bot-a", "bot-b"] and fails the assertion below.
     seedBot(db, "bot-b", { githubAppId: 7101, workspaceId: "other", name: "Alpha" });
@@ -446,6 +486,18 @@ describe("GET /_internal_admin/api/bots", () => {
     db.raw
       .prepare("UPDATE review_bots SET scope = 'shared', shared_at = '2026-01-05T00:00:00.000Z' WHERE id = 'bot-b'")
       .run();
+    // bot-b: one live installation and one removed (the count is live rows
+    // only), two live targets and one soft-deleted (same rule).
+    seedInstallation(db, "bot-b", 8101);
+    seedInstallation(db, "bot-b", 8102, true);
+    seedTarget(db, "bot-b", "other", "acme/one");
+    seedTarget(db, "bot-b", "other", "acme/two");
+    seedTarget(db, "bot-b", "other", "acme/gone", true);
+    // bot-a: one installation, no target.
+    seedInstallation(db, "bot-a", 8103);
+    // A retired bot's rows never reach the console.
+    seedInstallation(db, "bot-dead", 8104);
+    seedTarget(db, "bot-dead", "default", "acme/dead");
 
     const res = await adminRequest(db, "/api/bots", { method: "GET" });
     expect(res.status).toBe(200);
@@ -456,8 +508,13 @@ describe("GET /_internal_admin/api/bots", () => {
           name: "Alpha",
           githubAppId: 7101,
           workspaceId: "other",
+          workspaceName: "other",
+          // Seeded official workspace is `default`, so this one is outside it.
+          isOfficial: false,
           scope: "shared",
           sharedAt: "2026-01-05T00:00:00.000Z",
+          installationCount: 1,
+          liveTargetCount: 2,
           deletedAt: null,
         },
         {
@@ -465,14 +522,86 @@ describe("GET /_internal_admin/api/bots", () => {
           name: "Zulu",
           githubAppId: 7102,
           workspaceId: "default",
+          // The seeded default workspace's display name (migration 0026).
+          workspaceName: "Default",
+          isOfficial: true,
           scope: "owned",
           sharedAt: null,
+          installationCount: 1,
+          liveTargetCount: 0,
           deletedAt: null,
         },
       ],
     });
     // The console read is unaudited.
     expect(audits(db)).toEqual([]);
+  });
+
+  test("a designation naming a retired workspace reads as no designation", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    seedWorkspace(db, "retired");
+    seedBot(db, "bot-orphan", { githubAppId: 7301, workspaceId: "retired" });
+    seedOfficialWorkspace(db, "retired");
+    // Retiring a workspace only stamps its own row: the setting and
+    // `bot_workspaces` survive, so a stale value is what this read must not
+    // trust — the share guard would refuse the write it would otherwise enable
+    // (the console disables the action on `isOfficial: false`, pinned by the
+    // Bots screen's "disabled with the reason" case).
+    db.raw
+      .prepare("UPDATE workspaces SET deleted_at = '2026-01-06T00:00:00.000Z' WHERE id = ?")
+      .run("retired");
+
+    const res = await adminRequest(db, "/api/bots", { method: "GET" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toEqual({
+      bots: [
+        {
+          botId: "bot-orphan",
+          name: "bot-orphan",
+          githubAppId: 7301,
+          workspaceId: "retired",
+          workspaceName: "retired",
+          // The stale designation names a retired tenant: not official.
+          isOfficial: false,
+          scope: "owned",
+          sharedAt: null,
+          installationCount: 0,
+          liveTargetCount: 0,
+          deletedAt: null,
+        },
+      ],
+    });
+
+    // The two faces agree: the runtime read degrades the same row to "none".
+    const runtime = await adminRequest(db, "/api/runtime", { method: "GET" });
+    expect((await runtime.json()) as { officialWorkspaceId: unknown }).toMatchObject({
+      officialWorkspaceId: null,
+    });
+  });
+
+  test("costs one statement however many bots it lists", async () => {
+    /** One database with `count` bots, each with an installation and a target. */
+    const seeded = (count: number) => {
+      const db = createMigratedTestD1();
+      for (let index = 0; index < count; index += 1) {
+        seedBot(db, `bot-${index}`, { githubAppId: 7200 + index, workspaceId: "default" });
+        seedInstallation(db, `bot-${index}`, 8200 + index);
+        seedTarget(db, `bot-${index}`, "default", `target-${index}`);
+      }
+      return countingDb(db);
+    };
+
+    const one = seeded(1);
+    insertUser(one.db, OPERATOR);
+    const many = seeded(5);
+    insertUser(many.db, OPERATOR);
+
+    await adminRequest(one.db, "/api/bots", { method: "GET" });
+    await adminRequest(many.db, "/api/bots", { method: "GET" });
+    // Same cost for one bot and for five: the aggregates ride the one list
+    // statement instead of a read per row.
+    expect(many.prepared()).toBe(one.prepared());
   });
 
   test("a non-operator gets the empty 404", async () => {

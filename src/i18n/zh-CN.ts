@@ -1153,6 +1153,7 @@ export const zhCN: Dictionary = {
       flags: "服务器开关",
       runtime: "运行时参数",
       workspaces: "工作区",
+      bots: "机器人",
       usage: "审查用量",
       quotaVersions: "额度版本",
       users: "用户",
@@ -1342,6 +1343,60 @@ export const zhCN: Dictionary = {
       cancelAction: "取消",
       /** slug 写入失败且错误无法识别时的兜底文案。 */
       slugChangeFailed: "无法更改 {name} 的 slug。",
+      /**
+       * 表格上方的官方工作区卡片：唯一可以把 bot 标记为共享的租户。
+       * 清除是独立操作（不是保存空值），且不撤销已授予的共享。
+       */
+      officialTitle: "官方工作区",
+      officialDescription:
+        "只有此处指定的工作区里的 bot 可以被标记为共享。清除后不能再共享新 bot；已共享的仍可撤销。",
+      officialCurrent: "当前：",
+      officialNone: "未指定",
+      officialSelectLabel: "工作区",
+      /** 选择器的可访问名称；可见标签已在其上方。 */
+      officialSelectAria: "官方工作区",
+      officialSave: "保存",
+      officialClear: "清除",
+      officialSaved: "已保存官方工作区。",
+      officialCleared: "已清除官方工作区。已共享的仍可撤销。",
+      /** 两种写入失败且错误无法识别时的兜底文案。 */
+      officialSaveFailed: "无法更改官方工作区。",
+      officialLoadFailed: "无法加载官方工作区。",
+    },
+    /** 机器人页：每个在线 bot、其所属工作区与共享范围。 */
+    bots: {
+      description:
+        "所有在线审查机器人及其所属工作区与范围。只有在官方工作区里的 bot 才能被平台共享。",
+      loadFailed: "无法加载机器人列表。",
+      emptyTitle: "没有机器人",
+      emptyDescription: "此部署还没有任何在线审查机器人。",
+      botColumn: "机器人",
+      /** 机器人单元格的第二行：它运行的 GitHub App。 */
+      appMeta: "app {id}",
+      workspaceColumn: "工作区",
+      /** bot 所属工作区为何重要：共享需要官方工作区。 */
+      workspaceOfficial: "官方",
+      scopeColumn: "范围",
+      sharedColumn: "共享时间",
+      installationsColumn: "安装",
+      targetsColumn: "活 target",
+      shareAction: "共享",
+      unshareAction: "取消共享",
+      /** bot 所属工作区不是官方工作区时，操作按钮的标签。 */
+      shareUnavailable: "共享不可用",
+      notOfficialReason: "只有官方工作区里的机器人可以被共享。",
+      /** 共享确认 —— {name} 为 bot 名称。 */
+      shareConfirmTitle: "将 {name} 共享给整个平台？",
+      shareConsequence:
+        "其他工作区随后可以在自己的仓库上运行此机器人，按其自身套餐计费。凭据与模型链仍在本工作区配置。",
+      /** 取消共享确认 —— 运营者必须先读到的后果。 */
+      unshareConfirmTitle: "停止共享 {name}？",
+      unshareConsequence:
+        "其他工作区里的 target 会变为 Blocked（不可审），直到重新共享。本工作区仍可配置此机器人。",
+      confirmAction: "确认",
+      cancelAction: "取消",
+      /** 范围写入失败且错误无法识别时的兜底文案。 */
+      scopeChangeFailed: "无法更改 {name} 的共享状态。",
     },
     /** 审查用量页（spec bot-scope-and-claiming § Review usage）。 */
     usage: {

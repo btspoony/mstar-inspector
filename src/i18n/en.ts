@@ -1408,6 +1408,7 @@ export const en = {
       flags: "Server flags",
       runtime: "Runtime parameters",
       workspaces: "Workspaces",
+      bots: "Bots",
       usage: "Review usage",
       quotaVersions: "Quota versions",
       users: "Users",
@@ -1607,6 +1608,61 @@ export const en = {
       cancelAction: "Cancel",
       /** Fallback when the slug write fails with an unrecognised error. */
       slugChangeFailed: "Could not change the slug for {name}.",
+      /**
+       * The official-workspace card above the table: the one tenant whose bots
+       * may be offered platform-wide. Clearing is its own action, never an
+       * empty save, and it does not revoke a share already granted.
+       */
+      officialTitle: "Official workspace",
+      officialDescription:
+        "Only bots in this workspace can be marked as shared. Clearing the designation blocks new shares; shares already granted stay revocable.",
+      officialCurrent: "Current:",
+      officialNone: "Not specified",
+      officialSelectLabel: "Workspace",
+      /** The selector's accessible name; the visible label is above it. */
+      officialSelectAria: "Official workspace",
+      officialSave: "Save",
+      officialClear: "Clear",
+      officialSaved: "Official workspace saved.",
+      officialCleared: "Official workspace cleared. Shares already granted stay revocable.",
+      /** Fallback when either write fails with an unrecognised error. */
+      officialSaveFailed: "Could not change the official workspace.",
+      officialLoadFailed: "Could not load the official workspace.",
+    },
+    /** Bots page: every live bot, its workspace and its platform-wide scope. */
+    bots: {
+      description:
+        "Every live review bot, its owning workspace and its scope. Only a bot in the official workspace can be offered platform-wide.",
+      loadFailed: "Could not load the bot list.",
+      emptyTitle: "No bots",
+      emptyDescription: "This deployment has no live review bot yet.",
+      botColumn: "Bot",
+      /** The bot cell's second line: the GitHub App it runs as. */
+      appMeta: "app {id}",
+      workspaceColumn: "Workspace",
+      /** Why a bot's workspace matters: sharing needs the official one. */
+      workspaceOfficial: "official",
+      scopeColumn: "Scope",
+      sharedColumn: "Shared",
+      installationsColumn: "Installs",
+      targetsColumn: "Live targets",
+      shareAction: "Share",
+      unshareAction: "Unshare",
+      /** The action's label when the bot's workspace is not the official one. */
+      shareUnavailable: "Sharing unavailable",
+      notOfficialReason: "Only bots in the official workspace can be shared.",
+      /** Share confirmation — {name} is the bot. */
+      shareConfirmTitle: "Share {name} platform-wide?",
+      shareConsequence:
+        "Other workspaces can then run this bot on their own repositories, billed to their own plan. Its credentials and model chain stay configured here.",
+      /** Unshare confirmation — the consequence the operator must read first. */
+      unshareConfirmTitle: "Stop sharing {name}?",
+      unshareConsequence:
+        "Targets in other workspaces become Blocked until the bot is shared again. This workspace keeps configuring it.",
+      confirmAction: "Confirm",
+      cancelAction: "Cancel",
+      /** Fallback when the scope write fails with an unrecognised error. */
+      scopeChangeFailed: "Could not change the sharing of {name}.",
     },
     /** Review usage page (spec bot-scope-and-claiming § Review usage). */
     usage: {

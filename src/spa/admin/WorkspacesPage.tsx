@@ -1,8 +1,10 @@
 /**
  * Workspaces — every live tenant with its SQL-side counts, owner and resolved
  * plan (spec §3.3), a plan picker per row that writes one `PATCH
- * /api/workspaces/:id/plan` (spec §3.2), and a slug editor that writes one
- * `PATCH /api/workspaces/:id/slug`.
+ * /api/workspaces/:id/plan` (spec §3.2), a slug editor that writes one
+ * `PATCH /api/workspaces/:id/slug`, and — above the table — the platform's
+ * official-workspace card: the one tenant whose bots may be offered
+ * platform-wide (contract § 8.1).
  *
  * A downgrade below the live member count is legal and this screen never
  * touches a membership: the server's seat guard only blocks NEW invites, which
@@ -14,6 +16,8 @@
 import { useState, type FormEvent } from "react";
 import {
   Button,
+  CardContent,
+  CardHeader,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -31,11 +35,14 @@ import { t, type DictionaryKey } from "../../i18n";
 import type { Locale } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
+import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { EmptyState } from "../components/state/EmptyState";
 import { PageNotice } from "../pages/PageNotice";
 import {
   AdminWriteError,
+  readRuntime,
   readWorkspaces,
+  setOfficialWorkspace,
   setPlan,
   setWorkspaceSlug,
   useLoaded,
@@ -88,6 +95,140 @@ function planOptions(row: WorkspaceRow, locale: Locale): readonly { id: string; 
  */
 function seatHeadroom(row: WorkspaceRow): string {
   return row.includedMembers === null ? "—" : `${row.memberCount} / ${row.includedMembers}`;
+}
+
+/**
+ * The official workspace (contract § 8.1) — the one tenant whose bots may be
+ * marked shared platform-wide. Two writes, one each: Save designates the
+ * selected live workspace, Clear removes the designation. Clearing is its own
+ * action because an empty save is refused by the server, and it does not touch
+ * a share already granted (those stay revocable from the Bots screen).
+ */
+function OfficialWorkspaceCard({
+  locale,
+  workspaces,
+}: {
+  locale: Locale;
+  /** The page's own loaded rows — the selector's only source. */
+  workspaces: readonly WorkspaceRow[];
+}) {
+  const { state, reload, update } = useLoaded(readRuntime);
+  /** The operator's pick; `null` follows the stored designation. */
+  const [draft, setDraft] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+
+  const current = state.status === "ready" ? state.data.officialWorkspaceId : null;
+  // A designation pointing at a workspace this page no longer lists still
+  // reads as the stored id: the card reports what the server holds.
+  const currentName = current === null ? null : (workspaces.find((row) => row.id === current)?.name ?? current);
+  const selection = draft ?? current ?? workspaces[0]?.id ?? "";
+
+  async function commit(workspaceId: string | null): Promise<void> {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const stored = await setOfficialWorkspace(workspaceId);
+      update((data) => ({ ...data, officialWorkspaceId: stored }));
+      setDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, stored === null ? "admin.workspaces.officialCleared" : "admin.workspaces.officialSaved"),
+      });
+    } catch (error) {
+      // Generic message primary, the server's own refusal text as secondary detail.
+      const generic = t(locale, "admin.workspaces.officialSaveFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SectionCard tier="secondary">
+      <CardHeader>
+        <SectionCardTitle>{t(locale, "admin.workspaces.officialTitle")}</SectionCardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">
+          {t(locale, "admin.workspaces.officialDescription")}
+        </p>
+        {notice ? (
+          <div className="mt-4">
+            <PageNotice kind={notice.kind} message={notice.message} />
+          </div>
+        ) : null}
+        {state.status === "error" ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <PageNotice kind="error" message={t(locale, "admin.workspaces.officialLoadFailed")} />
+            <Button type="button" variant="secondary" size="sm" onClick={reload}>
+              {t(locale, "common.retry")}
+            </Button>
+          </div>
+        ) : null}
+        {state.status === "ready" ? (
+          <>
+            <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-muted-foreground">{t(locale, "admin.workspaces.officialCurrent")}</span>
+              <strong data-official-workspace={current ?? "none"}>
+                {currentName ?? t(locale, "admin.workspaces.officialNone")}
+              </strong>
+              {current === null ? null : <code className="text-xs text-muted-foreground">{current}</code>}
+            </div>
+            {workspaces.length === 0 ? null : (
+              <form
+                className="mt-4 flex flex-wrap items-end gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void commit(selection);
+                }}
+              >
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-medium" htmlFor="official-workspace">
+                    {t(locale, "admin.workspaces.officialSelectLabel")}
+                  </label>
+                  <Select value={selection} disabled={busy} onValueChange={setDraft}>
+                    <SelectTrigger
+                      id="official-workspace"
+                      size="sm"
+                      className="w-64"
+                      aria-label={t(locale, "admin.workspaces.officialSelectAria")}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {workspaces.map((row) => (
+                        <SelectItem key={row.id} value={row.id}>
+                          {row.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button type="submit" disabled={busy || selection === current}>
+                  {t(locale, "admin.workspaces.officialSave")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={busy || current === null}
+                  onClick={() => void commit(null)}
+                >
+                  {t(locale, "admin.workspaces.officialClear")}
+                </Button>
+              </form>
+            )}
+          </>
+        ) : null}
+      </CardContent>
+    </SectionCard>
+  );
 }
 
 export function WorkspacesPage({ locale }: { locale: Locale }) {
@@ -260,6 +401,7 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
             : workspaces;
           return (
             <div className="flex flex-col gap-4">
+              <OfficialWorkspaceCard locale={locale} workspaces={workspaces} />
               <TableSearch
                 locale={locale}
                 value={search}
