@@ -12,8 +12,8 @@ import {
   FlowSection,
   StatusBadge,
 } from "@design-system";
-import { LoadingNotice, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
-import { postForm } from "../api";
+import { LoadingNotice, NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
+import { patchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
 import {
@@ -36,6 +36,18 @@ import {
   type PendingAction,
 } from "./SettingsPage";
 import { ProvidersSection } from "./settings-providers";
+
+/**
+ * The share route's refusals: its two recoverable causes have their own copy
+ * (a stale page offering a share the designation no longer allows, and a
+ * caller whose role changed under it); everything else reuses the settings
+ * family's keyed resolver.
+ */
+function shareRefusalMessage(locale: SpaBoot["locale"], status: number, body: string): string {
+  if (status === 409) return t(locale, "botSettings.shareOutsideOfficial");
+  if (status === 403) return t(locale, "botSettings.shareForbidden");
+  return settingsErrorMessage(locale, body);
+}
 
 /**
  * The bot-owned configuration: credentials health, provider keys, model
@@ -78,6 +90,7 @@ export function BotSettingsView({
     notice: OpNotice;
     slot: number;
   } | null>(null);
+  const [shareNotice, setShareNotice] = useState<OpNotice | null>(null);
 
   async function submitSettings(
     fields: Record<string, string> | URLSearchParams,
@@ -131,12 +144,42 @@ export function BotSettingsView({
     return outcome;
   }
 
+  /**
+   * The share transition: the server owns the guards and both audit rows, so
+   * this only posts the target scope (a revoke always confirms) and turns the
+   * refusal's named cause into the page's own copy.
+   */
+  async function submitScope(scope: "owned" | "shared"): Promise<OpNotice> {
+    let status: number;
+    let body: string;
+    try {
+      ({ status, body } = await patchJson(`${appPath}/bot/scope`, {
+        scope,
+        ...(scope === "owned" ? { confirm: true } : {}),
+      }));
+    } catch {
+      return { kind: "error", message: t(locale, "common.saveFailed") };
+    }
+    if (status < 200 || status >= 300) {
+      return { kind: "error", message: shareRefusalMessage(locale, status, body) };
+    }
+    await onReload({ background: true });
+    return {
+      kind: "success",
+      message: t(locale, scope === "shared" ? "botSettings.shareSaved" : "botSettings.unshareSaved"),
+    };
+  }
+
   async function onConfirm(): Promise<void> {
     if (!pending || busy) return;
     const action = pending;
     setBusy(true);
     try {
-      if (action.kind === "remove-chain") {
+      if (action.kind === "share") {
+        setShareNotice(await submitScope("shared"));
+      } else if (action.kind === "unshare") {
+        setShareNotice(await submitScope("owned"));
+      } else if (action.kind === "remove-chain") {
         setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }));
       } else if (action.kind === "remove-custom") {
         // The remove outcome renders row-locally with the pre-POST row slot:
@@ -186,6 +229,32 @@ export function BotSettingsView({
         </div>
       )}
       <div className="flex flex-col">
+        {/* The share switch exists for exactly one caller: the official
+            workspace's manager. Every other caller sees no section, no title
+            and no copy — a non-official workspace has no share concept, and a
+            consuming workspace's read-only face never mentions it. */}
+        {payload.can_manage && payload.official_workspace === true ? (
+          <FlowSection
+            title={t(locale, "botSettings.shareTitle")}
+            subtitle={t(locale, "botSettings.shareCopy")}
+          >
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant={app.scope === "shared" ? "destructive-outline" : "secondary"}
+                  onClick={() => setPending({ kind: app.scope === "shared" ? "unshare" : "share" })}
+                >
+                  {t(
+                    locale,
+                    app.scope === "shared" ? "botSettings.unshareAction" : "botSettings.shareAction",
+                  )}
+                </Button>
+              </div>
+              <NoticeRegion notice={shareNotice} />
+            </div>
+          </FlowSection>
+        ) : null}
         <SandboxSection locale={locale} payload={payload} onSettings={submitSettings} />
         {payload.can_manage ? (
           <>

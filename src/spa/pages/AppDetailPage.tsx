@@ -428,7 +428,7 @@ function TargetOpsZone({
         payload={payload}
         onPending={setPending}
         notice={notice}
-        botWritable={!payload.blocked && payload.app.scope === "owned"}
+        botWritable={!payload.blocked && payload.can_configure_bot === true}
         targetOwned={false}
       />
       <Dialog
@@ -559,7 +559,7 @@ export function AppDetailView({
             {bot === null ? null : (
               <BotSettingsView
                 locale={locale}
-                payload={{ ...bot, can_manage: bot.can_manage && bot.app.scope === "owned" }}
+                payload={{ ...bot, can_manage: bot.can_configure_bot === true }}
                 groups={groups}
                 modelsLoading={modelsLoading}
                 notice={null}
