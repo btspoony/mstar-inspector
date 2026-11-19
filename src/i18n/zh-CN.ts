@@ -1040,7 +1040,7 @@ export const zhCN: Dictionary = {
     install: "安装",
     installCopy: "把此链接交给任意 GitHub 账号，即可在该账号上安装此 App。",
     installLink: "打开安装页面",
-    installLinkAria: "在新标签页中于 GitHub 打开 {name}",
+    installLinkAria: "{link}：{name}",
     installNoSlug: "此 App 尚无 GitHub slug，因此没有安装链接。请先刷新 GitHub 身份，再分享链接。",
     // 已安装标签页：平台共享机器人的认领。GitHub 的 Setup 重定向不带 state，
     // 认领记录是唯一能说明“这次安装属于哪个 target”的载体，因此先记认领再跳转。

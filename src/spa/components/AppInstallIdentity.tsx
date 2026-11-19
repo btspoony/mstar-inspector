@@ -39,7 +39,10 @@ export function AppInstallIdentity({ locale, name, avatarSrc, appId, href, child
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex w-fit items-center gap-1.5 text-sm text-primary hover:underline"
-            aria-label={t(locale, "settings.installLinkAria", { name })}
+            aria-label={t(locale, "settings.installLinkAria", {
+              link: t(locale, "settings.installLink"),
+              name,
+            })}
           >
             {t(locale, "settings.installLink")}
             <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />

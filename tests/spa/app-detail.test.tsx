@@ -424,8 +424,10 @@ describe("installed tab configuration surface (static SSR)", () => {
     expect(manage).toContain('href="https://github.com/apps/demo/installations/new"');
     expect(manage).toContain('target="_blank"');
     expect(manage).toContain('rel="noopener noreferrer"');
-    // The link's accessible name names the App, not the URL.
-    expect(manage).toContain(t("en", "settings.installLinkAria", { name: "Demo" }));
+    // The accessible name starts with the visible label and adds the App name.
+    expect(manage).toContain(
+      t("en", "settings.installLinkAria", { link: t("en", "settings.installLink"), name: "Demo" }),
+    );
     expect(manage).toContain(t("en", "settings.installCopy"));
   });
 

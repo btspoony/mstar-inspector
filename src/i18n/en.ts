@@ -1265,7 +1265,7 @@ export const en = {
     install: "Install",
     installCopy: "Share this link with any GitHub account to install the App.",
     installLink: "Open the installation page",
-    installLinkAria: "Open {name} on GitHub in a new tab",
+    installLinkAria: "{link}: {name}",
     installNoSlug:
       "This App has no GitHub slug yet, so there is no installation link. Refresh the GitHub identity, then share the link.",
     // Installed tab: claiming, for a bot shared platform-wide. The claim is
