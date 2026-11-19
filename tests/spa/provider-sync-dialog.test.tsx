@@ -118,7 +118,8 @@ describe("the provider model sync dialog (I-000644)", () => {
     const view = await mount(async () => pending);
     try {
       await view.click(view.byText(t("en", "settings.providers.sync.action")));
-      await view.setOpen(false);
+      await view.click(view.byText("Close"));
+      expect(view.container.ownerDocument.querySelector('[role="dialog"]')).toBeNull();
       await view.setOpen(true);
       await act(async () => {
         resolve(previewBody({ current: 50, fetched: 104, kept: 44, added: 60, dropped: 6 }));
@@ -126,9 +127,46 @@ describe("the provider model sync dialog (I-000644)", () => {
       });
       expect(view.container.ownerDocument.body.textContent).toContain(t("en", "settings.providers.sync.notFetched"));
       expect(view.byText(t("en", "settings.providers.sync.confirm"))?.disabled).toBe(true);
-      expect(view.byText(t("en", "settings.providers.sync.action"))?.disabled).toBe(false);
+      expect(view.container.ownerDocument.body.textContent).not.toContain(
+        t("en", "settings.providers.sync.summary", { fetched: 104, kept: 44, added: 60, dropped: 6 }),
+      );
     } finally {
       resolve(previewBody({}));
+      await view.cleanup();
+    }
+  });
+
+  test.each(["refusal", "network failure"])("dismiss requests during a write preserve its %s notice", async (failure) => {
+    let resolve!: (response: Response) => void;
+    let reject!: (reason: Error) => void;
+    const pending = new Promise<Response>((done, fail) => { resolve = done; reject = fail; });
+    const view = await mount(async (url) => url.includes("/provider-models/preview")
+      ? previewBody({ current: 50, fetched: 104, kept: 44, added: 60, dropped: 6 })
+      : pending);
+    try {
+      await view.click(view.byText(t("en", "settings.providers.sync.action")));
+      await view.click(view.byText(t("en", "settings.providers.sync.confirm")));
+      expect(view.byText(t("en", "common.cancel"))?.disabled).toBe(true);
+      await act(async () => {
+        view.win.document.dispatchEvent(new view.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      expect(view.container.ownerDocument.querySelector('[role="dialog"]')).not.toBeNull();
+      await view.click(view.byText("Close"));
+      expect(view.container.ownerDocument.querySelector('[role="dialog"]')).not.toBeNull();
+      await act(async () => {
+        if (failure === "refusal") resolve(new Response("Sync refused", { status: 503 }));
+        else reject(new Error("offline"));
+      });
+      expect(view.container.ownerDocument.body.textContent).toContain(
+        failure === "refusal" ? "Sync refused" : t("en", "common.saveFailed"),
+      );
+      expect(view.outcomes).toEqual([]);
+      expect(view.reloads).toEqual([]);
+      expect(view.byText(t("en", "common.cancel"))?.disabled).toBe(false);
+      await view.click(view.byText("Close"));
+      expect(view.container.ownerDocument.querySelector('[role="dialog"]')).toBeNull();
+    } finally {
+      resolve(new Response("", { status: 500 }));
       await view.cleanup();
     }
   });

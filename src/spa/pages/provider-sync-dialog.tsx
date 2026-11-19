@@ -54,12 +54,13 @@ function OpenProviderSyncDialog({
 }: ProviderSyncDialogProps) {
   // null = not fetched yet. The dialog never guesses a count it did not fetch.
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<"preview" | "write" | null>(null);
+  const busy = pending !== null;
   const [notice, setNotice] = useState<OpNotice | null>(null);
 
   async function fetchPreview(): Promise<void> {
     if (busy) return;
-    setBusy(true);
+    setPending("preview");
     setNotice(null);
     setPreview(null);
     try {
@@ -78,13 +79,13 @@ function OpenProviderSyncDialog({
       // so instead of leaving the operator guessing whether it ran.
       setNotice({ kind: "error", message: t(locale, "settings.providers.sync.fetchFailed") });
     } finally {
-      setBusy(false);
+      setPending(null);
     }
   }
 
   async function confirmSync(): Promise<void> {
     if (busy || preview === null) return;
-    setBusy(true);
+    setPending("write");
     setNotice(null);
     try {
       const { status, body } = await postForm(`${apiBase()}/apps/${encodeURIComponent(String(appId))}/settings`, {
@@ -109,12 +110,14 @@ function OpenProviderSyncDialog({
     } catch {
       setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
     } finally {
-      setBusy(false);
+      setPending(null);
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => {
+      if (pending !== "write") onOpenChange(next);
+    }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t(locale, "settings.providers.sync.title", { label })}</DialogTitle>
