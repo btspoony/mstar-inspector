@@ -5310,3 +5310,68 @@ describe("an owed Check settlement has a reader and a clearer", () => {
     expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(0);
   });
 });
+
+describe("runtime reconciler snapshot", () => {
+  test("selection limit and attempt cap apply with exactly one settings read per run", async () => {
+    const db = seededDb();
+    const first = await claim(db);
+    await claim(db, { headSha: "b".repeat(40) });
+    db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.check.select_limit", "1", "now");
+    db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.check.max_attempts", "2", "now");
+    db.raw.prepare("UPDATE review_checks SET attempts = 2 WHERE id = ?").run(first.attempt.identity.attemptId);
+    let reads = 0;
+    const original = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = original(sql);
+      if (sql.includes("review_runtime_settings WHERE key IN")) {
+        const bind = statement.bind.bind(statement);
+        statement.bind = (...args: unknown[]) => {
+          if (args.includes("platform.reconcile.check.max_attempts")) reads += 1;
+          return bind(...args);
+        };
+      }
+      return statement;
+    };
+    const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript()) });
+    expect(summary.examined).toBe(1);
+    expect(reads).toBe(1);
+    expect((await rawRow(db, first.attempt.identity.attemptId)).attempts).toBe(2);
+  });
+});
+
+describe("reconciler settings diagnostics", () => {
+  test("invalid settings continue recovery with defaults and warn without the stored value", async () => {
+    const db = seededDb();
+    await claim(db);
+    db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.check.max_attempts", "private-invalid-value", "now");
+    const warnings: Array<{ event: string; detail: string }> = [];
+    const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript()), log: { warn: (fields) => { warnings.push(fields); }, info: () => {} } });
+    expect(summary.examined).toBe(1);
+    const diagnostic = warnings.filter((entry) => entry.event === "ops_check_reconcile_settings_degraded");
+    expect(diagnostic).toHaveLength(1);
+    expect(JSON.parse(diagnostic[0]!.detail)).toEqual({ kind: "invalid_rows", keys: ["platform.reconcile.check.max_attempts"] });
+  });
+
+  test("a failed settings read continues recovery and logs a different redacted cause", async () => {
+    const db = seededDb();
+    await claim(db);
+    const original = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = original(sql);
+      if (sql.includes("review_runtime_settings WHERE key IN")) {
+        const bind = statement.bind.bind(statement);
+        statement.bind = (...args: unknown[]) => {
+          if (args.includes("platform.reconcile.check.max_attempts")) throw new Error("private read error");
+          return bind(...args);
+        };
+      }
+      return statement;
+    };
+    const warnings: Array<{ event: string; detail: string }> = [];
+    const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript()), log: { warn: (fields) => { warnings.push(fields); }, info: () => {} } });
+    expect(summary.examined).toBe(1);
+    const diagnostic = warnings.filter((entry) => entry.event === "ops_check_reconcile_settings_degraded");
+    expect(diagnostic).toHaveLength(1);
+    expect(JSON.parse(diagnostic[0]!.detail)).toEqual({ kind: "read_failed" });
+  });
+});

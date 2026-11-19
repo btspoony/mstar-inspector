@@ -1249,6 +1249,27 @@ export const zhCN: Dictionary = {
       /** 所有已存储设置都无法读取——数字只是文档默认值。 */
       claimUnreadable:
         "无法读取已存储的评论触发恢复设置，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
+      reconcileTitle: "恢复协调器",
+      reconcileDescription: "下一轮恢复生效；每轮仅读取一次设置。单请求预算不得超过整轮预算，发布通道、线程操作和每行请求数不得超过整轮请求数。",
+      reconcileFields: {
+        lifecycleMaxRequests: "生命周期每轮请求数",
+        lifecycleRunBudgetMs: "生命周期整轮预算（毫秒）",
+        lifecyclePerRequestMs: "生命周期单请求超时（毫秒）",
+        lifecycleThreadOperationRequests: "生命周期线程操作请求数",
+        lifecyclePublicationLaneMaxRequests: "生命周期发布通道请求数",
+        lifecycleSelectLimit: "生命周期每次选择行数",
+        lifecycleMaxAttempts: "生命周期最大尝试次数",
+        checkMaxRequests: "Check 每轮请求数",
+        checkRunBudgetMs: "Check 整轮预算（毫秒）",
+        checkPerRequestMs: "Check 单请求超时（毫秒）",
+        checkRowMaxRequests: "Check 每行请求数",
+        checkSelectLimit: "Check 每次选择行数",
+        checkMaxAttempts: "Check 最大尝试次数",
+      },
+      reconcileSave: "保存协调器设置",
+      reconcileSaved: "已保存协调器设置。",
+      reconcileFailed: "无法保存协调器设置。",
+      reconcileUnreadable: "无法信任部分设置，恢复任务使用全部默认值继续执行。请重试读取，或填写并保存全部设置。",
       sweepTitle: "定时故障巡检",
       sweepDescription:
         "在下一次巡检生效。失败次数超过阈值时触发告警；告警窗口用于统计失败次数和抑制重复告警。保留期清理会永久删除过期的 Webhook 投递记录。",
