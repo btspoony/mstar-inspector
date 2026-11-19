@@ -1133,6 +1133,7 @@ async function handleGuardHeld(
   // the App row BEFORE the guard, so this retry path reads no storage at all.
   const delays = guardRetryDelaysSeconds(level);
   const delaySeconds = delays[message.attempts - 1];
+  let retryAllowed = delaySeconds !== undefined;
   if (delaySeconds !== undefined) {
     if (commentClaimConsumed && message.body.comment_id !== undefined) {
       const payload = message.body;
@@ -1156,10 +1157,13 @@ async function handleGuardHeld(
           )
           .run();
       } catch (err) {
+        retryAllowed = false;
         const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(fields, `comment claim restore failed — retrying anyway: ${detail}`);
+        deps.log.warn(fields, `comment claim restore failed — dropping through terminal handling: ${detail}`);
       }
     }
+  }
+  if (retryAllowed) {
     // Say WHY nothing has started: the attach already put a `queued` run on
     // this commit, and the relabel adds the holder's context to it. Only a
     // `pr-held` refusal names a live review to wait for — a cap/storage

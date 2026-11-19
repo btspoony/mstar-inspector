@@ -9411,11 +9411,15 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     expect(h.sandbox.calls).toHaveLength(sandboxCalls);
   });
 
-  test("a held comment claim restore failure warns and still retries", async () => {
+  test("a held comment claim restore failure warns and records a terminal capacity drop", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9202 });
     seedClaim(db, payload, 9202, "queued");
-    await seedInflight(db);
+    db.raw.prepare(
+      `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+       VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
+    ).run();
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
     const consumer = createReviewConsumer(
       await h.makeEnv({ DB: dbFailingOn(db, "SET state = 'queued', payload_json") as never }),
       h.testLog,
@@ -9424,8 +9428,12 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
 
     await consumer(h.makeBatch(payload));
 
-    expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
-    expect(h.logLines.some((l) => l.level === "warn" && l.msg.includes("comment claim restore failed") && l.msg.includes("D1 unavailable"))).toBe(true);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.logLines.some((l) => l.level === "warn" && l.msg.includes("comment claim restore failed — dropping through terminal handling") && l.msg.includes("D1 unavailable"))).toBe(true);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ pr_number: payload.pr_number, stage: "pipeline" });
+    expect(String(failureRows(db)[0]!.error)).toContain("system-cap");
     expect(claimRows(db)[0]!.state).toBe("consumed");
     expect(h.sandbox.calls).toHaveLength(0);
   });
