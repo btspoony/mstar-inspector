@@ -1,5 +1,3 @@
-import { getReconcileSettings, RECONCILE_DEFAULTS } from "../dashboard/runtime-config-store";
-import type { ReconcileValues } from "../contracts/reconcile-settings";
 /**
  * M8 publication and thread recovery reconciler (spec
  * review-lifecycle §7.11 composition + §7.11.1) — the self-sufficient cron
@@ -64,7 +62,8 @@ import type { ReconcileValues } from "../contracts/reconcile-settings";
  * throwing injected dependency) is logged and folded into `errors`; nothing
  * ever throws out of `scheduled`.
  */
-
+import { getReconcileSettings } from "../dashboard/runtime-config-store";
+import type { ReconcileValues } from "../contracts/reconcile-settings";
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like, D1StatementLike } from "../store/types";
@@ -122,18 +121,6 @@ export type LifecycleReconcileSummary = {
   errors: number;
 };
 
-/** Whole-run GitHub request budget (§7.11.1: "≤80 requests/45s"). */
-export const RECONCILE_MAX_REQUESTS = RECONCILE_DEFAULTS.lifecycleMaxRequests;
-/** Whole-run wall-clock budget in ms (§7.11.1). */
-export const RECONCILE_RUN_BUDGET_MS = RECONCILE_DEFAULTS.lifecycleRunBudgetMs;
-/** Per-request cap (§7.11.1: "each request ≤5s"). */
-export const RECONCILE_PER_REQUEST_MS = RECONCILE_DEFAULTS.lifecyclePerRequestMs;
-/** Per-thread-operation request cap (§7.11.1: "≤15 GitHub requests"). */
-export const RECONCILE_THREAD_OPERATION_REQUESTS = RECONCILE_DEFAULTS.lifecycleThreadOperationRequests;
-/** The publication lane gets at most half the run budget before the thread lane. */
-export const RECONCILE_PUBLICATION_LANE_MAX_REQUESTS = RECONCILE_DEFAULTS.lifecyclePublicationLaneMaxRequests;
-/** Bounded selection per lane (§7.11.1: LIMIT 10). */
-export const RECONCILE_SELECT_LIMIT = RECONCILE_DEFAULTS.lifecycleSelectLimit;
 /**
  * Conservative, non-mutating preflight admission estimates for the
  * publication lane's operations (plan, send, read-only discovery).
@@ -800,7 +787,7 @@ async function reconcileLineBatches(
 ): Promise<void> {
   const handled = new Set<string>();
   for (;;) {
-    const rows = await listLineBatchRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+    const rows = await listLineBatchRecovery(db, now(), budget.settings.lifecycleSelectLimit);
     let retired = 0;
     for (const row of rows) {
       if (handled.has(row.id)) continue;
@@ -831,7 +818,7 @@ async function reconcileLineBatches(
           }
           // Any other thrown read observed nothing: one failed pass under the
           // read-scope reason, never a capture.
-          if (await noteLineDiscoveryFailure(db, row, "readback-scope", state.captures, now(), log)) retired += 1;
+          if (await noteLineDiscoveryFailure(db, row, "readback-scope", state.captures, now(), budget.settings.lifecycleMaxAttempts, log)) retired += 1;
           log.warn(
             { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
             "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
@@ -856,7 +843,7 @@ async function reconcileLineBatches(
           // persisted nothing — a throw included — IS a failed attempt.
           const reason: LineDiscoveryFailure =
             recovered.captured || recovered.failure === undefined ? "capture-failed" : recovered.failure;
-          if (await noteLineDiscoveryFailure(db, row, reason, state.captures, now(), log)) retired += 1;
+          if (await noteLineDiscoveryFailure(db, row, reason, state.captures, now(), budget.settings.lifecycleMaxAttempts, log)) retired += 1;
         }
         log.info(
           { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },
@@ -928,9 +915,10 @@ async function noteLineDiscoveryFailure(
   reason: LineDiscoveryFailure,
   observedCaptures: number,
   nowMs: number,
+  maxAttempts: number,
   log: ReconcileLog,
 ): Promise<boolean> {
-  const settled = await recordLineDiscoveryFailure(db, row.id, reason, observedCaptures, nowMs);
+  const settled = await recordLineDiscoveryFailure(db, row.id, reason, observedCaptures, nowMs, maxAttempts);
   if (settled === null || !settled.unresolvable) return false;
   log.warn(
     {

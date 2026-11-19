@@ -14,6 +14,7 @@
  * audit row. The tenant read and write never compare against the system value —
  * that quota applies at admission and stays out of this face.
  */
+import { RECONCILE_DEFAULTS, RECONCILE_LIMITS } from "../contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "./session";
@@ -21,7 +22,7 @@ import type { Env } from "../worker/env";
 import { createMigratedTestD1, type TestD1 } from "../../tests/store/helpers";
 import { withSpaAssets } from "../../tests/helpers/spa";
 import { t } from "../i18n";
-import { RECONCILE_DEFAULTS, RECONCILE_LIMITS, SWEEP_LIMITS, getReviewRouteWorkflowGate } from "./runtime-config-store";
+import { SWEEP_LIMITS, getReviewRouteWorkflowGate } from "./runtime-config-store";
 import { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 
 const SESSION_SECRET = ["test", "runtime", "routes", "session", "32-bytes!"].join("-");

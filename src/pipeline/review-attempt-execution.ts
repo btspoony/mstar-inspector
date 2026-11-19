@@ -196,7 +196,7 @@ import { createTargetsStore } from "../dashboard/targets-store";
 // The operator default review depth (migration 0047 pairing): read ONLY when
 // the target row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
-import { getRecheckAssignmentMaxBytes } from "../dashboard/runtime-config-store";
+import { getRecheckAssignmentMaxBytes, getReconcileSettings } from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads bot_provider_keys / bot_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
@@ -3297,7 +3297,14 @@ async function freezeKnownStop(
   try {
     const attempt = await getCheckAttempt(deps.env.DB, attemptId);
     if (attempt === null || attempt.desired !== "in_progress") return;
-    const lease = await claimCheckRecovery(deps.env.DB, attemptId, `stop:${crypto.randomUUID()}`, now);
+    const settings = await getReconcileSettings(deps.env.DB);
+    if (settings.issue) {
+      deps.log.warn(
+        line,
+        `check stop settings unavailable — using defaults: ${JSON.stringify(settings.issue)}`,
+      );
+    }
+    const lease = await claimCheckRecovery(deps.env.DB, attemptId, `stop:${crypto.randomUUID()}`, now, settings.values.checkMaxAttempts);
     if (lease === null) return;
     const frozen = await setCheckDesired(
       deps.env.DB,

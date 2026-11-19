@@ -27,6 +27,7 @@
  *   - the registry's boundary: nothing claims external exactly-once — the
  *     remote non-idempotency itself is covered in tests/pipeline/checks.test.ts
  */
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import {
   claimPublication,
@@ -45,7 +46,6 @@ import {
   CHECK_BACKOFF_MS,
   CHECK_EXTERNAL_ID_PREFIX,
   CHECK_LEASE_MS,
-  CHECK_MAX_ATTEMPTS,
   CHECK_NAME,
   CHECK_RECOVERY_LEASE_MS,
   type CheckAttempt,
@@ -511,7 +511,7 @@ describe("fenced mutations (spec §7.9)", () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    const taken = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1);
+    const taken = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(taken).not.toBeNull();
 
     expect(await attachCheckRunId(db, id, lease, 4242, T0)).toBe(false);
@@ -613,8 +613,8 @@ describe("fenced mutations (spec §7.9)", () => {
     // note: The release clears the lease and records its own due time. A row still
     // wanting `in_progress` is therefore a candidate on that backoff — the proof
     // it was released for may already be persisted — not merely at the deadline.
-    expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]!)).toHaveLength(1);
-    expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]! - 1)).toEqual([]);
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]!, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]! - 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
   });
 
   test("linkCheckPublication writes ONLY the publication link under the live fence", async () => {
@@ -838,10 +838,10 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     // note: A free lease alone is not enough: nothing released this row (it carries no
     // due time) and its execution deadline has not arrived, so it is NOT due.
     db.raw.prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`).run(id);
-    expect(await claimCheckRecovery(db, id, "reconciler", beforeDeadline)).toBeNull();
+    expect(await claimCheckRecovery(db, id, "reconciler", beforeDeadline, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
 
     // note: At the execution deadline it becomes due (the same rule the selector uses).
-    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE)).not.toBeNull();
+    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE, RECONCILE_DEFAULTS.checkMaxAttempts)).not.toBeNull();
 
     // note: With a terminal intent instead, a future backoff withholds it.
     const second = await claim(db, { action: "second" });
@@ -851,8 +851,8 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
       await deferCheckRecovery(db, sid, second.lease, { state: "pending", nextAttemptMs: 0, reason: "release" }, T0),
     ).toBe(true);
     db.raw.prepare(`UPDATE review_checks SET next_attempt_ms = ? WHERE id = ?`).run(DEADLINE + 1_000, sid);
-    expect(await claimCheckRecovery(db, sid, "reconciler", DEADLINE)).toBeNull();
-    expect(await claimCheckRecovery(db, sid, "reconciler", DEADLINE + 1_000)).not.toBeNull();
+    expect(await claimCheckRecovery(db, sid, "reconciler", DEADLINE, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
+    expect(await claimCheckRecovery(db, sid, "reconciler", DEADLINE + 1_000, RECONCILE_DEFAULTS.checkMaxAttempts)).not.toBeNull();
   });
 
   test("the claim refuses a row at the attempt cap", async () => {
@@ -861,10 +861,10 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const id = attempt.identity.attemptId;
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
-    db.raw.prepare(`UPDATE review_checks SET attempts = ? WHERE id = ?`).run(CHECK_MAX_ATTEMPTS, id);
-    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1)).toBeNull();
+    db.raw.prepare(`UPDATE review_checks SET attempts = ? WHERE id = ?`).run(RECONCILE_DEFAULTS.checkMaxAttempts, id);
+    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
     // note: A generous cap is an operator decision, not this claim's default.
-    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1, CHECK_MAX_ATTEMPTS + 1)).not.toBeNull();
+    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1, RECONCILE_DEFAULTS.checkMaxAttempts + 1)).not.toBeNull();
   });
 
   test("releaseCheckClaim gives a claim back with nothing else moved", async () => {
@@ -873,7 +873,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const id = attempt.identity.attemptId;
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
-    const recovery = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1);
+    const recovery = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(recovery).not.toBeNull();
     const before = await rawRow(db, id);
 
@@ -889,8 +889,8 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     expect(after.last_error).toBe(before.last_error);
     expect(after.publication_id).toBe(before.publication_id);
     // note: Immediately due and immediately reclaimable again.
-    expect(await listCheckReconcileBatch(db, DEADLINE + 1)).toHaveLength(1);
-    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1)).not.toBeNull();
+    expect(await listCheckReconcileBatch(db, DEADLINE + 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
+    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1, RECONCILE_DEFAULTS.checkMaxAttempts)).not.toBeNull();
   });
 
   test("releaseCheckClaim is a no-op once the lease has moved", async () => {
@@ -899,7 +899,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const id = attempt.identity.attemptId;
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
-    const recovery = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1);
+    const recovery = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1, RECONCILE_DEFAULTS.checkMaxAttempts);
     const stale: Lease = { holder: "reconciler", epoch: recovery!.epoch - 1, untilMs: recovery!.untilMs };
     expect(await releaseCheckClaim(db, id, stale, DEADLINE + 1)).toBe(false);
     expect((await rawRow(db, id)).holder).toBe("reconciler");
@@ -908,7 +908,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
   test("a live holder's lease is never taken", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    expect(await claimCheckRecovery(db, attempt.identity.attemptId, "reconciler", T0 + 1_000)).toBeNull();
+    expect(await claimCheckRecovery(db, attempt.identity.attemptId, "reconciler", T0 + 1_000, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
     const row = await getCheckAttempt(db, attempt.identity.attemptId);
     expect(row?.lease?.holder).toBe("run-a");
     expect(row?.lease?.epoch).toBe(1);
@@ -920,7 +920,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const { attempt } = await claim(db);
     const id = attempt.identity.attemptId;
     const later = DEADLINE + 5_000;
-    const lease = await claimCheckRecovery(db, id, "reconciler", later);
+    const lease = await claimCheckRecovery(db, id, "reconciler", later, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(lease).toEqual({ holder: "reconciler", epoch: 2, untilMs: later + CHECK_RECOVERY_LEASE_MS });
     const row = await getCheckAttempt(db, id);
     expect(row?.executionDeadlineMs).toBe(DEADLINE);
@@ -942,19 +942,19 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     // carry is what recovery sends once it owns the row.
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     expect(await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0)).toBe(true);
-    const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 + 1);
+    const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 + 1, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(reacquired).toEqual({ holder: "reconciler", epoch: 2, untilMs: T0 + 1 + CHECK_RECOVERY_LEASE_MS });
   });
 
   test("an unknown or already-terminal row cannot be claimed", async () => {
     const db = seededDb();
-    expect(await claimCheckRecovery(db, crypto.randomUUID(), "reconciler", T0)).toBeNull();
+    expect(await claimCheckRecovery(db, crypto.randomUUID(), "reconciler", T0, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0);
-    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE * 2)).toBeNull();
+    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE * 2, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
   });
 });
 
@@ -1037,7 +1037,7 @@ describe("zero-dispatch rollback and the no-request claim release (integrated se
     await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
     // note: A recovery claim, then the clock passes its 120s lease end: the row is
     // leased but no longer live (the zero-dispatch shape).
-    const recovery = await claimCheckRecovery(db, id, "reconciler", T0);
+    const recovery = await claimCheckRecovery(db, id, "reconciler", T0, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(recovery).not.toBeNull();
     const afterExpiry = recovery!.untilMs + 1;
 
@@ -1058,7 +1058,7 @@ describe("zero-dispatch rollback and the no-request claim release (integrated se
     expect(row.desired).toBe(before.desired);
     expect(row.observed).toBe(before.observed);
     expect(row.terminal_ms).toBeNull();
-    expect(await listCheckReconcileBatch(db, afterExpiry)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, afterExpiry, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
   });
 
   test("releaseExpiredCheckClaim still refuses a newer epoch", async () => {
@@ -1097,9 +1097,9 @@ describe("attach grace (spec §7.9)", () => {
 
     // note: Invisible to the recovery lane before the grace, due AT it: two minutes
     // after the attach instead of at the one-hour window's expiry.
-    expect(await listCheckReconcileBatch(db, grace - 1)).toEqual([]);
-    expect((await listCheckReconcileBatch(db, grace)).map((candidate) => candidate.identity.attemptId)).toEqual([id]);
-    expect(await claimCheckRecovery(db, id, "reconciler", grace)).not.toBeNull();
+    expect(await listCheckReconcileBatch(db, grace - 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
+    expect((await listCheckReconcileBatch(db, grace, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((candidate) => candidate.identity.attemptId)).toEqual([id]);
+    expect(await claimCheckRecovery(db, id, "reconciler", grace, RECONCILE_DEFAULTS.checkMaxAttempts)).not.toBeNull();
   });
 });
 
@@ -1415,15 +1415,15 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
     // note: A fresh claim wants in_progress and owns a live lease: not a candidate.
-    expect(await listCheckReconcileBatch(db, T0 + 1)).toEqual([]);
+    expect(await listCheckReconcileBatch(db, T0 + 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
     // note: A persisted terminal intent does not make it due while the lease is live.
     expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
-    expect(await listCheckReconcileBatch(db, T0 + 1)).toEqual([]);
+    expect(await listCheckReconcileBatch(db, T0 + 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
     expect(
       await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0),
     ).toBe(true);
     // note: Released and terminal-intended: a candidate immediately.
-    expect((await listCheckReconcileBatch(db, T0)).map((row) => row.identity.attemptId)).toEqual([id]);
+    expect((await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((row) => row.identity.attemptId)).toEqual([id]);
   });
 
   test("backoff, a live recovery lease and the attempt cap are all respected", async () => {
@@ -1435,28 +1435,28 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     expect(
       await deferCheckRecovery(db, id, lease, { state: "remote-unconfirmed", nextAttemptMs: backoff, reason: "down" }, T0),
     ).toBe(true);
-    expect(await listCheckReconcileBatch(db, backoff - 1)).toEqual([]);
-    expect(await listCheckReconcileBatch(db, backoff)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, backoff - 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
+    expect(await listCheckReconcileBatch(db, backoff, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
 
     // note: A live recovery lease hides the row even at its due time.
-    const holding = await claimCheckRecovery(db, id, "reconciler", backoff);
+    const holding = await claimCheckRecovery(db, id, "reconciler", backoff, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(holding).not.toBeNull();
-    expect(await listCheckReconcileBatch(db, backoff)).toEqual([]);
+    expect(await listCheckReconcileBatch(db, backoff, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
 
     // note: Every failed recovery action spends exactly one attempt.
-    for (let i = 1; i < CHECK_MAX_ATTEMPTS; i += 1) {
+    for (let i = 1; i < RECONCILE_DEFAULTS.checkMaxAttempts; i += 1) {
       // note: Each reacquire must wait out the PREVIOUS recovery lease (120s).
       const at = backoff + i * CHECK_RECOVERY_LEASE_MS + 1_000;
-      const next = await claimCheckRecovery(db, id, `reconciler-${i}`, at);
+      const next = await claimCheckRecovery(db, id, `reconciler-${i}`, at, RECONCILE_DEFAULTS.checkMaxAttempts);
       expect(next, `recovery claim ${i} should succeed`).not.toBeNull();
       expect(
         await deferCheckRecovery(db, id, next!, { state: "remote-unconfirmed", nextAttemptMs: 0, reason: "again" }, at),
       ).toBe(true);
     }
-    expect((await getCheckAttempt(db, id))?.attempts).toBe(CHECK_MAX_ATTEMPTS);
-    expect(await listCheckReconcileBatch(db, backoff + 1_000_000, CHECK_MAX_ATTEMPTS, 25)).toEqual([]);
+    expect((await getCheckAttempt(db, id))?.attempts).toBe(RECONCILE_DEFAULTS.checkMaxAttempts);
+    expect(await listCheckReconcileBatch(db, backoff + 1_000_000, RECONCILE_DEFAULTS.checkMaxAttempts, 25)).toEqual([]);
     // note: A generous cap is an operator decision, not this selector's default.
-    expect(await listCheckReconcileBatch(db, backoff + 1_000_000, CHECK_MAX_ATTEMPTS + 1, 25)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, backoff + 1_000_000, RECONCILE_DEFAULTS.checkMaxAttempts + 1, 25)).toHaveLength(1);
   });
 
   test("a released in_progress attempt is due on its own backoff, before its EXECUTION deadline", async () => {
@@ -1466,8 +1466,8 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     expect(
       await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0 + 1_000, reason: "release" }, T0),
     ).toBe(true);
-    expect(await listCheckReconcileBatch(db, T0 + 999)).toEqual([]);
-    expect((await listCheckReconcileBatch(db, T0 + 1_000)).map((r) => r.identity.attemptId)).toEqual([id]);
+    expect(await listCheckReconcileBatch(db, T0 + 999, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
+    expect((await listCheckReconcileBatch(db, T0 + 1_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((r) => r.identity.attemptId)).toEqual([id]);
     // note: …and that is long before the deadline the old rule waited for.
     expect(T0 + 1_000).toBeLessThan(attempt.executionDeadlineMs);
   });
@@ -1477,8 +1477,8 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     const { attempt } = await claim(db);
     // note: A dead lease is not a release: no due time was ever recorded.
     db.raw.prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`).run(attempt.identity.attemptId);
-    expect(await listCheckReconcileBatch(db, attempt.executionDeadlineMs - 1)).toEqual([]);
-    expect((await listCheckReconcileBatch(db, attempt.executionDeadlineMs)).map((r) => r.identity.attemptId)).toEqual([
+    expect(await listCheckReconcileBatch(db, attempt.executionDeadlineMs - 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
+    expect((await listCheckReconcileBatch(db, attempt.executionDeadlineMs, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((r) => r.identity.attemptId)).toEqual([
       attempt.identity.attemptId,
     ]);
   });
@@ -1500,10 +1500,10 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
         ),
       ).toBe(true);
     }
-    const batch = await listCheckReconcileBatch(db, T0 + 10_000, CHECK_MAX_ATTEMPTS, 2);
+    const batch = await listCheckReconcileBatch(db, T0 + 10_000, RECONCILE_DEFAULTS.checkMaxAttempts, 2);
     // note: Oldest due time first: index 2 was scheduled for T0, index 1 for T0+1000.
     expect(batch.map((row) => row.identity.attemptId)).toEqual([ids[2]!, ids[1]!]);
-    expect(await listCheckReconcileBatch(db, T0 + 10_000, CHECK_MAX_ATTEMPTS, 25)).toHaveLength(3);
+    expect(await listCheckReconcileBatch(db, T0 + 10_000, RECONCILE_DEFAULTS.checkMaxAttempts, 25)).toHaveLength(3);
   });
 
   test("suspended rows leave the selector and return on re-enable, keeping their identity", async () => {
@@ -1512,10 +1512,10 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     const id = attempt.identity.attemptId;
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
 
     expect(await suspendCheckRecovery(db, { appId: APP_ID, installationId: SCOPE.installationId }, "app disabled", T0)).toBe(1);
-    expect(await listCheckReconcileBatch(db, T0)).toEqual([]);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
     const suspended = await rawRow(db, id);
     expect(suspended.recovery_state).toBe("suspended");
     expect(suspended.external_id).toBe(attempt.identity.externalId);
@@ -1523,7 +1523,7 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     expect(suspended.desired).toBe("success");
 
     await reenableChecksForApps(db, [{ appId: APP_ID, installationId: SCOPE.installationId }], T0 + 1);
-    expect(await listCheckReconcileBatch(db, T0 + 1)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0 + 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
     expect((await rawRow(db, id)).recovery_state).toBe("pending");
   });
 
@@ -1533,7 +1533,7 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    const recovered = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1);
+    const recovered = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(recovered).not.toBeNull();
     expect(await markCheckLocalError(db, id, recovered!, "gave up after 5", DEADLINE + 1)).toBe(true);
     const row = await rawRow(db, id);
@@ -1543,7 +1543,7 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     expect(row.check_run_id).toBe(4242); // note: never cleared
     expect(row.external_id).toBe(attempt.identity.externalId);
     expect(row.observed).toBe("unknown"); // note: gave up locally, remote stays unknown
-    expect(await listCheckReconcileBatch(db, DEADLINE + 1_000)).toEqual([]);
+    expect(await listCheckReconcileBatch(db, DEADLINE + 1_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toEqual([]);
   });
 });
 
@@ -1609,7 +1609,7 @@ describe("tenant and App isolation (spec §7.0)", () => {
       await setCheckDesired(db, attempt.identity.attemptId, lease, CONCLUSION, null, T0);
       await deferCheckRecovery(db, attempt.identity.attemptId, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
     }
-    const batch = await listCheckReconcileBatch(db, T0);
+    const batch = await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit);
     expect(batch.map((row) => row.identity.scope.appId).sort()).toEqual([APP_ID, OTHER_APP_ID].sort());
     expect(batch.find((row) => row.identity.scope.appId === OTHER_APP_ID)?.identity.githubAppId).toBe(OTHER_NUMERIC_APP_ID);
   });
@@ -1850,7 +1850,7 @@ describe("recovery claim fences (spec §7.6 / §7.9)", () => {
     // note: Suspension is a CLAIM fence, not just a selector filter (§7.6): a stale
     // selector result or a direct caller must not lease a disabled App's row.
     expect(await suspendCheckRecovery(db, { appId: APP_ID, installationId: SCOPE.installationId }, "app disabled", T0)).toBe(1);
-    expect(await claimCheckRecovery(db, id, "stale-reconciler", T0 + 1)).toBeNull();
+    expect(await claimCheckRecovery(db, id, "stale-reconciler", T0 + 1, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
     expect((await getCheckAttempt(db, id))?.lease).toBeNull();
 
     // note: An operator retry must NOT resurrect it either: only the explicit
@@ -1860,7 +1860,7 @@ describe("recovery claim fences (spec §7.6 / §7.9)", () => {
 
     // note: Re-enable returns it to `pending`, and only then is it claimable again.
     await reenableChecksForApps(db, [{ appId: APP_ID, installationId: SCOPE.installationId }], T0 + 2);
-    const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 + 3);
+    const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 + 3, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(reacquired).not.toBeNull();
     expect(reacquired?.epoch).toBe(2);
   });
@@ -1877,7 +1877,7 @@ describe("recovery claim fences (spec §7.6 / §7.9)", () => {
     // decision to retry. The reopen is ONE conditional statement, so every
     // precondition is re-checked inside the write and the terminal row is not
     // resurrected.
-    const recovery = await claimCheckRecovery(db, id, "reconciler", T0 + 1);
+    const recovery = await claimCheckRecovery(db, id, "reconciler", T0 + 1, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(recovery).not.toBeNull();
     expect(await recordCheckObservation(db, id, recovery!, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0 + 1)).toBe(true);
 
@@ -2080,7 +2080,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
         { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: DIGEST },
       ]),
     ).toEqual([]);
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(0);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(0);
 
     expect(
       await listReenableableCheckPairs(db, [
@@ -2089,7 +2089,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     ).toEqual([{ appId: APP_ID, installationId: SCOPE.installationId }]);
     // note: Resuming returns the SAME historical identity to the batch.
     await reenableChecksForApps(db, [{ appId: APP_ID, installationId: SCOPE.installationId }], T0 + 1);
-    expect((await listCheckReconcileBatch(db, T0 + 1)).map((r) => r.identity.attemptId)).toEqual([id]);
+    expect((await listCheckReconcileBatch(db, T0 + 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((r) => r.identity.attemptId)).toEqual([id]);
   });
 
   test("the store read: a mixed-kind pair is resumable only when EVERY suspended row is releasable", async () => {
@@ -2243,7 +2243,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     expect(row.recovery_state).toBe("pending");
     expect(row.attempts).toBe(0);
     expect(row.external_id).toBe(attempt.identity.externalId);
-    expect(await listCheckReconcileBatch(db, T0 + 1)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0 + 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
   });
 
   test("suspendCheckForPause preserves the identity and spends no attempt", async () => {

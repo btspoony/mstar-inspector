@@ -1,4 +1,3 @@
-import { RECONCILE_DEFAULTS } from "../dashboard/runtime-config-store";
 /**
  * Finding lifecycle store (spec review-lifecycle §7.1/§7.2/
  * §7.7/§7.11.1) — durable lifecycle rows, fair rotation, the private
@@ -140,10 +139,6 @@ export const PUBLICATION_LEASE_MS = 120_000;
 /** `line_dispatch_ms` value for a row that predates the column: its intent is
  *  UNKNOWN (the batch may have been sent), so it is discovery-only forever. */
 export const LINE_DISPATCH_UNKNOWN = -1;
-/** Recovery attempt cap — rows at/after this count leave the selectors. The
- *  line batch's discovery bound reuses it: a readback that captured nothing is
- *  the same kind of attempt as any other lifecycle recovery. */
-export const LIFECYCLE_MAX_ATTEMPTS = RECONCILE_DEFAULTS.lifecycleMaxAttempts;
 /** Staged payload cap (spec §7.7: size ≤1 MiB UTF-8; reject, never truncate). */
 export const PUBLICATION_MAX_BYTES = 1_048_576;
 /**
@@ -1119,7 +1114,7 @@ function lifecycleApplyBatch(
  * deliberately NOT filtered — the reconciler decides per phase (prepared →
  * send, sending/unknown → read-only discovery, confirmed → apply).
  */
-export async function listPublicationRecovery(db: D1Like, nowMs: number, limit: number, maxAttempts: number = LIFECYCLE_MAX_ATTEMPTS): Promise<PublicationRow[]> {
+export async function listPublicationRecovery(db: D1Like, nowMs: number, limit: number, maxAttempts: number): Promise<PublicationRow[]> {
   const rows = await db
     .prepare(
       `SELECT * FROM review_publications
@@ -1145,7 +1140,7 @@ export async function listResolutionRecovery(
   db: D1Like,
   nowMs: number,
   limit: number,
-  maxAttempts: number = LIFECYCLE_MAX_ATTEMPTS,
+  maxAttempts: number,
 ): Promise<{ associationId: string; scope: Scope }[]> {
   const rows = await db
     .prepare(
@@ -1529,7 +1524,7 @@ export async function recordLineDiscoveryFailure(
   reason: string,
   observedCaptures: number,
   nowMs: number,
-  bound: number = LIFECYCLE_MAX_ATTEMPTS,
+  bound: number,
 ): Promise<LineDiscoveryOutcome | null> {
   const result = await db
     .prepare(

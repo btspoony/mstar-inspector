@@ -36,6 +36,7 @@
  * `REVIEW_LEVELS` reads `"default"` with `degraded: true` and never throws, and
  * a write outside the vocabulary is refused with no row and no audit row.
  */
+import { RECONCILE_DEFAULTS } from "../contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import {
   CHECK_TERMINALIZE_DEFAULT,
@@ -65,7 +66,6 @@ import {
   getCheckBudgets,
   getReconcileSettings,
   setReconcileSettings,
-  RECONCILE_DEFAULTS,
   getCommentClaimSettings,
   getEffectiveConcurrency,
   getRecheckAssignmentMaxBytes,

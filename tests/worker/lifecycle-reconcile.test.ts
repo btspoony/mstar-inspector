@@ -28,6 +28,7 @@
  *   - tenant/App isolation: only the failing pair is suspended
  *   - a throwing reviewer/dependency can never escape the handler
  */
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import { idemKey } from "../../src/contracts/idem";
@@ -40,7 +41,6 @@ import {
   listPublicationRecovery,
   listLineBatchRecovery,
   listResolutionRecovery,
-  LIFECYCLE_MAX_ATTEMPTS,
   recordPublicationProof,
   readLineBatchState,
   recordLineDiscoveryFailure,
@@ -70,12 +70,6 @@ import {
 import { listDiscussionWithOctokit } from "../../src/pipeline/discussion-context";
 import {
   reconcileReviewLifecycle,
-  RECONCILE_MAX_REQUESTS,
-  RECONCILE_PER_REQUEST_MS,
-  RECONCILE_PUBLICATION_LANE_MAX_REQUESTS,
-  RECONCILE_RUN_BUDGET_MS,
-  RECONCILE_SELECT_LIMIT,
-  RECONCILE_THREAD_OPERATION_REQUESTS,
   type LifecycleReconcileDeps,
   type ReconcileReviewer,
   type ReconcileTransport,
@@ -495,17 +489,6 @@ function threadRow(db: TestD1, id: string): { resolution_state: string; attempts
 // note: ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-describe("reconcileReviewLifecycle — constants (spec §7.11.1)", () => {
-  test("pins the budget constants", () => {
-    expect(RECONCILE_MAX_REQUESTS).toBe(80);
-    expect(RECONCILE_RUN_BUDGET_MS).toBe(45_000);
-    expect(RECONCILE_PER_REQUEST_MS).toBe(5_000);
-    expect(RECONCILE_THREAD_OPERATION_REQUESTS).toBe(15);
-    expect(RECONCILE_PUBLICATION_LANE_MAX_REQUESTS).toBe(40);
-    expect(RECONCILE_SELECT_LIMIT).toBe(10);
-  });
-});
 
 describe("publication lane — confirmed apply", () => {
   test("applies a confirmed publication after a crashed window, purely locally", async () => {
@@ -1245,7 +1228,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       id: "pub-stuck",
       appliedAgeMs: 200_000,
       dispatched: true,
-      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
     });
     await seedAppliedLineBatch(db, { id: "pub-fresh", appliedAgeMs: 100_000, dispatched: false, headSha: "fedcba9876543210fedcba9876543210fedcba98" });
 
@@ -1277,7 +1260,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     // its row, its count and its reason for the operator.
     expect(batchColumns(db, "pub-stuck")).toEqual({
       line_dispatch_ms: T0 - 5_000,
-      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS,
+      line_discovery_attempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts,
       line_unresolvable_ms: T0,
       line_unresolvable_reason: "marker-missing",
     });
@@ -1286,13 +1269,53 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     expect(reported[0]!.detail).toContain("publication=pub-stuck");
     expect(reported[0]!.detail).toContain("reason=marker-missing");
     // The selector never returns it again (the fresh batch captured its comment).
-    expect(await listLineBatchRecovery(db, T0 + 1, RECONCILE_SELECT_LIMIT)).toEqual([]);
+    expect(await listLineBatchRecovery(db, T0 + 1, RECONCILE_DEFAULTS.lifecycleSelectLimit)).toEqual([]);
 
     // A second pass reports nothing new and spends no further discovery.
     await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 1_000, reviewer, log });
     expect(warns.filter((warn) => warn.event === "ops_lifecycle_line_unresolvable")).toHaveLength(1);
-    expect(batchColumns(db, "pub-stuck").line_discovery_attempts).toBe(LIFECYCLE_MAX_ATTEMPTS);
+    expect(batchColumns(db, "pub-stuck").line_discovery_attempts).toBe(RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(calls.discovered).toBe(1);
+  });
+
+  test("line recovery uses the snapshot batch size and discovery cap without losing fairness", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    db.raw.prepare("INSERT INTO review_runtime_settings (key,value,updated_at) VALUES (?,?,'now')")
+      .run("platform.reconcile.lifecycle.select_limit", "1");
+    db.raw.prepare("INSERT INTO review_runtime_settings (key,value,updated_at) VALUES (?,?,'now')")
+      .run("platform.reconcile.lifecycle.max_attempts", "2");
+    await seedAppliedLineBatch(db, { id: "pub-stuck", appliedAgeMs: 200_000, dispatched: true, discoveryAttempts: 1 });
+    await seedAppliedLineBatch(db, { id: "pub-fresh", appliedAgeMs: 100_000, dispatched: false, headSha: "fedcba9876543210fedcba9876543210fedcba98" });
+    const limits: unknown[] = [];
+    const prepare = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = prepare(sql);
+      if (sql.includes("SELECT * FROM review_publications p") && sql.includes("line_unresolvable_ms IS NULL")) {
+        const bind = statement.bind.bind(statement);
+        statement.bind = (...args: unknown[]) => {
+          limits.push(args.at(-1));
+          return bind(...args);
+        };
+      }
+      return statement;
+    };
+    await reconcileReviewLifecycle(asEnv(db), {
+      now: () => T0,
+      reviewer: async () => okResolution({
+        recoverLineComments: async () => ({ posted: [], ambiguous: [], captured: false, reviewId: null, failure: "marker-missing" }),
+        postLineComments: async () => ({
+          posted: [{ associationId: "assoc-pub-fresh", commentId: 5001, path: "src/a.ts", line: 10 }],
+          ambiguous: [], captured: true, reviewId: 5000,
+        }),
+      }),
+    });
+    expect(limits.length).toBeGreaterThan(1);
+    expect(limits.every((limit) => limit === 1)).toBe(true);
+    expect(batchColumns(db, "pub-stuck").line_discovery_attempts).toBe(2);
+    expect(batchColumns(db, "pub-stuck").line_unresolvable_ms).toBe(T0);
+    expect(batchColumns(db, "pub-fresh").line_dispatch_ms).toBe(T0);
+    expect(await listLineBatchRecovery(db, T0 + 1, 1)).toEqual([]);
   });
 
   test("a batch that succeeds on its second discovery attempt resolves and is not marked unresolvable", async () => {
@@ -1342,13 +1365,13 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     seedApp(db, APP);
     // Two more stuck batches than the bounded selection returns in one query,
     // so a single SELECT would retire ten of them and never see the fresh row.
-    const stuck = RECONCILE_SELECT_LIMIT + 2;
+    const stuck = RECONCILE_DEFAULTS.lifecycleSelectLimit + 2;
     for (let i = 0; i < stuck; i += 1) {
       await seedAppliedLineBatch(db, {
         id: `pub-stuck-${i}`,
         appliedAgeMs: 300_000 + i,
         dispatched: true,
-        discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+        discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
         // 40 hex chars, distinct per batch: the journal is unique per head.
         headSha: i.toString(16).padStart(2, "0").repeat(20),
       });
@@ -1388,7 +1411,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     for (let i = 0; i < stuck; i += 1) {
       expect(batchColumns(db, `pub-stuck-${i}`)).toEqual({
         line_dispatch_ms: T0 - 5_000,
-        line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS,
+        line_discovery_attempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts,
         line_unresolvable_ms: T0,
         line_unresolvable_reason: "marker-missing",
       });
@@ -1436,15 +1459,15 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       id: "pub-raced",
       appliedAgeMs: 100_000,
       dispatched: true,
-      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
     });
 
     // The concurrent recovery task saved the comment first...
     await captureLineComments(db, "pub-raced", 9000, [{ associationId: "assoc-pub-raced", commentId: 9001 }], T0);
     // ...so the stale "readback observed nothing" at the bound must be a no-op.
-    expect(await recordLineDiscoveryFailure(db, "pub-raced", "marker-missing", 0, T0)).toBeNull();
+    expect(await recordLineDiscoveryFailure(db, "pub-raced", "marker-missing", 0, T0, RECONCILE_DEFAULTS.lifecycleMaxAttempts)).toBeNull();
     expect(batchColumns(db, "pub-raced")).toMatchObject({
-      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      line_discovery_attempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
       line_unresolvable_ms: null,
       line_unresolvable_reason: null,
     });
@@ -1457,7 +1480,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       id: "pub-partial",
       appliedAgeMs: 100_000,
       dispatched: true,
-      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
       intentCount: 2,
     });
 
@@ -1470,9 +1493,9 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     expect(await readLineBatchState(db, "pub-partial")).toMatchObject({ pending: true, captures: 1 });
 
     // The stale failure at the bound changes nothing: neither the count nor the marker.
-    expect(await recordLineDiscoveryFailure(db, "pub-partial", "comment-gone", 0, T0)).toBeNull();
+    expect(await recordLineDiscoveryFailure(db, "pub-partial", "comment-gone", 0, T0, RECONCILE_DEFAULTS.lifecycleMaxAttempts)).toBeNull();
     expect(batchColumns(db, "pub-partial")).toMatchObject({
-      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      line_discovery_attempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
       line_unresolvable_ms: null,
       line_unresolvable_reason: null,
     });
@@ -1528,7 +1551,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       id: "pub-progress",
       appliedAgeMs: 100_000,
       dispatched: true,
-      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
       intentCount: 2,
     });
 
@@ -1570,7 +1593,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     });
 
     // Still eligible, with the one remaining thread recoverable by a later pass.
-    expect(await listLineBatchRecovery(db, T0 + 2_000, RECONCILE_SELECT_LIMIT)).toHaveLength(1);
+    expect(await listLineBatchRecovery(db, T0 + 2_000, RECONCILE_DEFAULTS.lifecycleSelectLimit)).toHaveLength(1);
     const pending = db.raw
       .prepare(`SELECT id FROM review_threads WHERE publication_id = ? AND review_id IS NULL`)
       .all("pub-progress") as Array<{ id: string }>;
@@ -1615,7 +1638,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     // A newer generation admitted after that last write, same scope and head.
     const admittedMs = T0;
 
-    expect((await recordLineDiscoveryFailure(db, "pub-old", "marker-missing", 0, T0))?.attempts).toBe(2);
+    expect((await recordLineDiscoveryFailure(db, "pub-old", "marker-missing", 0, T0, RECONCILE_DEFAULTS.lifecycleMaxAttempts))?.attempts).toBe(2);
     await resetLineDiscoveryFailures(db, "pub-old");
 
     const after = db.raw
@@ -1672,7 +1695,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     expect(batchColumns(db, "pub-budget").line_discovery_attempts).toBe(3);
 
     // The work stays due: the row is still selected.
-    expect(await listLineBatchRecovery(db, T0 + 3_000, RECONCILE_SELECT_LIMIT)).toHaveLength(1);
+    expect(await listLineBatchRecovery(db, T0 + 3_000, RECONCILE_DEFAULTS.lifecycleSelectLimit)).toHaveLength(1);
   });
 });
 
@@ -1756,7 +1779,7 @@ describe("thread lane — retry, backoff, give-up (real §7.5 surface)", () => {
     const row = threadRow(db, "assoc-1");
     expect(row.resolution_state).toBe("needs-recheck");
     // note: No longer selectable by the recovery reader.
-    const pending = await listResolutionRecovery(db, T0 + 1_000_000, 10);
+    const pending = await listResolutionRecovery(db, T0 + 1_000_000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(pending.map((r) => r.associationId)).not.toContain("assoc-1");
   });
 
@@ -1842,10 +1865,10 @@ describe("suspended-pair scan fairness", () => {
     const fingerprint = await sha256Hex("enc-pem");
     const kinds = ["disabled", "missing", "deleted", "identity-mismatch"] as const;
     const repairedAssociationId = "22222222-3333-4444-5555-666666666666";
-    for (let i = 0; i < RECONCILE_SELECT_LIMIT + 2; i += 1) {
+    for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleSelectLimit + 2; i += 1) {
       const appId = `scan-${String(i).padStart(3, "0")}`;
       const scope = { ...SCOPE, appId };
-      const repaired = i === RECONCILE_SELECT_LIMIT + 1;
+      const repaired = i === RECONCILE_DEFAULTS.lifecycleSelectLimit + 1;
       const suspensionKind = repaired ? "disabled" : kinds[i % kinds.length]!;
       seedApp(db, appId, {
         githubAppId: 2000 + i,
@@ -1867,7 +1890,7 @@ describe("suspended-pair scan fairness", () => {
       }
     }
 
-    const repairedId = RECONCILE_SELECT_LIMIT + 1;
+    const repairedId = RECONCILE_DEFAULTS.lifecycleSelectLimit + 1;
     let now = T0;
     let reviewer = okReviewer();
     if (lane === "thread") {
@@ -1933,7 +1956,7 @@ describe("suspended-pair scan fairness", () => {
 
   test("a throwing identity probe does not pin the next scan to that pair", async () => {
     const db = createMigratedTestD1();
-    for (let i = 0; i <= RECONCILE_SELECT_LIMIT; i += 1) {
+    for (let i = 0; i <= RECONCILE_DEFAULTS.lifecycleSelectLimit; i += 1) {
       const appId = `scan-${String(i).padStart(3, "0")}`;
       const scope = { ...SCOPE, appId };
       seedApp(db, appId, { githubAppId: 3000 + i });
@@ -1943,7 +1966,7 @@ describe("suspended-pair scan fairness", () => {
     await reconcile(db, { now: () => T0, reviewer: async () => { throw new Error("probe failed"); } });
     expect(pubRow(db, "pub-0").recovery_state).toBe("suspended");
     await reconcile(db, { now: () => T0 + 1, reviewer: okReviewer() });
-    expect(pubRow(db, `pub-${RECONCILE_SELECT_LIMIT}`).recovery_state).toBe("pending");
+    expect(pubRow(db, `pub-${RECONCILE_DEFAULTS.lifecycleSelectLimit}`).recovery_state).toBe("pending");
     db.raw.close();
   });
 });
@@ -2009,7 +2032,7 @@ describe("budgets (spec §7.11.1)", () => {
 
     let call = 0;
     const now = () => {
-      const value = call++ < 1 ? T0 : T0 + RECONCILE_RUN_BUDGET_MS + 1_000;
+      const value = call++ < 1 ? T0 : T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs + 1_000;
       return value;
     };
     let resolved = 0;
@@ -2146,14 +2169,14 @@ describe("enforced per-request transport bound (spec §7.11.1)", () => {
 
     // note: Deadline = T0 + 45s (fixed at run start). With plenty of run left the
     // per-request bound is the 5s cap...
-    expect(transport.boundMs()).toBe(RECONCILE_PER_REQUEST_MS);
+    expect(transport.boundMs()).toBe(RECONCILE_DEFAULTS.lifecyclePerRequestMs);
     // note: ...and late in the run it collapses to the remaining time — this is the
     // clamp the review found missing (§7.11.1: "additionally capped by
     // remaining run deadline").
-    clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 30;
+    clock.now = T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs - 30;
     expect(transport.boundMs()).toBe(30);
     // invariant: Never zero/negative: a request already past the deadline gets 1ms.
-    clock.now = T0 + RECONCILE_RUN_BUDGET_MS + 10_000;
+    clock.now = T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs + 10_000;
     expect(transport.boundMs()).toBe(1);
 
     // note: The clamp is ENFORCED on the wire, not merely computed: a hung upstream
@@ -2169,7 +2192,7 @@ describe("enforced per-request transport bound (spec §7.11.1)", () => {
           }
           signal.addEventListener("abort", () => reject(signal.reason));
         })) as unknown as typeof fetch;
-      clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 40; // note: 40ms of run left
+      clock.now = T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs - 40; // note: 40ms of run left
       const started = performance.now();
       await expect(transport.fetchImpl("https://api.github.com/app")).rejects.toMatchObject({
         name: "TimeoutError",
@@ -2226,7 +2249,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     // note: TEN due rows — the §7.11.1 selection LIMIT. The ≤15-request envelope is
     // the admission ESTIMATE: only floor(80 / 15) = 5 may even start, and the
     // requests each operation really issues are charged at the transport.
-    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+    for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleSelectLimit; i += 1) {
       const rowId = `finding-row-${i}`;
       const assocId = `assoc-${i}`;
       seedFindingRow(db, rowId, "pub-1", SCOPE, "addressed");
@@ -2271,13 +2294,11 @@ describe("thread lane request budget (spec §7.11.1)", () => {
         });
       },
     });
-
-    expect(RECONCILE_MAX_REQUESTS).toBe(80);
     // note: 25 + 25 + 25 = 75 actual requests by three operations; 75 + 15 > 80, so
     // the fourth is never admitted. Actual requests stay under the cap.
     expect(resolved).toBe(3);
     expect(requests).toBe(75);
-    expect(requests).toBeLessThanOrEqual(RECONCILE_MAX_REQUESTS);
+    expect(requests).toBeLessThanOrEqual(RECONCILE_DEFAULTS.lifecycleMaxRequests);
     expect(summary.examined).toBe(3);
 
     // invariant: Budget exhaustion stops the lane BEFORE any claim/attempt mutation for
@@ -2285,7 +2306,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     const untouched = db.raw
       .query(`SELECT COUNT(*) AS n FROM review_threads WHERE attempts = 0 AND lease_until_ms IS NULL AND resolution_state = 'pending'`)
       .get() as { n: number };
-    expect(untouched.n).toBe(RECONCILE_SELECT_LIMIT - 3); // invariant: 7 rows never entered T2
+    expect(untouched.n).toBe(RECONCILE_DEFAULTS.lifecycleSelectLimit - 3); // invariant: 7 rows never entered T2
     expect(transport).toBeDefined();
 
     // invariant: The meter is the TRANSPORT: the remaining allowance is exactly
@@ -2298,12 +2319,12 @@ describe("thread lane request budget (spec §7.11.1)", () => {
         dispatched += 1;
         return new Response("{}", { status: 200 });
       }) as unknown as typeof fetch;
-      for (let i = 0; i < RECONCILE_MAX_REQUESTS - alreadySpent; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleMaxRequests - alreadySpent; i += 1) {
         await transport!.fetchImpl("https://api.github.com/x");
       }
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS - alreadySpent);
+      expect(dispatched).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests - alreadySpent);
       await expect(transport!.fetchImpl("https://api.github.com/x")).rejects.toThrow(/budget exhausted/);
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS - alreadySpent); // invariant: never dispatched
+      expect(dispatched).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests - alreadySpent); // invariant: never dispatched
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -2316,7 +2337,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     // requests through the SAME run transport, so its spend genuinely reduces
     // what the thread lane may admit — there is no separate allowance.
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE, { round: 1 }), 120_000);
-    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+    for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleSelectLimit; i += 1) {
       const rowId = `finding-row-${i}`;
       const assocId = `assoc-${i}`;
       seedFindingRow(db, rowId, "pub-1", SCOPE, "addressed");
@@ -2363,12 +2384,12 @@ describe("thread lane request budget (spec §7.11.1)", () => {
 
     // note: The lane cap is a real bound on ACTUAL requests: the publication lane
     // stops dispatching at 40 even though its estimate was tiny.
-    expect(publicationRequests).toBe(RECONCILE_PUBLICATION_LANE_MAX_REQUESTS);
+    expect(publicationRequests).toBe(RECONCILE_DEFAULTS.lifecyclePublicationLaneMaxRequests);
     // note: The thread lane then shares that same run allowance: every operation that
     // entered really issued its requests, and together the two lanes stop at
     // exactly the whole-run cap — admission alone never lets the run overshoot.
-    expect(threadRequests).toBe(RECONCILE_MAX_REQUESTS - RECONCILE_PUBLICATION_LANE_MAX_REQUESTS);
-    expect(publicationRequests + threadRequests).toBe(RECONCILE_MAX_REQUESTS);
+    expect(threadRequests).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests - RECONCILE_DEFAULTS.lifecyclePublicationLaneMaxRequests);
+    expect(publicationRequests + threadRequests).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests);
     expect(entered).toBeGreaterThan(0);
   });
 });
@@ -2461,14 +2482,14 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
       // allowance: repeated failures must not be able to issue unaccounted
       // requests past the cap.
       let refused = 0;
-      for (let i = 0; i < RECONCILE_MAX_REQUESTS + 20; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleMaxRequests + 20; i += 1) {
         try {
           await transport!.fetchImpl("https://api.github.com/x");
         } catch (err) {
           if (err instanceof Error && /budget exhausted/.test(err.message)) refused += 1;
         }
       }
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS);
+      expect(dispatched).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests);
       expect(refused).toBe(20);
     } finally {
       globalThis.fetch = realFetch;
@@ -2511,7 +2532,7 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
         return new Response("{}", { status: 200 });
       }) as unknown as typeof fetch;
 
-      for (let i = 0; i < RECONCILE_MAX_REQUESTS; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleMaxRequests; i += 1) {
         await transport!.fetchImpl("https://api.github.com/x");
       }
       dispatched = 0;
@@ -2843,7 +2864,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
         return okResolution({
           planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
           postPreparedDegraded: async () => {
-            await spendThrough(runTransport, RECONCILE_MAX_REQUESTS + 1);
+            await spendThrough(runTransport, RECONCILE_DEFAULTS.lifecycleMaxRequests + 1);
             return { posted: true, commentId: 777 };
           },
         });
@@ -2864,7 +2885,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
 
     // note: "No attempt spent" is what keeps the row immediately selectable: M8
     // re-selects it on the very next pass with its full attempt budget.
-    const dueAgain = await listPublicationRecovery(db, T0, RECONCILE_SELECT_LIMIT);
+    const dueAgain = await listPublicationRecovery(db, T0, RECONCILE_DEFAULTS.lifecycleSelectLimit, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(dueAgain.map((r) => r.id)).toContain("pub-1");
 
     // note: And the next run really does send it, proving the refusal deferred the
@@ -2902,7 +2923,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
           planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
           postPreparedDegraded: async () => {
             try {
-              await spendThrough(runTransport, RECONCILE_MAX_REQUESTS + 1);
+              await spendThrough(runTransport, RECONCILE_DEFAULTS.lifecycleMaxRequests + 1);
             } catch (refusal) {
               throw new Error("Request failed", { cause: refusal });
             }
