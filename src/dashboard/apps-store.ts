@@ -2280,15 +2280,38 @@ export type BotScopeRow = {
   scope: BotScope;
   shared_at: string | null;
   deleted_at: string | null;
+  /** The owning workspace's display name; NULL for an unmapped bot. */
+  workspace_name: string | null;
+  /** 0/1: the bot's workspace IS the platform's official workspace. */
+  is_official: number;
+  /** Live `bot_installations` rows (`removed_at IS NULL`). */
+  installation_count: number;
+  /** Live `review_targets` rows (`deleted_at IS NULL`). */
+  live_target_count: number;
 };
 
 /** The state a transition starts from: the live bot and its current scope. */
 const BOT_SCOPE_READ_SQL = `
   SELECT scope, shared_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
 
+/**
+ * The console's list. ONE statement for every bot: the workspace name, the
+ * official-workspace comparison and the two counts are correlated subqueries,
+ * never a read per row — the operator surface has no paging and a fan-out here
+ * would be one round trip per bot.
+ */
 const BOT_SCOPE_LIST_SQL = `
-  SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at
-    FROM review_bots b LEFT JOIN bot_workspaces w ON w.bot_id = b.id
+  SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at,
+         ws.name AS workspace_name,
+         EXISTS (SELECT 1 FROM review_runtime_settings s
+                  WHERE s.key = '${OFFICIAL_WORKSPACE_KEY}' AND s.value = w.workspace_id) AS is_official,
+         (SELECT COUNT(*) FROM bot_installations i
+           WHERE i.bot_id = b.id AND i.removed_at IS NULL) AS installation_count,
+         (SELECT COUNT(*) FROM review_targets t
+           WHERE t.bot_id = b.id AND t.deleted_at IS NULL) AS live_target_count
+    FROM review_bots b
+    LEFT JOIN bot_workspaces w ON w.bot_id = b.id
+    LEFT JOIN workspaces ws ON ws.id = w.workspace_id
    WHERE b.deleted_at IS NULL
    ORDER BY b.name, b.id`;
 
@@ -2408,7 +2431,11 @@ export async function setBotScope(
   return { outcome: "outside_official_workspace" };
 }
 
-/** Every live bot with its scope, name-ordered — the operator console's list. */
+/**
+ * Every live bot with its scope and the columns only the console needs
+ * (workspace name, the official-workspace flag, live installation and target
+ * counts) — name-ordered, one statement.
+ */
 export async function listBotScopes(db: AppsStoreD1): Promise<BotScopeRow[]> {
   const res = await db.prepare(BOT_SCOPE_LIST_SQL).all<BotScopeRow>();
   return res.results;
