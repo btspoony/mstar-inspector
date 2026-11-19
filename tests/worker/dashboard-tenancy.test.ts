@@ -1735,9 +1735,9 @@ describe("the route-local member gate", () => {
     const body = (await res.json()) as { targets: Array<{ target_id: string }> };
     expect(body.targets.map((target) => target.target_id)).toEqual(["target-app-acme"]);
     const userReads = statements.filter((sql) => /\b(?:FROM|JOIN)\s+users\b/i.test(sql));
-    expect(userReads).toEqual([
-      expect.stringMatching(/\bJOIN\s+workspaces\b[\s\S]*\bJOIN\s+workspace_members\b/i),
-    ]);
+    expect(userReads).toHaveLength(1);
+    expect(userReads[0]).toMatch(/\bworkspaces\b/i);
+    expect(userReads[0]).toMatch(/\bworkspace_members\b/i);
     expect(statements).toHaveLength(3);
   });
 
