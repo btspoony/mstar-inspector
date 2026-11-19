@@ -216,6 +216,11 @@ export type RuntimeConfig = {
   queue: QueueBacklog | null;
   /** The 24h GitHub secondary-rate-limit count; `0` when the server does not report it. */
   githubRateLimited24h: number;
+  /**
+   * The platform's designated official workspace — the one tenant whose bots
+   * may be offered platform-wide. `null` is "not designated", never unknown.
+   */
+  officialWorkspaceId: string | null;
 };
 
 function parseSweep(row: Json): SweepConfig | null {
@@ -343,7 +348,28 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
     githubRateLimited24h: parseGithubRateLimited(body),
+    // Additive field: an older Worker omits it, and an absent designation is
+    // exactly what `null` says on the wire. A present non-string is still a
+    // broken read, so `maybeText` answers it.
+    officialWorkspaceId:
+      body.officialWorkspaceId === undefined ? null : maybeText(body, "officialWorkspaceId"),
   };
+}
+
+/**
+ * Set or clear the platform's official workspace, answering the id the server
+ * stored (`null` for a clear). `null` is the only clear — the server refuses
+ * an empty string as a body-shape error, so the console never sends one.
+ */
+export async function setOfficialWorkspace(workspaceId: string | null): Promise<string | null> {
+  const answer = await write("PATCH", "/official-workspace", { workspaceId });
+  if (typeof answer === "object" && answer !== null && "workspaceId" in answer) {
+    const stored = answer.workspaceId;
+    if (stored === null || typeof stored === "string") return stored;
+  }
+  // A 2xx with an unreadable body still landed the write: the request value
+  // stands in, the same rule as `setSystemConcurrency`.
+  return workspaceId;
 }
 
 export async function saveSweepSettings(values: SweepValues): Promise<void> {

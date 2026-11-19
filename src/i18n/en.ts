@@ -1607,6 +1607,26 @@ export const en = {
       cancelAction: "Cancel",
       /** Fallback when the slug write fails with an unrecognised error. */
       slugChangeFailed: "Could not change the slug for {name}.",
+      /**
+       * The official-workspace card above the table: the one tenant whose bots
+       * may be offered platform-wide. Clearing is its own action, never an
+       * empty save, and it does not revoke a share already granted.
+       */
+      officialTitle: "Official workspace",
+      officialDescription:
+        "Only bots in this workspace can be marked as shared. Clearing the designation blocks new shares; shares already granted stay revocable.",
+      officialCurrent: "Current:",
+      officialNone: "Not specified",
+      officialSelectLabel: "Workspace",
+      /** The selector's accessible name; the visible label is above it. */
+      officialSelectAria: "Official workspace",
+      officialSave: "Save",
+      officialClear: "Clear",
+      officialSaved: "Official workspace saved.",
+      officialCleared: "Official workspace cleared. Shares already granted stay revocable.",
+      /** Fallback when either write fails with an unrecognised error. */
+      officialSaveFailed: "Could not change the official workspace.",
+      officialLoadFailed: "Could not load the official workspace.",
     },
     /** Review usage page (spec bot-scope-and-claiming § Review usage). */
     usage: {

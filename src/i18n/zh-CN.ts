@@ -1342,6 +1342,25 @@ export const zhCN: Dictionary = {
       cancelAction: "取消",
       /** slug 写入失败且错误无法识别时的兜底文案。 */
       slugChangeFailed: "无法更改 {name} 的 slug。",
+      /**
+       * 表格上方的官方工作区卡片：唯一可以把 bot 标记为共享的租户。
+       * 清除是独立操作（不是保存空值），且不撤销已授予的共享。
+       */
+      officialTitle: "官方工作区",
+      officialDescription:
+        "只有此处指定的工作区里的 bot 可以被标记为共享。清除后不能再共享新 bot；已共享的仍可撤销。",
+      officialCurrent: "当前：",
+      officialNone: "未指定",
+      officialSelectLabel: "工作区",
+      /** 选择器的可访问名称；可见标签已在其上方。 */
+      officialSelectAria: "官方工作区",
+      officialSave: "保存",
+      officialClear: "清除",
+      officialSaved: "已保存官方工作区。",
+      officialCleared: "已清除官方工作区。已共享的仍可撤销。",
+      /** 两种写入失败且错误无法识别时的兜底文案。 */
+      officialSaveFailed: "无法更改官方工作区。",
+      officialLoadFailed: "无法加载官方工作区。",
     },
     /** 审查用量页（spec bot-scope-and-claiming § Review usage）。 */
     usage: {
