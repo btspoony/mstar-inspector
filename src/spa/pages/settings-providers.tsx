@@ -7,7 +7,8 @@ import { ListRow, ListRowGroup } from "../components/ListRow";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import { modelsForProtocol, type CatalogProvider, type BotConfigSections, type ProviderManagementPayload } from "./data";
-import { LoadingNotice, NoticeRegion, PageNotice, type OpNotice } from "./PageNotice";
+import { LoadingNotice, NoticeRegion, type OpNotice } from "./PageNotice";
+import { ErrorState } from "../components/state/ErrorState";
 import { loadProviderCatalog } from "../provider-catalog";
 import { apiBase } from "../workspace-base";
 import type { StaticProviderCatalog } from "./data";
@@ -76,12 +77,7 @@ export function ProvidersSection(props: Omit<Parameters<typeof LoadedProvidersSe
   }} /> : (
     <FlowSection title={t(locale, "settings.providers.title")} subtitle={t(locale, "settings.providersCopy")}>
       {failed === version ? (
-        <>
-          <PageNotice kind="error" message={t(locale, "common.loadFailed")} />
-          <Button type="button" variant="outline" onClick={() => setRetry((value) => value + 1)}>
-            {t(locale, "common.retry")}
-          </Button>
-        </>
+        <ErrorState locale={locale} onRetry={() => setRetry((value) => value + 1)} />
       ) : <LoadingNotice locale={locale} />}
     </FlowSection>
   );
