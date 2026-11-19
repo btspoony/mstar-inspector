@@ -3,8 +3,7 @@ import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "./post-form-headers";
 /**
  * Same-origin JSON fetch for SPA pages.
  *
- * `redirect: "manual"` so a 302 to login is visible (the session cookie is
- * HttpOnly; the client cannot detect expiry except through the API).
+ * Manual redirects expose session expiry as an opaque redirect in browsers.
  */
 export class ApiError extends Error {
   readonly status: number;
@@ -18,17 +17,25 @@ export class ApiError extends Error {
   }
 }
 
+function handleRedirect(res: Response): void {
+  if (res.type === "opaqueredirect") {
+    window.location.replace("/dashboard/login");
+    throw new ApiError(res.status, "");
+  }
+  if (res.status >= 300 && res.status < 400) {
+    const location = res.headers.get("Location");
+    if (location) window.location.replace(location);
+    throw new ApiError(res.status, "");
+  }
+}
+
 export async function fetchJson(url: string): Promise<unknown> {
   const res = await fetch(url, {
     credentials: "same-origin",
     headers: { Accept: "application/json" },
     redirect: "manual",
   });
-  if (res.status >= 300 && res.status < 400) {
-    const location = res.headers.get("Location");
-    if (location) window.location.replace(location);
-    throw new ApiError(res.status, "");
-  }
+  handleRedirect(res);
   if (!res.ok) throw new ApiError(res.status, await res.text());
   return await res.json();
 }
@@ -48,11 +55,7 @@ export async function postForm(
     },
     body: new URLSearchParams(body),
   });
-  if (res.status >= 300 && res.status < 400) {
-    const location = res.headers.get("Location");
-    if (location) window.location.replace(location);
-    throw new ApiError(res.status, "");
-  }
+  handleRedirect(res);
   return { status: res.status, body: await res.text() };
 }
 
@@ -65,11 +68,7 @@ export async function putJson(url: string, body: unknown): Promise<{ status: num
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (res.status >= 300 && res.status < 400) {
-    const location = res.headers.get("Location");
-    if (location) window.location.replace(location);
-    throw new ApiError(res.status, "");
-  }
+  handleRedirect(res);
   return { status: res.status, body: await res.text() };
 }
 
@@ -86,11 +85,6 @@ export async function postJson(url: string, body: unknown): Promise<{ status: nu
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(body),
   });
-  if (res.status >= 300 && res.status < 400) {
-    const location = res.headers.get("Location");
-    if (location) window.location.replace(location);
-    throw new ApiError(res.status, "");
-  }
+  handleRedirect(res);
   return { status: res.status, body: await res.text() };
 }
-

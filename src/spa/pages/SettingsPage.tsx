@@ -221,7 +221,7 @@ export function settingsOpOutcome(
   body: string,
   successMessage?: string,
 ): OpNotice {
-  if (status >= 400) {
+  if (status < 200 || status >= 300) {
     return { kind: "error", message: settingsErrorMessage(locale, body) };
   }
   if (removeChanged(body) === false) {

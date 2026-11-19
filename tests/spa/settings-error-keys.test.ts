@@ -10,9 +10,25 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDictionaryKey, t } from "../../src/i18n";
-import { settingsErrorMessage, verifyRefusalMessage } from "../../src/spa/pages/SettingsPage";
+import { settingsErrorMessage, settingsOpOutcome, verifyRefusalMessage } from "../../src/spa/pages/SettingsPage";
 
 const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+
+describe("settings operation status", () => {
+  test.each([0, 199, 302, 400, 500])("status %i never reports success, including an empty opaque response", (status) => {
+    expect(settingsOpOutcome("en", status, "")).toEqual({ kind: "error", message: t("en", "common.loadFailed") });
+  });
+
+  test.each([200, 201, 204, 299])("status %i reports a successful save", (status) => {
+    expect(settingsOpOutcome("en", status, "")).toEqual({ kind: "success", message: t("en", "settings.changesSaved") });
+  });
+
+  test("2xx no-change stays a warning and 4xx retains its refusal message", () => {
+    expect(settingsOpOutcome("en", 200, JSON.stringify({ changed: false })).kind).toBe("warn");
+    expect(settingsOpOutcome("en", 403, JSON.stringify({ message: "Not allowed" })))
+      .toEqual({ kind: "error", message: "Not allowed" });
+  });
+});
 
 describe("isDictionaryKey", () => {
   test("known dictionary paths validate; unknown paths (newer server, stale client) do not", () => {
