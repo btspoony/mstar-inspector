@@ -1151,11 +1151,38 @@ describe("apps-store delivery read faces (consumption)", () => {
                       created_at DESC, rowid DESC) AS rn
            FROM webhook_deliveries WHERE bot_id = ?
          ) WHERE rn = 1`,
-      ).get(id);
+      ).get(id) ?? null;
       expect(summaries[id]).toEqual({ latest, rejected24h: 0 });
     }
+    expect(summaries["missing-app"]).toEqual({ latest: null, rejected24h: 0 });
+    expect(summaries[apps[2]!.id]).toEqual({ latest: null, rejected24h: 0 });
     expect(summaries[apps[0]!.id]!.latest!.id).toBe("delivery-296");
     expect(summaries[apps[1]!.id]!.latest!.id).toBe("delivery-299");
+  });
+
+  test("deliverySummaries uses health indexes without sorting delivery history", async () => {
+    const db = createMigratedD1();
+    const statements: string[] = [];
+    const s = store({
+      ...db,
+      prepare(sql: string) {
+        statements.push(sql);
+        return db.prepare(sql);
+      },
+    });
+    const ids = ["app-a", "app-b"];
+    await s.deliverySummaries(ids);
+    expect(statements).toHaveLength(2);
+    for (const [i, index] of [
+      "idx_webhook_deliveries_bot_health",
+      "idx_webhook_deliveries_bot_outcome_created",
+    ].entries()) {
+      const plan = db.raw.query(`EXPLAIN QUERY PLAN ${statements[i]!}`)
+        .all(...ids) as Array<{ detail: string }>;
+      const details = plan.map((row) => row.detail).join("\n");
+      expect(details).toContain(`USING COVERING INDEX ${index}`);
+      expect(details).not.toContain("TEMP B-TREE");
+    }
   });
 
   test("deliverySummaries propagates database read errors", async () => {

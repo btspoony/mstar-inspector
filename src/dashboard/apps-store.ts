@@ -377,6 +377,8 @@ export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected" | "skippe
  * magnitude, and a `pull_request` can legitimately land in `ignored` too. Both
  * faces rank by exactly this expression so they can never disagree.
  */
+// Also a key of idx_webhook_deliveries_bot_health (migration 0080). SQLite
+// matches expression indexes only on identical expressions; changes need a new migration.
 const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'rejected') THEN 0 ELSE 1 END`;
 
 /**
