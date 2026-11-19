@@ -45,6 +45,7 @@ import { MetricBand, type Metric } from "@/components/MetricBand";
 import { PageHeader } from "@/components/PageHeader";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { EmptyState } from "../components/state/EmptyState";
+import { AppInstallIdentity, appInstallHref } from "../components/AppInstallIdentity";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import { fetchJson, ApiError, postJson } from "../api";
@@ -436,10 +437,7 @@ export function AddRepositoryDialogBody({
   const matches =
     needle === "" ? [] : all.filter((repository) => `${repository.owner}/${repository.name}`.toLowerCase().includes(needle));
   const visible = matches.slice(0, REPOSITORY_LIST_CAP);
-  const installHref =
-    selectedApp?.slug == null
-      ? null
-      : `https://github.com/apps/${encodeURIComponent(selectedApp.slug)}/installations/new`;
+  const installHref = appInstallHref(selectedApp?.slug ?? null);
 
   return (
     <div className="flex flex-col gap-4" data-slot="add-repository-body">
@@ -478,52 +476,57 @@ export function AddRepositoryDialogBody({
           {/* Step 2 — the chosen App's live installations. */}
           <section className="flex flex-col gap-1.5" data-slot="add-step-installations">
             <span className="text-sm font-medium">{t(locale, "targets.addDialog.stepInstall")}</span>
-            {installations.state === "loading" ? (
-              <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.loadingInstallations")}</p>
-            ) : null}
-            {installations.state === "error" ? (
-              <ErrorState
-                locale={locale}
-                message={t(locale, "targets.addDialog.loadInstallationsFailed")}
-                onRetry={onRetryInstallations}
-              />
-            ) : null}
-            {installations.state === "ok" && installations.installations.length === 0 ? (
-              <>
-                <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.noInstallations")}</p>
-                {installHref === null ? null : (
-                  <a
-                    className="text-sm text-primary underline-offset-4 hover:underline"
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                {selectedApp === null ? null : (
+                  <AppInstallIdentity
+                    locale={locale}
+                    name={selectedApp.name}
+                    avatarSrc={null}
+                    appId={selectedApp.app_id}
                     href={installHref}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    {t(locale, "targets.addDialog.installNow")}
-                  </a>
+                  />
                 )}
-                <Button type="button" variant="outline" onClick={() => onRetryInstallations?.()}>
-                  {t(locale, "targets.addDialog.recheck")}
-                </Button>
-              </>
-            ) : null}
-            {installations.state === "ok" && installations.installations.length > 0 ? (
-              <>
-                <ul className="flex flex-col gap-1 text-sm text-muted-foreground">
-                  {installations.installations.map((row) => (
-                    <li key={row.installation_id}>
-                      {t(locale, "targets.addDialog.installationRow", {
-                        account: row.account_login ?? t(locale, "targets.addDialog.installationNoAccount"),
-                        id: row.installation_id,
-                        time: formatRelativeTime(row.seen_at, locale),
-                      })}
-                    </li>
-                  ))}
-                </ul>
-                <Button type="button" variant="outline" onClick={() => onRetryInstallations?.()}>
-                  {t(locale, "targets.addDialog.recheck")}
-                </Button>
-              </>
-            ) : null}
+              </div>
+              <div className="flex flex-col gap-2">
+                {installations.state === "loading" ? (
+                  <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.loadingInstallations")}</p>
+                ) : null}
+                {installations.state === "error" ? (
+                  <ErrorState
+                    locale={locale}
+                    message={t(locale, "targets.addDialog.loadInstallationsFailed")}
+                    onRetry={onRetryInstallations}
+                  />
+                ) : null}
+                {installations.state === "ok" && installations.installations.length === 0 ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.noInstallations")}</p>
+                    <Button type="button" variant="outline" onClick={() => onRetryInstallations?.()}>
+                      {t(locale, "targets.addDialog.recheck")}
+                    </Button>
+                  </>
+                ) : null}
+                {installations.state === "ok" && installations.installations.length > 0 ? (
+                  <>
+                    <ul className="flex flex-col gap-1 text-sm text-muted-foreground">
+                      {installations.installations.map((row) => (
+                        <li key={row.installation_id}>
+                          {t(locale, "targets.addDialog.installationRow", {
+                            account: row.account_login ?? t(locale, "targets.addDialog.installationNoAccount"),
+                            id: row.installation_id,
+                            time: formatRelativeTime(row.seen_at, locale),
+                          })}
+                        </li>
+                      ))}
+                    </ul>
+                    <Button type="button" variant="outline" onClick={() => onRetryInstallations?.()}>
+                      {t(locale, "targets.addDialog.recheck")}
+                    </Button>
+                  </>
+                ) : null}
+              </div>
+            </div>
           </section>
 
           {/* Step 3 — query-first repository scan. */}

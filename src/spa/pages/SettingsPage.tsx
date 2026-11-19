@@ -22,6 +22,7 @@ import {
   TabsTrigger,
 } from "@design-system";
 import { AppAvatar } from "../components/AppAvatar";
+import { AppInstallIdentity, appInstallHref } from "../components/AppInstallIdentity";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { fetchJson, postForm, putJson } from "../api";
@@ -538,7 +539,7 @@ export function AppInstallSection({
 }) {
   const slug = app.github_slug;
   const name = appDisplayName(app);
-  const href = slug ? `https://github.com/apps/${encodeURIComponent(slug)}/installations/new` : null;
+  const href = appInstallHref(slug);
   const [claiming, setClaiming] = useState(false);
   const [claimFailed, setClaimFailed] = useState(false);
   /** The installation id being bound, so one row's action is not doubled. */
@@ -593,90 +594,77 @@ export function AppInstallSection({
 
   return (
     <FlowSection title={t(locale, "settings.install")} subtitle={slug ? t(locale, "settings.installCopy") : undefined}>
-      <div className="flex items-start gap-4">
-        <AppAvatar
-          src={app.github_avatar_url}
-          appId={app.github_app_id}
-          className="h-10 w-10 shrink-0 rounded-full border border-(--border-default) object-cover"
-        />
-        <div className="flex min-w-0 flex-col gap-1">
-          <p className="font-semibold">{name}</p>
-          {blocked ? null : href === null ? (
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
-          ) : app.scope === "shared" && installation === null ? (
-            <>
-              <p className="text-sm text-muted-foreground">{t(locale, "settings.installClaimCopy")}</p>
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-fit"
-                disabled={claiming}
-                onClick={() => void startClaim()}
-              >
-                {t(locale, "settings.installClaim")}
-              </Button>
-              {claimFailed ? (
-                <p role="status" className="text-sm text-(--tone-warn-fg)">
-                  {t(locale, "settings.installClaimFailed")}
-                </p>
-              ) : null}
-              {pendingInstallations.length === 0 ? null : (
-                <div className="flex flex-col gap-2">
-                  <p className="text-sm font-medium">{t(locale, "settings.installPending")}</p>
-                  <ul className="flex flex-col gap-2">
-                    {pendingInstallations.map((row) => (
-                      <li key={row.installation_id} className="flex items-center gap-2 text-sm">
-                        <span>
-                          {row.account_login === null
-                            ? t(locale, "settings.installPendingUnknownAccount", {
-                                id: String(row.installation_id),
-                              })
-                            : row.account_login}
-                        </span>
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          className="w-fit"
-                          disabled={binding !== null}
-                          onClick={() => void bindInstallation(row.installation_id)}
-                        >
-                          {t(locale, "settings.installPendingBind")}
-                        </Button>
-                      </li>
-                    ))}
-                  </ul>
-                  {bindFailed ? (
-                    <p role="status" className="text-sm text-(--tone-warn-fg)">
-                      {t(locale, "settings.installBindFailed")}
-                    </p>
-                  ) : null}
-                </div>
-              )}
-            </>
-          ) : (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex w-fit items-center gap-1.5 text-sm text-primary hover:underline"
-              aria-label={t(locale, "settings.installLinkAria", { name })}
+      <AppInstallIdentity
+        locale={locale}
+        name={name}
+        avatarSrc={app.github_avatar_url}
+        appId={app.github_app_id}
+        href={blocked || href === null || (app.scope === "shared" && installation === null) ? null : href}
+      >
+        {blocked ? null : href === null ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
+        ) : app.scope === "shared" && installation === null ? (
+          <>
+            <p className="text-sm text-muted-foreground">{t(locale, "settings.installClaimCopy")}</p>
+            <Button
+              type="button"
+              variant="secondary"
+              className="w-fit"
+              disabled={claiming}
+              onClick={() => void startClaim()}
             >
-              {t(locale, "settings.installLink")}
-              <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            </a>
-          )}
-          {installation === null ? null : (
-            <p className="text-sm text-muted-foreground">
-              {installation.account_login === null
-                ? t(locale, "settings.installBoundNoAccount", { id: String(installation.id) })
-                : t(locale, "settings.installBoundAccount", { account: installation.account_login })}
-            </p>
-          )}
-          {installation !== null && installation.removed ? (
-            <p className="text-sm text-(--tone-warn-fg)">{t(locale, "settings.installRemoved")}</p>
-          ) : null}
-        </div>
-      </div>
+              {t(locale, "settings.installClaim")}
+            </Button>
+            {claimFailed ? (
+              <p role="status" className="text-sm text-(--tone-warn-fg)">
+                {t(locale, "settings.installClaimFailed")}
+              </p>
+            ) : null}
+            {pendingInstallations.length === 0 ? null : (
+              <div className="flex flex-col gap-2">
+                <p className="text-sm font-medium">{t(locale, "settings.installPending")}</p>
+                <ul className="flex flex-col gap-2">
+                  {pendingInstallations.map((row) => (
+                    <li key={row.installation_id} className="flex items-center gap-2 text-sm">
+                      <span>
+                        {row.account_login === null
+                          ? t(locale, "settings.installPendingUnknownAccount", {
+                              id: String(row.installation_id),
+                            })
+                          : row.account_login}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="w-fit"
+                        disabled={binding !== null}
+                        onClick={() => void bindInstallation(row.installation_id)}
+                      >
+                        {t(locale, "settings.installPendingBind")}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+                {bindFailed ? (
+                  <p role="status" className="text-sm text-(--tone-warn-fg)">
+                    {t(locale, "settings.installBindFailed")}
+                  </p>
+                ) : null}
+              </div>
+            )}
+          </>
+        ) : null}
+        {installation === null ? null : (
+          <p className="text-sm text-muted-foreground">
+            {installation.account_login === null
+              ? t(locale, "settings.installBoundNoAccount", { id: String(installation.id) })
+              : t(locale, "settings.installBoundAccount", { account: installation.account_login })}
+          </p>
+        )}
+        {installation !== null && installation.removed ? (
+          <p className="text-sm text-(--tone-warn-fg)">{t(locale, "settings.installRemoved")}</p>
+        ) : null}
+      </AppInstallIdentity>
     </FlowSection>
   );
 }

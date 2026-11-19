@@ -15,8 +15,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 import {
   Button,
-  CardContent,
-  CardHeader,
+  FlowSection,
   Input,
   Select,
   SelectContent,
@@ -26,7 +25,7 @@ import {
   ToggleGroup,
   ToggleGroupItem,
 } from "@design-system";
-import { SectionCard, SectionCardTitle } from "../components/SectionCard";
+import { AppInstallIdentity } from "../components/AppInstallIdentity";
 import { postJson } from "../api";
 import { apiBase } from "../workspace-base";
 import {
@@ -81,6 +80,9 @@ export type TargetPolicyPayload = {
     repo_owner: string | null;
     repo_name: string | null;
     app_name: string | null;
+    /** The bound App's GitHub facts for the identity row. */
+    app_id: number | null;
+    app_avatar_url: string | null;
     review_enabled: number;
     follow_workspace_defaults: number;
     /** The target-owned draft switch: 0 = a draft is held until it is ready. */
@@ -126,6 +128,12 @@ export function parseTargetPolicyPayload(data: unknown): TargetPolicyPayload | n
   if (repoOwner !== null && typeof repoOwner !== "string") return null;
   if (repoName !== null && typeof repoName !== "string") return null;
   if (appName !== null && typeof appName !== "string") return null;
+  const appId = row.app_id;
+  const appAvatarUrl = row.app_avatar_url;
+  // Missing fields read as null (older payloads), a wrong type rejects.
+  if (appId !== undefined && appId !== null && typeof appId !== "number") return null;
+  if (appAvatarUrl !== undefined && appAvatarUrl !== null && typeof appAvatarUrl !== "string")
+    return null;
   if (typeof row.review_enabled !== "number") return null;
   if (typeof row.follow_workspace_defaults !== "number") return null;
   const draftSwitch = row.review_drafts;
@@ -137,6 +145,8 @@ export function parseTargetPolicyPayload(data: unknown): TargetPolicyPayload | n
       repo_owner: repoOwner,
       repo_name: repoName,
       app_name: appName,
+      app_id: appId ?? null,
+      app_avatar_url: appAvatarUrl ?? null,
       review_enabled: row.review_enabled,
       follow_workspace_defaults: row.follow_workspace_defaults,
       review_drafts: draftSwitch,
@@ -158,21 +168,14 @@ const TRIGGER_LABEL_KEYS: Record<ReviewTriggerMode, DictionaryKey> = {
 const SWITCH_CLASS = "size-4 accent-(--tone-accent-solid)";
 
 /**
- * The four policy controls — trigger, depth, the gate score and its verdicts —
- * as ONE unit, because the target tab and the workspace-defaults tab render
- * exactly these four and differ only in what a save says. The gate is the one
- * cluster with a draft (two fields, one button); every other control saves on
- * selection and reads its value from `settings`, so a failed save simply leaves
- * the stored value on screen.
+ * The policy controls — trigger, depth, the gate score and its verdicts — each
+ * inside its own section, shared by the target tab and the workspace-defaults
+ * tab, which differ only in what a save says. Every control except the gate
+ * saves on selection and reads its value from `settings`, so a failed save
+ * simply leaves the stored value on screen. Each control's visible label is
+ * its section title, so the controls carry `aria-label`s instead.
  */
-export function ReviewPolicyFields({
-  locale,
-  settings,
-  levelDefault,
-  readOnly,
-  afterTrigger,
-  onSave,
-}: {
+type ReviewPolicyProps = {
   locale: Locale;
   settings: TargetPolicySettings;
   /** The level the depth select's inherit face names as the current default. */
@@ -185,7 +188,89 @@ export function ReviewPolicyFields({
   afterTrigger?: ReactNode;
   /** The caller's save: the one changed field, and only that field. */
   onSave: (fields: Record<string, unknown>) => Promise<void>;
-}) {
+};
+
+export function ReviewTriggerField({
+  locale,
+  settings,
+  readOnly,
+  afterTrigger,
+  onSave,
+}: Pick<ReviewPolicyProps, "locale" | "settings" | "readOnly" | "afterTrigger" | "onSave">) {
+  return (
+    <>
+      <div className="w-fit">
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          size="sm"
+          value={settings.trigger_mode}
+          disabled={readOnly}
+          onValueChange={(value) => {
+            if (value !== "") void onSave({ trigger_mode: value });
+          }}
+          aria-label={t(locale, "settings.triggerMode")}
+        >
+          {(Object.keys(TRIGGER_LABEL_KEYS) as ReviewTriggerMode[]).map((mode) => (
+            <ToggleGroupItem key={mode} value={mode} title={mode}>
+              {t(locale, TRIGGER_LABEL_KEYS[mode])}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+      </div>
+
+      {afterTrigger}
+    </>
+  );
+}
+
+export function ReviewDepthField({
+  locale,
+  settings,
+  levelDefault,
+  readOnly,
+  onSave,
+}: Pick<ReviewPolicyProps, "locale" | "settings" | "levelDefault" | "readOnly" | "onSave">) {
+  const level: ReviewDepthChoice = settings.review_level ?? REVIEW_DEPTH_INHERIT;
+  const levelOptions = reviewDepthOptions(locale, levelDefault ?? "default");
+  const levelLabel = t(locale, "settings.reviewDepth");
+  return (
+    <div className="w-fit max-w-xs">
+      <Select
+        value={level}
+        disabled={readOnly}
+        onValueChange={(value) => {
+          void onSave({ review_level: value === REVIEW_DEPTH_INHERIT ? null : value });
+        }}
+      >
+        <SelectTrigger aria-label={levelLabel}>
+          <SelectValue>
+            {levelOptions.find((option) => option.value === level)?.label ?? levelLabel}
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          {levelOptions.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+/**
+ * The gate is the one cluster with a draft (two fields, one button): the score
+ * and the verdict set stage locally until the save. The fieldset's visible
+ * title is the section heading, so `aria-label` names it instead of a legend.
+ */
+export function ReviewGateField({
+  locale,
+  settings,
+  readOnly,
+  onSave,
+}: Pick<ReviewPolicyProps, "locale" | "settings" | "readOnly" | "onSave">) {
   const [score, setScore] = useState(String(settings.check_min_score));
   const [verdicts, setVerdicts] = useState<string[]>([...settings.check_pass_verdicts]);
   const storedVerdicts = settings.check_pass_verdicts.join(",");
@@ -194,10 +279,6 @@ export function ReviewPolicyFields({
     setVerdicts([...settings.check_pass_verdicts]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.check_min_score, storedVerdicts]);
-
-  const level: ReviewDepthChoice = settings.review_level ?? REVIEW_DEPTH_INHERIT;
-  const levelOptions = reviewDepthOptions(locale, levelDefault ?? "default");
-  const levelLabel = t(locale, "settings.reviewDepth");
 
   function toggleVerdict(verdict: string): void {
     setVerdicts((current) =>
@@ -208,120 +289,106 @@ export function ReviewPolicyFields({
   }
 
   return (
-    <>
-      <div className="flex flex-col gap-2">
-        <span className="text-sm font-medium">{t(locale, "settings.triggerMode")}</span>
-        <div className="w-fit">
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            size="sm"
-            value={settings.trigger_mode}
-            disabled={readOnly}
-            onValueChange={(value) => {
-              if (value !== "") void onSave({ trigger_mode: value });
-            }}
-            aria-label={t(locale, "settings.triggerMode")}
-          >
-            {(Object.keys(TRIGGER_LABEL_KEYS) as ReviewTriggerMode[]).map((mode) => (
-              <ToggleGroupItem key={mode} value={mode} title={mode}>
-                {t(locale, TRIGGER_LABEL_KEYS[mode])}
-              </ToggleGroupItem>
+    <fieldset className="flex flex-col gap-3" aria-label={t(locale, "settings.reviewGate")}>
+      {settings.check_pass_verdicts_readable ? (
+        <>
+          <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
+            {t(locale, "settings.reviewGateScore")}
+            <Input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              className="w-28"
+              value={score}
+              disabled={readOnly}
+              onChange={(event) => setScore(event.target.value)}
+            />
+          </label>
+          <div className="flex flex-col gap-2">
+            <span className="text-sm font-medium">{t(locale, "settings.reviewGateVerdicts")}</span>
+            {PR_VERDICTS.map((verdict) => (
+              <label key={verdict} className="flex w-fit items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className={SWITCH_CLASS}
+                  checked={verdicts.includes(verdict)}
+                  disabled={readOnly}
+                  onChange={() => toggleVerdict(verdict)}
+                />
+                {verdict}
+              </label>
             ))}
-          </ToggleGroup>
-        </div>
-      </div>
+          </div>
+          {verdicts.length === 0 ? (
+            <p role="status" className="text-sm text-(--tone-warn-fg)">
+              {t(locale, "settings.reviewGateFailClosed")}
+            </p>
+          ) : null}
+          <div>
+            <Button
+              type="button"
+              disabled={readOnly || score.trim() === "" || Number.isNaN(Number(score))}
+              onClick={() =>
+                void onSave({
+                  check_min_score: Number(score),
+                  // One entry per checked box, in the vocabulary's order.
+                  check_pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
+                })
+              }
+            >
+              {t(locale, "settings.reviewGateSave")}
+            </Button>
+          </div>
+        </>
+      ) : (
+        // The stored list is unreadable, so there is no value to edit and no
+        // save that could round-trip it: the same recovery copy the
+        // App-settings face states stands in for the whole gate.
+        <p role="status" className="text-sm text-(--tone-warn-fg)">
+          {t(locale, "settings.reviewGateUnreadable")}
+        </p>
+      )}
+    </fieldset>
+  );
+}
 
-      {afterTrigger}
-
-      <div className="flex flex-col gap-2">
-        <span className="text-sm font-medium">{levelLabel}</span>
-        <div className="w-fit max-w-xs">
-          <Select
-            value={level}
-            disabled={readOnly}
-            onValueChange={(value) => {
-              void onSave({ review_level: value === REVIEW_DEPTH_INHERIT ? null : value });
-            }}
-          >
-            <SelectTrigger aria-label={levelLabel}>
-              <SelectValue>
-                {levelOptions.find((option) => option.value === level)?.label ?? levelLabel}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {levelOptions.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      <fieldset className="flex flex-col gap-3">
-        <legend className="text-sm font-medium">{t(locale, "settings.reviewGate")}</legend>
-        {settings.check_pass_verdicts_readable ? (
-          <>
-            <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
-              {t(locale, "settings.reviewGateScore")}
-              <Input
-                type="number"
-                min={0}
-                max={100}
-                step={1}
-                className="w-28"
-                value={score}
-                disabled={readOnly}
-                onChange={(event) => setScore(event.target.value)}
-              />
-            </label>
-            <div className="flex flex-col gap-2">
-              <span className="text-sm font-medium">{t(locale, "settings.reviewGateVerdicts")}</span>
-              {PR_VERDICTS.map((verdict) => (
-                <label key={verdict} className="flex w-fit items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className={SWITCH_CLASS}
-                    checked={verdicts.includes(verdict)}
-                    disabled={readOnly}
-                    onChange={() => toggleVerdict(verdict)}
-                  />
-                  {verdict}
-                </label>
-              ))}
-            </div>
-            {verdicts.length === 0 ? (
-              <p role="status" className="text-sm text-(--tone-warn-fg)">
-                {t(locale, "settings.reviewGateFailClosed")}
-              </p>
-            ) : null}
-            <div>
-              <Button
-                type="button"
-                disabled={readOnly || score.trim() === "" || Number.isNaN(Number(score))}
-                onClick={() =>
-                  void onSave({
-                    check_min_score: Number(score),
-                    // One entry per checked box, in the vocabulary's order.
-                    check_pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
-                  })
-                }
-              >
-                {t(locale, "settings.reviewGateSave")}
-              </Button>
-            </div>
-          </>
-        ) : (
-          // The stored list is unreadable, so there is no value to edit and no
-          // save that could round-trip it: the same recovery copy the
-          // App-settings face states stands in for the whole gate.
-          <p role="status" className="text-sm text-(--tone-warn-fg)">
-            {t(locale, "settings.reviewGateUnreadable")}
-          </p>
-        )}
-      </fieldset>
+/**
+ * The three policy sections — trigger, depth, gate — assembled once for both
+ * faces: the target tab and the workspace-defaults tab render the same titles
+ * and controls and differ only in what a save says.
+ */
+export function ReviewPolicySections({
+  locale,
+  settings,
+  levelDefault,
+  readOnly,
+  afterTrigger,
+  onSave,
+}: ReviewPolicyProps) {
+  return (
+    <>
+      <FlowSection title={t(locale, "settings.triggerMode")}>
+        <ReviewTriggerField
+          locale={locale}
+          settings={settings}
+          readOnly={readOnly}
+          afterTrigger={afterTrigger}
+          onSave={onSave}
+        />
+      </FlowSection>
+      <FlowSection title={t(locale, "settings.reviewDepth")}>
+        <ReviewDepthField
+          locale={locale}
+          settings={settings}
+          levelDefault={levelDefault}
+          readOnly={readOnly}
+          onSave={onSave}
+        />
+      </FlowSection>
+      <FlowSection title={t(locale, "settings.reviewGate")}>
+        <ReviewGateField locale={locale} settings={settings} readOnly={readOnly} onSave={onSave} />
+      </FlowSection>
     </>
   );
 }
@@ -393,29 +460,31 @@ export function TargetSettingsTab({
   );
 
   return (
-    <SectionCard tier="secondary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "targets.settings.heading")}</SectionCardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-5">
-        {/* Which bot this repository reviews under. Read-only: rebinding a
-            repository to another App is planned, not supported yet. */}
-        <div className="flex flex-col gap-1">
-          <span className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">
-            {t(locale, "targets.settings.boundApp")}
-          </span>
-          <span className="text-sm text-foreground">{target.app_name ?? "—"}</span>
-          <span className="text-sm text-muted-foreground">{t(locale, "targets.settings.boundAppPlanned")}</span>
-        </div>
-        <ReviewPolicyFields
+    <div className="flex flex-col">
+      {/* Which bot this repository reviews under. Read-only: rebinding a
+          repository to another App is planned, not supported yet. */}
+      <FlowSection title={t(locale, "targets.settings.boundApp")}>
+        <AppInstallIdentity
           locale={locale}
-          settings={effective}
-          levelDefault={defaults.review_level}
-          readOnly={busy || inheriting || gateUnreadable}
-          afterTrigger={draftSwitch}
-          onSave={savePolicy}
-        />
-
+          name={target.app_name ?? "—"}
+          avatarSrc={target.app_avatar_url}
+          appId={target.app_id ?? undefined}
+          href={null}
+        >
+          <span className="text-sm text-muted-foreground">
+            {t(locale, "targets.settings.boundAppPlanned")}
+          </span>
+        </AppInstallIdentity>
+      </FlowSection>
+      <ReviewPolicySections
+        locale={locale}
+        settings={effective}
+        levelDefault={defaults.review_level}
+        readOnly={busy || inheriting || gateUnreadable}
+        afterTrigger={draftSwitch}
+        onSave={savePolicy}
+      />
+      <FlowSection title={t(locale, "targets.settings.sectionState")}>
         <label className="flex w-fit items-center gap-2 text-sm font-medium">
           <input
             type="checkbox"
@@ -442,7 +511,7 @@ export function TargetSettingsTab({
           />
           {t(locale, target.review_enabled === 0 ? "settings.resumeReviews" : "settings.pauseReviews")}
         </label>
-      </CardContent>
-    </SectionCard>
+      </FlowSection>
+    </div>
   );
 }

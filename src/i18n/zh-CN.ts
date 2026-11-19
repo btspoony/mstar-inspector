@@ -200,6 +200,8 @@ export const zhCN: Dictionary = {
       following: "跟随工作区默认；关闭继承后可单独覆盖。",
       boundApp: "绑定的应用",
       boundAppPlanned: "更改仓库绑定的应用已在计划中，暂不支持。",
+      /** 审查状态 section：继承与暂停开关（target 状态，非策略）。 */
+      sectionState: "审查状态",
     },
     /** 组合空状态（EmptyState 的标题 + 描述）。 */
     emptyTitle: "还没有仓库",
@@ -232,8 +234,6 @@ export const zhCN: Dictionary = {
       loadingInstallations: "正在检查安装…",
       loadInstallationsFailed: "无法读取该应用的安装信息。",
       noInstallations: "该应用尚未安装到任何账号。",
-      /** 指向 GitHub 安装页；由应用自身的 slug 拼出。 */
-      installNow: "在 GitHub 上安装该应用",
       recheck: "重新检查",
       /** 一行安装信息：账号、安装 ID 与最近一次可见时间。 */
       installationRow: "{account} · 安装 {id} · 最近可见 {time}",

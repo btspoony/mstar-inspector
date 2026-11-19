@@ -237,6 +237,8 @@ export const en = {
         "Following the workspace defaults; turn inheritance off to override them individually.",
       boundApp: "Bound App",
       boundAppPlanned: "Changing the App a repository is bound to is planned, not supported yet.",
+      /** The Review state section: the inheritance and pause switches (target state, not policy). */
+      sectionState: "Review state",
     },
     /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No repositories yet",
@@ -270,8 +272,6 @@ export const en = {
       loadingInstallations: "Checking installations…",
       loadInstallationsFailed: "Could not read this App's installations.",
       noInstallations: "This App is not installed on any account yet.",
-      /** The GitHub install page, from the App's own slug. */
-      installNow: "Install this App on GitHub",
       recheck: "Re-check",
       /** One installation row: account, id and the last time it was seen. */
       installationRow: "{account} · installation {id} · seen {time}",

@@ -261,7 +261,6 @@ describe("App detail IA copy", () => {
       "targets.addDialog.stepApp",
       "targets.addDialog.stepInstall",
       "targets.addDialog.stepRepos",
-      "targets.addDialog.installNow",
       "targets.addDialog.recheck",
       "targets.addDialog.resultsCount",
       "targets.addDialog.resultsTruncated",
