@@ -2,10 +2,11 @@ import { deepStrictEqual } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createReviewBotsStore } from "../src/dashboard/apps-store";
-import { createMigratedTestD1 } from "../tests/store/helpers";
+import { createMigratedTestD1, execMigrationScript } from "../tests/store/helpers";
 
 // Run from the repository root: bun scripts/bench-delivery-health.ts [baseline-ref]
-const baselineRef = process.argv[2] ?? "main";
+// Main immediately before the delivery-health rewrite; stable after this PR merges.
+const baselineRef = process.argv[2] ?? "3c9e829e54401a7d45415417dd3ee8f0908aef69";
 const baselineSha = execFileSync("git", ["rev-parse", "--verify", baselineRef], {
   encoding: "utf8",
 }).trim();
@@ -41,8 +42,16 @@ console.log("rows\tbefore ms\tafter ms\tspeedup");
 for (const rows of [3000, 15000, 60000]) {
   const handle = createMigratedTestD1();
   const db = handle.raw;
+  const foreignKeys = db.prepare<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()!.foreign_keys;
+  function assertHealthIndexes(present: boolean) {
+    const names = new Set(db.prepare<{ name: string }, []>("PRAGMA index_list('webhook_deliveries')").all()
+      .map((index) => index.name));
+    for (const index of ["idx_webhook_deliveries_bot_health", "idx_webhook_deliveries_bot_outcome_created"]) {
+      deepStrictEqual(names.has(index), present, `${index} must be ${present ? "present" : "absent"}`);
+    }
+  }
   try {
-    db.exec(`PRAGMA foreign_keys = OFF;
+    execMigrationScript(db, `PRAGMA foreign_keys = OFF;
       DROP INDEX idx_webhook_deliveries_bot_health;
       DROP INDEX idx_webhook_deliveries_bot_outcome_created;`);
     const insert = db.prepare(`INSERT INTO webhook_deliveries
@@ -80,8 +89,11 @@ for (const rows of [3000, 15000, 60000]) {
       };
     }
 
+    db.exec(`PRAGMA foreign_keys = ${foreignKeys}`);
+    assertHealthIndexes(false);
     const old = measure(before, "before");
-    db.exec(migration);
+    execMigrationScript(db, migration);
+    assertHealthIndexes(true);
     // Capture the store's own statements rather than maintaining a second rewrite.
     const after: string[] = [];
     await createReviewBotsStore({
@@ -92,10 +104,12 @@ for (const rows of [3000, 15000, 60000]) {
       },
     }).deliverySummaries(ids);
     deepStrictEqual(after.length, 2);
+    deepStrictEqual(after.some((sql, i) => sql !== before[i]), true, "Before and after SQL must differ");
     const improved = measure(after, "after");
     deepStrictEqual(improved.results, old.results);
     console.log(`${rows}\t${old.ms.toFixed(3)}\t${improved.ms.toFixed(3)}\t${(old.ms / improved.ms).toFixed(1)}x; results identical`);
   } finally {
+    db.exec(`PRAGMA foreign_keys = ${foreignKeys}`);
     db.close();
   }
 }
