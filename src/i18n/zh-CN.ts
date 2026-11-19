@@ -200,7 +200,7 @@ export const zhCN: Dictionary = {
       following: "跟随工作区默认；关闭继承后可单独覆盖。",
       boundApp: "绑定的应用",
       boundAppPlanned: "更改仓库绑定的应用已在计划中，暂不支持。",
-      /** 审查状态 section：继承与暂停开关（target 状态，非策略）。 */
+      /** 审查状态：继承与暂停开关。 */
       sectionState: "审查状态",
     },
     /** 组合空状态（EmptyState 的标题 + 描述）。 */

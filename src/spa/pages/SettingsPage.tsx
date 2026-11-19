@@ -593,13 +593,13 @@ export function AppInstallSection({
   }
 
   return (
-    <FlowSection title={t(locale, "settings.install")} subtitle={slug ? t(locale, "settings.installCopy") : undefined}>
+    <FlowSection title={t(locale, "settings.install")} subtitle={href === null ? undefined : t(locale, "settings.installCopy")}>
       <AppInstallIdentity
         locale={locale}
         name={name}
         avatarSrc={app.github_avatar_url}
         appId={app.github_app_id}
-        href={blocked || href === null || (app.scope === "shared" && installation === null) ? null : href}
+        href={blocked || (app.scope === "shared" && installation === null) ? null : href}
       >
         {blocked ? null : href === null ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>

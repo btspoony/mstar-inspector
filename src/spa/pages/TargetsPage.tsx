@@ -474,9 +474,9 @@ export function AddRepositoryDialogBody({
           </section>
 
           {/* Step 2 — the chosen App's live installations. */}
-          <section className="flex flex-col gap-1.5" data-slot="add-step-installations">
+          <section className="@container flex flex-col gap-1.5" data-slot="add-step-installations">
             <span className="text-sm font-medium">{t(locale, "targets.addDialog.stepInstall")}</span>
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex flex-col gap-4 @md:flex-row @md:items-start @md:justify-between">
               <div className="min-w-0">
                 {selectedApp === null ? null : (
                   <AppInstallIdentity
