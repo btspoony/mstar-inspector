@@ -10,7 +10,7 @@
  * `QUEUE_MAX_ATTEMPTS` lives here because THIS module owns the per-delivery row
  * arithmetic: one message can leave at most one row per delivery, and the two
  * readers that must agree — the consumer's failed-claim stamp and the sweep's
- * alert threshold — are both derived from it instead of restating "4" or "6".
+ * default alert threshold — are both derived from it instead of restating it.
  * It is a queue fact, kept in a leaf so neither the worker's cron path nor the
  * review pipeline has to load the other to read it.
  *
@@ -26,7 +26,7 @@
  * NEVER writes created_at — the column is ALWAYS the DDL DEFAULT
  * `datetime('now')` (migration 0010), i.e. the `YYYY-MM-DD HH:MM:SS` UTC
  * format. The cron sweep's TEXT window comparison
- * (`created_at > datetime('now', '-24 hours')`) depends on this exact
+ * (`created_at > datetime('now', ?)`) depends on this exact
  * format; a producer that wrote an ISO-8601 or epoch value would silently
  * break the sweep. A CHECK constraint would require a table-rebuild
  * migration (SQLite) — disproportionate for a nit, so the contract is
@@ -74,7 +74,7 @@ import type { D1Like } from "./types";
  * platform and this code cannot drift apart silently.
  *
  * The consumer imports it for its failed-claim stamp; the sweep derives its
- * alert threshold from it. Kept in this leaf so neither has to load the other.
+ * default alert threshold from it. Kept in this leaf so neither has to load the other.
  */
 export const QUEUE_MAX_ATTEMPTS = 6;
 

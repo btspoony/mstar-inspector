@@ -14,14 +14,15 @@
 import { describe, expect, test } from "bun:test";
 import type { D1Database, ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
 import "../helpers/cloudflare-workers-mock";
-import { createFailureStore } from "../../src/store/failure-store";
-import { SWEEP_FAILURE_THRESHOLD } from "../../src/worker/sweep";
+import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 import { createMigratedTestD1, seedBot, seedTarget } from "../store/helpers";
 import { defaultSweepLog } from "../../src/worker/sweep";
 
 const { default: worker, Sandbox, SandboxV1 } = await import("../../src/worker/entry");
 import { APP_VERSION } from "../../src/version";
 import type { Env } from "../../src/worker/env";
+
+const SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1;
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {

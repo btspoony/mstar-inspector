@@ -2611,8 +2611,8 @@ the `/_internal_admin` runtime page groups the last 24 hours' rows by reason —
 `pr-held` (the PR lock), `system-cap`, `workspace-cap` and `error` (a storage
 fault) — on the same `GET /_internal_admin/api/runtime` read that reports the
 caps, field `admissionDrops24h`. That page is the surface for this signal
-because the 15 min cron sweep (§ Cron failure sweep) pages only above
-`SWEEP_FAILURE_THRESHOLD`.
+because the 15 min cron sweep (§ Cron failure sweep) pages only above the
+configured failure threshold.
 
 Two more fields ride that same runtime read, and the same page renders both:
 
@@ -2730,7 +2730,7 @@ behave.
   ([§ Lifecycle recovery](#lifecycle-recovery-7111)), then the
   Check recovery reconciler ([§ Check recovery](#check-recovery-7112)),
   each stage in its own try/catch so none can break another. The sweep reads
-  `review_failures` ONCE over the trailing 24h, grouped by stage
+  `review_failures` ONCE over the configured trailing window, grouped by stage
   (`SELECT stage, COUNT(*) … GROUP BY stage ORDER BY stage`; the per-attempt
   rows written by migration 0010 make this table the sufficient failure
   signal). `failures_24h` is the sum of those rows and the SAME ordered rows
@@ -2774,14 +2774,29 @@ behave.
   stages, so the tab's number and the history under it agree. The pager is the
   only reader that adds `quota`, so extending the paging set never hides a row
   from the dashboard. The stage lists are written once.
-- Threshold: `failures_24h > 7`, derived in `src/worker/sweep.ts` as
-  `SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1` (per-attempt semantics — a
-  DLQ'd message leaves up to 6 rows: 1 initial delivery + `max_retries: 5` = 5
-  retries). Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,
-  `SWEEP_WINDOW_HOURS`, `SWEEP_WEBHOOK_TIMEOUT_MS`).
+- Configure **Scheduled failure sweep** at `/_internal_admin/runtime`. A save
+  updates the six `platform.sweep.*` rows in `review_runtime_settings` and
+  applies on the next sweep. The operator-only `PATCH /_internal_admin/api/runtime`
+  accepts `{ "sweep": { ... } }` with all six integer fields below.
+
+  | API field | Absent-row default | Accepted range |
+  |---|---:|---:|
+  | `failureThreshold` | `QUEUE_MAX_ATTEMPTS + 1` (currently 7); paging requires strictly more failures | 1–10,000 |
+  | `windowHours` | 24 | 1–168 |
+  | `webhookTimeoutMs` | 3,000 | 100–15,000 |
+  | `retentionDays` | 30 | 1–365 |
+  | `retentionCap` | 500 delivery deletions per sweep | 1–500 |
+  | `inviteLapseCap` | 500 invite expirations per sweep | 1–500 |
+
+  The alert retains the wire field `failures_24h` for compatibility; use
+  `thresholds.window_hours` to interpret its actual counting interval. If
+  sweep settings cannot be read, valid values still apply and unreadable ones
+  fall back to defaults; delivery deletion is paused until the settings can be
+  read again. The admin form can retry the read or replace the settings.
+
 - Alert transport: structured `ops_sweep_alert` log event
   (`{event, failures_24h, dlq_check: "skipped", thresholds, stages}`) +
-  optional POST to `ALERT_WEBHOOK_URL` (JSON body, 3s timeout; a POST failure
+  optional POST to `ALERT_WEBHOOK_URL` (JSON body, configurable timeout; a POST failure
   degrades to a warn log, never throws). Absent `ALERT_WEBHOOK_URL` =
   log-only alerting. `stages` is `[{stage, count}, …]` in stage order — the
   exact rows whose counts sum to `failures_24h`, each one a stage an operator
@@ -2793,10 +2808,10 @@ behave.
   WINDOW, not a latch. Before posting, the sweep reads the newest
   `platform_audit_events` row with action `alert.failure_paging`
   (`SELECT MAX(created_at) …`): while that stamp is inside
-  `SWEEP_WINDOW_HOURS`, the breach posts nothing (`not_attempted`). After a 2xx
+  the configured interval, the breach posts nothing (`not_attempted`). After a 2xx
   POST it appends one such row (actor `sweep`, detail
-  `{failures_24h, stages}`). Nothing is ever stored in
-  `review_runtime_settings` — no key, no state, no generation — so there is no
+  `{failures_24h, stages}`). No de-bounce state is stored in
+  `review_runtime_settings`, so there is no
   edge to close and nothing to clear: nothing is latched, so no stale state can
   suppress an alert. The only thing that suppresses a post is an audit row whose
   stamp falls inside the window — that is what the de-bounce is for, and the

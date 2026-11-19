@@ -21,6 +21,8 @@ import type { Env } from "../worker/env";
 import { createMigratedTestD1, type TestD1 } from "../../tests/store/helpers";
 import { withSpaAssets } from "../../tests/helpers/spa";
 import { t } from "../i18n";
+import { SWEEP_LIMITS } from "./runtime-config-store";
+import { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 
 const SESSION_SECRET = ["test", "runtime", "routes", "session", "32-bytes!"].join("-");
 const OPERATOR = "Support-Bot";
@@ -158,6 +160,28 @@ const DEFAULT_COMMENT_CLAIM = {
   outboxMin: 1,
   outboxMax: 100,
   degraded: false,
+};
+
+const DEFAULT_SWEEP = {
+  values: {
+    failureThreshold: QUEUE_MAX_ATTEMPTS + 1,
+    windowHours: 24,
+    webhookTimeoutMs: 3_000,
+    retentionDays: 30,
+    retentionCap: 500,
+    inviteLapseCap: 500,
+  },
+  limits: SWEEP_LIMITS,
+  degraded: false,
+};
+
+const SWEEP_OVERRIDES = {
+  failureThreshold: 4,
+  windowHours: 12,
+  webhookTimeoutMs: 1_200,
+  retentionDays: 60,
+  retentionCap: 200,
+  inviteLapseCap: 250,
 };
 
 /** Both stored budget rows, raw, keyed by PK. */
@@ -364,6 +388,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       officialWorkspaceId: null,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       commentClaim: DEFAULT_COMMENT_CLAIM,
+      sweep: DEFAULT_SWEEP,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
@@ -462,6 +487,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       officialWorkspaceId: null,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       commentClaim: DEFAULT_COMMENT_CLAIM,
+      sweep: DEFAULT_SWEEP,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
@@ -478,6 +504,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       officialWorkspaceId: null,
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       commentClaim: DEFAULT_COMMENT_CLAIM,
+      sweep: DEFAULT_SWEEP,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
@@ -726,6 +753,51 @@ describe("PATCH /_internal_admin/api/runtime commentClaim", () => {
       expect(res.status, body).toBe(400);
     }
     expect(storedSystem(db)).toBeNull();
+    expect(storedBudgets(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("PATCH /_internal_admin/api/runtime sweep", () => {
+  test("one operator save persists all overrides and records the before/after audit", async () => {
+    const { db } = fixture();
+    for (const values of [DEFAULT_SWEEP.values, SWEEP_OVERRIDES]) {
+      const response = await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ sweep: values }) });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ sweep: values });
+    }
+    const response = await runtimeApi(db, { method: "GET" });
+    expect(await response.json()).toHaveProperty("sweep", { ...DEFAULT_SWEEP, values: SWEEP_OVERRIDES });
+    expect(storedBudgets(db)).toEqual({
+      "platform.sweep.failure_threshold": "4",
+      "platform.sweep.window_hours": "12",
+      "platform.sweep.webhook_timeout_ms": "1200",
+      "platform.sweep.retention_days": "60",
+      "platform.sweep.retention_cap": "200",
+      "platform.sweep.invite_lapse_cap": "250",
+    });
+    const rows = db.raw.query(
+      "SELECT actor_login, detail_json FROM platform_audit_events WHERE action = 'platform.sweep.set' ORDER BY rowid",
+    ).all() as Array<{ actor_login: string; detail_json: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[1]?.actor_login).toBe(OPERATOR);
+    expect(JSON.parse(rows[1]!.detail_json)).toEqual({ before: DEFAULT_SWEEP.values, after: SWEEP_OVERRIDES });
+  });
+
+  test("non-operators, invalid values and mixed writes cannot change any row", async () => {
+    const { db } = fixture();
+    const body = JSON.stringify({ sweep: SWEEP_OVERRIDES });
+    expect((await runtimeApi(db, { method: "PATCH", body, login: "dana" })).status).toBe(404);
+    for (const input of [
+      { sweep: { ...SWEEP_OVERRIDES, retentionCap: 501 } },
+      { sweep: { ...SWEEP_OVERRIDES, inviteLapseCap: 501 } },
+      { sweep: { ...SWEEP_OVERRIDES, windowHours: "12" } },
+      { sweep: { ...SWEEP_OVERRIDES, webhookTimeoutMs: 1_200.5 } },
+      { sweep: { windowHours: 6 } },
+      { sweep: SWEEP_OVERRIDES, concurrency: 8 },
+    ]) {
+      expect((await runtimeApi(db, { method: "PATCH", body: JSON.stringify(input) })).status).toBe(400);
+    }
     expect(storedBudgets(db)).toEqual({});
     expect(auditRows(db)).toEqual([]);
   });

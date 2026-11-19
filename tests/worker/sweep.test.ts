@@ -1,8 +1,7 @@
 /**
  * Ops sweep tests (architect verdict AL-6) — the cron
  * failure sweep (src/worker/sweep.ts) over the REAL migration DDL
- * (bun:sqlite D1 double, tests/store/helpers.ts) plus a recording fake for
- * the window-SQL pin and an injected fetch for the webhook paths.
+ * (bun:sqlite D1 double, tests/store/helpers.ts) plus an injected fetch for the webhook paths.
  *
  * Pinned contracts: the threshold DERIVED from the queue's delivery budget
  * (one fully-failed message never alerts), the 24h window, the 3s webhook
@@ -13,19 +12,13 @@
 
 import { describe, expect, jest, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { getSweepSettings, setSweepSettings } from "../../src/dashboard/runtime-config-store";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   ALERT_MAINTENANCE_AUDIT_ACTION,
   ALERT_PAGING_AUDIT_ACTION,
   runSweep,
-  SWEEP_FAILURE_THRESHOLD,
-  SWEEP_INVITE_LAPSE_CAP,
-  SWEEP_LOG_DETAIL_MAX,
-  SWEEP_RETENTION_CAP,
-  SWEEP_RETENTION_DAYS,
-  SWEEP_WEBHOOK_TIMEOUT_MS,
-  SWEEP_WINDOW_HOURS,
   type SweepAlertFields,
   type SweepCommentClaimFields,
   type SweepDeps,
@@ -43,6 +36,18 @@ import {
   type CommentClaimSettingsLogFields,
 } from "../../src/pipeline/comment-claim-settings-reader";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+
+const SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1;
+const SWEEP_INVITE_LAPSE_CAP = 500;
+const SWEEP_WINDOW_HOURS = 24;
+const SWEEP_OVERRIDE = {
+  failureThreshold: 2,
+  windowHours: 6,
+  webhookTimeoutMs: 250,
+  retentionDays: 60,
+  retentionCap: 1,
+  inviteLapseCap: 2,
+};
 
 /**
  * A migrated DB carrying the target every recorded row names (its FK parent).
@@ -101,12 +106,13 @@ function seedOutsideWindow(db: D1Like & { raw: Database }): void {
 }
 
 /** Minimal D1Like that records the query text and answers COUNT = 0. */
-function recordingDb(captured: string[]): D1Like {
+function recordingDb(captured: string[], bindings: Map<string, unknown[]>): D1Like {
   return {
     prepare(query: string): D1StatementLike {
       captured.push(query);
       const stmt: D1StatementLike = {
-        bind(..._values: unknown[]): D1StatementLike {
+        bind(...values: unknown[]): D1StatementLike {
+          bindings.set(query, values);
           return stmt;
         },
         async first<T = Record<string, unknown>>(): Promise<T | null> {
@@ -133,30 +139,33 @@ function recordingDb(captured: string[]): D1Like {
 }
 
 describe("runSweep", () => {
-  test("pins the AL-6 threshold/window/timeout constants", () => {
-    // Derived from the queue's delivery budget: one fully-failed message leaves
-    // QUEUE_MAX_ATTEMPTS rows, so a threshold one row above it keeps "one job
-    // never alerts, the second one does".
-    expect(SWEEP_FAILURE_THRESHOLD).toBe(QUEUE_MAX_ATTEMPTS + 1);
-    expect(SWEEP_FAILURE_THRESHOLD).toBeGreaterThan(QUEUE_MAX_ATTEMPTS);
-    expect(SWEEP_WINDOW_HOURS).toBe(24);
-    expect(SWEEP_WEBHOOK_TIMEOUT_MS).toBe(3000);
+  test("absent rows preserve the existing cron defaults", async () => {
+    expect(await getSweepSettings(failureDb())).toEqual({
+      degraded: false,
+      values: {
+        failureThreshold: QUEUE_MAX_ATTEMPTS + 1,
+        windowHours: 24,
+        webhookTimeoutMs: 3_000,
+        retentionDays: 30,
+        retentionCap: 500,
+        inviteLapseCap: 500,
+      },
+    });
   });
 
-  test("counts review_failures with the trailing-24h window SQL", async () => {
+  test("only one settings read supplies the default window to both alert lanes", async () => {
     const captured: string[] = [];
-    const result = await runSweep(recordingDb(captured));
-    expect(captured[0]).toContain("DELETE FROM webhook_deliveries");
-    // Migration 0039: the ledger's own bounded retention, terminal rows only.
-    expect(captured[1]).toContain("DELETE FROM pull_requests");
-    expect(captured[1]).toContain("state IN ('closed', 'merged')");
-    expect(captured[2]).toContain("UPDATE workspace_invites");
+    const bindings = new Map<string, unknown[]>();
+    const result = await runSweep(recordingDb(captured, bindings));
+    expect(captured.filter((query) => query.includes("FROM review_runtime_settings"))).toHaveLength(1);
+    const deliveryDelete = captured.find((query) => query.includes("DELETE FROM webhook_deliveries"));
+    expect(bindings.get(deliveryDelete!)).toEqual(["-30 days", 500]);
     const countAt = captured.findIndex((query) => query.includes("FROM review_failures"));
-    expect(captured[countAt]).toContain("created_at > datetime('now', '-24 hours')");
+    expect(bindings.get(captured[countAt]!)).toEqual(["-24 hours"]);
     // The maintenance signal is its own trailing-window read, in the same
     // window, right after the grouped one.
     expect(captured[countAt + 1]).toContain("stage = 'maintenance_deferred'");
-    expect(captured[countAt + 1]).toContain("created_at > datetime('now', '-24 hours')");
+    expect(bindings.get(captured[countAt + 1]!)).toEqual(["-24 hours"]);
     // A healthy window has no page to de-bounce, so nothing follows the reads:
     // no state write, no audit append.
     expect(captured).toHaveLength(countAt + 2);
@@ -213,8 +222,10 @@ describe("runSweep", () => {
     });
   });
 
-  test("a backlog larger than one run's cap drains across successive runs, losing nothing", async () => {
+  test.each([null, SWEEP_OVERRIDE])("an invite backlog drains across successive runs (settings %j)", async (settings) => {
     const db = failureDb();
+    if (settings) await setSweepSettings(db, settings, "operator");
+    const cap = settings?.inviteLapseCap ?? SWEEP_INVITE_LAPSE_CAP;
     db.raw
       .query(`INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
               VALUES ('ws-2', 'ws-2', 'Second', NULL, '2026-10-21T00:00:00.000Z', NULL)`)
@@ -227,7 +238,7 @@ describe("runSweep", () => {
           created_at, expires_at, accepted_at)
        VALUES (?, ?, ?, 'member', ?, NULL, ?, ?, NULL)`,
     );
-    const backlog = SWEEP_INVITE_LAPSE_CAP + 2;
+    const backlog = cap + 2;
     for (let i = 0; i < backlog; i++) {
       // Spread across both workspaces: the flip is global, not workspace-scoped.
       insert.run(`lapsed-${i}`, i % 2 === 0 ? "default" : "ws-2", `lapsed-${i}`, "pending", lapsed, lapsed);
@@ -238,15 +249,15 @@ describe("runSweep", () => {
 
     const { log, calls } = captureLog();
     const first = await runSweep(db, { log });
-    expect(first.invitesExpired).toBe(SWEEP_INVITE_LAPSE_CAP);
+    expect(first.invitesExpired).toBe(cap);
     const pendingAfterFirst = db.raw
       .query("SELECT COUNT(*) AS n FROM workspace_invites WHERE status = 'pending' AND expires_at <= ?")
       .get(lapsed) as { n: number };
-    expect(pendingAfterFirst.n).toBe(backlog - SWEEP_INVITE_LAPSE_CAP);
+    expect(pendingAfterFirst.n).toBe(backlog - cap);
 
     // The remainder is not stranded: the next run picks it up.
     const second = await runSweep(db, { log });
-    expect(second.invitesExpired).toBe(backlog - SWEEP_INVITE_LAPSE_CAP);
+    expect(second.invitesExpired).toBe(backlog - cap);
     const third = await runSweep(db, { log });
     expect(third.invitesExpired).toBe(0);
 
@@ -368,15 +379,11 @@ describe("runSweep", () => {
       webhook: "absent",
     });
   });
-  test("retention: DELETE shape (30-day window, 500-row cap, no bound params) + retention_swept log carries the deleted count", async () => {
-    const captured: string[] = [];
-    const binds: unknown[][] = [];
+  test("retention_swept log carries the deleted count", async () => {
     const db: D1Like = {
-      prepare(query: string): D1StatementLike {
-        captured.push(query);
+      prepare(): D1StatementLike {
         const stmt: D1StatementLike = {
-          bind(...values: unknown[]): D1StatementLike {
-            binds.push(values);
+          bind(): D1StatementLike {
             return stmt;
           },
           async first<T = Record<string, unknown>>(): Promise<T | null> {
@@ -402,16 +409,6 @@ describe("runSweep", () => {
     };
     const { log, calls } = captureLog();
     const result = await runSweep(db, { log });
-    // The retention DELETE is parameter-free — no `?` placeholders to bind.
-    expect(captured[0]).not.toContain("?");
-    // The only TWO-placeholder statement in the run is the invite-lapse flip:
-    // its ISO clock plus the per-run row cap. Every other bound statement is a
-    // single key (the paging window read) — a healthy run never reaches the
-    // audit append.
-    const inviteBound = binds.find((values) => values.length === 2);
-    expect(inviteBound).toBeDefined();
-    expect(inviteBound![1]).toBe(SWEEP_INVITE_LAPSE_CAP);
-    expect(binds.every((values) => values.length === 1 || values.length === 2)).toBe(true);
     // The fake reports changes: 3 for EVERY statement, so both janitors log;
     // the delivery sweep's line comes first.
     expect(calls).toHaveLength(2);
@@ -427,6 +424,7 @@ describe("runSweep", () => {
 
   test("seeks the retention cutoff and latest alert by action (EXPLAIN QUERY PLAN)", async () => {
     const db = failureDb();
+    const { values: settings } = await getSweepSettings(db);
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const captured: string[] = [];
     const { log } = captureLog();
@@ -443,7 +441,9 @@ describe("runSweep", () => {
     expect(retentionSql).toBeDefined();
     expect(alertSql).toBeDefined();
 
-    const retentionPlan = db.raw.query<{ detail: string }, []>(`EXPLAIN QUERY PLAN ${retentionSql}`).all();
+    const retentionPlan = db.raw
+      .query<{ detail: string }, [string, number]>(`EXPLAIN QUERY PLAN ${retentionSql}`)
+      .all(`-${settings.retentionDays} days`, settings.retentionCap);
     const alertPlan = db.raw
       .query<{ detail: string }, [string]>(`EXPLAIN QUERY PLAN ${alertSql}`)
       .all(ALERT_PAGING_AUDIT_ACTION);
@@ -455,8 +455,12 @@ describe("runSweep", () => {
     );
   });
 
-  test("retention deletes only rows older than 30 days (real D1)", async () => {
+  test.each([
+    { settings: null, middleAgeKept: false, oldCount: 0 },
+    { settings: SWEEP_OVERRIDE, middleAgeKept: true, oldCount: 1 },
+  ])("delivery cleanup applies retention days and row cap ($settings)", async ({ settings, middleAgeKept, oldCount }) => {
     const db = failureDb();
+    if (settings) await setSweepSettings(db, settings, "operator");
     db.raw
       .query(
         `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
@@ -473,13 +477,17 @@ describe("runSweep", () => {
         )
         .run(id, `-${ageDays} days`);
     };
-    insertDelivery("old-1", 61); // 61 days old — swept
-    insertDelivery("old-2", 31); // 31 days old (just past the boundary) — swept
-    insertDelivery("fresh", 1); // 1 day old — kept
+    insertDelivery("old-1", 61);
+    insertDelivery("old-2", 62);
+    insertDelivery("middle", 31);
+    insertDelivery("fresh", 1);
     const { log } = captureLog();
     const result = await runSweep(db, { log });
     const remaining = db.raw.query("SELECT id FROM webhook_deliveries ORDER BY id").all() as Array<{ id: string }>;
-    expect(remaining.map((r) => r.id)).toEqual(["fresh"]);
+    const ids = remaining.map((row) => row.id);
+    expect(ids).toContain("fresh");
+    expect(ids.includes("middle")).toBe(middleAgeKept);
+    expect(ids.filter((id) => id.startsWith("old-"))).toHaveLength(oldCount);
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,
@@ -541,6 +549,19 @@ describe("runSweep", () => {
       invitesExpired: 0,
       webhook: "absent",
     });
+  });
+
+  test("corrupt settings cannot delete deliveries using a fallback retention policy", async () => {
+    const db = failureDb();
+    await setSweepSettings(db, SWEEP_OVERRIDE, "operator");
+    db.raw.run("UPDATE review_runtime_settings SET value = 'bad' WHERE key = 'platform.sweep.retention_days'");
+    db.raw.run(`INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, created_at)
+                VALUES ('delivery', 'bot-sweep', 'pull_request', 'ok', datetime('now', '-31 days'))`);
+    await seedInWindow(db, 3);
+    const { log, calls } = captureLog();
+    expect(await runSweep(db, { log })).toMatchObject({ failures24h: 3, thresholdBreached: true });
+    expect(calls[0]?.fields.event).toBe("ops_sweep_settings_unreadable");
+    expect(db.raw.query("SELECT id FROM webhook_deliveries").get()).toEqual({ id: "delivery" });
   });
 
   test("counts only in-window rows, across the infra-failure stages (parse + runner/sandbox/pipeline)", async () => {
@@ -1157,6 +1178,37 @@ describe("runSweep — maintenance audit window", () => {
     });
     expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
     expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(0);
+  });
+
+  test("overrides apply to failure counts, both de-bounce lanes, the threshold and the webhook timeout", async () => {
+    const db = failureDb();
+    await seedInWindow(db, 3);
+    await seedDeferral(db);
+    for (const stage of ["runner", "maintenance_deferred"] as const) {
+      await createFailureStore(db).record({ ...BASE, stage, error: "old" });
+    }
+    db.raw.run("UPDATE review_failures SET created_at = datetime('now', '-8 hours') WHERE error = 'old'");
+    const oldStamp = new Date(Date.now() - 8 * 3_600_000).toISOString();
+    seedAudit(db, ALERT_PAGING_AUDIT_ACTION, "failure_paging", oldStamp);
+    seedAudit(db, ALERT_MAINTENANCE_AUDIT_ACTION, "maintenance_deferred", oldStamp);
+    const { fetchImpl, bodies } = sink();
+    const deps = { fetchImpl, log: captureLog().log, alertUrl: "https://ops.example/hook" };
+    expect(await runSweep(db, deps)).toMatchObject({ failures24h: 4, thresholdBreached: false, webhook: "not_attempted" });
+    await setSweepSettings(db, SWEEP_OVERRIDE, "operator");
+    const timeout = jest.spyOn(AbortSignal, "timeout");
+    try {
+      expect(await runSweep(db, deps)).toMatchObject({ failures24h: 3, thresholdBreached: true, webhook: "posted" });
+      expect(timeout).toHaveBeenCalledWith(SWEEP_OVERRIDE.webhookTimeoutMs);
+    } finally {
+      timeout.mockRestore();
+    }
+    expect(bodies()).toHaveLength(1);
+    expect(JSON.parse(bodies()[0]!)).toMatchObject({
+      failures_24h: 3,
+      thresholds: { failures_24h: 2, window_hours: 6 },
+      maintenance_deferred: { count: 1 },
+      due: ["infrastructure", "maintenance"],
+    });
   });
 
   test("a deferral inside the maintenance window does not post again", async () => {

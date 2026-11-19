@@ -84,10 +84,7 @@
  * `platform_audit_events` row in ONE `db.batch`, the `flag.set` pattern in
  * src/admin/index.ts — a failed write appends no audit row.
  *
- * Module boundary: a dashboard leaf whose imports are the `DashboardD1` type
- * from ./users and the closed review vocabulary from
- * packages/shared/src/runtime (values and types only) — no store/pipeline/
- * review code, no runtime dependency.
+ * Module boundary: no pipeline or worker dependencies.
  */
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import {
@@ -95,6 +92,8 @@ import {
   isCheckMinScoreValue,
 } from "../contracts/review-gate";
 import type { DashboardD1 } from "./users";
+import { SWEEP_FIELDS, type SweepField, type SweepLimits, type SweepValues } from "../contracts/sweep-settings";
+import { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 
 /** PK of the system row in `review_runtime_settings`. */
 export const SYSTEM_CONCURRENCY_KEY = "review.concurrency.system";
@@ -983,6 +982,88 @@ export async function setDefaultReviewLevel(
     db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_LEVEL_KEY, value, now, actor),
   ]);
   return value;
+}
+
+/** Defaults apply to absent rows. The row caps also preserve the per-run write ceiling. */
+const SWEEP_RULES = {
+  failureThreshold: { key: "platform.sweep.failure_threshold", fallback: QUEUE_MAX_ATTEMPTS + 1, min: 1, max: 10_000 },
+  windowHours: { key: "platform.sweep.window_hours", fallback: 24, min: 1, max: 168 },
+  webhookTimeoutMs: { key: "platform.sweep.webhook_timeout_ms", fallback: 3_000, min: 100, max: 15_000 },
+  retentionDays: { key: "platform.sweep.retention_days", fallback: 30, min: 1, max: 365 },
+  retentionCap: { key: "platform.sweep.retention_cap", fallback: 500, min: 1, max: 500 },
+  inviteLapseCap: { key: "platform.sweep.invite_lapse_cap", fallback: 500, min: 1, max: 500 },
+} satisfies Record<SweepField, { key: string; fallback: number; min: number; max: number }>;
+
+export const SWEEP_LIMITS = Object.fromEntries(
+  SWEEP_FIELDS.map((field) => {
+    const { min, max } = SWEEP_RULES[field];
+    return [field, { min, max }];
+  }),
+) as SweepLimits;
+
+const SWEEP_KEYS = SWEEP_FIELDS.map((field) => SWEEP_RULES[field].key);
+
+export async function getSweepSettings(
+  db: DashboardD1,
+): Promise<{ values: SweepValues; degraded: boolean }> {
+  let rows = new Map<string, unknown>();
+  let degraded = false;
+  try {
+    const { results } = await db
+      .prepare(`SELECT key, value FROM review_runtime_settings WHERE key IN (${SWEEP_KEYS.map(() => "?").join(", ")})`)
+      .bind(...SWEEP_KEYS)
+      .all<{ key: string; value: string }>();
+    rows = new Map(results.map(({ key, value }) => [key, value]));
+  } catch {
+    degraded = true;
+  }
+  const values = {} as SweepValues;
+  for (const field of SWEEP_FIELDS) {
+    const { key, fallback, min, max } = SWEEP_RULES[field];
+    const stored = parseInRange(rows.get(key), min, max);
+    const trusted = stored !== undefined && !Number.isNaN(stored);
+    if (rows.has(key) && !trusted) degraded = true;
+    values[field] = trusted ? stored : fallback;
+  }
+  return { values, degraded };
+}
+
+const SWEEP_BEFORE_SQL = SWEEP_FIELDS.map((field, index) => {
+  const { min, max } = SWEEP_RULES[field];
+  return `'${field}', ${storedBudgetSql(`?${index + 5}`, "NULL", min, max)}`;
+}).join(", ");
+
+const SWEEP_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'platform.sweep.set', 'runtime', 'platform.sweep',
+          json_object('before', json_object(${SWEEP_BEFORE_SQL}), 'after', json(?3)), ?4)`;
+
+export async function setSweepSettings(
+  db: DashboardD1,
+  input: unknown,
+  actor: string,
+): Promise<SweepValues> {
+  const source = input !== null && typeof input === "object" && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  const values = {} as SweepValues;
+  for (const field of SWEEP_FIELDS) {
+    const { min, max } = SWEEP_RULES[field];
+    const value = source[field];
+    if (!isIntegerIn(value, min, max)) {
+      throw new RuntimeConfigError("invalid_value", `sweep.${field} must be an integer in ${min}..${max}`);
+    }
+    values[field] = value;
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare(SWEEP_AUDIT_SQL).bind(crypto.randomUUID(), actor, JSON.stringify(values), now, ...SWEEP_KEYS),
+    ...SWEEP_FIELDS.map((field) =>
+      db.prepare(SYSTEM_UPSERT_SQL).bind(SWEEP_RULES[field].key, String(values[field]), now, actor),
+    ),
+  ]);
+  return values;
 }
 
 /**

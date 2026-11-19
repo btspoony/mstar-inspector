@@ -17,6 +17,7 @@ import {
   Toggle,
 } from "@design-system";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
+import { SWEEP_FIELDS, type SweepField, type SweepConfig, type SweepValues } from "../../contracts/sweep-settings";
 import { APP_VERSION } from "../../version";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
@@ -27,6 +28,7 @@ import { formatRelativeTime } from "../relative-time";
 import {
   AdminWriteError,
   readRuntime,
+  saveSweepSettings,
   setCheckBudgets,
   setCommentClaimSettings,
   setMaintenance,
@@ -96,6 +98,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [retryDraft, setRetryDraft] = useState<string | null>(null);
   const [attemptsDraft, setAttemptsDraft] = useState<string | null>(null);
   const [outboxDraft, setOutboxDraft] = useState<string | null>(null);
+  const [sweepDraft, setSweepDraft] = useState<Partial<Record<SweepField, string>>>({});
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
   /** The window's pending state: `null` = untouched, so the stored one shows. */
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
@@ -107,6 +110,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const concurrencySignal = useSaveSignal();
   const checkBudgetsSignal = useSaveSignal();
   const commentClaimSignal = useSaveSignal();
+  const sweepSignal = useSaveSignal();
   const recheckAssignmentSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
@@ -119,6 +123,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       | "concurrency"
       | "checkBudgets"
       | "commentClaim"
+      | "sweep"
       | "recheckAssignment"
       | "maintenance";
   } | null>(null);
@@ -264,6 +269,39 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
+  async function onSaveSweep(event: FormEvent<HTMLFormElement>, stored: SweepConfig): Promise<void> {
+    event.preventDefault();
+    if (busy || SWEEP_FIELDS.some((field) => concurrencySubmitBlocked(stored.degraded, sweepDraft[field] ?? null))) {
+      return;
+    }
+    const values = {} as SweepValues;
+    for (const field of SWEEP_FIELDS) {
+      values[field] = Number(sweepDraft[field] ?? stored.values[field]);
+    }
+    setBusy(true);
+    setNotice(null);
+    sweepSignal.start();
+    try {
+      await saveSweepSettings(values);
+      update((data) => ({ ...data, sweep: { ...stored, values, degraded: false } }));
+      setSweepDraft({});
+      setNotice({ kind: "success", message: t(locale, "admin.runtime.sweepSaved"), source: "sweep" });
+      sweepSignal.succeed();
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.sweepFailed");
+      setNotice({
+        kind: "error",
+        message: error instanceof AdminWriteError
+          ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+          : generic,
+        source: "sweep",
+      });
+      sweepSignal.fail();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onSaveRecheck(
     event: FormEvent<HTMLFormElement>,
     stored: RecheckAssignmentConfig,
@@ -366,6 +404,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           // Same absence rule for the migration-0048 card: an older Worker
           // behind this bundle reports no group, so the card is hidden.
           const claim = data.commentClaim;
+          const sweep = data.sweep;
           // And for the recheck seat's ask budget.
           const recheck = data.recheckAssignment;
           // And for the admission-drop counts.
@@ -724,6 +763,63 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 )}
               </CardContent>
             </SectionCard>
+            )}
+
+            {sweep === null ? null : (
+              <SectionCard tier="secondary">
+                <CardHeader>
+                  <SectionCardTitle>{t(locale, "admin.runtime.sweepTitle")}</SectionCardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-sm text-muted-foreground">{t(locale, "admin.runtime.sweepDescription")}</p>
+                  {notice?.source === "sweep" ? <CardOutcome notice={notice} status={sweepSignal.status} /> : null}
+                  {sweep.degraded ? (
+                    <div className="mt-4">
+                      <PageNotice kind="warn" message={t(locale, "admin.runtime.sweepUnreadable")} />
+                    </div>
+                  ) : null}
+                  <form className="mt-4 space-y-4" onSubmit={(event) => void onSaveSweep(event, sweep)}>
+                    <div className="grid max-w-3xl gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      {SWEEP_FIELDS.map((field) => (
+                        <div className="flex flex-col gap-1.5" key={field}>
+                          <label className="text-sm font-medium" htmlFor={`sweep-${field}`}>
+                            {t(locale, `admin.runtime.sweepFields.${field}`)}
+                          </label>
+                          <Input
+                            id={`sweep-${field}`}
+                            type="number"
+                            min={sweep.limits[field].min}
+                            max={sweep.limits[field].max}
+                            autoComplete="off"
+                            required
+                            disabled={busy}
+                            value={sweepDraft[field] ?? (sweep.degraded ? "" : String(sweep.values[field]))}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setSweepDraft((drafts) => ({ ...drafts, [field]: value }));
+                            }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="submit"
+                        disabled={busy}
+                        status={sweepSignal.status === "idle" ? undefined : sweepSignal.status}
+                      >
+                        {t(locale, "admin.runtime.sweepSave")}
+                      </Button>
+                      <SaveInFlight show={sweepSignal.status === "loading"} locale={locale} />
+                      {sweep.degraded ? (
+                        <Button type="button" variant="secondary" onClick={reload}>
+                          {t(locale, "common.retry")}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </form>
+                </CardContent>
+              </SectionCard>
             )}
 
             {recheck === null ? null : (
