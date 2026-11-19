@@ -1487,6 +1487,35 @@ describe("degraded-cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
 });
 
 describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
+  test("empty and zero-sized scans do not advance the cursor", async () => {
+    const db = createSeededTestD1();
+    expect(await listSuspendedLifecycleApps(db, 2)).toEqual([]);
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
+    await suspendPublicationRecovery(db, SCOPE, { kind: "disabled", reason: "disabled" }, 2_000);
+    expect(await listSuspendedLifecycleApps(db, 0)).toEqual([]);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM lifecycle_recovery_cursor").get()).toMatchObject({ n: 0 });
+    expect(await listSuspendedLifecycleApps(db, 1)).toHaveLength(1);
+    db.raw.close();
+  });
+
+  test("pair pages rotate durably, wrap, and survive removal of the cursor pair", async () => {
+    const db = createSeededTestD1();
+    const pairs = [SCOPE, { ...SCOPE, installationId: 124 }, { ...SCOPE, appId: OTHER_APP_ID }];
+    for (const [i, scope] of pairs.entries()) {
+      await stagePublication(db, { id: `pub-${i}`, payload: payload({ scope }), nowMs: 1_000 });
+      await suspendPublicationRecovery(db, scope, { kind: "disabled", reason: "disabled" }, 2_000);
+    }
+    const selected = (rows: Awaited<ReturnType<typeof listSuspendedLifecycleApps>>) =>
+      rows.map(({ appId, installationId }) => ({ appId, installationId }));
+    const expected = pairs.map(({ appId, installationId }) => ({ appId, installationId }));
+    expect(selected(await listSuspendedLifecycleApps(db, 2))).toEqual(expected.slice(0, 2));
+    expect(selected(await listSuspendedLifecycleApps(db, 2))).toEqual([expected[2]!, expected[0]!]);
+    db.raw.prepare("DELETE FROM review_publications WHERE id = 'pub-0'").run();
+    expect(selected(await listSuspendedLifecycleApps(db, 2))).toEqual(expected.slice(1));
+    expect(selected(await listSuspendedLifecycleApps(db, 2))).toEqual(expected.slice(1));
+    db.raw.close();
+  });
+
   test("suspension kinds round-trip through the durable reason, with the credential fingerprint", () => {
     const fingerprint = "a".repeat(64);
     const reason = suspensionReasonOf("identity-mismatch", "live App identity does not match", fingerprint);
@@ -1577,7 +1606,7 @@ describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
          WHERE id = 'pub-2'`,
       )
       .run(suspensionReasonOf("identity-mismatch", "identity mismatch", "e".repeat(64)));
-    const pairs = await listSuspendedLifecycleApps(db, 10);
+    const pairs = await listSuspendedLifecycleApps(db, 1);
     expect(pairs).toHaveLength(1);
     expect(pairs[0]!.requiresIdentityProof).toBe(true);
     // Withheld: the caller must re-prove identity rather than trust one digest.

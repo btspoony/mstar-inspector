@@ -40,6 +40,8 @@ import {
   listResolutionRecovery,
   recordPublicationProof,
   stagePublication,
+  suspendPublicationRecovery,
+  suspendResolutionRecovery,
   type LifecycleRound,
   type LineIntent,
   type PublicationPayload,
@@ -47,7 +49,7 @@ import {
   type VerifiedResolution,
 } from "../../src/store/finding-lifecycle";
 import type { D1Like } from "../../src/store/types";
-import { createReviewThreads, type GraphqlOctokit } from "../../src/pipeline/review-threads";
+import { createReviewThreads, sha256Hex, type GraphqlOctokit } from "../../src/pipeline/review-threads";
 import { listDiscussionWithOctokit } from "../../src/pipeline/discussion-context";
 import {
   reconcileReviewLifecycle,
@@ -773,6 +775,66 @@ describe("credential routing — suspension and re-enable (spec §7.6/§7.11.1)"
 
     expect(pubRow(db, "pub-a")).toMatchObject({ recovery_state: "pending", phase: "prepared" });
     expect(pubRow(db, "pub-a").last_error).toBeNull();
+  });
+});
+
+describe("suspended-pair scan fairness", () => {
+  test.each(["publication", "thread"] as const)("%s recovery rotates past more than a batch of unavailable pairs", async (lane) => {
+    const db = createMigratedTestD1();
+    const fingerprint = await sha256Hex("enc-pem");
+    const kinds = ["disabled", "missing", "deleted", "identity-mismatch"] as const;
+    for (let i = 0; i < RECONCILE_SELECT_LIMIT + 2; i += 1) {
+      const appId = `scan-${String(i).padStart(3, "0")}`;
+      const scope = { ...SCOPE, appId };
+      const repaired = i === RECONCILE_SELECT_LIMIT + 1;
+      const suspensionKind = repaired ? "disabled" : kinds[i % kinds.length]!;
+      seedApp(db, appId, {
+        githubAppId: 2000 + i,
+        status: suspensionKind === "disabled" && !repaired ? "disabled" : "active",
+        install: suspensionKind !== "missing",
+        deletedAt: suspensionKind === "deleted" ? new Date(T0).toISOString() : null,
+      });
+      const suspension = { kind: suspensionKind, reason: "operator correction required", credentialFingerprint: fingerprint };
+      await seedPrepared(db, `pub-${i}`, degradedPayload(scope), 0);
+      if (lane === "thread") {
+        seedFindingRow(db, `finding-${i}`, `pub-${i}`, scope, "addressed");
+        seedThreadRow(db, { id: `assoc-${i}`, publicationId: `pub-${i}`, findingRowId: `finding-${i}`, scope,
+          verified: verifiedFor(`assoc-${i}`, `finding-${i}`) });
+        await suspendResolutionRecovery(db, scope, suspension, T0);
+      } else {
+        await suspendPublicationRecovery(db, scope, suspension, T0);
+      }
+    }
+
+    for (let pass = 0; pass < 3; pass += 1) {
+      await reconcile(db, { now: () => T0 + pass, reviewer: okReviewer() });
+    }
+
+    const repairedId = RECONCILE_SELECT_LIMIT + 1;
+    if (lane === "publication") {
+      expect(pubRow(db, `pub-${repairedId}`).recovery_state).toBe("pending");
+      expect(pubRow(db, "pub-0").recovery_state).toBe("suspended");
+    } else {
+      expect(threadRow(db, `assoc-${repairedId}`).resolution_state).not.toBe("suspended");
+      expect(threadRow(db, "assoc-0").resolution_state).toBe("suspended");
+    }
+    db.raw.close();
+  });
+
+  test("a throwing identity probe does not pin the next scan to that pair", async () => {
+    const db = createMigratedTestD1();
+    for (let i = 0; i <= RECONCILE_SELECT_LIMIT; i += 1) {
+      const appId = `scan-${String(i).padStart(3, "0")}`;
+      const scope = { ...SCOPE, appId };
+      seedApp(db, appId, { githubAppId: 3000 + i });
+      await seedPrepared(db, `pub-${i}`, degradedPayload(scope), 0);
+      await suspendPublicationRecovery(db, scope, { kind: "identity-mismatch", reason: "needs proof" }, T0);
+    }
+    await reconcile(db, { now: () => T0, reviewer: async () => { throw new Error("probe failed"); } });
+    expect(pubRow(db, "pub-0").recovery_state).toBe("suspended");
+    await reconcile(db, { now: () => T0 + 1, reviewer: okReviewer() });
+    expect(pubRow(db, `pub-${RECONCILE_SELECT_LIMIT}`).recovery_state).toBe("pending");
+    db.raw.close();
   });
 });
 

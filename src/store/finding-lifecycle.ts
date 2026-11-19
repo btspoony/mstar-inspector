@@ -1378,7 +1378,10 @@ export async function suspendResolutionRecovery(
 
 /**
  * Distinct suspended `(bot_id, installation_id)` pairs across both lanes,
- * bounded — the re-enable probe input (§7.11.1: "Suspended rows are checked
+ * bounded and durably rotated by exact pair, including unavailable pairs.
+ * All reasons for each selected pair are read before deciding proof policy.
+ * This advances the scan cursor before returning the re-enable probe input
+ * (§7.11.1: "Suspended rows are checked
  * for exact-App re-enable before returning to pending"). `requiresIdentityProof`
  * is true when ANY of the pair's suspended rows was suspended for a reason
  * other than a disabled App (identity mismatch, missing mapping, deleted App,
@@ -1400,19 +1403,34 @@ export async function listSuspendedLifecycleApps(
 ): Promise<
   { appId: string; installationId: number; requiresIdentityProof: boolean; credentialFingerprint: string | null }[]
 > {
-  const pubs = await db
+  if (limit <= 0) return [];
+  const cursor = await db
     .prepare(
-      `SELECT DISTINCT bot_id, installation_id, last_error FROM review_publications
-       WHERE recovery_state = 'suspended' LIMIT ?`,
+      `SELECT bot_id, installation_id FROM lifecycle_recovery_cursor WHERE id = 1`,
     )
-    .bind(limit)
-    .all<{ bot_id: string; installation_id: number; last_error: string | null }>();
-  const threads = await db
+    .first<{ bot_id: string; installation_id: number }>();
+  const rows = await db
     .prepare(
-      `SELECT DISTINCT bot_id, installation_id, last_error FROM review_threads
-       WHERE resolution_state = 'suspended' LIMIT ?`,
+      `WITH reasons AS (
+         SELECT bot_id, installation_id, last_error FROM review_publications
+         WHERE recovery_state = 'suspended'
+         UNION
+         SELECT bot_id, installation_id, last_error FROM review_threads
+         WHERE resolution_state = 'suspended'
+       ), pairs AS (
+         SELECT DISTINCT bot_id, installation_id FROM reasons
+       ), page AS (
+         SELECT bot_id, installation_id,
+                CASE WHEN (bot_id, installation_id) > (?, ?) THEN 0 ELSE 1 END AS wrapped
+         FROM pairs
+         ORDER BY wrapped, bot_id, installation_id LIMIT ?
+       )
+       SELECT r.bot_id, r.installation_id, r.last_error
+       FROM page p JOIN reasons r
+         ON r.bot_id = p.bot_id AND r.installation_id = p.installation_id
+       ORDER BY p.wrapped, p.bot_id, p.installation_id`,
     )
-    .bind(limit)
+    .bind(cursor?.bot_id ?? "", cursor?.installation_id ?? -1, limit)
     .all<{ bot_id: string; installation_id: number; last_error: string | null }>();
   type Merged = {
     appId: string;
@@ -1422,7 +1440,7 @@ export async function listSuspendedLifecycleApps(
     conflicting: boolean;
   };
   const merged = new Map<string, Merged>();
-  for (const row of [...pubs.results, ...threads.results]) {
+  for (const row of rows.results) {
     const key = `${row.bot_id}:${row.installation_id}`;
     const existing = merged.get(key);
     const recorded = suspensionCredentialOf(row.last_error);
@@ -1440,7 +1458,17 @@ export async function listSuspendedLifecycleApps(
       conflicting,
     });
   }
-  return [...merged.values()].slice(0, limit).map((entry) => ({
+  const selected = [...merged.values()];
+  const last = selected.at(-1);
+  if (last) {
+    // Advance even when routing/proof fails, so unchanged failures cannot
+    // monopolize the next cron's bounded batch. The scan wraps at the end.
+    await db.prepare(
+      `INSERT INTO lifecycle_recovery_cursor (id, bot_id, installation_id) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET bot_id = excluded.bot_id, installation_id = excluded.installation_id`,
+    ).bind(last.appId, last.installationId).run();
+  }
+  return selected.map((entry) => ({
     appId: entry.appId,
     installationId: entry.installationId,
     requiresIdentityProof: entry.requiresIdentityProof,
