@@ -149,18 +149,18 @@ and not a boolean flag.
   refuses the share instead of letting it land against a stale value. The FROM
   scope is guarded the same way, so two identical transitions land once — the
   loser reports the state the winner persisted, with no second audit row.
-- Unsharing is deliberately NOT gated on the official workspace: a stale share
-  must stay revocable by the only role that can revoke it.
-- The flag is a platform authorization, never workspace self-service — with one
-  member-side exception, the owning workspace itself:
-  `PATCH /dashboard/:workspaceRef/api/apps/:appId/bot/scope` (`appBotScopeRoute`,
-  `src/dashboard/index.ts`, declared in `APP_ROUTES` with `access: "write"`)
-  lets that workspace's owner/admin share or unshare its own bot through the
-  same `setBotScope` store batch. No API key and no per-bot or per-workspace
-  operator scope writes `scope`. An installation shared before a designation
-  change stays revocable by its owning workspace through that route — the
-  unshare statement carries no official-workspace guard; the bot page's UI may
-  hide the control, the API path stays open.
+- Unsharing is deliberately NOT gated on the official workspace (`setBotScope`'s
+  unshare statement carries no such guard), so the bot's owning workspace can
+  always revoke a stale share — see the member-side route below.
+- The designation itself stays a platform authorization: no workspace can write
+  `platform.official_workspace_id`, and no API key or per-bot/per-workspace
+  operator scope writes `scope`. The one bot-scope exception is the owning
+  workspace itself: `PATCH /dashboard/:workspaceRef/api/apps/:appId/bot/scope`
+  (`appBotScopeRoute`, `src/dashboard/index.ts`, declared in `APP_ROUTES` with
+  `access: "write"`) lets that workspace's owner/admin reach `setBotScope` —
+  a share still requires the official-workspace guard, an unshare does not.
+  A bot shared before a designation change therefore stays revocable through
+  that route; the bot page's UI may hide the control, the API path stays open.
 - Success is `200 {"botId","scope","sharedAt"}`; the row and its audit row land
   in ONE `batch`, and a re-share stamps a new `shared_at` — the earlier instant
   survives only in the audit ledger.
