@@ -522,6 +522,65 @@ export async function readWorkspaces(): Promise<WorkspaceRow[]> {
   }));
 }
 
+/** A bot's scope: `owned` serves its workspace only, `shared` is offered platform-wide. */
+export type BotScope = "owned" | "shared";
+
+/** One `GET /api/bots` row: a live bot, its workspace and how far it reaches. */
+export type BotRow = {
+  botId: string;
+  name: string;
+  /** The GitHub App the bot runs as. */
+  githubAppId: number;
+  workspaceId: string | null;
+  /** The owning workspace's display name; `null` for an unmapped bot. */
+  workspaceName: string | null;
+  /** The bot's workspace IS the platform's official workspace. */
+  isOfficial: boolean;
+  scope: BotScope;
+  /** When the share was granted; `null` while the bot is owned. */
+  sharedAt: string | null;
+  /** Live GitHub installations (`removed_at IS NULL`). */
+  installationCount: number;
+  /** Live review targets (`deleted_at IS NULL`). */
+  liveTargetCount: number;
+};
+
+export async function readBots(): Promise<BotRow[]> {
+  const body = map(await fetchJson(`${BASE}/bots`), "bots response");
+  return list(body.bots, "bots").map((row) => {
+    const scope = text(row, "scope");
+    if (scope !== "owned" && scope !== "shared") {
+      throw new Error("admin API: bot scope is not owned|shared");
+    }
+    return {
+      botId: text(row, "botId"),
+      name: text(row, "name"),
+      githubAppId: num(row, "githubAppId"),
+      workspaceId: maybeText(row, "workspaceId"),
+      workspaceName: maybeText(row, "workspaceName"),
+      isOfficial: bool(row, "isOfficial"),
+      scope,
+      sharedAt: maybeText(row, "sharedAt"),
+      installationCount: num(row, "installationCount"),
+      liveTargetCount: num(row, "liveTargetCount"),
+    };
+  });
+}
+
+/**
+ * Move one bot between `owned` and `shared`. Only an unshare carries the
+ * confirmation the server demands: a share is not destructive, so it never
+ * sends one. The caller re-reads afterwards — `sharedAt` is the server's
+ * stamp, not something the console may guess.
+ */
+export async function setBotScope(botId: string, scope: BotScope): Promise<void> {
+  await write(
+    "PATCH",
+    `/bots/${encodeURIComponent(botId)}/scope`,
+    scope === "owned" ? { scope, confirm: true } : { scope },
+  );
+}
+
 /** One `GET /api/usage` row: a live workspace's reviews this UTC month. */
 export type UsageRow = {
   workspaceId: string;

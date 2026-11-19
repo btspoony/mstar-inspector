@@ -6,6 +6,7 @@ import "../styles/shadcn-theme.css";
 import { t, type Locale } from "../../i18n";
 import { otherLocale } from "../shell";
 import { readBoot } from "../boot";
+import { BotsPage } from "./BotsPage";
 import { DataUpgradePage } from "./DataUpgradePage";
 import { FlagsPage } from "./FlagsPage";
 import { RuntimePage } from "./RuntimePage";
@@ -47,6 +48,7 @@ const SCREENS: Record<AdminPageId, ComponentType<{ locale: Locale }>> = {
   flags: FlagsPage,
   runtime: RuntimePage,
   workspaces: WorkspacesPage,
+  bots: BotsPage,
   usage: UsagePage,
   "quota-versions": QuotaVersionsPage,
   users: UsersPage,

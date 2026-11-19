@@ -19,6 +19,7 @@ export const ADMIN_PAGES = [
   { id: "flags", labelKey: "admin.nav.flags" },
   { id: "runtime", labelKey: "admin.nav.runtime" },
   { id: "workspaces", labelKey: "admin.nav.workspaces" },
+  { id: "bots", labelKey: "admin.nav.bots" },
   { id: "usage", labelKey: "admin.nav.usage" },
   { id: "quota-versions", labelKey: "admin.nav.quotaVersions" },
   { id: "users", labelKey: "admin.nav.users" },

@@ -10,6 +10,7 @@ import { describe, expect, jest, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { type Element as DomElement, type Window } from "happy-dom";
+import { BotsPage } from "../../src/spa/admin/BotsPage";
 import { FlagsPage } from "../../src/spa/admin/FlagsPage";
 import { RuntimePage } from "../../src/spa/admin/RuntimePage";
 import { SupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
@@ -149,6 +150,10 @@ async function workspacesScreen(respond: Respond, locale: "en" | "zh_CN" = "en")
   );
 }
 
+async function botsScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(BotsPage, { locale }), respond);
+}
+
 async function usersScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
   return mount(createElement(UsersPage, { locale }), respond);
 }
@@ -209,6 +214,46 @@ const WORKSPACES = [
     // NULL is no seat cap: the cell must read "—", never "5 / 0".
     includedMembers: null,
     createdAt: "2026-09-18T09:00:00.000Z",
+  },
+];
+
+/** Two bots in the official workspace (one shared) and one outside it. */
+const BOTS = [
+  {
+    botId: "bot-1",
+    name: "mstar-inspector",
+    githubAppId: 4803300,
+    workspaceId: "ws_1",
+    workspaceName: "Acme",
+    isOfficial: true,
+    scope: "shared",
+    sharedAt: "2026-11-15T12:03:00.000Z",
+    installationCount: 2,
+    liveTargetCount: 5,
+  },
+  {
+    botId: "bot-2",
+    name: "team-a-reviewer",
+    githubAppId: 4803422,
+    workspaceId: "ws_2",
+    workspaceName: "Guild",
+    isOfficial: false,
+    scope: "owned",
+    sharedAt: null,
+    installationCount: 0,
+    liveTargetCount: 0,
+  },
+  {
+    botId: "bot-3",
+    name: "acme-bot",
+    githubAppId: 4803550,
+    workspaceId: "ws_1",
+    workspaceName: "Acme",
+    isOfficial: true,
+    scope: "owned",
+    sharedAt: null,
+    installationCount: 1,
+    liveTargetCount: 2,
   },
 ];
 
@@ -1224,6 +1269,161 @@ describe("Workspaces screen — official workspace card", () => {
     );
     // The table's own read is a different face: it still renders.
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(2);
+    await surface.close();
+  });
+});
+
+
+describe("Bots screen", () => {
+  /** The row action of `needle`'s row, located by its label. */
+  const rowAction = (surface: Surface, needle: string, label: string): DomElement | null =>
+    [...(rowContaining(surface, needle)?.querySelectorAll("button") ?? [])].find(
+      (node) => node.textContent === label,
+    ) ?? null;
+
+  /** The dialog's confirm button — Cancel leads, so it is never the first. */
+  const confirmButton = (surface: Surface): DomElement | null =>
+    [...surface.win.document.querySelectorAll('[data-slot="dialog-content"] button')].find(
+      (node) => node.textContent === "Confirm",
+    ) ?? null;
+
+  test("loading renders the table skeleton", async () => {
+    const surface = await botsScreen(never);
+    expect(surface.container.querySelector('[data-slot="page-skeleton"]')).not.toBeNull();
+    await surface.close();
+  });
+
+  test("a failed read renders the error state", async () => {
+    const surface = await botsScreen(failed);
+    expect(surface.container.querySelector('[data-slot="error-state"]')?.textContent).toContain(
+      "Could not load the bot list.",
+    );
+    await surface.close();
+  });
+
+  test("an empty list renders the empty state", async () => {
+    const surface = await botsScreen(() => json({ bots: [] }));
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No bots");
+    await surface.close();
+  });
+
+  test("rows carry the bot, its workspace, scope, stamp and counts", async () => {
+    const surface = await botsScreen(() => json({ bots: BOTS }));
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(3);
+
+    const shared = rowContaining(surface, "mstar-inspector");
+    // The bot cell is composite: the name over the GitHub App id.
+    expect(shared?.textContent).toContain("app 4803300");
+    expect(shared?.textContent).toContain("Acme");
+    // The official marker rides only the workspace that is the designation.
+    expect(shared?.querySelector('[data-slot="status-badge"]')?.textContent).toBe("official");
+    expect(shared?.textContent).toContain("shared");
+    expect(shared?.textContent).toContain("2026-11-15 12:03");
+    expect(shared?.textContent).toContain("2");
+    // A bot outside the designation carries the scope pill ALONE: no marker.
+    expect(
+      [...(rowContaining(surface, "team-a-reviewer")?.querySelectorAll('[data-slot="status-badge"]') ?? [])].map(
+        (node) => node.textContent,
+      ),
+    ).toEqual(["owned"]);
+    // An owned bot shows no stamp, never an invented one.
+    expect(rowContaining(surface, "acme-bot")?.textContent).toContain("—");
+    await surface.close();
+  });
+
+  test("the action is disabled with the reason outside the official workspace", async () => {
+    const surface = await botsScreen(() => json({ bots: BOTS }));
+    const action = rowAction(surface, "team-a-reviewer", "Sharing unavailable");
+    expect(action).not.toBeNull();
+    expect((action as unknown as HTMLButtonElement).disabled).toBe(true);
+    // A dead control the operator cannot explain is a dead end.
+    expect(rowContaining(surface, "team-a-reviewer")?.textContent).toContain(
+      "Only bots in the official workspace can be shared.",
+    );
+    await surface.close();
+  });
+
+  test("a share that outlived the designation stays revocable", async () => {
+    // The designation was re-pointed after this bot was shared. Sharing INTO
+    // the platform is refused there, but stranding the share would make it
+    // unrevocable from every console — the server allows the unshare, so the
+    // page must offer it.
+    const stale = [{ ...BOTS[1]!, scope: "shared", sharedAt: "2026-11-01T09:00:00.000Z" }];
+    const surface = await botsScreen(() => json({ bots: stale }));
+    const action = rowAction(surface, "team-a-reviewer", "Unshare");
+    expect(action).not.toBeNull();
+    expect((action as unknown as HTMLButtonElement).disabled).toBe(false);
+    await surface.close();
+  });
+
+  test("sharing writes one PATCH and re-reads the list", async () => {
+    const surface = await botsScreen((request) =>
+      request.method === "PATCH" ? json({ botId: "bot-3", scope: "shared", sharedAt: "x" }) : json({ bots: BOTS }),
+    );
+    await surface.click(rowAction(surface, "acme-bot", "Share"));
+
+    const dialog = surface.win.document.querySelector('[data-slot="dialog-content"]');
+    expect(dialog?.textContent).toContain("Share acme-bot platform-wide?");
+    // Nothing is written until the operator confirms.
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
+    await surface.click(confirmButton(surface));
+
+    const patches = surface.sent.filter((request) => request.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.url).toBe("/_internal_admin/api/bots/bot-3/scope");
+    // A share is not destructive, so it carries no confirmation body.
+    expect(patches[0]?.body).toEqual({ scope: "shared" });
+    // The accepted write re-reads: `sharedAt` is the server's stamp.
+    expect(surface.sent.filter((request) => request.method === "GET")).toHaveLength(2);
+    await surface.close();
+  });
+
+  test("unsharing asks first and names the consequence before writing", async () => {
+    const surface = await botsScreen((request) =>
+      request.method === "PATCH" ? json({ botId: "bot-1", scope: "owned", sharedAt: null }) : json({ bots: BOTS }),
+    );
+    await surface.click(rowAction(surface, "mstar-inspector", "Unshare"));
+
+    const dialog = surface.win.document.querySelector('[data-slot="dialog-content"]');
+    expect(dialog?.textContent).toContain("Stop sharing mstar-inspector?");
+    expect(dialog?.textContent).toContain(
+      "Targets in other workspaces become Blocked until the bot is shared again.",
+    );
+    await surface.click(confirmButton(surface));
+
+    const patches = surface.sent.filter((request) => request.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.body).toEqual({ scope: "owned", confirm: true });
+    await surface.close();
+  });
+
+  test("search filters on the bot name with the N / M counter", async () => {
+    const surface = await botsScreen(() => json({ bots: BOTS }));
+    expect(surface.text()).toContain("3 / 3");
+    await surface.type('input[type="search"]', "team");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(rowContaining(surface, "team-a-reviewer")).not.toBeNull();
+    expect(surface.text()).toContain("1 / 3");
+
+    await surface.type('input[type="search"]', "zzz");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain(
+      "No matches",
+    );
+    await surface.close();
+  });
+
+  test("a refused share keeps the localised primary message with the server detail", async () => {
+    const surface = await botsScreen((request) =>
+      request.method === "PATCH"
+        ? json({ error: "bot is outside the official workspace" }, 409)
+        : json({ bots: BOTS }),
+    );
+    await surface.click(rowAction(surface, "acme-bot", "Share"));
+    await surface.click(confirmButton(surface));
+
+    const alert = surface.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Could not change the sharing of acme-bot.");
+    expect(alert?.textContent).toContain("Server: bot is outside the official workspace");
     await surface.close();
   });
 });
