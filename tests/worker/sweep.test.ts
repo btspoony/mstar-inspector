@@ -1407,6 +1407,24 @@ describe("runSweep — comment-claim outbox", () => {
     expect(claimRow(db)).toMatchObject({ state: "queued", attempts: 0 });
   });
 
+  for (const ageMs of [1_000, -900_000]) {
+    test(`a full-attempt claim still awaiting delivery stays queued (age ${ageMs}ms)`, async () => {
+      const db = failureDb();
+      seedSettings(db, { maxAttempts: 1 });
+      seedClaim(db, { attempts: 1, ageMs });
+      const { queue, sent } = fakeQueue();
+      const { log, calls } = captureLog();
+
+      await runSweep(db, { log, queue });
+
+      expect(sent).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+      const row = claimRow(db);
+      expect(row).toMatchObject({ state: "queued", attempts: 1 });
+      expect(JSON.parse(row.payload_json!)).toMatchObject({ comment_id: 9001 });
+    });
+  }
+
   test("a claim at the stored attempt cap expires instead of being re-sent", async () => {
     const db = failureDb();
     // The cap is an operator setting on the runtime-config surface, not a

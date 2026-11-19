@@ -589,7 +589,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     const commentBudget = replayWaiting ? settings.outboxCap - 1 : settings.outboxCap;
     try {
       const nowMs = Date.now();
-      // Rows at the cap have exhausted every re-send: flip them to `expired`
+      // Stale rows at the cap have exhausted every re-send: flip them to `expired`
       // FIRST, so the selection below can never pick them again. The payload is
       // dropped in the same statement — a terminal tombstone holds only scope
       // keys, state and timestamps, and is never deleted (it is the dedup
@@ -597,9 +597,9 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       const expired = await db
         .prepare(
           `UPDATE comment_trigger_claims SET state = 'expired', payload_json = NULL
-            WHERE state = 'queued' AND attempts >= ?`,
+            WHERE state = 'queued' AND attempts >= ? AND queued_ms <= ?`,
         )
-        .bind(settings.maxAttempts)
+        .bind(settings.maxAttempts, nowMs - settings.retryMs)
         .run();
       const stale = await db
         .prepare(COMMENT_CLAIM_OUTBOX_SQL)

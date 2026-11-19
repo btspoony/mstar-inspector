@@ -9364,6 +9364,130 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     expect(claimRows(db)).toHaveLength(1);
   });
 
+  test("a held comment claim is requeued and runs exactly once after capacity is released", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9200 });
+    seedClaim(db, payload, 9200, "queued");
+    db.raw.prepare("UPDATE comment_trigger_claims SET attempts = 1").run();
+    db.raw.prepare(
+      `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+       VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
+    ).run();
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+    const before = Date.now();
+
+    await consumer(h.makeBatch(payload));
+
+    expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    const claim = claimRows(db)[0]!;
+    expect(claim.state).toBe("queued");
+    expect(claim.consumed_ms).toBeNull();
+    expect(JSON.parse(claim.payload_json!)).toEqual(payload);
+    const timing = db.raw.query("SELECT attempts, queued_ms FROM comment_trigger_claims").get() as {
+      attempts: number; queued_ms: number;
+    };
+    expect(timing.attempts).toBe(1);
+    expect(timing.queued_ms).toBeGreaterThanOrEqual(before + 60_000);
+    expect(timing.queued_ms).toBeLessThanOrEqual(Date.now() + 60_000);
+    expect(failureRows(db)).toHaveLength(0);
+
+    db.raw.prepare("DELETE FROM review_inflight").run();
+    h.queueState.attempts = 2;
+    await consumer(h.makeBatch(payload));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(claimRows(db)).toEqual([{ state: "consumed", consumed_ms: expect.any(Number), payload_json: null }]);
+    const sandboxCalls = h.sandbox.calls.length;
+    h.queueState.attempts = 3;
+    await consumer(h.makeBatch(payload));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(h.sandbox.calls).toHaveLength(sandboxCalls);
+  });
+
+  test("a held comment claim restore failure warns and records a terminal capacity drop", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9202 });
+    seedClaim(db, payload, 9202, "queued");
+    db.raw.prepare(
+      `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+       VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
+    ).run();
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: dbFailingOn(db, "SET state = 'queued', payload_json") as never }),
+      h.testLog,
+      h.overrides,
+    );
+
+    await consumer(h.makeBatch(payload));
+
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.logLines.some((l) => l.level === "warn" && l.msg.includes("comment claim restore failed — dropping through terminal handling") && l.msg.includes("D1 unavailable"))).toBe(true);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ pr_number: payload.pr_number, stage: "pipeline" });
+    expect(String(failureRows(db)[0]!.error)).toContain("system-cap");
+    expect(String(failureRows(db)[0]!.error)).toContain("comment claim restore failed: D1 unavailable");
+    expect(String(failureRows(db)[0]!.error)).not.toContain("refused retries");
+    expect((await createFailureStore(db).countAdmissionDrops24h())["system-cap"]).toBe(1);
+    expect(claimRows(db)[0]!.state).toBe("consumed");
+    expect(h.sandbox.calls).toHaveLength(0);
+  });
+
+  test("a pr-held comment claim restore failure records a drop without a known head", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9203 });
+    seedClaim(db, payload, 9203, "queued");
+    await seedInflight(db, { headSha: null });
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: dbFailingOn(db, "SET state = 'queued', payload_json") as never }),
+      h.testLog,
+      h.overrides,
+    );
+
+    await consumer(h.makeBatch(payload));
+
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(failureRows(db)).toHaveLength(1);
+    const failure = failureRows(db)[0]!;
+    expect(failure).toMatchObject({ pr_number: payload.pr_number, stage: "pipeline", head_sha: "" });
+    expect(String(failure.error)).toContain("comment claim restore failed: D1 unavailable");
+    expect(String(failure.error)).toContain("pr-held");
+    expect(String(failure.error)).not.toContain("refused retries");
+    expect((await createFailureStore(db).countAdmissionDrops24h())["pr-held"]).toBe(1);
+    const terminalWarn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("— acking"))!;
+    expect(terminalWarn.msg).toContain("comment claim restore failed: D1 unavailable");
+    expect(terminalWarn.msg).toContain("pr-held");
+    expect(terminalWarn.msg).not.toContain("delayed retries");
+    expect(claimRows(db)[0]!.state).toBe("consumed");
+    expect(h.sandbox.calls).toHaveLength(0);
+  });
+
+  test("a terminal held comment claim stays consumed", async () => {
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT;
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9201 });
+    seedClaim(db, payload, 9201, "queued");
+    await seedInflight(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(payload));
+
+    expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(claimRows(db)).toEqual([{ state: "consumed", consumed_ms: expect.any(Number), payload_json: null }]);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
   test("a job without comment_id never touches the claim table", async () => {
     const db = await createSeededTestD1();
     db.raw.prepare("UPDATE review_bots SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
