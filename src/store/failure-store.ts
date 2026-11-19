@@ -151,9 +151,12 @@ export type ReviewFailureRow = ReviewFailureInput & {
 /**
  * The admission-refusal reasons an operator sees on the runtime page. The
  * terminal drop row `handleGuardHeld` writes (`src/pipeline/consumer.ts`)
- * carries the reason only inside its stable error prefix
- * `review dropped after <n> refused retries: <reason> (…)` — it is not a
- * column and never becomes a stage value, so the read below derives it.
+ * carries the reason inside either error prefix:
+ * `review dropped after <n> refused retries: <reason> (…)` or
+ * `review dropped: comment claim restore failed: <detail>; admission refused: <reason> (…)`.
+ * It is not a column and never becomes a stage value, so the read below
+ * derives it. New drop formats in `handleGuardHeld` must extend the LIKE
+ * predicates below to keep these counts complete.
  */
 export const ADMISSION_DROP_REASONS = Object.freeze([
   "pr-held",
@@ -213,8 +216,11 @@ export type FailureStoreWithCounts = FailureStore & {
 const LIST_RECENT_DEFAULT_LIMIT = 50;
 
 /**
- * The writer's retry count is the only variable part before the reason, so a
- * `%` covers it; the open paren ends the reason token. Built from
+ * Matches both `review dropped after <n> refused retries: <reason> (…)` and
+ * `review dropped: comment claim restore failed: <detail>; admission refused: <reason> (…)`.
+ * `%` covers the retry count or restore detail; the open paren ends the reason
+ * token. New drop formats in `handleGuardHeld` must extend these LIKE predicates.
+ * Built from
  * `ADMISSION_DROP_REASONS` so the union and the SQL cannot diverge (the
  * `sqlStageList` precedent). Values are compile-time literals — no input
  * reaches this text.
