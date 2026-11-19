@@ -267,7 +267,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       outboxMax: COMMENT_CLAIM_OUTBOX_MAX,
       degraded: claim.degraded,
     },
-    sweep: { ...sweep, limits: SWEEP_LIMITS },
+    sweep: { values: sweep.values, limits: SWEEP_LIMITS, degraded: sweep.issue !== null },
     // The inheritance default, with the vocabulary so the console needs no
     // second source for its options.
     reviewLevel: { value: level.value, levels: REVIEW_LEVELS, degraded: level.degraded },

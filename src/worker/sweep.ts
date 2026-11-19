@@ -464,11 +464,17 @@ async function appendAlertAudit(
  */
 export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepResult> {
   const log = deps.log ?? defaultSweepLog;
-  const { values: settings, degraded } = await getSweepSettings(db);
-  if (degraded) {
+  const { values: settings, issue } = await getSweepSettings(db);
+  if (issue) {
+    const reason = issue.kind === "read_failed" ? "D1 settings read failed" : "Invalid settings rows";
     log.warn(
-      { event: "ops_sweep_settings_unreadable", detail: "Using defaults for unreadable settings; webhook retention skipped" },
-      "Check the admin runtime sweep settings before webhook retention resumes",
+      {
+        event: "ops_sweep_settings_unreadable",
+        detail: issue.kind === "read_failed"
+          ? warnDetail(issue.error, deps.alertUrl)
+          : issue.keys.join(", "),
+      },
+      `${reason}; webhook retention skipped — check the admin runtime sweep settings`,
     );
   } else {
     try {

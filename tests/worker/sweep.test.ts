@@ -141,7 +141,7 @@ function recordingDb(captured: string[], bindings: Map<string, unknown[]>): D1Li
 describe("runSweep", () => {
   test("absent rows preserve the existing cron defaults", async () => {
     expect(await getSweepSettings(failureDb())).toEqual({
-      degraded: false,
+      issue: null,
       values: {
         failureThreshold: QUEUE_MAX_ATTEMPTS + 1,
         windowHours: 24,
@@ -156,11 +156,17 @@ describe("runSweep", () => {
   test("only one settings read supplies the default window to both alert lanes", async () => {
     const captured: string[] = [];
     const bindings = new Map<string, unknown[]>();
-    const result = await runSweep(recordingDb(captured, bindings));
-    expect(captured.filter((query) => query.includes("FROM review_runtime_settings"))).toHaveLength(1);
+    const unexpectedQueueCall = () => { throw new Error("Unexpected queue call"); };
+    const result = await runSweep(recordingDb(captured, bindings), {
+      queue: { send: unexpectedQueueCall, sendBatch: unexpectedQueueCall, metrics: unexpectedQueueCall },
+    });
+    expect(captured.filter((query) =>
+      query.includes("FROM review_runtime_settings") &&
+      bindings.get(query)?.some((value) => typeof value === "string" && value.startsWith("platform.sweep.")),
+    )).toHaveLength(1);
     const deliveryDelete = captured.find((query) => query.includes("DELETE FROM webhook_deliveries"));
     expect(bindings.get(deliveryDelete!)).toEqual(["-30 days", 500]);
-    const countAt = captured.findIndex((query) => query.includes("FROM review_failures"));
+    const countAt = captured.findIndex((query) => query.includes("GROUP BY stage"));
     expect(bindings.get(captured[countAt]!)).toEqual(["-24 hours"]);
     // The maintenance signal is its own trailing-window read, in the same
     // window, right after the grouped one.
@@ -560,7 +566,33 @@ describe("runSweep", () => {
     await seedInWindow(db, 3);
     const { log, calls } = captureLog();
     expect(await runSweep(db, { log })).toMatchObject({ failures24h: 3, thresholdBreached: true });
-    expect(calls[0]?.fields.event).toBe("ops_sweep_settings_unreadable");
+    expect(calls[0]?.fields).toEqual({
+      event: "ops_sweep_settings_unreadable",
+      detail: "platform.sweep.retention_days",
+    });
+    expect(calls[0]?.msg).toContain("Invalid settings rows; webhook retention skipped");
+    expect(db.raw.query("SELECT id FROM webhook_deliveries").get()).toEqual({ id: "delivery" });
+  });
+
+  test("a failed settings read reports the redacted D1 error and skips webhook retention", async () => {
+    const db = failureDb();
+    db.raw.run(`INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, created_at)
+                VALUES ('delivery', 'bot-sweep', 'pull_request', 'ok', datetime('now', '-31 days'))`);
+    const alertUrl = "https://ops.example/local-alert";
+    const wrapped: D1Like = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("FROM review_runtime_settings")) throw new Error(`database unavailable: ${alertUrl}`);
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const { log, calls } = captureLog();
+    await runSweep(wrapped, { log, alertUrl });
+    expect(calls[0]?.fields).toEqual({
+      event: "ops_sweep_settings_unreadable",
+      detail: "database unavailable: [REDACTED]",
+    });
+    expect(calls[0]?.msg).toContain("D1 settings read failed; webhook retention skipped");
     expect(db.raw.query("SELECT id FROM webhook_deliveries").get()).toEqual({ id: "delivery" });
   });
 

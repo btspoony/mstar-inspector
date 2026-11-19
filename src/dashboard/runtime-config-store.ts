@@ -1003,29 +1003,35 @@ export const SWEEP_LIMITS = Object.fromEntries(
 
 const SWEEP_KEYS = SWEEP_FIELDS.map((field) => SWEEP_RULES[field].key);
 
+type SweepSettingsIssue =
+  | { kind: "read_failed"; error: unknown }
+  | { kind: "invalid_rows"; keys: string[] };
+
 export async function getSweepSettings(
   db: DashboardD1,
-): Promise<{ values: SweepValues; degraded: boolean }> {
+): Promise<{ values: SweepValues; issue: SweepSettingsIssue | null }> {
   let rows = new Map<string, unknown>();
-  let degraded = false;
+  let issue: SweepSettingsIssue | null = null;
   try {
     const { results } = await db
       .prepare(`SELECT key, value FROM review_runtime_settings WHERE key IN (${SWEEP_KEYS.map(() => "?").join(", ")})`)
       .bind(...SWEEP_KEYS)
       .all<{ key: string; value: string }>();
     rows = new Map(results.map(({ key, value }) => [key, value]));
-  } catch {
-    degraded = true;
+  } catch (error) {
+    issue = { kind: "read_failed", error };
   }
   const values = {} as SweepValues;
+  const invalidKeys: string[] = [];
   for (const field of SWEEP_FIELDS) {
     const { key, fallback, min, max } = SWEEP_RULES[field];
     const stored = parseInRange(rows.get(key), min, max);
     const trusted = stored !== undefined && !Number.isNaN(stored);
-    if (rows.has(key) && !trusted) degraded = true;
+    if (rows.has(key) && !trusted) invalidKeys.push(key);
     values[field] = trusted ? stored : fallback;
   }
-  return { values, degraded };
+  if (invalidKeys.length > 0) issue = { kind: "invalid_rows", keys: invalidKeys };
+  return { values, issue };
 }
 
 const SWEEP_BEFORE_SQL = SWEEP_FIELDS.map((field, index) => {
