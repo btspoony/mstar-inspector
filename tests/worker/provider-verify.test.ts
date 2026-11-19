@@ -43,6 +43,7 @@ import {
   builtinProbeCanRejectKey,
   customProbeCanRejectKey,
   failureBodySample,
+  fetchDeclaredProviderModels,
   ompProviderIdFor,
   verifyFetch,
   verifyProviderKey,
@@ -777,6 +778,80 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
       ok: false,
       reason: "invalid_key",
     });
+  });
+
+  test("real cross-origin redirects never receive provider credentials, including after a same-origin hop", async () => {
+    const received: Headers[] = [];
+    const destination = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch(request) {
+        received.push(request.headers);
+        return json(200, { data: [{ id: "m1" }] });
+      },
+    });
+    try {
+      const sourceKeys: Array<string | null> = [];
+      const source = Bun.serve({
+        hostname: "127.0.0.1", port: 0,
+        fetch(request) {
+          sourceKeys.push(request.headers.get("x-api-key") ?? request.headers.get("authorization"));
+          const location = new URL(request.url).pathname === "/v1/models"
+            ? "/next"
+            : new URL("/models", destination.url).toString();
+          return new Response("quota", { status: 302, headers: { location } });
+        },
+      });
+      try {
+        for (const api of ["anthropic-messages", "openai-completions"] as const) {
+          const custom = { baseUrl: new URL("/v1", source.url).toString(), api, modelIds: ["m1"] };
+          expect(await verifyProviderKey({ fetch: verifyFetch }, "my-custom", PLAIN_KEY, custom))
+            .toEqual({ ok: false, reason: "unexpected_response" });
+          expect(await fetchDeclaredProviderModels({ fetch: verifyFetch }, custom, PLAIN_KEY))
+            .toEqual({ ok: false, reason: "unexpected_response", keyless: false });
+        }
+        expect(sourceKeys).toHaveLength(8);
+        expect(sourceKeys.every((key) => key !== null && key.includes(PLAIN_KEY))).toBe(true);
+        expect(received).toHaveLength(0);
+      } finally {
+        await source.stop(true);
+      }
+    } finally {
+      await destination.stop(true);
+    }
+  });
+
+  test.each([301, 302, 303, 307, 308])("real same-origin %i redirects preserve credentials and model discovery", async (status) => {
+    const received: Array<string | null> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname === "/v1/models") {
+          return new Response(null, { status, headers: { location: "./final" } });
+        }
+        received.push(request.headers.get("x-api-key"));
+        return json(200, { data: [{ id: "m1" }] });
+      },
+    });
+    try {
+      const custom = { baseUrl: new URL("/v1", server.url).toString(), api: "anthropic-messages" as const, modelIds: ["m1"] };
+      expect(await verifyProviderKey({ fetch: verifyFetch }, "my-custom", PLAIN_KEY, custom))
+        .toEqual({ ok: true, models: ["m1"] });
+      expect(await fetchDeclaredProviderModels({ fetch: verifyFetch }, custom, PLAIN_KEY))
+        .toEqual({ ok: true, entries: [{ id: "m1", endpoints: null }] });
+      expect(received).toEqual([PLAIN_KEY, PLAIN_KEY]);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test.each([null, "http://[", "/v1/models"])("an unusable redirect location %s is refused without an unbounded chain", async (location) => {
+    let calls = 0;
+    const result = await verifyProviderKey({ fetch: async () => {
+      calls++;
+      return new Response("quota", { status: 302, headers: location === null ? {} : { location } });
+    } }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "unexpected_response" });
+    expect(calls).toBe(location === "/v1/models" ? 21 : 1);
   });
 
   test("openrouter verifies on its PUBLIC model list — the chain dropdown needs it — and records reachable", async () => {

@@ -343,6 +343,27 @@ function responseLeftOrigin(res: Response, requestUrl: string): boolean {
   }
 }
 
+async function fetchSameOrigin(deps: VerifyDeps, url: string, init: RequestInit): Promise<Response> {
+  let current = new URL(url);
+  const origin = current.origin;
+  for (let redirects = 0; ; redirects++) {
+    const res = await deps.fetch(current.toString(), { ...init, redirect: "manual" });
+    if (![301, 302, 303, 307, 308].includes(res.status)) return res;
+    const location = res.headers.get("location");
+    if (location === null) return res;
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      return res;
+    }
+    // Fetch's redirect-count limit applies across the same-origin chain too.
+    if (next.origin !== origin || redirects === 20) return res;
+    await discardFailureBody(res);
+    current = next;
+  }
+}
+
 /**
  * How much of a failure body the quota check may read: provider error JSON is
  * a few hundred bytes, and the cap keeps a huge (or hostile) error page from
@@ -415,6 +436,10 @@ async function discardFailureBody(res: Response): Promise<void> {
  *   anything else → unexpected_response.
  */
 async function failureReason(res: Response): Promise<VerifyFailureReason> {
+  if (res.status >= 300 && res.status < 400) {
+    await discardFailureBody(res);
+    return "unexpected_response";
+  }
   if (res.status === 401 || res.status === 403) {
     await discardFailureBody(res);
     return "invalid_key";
@@ -445,7 +470,7 @@ async function verifyModelsEndpoint(
   if (spec.anthropicVersion) headers["anthropic-version"] = "2023-06-01";
   let res: Response;
   try {
-    res = await deps.fetch(spec.url, {
+    res = await fetchSameOrigin(deps, spec.url, {
       method: "GET",
       headers,
       signal: AbortSignal.timeout(deps.timeoutMs ?? VERIFY_TIMEOUT_MS),
@@ -486,7 +511,7 @@ async function verifyProbe(
 ): Promise<VerifyResult> {
   let res: Response;
   try {
-    res = await deps.fetch(spec.url, {
+    res = await fetchSameOrigin(deps, spec.url, {
       method: "GET",
       headers: requestHeaders(spec.auth, key),
       signal: AbortSignal.timeout(deps.timeoutMs ?? VERIFY_TIMEOUT_MS),
@@ -620,7 +645,7 @@ async function verifyCustomProvider(
       : requestHeaders("bearer", key);
   let res: Response;
   try {
-    res = await deps.fetch(probe.toString(), {
+    res = await fetchSameOrigin(deps, probe.toString(), {
       method: "GET",
       headers,
       signal: AbortSignal.timeout(deps.timeoutMs ?? VERIFY_TIMEOUT_MS),
@@ -773,7 +798,7 @@ export async function fetchDeclaredProviderModels(
         : requestHeaders("bearer", key);
   let res: Response;
   try {
-    res = await deps.fetch(probe.toString(), {
+    res = await fetchSameOrigin(deps, probe.toString(), {
       method: "GET",
       headers,
       signal: AbortSignal.timeout(deps.timeoutMs ?? VERIFY_TIMEOUT_MS),
