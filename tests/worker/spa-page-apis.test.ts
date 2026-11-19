@@ -2,9 +2,10 @@
  * SPA JSON faces for members / apps / settings.
  * Same gates as the HTML pages; payloads never include encrypted columns.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import worker from "../../src/worker/index";
-import { createSecretbox } from "../../src/dashboard/secretbox";
+import { createSecretbox, SecretboxKeyError } from "../../src/dashboard/secretbox";
+import type { D1StatementLike } from "../../src/store/types";
 import type { Env } from "../../src/worker/env";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -81,6 +82,88 @@ async function get(path: string, login?: string, env?: Env): Promise<Response> {
   return worker.fetch(new Request(`https://worker.local${path}`, { headers }), env ?? makeEnv(await seededWorld()));
 }
 
+describe("versioned provider catalog", () => {
+  const path = "/dashboard/default/api/provider-catalog";
+
+  test("requires sign-in and admits a plain workspace member", async () => {
+    const env = makeEnv(await seededWorld());
+    const anonymous = await get(path, undefined, env);
+    expect(anonymous.status).toBe(302);
+    expect(anonymous.headers.get("location")).toBe("/dashboard/login");
+    const response = await get(path, "hubot", env);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { provider_catalog: Array<Record<string, unknown>> };
+    expect(body.provider_catalog.length).toBeGreaterThan(0);
+    expect(body.provider_catalog.every((row) => !Object.hasOwn(row, "eligibility"))).toBe(true);
+  });
+
+  test("only a matching version is immutable; unversioned/stale reads revalidate with ETag", async () => {
+    const env = makeEnv(await seededWorld());
+    const settingsResponse = await get("/dashboard/default/api/apps/1001/settings", "octocat", env);
+    const settings = await settingsResponse.json() as { provider_catalog_version: string };
+    const response = await get(path, "hubot", env);
+    expect(response.headers.get("cache-control")).toBe("private, no-cache");
+    const etag = response.headers.get("etag")!;
+    expect(etag).toBe(`"${settings.provider_catalog_version}"`);
+    const immutable = await get(`${path}?v=${settings.provider_catalog_version}`, "hubot", env);
+    expect(immutable.status).toBe(200);
+    expect(immutable.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
+    const stale = await get(`${path}?v=stale-fixture-version`, "hubot", env);
+    expect(stale.headers.get("cache-control")).toBe("private, no-cache");
+    for (const condition of [etag, `W/${etag}`, `"other", ${etag}`, "*"]) {
+      const notModified = await worker.fetch(new Request(`https://worker.local${path}`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${await cookie("hubot")}`, "If-None-Match": condition },
+      }), env);
+      expect(notModified.status).toBe(304);
+      expect(notModified.headers.get("cache-control")).toBe("private, no-cache");
+      expect(await notModified.text()).toBe("");
+    }
+    const changed = await worker.fetch(new Request(`https://worker.local${path}`, {
+      headers: { Cookie: `${SESSION_COOKIE}=${await cookie("hubot")}`, "If-None-Match": '"other"' },
+    }), env);
+    expect(changed.status).toBe(200);
+  });
+});
+
+test("concurrent settings reads log the first section's error even when a later key read rejects first", async () => {
+  const db = await seededWorld();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let keyStarted!: () => void;
+  const laterStarted = new Promise<void>((resolve) => { keyStarted = resolve; });
+  function wrap(statement: D1StatementLike, sql: string): D1StatementLike {
+    return new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") return (...args: unknown[]) => wrap(target.bind(...args), sql);
+        if (property === "all" && sql.includes("SELECT installation_id, account_login, seen_at FROM bot_installations")) {
+          return async () => { await held; throw new TypeError("earlier installation failure"); };
+        }
+        if (property === "all" && sql.includes("SELECT * FROM bot_provider_keys WHERE bot_id")) {
+          return async () => { keyStarted(); throw new SecretboxKeyError("later key failure"); };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
+  const warnings = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const pending = get("/dashboard/default/api/apps/1001/settings", "octocat", makeEnv({
+      prepare: (sql: string) => wrap(db.prepare(sql), sql), batch: db.batch.bind(db),
+    }));
+    await laterStarted;
+    release();
+    const response = await pending;
+    expect(response.status).toBe(500);
+    expect(warnings.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(expect.objectContaining({
+      event: "dashboard_settings", stage: "api_render", error_type: "TypeError", key_error: false,
+    }));
+  } finally {
+    release();
+    warnings.mockRestore();
+  }
+});
+
 describe("the retired deployment-level members face", () => {
   test("GET /dashboard/api/members is gone; the workspace face serves", async () => {
     // Authority is workspace-scoped, so a deployment-level member list has no
@@ -152,6 +235,9 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       };
       configured_providers?: Array<{ kind: string }>;
       provider_catalog?: Array<{ id: string; tier: string; verifiable: boolean; eligibility: string }>;
+      provider_catalog_version: string;
+      provider_eligibility: Record<string, string>;
+      model_limits_snapshot?: unknown;
       providers?: unknown;
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
     };
@@ -173,22 +259,20 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     // Fresh world = the unconfigured-App case: persisted state is EMPTY while
     // the catalog is fully populated.
     expect(body.configured_providers).toEqual([]);
-    expect(body.provider_catalog!.length).toBeGreaterThan(0);
-    expect(
-      body.provider_catalog!.some(
-        (p) => p.id === "azure-openai" && p.verifiable === false && p.eligibility === "builtin",
-      ),
-    ).toBe(true);
-    expect(body.provider_catalog!.some((p) => p.id === "workers-ai" && p.eligibility === "template")).toBe(true);
+    expect(body.provider_catalog).toBeUndefined();
+    expect(body.model_limits_snapshot).toBeUndefined();
+    expect(body.provider_catalog_version).toMatch(/^[0-9a-f]{64}$/);
+    expect(body.provider_eligibility["azure-openai"]).toBe("builtin");
+    expect(body.provider_eligibility["workers-ai"]).toBe("template");
     // omp is the selected runtime image: zero rows are unavailable this
     // iteration, and omp itself is NOT a catalog entry.
-    expect(body.provider_catalog!.some((p) => p.eligibility === "unavailable")).toBe(false);
+    expect(Object.values(body.provider_eligibility)).not.toContain("unavailable");
     // the selected image id defaults to omp, and the manage face
     // carries the enabled-registry selector choices (ids only — never
     // image-local yaml or secrets).
     expect(body.app.sandbox_image_id).toBe("omp");
     expect(body.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
-    expect(body.provider_catalog!.some((p) => p.id === "omp")).toBe(false);
+    expect(body.provider_eligibility["omp"]).toBeUndefined();
     expect(owner.headers.get("cache-control")).toBe("private, no-store");
 
     // The App's creator is a plain workspace member here, so creation no
@@ -247,6 +331,8 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(otherBody.keys).toBeUndefined();
     expect(otherBody.configured_providers).toBeUndefined();
     expect(otherBody.provider_catalog).toBeUndefined();
+    expect(otherBody).not.toHaveProperty("provider_catalog_version");
+    expect(otherBody).not.toHaveProperty("provider_eligibility");
     expect(otherBody.model_chains).toBeUndefined();
     expect(otherBody.model_roles).toBeUndefined();
     expect(otherBody.custom_providers).toBeUndefined();

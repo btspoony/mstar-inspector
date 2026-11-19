@@ -147,6 +147,8 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   const base = apiBase();
   const [payload, setPayload] = useState<SettingsPayload | null>(null);
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const loadSequence = useRef(0);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
@@ -167,27 +169,39 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   // refresh from a failed one (the draft create must not close on failure).
   const load = useCallback(
     async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
+      const sequence = ++loadSequence.current;
       if (!background) setState("loading");
       try {
         const loaded = await loadAppDetail(base, appId);
-        if (cancelledRef.current) return false;
+        if (cancelledRef.current || sequence !== loadSequence.current) return false;
         if (!loaded) {
           if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
           else setState("error");
           return false;
         }
-        const modelGroups = loaded.can_manage ? await loadModelGroups(base, appId) : [];
-        if (cancelledRef.current) return false;
         setPayload(loaded);
-        setGroups(modelGroups);
         setState("ok");
+        if (loaded.can_manage && !loaded.blocked) {
+          if (!background) {
+            setGroups([]);
+            setModelsLoading(true);
+          }
+          void loadModelGroups(base, appId).then((modelGroups) => {
+            if (cancelledRef.current || sequence !== loadSequence.current) return;
+            setGroups(modelGroups);
+            setModelsLoading(false);
+          });
+        } else {
+          setGroups([]);
+          setModelsLoading(false);
+        }
         // A healthy page has no page-level failure: any successful load —
         // foreground or background — clears the banner a failed background
         // reload left behind (the bugbot fix).
         setNotice(null);
         return true;
       } catch {
-        if (!cancelledRef.current) {
+        if (!cancelledRef.current && sequence === loadSequence.current) {
           if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
           else setState("error");
         }
@@ -239,6 +253,7 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           appId={appId}
           payload={payload}
           groups={groups}
+          modelsLoading={modelsLoading}
           notice={notice}
           search={search}
           onReload={load}
@@ -461,6 +476,7 @@ export function AppDetailView({
   appId,
   payload,
   groups,
+  modelsLoading = false,
   notice,
   search,
   onReload,
@@ -471,6 +487,7 @@ export function AppDetailView({
   payload: SettingsPayload;
   /** The chain editors' model options — empty for a member. */
   groups: ModelOptionGroup[];
+  modelsLoading?: boolean;
   notice: { kind: NoticeKind; message: string } | null;
   search: AppDetailSearch;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
@@ -544,6 +561,7 @@ export function AppDetailView({
                 locale={locale}
                 payload={{ ...bot, can_manage: bot.can_manage && bot.app.scope === "owned" }}
                 groups={groups}
+                modelsLoading={modelsLoading}
                 notice={null}
                 onReload={onReload}
               />

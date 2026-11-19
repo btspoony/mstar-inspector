@@ -100,6 +100,8 @@ const managePayload = {
   custom_providers: [],
   configured_providers: [],
   provider_catalog: [],
+  provider_catalog_version: "fixture-catalog",
+  provider_eligibility: {},
   model_role_ids: [],
   custom_provider_api_ids: [],
   sandbox_images: [{ id: "omp", enabled: true }],
@@ -143,6 +145,8 @@ const untargetedPayload: SettingsUntargetedPayload = {
   custom_providers: [],
   configured_providers: [],
   provider_catalog: [],
+  provider_catalog_version: "fixture-catalog",
+  provider_eligibility: {},
   model_role_ids: [],
   custom_provider_api_ids: [],
   sandbox_images: [{ id: "omp", enabled: true }],
@@ -669,6 +673,7 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     globalThis.fetch = (async (input: unknown) => {
       const target = String(input);
       if (target.endsWith("/models")) return json({ groups: [] });
+      if (target.includes("/api/provider-catalog")) return json({ provider_catalog: [], model_limits_snapshot: "fixture" });
       await held;
       return json(body);
     }) as unknown as typeof fetch;
@@ -690,6 +695,86 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       },
     };
   }
+
+  test("settings and delivery render before models/catalog resolve; only their editors wait", async () => {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/default/apps/1");
+    const realFetch = globalThis.fetch;
+    let releaseModels!: () => void;
+    let releaseCatalog!: () => void;
+    const models = new Promise<void>((resolve) => { releaseModels = resolve; });
+    const catalog = new Promise<void>((resolve) => { releaseCatalog = resolve; });
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/settings")) return Response.json({
+        ...managePayload, provider_catalog_version: "fixture-ready", provider_eligibility: {},
+      });
+      if (url.endsWith("/models")) {
+        await models;
+        return Response.json({ groups: [{ provider: "anthropic", source: "verified", selectors: ["anthropic/fixture-model"] }] });
+      }
+      if (url.includes("/api/provider-catalog")) {
+        await catalog;
+        return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
+      }
+      if (url.includes("/deliveries")) return Response.json({ deliveries: [], total: 0, repos: [], types: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    }) as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
+      expect(container.textContent).toContain("Demo");
+      expect(tabTrigger(container, t("en", "appDetail.tabDelivery"))).toBeDefined();
+      expect(container.querySelector(`[aria-label="${t("en", "settings.modelChainField")}"]`)).toBeNull();
+      expect(container.textContent).toContain(t("en", "common.loading"));
+      await click(win, tabTrigger(container, t("en", "appDetail.tabDelivery")));
+      expect(container.textContent).toContain(t("en", "appDetail.delivery.emptyTitle"));
+      await click(win, tabTrigger(container, t("en", "appDetail.tabSettings")));
+      await act(async () => { releaseModels(); });
+      const picker = container.querySelector(`[aria-label="${t("en", "settings.modelChainField")}"]`);
+      expect(picker).not.toBeNull();
+      await click(win, picker);
+      expect(win.document.body.textContent).toContain("anthropic/fixture-model");
+      await act(async () => { releaseCatalog(); });
+      expect(container.textContent).toContain(t("en", "settings.addProvider"));
+      expect(calls.filter((url) => url.includes("/api/provider-catalog"))).toHaveLength(1);
+    } finally {
+      releaseModels();
+      releaseCatalog();
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("model failure stays nonfatal and catalog failure is confined to provider management", async () => {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/default/apps/1");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      if (String(input).endsWith("/settings")) return Response.json({
+        ...managePayload, provider_catalog_version: "fixture-section-error", provider_eligibility: {},
+      });
+      return new Response("unavailable", { status: 503 });
+    }) as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
+      expect(container.textContent).toContain("Demo");
+      expect(container.querySelector(`[aria-label="${t("en", "settings.modelChainField")}"]`)).not.toBeNull();
+      const alerts = [...container.querySelectorAll('[role="alert"]')];
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]?.parentElement?.textContent).toContain(t("en", "settings.providers.title"));
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
 
   /** The label of the tab whose panel is active — empty when no panel is. */
   const activeTabLabel = (win: Window, container: DomElement) => {

@@ -124,6 +124,28 @@ async function getJson(path: string, login: string, env: Env): Promise<Response>
   );
 }
 
+async function readSettingsWithCatalog(response: Response, env: Env): Promise<unknown> {
+  const settings = await response.json() as {
+    provider_catalog_version: string;
+    provider_eligibility: Record<string, string>;
+    provider_catalog?: unknown;
+  };
+  expect(settings.provider_catalog).toBeUndefined();
+  expect(settings.provider_catalog_version).toMatch(/^[0-9a-f]{64}$/);
+  const catalogResponse = await getJson(
+    `/dashboard/default/api/provider-catalog?v=${settings.provider_catalog_version}`, "mallory", env,
+  );
+  expect(catalogResponse.status).toBe(200);
+  const catalog = await catalogResponse.json() as { provider_catalog: Array<{ id: string }> };
+  return {
+    ...settings,
+    ...catalog,
+    provider_catalog: catalog.provider_catalog.map((row) => ({
+      ...row, eligibility: settings.provider_eligibility[row.id],
+    })),
+  };
+}
+
 /** First 16 hex chars of SHA-256(plaintext) — the pool id the store derives. */
 async function keyIdOf(plainKey: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plainKey));
@@ -1038,7 +1060,7 @@ describe("GET settings includes delivery_summary for the sidebar", () => {
     const { db } = await seededWorld();
     const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", makeEnv(db));
     expect(res.status).toBe(200);
-    const body = (await res.json()) as {
+    const body = (await readSettingsWithCatalog(res, makeEnv(db))) as {
       delivery_summary: { latest: null; rejected24h: number };
       configured_providers?: Array<{ kind: string }>;
       provider_catalog?: Array<{ id: string; label: string; tier: string; verifiable: boolean; eligibility: string }>;
@@ -1116,7 +1138,7 @@ describe("GET settings configured_providers vs provider_catalog", () => {
   }> {
     const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
-    return (await res.json()) as {
+    return (await readSettingsWithCatalog(res, env)) as {
       configured_providers: ConfiguredRow[];
       provider_catalog: Array<{ id: string; tier: string; eligibility: string }>;
     };
@@ -1899,7 +1921,7 @@ describe("GET settings provider_catalog display_group (AD-547)", () => {
   async function getCatalog(env: Env): Promise<CatalogRow[]> {
     const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { provider_catalog: CatalogRow[] };
+    const body = (await readSettingsWithCatalog(res, env)) as { provider_catalog: CatalogRow[] };
     return body.provider_catalog;
   }
 
@@ -1969,7 +1991,7 @@ describe("GET settings provider_catalog usage_probe (per-key usage action)", () 
   async function getCatalogRows(env: Env): Promise<StampRow[]> {
     const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { provider_catalog: StampRow[] };
+    const body = (await readSettingsWithCatalog(res, env)) as { provider_catalog: StampRow[] };
     return body.provider_catalog;
   }
 
@@ -2010,7 +2032,7 @@ describe("GET settings provider_catalog — one row per provider, protocol as an
   async function catalogRows(env: Env): Promise<CatalogRow[]> {
     const res = await getJson(SETTINGS_JSON, "mallory", env);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { provider_catalog: CatalogRow[] };
+    const body = (await readSettingsWithCatalog(res, env)) as { provider_catalog: CatalogRow[] };
     return body.provider_catalog;
   }
 
@@ -2059,7 +2081,7 @@ describe("GET settings provider_catalog — one row per provider, protocol as an
       PLAIN_KEY,
     );
     const res = await getJson(SETTINGS_JSON, "mallory", makeEnv(db));
-    const body = (await res.json()) as {
+    const body = (await readSettingsWithCatalog(res, makeEnv(db))) as {
       custom_providers: Array<{ provider_id: string; legacy_of?: string }>;
       provider_catalog: CatalogRow[];
     };

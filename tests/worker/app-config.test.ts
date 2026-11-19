@@ -4508,7 +4508,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       // No override field was invented from the vendor number.
       expect(decl!.models_meta).toBeUndefined();
       // The settings face still knows the model's sizes — via the catalog.
-      const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+      const payload = await get("/dashboard/default/api/provider-catalog", await mallory(), makeEnv(db));
       const body = (await payload.json()) as {
         provider_catalog: Array<{ id: string; model_limits: Record<string, { contextWindow: number; maxTokens: number }> }>;
         model_limits_snapshot: string;
@@ -4555,9 +4555,9 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(row.models_meta).toBeUndefined();
   });
 
-  test("the settings payload stamps a per-model size table on every catalog row, plus its snapshot", async () => {
+  test("the catalog payload stamps a per-model size table on every catalog row, plus its snapshot", async () => {
     const { db } = await seededWorld();
-    const res = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
+    const res = await get("/dashboard/default/api/provider-catalog", await mallory(), makeEnv(db));
     const body = (await res.json()) as {
       provider_catalog: Array<{ id: string; model_limits: Record<string, { contextWindow: number; maxTokens: number }> }>;
       model_limits_snapshot: string;

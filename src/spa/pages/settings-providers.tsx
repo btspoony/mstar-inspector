@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { t } from "../../i18n";
 import { Button, FlowSection, StatusBadge, type StatusTone } from "@design-system";
@@ -7,7 +7,10 @@ import { ListRow, ListRowGroup } from "../components/ListRow";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import { modelsForProtocol, type CatalogProvider, type BotConfigSections } from "./data";
-import { NoticeRegion, type OpNotice } from "./PageNotice";
+import { LoadingNotice, NoticeRegion, PageNotice, type OpNotice } from "./PageNotice";
+import { loadProviderCatalog } from "../provider-catalog";
+import { apiBase } from "../workspace-base";
+import type { StaticProviderCatalog } from "./data";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { ProviderModelsDialog } from "./provider-models-dialog";
 import { ProviderSyncDialog } from "./provider-sync-dialog";
@@ -48,7 +51,37 @@ const TIER_FACE = {
  * Opening any of them inserts nothing into this list (AC-4) and changes no
  * route (AC-5); the per-row removes keep their confirmation dialog.
  */
-export function ProvidersSection({
+export function ProvidersSection(props: Parameters<typeof LoadedProvidersSection>[0]) {
+  const { payload, locale } = props;
+  const base = apiBase();
+  const version = payload.provider_catalog_version;
+  const [loaded, setLoaded] = useState<{ version: string; catalog: StaticProviderCatalog } | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  useEffect(() => {
+    if (!version) return;
+    let cancelled = false;
+    setFailed(null);
+    void loadProviderCatalog(base, version).then((catalog) => {
+      if (!cancelled) setLoaded({ version, catalog });
+    }).catch(() => { if (!cancelled) setFailed(version); });
+    return () => { cancelled = true; };
+  }, [base, version, payload]);
+  if (!version) return <LoadedProvidersSection {...props} />;
+  const catalog = loaded?.version === version ? loaded.catalog : null;
+  return catalog ? <LoadedProvidersSection {...props} payload={{
+    ...payload,
+    ...catalog,
+    provider_catalog: catalog.provider_catalog.map((row) => ({
+      ...row, eligibility: payload.provider_eligibility?.[row.id] ?? "unavailable",
+    })),
+  }} /> : (
+    <FlowSection title={t(locale, "settings.providers.title")} subtitle={t(locale, "settings.providersCopy")}>
+      {failed === version ? <PageNotice kind="error" message={t(locale, "common.loadFailed")} /> : <LoadingNotice locale={locale} />}
+    </FlowSection>
+  );
+}
+
+function LoadedProvidersSection({
   locale,
   payload,
   onVerify,
