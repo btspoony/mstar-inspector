@@ -26,16 +26,7 @@ import { NoticeRegion, type OpNotice } from "./PageNotice";
 /** The preview shape the Worker answers: counts only, never the ids. */
 type Preview = { current: number; fetched: number; kept: number; added: number; dropped: number };
 
-export function ProviderSyncDialog({
-  locale,
-  open,
-  onOpenChange,
-  appId,
-  provider,
-  label,
-  onOutcome,
-  onReload,
-}: {
+type ProviderSyncDialogProps = {
   locale: SpaBoot["locale"];
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -45,15 +36,31 @@ export function ProviderSyncDialog({
   onOutcome: (notice: OpNotice) => void;
   /** The stored declaration changed — the card re-reads its count. */
   onReload: () => Promise<unknown>;
-}) {
+};
+
+export function ProviderSyncDialog(props: ProviderSyncDialogProps) {
+  return props.open ? <OpenProviderSyncDialog {...props} /> : null;
+}
+
+function OpenProviderSyncDialog({
+  locale,
+  open,
+  onOpenChange,
+  appId,
+  provider,
+  label,
+  onOutcome,
+  onReload,
+}: ProviderSyncDialogProps) {
   // null = not fetched yet. The dialog never guesses a count it did not fetch.
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<"preview" | "write" | null>(null);
+  const busy = pending !== null;
   const [notice, setNotice] = useState<OpNotice | null>(null);
 
   async function fetchPreview(): Promise<void> {
     if (busy) return;
-    setBusy(true);
+    setPending("preview");
     setNotice(null);
     setPreview(null);
     try {
@@ -72,13 +79,13 @@ export function ProviderSyncDialog({
       // so instead of leaving the operator guessing whether it ran.
       setNotice({ kind: "error", message: t(locale, "settings.providers.sync.fetchFailed") });
     } finally {
-      setBusy(false);
+      setPending(null);
     }
   }
 
   async function confirmSync(): Promise<void> {
     if (busy || preview === null) return;
-    setBusy(true);
+    setPending("write");
     setNotice(null);
     try {
       const { status, body } = await postForm(`${apiBase()}/apps/${encodeURIComponent(String(appId))}/settings`, {
@@ -103,12 +110,14 @@ export function ProviderSyncDialog({
     } catch {
       setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
     } finally {
-      setBusy(false);
+      setPending(null);
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => {
+      if (pending !== "write") onOpenChange(next);
+    }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t(locale, "settings.providers.sync.title", { label })}</DialogTitle>
