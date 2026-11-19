@@ -1146,7 +1146,8 @@ async function handleGuardHeld(
         )
           .bind(
             JSON.stringify(payload),
-            Date.now(),
+            // Let the scheduled delivery arrive before the outbox recovery window starts.
+            Date.now() + delaySeconds * 1000,
             payload.installation_id,
             payload.owner,
             payload.repo,

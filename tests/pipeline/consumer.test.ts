@@ -9391,8 +9391,8 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
       attempts: number; queued_ms: number;
     };
     expect(timing.attempts).toBe(1);
-    expect(timing.queued_ms).toBeGreaterThanOrEqual(before);
-    expect(timing.queued_ms).toBeLessThanOrEqual(Date.now());
+    expect(timing.queued_ms).toBeGreaterThanOrEqual(before + 60_000);
+    expect(timing.queued_ms).toBeLessThanOrEqual(Date.now() + 60_000);
     expect(failureRows(db)).toHaveLength(0);
 
     db.raw.prepare("DELETE FROM review_inflight").run();
