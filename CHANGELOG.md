@@ -8,6 +8,28 @@ fragment format and the per-change commit flow.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-19
+
+### Changed
+
+- Load App settings without waiting for model-editor vocabulary; fetch the authenticated, versioned provider catalog separately and run independent settings reads concurrently while preserving error precedence.
+- **Scheduled failure sweep:** Platform operators can change alert thresholds, the alert window and timeout, webhook retention, and invite expiration batch size without a redeploy. The existing defaults are unchanged.
+- Reduce database round trips for workspace API authorization and overlap independent reads on dashboard page loads.
+
+### Fixed
+
+- **Check recovery** no longer starves a repaired App: the suspended-Check re-enable scan resumes from a durable rotation cursor (migration `0077_check_reenable_cursor`), so pairs whose credential is unchanged or whose review is still paused cannot hold the bounded batch, and a repaired pair behind any size of backlog is reached within a full rotation.
+- Restore a comment trigger's claim before delayed admission retries so capacity or in-flight guards do not silently discard its review; wait until the scheduled delivery and recovery window have passed before outbox recovery or expiry.
+- Avoid scanning webhook delivery history when selecting dashboard App health; preserve verdict priority and same-second ordering with indexed lookups.
+- Keep a final maintenance-window delivery unacknowledged when its failure record cannot be saved, allowing queue failure handling and dead-letter routing instead of silently losing the review.
+- Stabilized repository route test fixtures with fixed installation timestamps so ordering does not depend on crossing a millisecond boundary.
+- Rotate suspended lifecycle recovery scans with a durable exact-App pair cursor so unavailable Apps cannot starve repaired Apps. Apply the batch limit to pairs across both lanes without dropping suspension reasons needed for identity verification.
+- Reset provider model sync previews and notices when the dialog closes, requiring a fresh successful preview before confirmation after reopening and ignoring previews completed for a closed dialog.
+- Keep the dialog open while a sync write is pending so failures remain visible; preview fetches can still be dismissed.
+- Prevent provider verification and model discovery from forwarding credentials across origins on redirects, while preserving bounded same-origin redirects within the original timeout.
+- Redirect expired SPA sessions to login when browser fetch returns an opaque redirect, and require a successful HTTP status before reporting settings as saved.
+- Indexed the webhook retention cutoff and the per-action alert deduplication lookup to reduce scan work during scheduled sweeps.
+
 ## [1.0.1] - 2026-11-19
 
 ### Changed
