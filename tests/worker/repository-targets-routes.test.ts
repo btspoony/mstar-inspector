@@ -172,6 +172,10 @@ async function seededWorld(opts: { installations?: number[]; target?: boolean } 
       authoritative: true,
     });
   }
+  // Equal fixed stamps make the installation_id tiebreak independent of the clock.
+  db.raw
+    .prepare("UPDATE bot_installations SET seen_at = '2026-01-01 00:00:00.000' WHERE bot_id = ?")
+    .run(id);
   if (opts.target !== false) {
     seedTarget(db, id, { workspaceId: "default", repoId: 555001, repoOwner: "acme", repoName: "api" });
   }
