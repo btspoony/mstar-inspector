@@ -127,6 +127,33 @@ describe("the queue maintenance gate", () => {
     expect(String(rows[0]!.error)).toContain(`attempt ${QUEUE_MAX_ATTEMPTS}`);
   });
 
+  test("a final maintenance delivery is not acked when its failure record rejects", async () => {
+    const h = createConsumerHarness();
+    const db = await closedWindowDB();
+    const writeError = new Error("failure store unavailable");
+    const broken = {
+      ...db,
+      prepare(query: string) {
+        if (query.includes("INSERT INTO review_failures")) throw writeError;
+        return db.prepare(query);
+      },
+    };
+    const { createReviewConsumer } = await loadConsumer();
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: broken as never }),
+      deferLog([]),
+      h.overrides,
+    );
+    h.queueState.attempts = QUEUE_MAX_ATTEMPTS;
+
+    const delivery = consumer(h.makeBatch(makePayload()));
+    await expect(delivery).rejects.toBe(writeError);
+    expect(h.messageAckCalls).toHaveLength(0);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(h.sandbox.calls).toHaveLength(0);
+  });
+
   test("an unreadable window defers too — an unknowable fence is not open", async () => {
     const h = createConsumerHarness();
     const lines: ConsumerLogFields[] = [];

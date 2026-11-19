@@ -2999,6 +2999,10 @@ wrangler d1 execute mstar-inspector-prod-db --remote --env production --command 
     ORDER BY created_at DESC LIMIT 20"
 ```
 
+If no D1 failure row is found for a final maintenance-window delivery, check the
+DLQ (`review-dlq-prod`). A delivery whose failure-record write fails is left unacked
+and routed to the DLQ instead of being acked; it has no row for this replay path.
+
 Then request ONE replay, as a signed-in platform operator (the route sits behind
 the same `_internal_admin` gate as every other admin route — no cookie, a
 non-operator account or an unbound DB answers the framework 404). The POST

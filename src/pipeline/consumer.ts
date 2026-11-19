@@ -4093,7 +4093,8 @@ export function createReviewConsumer(
           })
           .catch((err: unknown) => {
             const detail = err instanceof Error ? err.message : String(err);
-            log.warn(deferral, `review_failures insert failed (deferred delivery trace lost): ${detail}`);
+            log.warn(deferral, `review_failures insert failed (leaving deferred delivery unacked): ${detail}`);
+            throw err;
           });
         message.ack();
       }
