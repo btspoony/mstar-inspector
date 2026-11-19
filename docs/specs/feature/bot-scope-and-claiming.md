@@ -12,7 +12,7 @@ A review bot's visibility (`owned` / `shared`), the platform's official workspac
 |---|---|
 | `review_bots.scope` | `owned` (default) or `shared`. A `shared` bot may be referenced by targets outside its owning workspace. |
 | `review_bots.shared_at` | Set when the bot is shared, cleared when unshared. A same-value write is a no-op: no row change, no audit row. |
-| Authority | Platform operator only, through `/_internal_admin`. A workspace owner cannot mark its own bot shared. |
+| Authority | Three actors. The platform operator, through the console (`PATCH /api/bots/:botId/scope`, `src/admin/index.ts`). The official workspace's owner/admin, for its own bots, through `PATCH /dashboard/:workspaceRef/api/apps/:appId/bot/scope` (`appBotScopeRoute`, `src/dashboard/index.ts`) — both routes land the transition through the store's `setBotScope` (`src/dashboard/apps-store.ts`), which re-checks the official-workspace guard inside the write's own batch. Everyone else has no scope write: a member route reaches no bot whose workspace it does not own (`canWriteBotScope`, `src/dashboard/index.ts`). |
 | Constraint | `shared` is only accepted for a bot whose workspace is the **official workspace** at write time. The check runs inside the same batch as the write, so a designation changed concurrently cannot authorize a stale share. |
 
 A retained target grants its workspace no bot-scope write; the bot's lifecycle, configuration, keys, metadata, installations and deliveries belong to its owning workspace, and a Blocked target's payload carries only target-owned configuration.
@@ -124,7 +124,7 @@ Both detail payload faces carry `blocked` and, when true, `blocked_reason = "bot
 
 ### Shared bots are read-only for their consumers
 
-Every bot-scoped write route — settings operations, key deletion, provider-key verification (`keys/verify`, both the builtin and the custom/declared path), disable/enable and delete — refuses a `shared` bot before parsing, probing or persisting, with zero outbound calls and no storage change. `refresh-metadata` and `keys/usage` are not configuration writes but must still authorize the bot. The predicate is `canWriteBotScope` (`src/dashboard/index.ts`), which requires the bot to be `owned` **and** the caller's workspace to be the bot's owning workspace.
+Every bot-scoped write route — settings operations, key deletion, provider-key verification (`keys/verify`, both the builtin and the custom/declared path), disable/enable and delete — refuses a `shared` bot before parsing, probing or persisting, with zero outbound calls and no storage change. `refresh-metadata` and `keys/usage` are not configuration writes but must still authorize the bot. The predicate is `canWriteBotScope` (`src/dashboard/index.ts`, `app.workspace_id === scope.workspaceId`): the caller's workspace must be the bot's owning workspace, read off the same joined row. Scope is not part of the decision, so a `shared` bot's **owning workspace keeps every configuration write** (including the share switch, `PATCH /dashboard/:workspaceRef/api/apps/:appId/bot/scope`, `appBotScopeRoute`), while a consuming workspace is refused — a retained target grants review configuration, never the bot.
 
 Two surfaces carry the two halves of a bot's configuration, and only one of them is refused here:
 

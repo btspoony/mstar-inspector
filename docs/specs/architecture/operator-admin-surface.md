@@ -164,6 +164,27 @@ ordered by `name, id`, as
 the console read is unaudited. `GET /_internal_admin/api/runtime` additionally
 states `officialWorkspaceId: string | null`.
 
+The two console faces that carry this section (§3.5), registered against
+`ADMIN_PAGES` (`src/spa/admin/pages.ts`) — the Worker serves one document per
+page id (`src/admin/index.ts`) and the admin entry routes the same ids
+client-side (`src/spa/admin/main.tsx`):
+
+- **Workspaces page card** (`src/spa/admin/WorkspacesPage.tsx`): above the
+  tenant table, the official-workspace card reads its current value from
+  `GET /api/runtime` (`readRuntime`, `src/spa/admin/api.ts`) and writes
+  `PATCH /api/official-workspace` (`setOfficialWorkspace`) — a `null` body
+  clears, never an empty string.
+- **Bots page** (`src/spa/admin/BotsPage.tsx`): reads `GET /api/bots`
+  (`readBots`, `src/dashboard/apps-store.ts`, one statement whose `is_official`
+  column joins the stored id to a live workspace, so a designation pointing at
+  a soft-deleted workspace reads as none) and writes
+  `PATCH /api/bots/:botId/scope` (`assignBotScope`) — an unshare requires the
+  `confirm: true` body, mirrored by the page's own confirmation dialog.
+
+Both writes append their `platform_audit_events` row through the store —
+`runtime.official_workspace.set` (`runtime-config-store.ts`) and
+`runtime.bot_scope.set` (`apps-store.ts`) — never from the SPA.
+
 Table reuse, deliberate: `review_runtime_settings` is the **platform's parameter
 store**, whose keys group by domain prefix — `review.*` for review behaviour,
 `platform.*` for platform state — and `RUNTIME_SETTING_DOMAINS` /
