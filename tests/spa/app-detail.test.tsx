@@ -747,13 +747,17 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     }
   });
 
-  test("model failure stays nonfatal and catalog failure is confined to provider management", async () => {
+  test("model failure stays nonfatal and a provider-local catalog failure can be retried", async () => {
     const { win, cleanup } = installDom("https://worker.local/dashboard/default/apps/1");
     const realFetch = globalThis.fetch;
+    let catalogAttempts = 0;
     globalThis.fetch = (async (input: unknown) => {
       if (String(input).endsWith("/settings")) return Response.json({
         ...managePayload, provider_catalog_version: "fixture-section-error", provider_eligibility: {},
       });
+      if (String(input).includes("/api/provider-catalog") && ++catalogAttempts > 1) {
+        return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
+      }
       return new Response("unavailable", { status: 503 });
     }) as typeof fetch;
     const container = win.document.createElement("div");
@@ -766,6 +770,12 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       const alerts = [...container.querySelectorAll('[role="alert"]')];
       expect(alerts).toHaveLength(1);
       expect(alerts[0]?.parentElement?.textContent).toContain(t("en", "settings.providers.title"));
+      const retry = [...container.querySelectorAll("button")].find((button) => button.textContent === t("en", "common.retry"));
+      expect(retry).toBeDefined();
+      await click(win, retry!);
+      expect(catalogAttempts).toBe(2);
+      expect(container.querySelectorAll('[role="alert"]')).toHaveLength(0);
+      expect(container.textContent).toContain(t("en", "settings.addProvider"));
     } finally {
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;

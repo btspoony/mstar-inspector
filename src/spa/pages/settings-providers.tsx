@@ -57,6 +57,7 @@ export function ProvidersSection(props: Omit<Parameters<typeof LoadedProvidersSe
   const version = payload.provider_catalog_version;
   const [loaded, setLoaded] = useState<{ version: string; catalog: StaticProviderCatalog } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
     let cancelled = false;
     setFailed(null);
@@ -64,7 +65,7 @@ export function ProvidersSection(props: Omit<Parameters<typeof LoadedProvidersSe
       if (!cancelled) setLoaded({ version, catalog });
     }).catch(() => { if (!cancelled) setFailed(version); });
     return () => { cancelled = true; };
-  }, [base, version]);
+  }, [base, version, retry]);
   const catalog = loaded?.version === version ? loaded.catalog : null;
   return catalog ? <LoadedProvidersSection {...props} payload={{
     ...payload,
@@ -74,7 +75,14 @@ export function ProvidersSection(props: Omit<Parameters<typeof LoadedProvidersSe
     })),
   }} /> : (
     <FlowSection title={t(locale, "settings.providers.title")} subtitle={t(locale, "settings.providersCopy")}>
-      {failed === version ? <PageNotice kind="error" message={t(locale, "common.loadFailed")} /> : <LoadingNotice locale={locale} />}
+      {failed === version ? (
+        <>
+          <PageNotice kind="error" message={t(locale, "common.loadFailed")} />
+          <Button type="button" variant="outline" onClick={() => setRetry((value) => value + 1)}>
+            {t(locale, "common.retry")}
+          </Button>
+        </>
+      ) : <LoadingNotice locale={locale} />}
     </FlowSection>
   );
 }
