@@ -705,6 +705,7 @@ describe("the data-upgrade routes", () => {
       "ledger-target-alignment",
       "orphan-ledger-attribution",
       "repo-backfill",
+      "repo-id-claim",
     ]);
     const listed = body.upgrades.find((item) => item.id === ITEM_ID)!;
     expect(listed.state.status).toBe("pending");
