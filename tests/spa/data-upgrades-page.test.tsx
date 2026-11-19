@@ -294,19 +294,19 @@ describe("data upgrade screen — static faces", () => {
       },
     ];
     const markup = view({ data: { upgrades: zero, maintenance: RUNTIME.maintenance } });
+    // An empty worklist states itself and folds: the operator reads the answer
+    // without opening a card that has no action to offer. The counts and the
+    // (disabled) start control are behind the disclosure.
     expect(markup).toContain(t("en", "admin.dataUpgrades.nothingToMigrate"));
-    // The control is rendered but unusable — an operator reads why, not an absent button.
-    // (`disabled=""` is the rendered attribute; the base class string also says `disabled:`.)
-    const startLabel = t("en", "admin.dataUpgrades.startAction").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const start = new RegExp(`<button[^>]*disabled=""[^>]*>${startLabel}</button>`);
-    expect(markup).toMatch(start);
+    const showLabel = t("en", "admin.dataUpgrades.showDetails").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(markup).toMatch(new RegExp(`>${showLabel}</button>`));
     // Both dictionaries state it.
     const zh = view({ locale: "zh_CN", data: { upgrades: zero, maintenance: RUNTIME.maintenance } });
     expect(zh).toContain(t("zh_CN", "admin.dataUpgrades.nothingToMigrate"));
-    // A counter above zero is work: the control stays live.
+    // A counter above zero is work: no empty-worklist copy, and no fold.
     const live = viewOf(0);
     expect(live).not.toContain(t("en", "admin.dataUpgrades.nothingToMigrate"));
-    expect(live).not.toMatch(start);
+    expect(live).not.toContain(t("en", "admin.dataUpgrades.showDetails"));
   });
 
   test("the banner states the window, the current item, its progress and the last error", () => {
@@ -409,6 +409,31 @@ const control = (container: DomElement, id: string, label: string): DomElement |
   button(card(container, id) ?? container, label);
 
 describe("data upgrade screen — mounted", () => {
+  test("an empty worklist keeps its start control disabled behind the disclosure", async () => {
+    const zero: DataUpgradeRow[] = [
+      {
+        ...UPGRADES[0]!,
+        state: state({ status: "pending" }),
+        preflight: { unidentified_targets: 0, ledger_pairs: 0 },
+      },
+    ];
+    const surface = await mount(readStub(zero));
+    // Folded, the card offers no run control at all.
+    expect(
+      control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.startAction")),
+    ).toBeNull();
+    await surface.click(
+      control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.showDetails")),
+    );
+    await surface.settle();
+    // `disabled` is the only thing keeping a zero-worklist run from opening the
+    // maintenance window a downtime item would own; pin it, not just the copy.
+    const start = control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.startAction"));
+    expect(start).not.toBeNull();
+    expect(start!.hasAttribute("disabled")).toBe(true);
+    await surface.close();
+  });
+
   test("start runs one batch per request until done, then re-reads the list", async () => {
     let steps = 0;
     const surface = await mount((request) => {
@@ -546,7 +571,12 @@ describe("data upgrade screen — mounted", () => {
     const text = card(surface.container, "finding-index")?.textContent ?? "";
     expect(text).toContain(t("en", "admin.dataUpgrades.statusPending"));
     expect(text).not.toContain("verify failed: orphan_rows=2");
-    // Pending again: the row offers start, and no verify (nothing ran yet).
+    // Pending again with an empty worklist folds; its counts and the start
+    // control live behind the disclosure.
+    await surface.click(
+      control(surface.container, "finding-index", t("en", "admin.dataUpgrades.showDetails")),
+    );
+    await surface.settle();
     expect(control(surface.container, "finding-index", t("en", "admin.dataUpgrades.startAction"))).not.toBeNull();
     await surface.close();
   });
