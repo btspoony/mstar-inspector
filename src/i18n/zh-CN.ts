@@ -200,6 +200,8 @@ export const zhCN: Dictionary = {
       following: "跟随工作区默认；关闭继承后可单独覆盖。",
       boundApp: "绑定的应用",
       boundAppPlanned: "更改仓库绑定的应用已在计划中，暂不支持。",
+      /** 审查状态：继承与暂停开关。 */
+      sectionState: "审查状态",
     },
     /** 组合空状态（EmptyState 的标题 + 描述）。 */
     emptyTitle: "还没有仓库",
@@ -232,8 +234,6 @@ export const zhCN: Dictionary = {
       loadingInstallations: "正在检查安装…",
       loadInstallationsFailed: "无法读取该应用的安装信息。",
       noInstallations: "该应用尚未安装到任何账号。",
-      /** 指向 GitHub 安装页；由应用自身的 slug 拼出。 */
-      installNow: "在 GitHub 上安装该应用",
       recheck: "重新检查",
       /** 一行安装信息：账号、安装 ID 与最近一次可见时间。 */
       installationRow: "{account} · 安装 {id} · 最近可见 {time}",
@@ -1040,7 +1040,7 @@ export const zhCN: Dictionary = {
     install: "安装",
     installCopy: "把此链接交给任意 GitHub 账号，即可在该账号上安装此 App。",
     installLink: "打开安装页面",
-    installLinkAria: "在新标签页中于 GitHub 安装 {name}",
+    installLinkAria: "{link}：{name}",
     installNoSlug: "此 App 尚无 GitHub slug，因此没有安装链接。请先刷新 GitHub 身份，再分享链接。",
     // 已安装标签页：平台共享机器人的认领。GitHub 的 Setup 重定向不带 state，
     // 认领记录是唯一能说明“这次安装属于哪个 target”的载体，因此先记认领再跳转。

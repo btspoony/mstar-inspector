@@ -414,14 +414,27 @@ describe("add-repository dialog (static SSR)", () => {
     );
   });
 
-  test("no installation: the GitHub install link plus a re-check, confirm disabled", () => {
+  test("no installation: exactly one GitHub install link plus a re-check, confirm disabled", () => {
     const markup = renderBody({ apps: [app()], installs: installations([]) });
     expect(markup).toContain(t("en", "targets.addDialog.noInstallations"));
-    expect(markup).toContain('href="https://github.com/apps/acme-inspector/installations/new"');
+    // The installation step offers the install entry exactly once — the shared
+    // identity link in the left column; the right column adds no second link.
+    const step =
+      markup.split('data-slot="add-step-installations"')[1]?.split('data-slot="add-step-repositories"')[0] ?? "";
+    expect(step.match(/href="https:\/\/github\.com\/apps\/acme-inspector\/installations\/new"/g)).toHaveLength(1);
     expect(markup).toContain(t("en", "targets.addDialog.recheck"));
     expect(confirmDisabled(markup)).toBe(true);
     // The repository step is not offered: there is nothing to search.
     expect(markup).not.toContain('id="add-repository-search"');
+  });
+
+  test("the installation step keeps one install link in every read state", () => {
+    for (const installs of [{ state: "loading" } as InstallationsState, { state: "error" } as InstallationsState, installations()]) {
+      const markup = renderBody({ apps: [app()], installs });
+      const step =
+        markup.split('data-slot="add-step-installations"')[1]?.split('data-slot="add-step-repositories"')[0] ?? "";
+      expect(step.match(/installations\/new/g)).toHaveLength(1);
+    }
   });
 
   test("a failed installation read offers its own retry", () => {
@@ -1346,6 +1359,8 @@ function targetPayload(
       repo_owner: "acme",
       repo_name: "api",
       app_name: "Acme Inspector",
+      app_id: null,
+      app_avatar_url: null,
       review_enabled: overrides.review_enabled ?? 1,
       follow_workspace_defaults: follow,
       review_drafts: draftSwitch,
@@ -1428,6 +1443,11 @@ describe("target settings tab (static SSR)", () => {
     expect(markup).toContain(t("en", "targets.settings.boundAppPlanned"));
     // No control offers the change: the row is copy.
     expect(markup).not.toContain('aria-label="' + t("en", "targets.settings.boundApp") + '"');
+    // The bound-App block is identity only: it never offers the install page.
+    const bound = markup
+      .split(t("en", "targets.settings.boundApp"))[1]
+      ?.split(t("en", "settings.triggerMode"))[0] ?? "";
+    expect(bound).not.toContain("<a ");
   });
 
   test("the pause switch reflects review_enabled", () => {

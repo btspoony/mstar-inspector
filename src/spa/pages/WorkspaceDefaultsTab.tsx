@@ -13,17 +13,12 @@
  */
 import { useState } from "react";
 import { t, type Locale } from "../../i18n";
-import { CardContent, CardHeader } from "@design-system";
-import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { postJson } from "../api";
 import { apiBase } from "../workspace-base";
 import { isReviewLevel, isReviewTriggerMode, type ReviewLevel } from "./data";
 import { settingsOpOutcome } from "./SettingsPage";
 import type { OpNotice } from "./PageNotice";
-import {
-  ReviewPolicyFields,
-  type TargetPolicySettings,
-} from "./TargetSettingsTab";
+import { ReviewPolicySections, type TargetPolicySettings } from "./TargetSettingsTab";
 
 /** `GET /api/targets/all` — the workspace defaults the fixed list row opens. */
 export type WorkspaceDefaultsPayload = {
@@ -94,19 +89,14 @@ export function WorkspaceDefaultsTab({
   }
 
   return (
-    <SectionCard tier="secondary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "targets.settings.heading")}</SectionCardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-5">
-        <ReviewPolicyFields
-          locale={locale}
-          settings={defaults}
-          levelDefault={defaults.review_level}
-          readOnly={busy || !canManage}
-          onSave={save}
-        />
-      </CardContent>
-    </SectionCard>
+    <div className="flex flex-col">
+      <ReviewPolicySections
+        locale={locale}
+        settings={defaults}
+        levelDefault={defaults.review_level}
+        readOnly={busy || !canManage}
+        onSave={save}
+      />
+    </div>
   );
 }

@@ -6493,6 +6493,9 @@ type TargetSettingsPayload = {
   repo_name: string | null;
   bot_id: string;
   app_name: string;
+  /** The bound App's GitHub facts for the identity row; null while no App row resolves. */
+  app_id: number | null;
+  app_avatar_url: string | null;
   review_enabled: number;
   follow_workspace_defaults: number;
   /** The target-owned draft switch (0070): 0 = hold drafts until ready. */
@@ -6513,6 +6516,8 @@ async function targetSettingsPayload(
       repo_name: target.repo_name,
       bot_id: target.bot_id,
       app_name: app === null ? "" : appDisplayName(app),
+      app_id: app === null ? null : app.github_app_id,
+      app_avatar_url: app === null ? null : app.github_avatar_url,
       review_enabled: target.review_enabled,
       follow_workspace_defaults: target.follow_workspace_defaults,
       review_drafts: target.review_drafts === 0 ? 0 : 1,

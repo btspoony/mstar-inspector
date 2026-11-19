@@ -183,6 +183,8 @@ describe("GET /dashboard/:workspaceRef/api/targets/:targetId", () => {
         review_enabled: 1,
         follow_workspace_defaults: 1,
         review_drafts: 1,
+        app_id: APP_ID,
+        app_avatar_url: null,
       },
       // The workspace defaults answer — never the row's inert placeholders —
       // plus the target-owned draft switch (D12).
