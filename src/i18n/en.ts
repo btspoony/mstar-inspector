@@ -1501,6 +1501,22 @@ export const en = {
       /** No stored setting could be read — the numbers are the documented defaults. */
       claimUnreadable:
         "The stored comment-trigger recovery settings could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
+      sweepTitle: "Scheduled failure sweep",
+      sweepDescription:
+        "Applies on the next sweep. Alerts fire above the failure threshold; the window covers both the count and repeat alerts. Retention permanently deletes old webhook deliveries.",
+      sweepFields: {
+        failureThreshold: "Failure threshold",
+        windowHours: "Alert window (hours)",
+        webhookTimeoutMs: "Alert webhook timeout (ms)",
+        retentionDays: "Webhook retention (days)",
+        retentionCap: "Webhook deletions per sweep",
+        inviteLapseCap: "Invite expirations per sweep",
+      },
+      sweepSave: "Save sweep settings",
+      sweepSaved: "Sweep settings saved.",
+      sweepFailed: "Could not save the sweep settings.",
+      sweepUnreadable:
+        "Some sweep settings could not be read. Webhook retention is paused. Retry the read or enter and save all six settings to restore it.",
       /** The prior-findings seat's ask budget. */
       recheckTitle: "Recheck assignment budget",
       recheckDescription:

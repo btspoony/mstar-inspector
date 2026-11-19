@@ -73,7 +73,8 @@ import {
 import { CHECK_SUMMARIES, CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
-import { defaultSweepLog, SWEEP_FAILURE_THRESHOLD } from "../../src/worker/sweep";
+import { defaultSweepLog } from "../../src/worker/sweep";
+import { QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 import worker from "../../src/worker/index";
 import { sha256Hex } from "../../src/pipeline/review-threads";
 import { CHECK_UPDATE_DEFAULT } from "../../src/dashboard/runtime-config-store";
@@ -117,6 +118,8 @@ import {
   withFailingReads,
 } from "./helpers/check-reconcile";
 import type { AdapterScript, AdoptOutcome, BeginOutcome, CompleteOutcome, FetchOutcome } from "./helpers/check-reconcile";
+
+const SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1;
 
 // The run's transport bounds every request with a REAL 5 s timeout, so a pass
 // that reaches the network makes the suite's runtime depend on GitHub's latency:

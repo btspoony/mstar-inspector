@@ -1,6 +1,6 @@
 /**
  * Ops failure sweep (architect verdict AL-6) — the cron handler's scan: read
- * `review_failures` ONCE over the trailing 24h grouped by stage (parse +
+ * `review_failures` ONCE over the configured trailing window grouped by stage (parse +
  * runner/sandbox/pipeline are the infra-failure rows that make this table the
  * sufficient failure signal, closing the "DLQ-bound failure leaves zero D1
  * trace" blind spot), sum the group counts, and alert when that total breaches
@@ -34,7 +34,7 @@
  * recent `platform_audit_events` row for the lane's own action —
  * `alert.failure_paging` (compass D17) for infrastructure, and
  * `alert.maintenance_deferred` for the maintenance signal — and posts nothing
- * while that stamp is inside `SWEEP_WINDOW_HOURS`; a 2xx POST appends the row.
+ * while that stamp is inside the configured window; a 2xx POST appends the row.
  * Two actions, so neither lane can silence the other. Nothing is ever latched,
  * so a breaching window with no recent alert always pages — a missed alert is
  * structurally impossible, and the price is that two sweeps overlapping inside
@@ -61,14 +61,8 @@
  *
  * Threshold semantics: PER-ATTEMPT rows — a DLQ'd message leaves up to
  * QUEUE_MAX_ATTEMPTS rows (one per delivery: 1 initial + the queue's
- * max_retries), so the threshold is DERIVED from that number instead of being a
- * second literal: `SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1` makes one
- * fully-failed message insufficient to trip the sweep, and the next message's
- * first attempts do — the same "roughly two messages" signal the constant had
- * when the queue retried three times. Add a guard rung (or raise
- * max_retries) and this moves with it. The constants below are the single
- * source (unit-test pinned); making them env-configurable is a future explicit
- * decision.
+ * max_retries). The threshold defaults to QUEUE_MAX_ATTEMPTS + 1 unless the
+ * operator overrides it in the platform runtime settings.
  */
 
 import type { Queue } from "@cloudflare/workers-types";
@@ -81,12 +75,11 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
-import { getMaintenanceMode, maintenanceClosed } from "../dashboard/runtime-config-store";
+import { getMaintenanceMode, getSweepSettings, maintenanceClosed } from "../dashboard/runtime-config-store";
 import { retryMaintenanceReplay } from "../admin/maintenance-replay";
 import {
   MAINTENANCE_DEFERRED_STAGE,
   PAGING_EXCLUDED_STAGES,
-  QUEUE_MAX_ATTEMPTS,
   sqlStageList,
 } from "../store/failure-store";
 import { QUOTA_STAGE } from "../contracts/failure-stages";
@@ -146,30 +139,8 @@ const MAINTENANCE_REPLAY_PENDING_SQL = `SELECT 1 AS pending FROM review_failures
               AND maintenance_replay_sent_at IS NULL
             LIMIT 1`;
 
-/**
- * Breach when `failures_24h > SWEEP_FAILURE_THRESHOLD` (AL-6): one row above a
- * single fully-failed message, so one DLQ'd job never alerts and the second
- * does (see the header).
- */
-export const SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1;
-
-/** Trailing count window in hours (AL-6): `datetime('now', '-24 hours')`. */
-export const SWEEP_WINDOW_HOURS = 24;
-
-/** Webhook POST timeout — a hung alert sink must never stall the cron. */
-export const SWEEP_WEBHOOK_TIMEOUT_MS = 3000;
-
 /** Cap on the webhook-failure `detail` log field — a warn line stays single-line. */
 export const SWEEP_LOG_DETAIL_MAX = 500;
-
-/** Retention window in days (PR #10): webhook_deliveries rows older than this are swept. */
-export const SWEEP_RETENTION_DAYS = 30;
-
-/** Retention row cap per run (PR #10): bounded work per 15-min sweep. */
-export const SWEEP_RETENTION_CAP = 500;
-
-/** Invite-lapse row cap per run (I-000096): same bounded-work rule as retention. */
-export const SWEEP_INVITE_LAPSE_CAP = 500;
 
 /**
  * The structured breach event — a JSON line on the consumer-derived log
@@ -211,6 +182,7 @@ export type SweepAlertFields = {
 export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
   event:
     | "ops_sweep_alert_webhook_failed"
+    | "ops_sweep_settings_unreadable"
     // The audit-window de-bounce (`alert.failure_paging` in
     // `platform_audit_events`): an unreadable window read, and the append that
     // records a delivered alert. Both degrade to a warn — neither may suppress
@@ -321,10 +293,7 @@ export const defaultSweepLog: SweepLog = {
 
 /**
  * The trailing-window predicate identifying the infrastructure failures that
- * page. The window modifier comes from SWEEP_WINDOW_HOURS (the constant is the
- * single source) so the SQL cannot drift from the pinned threshold table, and
- * the composed text stays byte-identical to the pre-constant form
- * (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
+ * page. Both the outer scan and the quota subquery use the same bound window.
  * `stage NOT IN (<paging stages>)` is the paging exclusion: attribution rows
  * are reviews that continued, and `quota` is one tenant's spent month (see the
  * header). The list comes from the contract's written partition, never a local
@@ -340,9 +309,9 @@ const QUOTA_SPREAD_SQL = `(SELECT COUNT(DISTINCT t.workspace_id)
               FROM review_failures q
               JOIN review_targets t ON t.id = q.target_id
              WHERE q.stage = '${QUOTA_STAGE}'
-               AND q.created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')) > 1`;
+               AND q.created_at > datetime('now', ?1)) > 1`;
 
-const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
+const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', ?1)
          AND (stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
               OR (stage = '${QUOTA_STAGE}' AND ${QUOTA_SPREAD_SQL}))
          AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'`;
@@ -354,14 +323,14 @@ const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', '-${SWEEP_WINDOW_
  */
 const MAINTENANCE_DEFERRED_COUNT_SQL = `SELECT COUNT(*) AS count FROM review_failures
        WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'
-         AND created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')`;
+         AND created_at > datetime('now', ?1)`;
 
 /**
  * The audit-window de-bounce is ONE read plus ONE append against
  * `platform_audit_events` (compass D17), per lane: `alert.failure_paging` rows
  * record delivered infrastructure alerts and `alert.maintenance_deferred` rows
  * record the maintenance signal, and the newest stamp for that action inside
- * `SWEEP_WINDOW_HOURS` suppresses the POST. There is no stored latch and no
+ * the configured window suppresses the POST. There is no stored latch and no
  * generation — a due window with no recent alert always alerts, and two
  * concurrent sweeps may each post once. The ledger
  * (migrations/0033_platform_admin.sql) is append-only and platform-scoped,
@@ -478,10 +447,10 @@ async function appendAlertAudit(
 }
 
 /**
- * Run one sweep: read the trailing-24h failure rows grouped by stage, and when
+ * Run one sweep: read the trailing-window failure rows grouped by stage, and when
  * that total breaches the threshold AND no alert is recorded inside the sweep
  * window, emit the `ops_sweep_alert` structured event + optionally POST it to
- * `alertUrl` (JSON body, SWEEP_WEBHOOK_TIMEOUT_MS timeout). A webhook failure
+ * `alertUrl` (JSON body, bounded by the configured timeout). A webhook failure
  * (network/timeout throw OR a non-2xx response) degrades to a warn log — it
  * NEVER throws (the alert must not take down the cron that produced it). D1
  * errors DO propagate to the caller (the `scheduled` handler wraps the whole
@@ -495,26 +464,37 @@ async function appendAlertAudit(
  */
 export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepResult> {
   const log = deps.log ?? defaultSweepLog;
-  // Best-effort retention (PR #10): sweep webhook_deliveries rows older
-  // than SWEEP_RETENTION_DAYS, capped at SWEEP_RETENTION_CAP rows per run.
-  // simplify: bounded work per 15-min sweep — a full table drains over
-  // successive runs; raise the cap or move to a dedicated janitor cron if
-  // the drain rate ever matters. A failure degrades to a warn and NEVER
-  // breaks the failure-sweep path below.
-  try {
-    const retention = await db
-      .prepare(
-        `DELETE FROM webhook_deliveries WHERE id IN (SELECT id FROM webhook_deliveries WHERE created_at < datetime('now', '-${SWEEP_RETENTION_DAYS} days') LIMIT ${SWEEP_RETENTION_CAP})`,
-      )
-      .run();
-    if (retention.meta.changes > 0) {
-      log.warn({ event: "retention_swept", deleted: retention.meta.changes }, "webhook_deliveries retention sweep");
-    }
-  } catch (error) {
+  const { values: settings, issue } = await getSweepSettings(db);
+  if (issue) {
+    const reason = issue.kind === "read_failed" ? "D1 settings read failed" : "Invalid settings rows";
     log.warn(
-      { event: "retention_swept_failed", detail: warnDetail(error, deps.alertUrl) },
-      "webhook_deliveries retention sweep failed — continuing",
+      {
+        event: "ops_sweep_settings_unreadable",
+        detail: issue.kind === "read_failed"
+          ? warnDetail(issue.error, deps.alertUrl)
+          : issue.keys.join(", "),
+      },
+      `${reason}; webhook retention skipped — check the admin runtime sweep settings`,
     );
+  } else {
+    try {
+      const retention = await db
+        .prepare(
+          `DELETE FROM webhook_deliveries WHERE id IN (
+             SELECT id FROM webhook_deliveries WHERE created_at < datetime('now', ?) LIMIT ?
+           )`,
+        )
+        .bind(`-${settings.retentionDays} days`, settings.retentionCap)
+        .run();
+      if (retention.meta.changes > 0) {
+        log.warn({ event: "retention_swept", deleted: retention.meta.changes }, "webhook_deliveries retention sweep");
+      }
+    } catch (error) {
+      log.warn(
+        { event: "retention_swept_failed", detail: warnDetail(error, deps.alertUrl) },
+        "webhook_deliveries retention sweep failed — continuing",
+      );
+    }
   }
   // PR-ledger retention (migration 0039): terminal PR rows only — an OPEN PR
   // stays a live review target however stale. Bounded per run like the
@@ -535,13 +515,13 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // Invite lapse (I-000096) moved here from the members-page read: a lapsed
   // pending invite already holds no seat and is already unlisted, so the flip
   // only makes the stored status catch up — at most one sweep interval late.
-  // The statement is global and bounded at SWEEP_INVITE_LAPSE_CAP rows per run,
+  // The statement is global and bounded by the configured rows per run,
   // so a larger backlog drains over successive runs instead of stalling one
   // sweep. Like retention, a failure degrades to a warn and NEVER breaks the
   // failure-sweep path below.
   let invitesExpired: number | null = null;
   try {
-    invitesExpired = await expireLapsedInvites(db, new Date().toISOString(), SWEEP_INVITE_LAPSE_CAP);
+    invitesExpired = await expireLapsedInvites(db, new Date().toISOString(), settings.inviteLapseCap);
   } catch (error) {
     log.warn(
       { event: "invite_lapse_swept_failed", detail: warnDetail(error, deps.alertUrl) },
@@ -717,28 +697,31 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   }
   // ONE grouped read supplies both the total and its breakdown, so a payload
   // can never describe a different instant than its own count.
+  const windowModifier = `-${settings.windowHours} hours`;
   const { results: stageRows } = await db
     .prepare(
       `SELECT stage, COUNT(*) AS count FROM review_failures
        WHERE ${FAILURE_PAGING_WHERE_SQL}
        GROUP BY stage ORDER BY stage`,
     )
+    .bind(windowModifier)
     .all<{ stage: string; count: number }>();
   const stages = stageRows.map((row) => ({ stage: row.stage, count: row.count }));
   const failures24h = stages.reduce((sum, row) => sum + row.count, 0);
-  const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
+  const thresholdBreached = failures24h > settings.failureThreshold;
   // The maintenance existence signal: its own trailing-window count, read before
   // the paging decision consumes it, so a healthy infrastructure total still
   // runs this lane and a deferral can never hide a breach or vice versa.
   const maintenanceRow = await db
     .prepare(MAINTENANCE_DEFERRED_COUNT_SQL)
+    .bind(windowModifier)
     .first<{ count: number }>();
   const maintenanceDeferred = maintenanceRow?.count ?? 0;
   // The infrastructure decision only SETS the disposition and, when it owes a
   // page, composes the alert body; delivery and the single exit are below.
   let webhook: SweepResult["webhook"] = "not_attempted";
   const nowMs = Date.now();
-  const windowMs = SWEEP_WINDOW_HOURS * 3_600_000;
+  const windowMs = settings.windowHours * 3_600_000;
   // Each lane de-bounces on its OWN audit action, so neither can silence the
   // other: a paging alert never suppresses the maintenance alert. A stamp only
   // suppresses when it is in the past and inside the trailing window — a
@@ -771,7 +754,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       event: "ops_sweep_alert",
       failures_24h: failures24h,
       dlq_check: "skipped",
-      thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: SWEEP_WINDOW_HOURS },
+      thresholds: { failures_24h: settings.failureThreshold, window_hours: settings.windowHours },
       stages,
       ...(maintenanceDue ? { maintenance_deferred: { count: maintenanceDeferred } } : {}),
       due,
@@ -793,7 +776,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(alert),
-          signal: AbortSignal.timeout(SWEEP_WEBHOOK_TIMEOUT_MS),
+          signal: AbortSignal.timeout(settings.webhookTimeoutMs),
         });
         if (!response.ok) {
           // Non-2xx = NOT posted: the sink rejected the alert. Throw a synthetic

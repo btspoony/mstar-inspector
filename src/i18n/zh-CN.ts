@@ -1240,6 +1240,22 @@ export const zhCN: Dictionary = {
       /** 所有已存储设置都无法读取——数字只是文档默认值。 */
       claimUnreadable:
         "无法读取已存储的评论触发恢复设置，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
+      sweepTitle: "定时故障巡检",
+      sweepDescription:
+        "在下一次巡检生效。失败次数超过阈值时触发告警；告警窗口用于统计失败次数和抑制重复告警。保留期清理会永久删除过期的 Webhook 投递记录。",
+      sweepFields: {
+        failureThreshold: "失败告警阈值",
+        windowHours: "告警窗口（小时）",
+        webhookTimeoutMs: "告警 Webhook 超时（毫秒）",
+        retentionDays: "Webhook 保留期（天）",
+        retentionCap: "每次巡检最多删除的投递记录",
+        inviteLapseCap: "每次巡检最多标记过期的邀请",
+      },
+      sweepSave: "保存巡检设置",
+      sweepSaved: "已保存巡检设置。",
+      sweepFailed: "无法保存巡检设置。",
+      sweepUnreadable:
+        "部分巡检设置无法读取，已暂停 Webhook 投递记录清理。请重试读取，或填写并保存全部六项设置以恢复清理。",
       /** 历史发现重审席位的提问预算。 */
       recheckTitle: "重审提问预算",
       recheckDescription:

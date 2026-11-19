@@ -214,12 +214,12 @@ only the paging exclusion set: one tenant's exhausted month is not a platform
 incident. That exclusion is conditional on its premise: when the same trailing
 window refuses `quota` in more than one workspace, the published ceiling itself
 is wrong and those rows re-enter the paging total (`QUOTA_SPREAD_SQL` in
-`src/worker/sweep.ts`). The sweep reads one grouped statement over the trailing
-24 hours;
+`src/worker/sweep.ts`). The sweep reads one grouped statement over the configured
+trailing window (24 hours by default);
 the returned stage counts supply both the infrastructure total and its
 breakdown, so they describe the same read. Paging requires counted failures
-strictly greater than `SWEEP_FAILURE_THRESHOLD`, derived in `src/worker/sweep.ts`
-as `QUEUE_MAX_ATTEMPTS + 1` from `src/store/failure-store.ts`.
+strictly greater than the platform's `platform.sweep.failure_threshold`, which
+defaults to `QUEUE_MAX_ATTEMPTS + 1`.
 
 ## RP metering and the monthly ceiling
 

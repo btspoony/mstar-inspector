@@ -15,6 +15,7 @@
  * does not own.
  */
 import { useEffect, useState } from "react";
+import { SWEEP_FIELDS, type SweepConfig, type SweepLimits, type SweepValues } from "../../contracts/sweep-settings";
 import { fetchJson } from "../api";
 
 const BASE = "/_internal_admin/api";
@@ -200,6 +201,8 @@ export type RuntimeConfig = {
    * `checkBudgets` (an older Worker behind a newer bundle).
    */
   commentClaim: CommentClaimConfig | null;
+  /** Null when the Worker predates the sweep settings surface. */
+  sweep: SweepConfig | null;
   /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
   recheckAssignment: RecheckAssignmentConfig | null;
   /** The maintenance window; `null` under the same older-Worker rule. */
@@ -214,6 +217,21 @@ export type RuntimeConfig = {
   /** The 24h GitHub secondary-rate-limit count; `0` when the server does not report it. */
   githubRateLimited24h: number;
 };
+
+function parseSweep(row: Json): SweepConfig | null {
+  if (row.sweep === undefined) return null;
+  const group = map(row.sweep, "runtime sweep");
+  const rawValues = map(group.values, "runtime sweep values");
+  const rawLimits = map(group.limits, "runtime sweep limits");
+  const values = {} as SweepValues;
+  const limits = {} as SweepLimits;
+  for (const field of SWEEP_FIELDS) {
+    const range = map(rawLimits[field], `runtime sweep limits.${field}`);
+    values[field] = num(rawValues, field);
+    limits[field] = { min: num(range, "min"), max: num(range, "max") };
+  }
+  return { values, limits, degraded: bool(group, "degraded") };
+}
 
 function parseCheckBudgets(row: Json): CheckBudgetConfig | null {
   const raw = row.checkBudgets;
@@ -319,12 +337,17 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     degraded: bool(body, "degraded"),
     checkBudgets: parseCheckBudgets(body),
     commentClaim: parseCommentClaim(body),
+    sweep: parseSweep(body),
     recheckAssignment: parseRecheckAssignment(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
     githubRateLimited24h: parseGithubRateLimited(body),
   };
+}
+
+export async function saveSweepSettings(values: SweepValues): Promise<void> {
+  await write("PATCH", "/runtime", { sweep: values });
 }
 
 /** The server's `{ concurrency }` answer; `null` when the body is not that shape. */
