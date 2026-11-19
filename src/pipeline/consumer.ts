@@ -1202,7 +1202,6 @@ async function handleGuardHeld(
   // the drop-record branch below.
   const payloadSha = message.body.head_sha;
   const heldSha = heldHeadSha ?? "";
-  const mayAbandon = admission.reason !== "pr-held" || Boolean(payloadSha && heldSha && payloadSha !== heldSha);
   if (
     restoreFailure === null &&
     admission.reason === "pr-held" &&
@@ -1224,7 +1223,7 @@ async function handleGuardHeld(
   // re-review a reviewed commit. Best-effort — a KV fault only leaves a stale
   // "1", which the skip then accepts and `review_failures` traces (the drop
   // row below).
-  if (mayAbandon && headSha !== "") {
+  if (headSha !== "") {
     const claimKey = idemKey({
       installation_id: message.body.installation_id,
       owner: message.body.owner,
@@ -1253,9 +1252,7 @@ async function handleGuardHeld(
   // This is the real drop: the run attached for this message will never
   // execute, so it is settled `neutral` with the refusal named. Best-effort;
   // the ack and the drop record are unaffected.
-  if (mayAbandon) {
-    await settleSkippedRow(deps, message.body, message.body.head_sha, `review admission refused: ${admission.reason}`);
-  }
+  await settleSkippedRow(deps, message.body, message.body.head_sha, `review admission refused: ${admission.reason}`);
   return deps.failureStore
     .record({
       target_id: message.body.targetId,

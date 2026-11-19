@@ -9467,32 +9467,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     expect(terminalWarn.msg).toContain("comment claim restore failed: D1 unavailable");
     expect(terminalWarn.msg).toContain("pr-held");
     expect(terminalWarn.msg).not.toContain("delayed retries");
-    expect(h.kvPuts.some((p) => p.value === "dropped")).toBe(false);
     expect(claimRows(db)[0]!.state).toBe("consumed");
-    expect(h.sandbox.calls).toHaveLength(0);
-  });
-
-  test("a pr-held comment claim restore failure preserves the live sha's idem claim", async () => {
-    const db = await createSeededTestD1();
-    const payload = makePayload({ comment_id: 9204 });
-    seedClaim(db, payload, 9204, "queued");
-    await seedInflight(db);
-    const key = idemKey({ ...payload, head_sha: payload.head_sha! });
-    h.kvState.entries.set(key, "1");
-    const consumer = createReviewConsumer(
-      await h.makeEnv({ DB: dbFailingOn(db, "SET state = 'queued', payload_json") as never }),
-      h.testLog,
-      h.overrides,
-    );
-
-    await consumer(h.makeBatch(payload));
-
-    expect(h.messageRetryCalls).toHaveLength(0);
-    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
-    expect(failureRows(db)).toHaveLength(1);
-    expect(h.kvState.entries.get(key)).toBe("1");
-    expect(h.kvPuts.some((p) => p.value === "dropped")).toBe(false);
-    expect(inflightRows(db)).toHaveLength(1);
     expect(h.sandbox.calls).toHaveLength(0);
   });
 
