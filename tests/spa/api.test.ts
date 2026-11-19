@@ -26,7 +26,7 @@ test.each(requests)("%s rejects an opaque session redirect and navigates to logi
   Object.defineProperty(response, "type", { value: "opaqueredirect" });
   const read = spyOn(response, "text");
   const navigate = spyOn(dom.win.location, "replace").mockImplementation(() => {});
-  globalThis.fetch = (async () => response) as typeof fetch;
+  globalThis.fetch = (async () => response) as unknown as typeof fetch;
   await expect(request()).rejects.toBeInstanceOf(ApiError);
   expect(navigate).toHaveBeenCalledWith("/dashboard/login");
   expect(read).not.toHaveBeenCalled();
@@ -34,14 +34,14 @@ test.each(requests)("%s rejects an opaque session redirect and navigates to logi
 
 test.each(requests)("%s preserves a successful JSON response", async (name, request) => {
   const body = JSON.stringify({ ok: true });
-  globalThis.fetch = (async () => new Response(body, { status: 200 })) as typeof fetch;
+  globalThis.fetch = (async () => new Response(body, { status: 200 })) as unknown as typeof fetch;
   expect(await request()).toEqual(name === "GET" ? { ok: true } : { status: 200, body });
 });
 
 test.each(requests)("%s keeps an ordinary 4xx as a refusal without navigation", async (name, request) => {
   const body = JSON.stringify({ message: "Not allowed" });
   const navigate = spyOn(dom.win.location, "replace").mockImplementation(() => {});
-  globalThis.fetch = (async () => new Response(body, { status: 403 })) as typeof fetch;
+  globalThis.fetch = (async () => new Response(body, { status: 403 })) as unknown as typeof fetch;
   if (name === "GET") {
     await expect(request()).rejects.toMatchObject({ status: 403, body });
   } else {
@@ -54,12 +54,12 @@ test("a readable redirect retains its server-provided destination", async () => 
   const navigate = spyOn(dom.win.location, "replace").mockImplementation(() => {});
   globalThis.fetch = (async () => new Response(null, {
     status: 302, headers: { Location: "/dashboard/login" },
-  })) as typeof fetch;
+  })) as unknown as typeof fetch;
   await expect(postForm("/dashboard/acme/settings", {})).rejects.toMatchObject({ status: 302 });
   expect(navigate).toHaveBeenCalledWith("/dashboard/login");
 });
 
 test("an empty successful form response remains successful", async () => {
-  globalThis.fetch = (async () => new Response(null, { status: 204 })) as typeof fetch;
+  globalThis.fetch = (async () => new Response(null, { status: 204 })) as unknown as typeof fetch;
   expect(await postForm("/dashboard/acme/settings", {})).toEqual({ status: 204, body: "" });
 });
