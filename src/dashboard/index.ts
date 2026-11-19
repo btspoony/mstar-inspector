@@ -4397,8 +4397,11 @@ const appProviderModelsPreviewRoute = async (c: DashboardContext): Promise<Respo
 };
 
 const providerCatalogRoute = async (c: DashboardContext) => {
-  const member = await requireMember(c);
-  if (!member.ok) return member.response;
+  if (c.get("tenant")?.principal !== "operator-granted") {
+    const member = await requireMember(c);
+    if (!member.ok) return member.response;
+  }
+  // Serve static vocabulary separately from tenant settings; only a matching v identifies immutable content.
   const catalog = await providerCatalog();
   const etag = `"${catalog.version}"`;
   c.header("ETag", etag);

@@ -330,13 +330,11 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       installations: [],
       configured_providers: [],
-      provider_catalog: [],
       provider_catalog_version: "fixture-catalog",
       provider_eligibility: {},
       model_role_ids: ["mstar-review-seat"],
@@ -351,7 +349,6 @@ describe("members/apps/settings parsers", () => {
         app: { github_slug: "demo", id: "app-demo", status: "active", review_enabled: 1, last_webhook_at: null },
         keys: [],
         configured_providers: [],
-        provider_catalog: [],
         provider_catalog_version: "fixture-catalog",
         provider_eligibility: {},
         model_role_ids: [],
@@ -387,13 +384,11 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       installations: [],
       configured_providers: [],
-      provider_catalog: [],
       provider_catalog_version: "fixture-catalog",
       provider_eligibility: {},
       model_role_ids: [],
@@ -442,12 +437,10 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       configured_providers: [],
-      provider_catalog: [],
       provider_catalog_version: "fixture-catalog",
       provider_eligibility: {},
       model_role_ids: [],
@@ -514,13 +507,11 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 90, pass_verdicts: ["ship it", "needs fixes"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       installations: [],
       configured_providers: [],
-      provider_catalog: [],
       provider_catalog_version: "fixture-catalog",
       provider_eligibility: {},
       model_role_ids: [],
@@ -604,10 +595,8 @@ describe("members/apps/settings parsers", () => {
       model_chains: [],
       custom_providers: [],
       configured_providers: [],
-      provider_catalog: [],
       provider_catalog_version: "fixture-catalog",
       provider_eligibility: {},
-      model_limits_snapshot: "2026-01-01",
       model_role_ids: [],
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
@@ -713,13 +702,11 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       installations: [],
       configured_providers: [],
-      provider_catalog: [],
       provider_catalog_version: "fixture-catalog",
       provider_eligibility: {},
       model_role_ids: [],
@@ -741,7 +728,9 @@ describe("members/apps/settings parsers", () => {
     };
     const unconfigured = parseSettings(manageBase);
     expect(unconfigured && unconfigured.can_manage && !unconfigured.blocked && unconfigured.configured_providers).toEqual([]);
-    expect(unconfigured && unconfigured.can_manage && !unconfigured.blocked && unconfigured.provider_catalog).toEqual([]);
+    expect(unconfigured).not.toHaveProperty("provider_catalog");
+    expect(unconfigured).not.toHaveProperty("model_limits_snapshot");
+    expect(Object.is(unconfigured, manageBase)).toBe(true);
     const { configured_providers: _droppedConfigured, ...withoutConfigured } = manageBase;
     expect(parseSettings(withoutConfigured)).toBeNull();
     const { provider_catalog_version: _droppedVersion, ...withoutVersion } = manageBase;
@@ -1100,8 +1089,9 @@ describe("provider catalog rows + add selection", () => {
   });
 
   test("saved provider refresh: stored keys and custom declarations parse as the configured list", () => {
+    const { provider_catalog: _catalog, model_limits_snapshot: _snapshot, ...settings } = manageBase;
     const saved = parseSettings({
-      ...manageBase,
+      ...settings,
       keys: [
         {
           provider: "anthropic",
@@ -1130,10 +1120,6 @@ describe("provider catalog rows + add selection", () => {
           model_ids: ["@cf/meta/llama-3-8b-instruct"],
         },
       ],
-      provider_catalog: [
-        catalogRow,
-        { ...catalogRow, id: "workers-ai", label: "Workers AI", tier: "template", eligibility: "template" },
-      ],
     });
     const rows = saved && saved.can_manage && !saved.blocked ? saved.configured_providers : [];
     expect(rows).toHaveLength(2);
@@ -1141,8 +1127,7 @@ describe("provider catalog rows + add selection", () => {
     expect(keyRow).toMatchObject({ kind: "key", provider: "anthropic", last4: "9988" });
     expect(customRow && customRow.kind === "custom" && customRow.provider_id).toBe("workers-ai");
     // Catalog vocabulary is loaded separately from configured state.
-    const catalogRows = saved && saved.can_manage && !saved.blocked ? saved.provider_catalog : [];
-    expect(catalogRows).toHaveLength(0);
+    expect(saved).not.toHaveProperty("provider_catalog");
   });
 
   test("multi-key rows stay one row each — a second key of one provider never overwrites the first", () => {

@@ -11,11 +11,11 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t, type Locale } from "../../src/i18n";
-import { ProvidersSection } from "../../src/spa/pages/settings-providers";
+import { LoadedProvidersSection as ProvidersSection } from "../../src/spa/pages/settings-providers";
 import type {
   CatalogProvider,
   ProviderKeyRow,
-  SettingsManagePayload,
+  SettingsManagePayload, ProviderManagementPayload,
 } from "../../src/spa/pages/data";
 import { installDom } from "./dom";
 
@@ -43,7 +43,7 @@ const keyRow = (provider: string, keyId: string, overrides: Partial<ProviderKeyR
   ...overrides,
 });
 
-function managePayload(overrides: Partial<SettingsManagePayload> = {}): SettingsManagePayload {
+function managePayload(overrides: Partial<SettingsManagePayload & ProviderManagementPayload> = {}): SettingsManagePayload & ProviderManagementPayload {
   return {
     can_manage: true,
     installation: null,
@@ -81,6 +81,8 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
     custom_providers: [],
     configured_providers: [],
     provider_catalog: [],
+    provider_catalog_version: "fixture-catalog",
+    provider_eligibility: {},
     model_role_ids: [],
     custom_provider_api_ids: ["openai-completions"],
     sandbox_images: [{ id: "omp", enabled: true }],
@@ -89,7 +91,7 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
   };
 }
 
-function render(payload: SettingsManagePayload, locale: Locale = "en"): string {
+function render(payload: SettingsManagePayload & ProviderManagementPayload, locale: Locale = "en"): string {
   return renderToStaticMarkup(
     createElement(ProvidersSection, {
       locale,
@@ -538,7 +540,7 @@ const mergedRow = (): CatalogProvider =>
     ],
   });
 
-const legacyPayload = (baseUrl: string): SettingsManagePayload =>
+const legacyPayload = (baseUrl: string): SettingsManagePayload & ProviderManagementPayload =>
   managePayload({
     provider_catalog: [mergedRow()],
     keys: [keyRow("merged-vendor-anthropic", "k1")],
@@ -553,7 +555,7 @@ const legacyPayload = (baseUrl: string): SettingsManagePayload =>
     ],
   });
 
-async function mountSection(payload: SettingsManagePayload) {
+async function mountSection(payload: SettingsManagePayload & ProviderManagementPayload) {
   const { win, cleanup } = installDom("http://localhost/dashboard/ws/settings");
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);

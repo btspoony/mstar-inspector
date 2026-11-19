@@ -94,12 +94,10 @@ const managePayload = {
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
   keys: [],
   model_chain: null,
-  model_limits_snapshot: "2026-01-01",
   model_roles: {},
   model_chains: [],
   custom_providers: [],
   configured_providers: [],
-  provider_catalog: [],
   provider_catalog_version: "fixture-catalog",
   provider_eligibility: {},
   model_role_ids: [],
@@ -139,12 +137,10 @@ const untargetedPayload: SettingsUntargetedPayload = {
   },
   keys: [],
   model_chain: null,
-  model_limits_snapshot: "2026-01-01",
   model_roles: {},
   model_chains: [],
   custom_providers: [],
   configured_providers: [],
-  provider_catalog: [],
   provider_catalog_version: "fixture-catalog",
   provider_eligibility: {},
   model_role_ids: [],
@@ -730,6 +726,7 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       expect(tabTrigger(container, t("en", "appDetail.tabDelivery"))).toBeDefined();
       expect(container.querySelector(`[aria-label="${t("en", "settings.modelChainField")}"]`)).toBeNull();
       expect(container.textContent).toContain(t("en", "common.loading"));
+      expect(container.textContent).toContain(t("en", "settings.seats"));
       await click(win, tabTrigger(container, t("en", "appDetail.tabDelivery")));
       expect(container.textContent).toContain(t("en", "appDetail.delivery.emptyTitle"));
       await click(win, tabTrigger(container, t("en", "appDetail.tabSettings")));

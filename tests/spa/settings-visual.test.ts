@@ -22,10 +22,10 @@ import { t } from "../../src/i18n";
 import { SectionCard } from "../../src/spa/components/SectionCard";
 import { PageNotice, type OpNotice } from "../../src/spa/pages/PageNotice";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
-import type { BotConfigSections, BotSettingsPayload, SettingsManagePayload } from "../../src/spa/pages/data";
+import type { BotConfigSections, BotSettingsPayload, SettingsManagePayload, ProviderManagementPayload } from "../../src/spa/pages/data";
 import { BotSettingsView } from "../../src/spa/pages/BotSettingsPage";
 import { DeliveryStatusView } from "../../src/spa/pages/AppDeliveryTab";
-import { ProvidersSection } from "../../src/spa/pages/settings-providers";
+import { LoadedProvidersSection as ProvidersSection } from "../../src/spa/pages/settings-providers";
 import { alertSegments } from "../helpers/token-colour";
 import { withLocation } from "./browser-stub";
 
@@ -76,12 +76,12 @@ const detailPayload = (): SettingsManagePayload => ({
   check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
   keys: [],
   model_chain: null,
-  model_limits_snapshot: "2026-01-01",
   model_roles: {},
   model_chains: [],
   custom_providers: [],
   configured_providers: [],
-  provider_catalog: [],
+  provider_catalog_version: "fixture-catalog",
+  provider_eligibility: {},
   model_role_ids: [],
   custom_provider_api_ids: [],
   sandbox_images: [{ id: "omp", enabled: true }],
@@ -92,8 +92,9 @@ const detailPayload = (): SettingsManagePayload => ({
  * The same payload with one configured provider: the precondition for the group
  * card the providers section renders.
  */
-const providersPayload = (): SettingsManagePayload => ({
+const providersPayload = (): SettingsManagePayload & ProviderManagementPayload => ({
   ...detailPayload(),
+  model_limits_snapshot: "fixture-snapshot",
   keys: [
     {
       provider: "openai",
@@ -573,8 +574,8 @@ describe("the bot page carries the moved sections", () => {
         verified_status: null,
       },
     ],
-    provider_catalog: [],
-    model_limits_snapshot: "2026-01-01",
+    provider_catalog_version: "fixture-catalog",
+    provider_eligibility: {},
     model_role_ids: ["mstar-review-seat"],
     custom_provider_api_ids: [],
     sandbox_images: [{ id: "omp", enabled: true }],
@@ -591,9 +592,9 @@ describe("the bot page carries the moved sections", () => {
         onReload: async () => true,
       }),
     );
-    // Providers: a stored key's masked tail is the value the section renders.
+    // Provider management waits for its separately loaded catalog.
     expect(markup).toContain(t("en", "settings.providers.title"));
-    expect(markup).toContain("wxyz");
+    expect(markup).toContain(t("en", "common.loading"));
     // Chains: the Default chain's selectors plus the named chain.
     expect(markup).toContain(t("en", "settings.modelChains"));
     expect(markup).toContain("openai/gpt-5");

@@ -205,20 +205,18 @@ export function BotSettingsView({
                 <LoadingNotice locale={locale} />
               </FlowSection>
             ) : (
-              <>
-                <ChainsSection
-                  locale={locale}
-                  payload={payload}
-                  groups={groups}
-                  onSettings={submitSettings}
-                  onCreateDraft={createDraftChain}
-                  onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
-                  notice={chainsNotice}
-                  onOutcome={setChainsNotice}
-                />
-                <SeatsSection locale={locale} payload={payload} onSettings={submitSettings} />
-              </>
+              <ChainsSection
+                locale={locale}
+                payload={payload}
+                groups={groups}
+                onSettings={submitSettings}
+                onCreateDraft={createDraftChain}
+                onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
+                notice={chainsNotice}
+                onOutcome={setChainsNotice}
+              />
             )}
+            <SeatsSection locale={locale} payload={payload} onSettings={submitSettings} />
           </>
         ) : (
           <>

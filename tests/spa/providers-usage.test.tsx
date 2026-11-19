@@ -33,9 +33,9 @@ import {
   parseUsageSnapshot,
   type CatalogProvider,
   type ProviderKeyRow,
-  type SettingsManagePayload,
+  type SettingsManagePayload, type ProviderManagementPayload,
 } from "../../src/spa/pages/data";
-import { ProvidersSection } from "../../src/spa/pages/settings-providers";
+import { LoadedProvidersSection as ProvidersSection } from "../../src/spa/pages/settings-providers";
 import { UsagePanel } from "../../src/spa/pages/usage-panel";
 import type { OpNotice } from "../../src/spa/pages/PageNotice";
 import { installDom } from "./dom";
@@ -66,7 +66,7 @@ const keyRow = (provider: string, overrides: Partial<ProviderKeyRow> = {}): Prov
   ...overrides,
 });
 
-function managePayload(overrides: Partial<SettingsManagePayload> = {}): SettingsManagePayload {
+function managePayload(overrides: Partial<SettingsManagePayload & ProviderManagementPayload> = {}): SettingsManagePayload & ProviderManagementPayload {
   return {
     can_manage: true,
     installation: null,
@@ -104,6 +104,8 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
     custom_providers: [],
     configured_providers: [],
     provider_catalog: [],
+    provider_catalog_version: "fixture-catalog",
+    provider_eligibility: {},
     model_role_ids: [],
     custom_provider_api_ids: [],
     sandbox_images: [{ id: "omp", enabled: true }],
@@ -139,7 +141,7 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-async function mount(payload: SettingsManagePayload, loc: SpaBoot["locale"] = locale) {
+async function mount(payload: SettingsManagePayload & ProviderManagementPayload, loc: SpaBoot["locale"] = locale) {
   const { win, cleanup: cleanupDom } = installDom("http://localhost/dashboard/acme/apps");
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
@@ -212,7 +214,7 @@ const probedProvider = "commandcode";
 function probedPayload(
   catalogOverrides: Partial<CatalogProvider> = {},
   keys: ProviderKeyRow[] = [keyRow(probedProvider)],
-): SettingsManagePayload {
+): SettingsManagePayload & ProviderManagementPayload {
   return managePayload({
     keys,
     provider_catalog: [

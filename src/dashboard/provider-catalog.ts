@@ -1,4 +1,6 @@
 import { PROVIDER_IDS, PROVIDER_META } from "./app-config-store";
+// Display-only picker grouping (AD-547). Never a mechanics input —
+// the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { MODEL_LIMITS, MODEL_LIMITS_SNAPSHOT } from "../contracts/provider-model-limits.generated";
 import { PROVIDER_VERIFY_ENDPOINTS } from "./provider-verify";
@@ -8,6 +10,15 @@ let catalog: Promise<{ json: string; version: string }> | undefined;
 
 export function providerCatalog() {
   return catalog ??= (async () => {
+    // Builtin ids in PROVIDER_IDS order, then the template tier (the
+    // hand-curated workers-ai entry followed by the snapshot's key order).
+    // `verifiable: false` marks the console-only providers (no probeable
+    // endpoint: azure-openai / ai-gateway); templates verify via the custom
+    // probe, so always verifiable.
+    // (AD-547): `display_group` is display-only picker grouping. Array order
+    // is unchanged; add/verify/save mechanics branch on tier/eligibility.
+    // `usage_probe` marks the providers whose own quota endpoint the per-key
+    // usage action can ask, derived from the probe table, not a hand-kept list.
     const provider_catalog = [
       ...PROVIDER_IDS.map((id) => {
         const meta = PROVIDER_META[id];
@@ -65,6 +76,8 @@ export function providerCatalog() {
           display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
         })),
     ];
+    // The model dialog names this vendor snapshot beside a catalog-supplied
+    // size so the operator can judge how fresh it is.
     const json = JSON.stringify({ provider_catalog, model_limits_snapshot: MODEL_LIMITS_SNAPSHOT });
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));
     const version = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");

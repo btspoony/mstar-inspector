@@ -278,6 +278,22 @@ describe("operator with a valid grant", () => {
     expect(auditRows(db).map((row) => row.action)).toEqual(["support.read"]);
   });
 
+  test("the static catalog follows member-list read access for granted operators and outsiders", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const env = envFor(db);
+    const catalog = await worker.fetch(await authedRequest("/dashboard/acme/api/provider-catalog", OPERATOR), env);
+    expect(catalog.status).toBe(200);
+    expect((await catalog.json() as { provider_catalog: unknown[] }).provider_catalog.length).toBeGreaterThan(0);
+    expect(auditRows(db).map((row) => row.action)).toEqual(["support.read"]);
+    seedUser(db, "stranger");
+    const catalogRefusal = await worker.fetch(await authedRequest("/dashboard/acme/api/provider-catalog", "stranger"), env);
+    const memberRefusal = await worker.fetch(await authedRequest("/dashboard/acme/api/members", "stranger"), env);
+    expect(catalogRefusal.status).toBe(404);
+    expect(catalogRefusal.status).toBe(memberRefusal.status);
+    expect(await catalogRefusal.text()).toBe(await memberRefusal.text());
+  });
+
   test("the grants notice is readable and audited", async () => {
     const { db } = fixture();
     grant(db, "ws-acme", OPERATOR, DAY);

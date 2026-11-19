@@ -778,12 +778,8 @@ export type BotConfigSections = {
   }>;
   /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
   configured_providers: ConfiguredProvider[];
-  /** Discovery metadata + eligibility — never configured state. */
-  provider_catalog: CatalogProvider[];
-  provider_catalog_version?: string;
-  provider_eligibility?: Record<string, ProviderEligibility>;
-  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
-  model_limits_snapshot: string;
+  provider_catalog_version: string;
+  provider_eligibility: Record<string, ProviderEligibility>;
   model_role_ids: readonly string[];
   custom_provider_api_ids: readonly string[];
   /** The selector's choices — enabled registry entries only (never yaml/secrets). */
@@ -797,6 +793,13 @@ export type BotConfigSections = {
  * never configure it.
  */
 export type BotSettingsPayload = { can_manage: boolean } & BotConfigSections;
+
+/** Provider-management data after the static catalog has loaded. */
+export type ProviderManagementPayload = BotConfigSections & {
+  provider_catalog: CatalogProvider[];
+  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
+  model_limits_snapshot: string;
+};
 
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
 export type SettingsReadOnlyPayload = {
@@ -2350,8 +2353,6 @@ function parseCatalogReference(data: Record<string, unknown>): boolean {
   if (typeof data.provider_catalog_version !== "string" || data.provider_catalog_version.length === 0 ||
     !isRecord(data.provider_eligibility) || !Object.values(data.provider_eligibility).every((value) =>
       value === "builtin" || value === "template" || value === "unavailable")) return false;
-  data.provider_catalog = [];
-  data.model_limits_snapshot = "";
   return true;
 }
 
@@ -2492,9 +2493,8 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-export function parseSettings(value: unknown): SettingsPayload | null {
-  if (!isRecord(value)) return null;
-  const data = { ...value };
+export function parseSettings(data: unknown): SettingsPayload | null {
+  if (!isRecord(data)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   // The delivery URL's workspace segment: the server-resolved id, required on
@@ -2651,9 +2651,8 @@ function isSandboxImageList(value: unknown): value is Array<{ id: string; enable
  * field by field like {@link parseSettings} — a payload that cannot round-trip
  * fails the parse instead of rendering a control the server would refuse.
  */
-export function parseBotSettings(value: unknown): BotSettingsPayload | null {
-  if (!isRecord(value)) return null;
-  const data = { ...value };
+export function parseBotSettings(data: unknown): BotSettingsPayload | null {
+  if (!isRecord(data)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   const app = data.app;
