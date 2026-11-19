@@ -135,8 +135,9 @@ export const CHECK_ROW_MAX_REQUESTS = 6;
 const CREDENTIAL_REQUESTS = 2;
 /**
  * Bound on the status-driven re-enable pass. The pairs are selected from the
- * rows that are ACTUALLY suspended — never a window over all Apps — so the
- * bound is the row batch's own order rather than an app-count ceiling.
+ * rows that are ACTUALLY suspended — never a window over all Apps — and each
+ * pass resumes after the last pair the previous pass scanned, so pairs the
+ * resume filter rejects cannot pin the window over a repaired pair.
  */
 const REENABLE_PAIR_LIMIT = CHECK_RECONCILE_LIMIT;
 
@@ -582,17 +583,33 @@ async function reenableHealthyAppChecks(
     // no tenant-facing field. Upgrade: tenant-filter it once check
     // reconciliation becomes workspace-scoped.
     .prepare(
-      `SELECT DISTINCT rc.bot_id AS bot_id, rc.installation_id AS installation_id
+      `SELECT DISTINCT rc.bot_id AS bot_id, rc.installation_id AS installation_id,
+              CASE WHEN cur.id IS NULL OR (rc.installation_id, rc.bot_id) > (cur.installation_id, cur.bot_id)
+                   THEN 0 ELSE 1 END AS wrapped
          FROM review_checks rc
          JOIN review_bots ga ON ga.id = rc.bot_id
+         LEFT JOIN check_reenable_cursor cur ON cur.id = 1
         WHERE rc.recovery_state = 'suspended'
           AND ga.status = 'active' AND ga.deleted_at IS NULL
-        ORDER BY rc.installation_id, rc.bot_id
+        ORDER BY wrapped, rc.installation_id, rc.bot_id
         LIMIT ?`,
     )
     .bind(REENABLE_PAIR_LIMIT)
     .all<{ bot_id: string; installation_id: number }>();
   if (suspended.length === 0) return;
+
+  // Advance before any pair is judged, so a batch the filter rejects in full
+  // (or a failing read below) still moves the next pass on; the scan wraps.
+  // Trade-off: a pair deferred by the budget, or caught in a
+  // `listReenableableCheckPairs` failure, is retried only after a full rotation.
+  const last = suspended[suspended.length - 1]!;
+  await db
+    .prepare(
+      `INSERT INTO check_reenable_cursor (id, installation_id, bot_id) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET installation_id = excluded.installation_id, bot_id = excluded.bot_id`,
+    )
+    .bind(last.installation_id, last.bot_id)
+    .run();
 
   // The current credential digest per pair, so an unchanged envelope is
   // detectable WITHOUT touching the network. A pair whose digest cannot be read
