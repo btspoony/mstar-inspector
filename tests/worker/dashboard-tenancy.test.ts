@@ -1711,11 +1711,7 @@ describe("App creation is owner/admin", () => {
 });
 
 describe("the route-local member gate", () => {
-  /**
-   * Every statement the request prepares, in order. The session guard and
-   * `requireMember` both read the caller's `users` row, so the count of
-   * `users` lookups is the read the request actually pays twice.
-   */
+  /** Every statement the request prepares, in order. */
   function recordingDb(db: TestD1): { observed: TestD1; statements: string[] } {
     const statements: string[] = [];
     const observed = {
@@ -1730,22 +1726,17 @@ describe("the route-local member gate", () => {
 
   const USER_READ = /FROM users WHERE github_login/;
 
-  test("a workspace route reads the users row once per request", async () => {
+  test("the repository list fits in three reads: maintenance, access, and data", async () => {
     const { db } = tenancyFixture();
     const { observed, statements } = recordingDb(db);
     const res = await worker.fetch(
-      await authedRequest("/dashboard/acme/api/apps", "mallory"),
+      await authedRequest("/dashboard/acme/api/targets", "mallory"),
       envFor(observed),
     );
-    // The route still answers with the caller's own identity and workspace.
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { viewer: { login: string }; apps: Array<{ github_app_id: number }> };
-    expect(body.viewer.login).toBe("mallory");
-    // The list payload's GitHub-identity fields are the App-ID payload task's;
-    // this fixture only needs the App to be addressable, by its numeric id.
-    expect(body.apps.map((app) => app.github_app_id)).toEqual([appAcmeId(db)]);
-    // The guard already read this row; the gate must not read it again.
-    expect(statements.filter((sql) => USER_READ.test(sql))).toHaveLength(1);
+    const body = (await res.json()) as { targets: Array<{ target_id: string }> };
+    expect(body.targets.map((target) => target.target_id)).toEqual(["target-app-acme"]);
+    expect(statements).toHaveLength(3);
   });
 
   test("a mount without the session guard still resolves the user", async () => {

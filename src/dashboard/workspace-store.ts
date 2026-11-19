@@ -18,6 +18,7 @@ import {
   FREE_SLOT_REFUSAL,
   FreeWorkspaceSlotError,
 } from "./entitlement";
+import type { DashboardUserRow } from "./users";
 
 /** Membership role inside one workspace (migration 0026 CHECK domain). */
 export type WorkspaceRole = "owner" | "admin" | "member";
@@ -84,19 +85,58 @@ export async function getWorkspaceByRef(
 }
 
 /**
- * The user's role in one workspace, or null when they are not a member. Keyed
- * by the users row id (a login rename cannot orphan a membership).
+ * Resolve the active user, live ref and workspace role in a single snapshot.
+ * A removed user is distinct from a live user addressing an unknown or
+ * ambiguous ref: the guard must still invalidate the removed user's cookie.
  */
-export async function getMembership(
+export async function getWorkspaceRequestAccess(
   db: WorkspaceStoreD1,
-  workspaceId: string,
-  userId: string,
-): Promise<WorkspaceRole | null> {
-  const row = await db
-    .prepare(`SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?`)
-    .bind(workspaceId, userId)
-    .first<{ role: WorkspaceRole }>();
-  return row?.role ?? null;
+  login: string,
+  ref: string,
+): Promise<{ user: DashboardUserRow; workspace: WorkspaceRow | null; role: WorkspaceRole | null } | null> {
+  const { results } = await db
+    .prepare(
+      `SELECT u.*, w.id AS workspace_id, w.slug AS workspace_slug,
+              w.name AS workspace_name, w.created_at AS workspace_created_at, wm.role AS workspace_role
+         FROM users u
+         LEFT JOIN workspaces w ON (w.slug = ?2 OR w.id = ?2) AND w.deleted_at IS NULL
+         LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = u.id
+        WHERE u.github_login = ?1 COLLATE NOCASE
+        LIMIT 2`,
+    )
+    .bind(login, ref)
+    .all<
+      DashboardUserRow &
+        (
+          | { workspace_id: null }
+          | {
+              workspace_id: string;
+              workspace_slug: string;
+              workspace_name: string;
+              workspace_created_at: string;
+              workspace_role: WorkspaceRole | null;
+            }
+        )
+    >();
+  const row = results[0];
+  if (row === undefined) return null;
+  const { id, github_login, role, created_at, invited_by } = row;
+  const user = { id, github_login, role, created_at, invited_by };
+  if (results.length > 1) {
+    console.warn(JSON.stringify({ event: "workspace_ref_ambiguous", ref }));
+    return { user, workspace: null, role: null };
+  }
+  if (row.workspace_id === null) return { user, workspace: null, role: null };
+  return {
+    user,
+    workspace: {
+      id: row.workspace_id,
+      slug: row.workspace_slug,
+      name: row.workspace_name,
+      created_at: row.workspace_created_at,
+    },
+    role: row.workspace_role,
+  };
 }
 
 /**
@@ -296,28 +336,6 @@ export async function countMembersAndPendingInvites(
 }
 
 /**
- * How many live workspaces this login belongs to — `0` is the "no workspace
- * yet" state that offers creation. Soft-deleted workspaces do not
- * count: a retired tenant is not a home.
- */
-export async function countMembershipsForLogin(
-  db: WorkspaceStoreD1,
-  login: string,
-): Promise<number> {
-  const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS n
-         FROM workspace_members wm
-         JOIN users u ON u.id = wm.user_id
-         JOIN workspaces w ON w.id = wm.workspace_id
-        WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL`,
-    )
-    .bind(login)
-    .first<{ n: number }>();
-  return row?.n ?? 0;
-}
-
-/**
  * How many live FREE workspaces this login belongs to — the count the free-slot
  * predicate reads. Same rule as {@link resolveWorkspacePlan}: only an `active`
  * subscription row counts, so a workspace with no row (or only a non-active
@@ -358,8 +376,8 @@ export type WorkspaceMembershipOption = {
  * Both identifiers ride the row: the path segment may be the stable `id` or the
  * readable `slug`, so a consumer cannot decide "which row is current" from one
  * field (and right after a rename the path still holds the OLD slug while the
- * stored `slug` is new). Same predicate as {@link countMembershipsForLogin}: a
- * retired tenant is not a home and never appears as a switch target.
+ * stored `slug` is new). A retired tenant is not a home and never appears as
+ * a switch target.
  */
 export async function listWorkspaceMembershipOptions(
   db: WorkspaceStoreD1,
