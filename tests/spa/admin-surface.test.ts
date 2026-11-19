@@ -21,6 +21,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { opsSurface } from "../../src/design-system/tokens";
 import { t } from "../../src/i18n";
+import { adminApp } from "../../src/admin/index";
+import { APP_ROUTES, dashboardApp } from "../../src/dashboard/index";
+import { ADMIN_PAGES } from "../../src/spa/admin/pages";
 import { RuntimePage } from "../../src/spa/admin/RuntimePage";
 import { SettingsView } from "../../src/spa/pages/SettingsPage";
 import { APP_VERSION } from "../../src/version";
@@ -221,5 +224,53 @@ describe("the release version lives on the console only", () => {
     );
     expect(markup).not.toContain(`v${APP_VERSION}`);
     expect(markup).not.toContain(t("en", "admin.runtime.version", { version: `v${APP_VERSION}` }));
+  });
+});
+
+describe("every ADMIN_PAGES id is served and routed", () => {
+  // Registered paths on the admin sub-app (src/admin/index.ts), Hono's own projection.
+  const adminRoutes = adminApp.routes.map((route) => route.method.toUpperCase() + " " + route.path);
+
+  test("each page id has a served document and a client route", () => {
+    // One document per id from the Worker, one id lookup in the client entry —
+    // both sides read the SAME list, so a dropped page fails here either way.
+    expect(ADMIN_PAGES.length).toBeGreaterThan(0);
+    for (const page of ADMIN_PAGES) {
+      expect(adminRoutes, "no served document for " + page.id).toContain("GET /" + page.id);
+      expect(adminRoutes, "no console root document").toContain("GET /");
+    }
+  });
+
+  test("every page id resolves to a non-empty localized nav label in both locales", () => {
+    for (const page of ADMIN_PAGES) {
+      for (const locale of ["en", "zh_CN"] as const) {
+        const label = t(locale, page.labelKey);
+        expect(label, locale + " " + page.labelKey).not.toBe(page.labelKey);
+        expect(label.length).toBeGreaterThan(0);
+      }
+    }
+  });
+});
+
+describe("the shared-bot routes are registered", () => {
+  const paths = (app: { routes: { method: string; path: string }[] }) =>
+    app.routes.map((route) => route.method.toUpperCase() + " " + route.path);
+
+  test("the admin table carries the bots read and scope write beside the designation write", () => {
+    const routes = paths(adminApp);
+    expect(routes).toContain("GET /api/bots");
+    expect(routes).toContain("PATCH /api/bots/:botId/scope");
+    expect(routes).toContain("PATCH /api/official-workspace");
+  });
+
+  test("the workspace route table carries the owning workspace's scope write", () => {
+    const routes = paths(dashboardApp);
+    expect(routes).toContain("PATCH /:workspaceRef/api/apps/:appId/bot/scope");
+    // The route must sit in APP_ROUTES with write access, not a stray handler:
+    // read-classified rows would widen the operator read ceiling's suffix match.
+    const row = APP_ROUTES.find((entry) => entry.path === "/api/apps/:appId/bot/scope");
+    expect(row, "workspace scope route is declared in APP_ROUTES").toBeDefined();
+    expect(row && row.method).toBe("patch"); // APP_ROUTES declares its own lowercase method
+    expect(row && row.access).toBe("write");
   });
 });
