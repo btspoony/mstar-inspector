@@ -778,10 +778,8 @@ export type BotConfigSections = {
   }>;
   /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
   configured_providers: ConfiguredProvider[];
-  /** Discovery metadata + eligibility — never configured state. */
-  provider_catalog: CatalogProvider[];
-  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
-  model_limits_snapshot: string;
+  provider_catalog_version: string;
+  provider_eligibility: Record<string, ProviderEligibility>;
   model_role_ids: readonly string[];
   custom_provider_api_ids: readonly string[];
   /** The selector's choices — enabled registry entries only (never yaml/secrets). */
@@ -795,6 +793,13 @@ export type BotConfigSections = {
  * never configure it.
  */
 export type BotSettingsPayload = { can_manage: boolean } & BotConfigSections;
+
+/** Provider-management data after the static catalog has loaded. */
+export type ProviderManagementPayload = BotConfigSections & {
+  provider_catalog: CatalogProvider[];
+  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
+  model_limits_snapshot: string;
+};
 
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
 export type SettingsReadOnlyPayload = {
@@ -2331,6 +2336,26 @@ function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
   );
 }
 
+export type StaticProviderCatalog = {
+  provider_catalog: Omit<CatalogProvider, "eligibility">[];
+  model_limits_snapshot: string;
+};
+
+export function parseProviderCatalog(value: unknown): StaticProviderCatalog | null {
+  if (!isRecord(value) || !Array.isArray(value.provider_catalog) ||
+    typeof value.model_limits_snapshot !== "string" || value.model_limits_snapshot.length === 0) return null;
+  const rows = value.provider_catalog.map((row: unknown) =>
+    isRecord(row) ? { ...row, eligibility: row.tier } : row);
+  return isCatalogProviderList(rows) ? value as StaticProviderCatalog : null;
+}
+
+function parseCatalogReference(data: Record<string, unknown>): boolean {
+  if (typeof data.provider_catalog_version !== "string" || data.provider_catalog_version.length === 0 ||
+    !isRecord(data.provider_eligibility) || !Object.values(data.provider_eligibility).every((value) =>
+      value === "builtin" || value === "template" || value === "unavailable")) return false;
+  return true;
+}
+
 /**
  * Which configuration form a selected Add Provider entry requires:
  * `key` = verifiable builtin (verify-first `/keys/verify`), `template` =
@@ -2469,7 +2494,8 @@ function isNullableString(value: unknown): value is string | null {
 }
 
 export function parseSettings(data: unknown): SettingsPayload | null {
-  if (!isRecord(data) || !isRecord(data.app)) return null;
+  if (!isRecord(data)) return null;
+  if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   // The delivery URL's workspace segment: the server-resolved id, required on
   // both faces (a path ref may be a slug and must never be printed).
@@ -2585,15 +2611,8 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
   if (!Array.isArray(data.model_chains)) return null;
-  // Clean cutover: the primary list is configured state and the
-  // catalog is discovery-only — BOTH are required and row-validated, so the
-  // old `providers` dump (or catalog rows masquerading as configured state)
-  // fails the parse instead of silently passing.
   if (!isConfiguredProviderList(data.configured_providers)) return null;
-  if (!isCatalogProviderList(data.provider_catalog)) return null;
-  // The vendor snapshot the catalog sizes came from: the model dialog names it
-  // beside a pre-filled value, so an absent one fails the parse.
-  if (typeof data.model_limits_snapshot !== "string" || data.model_limits_snapshot.length === 0) return null;
+  if (!parseCatalogReference(data)) return null;
   // The manage face: the selector choices — { id, enabled } rows only.
   if (!isSandboxImageList(data.sandbox_images)) return null;
   // Cached visibility is nullable (null = the row read failed); any other
@@ -2633,7 +2652,8 @@ function isSandboxImageList(value: unknown): value is Array<{ id: string; enable
  * fails the parse instead of rendering a control the server would refuse.
  */
 export function parseBotSettings(data: unknown): BotSettingsPayload | null {
-  if (!isRecord(data) || !isRecord(data.app)) return null;
+  if (!isRecord(data)) return null;
+  if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   const app = data.app;
   if (typeof app.github_app_id !== "number" || typeof app.id !== "string") return null;
@@ -2657,10 +2677,9 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!isRecord(data.model_roles) || !Array.isArray(data.model_chains)) return null;
   if (!Array.isArray(data.custom_providers)) return null;
   if (!isConfiguredProviderList(data.configured_providers)) return null;
-  if (!isCatalogProviderList(data.provider_catalog)) return null;
+  if (!parseCatalogReference(data)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
-  if (typeof data.model_limits_snapshot !== "string" || data.model_limits_snapshot.length === 0) return null;
   if (!isSandboxImageList(data.sandbox_images)) return null;
   return data as BotSettingsPayload;
 }
@@ -2946,4 +2965,3 @@ export function createWorkspaceRefusalKey(status: number, body: string): Diction
   if (body === WORKSPACE_CREATION_CLOSED_REFUSAL) return "nav.newWorkspaceBlockedFlag";
   return null;
 }
-

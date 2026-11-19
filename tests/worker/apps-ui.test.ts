@@ -537,8 +537,8 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
         "model_chains",
         "custom_providers",
         "configured_providers",
-        "provider_catalog",
-        "model_limits_snapshot",
+        "provider_catalog_version",
+        "provider_eligibility",
         "model_role_ids",
         "custom_provider_api_ids",
         "sandbox_images",
@@ -1202,6 +1202,8 @@ describe("a retained target on another workspace's bot grants no bot-scope write
       "custom_providers",
       "configured_providers",
       "provider_catalog",
+      "provider_catalog_version",
+      "provider_eligibility",
       "sandbox_images",
       "model_limits_snapshot",
       "model_role_ids",
@@ -1238,7 +1240,9 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     ]);
     expect(ownerBody.deliveries).toBeUndefined();
     expect(Array.isArray(ownerBody.keys)).toBe(true);
-    expect(Array.isArray(ownerBody.provider_catalog)).toBe(true);
+    expect(ownerBody.provider_catalog).toBeUndefined();
+    expect(typeof ownerBody.provider_catalog_version).toBe("string");
+    expect(ownerBody.provider_eligibility).toBeObject();
   });
 
   test("the consuming workspace keeps its TARGET settings, and the owner keeps the bot", async () => {

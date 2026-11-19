@@ -60,8 +60,8 @@ function payload(): BotSettingsPayload {
         verified_status: null,
       },
     ],
-    provider_catalog: [],
-    model_limits_snapshot: "2026-01-01",
+    provider_catalog_version: "fixture-catalog",
+    provider_eligibility: {},
     model_role_ids: ["mstar-review-seat"],
     custom_provider_api_ids: [],
     sandbox_images: [{ id: "omp", enabled: true }],
@@ -78,6 +78,9 @@ async function refusalNotice(answer: { status: number; body: string } | "reject"
   const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps/1/bot");
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: unknown) => {
+    if (String(input).includes("/api/provider-catalog")) {
+      return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
+    }
     if (!String(input).includes("/keys/verify")) return new Response("ok", { status: 200 });
     if (answer === "reject") throw new TypeError("Failed to fetch");
     return new Response(answer.body, { status: answer.status });

@@ -14,7 +14,7 @@ import { act, createElement, useState, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { t } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
-import type { CatalogProvider, SettingsManagePayload } from "../../src/spa/pages/data";
+import type { CatalogProvider, SettingsManagePayload, ProviderManagementPayload } from "../../src/spa/pages/data";
 import type { OpNotice } from "../../src/spa/pages/PageNotice";
 import { AddKeyDialog, AddProviderDialog, CustomProviderDialog } from "../../src/spa/pages/providers-dialogs";
 import { installDom } from "./dom";
@@ -62,7 +62,7 @@ const CATALOG: CatalogProvider[] = [
   catalogEntry("mistral", { label: "Mistral", eligibility: "unavailable" }),
 ];
 
-function managePayload(overrides: Partial<SettingsManagePayload> = {}): SettingsManagePayload {
+function managePayload(overrides: Partial<SettingsManagePayload & ProviderManagementPayload> = {}): SettingsManagePayload & ProviderManagementPayload {
   return {
     can_manage: true,
     installation: null,
@@ -100,6 +100,8 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
     custom_providers: [],
     configured_providers: [],
     provider_catalog: CATALOG,
+    provider_catalog_version: "fixture-catalog",
+    provider_eligibility: {},
     model_role_ids: [],
     custom_provider_api_ids: ["openai-completions"],
     sandbox_images: [{ id: "omp", enabled: true }],
@@ -420,7 +422,7 @@ describe("AddProviderDialog — a merged provider's protocol is a choice on add"
     (
       catalog: CatalogProvider[],
       options: {
-        customProviders?: SettingsManagePayload["custom_providers"];
+        customProviders?: ProviderManagementPayload["custom_providers"];
         onSettings?: (fields: Record<string, string>) => Promise<OpNotice>;
       } = {},
     ) =>

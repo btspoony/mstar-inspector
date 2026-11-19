@@ -22,6 +22,8 @@
  */
 import { Hono, type Context, type Handler } from "hono";
 import { getCookie } from "hono/cookie";
+import { orderedReads } from "./ordered-reads";
+import { providerCatalog } from "./provider-catalog";
 // The review gate's verdict vocabulary — the same engine constant apps-store
 // validates saveCheckGate against, so the route's 400 and the store's
 // backstop can never drift.
@@ -171,24 +173,20 @@ import {
   type CustomProviderModelMeta,
   type CustomProviderModelsMeta,
 } from "./app-config-store";
-// Display-only picker grouping (AD-547). Never a mechanics input —
-// the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
-import { LEGACY_PROVIDER_IDS, PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
+import { LEGACY_PROVIDER_IDS } from "../contracts/provider-catalog.generated";
 import { isFindingSeverity } from "../contracts/finding-severity";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS } from "../contracts/provider-models";
-import { MODEL_LIMITS, MODEL_LIMITS_SNAPSHOT } from "../contracts/provider-model-limits.generated";
 import { enabledSandboxImages, getSandboxImage } from "../contracts/sandbox-images";
 import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import {
-  PROVIDER_VERIFY_ENDPOINTS,
   fetchDeclaredProviderModels,
   modelIdsForProtocol,
   verifyFetch,
   verifyProviderKey,
   type VerifyFailureReason,
 } from "./provider-verify";
-import { endpointHost, hasUsageProbe, probeProviderUsage, usageProbeHosts } from "./provider-usage";
+import { endpointHost, probeProviderUsage, usageProbeHosts } from "./provider-usage";
 import {
   countUsers,
   deleteWorkspaceMember,
@@ -3685,20 +3683,19 @@ async function refreshGithubMetadataForRead(
  */
 async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionKey: string) {
   const apps = createReviewBotsStore(db);
-  const installations = await apps.listInstallations(app.id);
-  const deliverySummary = await apps.deliverySummary(app.id);
   const store = createAppConfigStore(db, encryptionKey);
-  const maskedKeys = await store.listProviderKeys(app.id);
-  const modelChain = await store.getModelChain(app.id);
-  const modelChainSeats = await store.getModelChainSeats(app.id);
-  const modelChains = await store.getModelChains(app.id);
-  const customProviders = await store.listCustomProviders(app.id);
-  // The custom/template pools' own masked rows — the declaration list above
-  // carries no key material, so without this read a custom provider rendered
-  // one declaration row whatever its pool size: no key identity, mask or
-  // per-key verification state, and no way to drop one key instead of the
-  // whole pool.
-  const customKeys = await store.listCustomProviderKeys(app.id);
+  const [installations, deliverySummary, maskedKeys, modelChain, modelChainSeats, modelChains, customProviders, customKeys] =
+    await orderedReads([
+      apps.listInstallations(app.id),
+      apps.deliverySummary(app.id),
+      store.listProviderKeys(app.id),
+      store.getModelChain(app.id),
+      store.getModelChainSeats(app.id),
+      store.getModelChains(app.id),
+      store.listCustomProviders(app.id),
+      store.listCustomProviderKeys(app.id),
+    ]);
+  const catalog = await providerCatalog();
   const keyRows = [...maskedKeys, ...customKeys];
   // (spec § Provider configuration contract): eligibility is judged
   // against the App's SELECTED runtime harness, never an inferred filter. The
@@ -3775,85 +3772,10 @@ async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionK
         model_ids: [...row.model_ids],
       })),
     ],
-    // Discovery metadata (the retired `providers` dump) plus
-    // eligibility vs the App's selected image. Builtin ids in PROVIDER_IDS
-    // order, then the template tier (the hand-curated workers-ai entry
-    // followed by the snapshot breadth — the catalog's own key order).
-    // `verifiable: false` marks the console-only providers (no probeable
-    // endpoint: azure-openai / ai-gateway — the old
-    // addKeyProviderIds filter); templates verify via
-    // the custom probe, so always verifiable.
-    // (AD-547): every entry also carries a display-only
-    // `display_group` ("common" = the 5-entry 常用提供方 tier, "catalog" =
-    // everything else, in both tiers). Array order is unchanged and the
-    // field drives ONLY picker grouping — the add/verify/save mechanics
-    // keep branching on `tier`/`eligibility`, never on `display_group`.
-    // `usage_probe` marks the providers whose own quota endpoint the
-    // per-key usage action can ask (the probe table's catalog ids); it is
-    // derived, never a second hand-kept list.
-    provider_catalog: [
-      ...PROVIDER_IDS.map((id) => {
-        const meta = PROVIDER_META[id];
-        if (!meta) throw new Error(`PROVIDER_META missing ${id}`);
-        return {
-          id,
-          label: meta.label,
-          tier: meta.tier,
-          base_url: meta.baseUrl,
-          api: meta.api,
-          models: [...meta.models],
-          // The row's own endpoint: the SPA applies the same base-URL
-          // predicate the Worker does before it trusts `model_limits`.
-          // The per-model sizes the vendor directory states, keyed by model
-          // id. The model dialog pre-fills its blank fields from here and
-          // posts no override for a value the operator leaves untouched.
-          model_limits: MODEL_LIMITS[id] ?? {},
-          // Mixed-protocol rows only: the protocol choice the add form
-          // offers, default first. Absent = a single-protocol row.
-          ...(meta.protocols === undefined
-            ? {}
-            : {
-                protocols: meta.protocols.map((option) => ({
-                  api: option.api,
-                  base_url: option.baseUrl,
-                  models: [...option.models],
-                })),
-              }),
-          verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
-          usage_probe: hasUsageProbe(id),
-          eligibility: ompRuntime ? meta.tier : "unavailable",
-          display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
-        };
-      }),
-      ...Object.entries(PROVIDER_META)
-        .filter(([id, meta]) => meta.tier === "template" && !PROVIDER_IDS.includes(id))
-        .map(([id, meta]) => ({
-          id,
-          label: meta.label,
-          tier: meta.tier,
-          base_url: meta.baseUrl,
-          api: meta.api,
-          models: [...meta.models],
-          model_limits: MODEL_LIMITS[id] ?? {},
-          ...(meta.protocols === undefined
-            ? {}
-            : {
-                protocols: meta.protocols.map((option) => ({
-                  api: option.api,
-                  base_url: option.baseUrl,
-                  models: [...option.models],
-                })),
-              }),
-          verifiable: true,
-          usage_probe: hasUsageProbe(id),
-          eligibility: ompRuntime ? meta.tier : "unavailable",
-          display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
-        })),
-    ],
-    // The vendor snapshot the per-model sizes came from: the model dialog
-    // names it beside a catalog-supplied value so the operator can judge
-    // how fresh it is.
-    model_limits_snapshot: MODEL_LIMITS_SNAPSHOT,
+    provider_catalog_version: catalog.version,
+    provider_eligibility: Object.fromEntries(
+      Object.entries(PROVIDER_META).map(([id, meta]) => [id, ompRuntime ? meta.tier : "unavailable"]),
+    ),
     model_role_ids: MODEL_ROLE_IDS,
     custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
     // (spec § Technical interfaces): the manage face's selector
@@ -4472,6 +4394,26 @@ const appProviderModelsPreviewRoute = async (c: DashboardContext): Promise<Respo
   }
 };
 
+const providerCatalogRoute = async (c: DashboardContext) => {
+  if (c.get("tenant")?.principal !== "operator-granted") {
+    const member = await requireMember(c);
+    if (!member.ok) return member.response;
+  }
+  // Serve static vocabulary separately from tenant settings; only a matching v identifies immutable content.
+  const catalog = await providerCatalog();
+  const etag = `"${catalog.version}"`;
+  c.header("ETag", etag);
+  c.header("Cache-Control", c.req.query("v") === catalog.version
+    ? "private, max-age=31536000, immutable"
+    : "private, no-cache");
+  if (c.req.header("If-None-Match")?.split(",").some((value) =>
+    value.trim() === "*" || value.trim().replace(/^W\//, "") === etag)) {
+    return c.body(null, 304);
+  }
+  c.header("Content-Type", "application/json; charset=UTF-8");
+  return c.body(catalog.json);
+};
+
 const appModelsRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
@@ -4481,8 +4423,10 @@ const appModelsRoute = async (c: DashboardContext) => {
   if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
-    const verified = await store.getVerifiedModels(gate.app.id);
-    const custom = await store.listCustomProviders(gate.app.id);
+    const [verified, custom] = await orderedReads([
+      store.getVerifiedModels(gate.app.id),
+      store.listCustomProviders(gate.app.id),
+    ]);
     c.header("Cache-Control", "private, no-store");
     return c.json({ groups: composeModelOptions(verified, custom) });
   } catch (err) {
@@ -6882,6 +6826,7 @@ type AppRoute = {
 };
 
 const APP_ROUTES: ReadonlyArray<AppRoute> = [
+  { method: "get", path: "/api/provider-catalog", handler: providerCatalogRoute, access: "read" },
   { method: "get", path: "/apps/:appId/onboarding", handler: appOnboardingRoute, access: "write" },
   { method: "get", path: "/api/apps", handler: appListRoute, access: "write" },
   { method: "post", path: "/apps/:appId/disable", handler: (c) => appStatusAction(c, "disable"), access: "write" },

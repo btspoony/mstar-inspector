@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   CatalogProvider,
   ProviderKeyRow,
-  SettingsManagePayload,
+  SettingsManagePayload, ProviderManagementPayload,
 } from "../../src/spa/pages/data";
 import { providerGroups } from "../../src/spa/pages/providers-groups";
 
@@ -36,7 +36,7 @@ const key = (provider: string, keyId: string, overrides: Partial<ProviderKeyRow>
   ...overrides,
 });
 
-function payload(overrides: Partial<SettingsManagePayload> = {}): SettingsManagePayload {
+function payload(overrides: Partial<SettingsManagePayload & ProviderManagementPayload> = {}): SettingsManagePayload & ProviderManagementPayload {
   return {
     can_manage: true,
     installation: null,
@@ -74,6 +74,8 @@ function payload(overrides: Partial<SettingsManagePayload> = {}): SettingsManage
     custom_providers: [],
     configured_providers: [],
     provider_catalog: [],
+    provider_catalog_version: "fixture-catalog",
+    provider_eligibility: {},
     model_role_ids: [],
     custom_provider_api_ids: [],
     sandbox_images: [],

@@ -12,7 +12,7 @@ import {
   FlowSection,
   StatusBadge,
 } from "@design-system";
-import { PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
+import { LoadingNotice, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
@@ -53,12 +53,14 @@ export function BotSettingsView({
   locale,
   payload,
   groups,
+  modelsLoading = false,
   notice,
   onReload,
 }: {
   locale: SpaBoot["locale"];
   payload: BotSettingsPayload;
   groups: ModelOptionGroup[];
+  modelsLoading?: boolean;
   notice: { kind: NoticeKind; message: string } | null;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
@@ -198,16 +200,22 @@ export function BotSettingsView({
               onOutcome={setProvidersNotice}
               onReload={() => onReload({ background: true })}
             />
-            <ChainsSection
-              locale={locale}
-              payload={payload}
-              groups={groups}
-              onSettings={submitSettings}
-              onCreateDraft={createDraftChain}
-              onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
-              notice={chainsNotice}
-              onOutcome={setChainsNotice}
-            />
+            {modelsLoading ? (
+              <FlowSection title={t(locale, "settings.modelChains")} subtitle={t(locale, "settings.modelChainsCopy")}>
+                <LoadingNotice locale={locale} />
+              </FlowSection>
+            ) : (
+              <ChainsSection
+                locale={locale}
+                payload={payload}
+                groups={groups}
+                onSettings={submitSettings}
+                onCreateDraft={createDraftChain}
+                onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
+                notice={chainsNotice}
+                onOutcome={setChainsNotice}
+              />
+            )}
             <SeatsSection locale={locale} payload={payload} onSettings={submitSettings} />
           </>
         ) : (
@@ -359,4 +367,3 @@ export function BotSeatsSummary({ locale, payload }: { locale: SpaBoot["locale"]
     </FlowSection>
   );
 }
-

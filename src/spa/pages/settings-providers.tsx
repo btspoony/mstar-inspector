@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { t } from "../../i18n";
 import { Button, FlowSection, StatusBadge, type StatusTone } from "@design-system";
@@ -6,8 +6,12 @@ import { GroupCard, GroupCardBody, GroupCardHeader } from "../components/GroupCa
 import { ListRow, ListRowGroup } from "../components/ListRow";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
-import { modelsForProtocol, type CatalogProvider, type BotConfigSections } from "./data";
-import { NoticeRegion, type OpNotice } from "./PageNotice";
+import { modelsForProtocol, type CatalogProvider, type BotConfigSections, type ProviderManagementPayload } from "./data";
+import { LoadingNotice, NoticeRegion, type OpNotice } from "./PageNotice";
+import { ErrorState } from "../components/state/ErrorState";
+import { loadProviderCatalog } from "../provider-catalog";
+import { apiBase } from "../workspace-base";
+import type { StaticProviderCatalog } from "./data";
 import { AddKeyDialog, AddProviderDialog } from "./providers-dialogs";
 import { ProviderModelsDialog } from "./provider-models-dialog";
 import { ProviderSyncDialog } from "./provider-sync-dialog";
@@ -48,7 +52,38 @@ const TIER_FACE = {
  * Opening any of them inserts nothing into this list (AC-4) and changes no
  * route (AC-5); the per-row removes keep their confirmation dialog.
  */
-export function ProvidersSection({
+export function ProvidersSection(props: Omit<Parameters<typeof LoadedProvidersSection>[0], "payload"> & { payload: BotConfigSections }) {
+  const { payload, locale } = props;
+  const base = apiBase();
+  const version = payload.provider_catalog_version;
+  const [loaded, setLoaded] = useState<{ version: string; catalog: StaticProviderCatalog } | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setFailed(null);
+    void loadProviderCatalog(base, version).then((catalog) => {
+      if (!cancelled) setLoaded({ version, catalog });
+    }).catch(() => { if (!cancelled) setFailed(version); });
+    return () => { cancelled = true; };
+  }, [base, version, retry]);
+  const catalog = loaded?.version === version ? loaded.catalog : null;
+  return catalog ? <LoadedProvidersSection {...props} payload={{
+    ...payload,
+    ...catalog,
+    provider_catalog: catalog.provider_catalog.map((row) => ({
+      ...row, eligibility: payload.provider_eligibility[row.id] ?? "unavailable",
+    })),
+  }} /> : (
+    <FlowSection title={t(locale, "settings.providers.title")} subtitle={t(locale, "settings.providersCopy")}>
+      {failed === version ? (
+        <ErrorState locale={locale} onRetry={() => setRetry((value) => value + 1)} />
+      ) : <LoadingNotice locale={locale} />}
+    </FlowSection>
+  );
+}
+
+export function LoadedProvidersSection({
   locale,
   payload,
   onVerify,
@@ -60,7 +95,7 @@ export function ProvidersSection({
   onReload,
 }: {
   locale: SpaBoot["locale"];
-  payload: BotConfigSections;
+  payload: ProviderManagementPayload;
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onPending: (action: PendingAction) => void;

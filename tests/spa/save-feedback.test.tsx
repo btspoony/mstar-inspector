@@ -27,7 +27,7 @@ import { useSaveSignal } from "../../src/spa/components/save-signal";
 import { NoticeRegion, type OpNotice } from "../../src/spa/pages/PageNotice";
 import { RuntimePage } from "../../src/spa/admin/RuntimePage";
 import { AddKeyDialog, CustomProviderDialog } from "../../src/spa/pages/providers-dialogs";
-import type { SettingsManagePayload } from "../../src/spa/pages/data";
+import type { ProviderManagementPayload } from "../../src/spa/pages/data";
 import { WorkspaceSettingsPage } from "../../src/spa/pages/WorkspaceSettingsPage";
 import type { SpaBoot } from "../../src/spa/boot";
 import { installDom } from "./dom";
@@ -887,7 +887,7 @@ describe("in-flight save announcement", () => {
             locale: "en",
             open: true,
             onOpenChange: () => {},
-            payload: { custom_provider_api_ids: ["openai-completions"] } as unknown as SettingsManagePayload,
+            payload: { custom_provider_api_ids: ["openai-completions"] } as unknown as ProviderManagementPayload,
             onSettings: () =>
               new Promise<OpNotice>((resolve) => {
                 resolveSettings = resolve;

@@ -24,6 +24,7 @@ import {
   parseMembers,
   parseReviewUsage,
   parseSettings,
+  parseProviderCatalog,
   parseSharedBots,
   PR_VERDICTS as SPA_PR_VERDICTS,
   providerFormKind,
@@ -329,13 +330,13 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       installations: [],
       configured_providers: [],
-      provider_catalog: [],
+      provider_catalog_version: "fixture-catalog",
+      provider_eligibility: {},
       model_role_ids: ["mstar-review-seat"],
       custom_provider_api_ids: ["openai-completions"],
       sandbox_images: [{ id: "omp", enabled: true }],
@@ -348,7 +349,8 @@ describe("members/apps/settings parsers", () => {
         app: { github_slug: "demo", id: "app-demo", status: "active", review_enabled: 1, last_webhook_at: null },
         keys: [],
         configured_providers: [],
-        provider_catalog: [],
+        provider_catalog_version: "fixture-catalog",
+        provider_eligibility: {},
         model_role_ids: [],
         custom_provider_api_ids: [],
       }),
@@ -382,13 +384,13 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       installations: [],
       configured_providers: [],
-      provider_catalog: [],
+      provider_catalog_version: "fixture-catalog",
+      provider_eligibility: {},
       model_role_ids: [],
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
@@ -435,12 +437,12 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       configured_providers: [],
-      provider_catalog: [],
+      provider_catalog_version: "fixture-catalog",
+      provider_eligibility: {},
       model_role_ids: [],
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
@@ -505,13 +507,13 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 90, pass_verdicts: ["ship it", "needs fixes"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       installations: [],
       configured_providers: [],
-      provider_catalog: [],
+      provider_catalog_version: "fixture-catalog",
+      provider_eligibility: {},
       model_role_ids: [],
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
@@ -593,8 +595,8 @@ describe("members/apps/settings parsers", () => {
       model_chains: [],
       custom_providers: [],
       configured_providers: [],
-      provider_catalog: [],
-      model_limits_snapshot: "2026-01-01",
+      provider_catalog_version: "fixture-catalog",
+      provider_eligibility: {},
       model_role_ids: [],
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
@@ -700,13 +702,13 @@ describe("members/apps/settings parsers", () => {
       check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
       keys: [],
       model_chain: null,
-      model_limits_snapshot: "2026-01-01",
       model_roles: {},
       model_chains: [],
       custom_providers: [],
       installations: [],
       configured_providers: [],
-      provider_catalog: [],
+      provider_catalog_version: "fixture-catalog",
+      provider_eligibility: {},
       model_role_ids: [],
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
@@ -724,26 +726,18 @@ describe("members/apps/settings parsers", () => {
       eligibility: "builtin",
       display_group: "common",
     };
-    // The required unconfigured-App case: EMPTY configured state + a
-    // non-empty catalog parses — a catalog dump is never configured state.
-    const unconfigured = parseSettings({
-      ...manageBase,
-      provider_catalog: [
-        catalogRow,
-        { ...catalogRow, id: "workers-ai", tier: "template", eligibility: "template" },
-      ],
-    });
+    const unconfigured = parseSettings(manageBase);
     expect(unconfigured && unconfigured.can_manage && !unconfigured.blocked && unconfigured.configured_providers).toEqual([]);
-    expect(unconfigured && unconfigured.can_manage && !unconfigured.blocked && unconfigured.provider_catalog).toHaveLength(2);
-    // Both collections are REQUIRED (clean cutover — no legacy shape).
+    expect(unconfigured).not.toHaveProperty("provider_catalog");
+    expect(unconfigured).not.toHaveProperty("model_limits_snapshot");
     const { configured_providers: _droppedConfigured, ...withoutConfigured } = manageBase;
     expect(parseSettings(withoutConfigured)).toBeNull();
-    const { provider_catalog: _droppedCatalog, ...withoutCatalog } = manageBase;
-    expect(parseSettings(withoutCatalog)).toBeNull();
-    // A catalog row without eligibility (the old dump shape) is rejected.
-    const { eligibility: _droppedEligibility, ...rowWithoutEligibility } = catalogRow;
-    expect(parseSettings({ ...manageBase, provider_catalog: [rowWithoutEligibility] })).toBeNull();
-    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, eligibility: "maybe" }] })).toBeNull();
+    const { provider_catalog_version: _droppedVersion, ...withoutVersion } = manageBase;
+    expect(parseSettings(withoutVersion)).toBeNull();
+    const { provider_eligibility: _droppedEligibility, ...withoutEligibility } = manageBase;
+    expect(parseSettings(withoutEligibility)).toBeNull();
+    expect(parseSettings({ ...manageBase, provider_eligibility: { anthropic: "maybe" } })).toBeNull();
+    expect(parseSettings({ ...manageBase, provider_catalog_version: "" })).toBeNull();
     // A configured row without the `kind` discriminator (catalog-shaped) is rejected.
     expect(parseSettings({ ...manageBase, configured_providers: [{ ...catalogRow }] })).toBeNull();
     // Key rows need their identity, the masked tail (never plaintext) and the
@@ -961,6 +955,8 @@ describe("provider catalog rows + add selection", () => {
     installations: [],
     configured_providers: [],
     provider_catalog: [],
+    provider_catalog_version: "fixture-catalog",
+    provider_eligibility: {},
     model_role_ids: [],
     custom_provider_api_ids: [],
     sandbox_images: [{ id: "omp", enabled: true }],
@@ -981,42 +977,42 @@ describe("provider catalog rows + add selection", () => {
 
   test("catalog rows are row-validated on models/verifiable/base_url/api (guards)", () => {
     // A well-formed row (nullable url/api for builtins) parses.
-    expect(parseSettings({ ...manageBase, provider_catalog: [catalogRow] })).not.toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [catalogRow] })).not.toBeNull();
     // A drifted payload missing `models` must fail the parse — the Add
     // Provider UI branches on it, so a partial row can never render.
     const { models: _droppedModels, ...withoutModels } = catalogRow;
-    expect(parseSettings({ ...manageBase, provider_catalog: [withoutModels] })).toBeNull();
-    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, models: "claude-fable-5" }] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [withoutModels] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, models: "claude-fable-5" }] })).toBeNull();
     // verifiable decides the form kind — non-boolean is a contract breach.
-    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, verifiable: "yes" }] })).toBeNull();
-    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, verifiable: null }] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, verifiable: "yes" }] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, verifiable: null }] })).toBeNull();
     // `usage_probe` decides whether the row renders the usage action — a
     // non-boolean stamp is a contract breach, not a silent `false`.
-    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, usage_probe: "yes" }] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, usage_probe: "yes" }] })).toBeNull();
     // base_url / api are string-or-null.
-    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, base_url: 5 }] })).toBeNull();
-    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, api: [] }] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, base_url: 5 }] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, api: [] }] })).toBeNull();
     // Review handoff S2: the display-group stamp is word-checked —
     // a row missing `display_group` (the pre-54 route shape) or carrying a
     // stray value fails the parse instead of silently falling out of both
     // picker groups.
     const { display_group: _droppedDisplayGroup, ...withoutDisplayGroup } = catalogRow;
-    expect(parseSettings({ ...manageBase, provider_catalog: [withoutDisplayGroup] })).toBeNull();
-    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, display_group: "builtin" }] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [withoutDisplayGroup] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, display_group: "builtin" }] })).toBeNull();
     // The per-model size table (payload `model_limits`) and the snapshot it
     // came from are required: the model dialog pre-fills from them, so a row
     // without the table — or with a non-positive/non-integer size — fails.
     const { model_limits: _droppedLimits, ...withoutLimits } = catalogRow;
-    expect(parseSettings({ ...manageBase, provider_catalog: [withoutLimits] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [withoutLimits] })).toBeNull();
     expect(
-      parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, model_limits: { m: { contextWindow: 0, maxTokens: 1 } } }] }),
+      parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, model_limits: { m: { contextWindow: 0, maxTokens: 1 } } }] }),
     ).toBeNull();
     expect(
-      parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, model_limits: { m: { contextWindow: 10 } } }] }),
+      parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, model_limits: { m: { contextWindow: 10 } } }] }),
     ).toBeNull();
     const { model_limits_snapshot: _droppedSnapshot, ...withoutSnapshot } = manageBase;
-    expect(parseSettings(withoutSnapshot)).toBeNull();
-    expect(parseSettings({ ...manageBase, model_limits_snapshot: "" })).toBeNull();
+    expect(parseProviderCatalog(withoutSnapshot)).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, model_limits_snapshot: "" })).toBeNull();
   });
 
   test("a merged catalog row's protocol options are row-validated; a single-protocol row omits them", () => {
@@ -1030,21 +1026,21 @@ describe("provider catalog rows + add selection", () => {
         { api: "anthropic-messages", base_url: "https://api.merged.test/anthropic", models: ["b"] },
       ],
     };
-    expect(parseSettings({ ...manageBase, provider_catalog: [merged] })).not.toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [merged] })).not.toBeNull();
     // Absent is the single-protocol shape — the pre-merge rows keep parsing.
-    expect(parseSettings({ ...manageBase, provider_catalog: [catalogRow] })).not.toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [catalogRow] })).not.toBeNull();
     // The add form renders a control per option, so a drifted option fails the
     // parse instead of reaching a select that cannot materialize it.
     expect(
-      parseSettings({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ api: "anthropic-messages", base_url: 5, models: ["b"] }] }] }),
+      parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ api: "anthropic-messages", base_url: 5, models: ["b"] }] }] }),
     ).toBeNull();
     expect(
-      parseSettings({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ base_url: "https://x.test", models: [] }] }] }),
+      parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ base_url: "https://x.test", models: [] }] }] }),
     ).toBeNull();
     expect(
-      parseSettings({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ api: "anthropic-messages", base_url: null, models: "b" }] }] }),
+      parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ api: "anthropic-messages", base_url: null, models: "b" }] }] }),
     ).toBeNull();
-    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...merged, protocols: [] }] })).toBeNull();
+    expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...merged, protocols: [] }] })).toBeNull();
   });
 
   test("the protocol lookups: a declaration's vocabulary", () => {
@@ -1092,8 +1088,9 @@ describe("provider catalog rows + add selection", () => {
   });
 
   test("saved provider refresh: stored keys and custom declarations parse as the configured list", () => {
+    const { provider_catalog: _catalog, model_limits_snapshot: _snapshot, ...settings } = manageBase;
     const saved = parseSettings({
-      ...manageBase,
+      ...settings,
       keys: [
         {
           provider: "anthropic",
@@ -1122,20 +1119,14 @@ describe("provider catalog rows + add selection", () => {
           model_ids: ["@cf/meta/llama-3-8b-instruct"],
         },
       ],
-      provider_catalog: [
-        catalogRow,
-        { ...catalogRow, id: "workers-ai", label: "Workers AI", tier: "template", eligibility: "template" },
-      ],
     });
     const rows = saved && saved.can_manage && !saved.blocked ? saved.configured_providers : [];
     expect(rows).toHaveLength(2);
     const [keyRow, customRow] = rows;
     expect(keyRow).toMatchObject({ kind: "key", provider: "anthropic", last4: "9988" });
     expect(customRow && customRow.kind === "custom" && customRow.provider_id).toBe("workers-ai");
-    // The refreshed payload keeps catalog vs configured disjoint even after
-    // a save: both catalog rows remain discovery-only.
-    const catalogRows = saved && saved.can_manage && !saved.blocked ? saved.provider_catalog : [];
-    expect(catalogRows).toHaveLength(2);
+    // Catalog vocabulary is loaded separately from configured state.
+    expect(saved).not.toHaveProperty("provider_catalog");
   });
 
   test("multi-key rows stay one row each — a second key of one provider never overwrites the first", () => {
