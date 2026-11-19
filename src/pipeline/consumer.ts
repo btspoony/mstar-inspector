@@ -905,6 +905,7 @@ export type ProcessOutcome =
       kind: "guard-held";
       admission: AdmissionRefusalFields;
       heldHeadSha: string | null;
+      commentClaimConsumed: boolean;
       /**
        * The App's resolved review depth, carried from the same row read that
        * admitted this message: the retry schedule must follow the App, and the
@@ -1115,6 +1116,7 @@ async function handleGuardHeld(
   admission: AdmissionRefusalFields,
   heldHeadSha: string | null,
   level: ReviewLevel,
+  commentClaimConsumed: boolean,
 ): Promise<void> {
   const fields = { ...toBaseFields(message.body), ...admission };
   // Why this message was held, appended to both lines: the delay schedule alone
@@ -1132,6 +1134,26 @@ async function handleGuardHeld(
   const delays = guardRetryDelaysSeconds(level);
   const delaySeconds = delays[message.attempts - 1];
   if (delaySeconds !== undefined) {
+    if (commentClaimConsumed && message.body.comment_id !== undefined) {
+      const payload = message.body;
+      try {
+        // Other deliveries cannot consume a consumed row; only this delivery can restore it.
+        await deps.env.DB.prepare(
+          `UPDATE comment_trigger_claims
+              SET state = 'queued', payload_json = ?, consumed_ms = NULL, queued_ms = ?
+            WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+              AND state = 'consumed'`,
+        )
+          .bind(
+            JSON.stringify(payload), Date.now(), payload.installation_id,
+            payload.owner, payload.repo, payload.pr_number, payload.comment_id,
+          )
+          .run();
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `comment claim restore failed — retrying anyway: ${detail}`);
+      }
+    }
     // Say WHY nothing has started: the attach already put a `queued` run on
     // this commit, and the relabel adds the holder's context to it. Only a
     // `pr-held` refusal names a live review to wait for — a cap/storage
@@ -4105,7 +4127,7 @@ export function createReviewConsumer(
       // delayed retry (or the final ack-with-warning) instead of throwing
       // into the queue's immediate ×3 retry → DLQ path.
       if (outcome.kind === "guard-held") {
-        await handleGuardHeld(message, deps, outcome.admission, outcome.heldHeadSha, outcome.level);
+        await handleGuardHeld(message, deps, outcome.admission, outcome.heldHeadSha, outcome.level, outcome.commentClaimConsumed);
       } else if (outcome.kind === "paused") {
         // Architect lock L4: a paused App's in-flight message is
         // acked DIRECTLY — an intentional skip (its claim was already stamped
@@ -4284,6 +4306,7 @@ async function processMessage(
   // review_failures row + rethrow). Pure relocation — no runtime guard
   // (AL-24-4 forbids one).
   let baseFields: ConsumerLogFields | undefined;
+  let commentClaimConsumed = false;
   // §7.10 Check seam state: the handle from the step-4 begin hook
   // (null = no Checks / hook failed) and the ONCE-guarded terminalize —
   // every terminal path reports exactly one outcome, hook exceptions are
@@ -4685,6 +4708,7 @@ async function processMessage(
         deps.log.info(baseFields, "comment trigger already claimed — ack without running");
         return { kind: "ok" };
       }
+      commentClaimConsumed = true;
     }
     // Credential resolution FIRST (lock L4 — consumer-side),
     // before the guard/sandbox: app → D1 row gated
@@ -4963,6 +4987,7 @@ async function processMessage(
       // this attempt_key — settling here could close the live review's own run.
       return {
         kind: "guard-held",
+        commentClaimConsumed,
         admission: refusal,
         heldHeadSha: admission.reason === "pr-held" ? admission.heldHeadSha : null,
         level,
