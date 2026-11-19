@@ -134,9 +134,10 @@ export const CHECK_ROW_MAX_REQUESTS = 6;
  */
 const CREDENTIAL_REQUESTS = 2;
 /**
- * Bound on the status-driven re-enable pass. The pairs are selected from the
- * rows that are ACTUALLY suspended — never a window over all Apps — so the
- * bound is the row batch's own order rather than an app-count ceiling.
+ * Bound on the resumable pairs one re-enable pass may probe. The pairs are
+ * selected from the rows that are ACTUALLY suspended — never a window over all
+ * Apps — and the bound counts pairs that pass the resume filter, not pairs
+ * scanned, so filtered-out pairs never consume it.
  */
 const REENABLE_PAIR_LIMIT = CHECK_RECONCILE_LIMIT;
 
@@ -540,6 +541,8 @@ export async function reconcileReviewChecks(
   }
 }
 
+type SuspendedPair = { bot_id: string; installation_id: number };
+
 /**
  * §7.11.2 step 6's re-enable half (P68-QC-003). Resuming a suspended pair is
  * decision-heavy and the M8 lane's P67-QC-007 lesson is the contract: an
@@ -577,50 +580,61 @@ async function reenableHealthyAppChecks(
   log: CheckReconcileLog,
   updateBudgetMs: number | undefined,
 ): Promise<void> {
-  const { results: suspended } = await db
-    // shortcut: tenant-bypass — bounded reconciliation scan selecting ids only;
-    // no tenant-facing field. Upgrade: tenant-filter it once check
-    // reconciliation becomes workspace-scoped.
-    .prepare(
-      `SELECT DISTINCT rc.bot_id AS bot_id, rc.installation_id AS installation_id
-         FROM review_checks rc
-         JOIN review_bots ga ON ga.id = rc.bot_id
-        WHERE rc.recovery_state = 'suspended'
-          AND ga.status = 'active' AND ga.deleted_at IS NULL
-        ORDER BY rc.installation_id, rc.bot_id
-        LIMIT ?`,
-    )
-    .bind(REENABLE_PAIR_LIMIT)
-    .all<{ bot_id: string; installation_id: number }>();
-  if (suspended.length === 0) return;
+  // Pages walk the suspended pairs by key until a full batch is resumable, so
+  // pairs filtered out below (an unchanged credential, a held kill switch) can
+  // never pin the window and starve a repaired pair that sorts after them.
+  const resumable: { appId: string; installationId: number }[] = [];
+  let after: SuspendedPair | null = null;
+  while (resumable.length < REENABLE_PAIR_LIMIT && now() < budget.deadline) {
+    const { results: suspended } = await db
+      // shortcut: tenant-bypass — bounded reconciliation scan selecting ids only;
+      // no tenant-facing field. Upgrade: tenant-filter it once check
+      // reconciliation becomes workspace-scoped.
+      .prepare(
+        `SELECT DISTINCT rc.bot_id AS bot_id, rc.installation_id AS installation_id
+           FROM review_checks rc
+           JOIN review_bots ga ON ga.id = rc.bot_id
+          WHERE rc.recovery_state = 'suspended'
+            AND ga.status = 'active' AND ga.deleted_at IS NULL
+            AND (? IS NULL OR (rc.installation_id, rc.bot_id) > (?, ?))
+          ORDER BY rc.installation_id, rc.bot_id
+          LIMIT ?`,
+      )
+      .bind(after?.installation_id ?? null, after?.installation_id ?? null, after?.bot_id ?? null, REENABLE_PAIR_LIMIT)
+      .all<SuspendedPair>();
+    if (suspended.length === 0) break;
 
-  // The current credential digest per pair, so an unchanged envelope is
-  // detectable WITHOUT touching the network. A pair whose digest cannot be read
-  // yields a null the store's rule handles (F-005).
-  const candidates: { appId: string; installationId: number; currentFingerprint: string | null }[] = [];
-  for (const pair of suspended) {
-    const routing = await checkRoutingRow(db, pair.bot_id, pair.installation_id);
-    const currentFingerprint = routing === null ? null : await sha256Hex(routing.private_key_enc);
-    candidates.push({
-      appId: pair.bot_id,
-      installationId: pair.installation_id,
-      currentFingerprint,
-    });
-  }
+    // The current credential digest per pair, so an unchanged envelope is
+    // detectable WITHOUT touching the network. A pair whose digest cannot be read
+    // yields a null the store's rule handles (F-005).
+    const candidates: { appId: string; installationId: number; currentFingerprint: string | null }[] = [];
+    for (const pair of suspended) {
+      const routing = await checkRoutingRow(db, pair.bot_id, pair.installation_id);
+      const currentFingerprint = routing === null ? null : await sha256Hex(routing.private_key_enc);
+      candidates.push({
+        appId: pair.bot_id,
+        installationId: pair.installation_id,
+        currentFingerprint,
+      });
+    }
 
-  // Status-only resumes (kind `disabled`/`paused`) and operator corrections
-  // resolve here with no further probe; a pair suspended for a credential
-  // reason with an UNCHANGED envelope is filtered out and never re-probed
-  // (P68-QC-003).
-  let resumable: { appId: string; installationId: number }[];
-  try {
-    resumable = await listReenableableCheckPairs(db, candidates);
-  } catch (error) {
-    log.warn(
-      { event: "ops_check_reconcile_reenable_read_failed", detail: error instanceof Error ? error.message : String(error) },
-      "check re-enable scan failed — suspended rows stay suspended",
-    );
-    return;
+    // Status-only resumes (kind `disabled`/`paused`) and operator corrections
+    // resolve here with no further probe; a pair suspended for a credential
+    // reason with an UNCHANGED envelope is filtered out and never re-probed
+    // (P68-QC-003).
+    try {
+      const page = await listReenableableCheckPairs(db, candidates);
+      resumable.push(...page.slice(0, REENABLE_PAIR_LIMIT - resumable.length));
+    } catch (error) {
+      log.warn(
+        { event: "ops_check_reconcile_reenable_read_failed", detail: error instanceof Error ? error.message : String(error) },
+        "check re-enable scan failed — suspended rows stay suspended",
+      );
+      return;
+    }
+    if (suspended.length < REENABLE_PAIR_LIMIT) break;
+    const last: SuspendedPair = suspended[suspended.length - 1]!;
+    after = last;
   }
   if (resumable.length === 0) return;
 

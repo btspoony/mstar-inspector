@@ -2368,6 +2368,62 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     expect(row.external_id).toBe((await rawRow(db, id)).external_id);
   });
 
+  test("unchanged pairs filling a whole scan page never starve a repaired pair that sorts after them", async () => {
+    const db = seededDb();
+    // CHECK_RECONCILE_LIMIT active Apps whose identity-mismatch suspension was
+    // proven against their CURRENT envelope: each is filtered out with no probe.
+    const stuckIds: string[] = [];
+    for (let index = 0; index < CHECK_RECONCILE_LIMIT; index += 1) {
+      const appId = `00000000-0000-0000-0000-${String(index).padStart(12, "0")}`;
+      const installationId = 200 + index;
+      seedApp(db, appId, 5_000 + index, { installationId });
+      const { attempt } = await claim(db, {
+        scope: { ...SCOPE, appId, installationId },
+        githubAppId: 5_000 + index,
+        action: `stuck-${index}`,
+      });
+      db.raw
+        .prepare(
+          `UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended', attempts = 0, last_error = ? WHERE id = ?`,
+        )
+        .run(checkSuspensionReason("identity-mismatch", "suspended", await sha256Hex("enc-pem")), attempt.identity.attemptId);
+      stuckIds.push(attempt.identity.attemptId);
+    }
+    // One more pair, ordered after all of them (installation 999), whose
+    // operator replaced the credentials since the suspension was recorded.
+    const repairedApp = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+    const repairedScope = { ...SCOPE, appId: repairedApp, installationId: 999 };
+    seedApp(db, repairedApp, 9_999, { installationId: repairedScope.installationId });
+    const { attempt: repaired } = await claim(db, { scope: repairedScope, githubAppId: 9_999, action: "repaired" });
+    db.raw
+      .prepare(
+        `UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended', attempts = 0, last_error = ? WHERE id = ?`,
+      )
+      .run(checkSuspensionReason("identity-mismatch", "suspended", await sha256Hex("enc-pem")), repaired.identity.attemptId);
+    db.raw.prepare(`UPDATE review_bots SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(repairedApp);
+
+    const probed: string[] = [];
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: async (input) => {
+          probed.push(input.scope.appId);
+          return scriptedCredentials(db, agreeingScript(), undefined, repairedScope)(input);
+        },
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    // Only the repaired pair earned a probe, and its Check left suspension.
+    expect(new Set(probed)).toEqual(new Set([repairedApp]));
+    expect((await rawRow(db, repaired.identity.attemptId)).recovery_state).toBe("done");
+    for (const id of stuckIds) {
+      expect((await rawRow(db, id)).recovery_state).toBe("suspended");
+    }
+  });
+
   test("a KEPT-failing corrected envelope re-stamps with the new digest instead of churning", async () => {
     const db = seededDb();
     const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
