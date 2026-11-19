@@ -73,6 +73,8 @@ import {
   type GithubAppTenantRow,
   type LedgerScope,
   type PullRequestReviewing,
+  type BotScope,
+  setBotScope,
 } from "./apps-store";
 import {
   checkGateOf,
@@ -228,6 +230,7 @@ import {
   isConcurrencyValue,
   maintenanceClosed,
   readDefaultReviewLevel,
+  readOfficialWorkspaceId,
   setWorkspaceConcurrency,
   type DegradedReason,
   type MaintenanceMode,
@@ -2824,10 +2827,12 @@ function canManageApp(scope: WorkspaceScope): boolean {
  * workspace's retained target on another workspace's bot (the revoked-share
  * read), but a target grants its own review configuration, never the bot:
  * the caller's workspace must be the bot's OWNING workspace (its
- * `bot_workspaces` mapping), read off the same joined row. `shared` is
- * platform-authorised, so it is read-only here for its owner too; the
- * platform operator's own write path is `/_internal_admin`, which no member
- * route reaches.
+ * `bot_workspaces` mapping), read off the same joined row. Scope is NOT part
+ * of the decision: sharing decides who else may USE the bot, never who may
+ * configure it, so an owning workspace keeps every write while the bot is
+ * `shared` and a consuming workspace is still refused. The platform
+ * operator's own write path is `/_internal_admin`, which no member route
+ * reaches.
  *
  * Target-owned settings (trigger mode, depth, Check gate, allowlist, pause,
  * park) do NOT use this predicate: the target's workspace role governs them.
@@ -2836,7 +2841,7 @@ function canWriteBotScope(
   app: Pick<GithubAppRow, "workspace_id" | "scope">,
   scope: WorkspaceScope,
 ): boolean {
-  return app.scope === "owned" && app.workspace_id === scope.workspaceId;
+  return app.workspace_id === scope.workspaceId;
 }
 
 /**
@@ -3955,6 +3960,12 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const effective = target === null ? null : await readEffectiveTargetSettings(gate.db, target);
     const checkGate = effective === null ? null : checkGateOf(effective);
     const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(gate.db)).value;
+    // The share switch's two render facts, both derived per read (neither is
+    // stored): the bot's workspace IS the platform's official workspace today,
+    // and THIS caller's workspace owns the bot. They are a render gate only —
+    // `setBotScope` re-checks the designation inside its batch, so a stale page
+    // cannot authorize a share.
+    const officialWorkspaceId = await readOfficialWorkspaceId(gate.db);
     const targetOwned =
       target === null
         ? { app: {}, top: {} }
@@ -4025,6 +4036,13 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // The derived Blocked state (no stored column): see blockedReasonFor.
       blocked: blockedReason !== null,
       blocked_reason: blockedReason,
+      // The share switch's two render facts, both derived per read: the bot's
+      // workspace IS the platform's official workspace today, and THIS caller's
+      // workspace OWNS the bot (the one write predicate). A render gate only —
+      // `setBotScope` re-checks the designation inside its batch, so a stale
+      // page cannot authorize a share.
+      official_workspace: officialWorkspaceId !== null && officialWorkspaceId === app.workspace_id,
+      can_configure_bot: canWriteBotScope(app, gate.scope),
     };
     if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
       return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
@@ -4097,10 +4115,7 @@ const appBotRoute = async (c: DashboardContext) => {
   }
   const sections = await botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY);
   return c.json({
-    can_manage:
-      app.scope === "owned" &&
-      app.workspace_id === member.scope.workspaceId &&
-      canManageApp(member.scope),
+    can_manage: canWriteBotScope(app, member.scope) && canManageApp(member.scope),
     app: {
       github_app_id: app.github_app_id,
       // The local App UID — the webhook URL's app segment.
@@ -4118,6 +4133,59 @@ const appBotRoute = async (c: DashboardContext) => {
     },
     ...sections,
   });
+};
+
+/**
+ * `PATCH /api/apps/:appId/bot/scope` — the bot's owning workspace marks it
+ * shared with every other workspace, or revokes the share (contract § 8.2, the
+ * member-side twin of the operator route `PATCH /_internal_admin/api/bots/:id/scope`).
+ *
+ * The transition table, the official-workspace guard and both audit rows are
+ * the store's `setBotScope`, evaluated inside its own batch: this handler only
+ * decides whether the CALLER may ask, then maps each outcome. Authorization is
+ * the two existing rules and nothing bespoke — owner/admin of the workspace, and
+ * that workspace OWNING the bot (`canWriteBotScope`): a target on a shared bot
+ * is a consumer, and consumption is not configuration authority.
+ */
+const appBotScopeRoute = async (c: DashboardContext): Promise<Response> => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  const app = await resolveScopedApp(
+    createReviewBotsStore(gate.db),
+    c.req.param("appId") ?? "",
+    gate.scope,
+  );
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(gate.scope)) return c.json({ error: "forbidden" }, 403);
+  if (!canWriteBotScope(app, gate.scope)) return botReadOnlyResponse(c);
+  let scope: unknown;
+  let confirm: unknown;
+  try {
+    const body = (await c.req.json()) as { scope?: unknown; confirm?: unknown };
+    scope = body.scope;
+    confirm = body.confirm;
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (scope !== "owned" && scope !== "shared") {
+    return c.json({ error: 'body must be { scope: "owned" | "shared" }' }, 400);
+  }
+  const outcome = await setBotScope(gate.db, {
+    botId: app.id,
+    scope: scope as BotScope,
+    // Only a literal `true` confirms a revoke; any other value refuses it.
+    confirm: confirm === true,
+    actor: gate.session.login,
+    now: new Date().toISOString(),
+  });
+  if (outcome.outcome === "bot_not_found") return c.json({ error: "bot not found" }, 404);
+  if (outcome.outcome === "outside_official_workspace") {
+    return c.json({ error: "bot is outside the official workspace" }, 409);
+  }
+  if (outcome.outcome === "confirm_required") {
+    return c.json({ error: "confirm required" }, 409);
+  }
+  return c.json({ scope: outcome.scope, sharedAt: outcome.sharedAt });
 };
 
 /**
@@ -6819,7 +6887,7 @@ const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Respons
 type AppRouteHandler = (c: DashboardContext) => Response | Promise<Response>;
 
 type AppRoute = {
-  method: "get" | "post";
+  method: "get" | "post" | "patch";
   path: string;
   handler: AppRouteHandler;
   /**
@@ -6857,6 +6925,9 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },
+  // The bot page's share switch: the bot's owning workspace marks it shared or
+  // revokes the share. `write` — the transition writes a bot row and audits.
+  { method: "patch", path: "/api/apps/:appId/bot/scope", handler: appBotScopeRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/deliveries", handler: appDeliveriesRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
   // `write`-classified like every App JSON read: the preview spends the App's
@@ -6935,6 +7006,7 @@ function workspaceOnly(
 for (const route of APP_ROUTES) {
   const path = `/:workspaceRef${route.path}`;
   if (route.method === "get") dashboardApp.get(path, workspaceOnly(route.handler));
+  else if (route.method === "patch") dashboardApp.patch(path, workspaceOnly(route.handler));
   else dashboardApp.post(path, workspaceOnly(route.handler));
 }
 
