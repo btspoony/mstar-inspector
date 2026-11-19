@@ -82,5 +82,8 @@ export function providerCatalog() {
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));
     const version = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
     return { json, version };
-  })();
+  })().catch((error: unknown) => {
+    catalog = undefined;
+    throw error;
+  });
 }
