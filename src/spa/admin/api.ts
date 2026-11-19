@@ -15,6 +15,7 @@
  * does not own.
  */
 import { useEffect, useState } from "react";
+import { RECONCILE_FIELDS, type ReconcileConfig, type ReconcileLimits, type ReconcileValues } from "../../contracts/reconcile-settings";
 import { SWEEP_FIELDS, type SweepConfig, type SweepLimits, type SweepValues } from "../../contracts/sweep-settings";
 import { fetchJson } from "../api";
 
@@ -203,6 +204,7 @@ export type RuntimeConfig = {
   commentClaim: CommentClaimConfig | null;
   /** Null when the Worker predates the sweep settings surface. */
   sweep: SweepConfig | null;
+  reconcile: ReconcileConfig | null;
   /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
   recheckAssignment: RecheckAssignmentConfig | null;
   /** The maintenance window; `null` under the same older-Worker rule. */
@@ -217,6 +219,21 @@ export type RuntimeConfig = {
   /** The 24h GitHub secondary-rate-limit count; `0` when the server does not report it. */
   githubRateLimited24h: number;
 };
+
+function parseReconcile(row: Json): ReconcileConfig | null {
+  if (row.reconcile === undefined) return null;
+  const group = map(row.reconcile, "runtime reconcile");
+  const rawValues = map(group.values, "runtime reconcile values");
+  const rawLimits = map(group.limits, "runtime reconcile limits");
+  const values = {} as ReconcileValues;
+  const limits = {} as ReconcileLimits;
+  for (const field of RECONCILE_FIELDS) {
+    const range = map(rawLimits[field], `runtime reconcile limits.${field}`);
+    values[field] = num(rawValues, field);
+    limits[field] = { min: num(range, "min"), max: num(range, "max") };
+  }
+  return { values, limits, degraded: bool(group, "degraded") };
+}
 
 function parseSweep(row: Json): SweepConfig | null {
   if (row.sweep === undefined) return null;
@@ -338,12 +355,17 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     checkBudgets: parseCheckBudgets(body),
     commentClaim: parseCommentClaim(body),
     sweep: parseSweep(body),
+    reconcile: parseReconcile(body),
     recheckAssignment: parseRecheckAssignment(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
     githubRateLimited24h: parseGithubRateLimited(body),
   };
+}
+
+export async function saveReconcileSettings(values: ReconcileValues): Promise<void> {
+  await write("PATCH", "/runtime", { reconcile: values });
 }
 
 export async function saveSweepSettings(values: SweepValues): Promise<void> {

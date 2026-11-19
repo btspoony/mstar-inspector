@@ -2106,3 +2106,26 @@ describe("uncertain-publication discovery through the real capture", () => {
     expect(unproven.proof_json).toBeNull();
   });
 });
+
+describe("runtime lifecycle selection", () => {
+  test("configured selection limit and attempt cap bound a pass with one snapshot", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    for (let index = 0; index < 3; index += 1) await seedConfirmedCrashed(db, `runtime-${index}`, reviewPayload({ ...SCOPE, prNumber: 200 + index }));
+    db.raw.prepare("UPDATE review_publications SET attempts = 2 WHERE id = 'runtime-0'").run();
+    db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.lifecycle.select_limit", "1", "now");
+    db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.lifecycle.max_attempts", "2", "now");
+    let reads = 0;
+    const original = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = original(sql);
+      if (sql.includes("review_runtime_settings WHERE key IN")) reads += 1;
+      return statement;
+    };
+    const result = await reconcile(db, { now: () => T0 });
+    expect(result.examined).toBe(1);
+    expect(reads).toBe(1);
+    expect(pubRow(db, "runtime-0").phase).toBe("confirmed");
+    db.raw.close();
+  });
+});

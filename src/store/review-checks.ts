@@ -1,3 +1,4 @@
+import { RECONCILE_DEFAULTS } from "../dashboard/runtime-config-store";
 /**
  * Review Check attempt registry (spec review-lifecycle §7.1
  * second block + §7.9). One row per Check ATTEMPT; this module is the only
@@ -246,9 +247,9 @@ export const CHECK_RECOVERY_LEASE_MS = 120_000;
  */
 export const CHECK_STALE_HOLDER_MS = 120_000;
 /** Recovery attempt cap (spec §7.11.2: maxAttempts = 5). */
-export const CHECK_MAX_ATTEMPTS = 5;
+export const CHECK_MAX_ATTEMPTS = RECONCILE_DEFAULTS.checkMaxAttempts;
 /** Reconcile batch size (spec §7.11.2: limit = 25). */
-export const CHECK_RECONCILE_LIMIT = 25;
+export const CHECK_RECONCILE_LIMIT = RECONCILE_DEFAULTS.checkSelectLimit;
 /**
  * Backoff after the Nth failed recovery attempt (spec §7.11.1's ladder, which
  * §7.11.2's bounded Check recovery inherits); indexed by `attempts - 1`.

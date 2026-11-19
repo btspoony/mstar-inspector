@@ -63,6 +63,9 @@ import {
   WORKSPACE_CONCURRENCY_MAX,
   type EffectiveConcurrency,
   getCheckBudgets,
+  getReconcileSettings,
+  setReconcileSettings,
+  RECONCILE_DEFAULTS,
   getCommentClaimSettings,
   getEffectiveConcurrency,
   getRecheckAssignmentMaxBytes,
@@ -1027,5 +1030,37 @@ describe("workspace check_min_score default", () => {
       degraded: true,
       reason: "read-failed",
     });
+  });
+});
+
+describe("reconciler settings snapshot", () => {
+  test("absent rows use unchanged defaults and valid overrides round-trip", async () => {
+    const db = createMigratedTestD1();
+    expect(await getReconcileSettings(db)).toEqual({ values: RECONCILE_DEFAULTS, issue: null });
+    const values = { ...RECONCILE_DEFAULTS, checkSelectLimit: 1, lifecycleMaxAttempts: 2 };
+    await setReconcileSettings(db, values, "operator");
+    expect(await getReconcileSettings(db)).toEqual({ values, issue: null });
+    db.raw.close();
+  });
+
+  test("invalid rows and relations revert the entire snapshot with key-only diagnostics", async () => {
+    const db = createMigratedTestD1();
+    const set = (key: string, value: string) => db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value, "now");
+    await setReconcileSettings(db, { ...RECONCILE_DEFAULTS, checkSelectLimit: 1 }, "operator");
+    set("platform.reconcile.lifecycle.max_attempts", "sensitive-invalid-value");
+    expect(await getReconcileSettings(db)).toEqual({
+      values: RECONCILE_DEFAULTS, issue: { kind: "invalid_rows", keys: ["platform.reconcile.lifecycle.max_attempts"] },
+    });
+    set("platform.reconcile.lifecycle.max_attempts", "2");
+    set("platform.reconcile.lifecycle.max_requests", "1");
+    const read = await getReconcileSettings(db);
+    expect(read.values).toEqual(RECONCILE_DEFAULTS);
+    expect(read.issue?.kind).toBe("invalid_rows");
+    db.raw.close();
+  });
+
+  test("read failure is distinguished without exposing the error or stored values", async () => {
+    const db = { prepare: () => { throw new Error("sensitive database error"); } } as unknown as DashboardD1;
+    expect(await getReconcileSettings(db)).toEqual({ values: RECONCILE_DEFAULTS, issue: { kind: "read_failed" } });
   });
 });

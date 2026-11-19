@@ -94,6 +94,7 @@ import {
 import type { DashboardD1 } from "./users";
 import { SWEEP_FIELDS, type SweepField, type SweepLimits, type SweepValues } from "../contracts/sweep-settings";
 import { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
+import { RECONCILE_FIELDS, type ReconcileField, type ReconcileLimits, type ReconcileValues } from "../contracts/reconcile-settings";
 
 /** PK of the system row in `review_runtime_settings`. */
 export const SYSTEM_CONCURRENCY_KEY = "review.concurrency.system";
@@ -982,6 +983,110 @@ export async function setDefaultReviewLevel(
     db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_LEVEL_KEY, value, now, actor),
   ]);
   return value;
+}
+
+/** Request ceilings bound GitHub rate consumption per cron invocation. */
+const RECONCILE_REQUEST_HARD_MAX = 100;
+/** Keep recovery inside the cron isolate's wall-clock lifetime. */
+const RECONCILE_RUN_HARD_MAX_MS = 60_000;
+/** Bound one stalled GitHub operation without consuming the full cron lifetime. */
+const RECONCILE_REQUEST_HARD_MAX_MS = 15_000;
+/** Bound D1 selection and recovery fan-out within a cron invocation. */
+const RECONCILE_SELECT_HARD_MAX = 100;
+/** Bound repeated GitHub mutations before operator intervention is required. */
+const RECONCILE_ATTEMPTS_HARD_MAX = 10;
+
+const RECONCILE_RULES = {
+  lifecycleMaxRequests: { key: "platform.reconcile.lifecycle.max_requests", fallback: 80, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
+  lifecycleRunBudgetMs: { key: "platform.reconcile.lifecycle.run_budget_ms", fallback: 45_000, min: 1, max: RECONCILE_RUN_HARD_MAX_MS },
+  lifecyclePerRequestMs: { key: "platform.reconcile.lifecycle.per_request_ms", fallback: 5_000, min: 1, max: RECONCILE_REQUEST_HARD_MAX_MS },
+  lifecycleThreadOperationRequests: { key: "platform.reconcile.lifecycle.thread_operation_requests", fallback: 15, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
+  lifecyclePublicationLaneMaxRequests: { key: "platform.reconcile.lifecycle.publication_lane_max_requests", fallback: 40, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
+  lifecycleSelectLimit: { key: "platform.reconcile.lifecycle.select_limit", fallback: 10, min: 1, max: RECONCILE_SELECT_HARD_MAX },
+  lifecycleMaxAttempts: { key: "platform.reconcile.lifecycle.max_attempts", fallback: 5, min: 1, max: RECONCILE_ATTEMPTS_HARD_MAX },
+  checkMaxRequests: { key: "platform.reconcile.check.max_requests", fallback: 100, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
+  checkRunBudgetMs: { key: "platform.reconcile.check.run_budget_ms", fallback: 60_000, min: 1, max: RECONCILE_RUN_HARD_MAX_MS },
+  checkPerRequestMs: { key: "platform.reconcile.check.per_request_ms", fallback: 5_000, min: 1, max: RECONCILE_REQUEST_HARD_MAX_MS },
+  checkRowMaxRequests: { key: "platform.reconcile.check.row_max_requests", fallback: 6, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
+  checkSelectLimit: { key: "platform.reconcile.check.select_limit", fallback: 25, min: 1, max: RECONCILE_SELECT_HARD_MAX },
+  checkMaxAttempts: { key: "platform.reconcile.check.max_attempts", fallback: 5, min: 1, max: RECONCILE_ATTEMPTS_HARD_MAX },
+} satisfies Record<ReconcileField, { key: string; fallback: number; min: number; max: number }>;
+
+export const RECONCILE_LIMITS = Object.fromEntries(RECONCILE_FIELDS.map((field) => {
+  const { min, max } = RECONCILE_RULES[field];
+  return [field, { min, max }];
+})) as ReconcileLimits;
+
+const RECONCILE_KEYS = RECONCILE_FIELDS.map((field) => RECONCILE_RULES[field].key);
+export const RECONCILE_DEFAULTS = Object.fromEntries(RECONCILE_FIELDS.map((field) => [field, RECONCILE_RULES[field].fallback])) as ReconcileValues;
+
+function invalidReconcileRelations(values: ReconcileValues): ReconcileField[] {
+  const invalid: ReconcileField[] = [];
+  if (values.lifecyclePerRequestMs > values.lifecycleRunBudgetMs) invalid.push("lifecyclePerRequestMs", "lifecycleRunBudgetMs");
+  if (values.checkPerRequestMs > values.checkRunBudgetMs) invalid.push("checkPerRequestMs", "checkRunBudgetMs");
+  if (values.lifecyclePublicationLaneMaxRequests > values.lifecycleMaxRequests) invalid.push("lifecyclePublicationLaneMaxRequests", "lifecycleMaxRequests");
+  if (values.lifecycleThreadOperationRequests > values.lifecycleMaxRequests) invalid.push("lifecycleThreadOperationRequests", "lifecycleMaxRequests");
+  if (values.checkRowMaxRequests > values.checkMaxRequests) invalid.push("checkRowMaxRequests", "checkMaxRequests");
+  return [...new Set(invalid)];
+}
+
+type ReconcileSettingsIssue = { kind: "read_failed" } | { kind: "invalid_rows"; keys: string[] };
+
+export async function getReconcileSettings(db: DashboardD1): Promise<{ values: ReconcileValues; issue: ReconcileSettingsIssue | null }> {
+  try {
+    const { results } = await db.prepare(`SELECT key, value FROM review_runtime_settings WHERE key IN (${RECONCILE_KEYS.map(() => "?").join(", ")})`)
+      .bind(...RECONCILE_KEYS).all<{ key: string; value: unknown }>();
+    const rows = new Map(results.map(({ key, value }) => [key, value]));
+    const values = { ...RECONCILE_DEFAULTS };
+    const invalid: ReconcileField[] = [];
+    for (const field of RECONCILE_FIELDS) {
+      const { key, min, max } = RECONCILE_RULES[field];
+      if (!rows.has(key)) continue;
+      const parsed = parseInRange(rows.get(key), min, max);
+      if (parsed === undefined || Number.isNaN(parsed)) invalid.push(field);
+      else values[field] = parsed;
+    }
+    invalid.push(...invalidReconcileRelations(values));
+    if (invalid.length > 0) {
+      return { values: { ...RECONCILE_DEFAULTS }, issue: { kind: "invalid_rows", keys: [...new Set(invalid.map((field) => RECONCILE_RULES[field].key))] } };
+    }
+    return { values, issue: null };
+  } catch {
+    return { values: { ...RECONCILE_DEFAULTS }, issue: { kind: "read_failed" } };
+  }
+}
+
+const RECONCILE_BEFORE_SQL = RECONCILE_FIELDS.map((field, index) => {
+  const { min, max } = RECONCILE_RULES[field];
+  return `'${field}', ${storedBudgetSql(`?${index + 5}`, "NULL", min, max)}`;
+}).join(", ");
+
+const RECONCILE_AUDIT_SQL = `INSERT INTO platform_audit_events
+  (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'platform.reconcile.set', 'runtime', 'platform.reconcile',
+    json_object('before', json_object(${RECONCILE_BEFORE_SQL}), 'after', json(?3)), ?4)`;
+
+export async function setReconcileSettings(db: DashboardD1, input: unknown, actor: string): Promise<ReconcileValues> {
+  const source = input !== null && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const values = {} as ReconcileValues;
+  for (const field of RECONCILE_FIELDS) {
+    const { min, max } = RECONCILE_RULES[field];
+    const value = source[field];
+    if (!isIntegerIn(value, min, max)) {
+      throw new RuntimeConfigError("invalid_value", `reconcile.${field} must be an integer in ${min}..${max}; correct the field in Admin > Runtime and save again`);
+    }
+    values[field] = value;
+  }
+  const invalid = invalidReconcileRelations(values);
+  if (invalid.length > 0) {
+    throw new RuntimeConfigError("invalid_value", `reconcile budgets must satisfy per-request <= run budget, publication lane/thread operation/row <= total requests; correct ${invalid.join(", ")} in Admin > Runtime and save again`);
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare(RECONCILE_AUDIT_SQL).bind(crypto.randomUUID(), actor, JSON.stringify(values), now, ...RECONCILE_KEYS),
+    ...RECONCILE_FIELDS.map((field) => db.prepare(SYSTEM_UPSERT_SQL).bind(RECONCILE_RULES[field].key, String(values[field]), now, actor)),
+  ]);
+  return values;
 }
 
 /** Defaults apply to absent rows. The row caps also preserve the per-run write ceiling. */

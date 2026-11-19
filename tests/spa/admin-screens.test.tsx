@@ -16,6 +16,7 @@ import { SupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
 import { UsagePage } from "../../src/spa/admin/UsagePage";
 import { UsersPage } from "../../src/spa/admin/UsersPage";
 import { WorkspacesPage } from "../../src/spa/admin/WorkspacesPage";
+import { RECONCILE_DEFAULTS, RECONCILE_LIMITS } from "../../src/dashboard/runtime-config-store";
 import { installDom } from "./dom";
 
 const realFetch = globalThis.fetch;
@@ -435,6 +436,28 @@ describe("Runtime screen", () => {
     checkBudgets: CHECK_BUDGETS,
     commentClaim: COMMENT_CLAIM,
   };
+
+  test("reconciler fields save all settings and show persisted overrides after remount", async () => {
+    let values = { ...RECONCILE_DEFAULTS };
+    const respond: Respond = (request) => {
+      if (request.method === "PATCH") {
+        values = (request.body as { reconcile: typeof values }).reconcile;
+        return json({ reconcile: values });
+      }
+      return json({ ...RUNTIME, reconcile: { values, limits: RECONCILE_LIMITS, degraded: false } });
+    };
+    const surface = await runtimeScreen(respond);
+    expect((surface.container.querySelector("#reconcile-checkSelectLimit") as unknown as HTMLInputElement).value).toBe(String(RECONCILE_DEFAULTS.checkSelectLimit));
+    await surface.type("#reconcile-checkSelectLimit", "1");
+    await surface.click(surface.container.querySelector("#reconcile-checkSelectLimit")!.closest("form")!.querySelector('button[type="submit"]'));
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      { url: "/_internal_admin/api/runtime", method: "PATCH", body: { reconcile: { ...RECONCILE_DEFAULTS, checkSelectLimit: 1 } } },
+    ]);
+    await surface.close();
+    const refreshed = await runtimeScreen(respond);
+    expect((refreshed.container.querySelector("#reconcile-checkSelectLimit") as unknown as HTMLInputElement).value).toBe("1");
+    await refreshed.close();
+  });
 
   test("a failed read renders the error with a retry that reloads", async () => {
     let failing = true;

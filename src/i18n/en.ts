@@ -1501,6 +1501,27 @@ export const en = {
       /** No stored setting could be read — the numbers are the documented defaults. */
       claimUnreadable:
         "The stored comment-trigger recovery settings could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
+      reconcileTitle: "Recovery reconcilers",
+      reconcileDescription: "Applies on the next recovery run, with one settings snapshot per run. Request timeouts must fit the run budget; publication, thread-operation and row requests must fit total requests.",
+      reconcileFields: {
+        lifecycleMaxRequests: "Lifecycle requests per run",
+        lifecycleRunBudgetMs: "Lifecycle run budget (ms)",
+        lifecyclePerRequestMs: "Lifecycle request timeout (ms)",
+        lifecycleThreadOperationRequests: "Lifecycle thread operation requests",
+        lifecyclePublicationLaneMaxRequests: "Lifecycle publication lane requests",
+        lifecycleSelectLimit: "Lifecycle rows per selection",
+        lifecycleMaxAttempts: "Lifecycle maximum attempts",
+        checkMaxRequests: "Check requests per run",
+        checkRunBudgetMs: "Check run budget (ms)",
+        checkPerRequestMs: "Check request timeout (ms)",
+        checkRowMaxRequests: "Check requests per row",
+        checkSelectLimit: "Check rows per selection",
+        checkMaxAttempts: "Check maximum attempts",
+      },
+      reconcileSave: "Save reconciler settings",
+      reconcileSaved: "Reconciler settings saved.",
+      reconcileFailed: "Could not save reconciler settings.",
+      reconcileUnreadable: "Some settings could not be trusted. Recovery continues with all documented defaults. Retry the read or enter and save all settings.",
       sweepTitle: "Scheduled failure sweep",
       sweepDescription:
         "Applies on the next sweep. Alerts fire above the failure threshold; the window covers both the count and repeat alerts. Retention permanently deletes old webhook deliveries.",

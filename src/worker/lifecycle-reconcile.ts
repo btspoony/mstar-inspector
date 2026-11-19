@@ -1,3 +1,5 @@
+import { getReconcileSettings, RECONCILE_DEFAULTS } from "../dashboard/runtime-config-store";
+import type { ReconcileValues } from "../contracts/reconcile-settings";
 /**
  * M8 publication and thread recovery reconciler (spec
  * review-lifecycle §7.11 composition + §7.11.1) — the self-sufficient cron
@@ -77,7 +79,6 @@ import {
   listResolutionRecovery,
   listSuspendedLifecycleApps,
   LIFECYCLE_BACKOFF_MS,
-  LIFECYCLE_MAX_ATTEMPTS,
   markPublicationFailed,
   markPublicationLocalError,
   markPublicationUnknown,
@@ -111,17 +112,17 @@ export type LifecycleReconcileSummary = {
 };
 
 /** Whole-run GitHub request budget (§7.11.1: "≤80 requests/45s"). */
-export const RECONCILE_MAX_REQUESTS = 80;
+export const RECONCILE_MAX_REQUESTS = RECONCILE_DEFAULTS.lifecycleMaxRequests;
 /** Whole-run wall-clock budget in ms (§7.11.1). */
-export const RECONCILE_RUN_BUDGET_MS = 45_000;
+export const RECONCILE_RUN_BUDGET_MS = RECONCILE_DEFAULTS.lifecycleRunBudgetMs;
 /** Per-request cap (§7.11.1: "each request ≤5s"). */
-export const RECONCILE_PER_REQUEST_MS = 5_000;
+export const RECONCILE_PER_REQUEST_MS = RECONCILE_DEFAULTS.lifecyclePerRequestMs;
 /** Per-thread-operation request cap (§7.11.1: "≤15 GitHub requests"). */
-export const RECONCILE_THREAD_OPERATION_REQUESTS = 15;
+export const RECONCILE_THREAD_OPERATION_REQUESTS = RECONCILE_DEFAULTS.lifecycleThreadOperationRequests;
 /** The publication lane gets at most half the run budget before the thread lane. */
-export const RECONCILE_PUBLICATION_LANE_MAX_REQUESTS = 40;
+export const RECONCILE_PUBLICATION_LANE_MAX_REQUESTS = RECONCILE_DEFAULTS.lifecyclePublicationLaneMaxRequests;
 /** Bounded selection per lane (§7.11.1: LIMIT 10). */
-export const RECONCILE_SELECT_LIMIT = 10;
+export const RECONCILE_SELECT_LIMIT = RECONCILE_DEFAULTS.lifecycleSelectLimit;
 /**
  * Conservative, non-mutating preflight admission estimates for the
  * publication lane's operations (plan, send, read-only discovery).
@@ -345,6 +346,7 @@ export type LifecycleReconcileDeps = {
 // ---------------------------------------------------------------------------
 
 type RunBudget = {
+  settings: ReconcileValues;
   /** ACTUAL requests issued this run (mutated only at the transport). */
   spent: number;
   deadline: number;
@@ -367,8 +369,8 @@ type RunBudget = {
  * simply stays due.
  */
 function canSpend(budget: RunBudget, nowMs: number, cost: number, laneScoped: boolean): boolean {
-  if (budget.spent + cost > RECONCILE_MAX_REQUESTS) return false;
-  if (laneScoped && budget.spent + cost > RECONCILE_PUBLICATION_LANE_MAX_REQUESTS) return false;
+  if (budget.spent + cost > budget.settings.lifecycleMaxRequests) return false;
+  if (laneScoped && budget.spent + cost > budget.settings.lifecyclePublicationLaneMaxRequests) return false;
   if (budget.spent + cost > budget.laneCap) return false;
   if (nowMs >= budget.deadline) return false;
   return true;
@@ -445,7 +447,7 @@ function isBudgetRefusal(error: unknown): boolean {
  * stays durable and due rather than being lost or silently unmetered.
  */
 function buildTransport(budget: RunBudget, now: () => number): ReconcileTransport {
-  const boundMs = (): number => Math.max(1, Math.min(RECONCILE_PER_REQUEST_MS, budget.deadline - now()));
+  const boundMs = (): number => Math.max(1, Math.min(budget.settings.lifecyclePerRequestMs, budget.deadline - now()));
   return {
     boundMs,
     fetchImpl: (input, init) => {
@@ -453,7 +455,7 @@ function buildTransport(budget: RunBudget, now: () => number): ReconcileTranspor
       if (!canSpend(budget, now(), 1, false)) {
         return Promise.reject(
           new RecoveryBudgetRefused(
-            `recovery request budget exhausted (spent=${budget.spent}/${RECONCILE_MAX_REQUESTS}, deadline=${budget.deadline}) — request not dispatched; work stays due`,
+            `recovery request budget exhausted (spent=${budget.spent}/${budget.settings.lifecycleMaxRequests}, deadline=${budget.deadline}) — request not dispatched; work stays due`,
           ),
         );
       }
@@ -502,8 +504,10 @@ export async function reconcileReviewLifecycle(
       );
       return summary;
     }
+    const settings = await getReconcileSettings(db);
+    if (settings.issue) log.warn({ event: "ops_lifecycle_reconcile_settings_degraded", detail: JSON.stringify(settings.issue) }, "lifecycle reconcile settings unavailable — using defaults");
     const now = deps.now ?? (() => Date.now());
-    const budget: RunBudget = { spent: 0, deadline: now() + RECONCILE_RUN_BUDGET_MS, laneCap: RECONCILE_MAX_REQUESTS };
+    const budget: RunBudget = { settings: settings.values, spent: 0, deadline: now() + settings.values.lifecycleRunBudgetMs, laneCap: settings.values.lifecycleMaxRequests };
     const reviewerFactory = deps.reviewer ?? productionReviewerFactory;
     // The enforced per-request bound (§7.11.1): every request made by a
     // reviewer this run builds is aborted at min(5s, remaining run time).
@@ -523,7 +527,7 @@ export async function reconcileReviewLifecycle(
     //      the pair is left alone with no probe and no churn — and the
     //      proof is attempted again only after the credential envelope
     //      actually changed (the operator's correction).
-    const suspendedPairs = await listSuspendedLifecycleApps(db, RECONCILE_SELECT_LIMIT);
+    const suspendedPairs = await listSuspendedLifecycleApps(db, budget.settings.lifecycleSelectLimit);
     for (const pair of suspendedPairs) {
       try {
         const row = await routingRow(db, pair.appId, pair.installationId);
@@ -579,13 +583,13 @@ export async function reconcileReviewLifecycle(
     // applied to ACTUAL requests at the transport (a paginating scan or a
     // token mint can issue more than its operation estimate), so the half
     // share is a real bound for this lane rather than a scheduling hint.
-    budget.laneCap = RECONCILE_PUBLICATION_LANE_MAX_REQUESTS;
+    budget.laneCap = budget.settings.lifecyclePublicationLaneMaxRequests;
     await reconcilePublications(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
     // 2. Thread lane — the remaining run budget (its own ≤15-request
     // per-operation envelope is the admission estimate; the actual requests
     // are metered under the whole-run cap).
-    budget.laneCap = RECONCILE_MAX_REQUESTS;
+    budget.laneCap = budget.settings.lifecycleMaxRequests;
     await reconcileResolutions(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
     log.info({ event: "ops_lifecycle_reconcile", ...summary }, "lifecycle reconcile pass complete");
@@ -704,7 +708,7 @@ async function reconcilePublications(
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
-  const rows = await listPublicationRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+  const rows = await listPublicationRecovery(db, now(), budget.settings.lifecycleSelectLimit, budget.settings.lifecycleMaxAttempts);
   for (const row of rows) {
     summary.examined += 1;
     // A definitively failed send is not re-sent by recovery (the operator
@@ -712,7 +716,7 @@ async function reconcilePublications(
     // rows are bookkeeping residue — examined, never re-worked.
     if (row.phase === "failed" || row.phase === "applied" || row.phase === "superseded") continue;
     if (row.phase === "confirmed") {
-      await applyConfirmedPublication(db, now, row, summary);
+      await applyConfirmedPublication(db, now, budget, row, summary);
       continue;
     }
     // prepared / sending / unknown need GitHub — route credentials first.
@@ -740,6 +744,7 @@ async function reconcilePublications(
 async function applyConfirmedPublication(
   db: D1Like,
   now: () => number,
+  budget: RunBudget,
   row: PublicationRow,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
@@ -751,9 +756,9 @@ async function applyConfirmedPublication(
       summary.applied += 1;
       return;
     }
-    await settleFailedPublicationAttempt(db, now, row, lease, "apply rejected (lease/proof/payload gate)", summary, false);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "apply rejected (lease/proof/payload gate)", summary, false);
   } catch (error) {
-    await settleFailedPublicationAttempt(db, now, row, lease, error instanceof Error ? error.message : String(error), summary, false);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, error instanceof Error ? error.message : String(error), summary, false);
   }
 }
 
@@ -848,7 +853,7 @@ async function sendPreparedPublication(
       confirmedMs: now(),
     });
     if (!recorded) {
-      await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the confirmation", summary, true);
+      await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "proof persistence rejected the confirmation", summary, true);
       return;
     }
     const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
@@ -856,7 +861,7 @@ async function sendPreparedPublication(
       summary.applied += 1;
       return;
     }
-    await settleFailedPublicationAttempt(db, now, row, lease, "post-proof apply did not complete", summary, false);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "post-proof apply did not complete", summary, false);
   } catch (error) {
     if (error instanceof PreparedSendRejected) {
       // A definitive pre-send rejection (§7.7): no request left the Worker,
@@ -904,7 +909,7 @@ async function sendPreparedPublication(
     }
     // The send MAY have landed (§7.7): the honest phase is unknown —
     // read-only discovery only, never a blind second create.
-    await settleFailedPublicationAttempt(db, now, row, lease, error instanceof Error ? error.message : String(error), summary, true);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, error instanceof Error ? error.message : String(error), summary, true);
   }
 }
 
@@ -948,12 +953,12 @@ async function discoverUncertainPublication(
       (item) => item.source === "issue" && item.ownAuthor === true && item.body === row.payload.body,
     );
     if (hit === undefined) {
-      await settleFailedPublicationAttempt(db, now, row, lease, "read-only discovery found no exact publication match", summary, true);
+      await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "read-only discovery found no exact publication match", summary, true);
       return;
     }
     const commentId = Number(hit.id);
     if (!Number.isSafeInteger(commentId) || commentId <= 0) {
-      await settleFailedPublicationAttempt(db, now, row, lease, "discovered publication carries an unusable comment id", summary, true);
+      await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "discovered publication carries an unusable comment id", summary, true);
       return;
     }
     const recorded = await recordPublicationProof(db, row.id, lease, {
@@ -967,7 +972,7 @@ async function discoverUncertainPublication(
       confirmedMs: now(),
     });
     if (!recorded) {
-      await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the discovered publication", summary, true);
+      await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "proof persistence rejected the discovered publication", summary, true);
       return;
     }
     const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
@@ -975,9 +980,9 @@ async function discoverUncertainPublication(
       summary.applied += 1;
       return;
     }
-    await settleFailedPublicationAttempt(db, now, row, lease, "post-proof apply did not complete", summary, false);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "post-proof apply did not complete", summary, false);
   } catch (error) {
-    await settleFailedPublicationAttempt(db, now, row, lease, error instanceof Error ? error.message : String(error), summary, true);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, error instanceof Error ? error.message : String(error), summary, true);
   }
 }
 
@@ -991,6 +996,7 @@ async function discoverUncertainPublication(
 async function settleFailedPublicationAttempt(
   db: D1Like,
   now: () => number,
+  maxAttempts: number,
   row: PublicationRow,
   lease: Lease,
   reason: string,
@@ -999,7 +1005,7 @@ async function settleFailedPublicationAttempt(
   uncertain: boolean,
 ): Promise<void> {
   const attemptsAfter = row.attempts + 1; // the claim counted exactly one
-  if (attemptsAfter >= LIFECYCLE_MAX_ATTEMPTS) {
+  if (attemptsAfter >= maxAttempts) {
     await markPublicationLocalError(db, row.id, lease, giveUpLine(row.payload.scope, row.id, attemptsAfter, reason), now());
     summary.errors += 1;
     return;
@@ -1025,14 +1031,14 @@ async function reconcileResolutions(
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
-  const rows = await listResolutionRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+  const rows = await listResolutionRecovery(db, now(), budget.settings.lifecycleSelectLimit, budget.settings.lifecycleMaxAttempts);
   for (const { associationId, scope } of rows) {
     // Preflight admission BEFORE any claim: one operation may spend up to the
     // §7.11.1 ≤15-request thread envelope (estimate only — the ACTUAL requests
     // are metered at the transport). A false gate stops the lane WITHOUT a
     // claim or an attempt — the row simply stays due (§7.11.1: budget
     // exhaustion is not a failed attempt).
-    if (!canSpend(budget, now(), RECONCILE_THREAD_OPERATION_REQUESTS, false)) return;
+    if (!canSpend(budget, now(), budget.settings.lifecycleThreadOperationRequests, false)) return;
     summary.examined += 1;
     // Pair credentials come FIRST; the §7.5 surface claims and counts its
     // attempt only inside `resolveFindingThread`, which the admission above
@@ -1066,13 +1072,13 @@ async function reconcileResolutions(
           summary.unknown += 1;
           break;
         case "retry":
-          await settleFailedResolveAttempt(db, now, associationId, work, outcome.reason, summary);
+          await settleFailedResolveAttempt(db, now, budget.settings.lifecycleMaxAttempts, associationId, work, outcome.reason, summary);
           break;
       }
     } catch (error) {
       // The §7.5 surface contracts typed outcomes; a throw is an infra
       // failure — attempt already consumed by its claim, so defer/cap.
-      await settleFailedResolveAttempt(db, now, associationId, work, error instanceof Error ? error.message : String(error), summary);
+      await settleFailedResolveAttempt(db, now, budget.settings.lifecycleMaxAttempts, associationId, work, error instanceof Error ? error.message : String(error), summary);
     }
   }
 }
@@ -1086,13 +1092,14 @@ async function reconcileResolutions(
 async function settleFailedResolveAttempt(
   db: D1Like,
   now: () => number,
+  maxAttempts: number,
   associationId: string,
   work: { scope: Scope; attempts: number },
   reason: string,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
   const attemptsAfter = work.attempts + 1; // the §7.5 claim counted exactly one
-  if (attemptsAfter >= LIFECYCLE_MAX_ATTEMPTS) {
+  if (attemptsAfter >= maxAttempts) {
     await markResolutionLocalError(db, associationId, giveUpLine(work.scope, associationId, attemptsAfter, reason), now());
     summary.errors += 1;
     return;

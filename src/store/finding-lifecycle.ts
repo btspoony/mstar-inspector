@@ -1,3 +1,4 @@
+import { RECONCILE_DEFAULTS } from "../dashboard/runtime-config-store";
 /**
  * Finding lifecycle store (spec review-lifecycle §7.1/§7.2/
  * §7.7/§7.11.1) — durable lifecycle rows, fair rotation, the private
@@ -113,7 +114,7 @@ export type PublicationRow = {
 /** Publication lease duration (spec §7.7 step 8: "120s, epoch-fenced"). */
 export const PUBLICATION_LEASE_MS = 120_000;
 /** Recovery attempt cap — rows at/after this count leave the selectors. */
-export const LIFECYCLE_MAX_ATTEMPTS = 5;
+export const LIFECYCLE_MAX_ATTEMPTS = RECONCILE_DEFAULTS.lifecycleMaxAttempts;
 /** Staged payload cap (spec §7.7: size ≤1 MiB UTF-8; reject, never truncate). */
 export const PUBLICATION_MAX_BYTES = 1_048_576;
 /**
@@ -946,7 +947,7 @@ function lifecycleApplyBatch(
  * deliberately NOT filtered — the reconciler decides per phase (prepared →
  * send, sending/unknown → read-only discovery, confirmed → apply).
  */
-export async function listPublicationRecovery(db: D1Like, nowMs: number, limit: number): Promise<PublicationRow[]> {
+export async function listPublicationRecovery(db: D1Like, nowMs: number, limit: number, maxAttempts: number = LIFECYCLE_MAX_ATTEMPTS): Promise<PublicationRow[]> {
   const rows = await db
     .prepare(
       `SELECT * FROM review_publications
@@ -956,7 +957,7 @@ export async function listPublicationRecovery(db: D1Like, nowMs: number, limit: 
        ORDER BY COALESCE(next_attempt_ms, created_ms), id
        LIMIT ?`,
     )
-    .bind(LIFECYCLE_MAX_ATTEMPTS, nowMs, nowMs, limit)
+    .bind(maxAttempts, nowMs, nowMs, limit)
     .all<ReviewPublicationRow>();
   return rows.results.map(publicationRowOf);
 }
@@ -972,6 +973,7 @@ export async function listResolutionRecovery(
   db: D1Like,
   nowMs: number,
   limit: number,
+  maxAttempts: number = LIFECYCLE_MAX_ATTEMPTS,
 ): Promise<{ associationId: string; scope: Scope }[]> {
   const rows = await db
     .prepare(
@@ -983,7 +985,7 @@ export async function listResolutionRecovery(
        ORDER BY COALESCE(next_attempt_ms, created_ms), id
        LIMIT ?`,
     )
-    .bind(LIFECYCLE_MAX_ATTEMPTS, nowMs, nowMs, limit)
+    .bind(maxAttempts, nowMs, nowMs, limit)
     .all<{ id: string; bot_id: string; installation_id: number; owner: string; repo: string; pr_number: number }>();
   return rows.results.map(threadScope);
 }
