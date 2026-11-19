@@ -2789,10 +2789,13 @@ behave.
   | `inviteLapseCap` | 500 invite expirations per sweep | 1–500 |
 
   The alert retains the wire field `failures_24h` for compatibility; use
-  `thresholds.window_hours` to interpret its actual counting interval. If
-  sweep settings cannot be read, valid values still apply and unreadable ones
-  fall back to defaults; delivery deletion is paused until the settings can be
-  read again. The admin form can retry the read or replace the settings.
+  `thresholds.window_hours` to interpret its actual counting interval.
+  Webhook delivery deletion pauses when the settings read fails or any stored
+  value is invalid. After a read failure, retry the read in Admin → Runtime to
+  confirm access has recovered; deletion resumes on the next successful
+  sweep with valid settings. An invalid row keeps the other valid values in
+  effect and uses the default for the invalid field. To restore deletion in
+  that case, enter and save all six settings in the admin form.
 
 - Alert transport: structured `ops_sweep_alert` log event
   (`{event, failures_24h, dlq_check: "skipped", thresholds, stages}`) +
@@ -2984,8 +2987,8 @@ Notes:
 - `created_at` is ALWAYS the column DEFAULT `datetime('now')` format
   (`YYYY-MM-DD HH:MM:SS` UTC) — the TEXT comparison above depends on it
   (see `src/store/failure-store.ts` header, BUG-03 contract).
-- The sweep's 24h window is unaffected: 30-day retention never touches
-  in-window rows.
+- The sweep's configurable alert window (24 hours by default, at most 168)
+  is shorter than this 30-day retention window, so in-window rows are untouched.
 - The second term is the pending-replay guard: a requested row is deleted only
   once its send resolved. Sent rows and never-requested rows age out as before,
   so the guard does not grow the table on its own.

@@ -3,11 +3,10 @@
  * failure sweep (src/worker/sweep.ts) over the REAL migration DDL
  * (bun:sqlite D1 double, tests/store/helpers.ts) plus an injected fetch for the webhook paths.
  *
- * Pinned contracts: the threshold DERIVED from the queue's delivery budget
- * (one fully-failed message never alerts), the 24h window, the 3s webhook
- * timeout, the trailing-24h window SQL, the `ops_sweep_alert`
- * payload shape (`dlq_check: "skipped"` — DLQ depth is NOT read), webhook
- * absent = log-only, webhook failure = warn log only (never throws).
+ * Covers absent-row defaults, including the queue-derived alert threshold,
+ * and runtime overrides for the bound SQL window, webhook timeout, and janitor
+ * limits. Also covers the `ops_sweep_alert` wire shape, log-only alerting, and
+ * fail-soft webhook delivery.
  */
 
 import { describe, expect, jest, mock, test } from "bun:test";
