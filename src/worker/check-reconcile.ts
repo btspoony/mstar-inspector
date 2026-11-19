@@ -600,6 +600,8 @@ async function reenableHealthyAppChecks(
 
   // Advance before any pair is judged, so a batch the filter rejects in full
   // (or a failing read below) still moves the next pass on; the scan wraps.
+  // Trade-off: a pair deferred by the budget, or caught in a
+  // `listReenableableCheckPairs` failure, is retried only after a full rotation.
   const last = suspended[suspended.length - 1]!;
   await db
     .prepare(
