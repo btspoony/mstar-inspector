@@ -8,6 +8,22 @@ fragment format and the per-change commit flow.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-19
+
+### Changed
+
+- **The repository surface is a table sorted by the newest review, with a 待安装 filter**: the workspace's repositories list as rows — name, App, status, last review — newest review first, and a segment counts the rows still awaiting install so an operator can narrow to them. Adding a repository is a three-step flow, the installed-roster face names each installation's account, id, last sync and state again, and the chain editor's row controls sit on one right-aligned line with the seat rows compacted.
+- **The delivery tab loads before it claims an empty state**: it shows its own loading face while the first read is in flight instead of rendering "no deliveries" and then replacing it.
+
+### Added
+
+- **The provider catalogue refreshes itself, and a red gate blocks the publish**: a daily workflow rebuilds `scripts/provider-catalog/generated/` from its declared inputs, declares the directory's contract in `scripts/provider-catalog/README.md` (whose table's first column is the tracked file list), and runs typecheck plus the full suite before it pushes — a non-zero exit stops the run with nothing committed, nothing pushed, no PR opened. Overrides live in `inputs/overrides.json` so a bucket whose upstream data is staler or worse than the live API keeps its curated entries.
+- **Hermes harness 4.7.3 with omp 18.22.2**: the engine/CLI pin, the image's `HARNESS_VERSION`/`harnessRef` anchor and every lockfile move as one release, and a new fingerprint gate (`scripts/check-image-inputs.ts`) fails when an image input changed without the marker line moving — the failure that let a deployed Worker keep using a stale runner.
+
+### Fixed
+
+- **A repository shows its real install state, and the console says when an upgrade has nothing to do**: a `repo-backfill` run rebuilt one target per repository but wrote `repo_id = NULL`, and the dashboard reads that as 待安装 — so repositories with a full review history listed as uninstalled. A fourth operator upgrade, `repo-id-claim`, claims the numeric id from the bot's live installation without creating, retiring or re-pointing anything; it refuses a repository whose id two live targets both name, and tries every live installation for an owner rather than only the oldest. An upgrade card whose preflight is all zero now folds behind a "nothing to migrate" header instead of offering a disabled button.
+
 ## [1.0.0] - 2026-11-18
 
 ### Changed

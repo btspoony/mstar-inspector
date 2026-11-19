@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-19
+
+### Changed
+
+- **仓库页改为按最近审查倒序的表格，并带「待安装」筛选**：工作区仓库以行呈现——名称、App、状态、最近审查——最近审查在前；分段控件统计仍待安装的行，便于运营者只看这些。添加仓库改为三步流程；已安装名册重新列出每个 installation 的账号、ID、最近同步与状态；模型链编辑器的行操作靠右对齐，席位行更紧凑。
+- **投递页先显示加载态，而不是先报空**：首次读取进行中时显示自己的加载面，不再先渲染「没有投递」再替换。
+
+### Added
+
+- **provider 目录自动刷新，门禁红了就不发布**：每日 workflow 从声明的输入重建 `scripts/provider-catalog/generated/`，在 `scripts/provider-catalog/README.md` 里声明目录契约（表格首列即受版本控制的文件清单），推送前先跑 typecheck 与全量测试——非零退出即中止，不提交、不推送、不开 PR。覆盖项放在 `inputs/overrides.json`，让上游数据比 live API 更旧或更差的桶保留精选条目。
+- **harness 4.7.3 与 omp 18.22.2**：engine/CLI 的 pin、镜像的 `HARNESS_VERSION`/`harnessRef` 锚点与所有 lockfile 作为一次发布整体移动；新增指纹门禁（`scripts/check-image-inputs.ts`），镜像输入变了却没有移动标记行时失败——正是这个缺口让部署的 Worker 继续使用过期 runner。
+
+### Fixed
+
+- **仓库显示真实安装状态，控制台会说明某项升级无事可做**：`repo-backfill` 为每个仓库重建了一个 target，但把 `repo_id` 写成 `NULL`，而 dashboard 把这种状态读作「待安装」——于是有完整审查历史的仓库被列成未安装。新增第四项运营升级 `repo-id-claim`：从 bot 的 live installation 认领数字 id，不创建、不退休、不重指任何 target；当同一仓库被两个 live target 同时命名时拒绝认领，并遍历所有 live installation 而不是只看最旧的一个。预检全零的升级卡片改为折叠，头部直接写「无需升级」，不再显示一个禁用的按钮。
+
 ## [1.0.0] - 2026-11-18
 
 ### Changed
