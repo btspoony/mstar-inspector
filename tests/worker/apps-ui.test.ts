@@ -604,7 +604,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     expect(body.app.scope).toBe("shared");
   });
 
-  test("a shared bot is read-only for the owning workspace's manager too", async () => {
+  test("a shared bot stays configurable for its owning workspace's manager", async () => {
     const db = await seededWorld();
     shareBot(db, MALLORY_APP_ID);
     const res = await get(
@@ -614,7 +614,9 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { can_manage: unknown };
-    expect(body.can_manage).toBe(false);
+    // Scope decides who else may USE the bot; it never removes configuration
+    // authority from the workspace that owns it.
+    expect(body.can_manage).toBe(true);
   });
 
   test("an unknown, non-numeric or foreign (unshared) App answers the same 404 with no GitHub call", async () => {
@@ -638,20 +640,25 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     }
   });
 
-  test("a bot-scoped op posted for a shared bot is refused server-side, and a target-scoped op still saves", async () => {
+  test("a bot-scoped op posted for a shared bot by its owning workspace saves, and a target-scoped op still saves", async () => {
     const db = await seededWorld();
     shareBot(db, MALLORY_APP_ID);
-    // The owning workspace's manager still cannot configure a shared bot: the
-    // refusal is the route's, not the page's.
-    const refused = await postForm(
+    // Sharing decides who else may USE the bot, never who configures it: the
+    // owning workspace's manager keeps every bot-scoped write.
+    const botSave = await postForm(
       `/dashboard/default/apps/${MALLORY_APP_ID}/settings`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
       { op: "save-sandbox-image", sandbox_image_id: "omp" },
     );
-    expect(refused.status).toBe(403);
-    const body = (await refused.json()) as { key: unknown };
-    expect(body.key).toBe("settings.error.botReadOnly");
+    expect(botSave.status).not.toBe(403);
+    expect(
+      (
+        db.raw
+          .query("SELECT sandbox_image_id FROM review_bots WHERE github_app_id = ?")
+          .get(MALLORY_APP_ID) as { sandbox_image_id: string }
+      ).sandbox_image_id,
+    ).toBe("omp");
     // The target-scoped save stays available — at its OWN address: the target
     // is what this workspace owns, whatever the bot's scope.
     const targetRow = db.raw
@@ -673,11 +680,13 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     expect(target.review_level).toBe("quick");
   });
 
-  test("keys/verify is refused for a shared bot on both paths, before any probe or store write", async () => {
+  test("keys/verify reaches the probe for a shared bot's owning workspace, storing nothing when it fails", async () => {
     const db = await seededWorld();
     shareBot(db, MALLORY_APP_ID);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const fetchSpy = spyOn(globalThis, "fetch");
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
+      throw new Error("no provider probe in this test");
+    }) as unknown as typeof fetch);
     try {
       for (const provider of ["anthropic", "matrix-custom"]) {
         const res = await postForm(
@@ -686,29 +695,37 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
           makeEnv(db),
           { provider, key: `test-matrix-${provider}` },
         );
-        expect(res.status, provider).toBe(403);
-        const body = (await res.json()) as { key: unknown };
-        expect(body.key, provider).toBe("settings.error.botReadOnly");
+        // Sharing never removes the owning workspace's write authority, so the
+        // bot-read-only refusal is gone; the failed probe is the route's own.
+        expect(res.status, provider).not.toBe(403);
       }
-      expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
     }
-    // Neither pool gained a row: the refusal precedes the verify-then-store.
+    // No probe reached a provider, so neither pool gained a row.
     expect(
       (db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).n,
     ).toBe(0);
   });
 
-  test("lifecycle actions on a shared bot are refused for its owning manager too", async () => {
+  test("lifecycle actions on a shared bot stay with its owning workspace's manager", async () => {
     const db = await seededWorld();
     shareBot(db, MALLORY_APP_ID);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    for (const action of ["disable", "enable", "delete"]) {
+    for (const action of ["disable", "enable"]) {
       const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/${action}`, cookie, makeEnv(db));
-      expect(res.status, action).toBe(403);
+      expect(res.status, action).toBe(200);
     }
     expect(appStatus(db, MALLORY_APP_ID)).toBe("active");
+    const deleted = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/delete`, cookie, makeEnv(db));
+    expect(deleted.status).toBe(200);
+    expect(
+      (
+        db.raw.query("SELECT deleted_at FROM review_bots WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
+          deleted_at: string | null;
+        }
+      ).deleted_at,
+    ).not.toBeNull();
   });
 
   test("no session → 302 to login", async () => {

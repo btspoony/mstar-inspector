@@ -557,8 +557,9 @@ async function assignBotScope(c: AdminContext): Promise<Response> {
 }
 
 /**
- * Every live bot with its scope (contract § 8.3), name-ordered. A console read
- * is unaudited: on this surface audit rows attach to writes.
+ * Every live bot with its scope and the workspace/installation columns the
+ * console's table shows (contract § 8.3), name-ordered. A console read is
+ * unaudited: on this surface audit rows attach to writes.
  */
 async function readBots(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
@@ -572,8 +573,13 @@ async function readBots(c: AdminContext): Promise<Response> {
       name: row.name,
       githubAppId: row.github_app_id,
       workspaceId: row.workspace_id,
+      workspaceName: row.workspace_name,
+      // The store answers SQLite's 0/1; the console reads a boolean.
+      isOfficial: Boolean(row.is_official),
       scope: row.scope,
       sharedAt: row.shared_at,
+      installationCount: row.installation_count,
+      liveTargetCount: row.live_target_count,
       deletedAt: row.deleted_at,
     })),
   });

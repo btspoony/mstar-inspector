@@ -216,6 +216,11 @@ export type RuntimeConfig = {
   queue: QueueBacklog | null;
   /** The 24h GitHub secondary-rate-limit count; `0` when the server does not report it. */
   githubRateLimited24h: number;
+  /**
+   * The platform's designated official workspace — the one tenant whose bots
+   * may be offered platform-wide. `null` is "not designated", never unknown.
+   */
+  officialWorkspaceId: string | null;
 };
 
 function parseSweep(row: Json): SweepConfig | null {
@@ -343,7 +348,28 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
     githubRateLimited24h: parseGithubRateLimited(body),
+    // Additive field: an older Worker omits it, and an absent designation is
+    // exactly what `null` says on the wire. A present non-string is still a
+    // broken read, so `maybeText` answers it.
+    officialWorkspaceId:
+      body.officialWorkspaceId === undefined ? null : maybeText(body, "officialWorkspaceId"),
   };
+}
+
+/**
+ * Set or clear the platform's official workspace, answering the id the server
+ * stored (`null` for a clear). `null` is the only clear — the server refuses
+ * an empty string as a body-shape error, so the console never sends one.
+ */
+export async function setOfficialWorkspace(workspaceId: string | null): Promise<string | null> {
+  const answer = await write("PATCH", "/official-workspace", { workspaceId });
+  if (typeof answer === "object" && answer !== null && "workspaceId" in answer) {
+    const stored = answer.workspaceId;
+    if (stored === null || typeof stored === "string") return stored;
+  }
+  // A 2xx with an unreadable body still landed the write: the request value
+  // stands in, the same rule as `setSystemConcurrency`.
+  return workspaceId;
 }
 
 export async function saveSweepSettings(values: SweepValues): Promise<void> {
@@ -494,6 +520,65 @@ export async function readWorkspaces(): Promise<WorkspaceRow[]> {
     includedMembers: maybeNum(row, "includedMembers"),
     createdAt: text(row, "createdAt"),
   }));
+}
+
+/** A bot's scope: `owned` serves its workspace only, `shared` is offered platform-wide. */
+export type BotScope = "owned" | "shared";
+
+/** One `GET /api/bots` row: a live bot, its workspace and how far it reaches. */
+export type BotRow = {
+  botId: string;
+  name: string;
+  /** The GitHub App the bot runs as. */
+  githubAppId: number;
+  workspaceId: string | null;
+  /** The owning workspace's display name; `null` for an unmapped bot. */
+  workspaceName: string | null;
+  /** The bot's workspace IS the platform's official workspace. */
+  isOfficial: boolean;
+  scope: BotScope;
+  /** When the share was granted; `null` while the bot is owned. */
+  sharedAt: string | null;
+  /** Live GitHub installations (`removed_at IS NULL`). */
+  installationCount: number;
+  /** Live review targets (`deleted_at IS NULL`). */
+  liveTargetCount: number;
+};
+
+export async function readBots(): Promise<BotRow[]> {
+  const body = map(await fetchJson(`${BASE}/bots`), "bots response");
+  return list(body.bots, "bots").map((row) => {
+    const scope = text(row, "scope");
+    if (scope !== "owned" && scope !== "shared") {
+      throw new Error("admin API: bot scope is not owned|shared");
+    }
+    return {
+      botId: text(row, "botId"),
+      name: text(row, "name"),
+      githubAppId: num(row, "githubAppId"),
+      workspaceId: maybeText(row, "workspaceId"),
+      workspaceName: maybeText(row, "workspaceName"),
+      isOfficial: bool(row, "isOfficial"),
+      scope,
+      sharedAt: maybeText(row, "sharedAt"),
+      installationCount: num(row, "installationCount"),
+      liveTargetCount: num(row, "liveTargetCount"),
+    };
+  });
+}
+
+/**
+ * Move one bot between `owned` and `shared`. Only an unshare carries the
+ * confirmation the server demands: a share is not destructive, so it never
+ * sends one. The caller re-reads afterwards — `sharedAt` is the server's
+ * stamp, not something the console may guess.
+ */
+export async function setBotScope(botId: string, scope: BotScope): Promise<void> {
+  await write(
+    "PATCH",
+    `/bots/${encodeURIComponent(botId)}/scope`,
+    scope === "owned" ? { scope, confirm: true } : { scope },
+  );
 }
 
 /** One `GET /api/usage` row: a live workspace's reviews this UTC month. */

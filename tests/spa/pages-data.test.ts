@@ -306,6 +306,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
     const ok = parseSettings({
       can_manage: true,
+      official_workspace: true,
+      can_configure_bot: true,
       installation: null,
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
@@ -360,6 +362,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the sandbox image selection + selector choices", () => {
     const manageBase = {
       can_manage: true,
+      official_workspace: true,
+      can_configure_bot: true,
       installation: null,
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
@@ -413,6 +417,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review trigger mode and review depth on the manage face; off-vocabulary fails the parse", () => {
     const base = {
       can_manage: true,
+      official_workspace: true,
+      can_configure_bot: true,
       installation: null,
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
@@ -483,6 +489,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review gate and visibility on the manage face; malformed values fail the parse", () => {
     const base = {
       can_manage: true,
+      official_workspace: true,
+      can_configure_bot: true,
       installation: null,
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
@@ -555,53 +563,60 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: null } })).not.toBeNull();
   });
 
+  /**
+   * The manager, non-Blocked face as the worker sends it (2026-11-18 shape):
+   * the owner allowlist and its overlap flag left with the repository surface,
+   * so the wire carries neither and the parse must not require what the server
+   * retired.
+   */
+  const MANAGER_PAYLOAD = {
+    can_manage: true,
+    official_workspace: true,
+    can_configure_bot: true,
+    workspace_id: "ws_0123456789abcdefghijkl",
+    targets_many: false,
+    installation: null,
+    pending_installations: [],
+    blocked: false,
+    blocked_reason: null,
+    target_id: "rt-501",
+    app: {
+      github_app_id: 1,
+      id: "app-demo",
+      status: "active",
+      created_by: "mallory",
+      last_webhook_at: null,
+      sandbox_image_id: "omp",
+      scope: "owned",
+      github_name: "Demo",
+      github_slug: "demo",
+      github_description: null,
+      github_html_url: "https://github.com/apps/demo",
+      github_avatar_url: null,
+      github_metadata_synced_at: "2026-01-01 00:00:00",
+      github_visibility: "unknown",
+      review_enabled: true,
+      review_trigger_mode: "every_push",
+      review_level: null,
+      default_review_level: "default",
+    },
+    check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
+    keys: [],
+    model_chain: null,
+    model_roles: {},
+    model_chains: [],
+    custom_providers: [],
+    configured_providers: [],
+    provider_catalog_version: "fixture-catalog",
+    provider_eligibility: {},
+    model_role_ids: [],
+    custom_provider_api_ids: [],
+    sandbox_images: [{ id: "omp", enabled: true }],
+    installations: [],
+  };
+
   test("parseSettings accepts the manager payloads the worker sends: no allowlist, no owner_overlap", () => {
-    // Live staging shape (2026-11-18): the owner allowlist and its overlap
-    // flag left with the repository surface, so the wire carries neither. The
-    // parse must not require a requirement the server retired.
-    const manager = {
-      can_manage: true,
-      workspace_id: "ws_0123456789abcdefghijkl",
-      targets_many: false,
-      installation: null,
-      pending_installations: [],
-      blocked: false,
-      blocked_reason: null,
-      target_id: "rt-501",
-      app: {
-        github_app_id: 1,
-        id: "app-demo",
-        status: "active",
-        created_by: "mallory",
-        last_webhook_at: null,
-        sandbox_image_id: "omp",
-        scope: "owned",
-        github_name: "Demo",
-        github_slug: "demo",
-        github_description: null,
-        github_html_url: "https://github.com/apps/demo",
-        github_avatar_url: null,
-        github_metadata_synced_at: "2026-01-01 00:00:00",
-        github_visibility: "unknown",
-        review_enabled: true,
-        review_trigger_mode: "every_push",
-        review_level: null,
-        default_review_level: "default",
-      },
-      check_gate: { min_score: 80, pass_verdicts: ["ship it"] },
-      keys: [],
-      model_chain: null,
-      model_roles: {},
-      model_chains: [],
-      custom_providers: [],
-      configured_providers: [],
-      provider_catalog_version: "fixture-catalog",
-      provider_eligibility: {},
-      model_role_ids: [],
-      custom_provider_api_ids: [],
-      sandbox_images: [{ id: "omp", enabled: true }],
-      installations: [],
-    };
+    const manager = MANAGER_PAYLOAD;
     expect(parseSettings(manager)).toMatchObject({ target_id: "rt-501", check_gate: { min_score: 80 } });
     // The Blocked branch reads the same target-owned slice and had the same
     // two retired requirements.
@@ -609,6 +624,19 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings(blocked)).toMatchObject({ blocked: true, target_id: "rt-501" });
     // Genuine drift still fails: the flag and its reason are one invariant.
     expect(parseSettings({ ...blocked, blocked_reason: null })).toBeNull();
+  });
+
+  test("parseSettings requires the share facts on the bot-readable manager face", () => {
+    // The bot page renders its share switch from these two, so a payload that
+    // cannot answer them is not a settings read: absent (the Bot/Blocked faces
+    // carry neither) and off-type values both fail instead of rendering a
+    // control the server would refuse.
+    expect(parseSettings(MANAGER_PAYLOAD)).not.toBeNull();
+    for (const key of ["official_workspace", "can_configure_bot"] as const) {
+      const { [key]: _dropped, ...rest } = MANAGER_PAYLOAD;
+      expect(parseSettings(rest), key).toBeNull();
+      expect(parseSettings({ ...MANAGER_PAYLOAD, [key]: "yes" }), key).toBeNull();
+    }
   });
 
   test("parseReviewUsage accepts the quota block the worker sends: no month inside quota", () => {
@@ -678,6 +706,8 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings separates configured state from the catalog", () => {
     const manageBase = {
       can_manage: true,
+      official_workspace: true,
+      can_configure_bot: true,
       installation: null,
       pending_installations: [],
       workspace_id: "ws_0123456789abcdefghijkl",
@@ -837,6 +867,8 @@ describe("members/apps/settings parsers", () => {
     expect(
       parseSettings({
         can_manage: true,
+        official_workspace: true,
+        can_configure_bot: true,
         installation: null,
         pending_installations: [],
         workspace_id: "ws_0123456789abcdefghijkl",
@@ -924,6 +956,8 @@ describe("model chain tab model", () => {
 describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
+    official_workspace: true,
+    can_configure_bot: true,
     installation: null,
     pending_installations: [],
     workspace_id: "ws_0123456789abcdefghijkl",

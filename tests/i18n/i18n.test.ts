@@ -409,3 +409,96 @@ describe("creation chooser copy", () => {
     expect(t("en", "apps.createUnavailable.role")).toContain("owner or admin");
   });
 });
+
+describe("the shared-bot surfaces' copy", () => {
+  // The three key families the two shipped surfaces render: the console's
+  // official-workspace card (admin.workspaces.official*), the console's Bots
+  // page (admin.bots.*) and the bot page's share switch (botSettings.share*).
+  // The families are enumerated deliberately — deriving them from the pages
+  // would need machinery this file does not have.
+  const CONSOLE_CARD_KEYS = [
+    "admin.workspaces.officialTitle",
+    "admin.workspaces.officialDescription",
+    "admin.workspaces.officialCurrent",
+    "admin.workspaces.officialNone",
+    "admin.workspaces.officialSelectLabel",
+    "admin.workspaces.officialSelectAria",
+    "admin.workspaces.officialSave",
+    "admin.workspaces.officialClear",
+    "admin.workspaces.officialSaved",
+    "admin.workspaces.officialCleared",
+    "admin.workspaces.officialSaveFailed",
+    "admin.workspaces.officialLoadFailed",
+  ] as const satisfies readonly DictionaryKey[];
+  const BOTS_PAGE_KEYS = [
+    "admin.bots.description",
+    "admin.bots.loadFailed",
+    "admin.bots.emptyTitle",
+    "admin.bots.emptyDescription",
+    "admin.bots.botColumn",
+    "admin.bots.appMeta",
+    "admin.bots.workspaceColumn",
+    "admin.bots.workspaceOfficial",
+    "admin.bots.scopeColumn",
+    "admin.bots.sharedColumn",
+    "admin.bots.installationsColumn",
+    "admin.bots.targetsColumn",
+    "admin.bots.shareAction",
+    "admin.bots.unshareAction",
+    "admin.bots.shareUnavailable",
+    "admin.bots.notOfficialReason",
+    "admin.bots.shareConfirmTitle",
+    "admin.bots.shareConsequence",
+    "admin.bots.unshareConfirmTitle",
+    "admin.bots.unshareConsequence",
+    "admin.bots.confirmAction",
+    "admin.bots.cancelAction",
+    "admin.bots.scopeChangeFailed",
+  ] as const satisfies readonly DictionaryKey[];
+  const SHARE_SWITCH_KEYS = [
+    "botSettings.shareTitle",
+    "botSettings.shareCopy",
+    "botSettings.shareAction",
+    "botSettings.unshareAction",
+    "botSettings.shareSaved",
+    "botSettings.unshareSaved",
+    "botSettings.confirmShareTitle",
+    "botSettings.confirmShareBody",
+    "botSettings.confirmUnshareTitle",
+    "botSettings.confirmUnshareBody",
+    "botSettings.shareOutsideOfficial",
+    "botSettings.shareForbidden",
+  ] as const satisfies readonly DictionaryKey[];
+
+  test("every key the two new console surfaces use exists in both locales", () => {
+    // The satisfies clauses above are the compile-time half; this runtime half
+    // proves each key RESOLVES per locale - a lookup miss returns the key.
+    for (const key of [...CONSOLE_CARD_KEYS, ...BOTS_PAGE_KEYS]) {
+      expect(isDictionaryKey(key), key).toBe(true);
+      for (const locale of LOCALES) {
+        expect(t(locale, key), locale + " " + key).not.toBe(key);
+        expect(t(locale, key).length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test("the workspace bot page's share switch keys exist in both locales", () => {
+    for (const key of SHARE_SWITCH_KEYS) {
+      expect(isDictionaryKey(key), key).toBe(true);
+      for (const locale of LOCALES) {
+        expect(t(locale, key), locale + " " + key).not.toBe(key);
+        expect(t(locale, key).length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test("the nav label for the Bots page is registered and localized", () => {
+    // ADMIN_PAGES' bots entry names this key; a renamed family fails both here
+    // and in the admin-surface route tests.
+    for (const locale of LOCALES) {
+      const label = t(locale, "admin.nav.bots");
+      expect(label).not.toBe("admin.nav.bots");
+      expect(label.length).toBeGreaterThan(0);
+    }
+  });
+});

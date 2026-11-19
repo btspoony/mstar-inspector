@@ -271,6 +271,20 @@ export const zhCN: Dictionary = {
     sandboxCopy: "该机器人的每次评审所用的运行时沙箱。",
     providersNone: "还没有提供方密钥或自定义提供方。",
     chainsCopy: "该机器人的评审用来选择模型的模型链。",
+    /** 共享开关。仅官方工作区的管理员渲染。 */
+    shareTitle: "共享此机器人",
+    shareCopy: "允许其他工作区在自己的仓库上使用此机器人；它的凭据与模型链仍在本工作区配置。",
+    shareAction: "共享",
+    unshareAction: "取消共享",
+    shareSaved: "此机器人已对所有工作区共享。",
+    unshareSaved: "此机器人已不再共享。",
+    confirmShareTitle: "将 {name} 共享给所有工作区？",
+    confirmShareBody: "共享后，其他工作区可为自己的仓库创建 target 并触发审查，按该机器人的套餐计费。",
+    confirmUnshareTitle: "取消共享 {name}？",
+    confirmUnshareBody: "其他工作区在此机器人上的 target 会变为 Blocked 并停止审查，直到重新共享。",
+    // 共享路由的两个可恢复拒绝。
+    shareOutsideOfficial: "此机器人所属工作区已不是平台的官方工作区，无法共享。需先由平台操作员指定。",
+    shareForbidden: "只有本工作区的所有者或管理员可以共享它的机器人。",
   },
   /** Per-App 拉取请求标签页：App 收到的所有 PR 台账。详情以 owner/repo/number 寻址（同一 App 可能在多个仓库见到同一个编号），并以 `pr=owner/repo/number` 挂在 URL 上。 */
   pullRequests: {
@@ -1153,6 +1167,7 @@ export const zhCN: Dictionary = {
       flags: "服务器开关",
       runtime: "运行时参数",
       workspaces: "工作区",
+      bots: "机器人",
       usage: "审查用量",
       quotaVersions: "额度版本",
       users: "用户",
@@ -1342,6 +1357,60 @@ export const zhCN: Dictionary = {
       cancelAction: "取消",
       /** slug 写入失败且错误无法识别时的兜底文案。 */
       slugChangeFailed: "无法更改 {name} 的 slug。",
+      /**
+       * 表格上方的官方工作区卡片：唯一可以把 bot 标记为共享的租户。
+       * 清除是独立操作（不是保存空值），且不撤销已授予的共享。
+       */
+      officialTitle: "官方工作区",
+      officialDescription:
+        "只有此处指定的工作区里的 bot 可以被标记为共享。清除后不能再共享新 bot；已共享的仍可撤销。",
+      officialCurrent: "当前：",
+      officialNone: "未指定",
+      officialSelectLabel: "工作区",
+      /** 选择器的可访问名称；可见标签已在其上方。 */
+      officialSelectAria: "官方工作区",
+      officialSave: "保存",
+      officialClear: "清除",
+      officialSaved: "已保存官方工作区。",
+      officialCleared: "已清除官方工作区。已共享的仍可撤销。",
+      /** 两种写入失败且错误无法识别时的兜底文案。 */
+      officialSaveFailed: "无法更改官方工作区。",
+      officialLoadFailed: "无法加载官方工作区。",
+    },
+    /** 机器人页：每个在线 bot、其所属工作区与共享范围。 */
+    bots: {
+      description:
+        "所有在线审查机器人及其所属工作区与范围。只有在官方工作区里的 bot 才能被平台共享。",
+      loadFailed: "无法加载机器人列表。",
+      emptyTitle: "没有机器人",
+      emptyDescription: "此部署还没有任何在线审查机器人。",
+      botColumn: "机器人",
+      /** 机器人单元格的第二行：它运行的 GitHub App。 */
+      appMeta: "app {id}",
+      workspaceColumn: "工作区",
+      /** bot 所属工作区为何重要：共享需要官方工作区。 */
+      workspaceOfficial: "官方",
+      scopeColumn: "范围",
+      sharedColumn: "共享时间",
+      installationsColumn: "安装",
+      targetsColumn: "活 target",
+      shareAction: "共享",
+      unshareAction: "取消共享",
+      /** bot 所属工作区不是官方工作区时，操作按钮的标签。 */
+      shareUnavailable: "共享不可用",
+      notOfficialReason: "只有官方工作区里的机器人可以被共享。",
+      /** 共享确认 —— {name} 为 bot 名称。 */
+      shareConfirmTitle: "将 {name} 共享给整个平台？",
+      shareConsequence:
+        "其他工作区随后可以在自己的仓库上运行此机器人，按其自身套餐计费。凭据与模型链仍在本工作区配置。",
+      /** 取消共享确认 —— 运营者必须先读到的后果。 */
+      unshareConfirmTitle: "停止共享 {name}？",
+      unshareConsequence:
+        "其他工作区里的 target 会变为 Blocked（不可审），直到重新共享。本工作区仍可配置此机器人。",
+      confirmAction: "确认",
+      cancelAction: "取消",
+      /** 范围写入失败且错误无法识别时的兜底文案。 */
+      scopeChangeFailed: "无法更改 {name} 的共享状态。",
     },
     /** 审查用量页（spec bot-scope-and-claiming § Review usage）。 */
     usage: {
