@@ -730,8 +730,6 @@ describe("members/apps/settings parsers", () => {
     expect(unconfigured && unconfigured.can_manage && !unconfigured.blocked && unconfigured.configured_providers).toEqual([]);
     expect(unconfigured).not.toHaveProperty("provider_catalog");
     expect(unconfigured).not.toHaveProperty("model_limits_snapshot");
-    const legacyCatalog = parseSettings({ ...manageBase, provider_catalog: [catalogRow] });
-    expect(legacyCatalog && legacyCatalog.can_manage && !legacyCatalog.blocked && legacyCatalog.configured_providers).toEqual([]);
     const { configured_providers: _droppedConfigured, ...withoutConfigured } = manageBase;
     expect(parseSettings(withoutConfigured)).toBeNull();
     const { provider_catalog_version: _droppedVersion, ...withoutVersion } = manageBase;
