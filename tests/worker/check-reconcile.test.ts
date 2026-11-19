@@ -2368,57 +2368,84 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     expect(row.external_id).toBe((await rawRow(db, id)).external_id);
   });
 
-  test("unchanged pairs filling a whole scan page never starve a repaired pair that sorts after them", async () => {
-    const db = seededDb();
-    // CHECK_RECONCILE_LIMIT active Apps whose identity-mismatch suspension was
-    // proven against their CURRENT envelope: each is filtered out with no probe.
-    const stuckIds: string[] = [];
-    for (let index = 0; index < CHECK_RECONCILE_LIMIT; index += 1) {
-      const appId = `00000000-0000-0000-0000-${String(index).padStart(12, "0")}`;
-      const installationId = 200 + index;
-      seedApp(db, appId, 5_000 + index, { installationId });
+  /** Suspends one Check per pair for an unchanged identity mismatch; the last pair's credential is then rotated. */
+  async function seedSuspendedBacklog(db: TestD1, unchanged: number) {
+    const suspend = async (appId: string, githubAppId: number, installationId: number) => {
+      seedApp(db, appId, githubAppId, { installationId });
       const { attempt } = await claim(db, {
         scope: { ...SCOPE, appId, installationId },
-        githubAppId: 5_000 + index,
-        action: `stuck-${index}`,
+        githubAppId,
+        action: `stuck-${installationId}`,
       });
       db.raw
         .prepare(
           `UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended', attempts = 0, last_error = ? WHERE id = ?`,
         )
-        .run(checkSuspensionReason("identity-mismatch", "suspended", await sha256Hex("enc-pem")), attempt.identity.attemptId);
-      stuckIds.push(attempt.identity.attemptId);
+        .run(
+          checkSuspensionReason("identity-mismatch", "suspended", await sha256Hex("enc-pem")),
+          attempt.identity.attemptId,
+        );
+      return attempt.identity.attemptId;
+    };
+    const stuckIds: string[] = [];
+    for (let index = 0; index < unchanged; index += 1) {
+      const appId = `00000000-0000-0000-0000-${String(index).padStart(12, "0")}`;
+      stuckIds.push(await suspend(appId, 5_000 + index, 200 + index));
     }
-    // One more pair, ordered after all of them (installation 999), whose
-    // operator replaced the credentials since the suspension was recorded.
-    const repairedApp = "ffffffff-ffff-ffff-ffff-ffffffffffff";
-    const repairedScope = { ...SCOPE, appId: repairedApp, installationId: 999 };
-    seedApp(db, repairedApp, 9_999, { installationId: repairedScope.installationId });
-    const { attempt: repaired } = await claim(db, { scope: repairedScope, githubAppId: 9_999, action: "repaired" });
-    db.raw
-      .prepare(
-        `UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended', attempts = 0, last_error = ? WHERE id = ?`,
-      )
-      .run(checkSuspensionReason("identity-mismatch", "suspended", await sha256Hex("enc-pem")), repaired.identity.attemptId);
-    db.raw.prepare(`UPDATE review_bots SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(repairedApp);
+    const repairedScope = { ...SCOPE, appId: "ffffffff-ffff-ffff-ffff-ffffffffffff", installationId: 9_999 };
+    const repairedId = await suspend(repairedScope.appId, 9_999, repairedScope.installationId);
+    db.raw.prepare(`UPDATE review_bots SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(repairedScope.appId);
+    return { stuckIds, repairedId, repairedScope };
+  }
 
+  async function passUntilResumed(db: TestD1, repairedId: string, repairedScope: Scope, maxPasses: number) {
     const probed: string[] = [];
     const fetchStub = stubFetch();
+    let passes = 0;
     try {
-      const summary = await run(db, {
-        now: () => T0,
-        credentials: async (input) => {
-          probed.push(input.scope.appId);
-          return scriptedCredentials(db, agreeingScript(), undefined, repairedScope)(input);
-        },
-      });
-      expect(summary.completed).toBe(1);
+      while (passes < maxPasses && (await rawRow(db, repairedId)).recovery_state === "suspended") {
+        passes += 1;
+        await run(db, {
+          now: () => T0,
+          credentials: async (input) => {
+            probed.push(input.scope.appId);
+            return scriptedCredentials(db, agreeingScript(), undefined, repairedScope)(input);
+          },
+        });
+      }
     } finally {
       fetchStub.restore();
     }
-    // Only the repaired pair earned a probe, and its Check left suspension.
-    expect(new Set(probed)).toEqual(new Set([repairedApp]));
-    expect((await rawRow(db, repaired.identity.attemptId)).recovery_state).toBe("done");
+    return { passes, probed };
+  }
+
+  test("unchanged pairs filling a whole scan page never starve a repaired pair that sorts after them", async () => {
+    const db = seededDb();
+    const { stuckIds, repairedId, repairedScope } = await seedSuspendedBacklog(db, CHECK_RECONCILE_LIMIT);
+
+    const { passes, probed } = await passUntilResumed(db, repairedId, repairedScope, 3);
+
+    expect(passes).toBe(2);
+    expect(new Set(probed)).toEqual(new Set([repairedScope.appId]));
+    expect((await rawRow(db, repairedId)).recovery_state).toBe("done");
+    for (const id of stuckIds) {
+      expect((await rawRow(db, id)).recovery_state).toBe("suspended");
+    }
+  });
+
+  test("the re-enable scan rotates through a backlog of several pages and wraps back to the start", async () => {
+    const db = seededDb();
+    const backlog = CHECK_RECONCILE_LIMIT * 3;
+    const { stuckIds, repairedId, repairedScope } = await seedSuspendedBacklog(db, backlog);
+
+    const { passes } = await passUntilResumed(db, repairedId, repairedScope, 10);
+
+    expect(passes).toBe(Math.ceil((backlog + 1) / CHECK_RECONCILE_LIMIT));
+    expect((await rawRow(db, repairedId)).recovery_state).toBe("done");
+    // The pass that reached the repaired pair wrapped and filled its page from the start.
+    const wrappedPairs = passes * CHECK_RECONCILE_LIMIT - (backlog + 1);
+    const cursor = db.raw.prepare(`SELECT installation_id FROM check_reenable_cursor`).get() as { installation_id: number };
+    expect(cursor.installation_id).toBe(200 + wrappedPairs - 1);
     for (const id of stuckIds) {
       expect((await rawRow(db, id)).recovery_state).toBe("suspended");
     }
