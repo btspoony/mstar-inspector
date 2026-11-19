@@ -408,6 +408,7 @@ export const APP_CREDENTIAL_RESOLUTION_MIGRATIONS = shape("app-credential-resolu
   "0031_plans_usage.sql",
   // 0032: the seeded `unlimited` row 0063's per-plan ceilings reference.
   "0032_unlimited_plan.sql",
+  "0033_platform_admin.sql",
   "0036_app_identity.sql",
   // Every later migration, derived from the directory (0040–… included):
   // the consumer's per-message admission reads the runtime caps and writes
@@ -463,6 +464,7 @@ export const CONSUMER_POST_CHAINS_MIGRATIONS: readonly string[] = [
   "0031_plans_usage.sql",
   // 0032: the seeded `unlimited` row 0063's per-plan ceilings reference.
   "0032_unlimited_plan.sql",
+  "0033_platform_admin.sql",
   "0036_app_identity.sql",
   ...migrationsAfter(36),
 ];

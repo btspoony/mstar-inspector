@@ -425,6 +425,36 @@ describe("runSweep", () => {
     });
   });
 
+  test("seeks the retention cutoff and latest alert by action (EXPLAIN QUERY PLAN)", async () => {
+    const db = failureDb();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const captured: string[] = [];
+    const { log } = captureLog();
+    await runSweep({
+      ...db,
+      prepare(sql) {
+        captured.push(sql);
+        return db.prepare(sql);
+      },
+    }, { log });
+
+    const retentionSql = captured.find((sql) => sql.includes("DELETE FROM webhook_deliveries"));
+    const alertSql = captured.find((sql) => sql.includes("FROM platform_audit_events"));
+    expect(retentionSql).toBeDefined();
+    expect(alertSql).toBeDefined();
+
+    const retentionPlan = db.raw.query<{ detail: string }, []>(`EXPLAIN QUERY PLAN ${retentionSql}`).all();
+    const alertPlan = db.raw
+      .query<{ detail: string }, [string]>(`EXPLAIN QUERY PLAN ${alertSql}`)
+      .all(ALERT_PAGING_AUDIT_ACTION);
+    expect(retentionPlan.map(({ detail }) => detail).join("\n")).toMatch(
+      /SEARCH webhook_deliveries .*idx_webhook_deliveries_created \(created_at</,
+    );
+    expect(alertPlan.map(({ detail }) => detail).join("\n")).toMatch(
+      /SEARCH platform_audit_events .*platform_audit_events_action_created \(action=\?/,
+    );
+  });
+
   test("retention deletes only rows older than 30 days (real D1)", async () => {
     const db = failureDb();
     db.raw
