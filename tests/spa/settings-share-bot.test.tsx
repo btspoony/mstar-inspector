@@ -13,11 +13,24 @@ import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { t } from "../../src/i18n";
+import { APP_ROUTES } from "../../src/dashboard/index";
 import { BotSettingsView } from "../../src/spa/pages/BotSettingsPage";
 import type { BotSettingsPayload } from "../../src/spa/pages/data";
 import { installDom } from "./dom";
 
 const locale = "en" as const;
+const WORKSPACE_REF = "acme";
+
+/**
+ * The path the page must PATCH, DERIVED from the worker's own route table: a
+ * page that composes its own URL would otherwise keep passing its own test
+ * while the request 404s against a route registered under another prefix.
+ */
+function registeredScopePath(appId: string): string {
+  const route = APP_ROUTES.find((row) => row.method === "patch" && row.path.endsWith("/bot/scope"));
+  if (route === undefined) throw new Error("no PATCH .../bot/scope route is registered");
+  return `/dashboard/${WORKSPACE_REF}${route.path.replace(":appId", appId)}`;
+}
 
 function payload(overrides: Partial<BotSettingsPayload> = {}): BotSettingsPayload {
   return {
@@ -135,7 +148,7 @@ describe("the bot page's share switch", () => {
       await view.click(view.buttonWith(t(locale, "botSettings.shareAction"), view.dialog() ?? undefined));
 
       expect(view.scopeCalls()).toEqual([
-        { path: "/dashboard/acme/apps/1/bot/scope", method: "PATCH", body: { scope: "shared" } },
+        { path: registeredScopePath("1"), method: "PATCH", body: { scope: "shared" } },
       ]);
       expect(view.reloads).toHaveLength(1);
       expect(view.container.textContent).toContain(t(locale, "botSettings.shareSaved"));
@@ -154,7 +167,7 @@ describe("the bot page's share switch", () => {
       await view.click(view.buttonWith(t(locale, "botSettings.unshareAction"), view.dialog() ?? undefined));
 
       expect(view.scopeCalls()).toEqual([
-        { path: "/dashboard/acme/apps/1/bot/scope", method: "PATCH", body: { scope: "owned", confirm: true } },
+        { path: registeredScopePath("1"), method: "PATCH", body: { scope: "owned", confirm: true } },
       ]);
       expect(view.reloads).toHaveLength(1);
     } finally {

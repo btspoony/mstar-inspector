@@ -56,10 +56,11 @@ function shareRefusalMessage(locale: SpaBoot["locale"], status: number, body: st
  * sections and their write pipeline and owns no page of its own (the retired
  * `/bot` page is a redirect to that tab).
  *
- * `payload.can_manage` is the BOT-scoped permission bit: a `shared` bot reads
- * as `false` whatever the caller's workspace role is, so the sections render
- * non-editable and the bot-scoped POST family refuses the write the face would
- * otherwise offer. Every write below rides that existing family.
+ * `payload.can_manage` is the BOT-scoped permission bit, and it is the server's
+ * ownership fact: a workspace that reaches the bot only through a target on it
+ * reads `false`, so the sections render non-editable and the bot-scoped write
+ * family refuses what the face would otherwise offer. The bot's own scope does
+ * not enter the answer — its sharing workspace keeps every write.
  */
 export function BotSettingsView({
   locale,
@@ -80,7 +81,10 @@ export function BotSettingsView({
   // Every write below is the settings family's: the ops ride
   // `POST /apps/:appId/settings` (and its key/delete sibling), so this page
   // adds no second save path and the server's `can_manage` rule is the gate.
+  // The ONE exception is the share transition: it is a JSON route of the App
+  // API family (`/api/apps/:appId/bot/scope`), like the key probe beside it.
   const appPath = `${apiBase()}/apps/${app.github_app_id}`;
+  const appApiPath = `${apiBase()}/api/apps/${app.github_app_id}`;
   const base = `${appPath}/settings`;
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
@@ -153,7 +157,7 @@ export function BotSettingsView({
     let status: number;
     let body: string;
     try {
-      ({ status, body } = await patchJson(`${appPath}/bot/scope`, {
+      ({ status, body } = await patchJson(`${appApiPath}/bot/scope`, {
         scope,
         ...(scope === "owned" ? { confirm: true } : {}),
       }));

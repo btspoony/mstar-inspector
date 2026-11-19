@@ -3028,8 +3028,8 @@ async function appStatusAction(
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
-  // A bot's lifecycle belongs to its OWNING workspace (and a `shared` bot to
-  // the platform): a target on it is not authority over it.
+  // A bot's lifecycle belongs to its OWNING workspace, whatever the bot's
+  // scope: a target on it is consumption, not authority over it.
   if (!canWriteBotScope(app, gate.scope)) return botReadOnlyResponse(c);
   if (action === "delete") {
     await apps.softDeleteApp(app.id);
@@ -4096,10 +4096,12 @@ async function resolveVisibleBot(
  * sandbox image, installations); the workspace-owned review policy stays on the
  * target detail, which links to this page.
  *
- * `can_manage` governs BOT-scoped writes only, and it is `false` for a `shared`
- * bot whatever the caller's workspace role is: a tenant may use a shared bot,
- * never configure it. The bot-scoped POST family enforces the same rule
- * server-side — hiding the page's controls is not the gate.
+ * `can_manage` governs BOT-scoped writes only, and it is the same predicate
+ * those writes use: this caller must be a manager of the workspace that OWNS
+ * the bot, whatever the bot's scope. A tenant may use a shared bot; it never
+ * configures one, and the sharing workspace never loses it. The bot-scoped
+ * POST family enforces the same rule server-side — hiding the page's controls
+ * is not the gate.
  */
 const appBotRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
@@ -4787,9 +4789,9 @@ const appKeyUsageRoute = async (c: DashboardContext) => {
  */
 /**
  * The BOT-scoped settings ops. They require `canWriteBotScope`: only the bot's
- * owning workspace, while it is `owned`, may run one. A retained target on
- * another workspace's bot grants none of them, and a `shared` bot belongs to
- * the platform.
+ * OWNING workspace may run one, and the bot's scope never enters that answer —
+ * sharing decides who else may USE the bot, not who configures it. A retained
+ * target on another workspace's bot grants none of them.
  */
 const BOT_SCOPED_SETTINGS_OPS: ReadonlySet<string> = new Set([
   "add-key",
@@ -6898,7 +6900,12 @@ type AppRoute = {
   access?: "read" | "write";
 };
 
-const APP_ROUTES: ReadonlyArray<AppRoute> = [
+/**
+ * Exported for the tests that must prove a page's request is a route this
+ * table actually registers — a page and a route that each pin their own URL
+ * string can drift apart while both stay green.
+ */
+export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/provider-catalog", handler: providerCatalogRoute, access: "read" },
   { method: "get", path: "/apps/:appId/onboarding", handler: appOnboardingRoute, access: "write" },
   { method: "get", path: "/api/apps", handler: appListRoute, access: "write" },
