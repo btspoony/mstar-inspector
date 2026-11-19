@@ -428,6 +428,15 @@ describe("add-repository dialog (static SSR)", () => {
     expect(markup).not.toContain('id="add-repository-search"');
   });
 
+  test("the installation step keeps one install link in every read state", () => {
+    for (const installs of [{ state: "loading" } as InstallationsState, { state: "error" } as InstallationsState, installations()]) {
+      const markup = renderBody({ apps: [app()], installs });
+      const step =
+        markup.split('data-slot="add-step-installations"')[1]?.split('data-slot="add-step-repositories"')[0] ?? "";
+      expect(step.match(/installations\/new/g)).toHaveLength(1);
+    }
+  });
+
   test("a failed installation read offers its own retry", () => {
     const markup = renderBody({ apps: [app()], installs: { state: "error" } });
     // The copy's apostrophe is HTML-escaped in static markup; the prefix is
