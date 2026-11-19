@@ -831,8 +831,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
    * renders every row's health on each POST re-render, so the per-App
    * deliverySummary fan-out (2N statements) is replaced by exactly TWO
    * statements for any N: (a) the newest row per app — ranked by an outcome
-   * tier, newest first inside each tier — via a ROW_NUMBER() window (SQLite
-   * 3.25+, D1-supported), and (b) the 24h `rejected` count grouped by app
+   * tier, newest first inside each tier — via an indexed top-one lookup
+   * per requested app, and (b) the 24h `rejected` count grouped by app
    * (same window + healthy-outcome exclusion as deliverySummary; AL-20-2).
    *
    * The tier exists because the event name does not predict the outcome:
@@ -860,12 +860,15 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     const [latestRes, rejectedRes] = await Promise.all([
       db
         .prepare(
-          `SELECT bot_id, id, event_name, outcome, status_code, repository_full_name, created_at FROM (
-             SELECT *, ROW_NUMBER() OVER (PARTITION BY bot_id
-               ORDER BY ${DELIVERY_VERDICT_TIER_SQL},
-                        created_at DESC, rowid DESC) AS rn
-             FROM webhook_deliveries WHERE bot_id IN (${placeholders})
-           ) WHERE rn = 1`,
+          `WITH requested(bot_id) AS (VALUES ${appIds.map(() => "(?)").join(", ")})
+           SELECT bot_id, id, event_name, outcome, status_code, repository_full_name, created_at
+           FROM webhook_deliveries WHERE rowid IN (
+             SELECT (SELECT rowid FROM webhook_deliveries
+                     WHERE bot_id = requested.bot_id
+                     ORDER BY ${DELIVERY_VERDICT_TIER_SQL}, created_at DESC, rowid DESC
+                     LIMIT 1)
+             FROM requested
+           )`,
         )
         .bind(...appIds)
         .all<WebhookDeliveryRow>(),
@@ -1805,7 +1808,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      * newest first, plus the face's whole repository option set, plus each
      * row's D11 reviewing projection. FIVE statements per call regardless of
      * N — the rows, the newest review per (owner, repo, pr_number) via a
-     * ROW_NUMBER() window (the deliverySummaries shape), the failure count
+     * ROW_NUMBER() window, the failure count
      * joined through `bot_installations`, the option set, and the App's live
      * review locks (`liveReviewLocks`) — never one query per row, and never a
      * second round trip for any of them (the lock read is issued beside the

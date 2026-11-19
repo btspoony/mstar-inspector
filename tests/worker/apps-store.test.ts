@@ -30,6 +30,7 @@ import type {
   CreateAppInput,
   GithubAppMetadataInput,
   GithubAppRow,
+  WebhookDeliveryRow,
 } from "../../src/dashboard/apps-store";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -1117,6 +1118,50 @@ describe("apps-store delivery read faces (consumption)", () => {
       expect.objectContaining({ [appA.id]: { latest: expect.objectContaining({ outcome: "ok" }), rejected24h: 0 } }),
     );
     expect(Object.keys(await s.deliverySummaries([]))).toEqual([]);
+  });
+
+  test("deliverySummaries preserves window-query results across tiers, timestamp ties and missing apps", async () => {
+    const db = createMigratedD1();
+    const apps = [];
+    for (const githubAppId of [123460, 123461, 123462]) {
+      apps.push(await seedApp(db, { githubAppId }));
+    }
+    const insert = db.raw.prepare(
+      `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (let i = 0; i < 300; i++) {
+      const app = apps[i % 2]!;
+      const outcome = i % 2 === 0
+        ? ["ok", "paused", "rejected", "ignored", "skipped"][i % 5]!
+        : ["ignored", "skipped"][i % 3 === 0 ? 0 : 1]!;
+      insert.run(
+        `delivery-${i}`, app.id, i % 3 === 0 ? null : "pull_request", outcome,
+        outcome === "rejected" ? 403 : null, i % 3 === 0 ? null : "acme/widgets",
+        i % 4 === 0 ? "2020-01-02 00:00:00" : "2020-01-01 00:00:00",
+      );
+    }
+    const ids = [...apps.map((app) => app.id), "missing-app", apps[0]!.id];
+    const summaries = await store(db).deliverySummaries(ids);
+    for (const id of ids) {
+      const latest = db.raw.prepare<WebhookDeliveryRow, [string]>(
+        `SELECT bot_id, id, event_name, outcome, status_code, repository_full_name, created_at FROM (
+           SELECT *, ROW_NUMBER() OVER (PARTITION BY bot_id
+             ORDER BY CASE WHEN outcome IN ('ok', 'paused', 'rejected') THEN 0 ELSE 1 END,
+                      created_at DESC, rowid DESC) AS rn
+           FROM webhook_deliveries WHERE bot_id = ?
+         ) WHERE rn = 1`,
+      ).get(id);
+      expect(summaries[id]).toEqual({ latest, rejected24h: 0 });
+    }
+    expect(summaries[apps[0]!.id]!.latest!.id).toBe("delivery-296");
+    expect(summaries[apps[1]!.id]!.latest!.id).toBe("delivery-299");
+  });
+
+  test("deliverySummaries propagates database read errors", async () => {
+    const db = createMigratedD1();
+    db.raw.exec("DROP TABLE webhook_deliveries");
+    await expect(store(db).deliverySummaries(["missing-app"])).rejects.toThrow("no such table");
   });
 
   test("deliverySummaries ranks by outcome tier: a newer ignored bypass row never outranks an older ok", async () => {
