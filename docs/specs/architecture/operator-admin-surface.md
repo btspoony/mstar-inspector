@@ -151,9 +151,16 @@ and not a boolean flag.
   loser reports the state the winner persisted, with no second audit row.
 - Unsharing is deliberately NOT gated on the official workspace: a stale share
   must stay revocable by the only role that can revoke it.
-- The flag is a platform authorization, never workspace self-service. No
-  dashboard route, workspace-owner path or API key writes `scope`, and no
-  per-bot or per-workspace operator scope exists to widen it.
+- The flag is a platform authorization, never workspace self-service — with one
+  member-side exception, the owning workspace itself:
+  `PATCH /dashboard/:workspaceRef/api/apps/:appId/bot/scope` (`appBotScopeRoute`,
+  `src/dashboard/index.ts`, declared in `APP_ROUTES` with `access: "write"`)
+  lets that workspace's owner/admin share or unshare its own bot through the
+  same `setBotScope` store batch. No API key and no per-bot or per-workspace
+  operator scope writes `scope`. An installation shared before a designation
+  change stays revocable by its owning workspace through that route — the
+  unshare statement carries no official-workspace guard; the bot page's UI may
+  hide the control, the API path stays open.
 - Success is `200 {"botId","scope","sharedAt"}`; the row and its audit row land
   in ONE `batch`, and a re-share stamps a new `shared_at` — the earlier instant
   survives only in the audit ledger.
@@ -172,13 +179,14 @@ client-side (`src/spa/admin/main.tsx`):
 - **Workspaces page card** (`src/spa/admin/WorkspacesPage.tsx`): above the
   tenant table, the official-workspace card reads its current value from
   `GET /api/runtime` (`readRuntime`, `src/spa/admin/api.ts`) and writes
-  `PATCH /api/official-workspace` (`setOfficialWorkspace`) — a `null` body
-  clears, never an empty string.
-- **Bots page** (`src/spa/admin/BotsPage.tsx`): reads `GET /api/bots`
-  (`readBots`, `src/dashboard/apps-store.ts`, one statement whose `is_official`
-  column joins the stored id to a live workspace, so a designation pointing at
-  a soft-deleted workspace reads as none) and writes
-  `PATCH /api/bots/:botId/scope` (`assignBotScope`) — an unshare requires the
+  `PATCH /api/official-workspace` (`setOfficialWorkspace`) — the wire clear is
+  `{"workspaceId": null}`, never an empty string (a bare `null` body is a 400).
+- **Bots page** (`src/spa/admin/BotsPage.tsx`): reads `GET /api/bots` — the
+  `readBots` handler (`src/admin/index.ts`, SPA client in `src/spa/admin/api.ts`)
+  backed by `listBotScopes` (`src/dashboard/apps-store.ts`), one statement
+  whose `is_official` column joins the stored id to a live workspace, so a
+  designation pointing at a soft-deleted workspace reads as none — and writes
+  `PATCH /api/bots/:botId/scope` (`assignBotScope`). An unshare requires the
   `confirm: true` body, mirrored by the page's own confirmation dialog.
 
 Both writes append their `platform_audit_events` row through the store —

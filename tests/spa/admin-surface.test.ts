@@ -231,7 +231,7 @@ describe("every ADMIN_PAGES id is served and routed", () => {
   // Registered paths on the admin sub-app (src/admin/index.ts), Hono's own projection.
   const adminRoutes = adminApp.routes.map((route) => route.method.toUpperCase() + " " + route.path);
 
-  test("each page id has a served document and a client route", () => {
+  test("each page id has a served document and a localized nav label", () => {
     // One document per id from the Worker, one id lookup in the client entry —
     // both sides read the SAME list, so a dropped page fails here either way.
     expect(ADMIN_PAGES.length).toBeGreaterThan(0);

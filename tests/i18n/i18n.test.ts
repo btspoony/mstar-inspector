@@ -414,6 +414,8 @@ describe("the shared-bot surfaces' copy", () => {
   // The three key families the two shipped surfaces render: the console's
   // official-workspace card (admin.workspaces.official*), the console's Bots
   // page (admin.bots.*) and the bot page's share switch (botSettings.share*).
+  // The families are enumerated deliberately — deriving them from the pages
+  // would need machinery this file does not have.
   const CONSOLE_CARD_KEYS = [
     "admin.workspaces.officialTitle",
     "admin.workspaces.officialDescription",
