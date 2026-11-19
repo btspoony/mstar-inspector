@@ -788,11 +788,15 @@ export type BotConfigSections = {
 
 /**
  * The bot page's payload: the bot-owned sections plus the ONE permission bit
- * that governs bot-scoped writes. `can_manage` is false for a `shared` bot
- * whatever the caller's workspace role is — a tenant may use a shared bot,
- * never configure it.
+ * that governs bot-scoped writes. `can_manage` answers "this caller manages
+ * the workspace that OWNS the bot" — a consuming workspace gets these sections
+ * read-only, and the bot's scope never enters the answer.
  */
-export type BotSettingsPayload = { can_manage: boolean } & BotConfigSections;
+export type BotSettingsPayload = {
+  can_manage: boolean;
+  /** Present only for a caller that may see the bot's own configuration. */
+  official_workspace?: boolean;
+} & BotConfigSections;
 
 /** Provider-management data after the static catalog has loaded. */
 export type ProviderManagementPayload = BotConfigSections & {
@@ -864,6 +868,15 @@ type SettingsManageBase = {
    * "not many".
    */
   targets_many?: boolean;
+  /**
+   * The share switch's two facts, derived per read: the bot's workspace IS the
+   * platform's designated official workspace today, and THIS caller's workspace
+   * OWNS the bot. Both are render gates only — the server re-checks the
+   * designation inside the transition's batch — and both are absent on the
+   * faces that carry no bot-owned section.
+   */
+  official_workspace?: boolean;
+  can_configure_bot?: boolean;
 } & BotConfigSections;
 
 /**
@@ -2597,6 +2610,12 @@ export function parseSettings(data: unknown): SettingsPayload | null {
     if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
     return data as SettingsPayload;
   }
+  // The share switch's facts ride this face and this face only: the caller can
+  // see the bot's own configuration here, so the page must be able to decide
+  // whether to offer the share at all. Absent/non-boolean fails the read —
+  // rendering the switch on a guess would offer a write the server refuses.
+  if (typeof data.official_workspace !== "boolean") return null;
+  if (typeof data.can_configure_bot !== "boolean") return null;
   // The selected runtime-image id rides the MANAGER face (registry id
   // only — never image-local configuration or secrets).
   if (typeof data.app.sandbox_image_id !== "string") return null;

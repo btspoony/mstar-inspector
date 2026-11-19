@@ -312,6 +312,24 @@ export const en = {
     sandboxCopy: "The runtime harness every review of this bot runs under.",
     providersNone: "No provider key or custom provider yet.",
     chainsCopy: "The model chains this bot's reviews select their models from.",
+    /** The share switch. Rendered only for the official workspace's manager. */
+    shareTitle: "Share this bot",
+    shareCopy:
+      "Let other workspaces use this bot on their own repositories. Its credentials and model chains stay configured here.",
+    shareAction: "Share",
+    unshareAction: "Stop sharing",
+    shareSaved: "This bot is now shared with every workspace.",
+    unshareSaved: "This bot is no longer shared.",
+    confirmShareTitle: "Share {name} with every workspace?",
+    confirmShareBody:
+      "Other workspaces can then create targets on their own repositories and trigger reviews on this bot, billed to its plan.",
+    confirmUnshareTitle: "Stop sharing {name}?",
+    confirmUnshareBody:
+      "Targets other workspaces hold on this bot become Blocked — they stop reviewing — until it is shared again.",
+    // The share route's two recoverable refusals.
+    shareOutsideOfficial:
+      "This bot's workspace is no longer the platform's official workspace, so it cannot be shared. An operator sets the designation first.",
+    shareForbidden: "Only an owner or admin of this workspace can share its bot.",
   },
   /**
    * Per-App Pull requests tab: the ledger of every PR the App received.

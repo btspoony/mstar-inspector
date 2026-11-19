@@ -75,6 +75,8 @@ const BOOT = { locale: "en" as const, login: "mallory", name: null };
 
 const managePayload = {
   can_manage: true as const,
+  official_workspace: true as const,
+  can_configure_bot: true as const,
   installation: null,
   pending_installations: [],
   blocked: false as const,
@@ -114,6 +116,8 @@ const managePayload = {
  */
 const untargetedPayload: SettingsUntargetedPayload = {
   can_manage: true,
+  official_workspace: true,
+  can_configure_bot: true,
   installation: null,
   pending_installations: [],
   blocked: false,

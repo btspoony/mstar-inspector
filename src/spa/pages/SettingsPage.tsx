@@ -71,6 +71,7 @@ import { ProvidersSection } from "./settings-providers";
 
 export type PendingAction =
   | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
+  | { kind: "share" | "unshare" }
   | { kind: "remove-chain"; name: string }
   | { kind: "remove-key"; provider: string; keyId: string; last4: string }
   | { kind: "remove-custom"; providerId: string };
@@ -290,6 +291,22 @@ export function pendingConfirmCopy(
       title: t(locale, "settings.confirmRemoveCustomTitle", { provider: pending.providerId }),
       body: t(locale, "settings.confirmRemoveCustomBody", { provider: pending.providerId }),
       action: t(locale, "settings.remove"),
+      destructive: true,
+    };
+  }
+  if (pending.kind === "share") {
+    return {
+      title: t(locale, "botSettings.confirmShareTitle", { name }),
+      body: t(locale, "botSettings.confirmShareBody"),
+      action: t(locale, "botSettings.shareAction"),
+      destructive: false,
+    };
+  }
+  if (pending.kind === "unshare") {
+    return {
+      title: t(locale, "botSettings.confirmUnshareTitle", { name }),
+      body: t(locale, "botSettings.confirmUnshareBody"),
+      action: t(locale, "botSettings.unshareAction"),
       destructive: true,
     };
   }

@@ -72,6 +72,19 @@ export async function putJson(url: string, body: unknown): Promise<{ status: num
   return { status: res.status, body: await res.text() };
 }
 
+/** PATCH a JSON body (the bot-scope transition); the 4xx body comes back for its `error` cause. */
+export async function patchJson(url: string, body: unknown): Promise<{ status: number; body: string }> {
+  const res = await fetch(url, {
+    method: "PATCH",
+    credentials: "same-origin",
+    redirect: "manual",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  handleRedirect(res);
+  return { status: res.status, body: await res.text() };
+}
+
 /**
  * POST a JSON body; the 4xx body comes back for the caller to parse (the
  * add-repository refusal names the repositories that already existed). A 3xx
