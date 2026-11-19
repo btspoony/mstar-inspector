@@ -1134,6 +1134,7 @@ async function handleGuardHeld(
   const delays = guardRetryDelaysSeconds(level);
   const delaySeconds = delays[message.attempts - 1];
   let retryAllowed = delaySeconds !== undefined;
+  let restoreFailure: string | null = null;
   if (delaySeconds !== undefined) {
     if (commentClaimConsumed && message.body.comment_id !== undefined) {
       const payload = message.body;
@@ -1159,6 +1160,7 @@ async function handleGuardHeld(
       } catch (err) {
         retryAllowed = false;
         const detail = err instanceof Error ? err.message : String(err);
+        restoreFailure = `comment claim restore failed: ${detail}`;
         deps.log.warn(fields, `comment claim restore failed — dropping through terminal handling: ${detail}`);
       }
     }
@@ -1180,7 +1182,9 @@ async function handleGuardHeld(
   }
   deps.log.warn(
     fields,
-    `${what} after ${delays.length} delayed retries (attempt ${message.attempts}; ${heldBecause}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
+    restoreFailure !== null
+      ? `review dropped: ${restoreFailure} (attempt ${message.attempts}; ${heldBecause}) — acking, no DLQ`
+      : `${what} after ${delays.length} delayed retries (attempt ${message.attempts}; ${heldBecause}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
   );
   message.ack();
   // A cap/storage refusal that survived the whole backoff leaves the review
@@ -1199,6 +1203,7 @@ async function handleGuardHeld(
   const payloadSha = message.body.head_sha;
   const heldSha = heldHeadSha ?? "";
   if (
+    restoreFailure === null &&
     admission.reason === "pr-held" &&
     (payloadSha === null || payloadSha === "" || heldSha === "" || payloadSha === heldSha)
   ) {
@@ -1236,9 +1241,8 @@ async function handleGuardHeld(
   const identity = `${message.body.owner}/${message.body.repo}#${message.body.pr_number}`;
   // A shifted-sha drop names the sha the live review holds, so an operator can
   // see which commit was skipped rather than guessing from the refusal code.
-  // Reaching here on `pr-held` means both shas are non-empty and differ.
   const heldNote =
-    admission.reason === "pr-held"
+    admission.reason === "pr-held" && payloadSha && heldSha && payloadSha !== heldSha
       ? ` — the in-flight review holds head_sha ${heldSha}, so this commit was never reviewed`
       : "";
   // §7.9: the TERMINAL refusal is the only guard outcome that settles this
@@ -1258,7 +1262,7 @@ async function handleGuardHeld(
       pr_number: message.body.pr_number,
       head_sha: headSha,
       stage: "pipeline",
-      error: `review dropped after ${delays.length} refused retries: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap}${cause}) — PR ${identity}, head_sha ${
+      error: `${restoreFailure !== null ? `review dropped: ${restoreFailure}; admission refused` : `review dropped after ${delays.length} refused retries`}: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap}${cause}) — PR ${identity}, head_sha ${
         headSha === "" ? "unresolved (comment trigger, no sha in payload)" : headSha
       }${heldNote}`,
     })

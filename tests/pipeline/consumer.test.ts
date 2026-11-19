@@ -9434,6 +9434,37 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ pr_number: payload.pr_number, stage: "pipeline" });
     expect(String(failureRows(db)[0]!.error)).toContain("system-cap");
+    expect(String(failureRows(db)[0]!.error)).toContain("comment claim restore failed: D1 unavailable");
+    expect(String(failureRows(db)[0]!.error)).not.toContain("refused retries");
+    expect(claimRows(db)[0]!.state).toBe("consumed");
+    expect(h.sandbox.calls).toHaveLength(0);
+  });
+
+  test("a pr-held comment claim restore failure records a drop without a known head", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9203 });
+    seedClaim(db, payload, 9203, "queued");
+    await seedInflight(db, { headSha: null });
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: dbFailingOn(db, "SET state = 'queued', payload_json") as never }),
+      h.testLog,
+      h.overrides,
+    );
+
+    await consumer(h.makeBatch(payload));
+
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(failureRows(db)).toHaveLength(1);
+    const failure = failureRows(db)[0]!;
+    expect(failure).toMatchObject({ pr_number: payload.pr_number, stage: "pipeline", head_sha: "" });
+    expect(String(failure.error)).toContain("comment claim restore failed: D1 unavailable");
+    expect(String(failure.error)).toContain("pr-held");
+    expect(String(failure.error)).not.toContain("refused retries");
+    const terminalWarn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("— acking"))!;
+    expect(terminalWarn.msg).toContain("comment claim restore failed: D1 unavailable");
+    expect(terminalWarn.msg).toContain("pr-held");
+    expect(terminalWarn.msg).not.toContain("delayed retries");
     expect(claimRows(db)[0]!.state).toBe("consumed");
     expect(h.sandbox.calls).toHaveLength(0);
   });
