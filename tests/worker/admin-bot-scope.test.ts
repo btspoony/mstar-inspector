@@ -537,6 +537,49 @@ describe("GET /_internal_admin/api/bots", () => {
     expect(audits(db)).toEqual([]);
   });
 
+  test("a designation naming a retired workspace reads as no designation", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    seedWorkspace(db, "retired");
+    seedBot(db, "bot-orphan", { githubAppId: 7301, workspaceId: "retired" });
+    seedOfficialWorkspace(db, "retired");
+    // Retiring a workspace only stamps its own row: the setting and
+    // `bot_workspaces` survive, so a stale value is what this read must not
+    // trust — the share guard would refuse the write it would otherwise enable
+    // (the console disables the action on `isOfficial: false`, pinned by the
+    // Bots screen's "disabled with the reason" case).
+    db.raw
+      .prepare("UPDATE workspaces SET deleted_at = '2026-01-06T00:00:00.000Z' WHERE id = ?")
+      .run("retired");
+
+    const res = await adminRequest(db, "/api/bots", { method: "GET" });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown).toEqual({
+      bots: [
+        {
+          botId: "bot-orphan",
+          name: "bot-orphan",
+          githubAppId: 7301,
+          workspaceId: "retired",
+          workspaceName: "retired",
+          // The stale designation names a retired tenant: not official.
+          isOfficial: false,
+          scope: "owned",
+          sharedAt: null,
+          installationCount: 0,
+          liveTargetCount: 0,
+          deletedAt: null,
+        },
+      ],
+    });
+
+    // The two faces agree: the runtime read degrades the same row to "none".
+    const runtime = await adminRequest(db, "/api/runtime", { method: "GET" });
+    expect((await runtime.json()) as { officialWorkspaceId: unknown }).toMatchObject({
+      officialWorkspaceId: null,
+    });
+  });
+
   test("costs one statement however many bots it lists", async () => {
     /** One database with `count` bots, each with an installation and a target. */
     const seeded = (count: number) => {

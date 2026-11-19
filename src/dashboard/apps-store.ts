@@ -2299,11 +2299,19 @@ const BOT_SCOPE_READ_SQL = `
  * official-workspace comparison and the two counts are correlated subqueries,
  * never a read per row — the operator surface has no paging and a fan-out here
  * would be one round trip per bot.
+ *
+ * `is_official` resolves the designation the way the runtime read does: the
+ * stored id must name a LIVE workspace. A retired tenant leaves both the
+ * setting row and `bot_workspaces` behind, so comparing the id alone would
+ * enable a share the share guard then refuses (the same predicate is spelled
+ * in `officialWorkspaceGuardSql`).
  */
 const BOT_SCOPE_LIST_SQL = `
   SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at,
          ws.name AS workspace_name,
-         EXISTS (SELECT 1 FROM review_runtime_settings s
+         EXISTS (SELECT 1
+                   FROM review_runtime_settings s
+                   JOIN workspaces live ON live.id = s.value AND live.deleted_at IS NULL
                   WHERE s.key = '${OFFICIAL_WORKSPACE_KEY}' AND s.value = w.workspace_id) AS is_official,
          (SELECT COUNT(*) FROM bot_installations i
            WHERE i.bot_id = b.id AND i.removed_at IS NULL) AS installation_count,
