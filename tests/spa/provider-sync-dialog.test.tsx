@@ -61,7 +61,12 @@ async function mount(handler: (url: string, init?: RequestInit) => Promise<Respo
     });
     await act(async () => {});
   };
-  return { win, container, outcomes, reloads, byText, click, cleanup: async () => {
+  const setOpen = async (next: boolean) => {
+    open = next;
+    await render();
+    await act(async () => {});
+  };
+  return { win, container, outcomes, reloads, byText, click, setOpen, cleanup: async () => {
     await act(async () => root.unmount());
     cleanup();
   } };
@@ -74,6 +79,60 @@ const previewBody = (preview: Record<string, number>): Response =>
   });
 
 describe("the provider model sync dialog (I-000644)", () => {
+  test("closing and reopening discards the preview and requires a fresh successful fetch", async () => {
+    let fetches = 0;
+    const view = await mount(async () => {
+      fetches++;
+      return fetches === 2
+        ? new Response("Provider unavailable", { status: 503 })
+        : previewBody({ current: 50, fetched: 104, kept: 44, added: 60, dropped: 6 });
+    });
+    try {
+      await view.click(view.byText(t("en", "settings.providers.sync.action")));
+      expect(view.byText(t("en", "settings.providers.sync.confirm"))?.disabled).toBe(false);
+      await view.click(view.byText(t("en", "common.cancel")));
+      await view.setOpen(true);
+      expect(view.container.ownerDocument.body.textContent).toContain(t("en", "settings.providers.sync.notFetched"));
+      expect(view.container.ownerDocument.body.textContent).not.toContain(
+        t("en", "settings.providers.sync.summary", { fetched: 104, kept: 44, added: 60, dropped: 6 }),
+      );
+      expect(view.byText(t("en", "settings.providers.sync.confirm"))?.disabled).toBe(true);
+      await view.click(view.byText(t("en", "settings.providers.sync.action")));
+      expect(view.byText(t("en", "settings.providers.sync.confirm"))?.disabled).toBe(true);
+      expect(view.container.ownerDocument.body.textContent).toContain("Provider unavailable");
+      await view.setOpen(false);
+      await view.setOpen(true);
+      expect(view.container.ownerDocument.body.textContent).not.toContain("Provider unavailable");
+      await view.click(view.byText(t("en", "settings.providers.sync.action")));
+      expect(view.byText(t("en", "settings.providers.sync.confirm"))?.disabled).toBe(false);
+      expect(fetches).toBe(3);
+      expect(view.outcomes).toEqual([]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a preview that finishes after closing cannot enable confirmation after reopening", async () => {
+    let resolve!: (response: Response) => void;
+    const pending = new Promise<Response>((done) => { resolve = done; });
+    const view = await mount(async () => pending);
+    try {
+      await view.click(view.byText(t("en", "settings.providers.sync.action")));
+      await view.setOpen(false);
+      await view.setOpen(true);
+      await act(async () => {
+        resolve(previewBody({ current: 50, fetched: 104, kept: 44, added: 60, dropped: 6 }));
+        await pending;
+      });
+      expect(view.container.ownerDocument.body.textContent).toContain(t("en", "settings.providers.sync.notFetched"));
+      expect(view.byText(t("en", "settings.providers.sync.confirm"))?.disabled).toBe(true);
+      expect(view.byText(t("en", "settings.providers.sync.action"))?.disabled).toBe(false);
+    } finally {
+      resolve(previewBody({}));
+      await view.cleanup();
+    }
+  });
+
   test("it starts 'not fetched', with confirmation unavailable and no count claimed", async () => {
     const view = await mount(async () => previewBody({ current: 50, fetched: 104, kept: 44, added: 60, dropped: 6 }));
     try {

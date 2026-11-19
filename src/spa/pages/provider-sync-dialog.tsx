@@ -26,16 +26,7 @@ import { NoticeRegion, type OpNotice } from "./PageNotice";
 /** The preview shape the Worker answers: counts only, never the ids. */
 type Preview = { current: number; fetched: number; kept: number; added: number; dropped: number };
 
-export function ProviderSyncDialog({
-  locale,
-  open,
-  onOpenChange,
-  appId,
-  provider,
-  label,
-  onOutcome,
-  onReload,
-}: {
+type ProviderSyncDialogProps = {
   locale: SpaBoot["locale"];
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -45,7 +36,22 @@ export function ProviderSyncDialog({
   onOutcome: (notice: OpNotice) => void;
   /** The stored declaration changed — the card re-reads its count. */
   onReload: () => Promise<unknown>;
-}) {
+};
+
+export function ProviderSyncDialog(props: ProviderSyncDialogProps) {
+  return props.open ? <OpenProviderSyncDialog {...props} /> : null;
+}
+
+function OpenProviderSyncDialog({
+  locale,
+  open,
+  onOpenChange,
+  appId,
+  provider,
+  label,
+  onOutcome,
+  onReload,
+}: ProviderSyncDialogProps) {
   // null = not fetched yet. The dialog never guesses a count it did not fetch.
   const [preview, setPreview] = useState<Preview | null>(null);
   const [busy, setBusy] = useState(false);
