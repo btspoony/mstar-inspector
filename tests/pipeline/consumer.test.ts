@@ -9436,6 +9436,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     expect(String(failureRows(db)[0]!.error)).toContain("system-cap");
     expect(String(failureRows(db)[0]!.error)).toContain("comment claim restore failed: D1 unavailable");
     expect(String(failureRows(db)[0]!.error)).not.toContain("refused retries");
+    expect((await createFailureStore(db).countAdmissionDrops24h())["system-cap"]).toBe(1);
     expect(claimRows(db)[0]!.state).toBe("consumed");
     expect(h.sandbox.calls).toHaveLength(0);
   });
@@ -9461,6 +9462,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     expect(String(failure.error)).toContain("comment claim restore failed: D1 unavailable");
     expect(String(failure.error)).toContain("pr-held");
     expect(String(failure.error)).not.toContain("refused retries");
+    expect((await createFailureStore(db).countAdmissionDrops24h())["pr-held"]).toBe(1);
     const terminalWarn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("— acking"))!;
     expect(terminalWarn.msg).toContain("comment claim restore failed: D1 unavailable");
     expect(terminalWarn.msg).toContain("pr-held");

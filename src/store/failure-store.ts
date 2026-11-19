@@ -220,18 +220,19 @@ const LIST_RECENT_DEFAULT_LIMIT = 50;
  * reaches this text.
  */
 const admissionDropLike = (reason: AdmissionDropReason): string =>
-  `'review dropped after % refused retries: ${reason} (%'`;
+  `(error LIKE 'review dropped after % refused retries: ${reason} (%'
+    OR error LIKE 'review dropped: comment claim restore failed: %; admission refused: ${reason} (%')`;
 
 const ADMISSION_DROP_SQL = `SELECT CASE
     ${ADMISSION_DROP_REASONS.map(
-      (reason) => `WHEN error LIKE ${admissionDropLike(reason)} THEN '${reason}'`,
+      (reason) => `WHEN ${admissionDropLike(reason)} THEN '${reason}'`,
     ).join("\n    ")}
   END AS reason,
   COUNT(*) AS drops
 FROM review_failures
 WHERE stage = 'pipeline'
   AND created_at > datetime('now', '-24 hours')
-  AND (${ADMISSION_DROP_REASONS.map((reason) => `error LIKE ${admissionDropLike(reason)}`).join("\n    OR ")})
+  AND (${ADMISSION_DROP_REASONS.map((reason) => admissionDropLike(reason)).join("\n    OR ")})
 GROUP BY reason`;
 
 /**
