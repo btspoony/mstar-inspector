@@ -353,11 +353,9 @@ describe("the pre-workspace App face is retired", () => {
     expect(answers[0]).toMatchObject({ status: 302, location: "/dashboard/login" });
   });
 
-  test("the tenant gate issues no workspace read for an anonymous request", async () => {
+  test("an anonymous workspace API request reads only the maintenance window", async () => {
     const { db } = tenancyFixture();
     const statements: string[] = [];
-    // Record every statement the request prepares; a classified-only gate must
-    // not touch `workspaces` before the session read.
     const observed = {
       ...db,
       prepare(query: string) {
@@ -370,7 +368,7 @@ describe("the pre-workspace App face is retired", () => {
       envFor(observed),
     );
     expect(res.status).toBe(302);
-    expect(statements.filter((sql) => sql.includes("FROM workspaces"))).toEqual([]);
+    expect(statements).toHaveLength(1);
   });
 });
 
