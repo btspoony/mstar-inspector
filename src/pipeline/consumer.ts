@@ -1145,8 +1145,13 @@ async function handleGuardHeld(
               AND state = 'consumed'`,
         )
           .bind(
-            JSON.stringify(payload), Date.now(), payload.installation_id,
-            payload.owner, payload.repo, payload.pr_number, payload.comment_id,
+            JSON.stringify(payload),
+            Date.now(),
+            payload.installation_id,
+            payload.owner,
+            payload.repo,
+            payload.pr_number,
+            payload.comment_id,
           )
           .run();
       } catch (err) {
@@ -4127,7 +4132,14 @@ export function createReviewConsumer(
       // delayed retry (or the final ack-with-warning) instead of throwing
       // into the queue's immediate ×3 retry → DLQ path.
       if (outcome.kind === "guard-held") {
-        await handleGuardHeld(message, deps, outcome.admission, outcome.heldHeadSha, outcome.level, outcome.commentClaimConsumed);
+        await handleGuardHeld(
+          message,
+          deps,
+          outcome.admission,
+          outcome.heldHeadSha,
+          outcome.level,
+          outcome.commentClaimConsumed,
+        );
       } else if (outcome.kind === "paused") {
         // Architect lock L4: a paused App's in-flight message is
         // acked DIRECTLY — an intentional skip (its claim was already stamped
