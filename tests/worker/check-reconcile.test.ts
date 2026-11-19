@@ -28,6 +28,7 @@
  *     on the shared cron, `reconcileReviewChecks` on its own every-minute cron,
  *     each stage caught independently
  */
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
@@ -35,9 +36,7 @@ import {
   CHECK_ATTACH_GRACE_MS,
   CHECK_ATTACH_WINDOW_MS,
   CHECK_BACKOFF_MS,
-  CHECK_MAX_ATTEMPTS,
   CHECK_NAME,
-  CHECK_RECONCILE_LIMIT,
   CHECK_RECOVERY_LEASE_MS,
   CHECK_STALE_HOLDER_MS,
   claimCheckRecovery,
@@ -59,10 +58,6 @@ import {
 } from "../../src/store/review-checks";
 import { claimPublication } from "../../src/store/finding-lifecycle";
 import {
-  CHECK_RECONCILE_MAX_REQUESTS,
-  CHECK_RECONCILE_PER_REQUEST_MS,
-  CHECK_RECONCILE_RUN_BUDGET_MS,
-  CHECK_ROW_MAX_REQUESTS,
   defaultCheckReconcileLog,
   reconcileReviewChecks,
   type CheckCredentialFactory,
@@ -142,12 +137,6 @@ afterAll(() => {
 
 describe("budget and selector constants (spec §7.11.2)", () => {
   test("pins the §7.11.2 verbatim bounds", () => {
-    expect(CHECK_RECONCILE_MAX_REQUESTS).toBe(100);
-    expect(CHECK_RECONCILE_RUN_BUDGET_MS).toBe(60_000);
-    expect(CHECK_RECONCILE_PER_REQUEST_MS).toBe(5_000);
-    expect(CHECK_ROW_MAX_REQUESTS).toBe(6);
-    expect(CHECK_MAX_ATTEMPTS).toBe(5);
-    expect(CHECK_RECONCILE_LIMIT).toBe(25);
     expect(CHECK_RECOVERY_LEASE_MS).toBe(120_000);
     expect(CHECK_BACKOFF_MS).toEqual([60_000, 120_000, 240_000, 480_000, 960_000]);
   });
@@ -296,8 +285,8 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     db.raw
       .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, attempts = 1 WHERE id = ?`)
       .run(attempt.identity.attemptId);
-    expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(0);
-    expect(await listCheckReconcileBatch(db, T0 + 900_000)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0 + 60_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(0);
+    expect(await listCheckReconcileBatch(db, T0 + 900_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
   });
 
   test("a frozen intent stops waiting on a dead holder after CHECK_STALE_HOLDER_MS", async () => {
@@ -314,10 +303,10 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     expect((await rawRow(db, id)).lease_until_ms).toBe(T0 + 900_000);
 
     // Silent for less than the stale window: still the row's owner.
-    expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS - 1)).toHaveLength(0);
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS - 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(0);
     // Silent for the window: the frozen conclusion no longer waits for it.
-    expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS)).toHaveLength(1);
-    const taken = await claimCheckRecovery(db, id, "reconciler", T0 + CHECK_STALE_HOLDER_MS);
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
+    const taken = await claimCheckRecovery(db, id, "reconciler", T0 + CHECK_STALE_HOLDER_MS, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(taken).not.toBeNull();
     // The epoch bump is what fences the old holder out.
     expect(taken!.epoch).toBe(lease.epoch + 1);
@@ -333,8 +322,8 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     });
     const id = attempt.identity.attemptId;
     // The model may still be running, so only the execution deadline governs.
-    expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS + 1)).toHaveLength(0);
-    expect(await claimCheckRecovery(db, id, "reconciler", T0 + CHECK_STALE_HOLDER_MS + 1)).toBeNull();
+    expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS + 1, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(0);
+    expect(await claimCheckRecovery(db, id, "reconciler", T0 + CHECK_STALE_HOLDER_MS + 1, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
     expect((await rawRow(db, id)).holder).toBe("consumer:x");
   });
 
@@ -349,7 +338,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: "gate" }, null, T0);
     // A holder mid-`completeCheck` has frozen the intent seconds ago: taking the
     // row now would race a send that is still in flight.
-    expect(await listCheckReconcileBatch(db, T0 + 30_000)).toHaveLength(0);
+    expect(await listCheckReconcileBatch(db, T0 + 30_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(0);
   });
 
   test("a not-yet-due row and a row at the attempt cap are both left alone", async () => {
@@ -362,7 +351,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     const capped = await claim(db, { action: "capped", triggeredBy: "third" });
     db.raw
       .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, attempts = ? WHERE id = ?`)
-      .run(CHECK_MAX_ATTEMPTS, capped.attempt.identity.attemptId);
+      .run(RECONCILE_DEFAULTS.checkMaxAttempts, capped.attempt.identity.attemptId);
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript()) });
@@ -372,7 +361,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
       fetchStub.restore();
     }
     expect((await rawRow(db, early.attempt.identity.attemptId)).terminal_ms).toBeNull();
-    expect((await rawRow(db, capped.attempt.identity.attemptId)).attempts).toBe(CHECK_MAX_ATTEMPTS);
+    expect((await rawRow(db, capped.attempt.identity.attemptId)).attempts).toBe(RECONCILE_DEFAULTS.checkMaxAttempts);
     expect((await rawRow(db, capped.attempt.identity.attemptId)).terminal_ms).toBeNull();
   });
 
@@ -993,7 +982,7 @@ describe("backoff and honest give-up (spec §7.11.2 steps 4–5)", () => {
       .prepare(
         `UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, attempts = ?, create_state = 'known', check_run_id = 777 WHERE id = ?`,
       )
-      .run(CHECK_MAX_ATTEMPTS - 1, attempt.identity.attemptId);
+      .run(RECONCILE_DEFAULTS.checkMaxAttempts - 1, attempt.identity.attemptId);
     const warned: { event: string; detail: string }[] = [];
     const fetchStub = stubFetch();
     try {
@@ -1072,7 +1061,7 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
     } finally {
       fetchStub.restore();
     }
-    expect(fetchStub.urls).toHaveLength(CHECK_ROW_MAX_REQUESTS);
+    expect(fetchStub.urls).toHaveLength(RECONCILE_DEFAULTS.checkRowMaxRequests);
     const row = await rawRow(db, attempt.identity.attemptId);
     // The deferral mutated NOTHING and spent NO attempt: the row stays due.
     expect(row.attempts).toBe(0);
@@ -1097,12 +1086,12 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
       const transport = capture.transport;
       if (transport === undefined) throw new Error("the run never built a transport");
       const before = fetchStub.urls.length;
-      for (let i = 0; i < CHECK_RECONCILE_MAX_REQUESTS; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.checkMaxRequests; i += 1) {
         await transport.fetchImpl(`https://api.github.com/x?n=${i}`);
       }
-      expect(fetchStub.urls.length - before).toBe(CHECK_RECONCILE_MAX_REQUESTS);
+      expect(fetchStub.urls.length - before).toBe(RECONCILE_DEFAULTS.checkMaxRequests);
       await expect(transport.fetchImpl("https://api.github.com/x?over=1")).rejects.toThrow(/budget exhausted/);
-      expect(fetchStub.urls.length - before).toBe(CHECK_RECONCILE_MAX_REQUESTS);
+      expect(fetchStub.urls.length - before).toBe(RECONCILE_DEFAULTS.checkMaxRequests);
     } finally {
       fetchStub.restore();
     }
@@ -1123,10 +1112,10 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
         },
       });
       const transport = capture.transport!;
-      expect(transport.boundMs()).toBe(CHECK_RECONCILE_PER_REQUEST_MS);
-      clock = T0 + CHECK_RECONCILE_RUN_BUDGET_MS - 10;
+      expect(transport.boundMs()).toBe(RECONCILE_DEFAULTS.checkPerRequestMs);
+      clock = T0 + RECONCILE_DEFAULTS.checkRunBudgetMs - 10;
       expect(transport.boundMs()).toBe(10);
-      clock = T0 + CHECK_RECONCILE_RUN_BUDGET_MS;
+      clock = T0 + RECONCILE_DEFAULTS.checkRunBudgetMs;
       expect(transport.boundMs()).toBe(1); // never zero or negative
     } finally {
       fetchStub.restore();
@@ -1144,7 +1133,7 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
       const summary = await run(db, {
         now: () => {
           const value = clock;
-          clock = T0 + CHECK_RECONCILE_RUN_BUDGET_MS;
+          clock = T0 + RECONCILE_DEFAULTS.checkRunBudgetMs;
           return value;
         },
         credentials: scriptedCredentials(db, agreeingScript()),
@@ -1507,12 +1496,12 @@ describe("claim repeats the selector's eligibility (L2 fix 1 finding 1)", () => 
 
   test("reaching the attempt cap after selection blocks the claim", async () => {
     const { summary, row, urls } = await withPostSelectionMutation((db, id) => {
-      db.raw.prepare(`UPDATE review_checks SET attempts = ? WHERE id = ?`).run(CHECK_MAX_ATTEMPTS, id);
+      db.raw.prepare(`UPDATE review_checks SET attempts = ? WHERE id = ?`).run(RECONCILE_DEFAULTS.checkMaxAttempts, id);
     });
     expect(summary.examined).toBe(1);
     expect(summary.gaveUp).toBe(0);
     expect(urls).toHaveLength(0);
-    expect(row.attempts).toBe(CHECK_MAX_ATTEMPTS); // not incremented further
+    expect(row.attempts).toBe(RECONCILE_DEFAULTS.checkMaxAttempts); // not incremented further
     expect(row.holder).toBe("consumer-run");
     expect(row.terminal_ms).toBeNull();
   });
@@ -1691,7 +1680,7 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
     expect(row.terminal_ms).toBeNull();
     // NOT immediately due: the deferral is what stops the every-pass credential
     // mint + adoption re-walk this finding names.
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(0);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(0);
   });
 
   test("an UNPAUSED App with the same shape still creates exactly once", async () => {
@@ -1791,7 +1780,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
 
     // The run ceiling held exactly, which is what makes the claims below
     // meaningful rather than vacuous.
-    expect(fetchStub.urls.length).toBe(CHECK_RECONCILE_MAX_REQUESTS);
+    expect(fetchStub.urls.length).toBe(RECONCILE_DEFAULTS.checkMaxRequests);
     // The ceiling stopped work BEFORE any create could leave.
     expect(creates).toBe(0);
 
@@ -1846,9 +1835,9 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
     // The load-bearing assertion: the selector sees the row due at the very
     // clock instant the refusal happened. A withheld 120s recovery lease would
     // hide it here, which is precisely the defect finding 4 names.
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
     // …and a SECOND pass in the same window can claim it again immediately.
-    const reclaim = await claimCheckRecovery(db, attempt.identity.attemptId, "reconciler", T0);
+    const reclaim = await claimCheckRecovery(db, attempt.identity.attemptId, "reconciler", T0, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(reclaim, "the released row must be immediately reclaimable").not.toBeNull();
   });
 
@@ -1862,7 +1851,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
       await run(db, {
         now: () => T0,
         credentials: scriptedCredentials(db, {
-          requestsPerCall: CHECK_ROW_MAX_REQUESTS + 1,
+          requestsPerCall: RECONCILE_DEFAULTS.checkRowMaxRequests + 1,
           adopt: async () => ({ kind: "absent" }),
         }),
       });
@@ -1874,7 +1863,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
     expect(row.lease_until_ms).toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.recovery_state).toBe("pending");
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
   });
 
   test("a refusal inside the owned-run FETCH releases the claim too", async () => {
@@ -1889,7 +1878,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
       await run(db, {
         now: () => T0,
         credentials: scriptedCredentials(db, {
-          requestsPerCall: CHECK_ROW_MAX_REQUESTS + 1,
+          requestsPerCall: RECONCILE_DEFAULTS.checkRowMaxRequests + 1,
           fetch: async () => ({ kind: "unavailable", reason: "should not be reached" }),
         }),
       });
@@ -1902,7 +1891,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
     expect(row.attempts).toBe(0);
     expect(row.recovery_state).toBe("pending");
     expect(row.check_run_id).toBe(321); // identity retained
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
   });
 
   test("a refusal inside the terminal UPDATE releases the claim too", async () => {
@@ -1919,7 +1908,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
         now: () => T0,
         credentials: scriptedCredentials(db, {
           // adoption is skipped (id known): fetch spends 1, the update the rest.
-          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          requestsPerCall: RECONCILE_DEFAULTS.checkRowMaxRequests,
           fetch: async (identity) => ({
             kind: "found",
             remote: remoteFor(identity, { id: 321, status: "in_progress", conclusion: null }),
@@ -1936,7 +1925,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
     expect(row.recovery_state).toBe("pending");
     expect(row.observed).toBe("unknown");
     expect(row.check_run_id).toBe(321);
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
   });
 });
 
@@ -1981,9 +1970,9 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
     // …and immediately reclaimable.
-    expect(await claimCheckRecovery(db, id, "reconciler", T0)).not.toBeNull();
+    expect(await claimCheckRecovery(db, id, "reconciler", T0, RECONCILE_DEFAULTS.checkMaxAttempts)).not.toBeNull();
     void creates;
   });
 
@@ -2025,8 +2014,8 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
     expect(row.next_attempt_ms).toBeNull();
     expect(row.last_error).toBeNull();
     // Immediately selector-due and reclaimable at that same instant.
-    expect(await listCheckReconcileBatch(db, clock)).toHaveLength(1);
-    expect(await claimCheckRecovery(db, id, "reconciler", clock)).not.toBeNull();
+    expect(await listCheckReconcileBatch(db, clock, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
+    expect(await claimCheckRecovery(db, id, "reconciler", clock, RECONCILE_DEFAULTS.checkMaxAttempts)).not.toBeNull();
   });
 
   test("requests > 0 stays possibly-sent: a spent attempt with backoff, no rollback", async () => {
@@ -2148,7 +2137,7 @@ describe("zero-dispatch fetch/complete refusals stay due (no attempt spent)", ()
     expect(row.desired).toBe("failure");
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
   });
 
   test("a zero-dispatch read refusal releases the claim without spending an attempt", async () => {
@@ -2182,7 +2171,7 @@ describe("zero-dispatch fetch/complete refusals stay due (no attempt spent)", ()
     expect(row.terminal_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
     expect(row.holder).toBeNull();
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
   });
 });
 
@@ -2197,10 +2186,10 @@ describe("operator retry accepts a recorded in-progress observation (L2 fix 1 fi
     // still pending" state the spec's operator retry exists for.
     db.raw
       .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 321, observed = 'in_progress', recovery_state = 'local-error', terminal_ms = ?, attempts = ? WHERE id = ?`)
-      .run(T0, CHECK_MAX_ATTEMPTS, id);
+      .run(T0, RECONCILE_DEFAULTS.checkMaxAttempts, id);
 
     // A live lease is still refused.
-    const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 - 1);
+    const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 - 1, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(reacquired).toBeNull();
 
     expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: id, nowMs: T0 })).toBe(true);
@@ -2214,7 +2203,7 @@ describe("operator retry accepts a recorded in-progress observation (L2 fix 1 fi
     // The observation is RETAINED, never rewritten to a fake completion.
     expect(row.observed).toBe("in_progress");
     // …and the row is a selector candidate again.
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
   });
 
   test("a TERMINAL observation is still refused (settled evidence is not reopened)", async () => {
@@ -2335,7 +2324,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     expect(row.recovery_state).toBe("suspended");
     expect(row.attempts).toBe(0);
     // And it never occupied the bounded batch.
-    expect(await listCheckReconcileBatch(db, T0 + 15 * 60_000)).toHaveLength(0);
+    expect(await listCheckReconcileBatch(db, T0 + 15 * 60_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(0);
   });
 
   test("an operator-corrected envelope reopens the pair and resumes the SAME attempt identity", async () => {
@@ -2424,7 +2413,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
 
   test("unchanged pairs filling a whole scan page never starve a repaired pair that sorts after them", async () => {
     const db = seededDb();
-    const { stuckIds, repairedId, repairedScope } = await seedSuspendedBacklog(db, CHECK_RECONCILE_LIMIT);
+    const { stuckIds, repairedId, repairedScope } = await seedSuspendedBacklog(db, RECONCILE_DEFAULTS.checkSelectLimit);
 
     const { passes, probed } = await passUntilResumed(db, repairedId, repairedScope, 3);
 
@@ -2438,15 +2427,15 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
 
   test("the re-enable scan rotates through a backlog of several pages and wraps back to the start", async () => {
     const db = seededDb();
-    const backlog = CHECK_RECONCILE_LIMIT * 3;
+    const backlog = RECONCILE_DEFAULTS.checkSelectLimit * 3;
     const { stuckIds, repairedId, repairedScope } = await seedSuspendedBacklog(db, backlog);
 
     const { passes } = await passUntilResumed(db, repairedId, repairedScope, 10);
 
-    expect(passes).toBe(Math.ceil((backlog + 1) / CHECK_RECONCILE_LIMIT));
+    expect(passes).toBe(Math.ceil((backlog + 1) / RECONCILE_DEFAULTS.checkSelectLimit));
     expect((await rawRow(db, repairedId)).recovery_state).toBe("done");
     // The pass that reached the repaired pair wrapped and filled its page from the start.
-    const wrappedPairs = passes * CHECK_RECONCILE_LIMIT - (backlog + 1);
+    const wrappedPairs = passes * RECONCILE_DEFAULTS.checkSelectLimit - (backlog + 1);
     const cursor = db.raw.prepare(`SELECT installation_id FROM check_reenable_cursor`).get() as { installation_id: number };
     expect(cursor.installation_id).toBe(200 + wrappedPairs - 1);
     for (const id of stuckIds) {
@@ -2547,7 +2536,7 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
       expect(row.attempts).toBe(0);
       expect(checkSuspensionKindOf(row.last_error as string)).toBe("paused");
       // Out of the batch — the per-pass churn is gone.
-      expect(await listCheckReconcileBatch(db, T0)).toHaveLength(0);
+      expect(await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(0);
 
       // A SECOND paused pass costs nothing: the row is not even selected, so no
       // credential resolution and no adoption walk is issued for it.
@@ -2649,7 +2638,7 @@ describe("pre-dispatch refusal is typed end to end (P68-QC-005)", () => {
       });
       expect(transport).toBeDefined();
       // Exhaust the run budget so the NEXT admission is refused pre-dispatch.
-      for (let i = 0; i < CHECK_RECONCILE_MAX_REQUESTS; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.checkMaxRequests; i += 1) {
         await transport!.fetchImpl("https://api.github.com/probe");
       }
       // The refusal must be the UPSTREAM marker class, not a local look-alike:
@@ -2752,7 +2741,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
           if (scope.installationId === DISTRACTOR) {
             // Burn the whole run cap here; the last request is refused before
             // dispatch, which stops the loop.
-            for (let i = 0; i < CHECK_RECONCILE_MAX_REQUESTS + 5; i += 1) {
+            for (let i = 0; i < RECONCILE_DEFAULTS.checkMaxRequests + 5; i += 1) {
               try {
                 await transport.fetchImpl(`https://api.github.com/burn/${i}`);
               } catch {
@@ -2837,7 +2826,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
           try {
             // One MORE than the run's whole allowance, so the last request is
             // refused before dispatch and the budget flag is set.
-            for (let i = 0; i <= CHECK_RECONCILE_MAX_REQUESTS; i += 1) {
+            for (let i = 0; i <= RECONCILE_DEFAULTS.checkMaxRequests; i += 1) {
               await transport.fetchImpl("https://api.github.com/probe");
             }
           } catch {
@@ -2975,7 +2964,7 @@ const FUTURE_DEADLINE = T0 + 900_000;
  */
 async function abandonedAttempt(db: TestD1, deadlineMs: number = FUTURE_DEADLINE): Promise<{ attempt: CheckAttempt; id: string }> {
   const transport: CheckTransport = {
-    boundMs: () => CHECK_RECONCILE_PER_REQUEST_MS,
+    boundMs: () => RECONCILE_DEFAULTS.checkPerRequestMs,
     fetchImpl: (input, init) => fetch(input, init),
   };
   const lifecycle = createCheckLifecycle({
@@ -3072,7 +3061,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const { id } = await abandonedAttempt(db);
     // The whole point of the released-row eligibility: a row whose intent is
     // still `in_progress` is SELECTED long before its execution deadline.
-    expect(await listCheckReconcileBatch(db, T0 + 120_000)).toHaveLength(1);
+    expect(await listCheckReconcileBatch(db, T0 + 120_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
     const stub = stubFetch();
     let factoryCalls = 0;
     const events: Array<Record<string, unknown>> = [];
@@ -3144,7 +3133,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 
       // The pass AFTER the deadline — the rung has not elapsed yet — must
       // already select the row and conclude it.
-      expect(await listCheckReconcileBatch(db, deadline + 1_000)).toHaveLength(1);
+      expect(await listCheckReconcileBatch(db, deadline + 1_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).toHaveLength(1);
       const summary = await run(db, {
         now: () => deadline + 1_000,
         credentials: scriptedCredentials(db, {

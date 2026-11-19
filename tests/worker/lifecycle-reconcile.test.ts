@@ -29,6 +29,7 @@
  *   - tenant/App isolation: only the failing pair is suspended
  *   - a throwing reviewer/dependency can never escape the handler
  */
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import { idemKey } from "../../src/contracts/idem";
@@ -61,12 +62,6 @@ import {
 import { listDiscussionWithOctokit } from "../../src/pipeline/discussion-context";
 import {
   reconcileReviewLifecycle,
-  RECONCILE_MAX_REQUESTS,
-  RECONCILE_PER_REQUEST_MS,
-  RECONCILE_PUBLICATION_LANE_MAX_REQUESTS,
-  RECONCILE_RUN_BUDGET_MS,
-  RECONCILE_SELECT_LIMIT,
-  RECONCILE_THREAD_OPERATION_REQUESTS,
   type LifecycleReconcileDeps,
   type ReconcileReviewer,
   type ReconcileTransport,
@@ -465,17 +460,6 @@ function threadRow(db: TestD1, id: string): { resolution_state: string; attempts
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("reconcileReviewLifecycle — constants (spec §7.11.1)", () => {
-  test("pins the budget constants", () => {
-    expect(RECONCILE_MAX_REQUESTS).toBe(80);
-    expect(RECONCILE_RUN_BUDGET_MS).toBe(45_000);
-    expect(RECONCILE_PER_REQUEST_MS).toBe(5_000);
-    expect(RECONCILE_THREAD_OPERATION_REQUESTS).toBe(15);
-    expect(RECONCILE_PUBLICATION_LANE_MAX_REQUESTS).toBe(40);
-    expect(RECONCILE_SELECT_LIMIT).toBe(10);
-  });
-});
-
 describe("publication lane — confirmed apply", () => {
   test("applies a confirmed publication after a crashed window, purely locally", async () => {
     const db = createMigratedTestD1();
@@ -706,7 +690,7 @@ describe("thread lane — retry, backoff, give-up (real §7.5 surface)", () => {
     const row = threadRow(db, "assoc-1");
     expect(row.resolution_state).toBe("needs-recheck");
     // No longer selectable by the recovery reader.
-    const pending = await listResolutionRecovery(db, T0 + 1_000_000, 10);
+    const pending = await listResolutionRecovery(db, T0 + 1_000_000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(pending.map((r) => r.associationId)).not.toContain("assoc-1");
   });
 
@@ -792,10 +776,10 @@ describe("suspended-pair scan fairness", () => {
     const fingerprint = await sha256Hex("enc-pem");
     const kinds = ["disabled", "missing", "deleted", "identity-mismatch"] as const;
     const repairedAssociationId = "22222222-3333-4444-5555-666666666666";
-    for (let i = 0; i < RECONCILE_SELECT_LIMIT + 2; i += 1) {
+    for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleSelectLimit + 2; i += 1) {
       const appId = `scan-${String(i).padStart(3, "0")}`;
       const scope = { ...SCOPE, appId };
-      const repaired = i === RECONCILE_SELECT_LIMIT + 1;
+      const repaired = i === RECONCILE_DEFAULTS.lifecycleSelectLimit + 1;
       const suspensionKind = repaired ? "disabled" : kinds[i % kinds.length]!;
       seedApp(db, appId, {
         githubAppId: 2000 + i,
@@ -817,7 +801,7 @@ describe("suspended-pair scan fairness", () => {
       }
     }
 
-    const repairedId = RECONCILE_SELECT_LIMIT + 1;
+    const repairedId = RECONCILE_DEFAULTS.lifecycleSelectLimit + 1;
     let now = T0;
     let reviewer = okReviewer();
     if (lane === "thread") {
@@ -883,7 +867,7 @@ describe("suspended-pair scan fairness", () => {
 
   test("a throwing identity probe does not pin the next scan to that pair", async () => {
     const db = createMigratedTestD1();
-    for (let i = 0; i <= RECONCILE_SELECT_LIMIT; i += 1) {
+    for (let i = 0; i <= RECONCILE_DEFAULTS.lifecycleSelectLimit; i += 1) {
       const appId = `scan-${String(i).padStart(3, "0")}`;
       const scope = { ...SCOPE, appId };
       seedApp(db, appId, { githubAppId: 3000 + i });
@@ -893,7 +877,7 @@ describe("suspended-pair scan fairness", () => {
     await reconcile(db, { now: () => T0, reviewer: async () => { throw new Error("probe failed"); } });
     expect(pubRow(db, "pub-0").recovery_state).toBe("suspended");
     await reconcile(db, { now: () => T0 + 1, reviewer: okReviewer() });
-    expect(pubRow(db, `pub-${RECONCILE_SELECT_LIMIT}`).recovery_state).toBe("pending");
+    expect(pubRow(db, `pub-${RECONCILE_DEFAULTS.lifecycleSelectLimit}`).recovery_state).toBe("pending");
     db.raw.close();
   });
 });
@@ -959,7 +943,7 @@ describe("budgets (spec §7.11.1)", () => {
 
     let call = 0;
     const now = () => {
-      const value = call++ < 1 ? T0 : T0 + RECONCILE_RUN_BUDGET_MS + 1_000;
+      const value = call++ < 1 ? T0 : T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs + 1_000;
       return value;
     };
     let resolved = 0;
@@ -1096,14 +1080,14 @@ describe("enforced per-request transport bound (spec §7.11.1)", () => {
 
     // Deadline = T0 + 45s (fixed at run start). With plenty of run left the
     // per-request bound is the 5s cap...
-    expect(transport.boundMs()).toBe(RECONCILE_PER_REQUEST_MS);
+    expect(transport.boundMs()).toBe(RECONCILE_DEFAULTS.lifecyclePerRequestMs);
     // ...and late in the run it collapses to the remaining time — this is the
     // clamp the review found missing (§7.11.1: "additionally capped by
     // remaining run deadline").
-    clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 30;
+    clock.now = T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs - 30;
     expect(transport.boundMs()).toBe(30);
     // Never zero/negative: a request already past the deadline gets 1ms.
-    clock.now = T0 + RECONCILE_RUN_BUDGET_MS + 10_000;
+    clock.now = T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs + 10_000;
     expect(transport.boundMs()).toBe(1);
 
     // The clamp is ENFORCED on the wire, not merely computed: a hung upstream
@@ -1119,7 +1103,7 @@ describe("enforced per-request transport bound (spec §7.11.1)", () => {
           }
           signal.addEventListener("abort", () => reject(signal.reason));
         })) as unknown as typeof fetch;
-      clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 40; // 40ms of run left
+      clock.now = T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs - 40; // 40ms of run left
       const started = performance.now();
       await expect(transport.fetchImpl("https://api.github.com/app")).rejects.toMatchObject({
         name: "TimeoutError",
@@ -1176,7 +1160,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     // TEN due rows — the §7.11.1 selection LIMIT. The ≤15-request envelope is
     // the admission ESTIMATE: only floor(80 / 15) = 5 may even start, and the
     // requests each operation really issues are charged at the transport.
-    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+    for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleSelectLimit; i += 1) {
       const rowId = `finding-row-${i}`;
       const assocId = `assoc-${i}`;
       seedFindingRow(db, rowId, "pub-1", SCOPE, "addressed");
@@ -1221,13 +1205,11 @@ describe("thread lane request budget (spec §7.11.1)", () => {
         });
       },
     });
-
-    expect(RECONCILE_MAX_REQUESTS).toBe(80);
     // 25 + 25 + 25 = 75 actual requests by three operations; 75 + 15 > 80, so
     // the fourth is never admitted. Actual requests stay under the cap.
     expect(resolved).toBe(3);
     expect(requests).toBe(75);
-    expect(requests).toBeLessThanOrEqual(RECONCILE_MAX_REQUESTS);
+    expect(requests).toBeLessThanOrEqual(RECONCILE_DEFAULTS.lifecycleMaxRequests);
     expect(summary.examined).toBe(3);
 
     // Budget exhaustion stops the lane BEFORE any claim/attempt mutation for
@@ -1235,7 +1217,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     const untouched = db.raw
       .query(`SELECT COUNT(*) AS n FROM review_threads WHERE attempts = 0 AND lease_until_ms IS NULL AND resolution_state = 'pending'`)
       .get() as { n: number };
-    expect(untouched.n).toBe(RECONCILE_SELECT_LIMIT - 3); // 7 rows never entered T2
+    expect(untouched.n).toBe(RECONCILE_DEFAULTS.lifecycleSelectLimit - 3); // 7 rows never entered T2
     expect(transport).toBeDefined();
 
     // The meter is the TRANSPORT: the remaining allowance is exactly
@@ -1248,12 +1230,12 @@ describe("thread lane request budget (spec §7.11.1)", () => {
         dispatched += 1;
         return new Response("{}", { status: 200 });
       }) as unknown as typeof fetch;
-      for (let i = 0; i < RECONCILE_MAX_REQUESTS - alreadySpent; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleMaxRequests - alreadySpent; i += 1) {
         await transport!.fetchImpl("https://api.github.com/x");
       }
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS - alreadySpent);
+      expect(dispatched).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests - alreadySpent);
       await expect(transport!.fetchImpl("https://api.github.com/x")).rejects.toThrow(/budget exhausted/);
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS - alreadySpent); // never dispatched
+      expect(dispatched).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests - alreadySpent); // never dispatched
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1266,7 +1248,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     // requests through the SAME run transport, so its spend genuinely reduces
     // what the thread lane may admit — there is no separate allowance.
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE, { round: 1 }), 120_000);
-    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+    for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleSelectLimit; i += 1) {
       const rowId = `finding-row-${i}`;
       const assocId = `assoc-${i}`;
       seedFindingRow(db, rowId, "pub-1", SCOPE, "addressed");
@@ -1313,12 +1295,12 @@ describe("thread lane request budget (spec §7.11.1)", () => {
 
     // The lane cap is a real bound on ACTUAL requests: the publication lane
     // stops dispatching at 40 even though its estimate was tiny.
-    expect(publicationRequests).toBe(RECONCILE_PUBLICATION_LANE_MAX_REQUESTS);
+    expect(publicationRequests).toBe(RECONCILE_DEFAULTS.lifecyclePublicationLaneMaxRequests);
     // The thread lane then shares that same run allowance: every operation that
     // entered really issued its requests, and together the two lanes stop at
     // exactly the whole-run cap — admission alone never lets the run overshoot.
-    expect(threadRequests).toBe(RECONCILE_MAX_REQUESTS - RECONCILE_PUBLICATION_LANE_MAX_REQUESTS);
-    expect(publicationRequests + threadRequests).toBe(RECONCILE_MAX_REQUESTS);
+    expect(threadRequests).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests - RECONCILE_DEFAULTS.lifecyclePublicationLaneMaxRequests);
+    expect(publicationRequests + threadRequests).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests);
     expect(entered).toBeGreaterThan(0);
   });
 });
@@ -1411,14 +1393,14 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
       // allowance: repeated failures must not be able to issue unaccounted
       // requests past the cap.
       let refused = 0;
-      for (let i = 0; i < RECONCILE_MAX_REQUESTS + 20; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleMaxRequests + 20; i += 1) {
         try {
           await transport!.fetchImpl("https://api.github.com/x");
         } catch (err) {
           if (err instanceof Error && /budget exhausted/.test(err.message)) refused += 1;
         }
       }
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS);
+      expect(dispatched).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests);
       expect(refused).toBe(20);
     } finally {
       globalThis.fetch = realFetch;
@@ -1461,7 +1443,7 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
         return new Response("{}", { status: 200 });
       }) as unknown as typeof fetch;
 
-      for (let i = 0; i < RECONCILE_MAX_REQUESTS; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleMaxRequests; i += 1) {
         await transport!.fetchImpl("https://api.github.com/x");
       }
       dispatched = 0;
@@ -1794,7 +1776,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
         return okResolution({
           planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
           postPreparedDegraded: async () => {
-            await spendThrough(runTransport, RECONCILE_MAX_REQUESTS + 1);
+            await spendThrough(runTransport, RECONCILE_DEFAULTS.lifecycleMaxRequests + 1);
             return { posted: true, commentId: 777 };
           },
         });
@@ -1815,7 +1797,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
 
     // "No attempt spent" is what keeps the row immediately selectable: M8
     // re-selects it on the very next pass with its full attempt budget.
-    const dueAgain = await listPublicationRecovery(db, T0, RECONCILE_SELECT_LIMIT);
+    const dueAgain = await listPublicationRecovery(db, T0, RECONCILE_DEFAULTS.lifecycleSelectLimit, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(dueAgain.map((r) => r.id)).toContain("pub-1");
 
     // And the next run really does send it, proving the refusal deferred the
@@ -1853,7 +1835,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
           planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
           postPreparedDegraded: async () => {
             try {
-              await spendThrough(runTransport, RECONCILE_MAX_REQUESTS + 1);
+              await spendThrough(runTransport, RECONCILE_DEFAULTS.lifecycleMaxRequests + 1);
             } catch (refusal) {
               throw new Error("Request failed", { cause: refusal });
             }

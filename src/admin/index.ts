@@ -10,6 +10,7 @@
  * Authorization: every handler re-checks `operatorLogin` itself
  * (`./gate.ts`) — no mounted middleware stands in for it.
  */
+import { RECONCILE_LIMITS } from "../contracts/reconcile-settings";
 import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
 import { listBotScopes, setBotScope } from "../dashboard/apps-store";
@@ -38,7 +39,6 @@ import {
   getRecheckAssignmentMaxBytes,
   getSweepSettings,
   getReconcileSettings,
-  RECONCILE_LIMITS,
   setReconcileSettings,
   getSystemConcurrency,
   isConcurrencyValue,

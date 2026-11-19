@@ -1,5 +1,3 @@
-import { getReconcileSettings, RECONCILE_DEFAULTS } from "../dashboard/runtime-config-store";
-import type { ReconcileValues } from "../contracts/reconcile-settings";
 /**
  * M7 Check recovery reconciler (spec review-lifecycle
  * §7.11.2) — the second independent cron lane, composed after the M8
@@ -45,7 +43,8 @@ import type { ReconcileValues } from "../contracts/reconcile-settings";
  *   recovery failure is logged and folded into `errors`, so nothing ever
  *   escapes into `scheduled`.
  */
-
+import { getReconcileSettings } from "../dashboard/runtime-config-store";
+import type { ReconcileValues } from "../contracts/reconcile-settings";
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like } from "../store/types";
@@ -116,14 +115,6 @@ export type CheckReconcileSummary = {
   deferred: number;
 };
 
-/** Whole-run request budget (§7.11.2: "≤100 requests/60s/run"). */
-export const CHECK_RECONCILE_MAX_REQUESTS = RECONCILE_DEFAULTS.checkMaxRequests;
-/** Whole-run wall-clock window in ms (§7.11.2). */
-export const CHECK_RECONCILE_RUN_BUDGET_MS = RECONCILE_DEFAULTS.checkRunBudgetMs;
-/** Per-request cap (§7.11.2: "≤5s/request"). */
-export const CHECK_RECONCILE_PER_REQUEST_MS = RECONCILE_DEFAULTS.checkPerRequestMs;
-/** Per-row request cap (§7.11.2: "≤6 requests/row"). */
-export const CHECK_ROW_MAX_REQUESTS = RECONCILE_DEFAULTS.checkRowMaxRequests;
 /**
  * Preflight estimate for the credential lane (spec §7.11.2 "the App is
  * enabled"): the §7.5 live App-identity proof (`GET /app`) plus the

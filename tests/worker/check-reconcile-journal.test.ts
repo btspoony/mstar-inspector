@@ -10,11 +10,11 @@
  * every fixture comes from `./helpers/check-reconcile`, so the two suites drive
  * the same production surface.
  */
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import {
   CHECK_BACKOFF_MS,
   CHECK_NAME,
-  CHECK_RECONCILE_LIMIT,
   deferCheckRecovery,
   listCheckReconcileBatch,
   setCheckDesired,
@@ -906,7 +906,7 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
     // until its deadline. The wait's claim-and-give-back defer is what keeps
     // their due times moving forward.
     const deadIds: string[] = [];
-    for (let index = 0; index < CHECK_RECONCILE_LIMIT + 1; index += 1) {
+    for (let index = 0; index < RECONCILE_DEFAULTS.checkSelectLimit + 1; index += 1) {
       const { attempt, lease } = await claim(db, {
         headSha: `${index.toString(16).padStart(2, "0")}${"0".repeat(38)}`,
         nowMs: T0,
@@ -957,12 +957,12 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
       });
       // The bound still applies: one pass reads exactly `CHECK_RECONCILE_LIMIT`
       // rows and the publishable attempt is the 27th…
-      expect(first.examined).toBe(CHECK_RECONCILE_LIMIT);
+      expect(first.examined).toBe(RECONCILE_DEFAULTS.checkSelectLimit);
       expect(first.completed).toBe(0);
 
       // …but the dead rows it read no longer hold the head — the very next
       // selection is the one straggler plus the publishable attempt.
-      const nextIds = (await listCheckReconcileBatch(db, T0 + 120_000)).map((row) => row.identity.attemptId);
+      const nextIds = (await listCheckReconcileBatch(db, T0 + 120_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((row) => row.identity.attemptId);
       expect(nextIds).toHaveLength(2);
       expect(nextIds).toContain(publishableId);
 

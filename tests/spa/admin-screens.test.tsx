@@ -6,6 +6,7 @@
  * Mounted in happy-dom because the states live in effects and both controls
  * are Radix widgets that only answer real events.
  */
+import { RECONCILE_DEFAULTS, RECONCILE_LIMITS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, jest, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -16,7 +17,6 @@ import { SupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
 import { UsagePage } from "../../src/spa/admin/UsagePage";
 import { UsersPage } from "../../src/spa/admin/UsersPage";
 import { WorkspacesPage } from "../../src/spa/admin/WorkspacesPage";
-import { RECONCILE_DEFAULTS, RECONCILE_LIMITS } from "../../src/dashboard/runtime-config-store";
 import { installDom } from "./dom";
 
 const realFetch = globalThis.fetch;

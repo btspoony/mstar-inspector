@@ -1,4 +1,3 @@
-import { RECONCILE_DEFAULTS } from "../dashboard/runtime-config-store";
 /**
  * Review Check attempt registry (spec review-lifecycle §7.1
  * second block + §7.9). One row per Check ATTEMPT; this module is the only
@@ -246,10 +245,6 @@ export const CHECK_RECOVERY_LEASE_MS = 120_000;
  * execution deadline alone governs those, because the model may still be running.
  */
 export const CHECK_STALE_HOLDER_MS = 120_000;
-/** Recovery attempt cap (spec §7.11.2: maxAttempts = 5). */
-export const CHECK_MAX_ATTEMPTS = RECONCILE_DEFAULTS.checkMaxAttempts;
-/** Reconcile batch size (spec §7.11.2: limit = 25). */
-export const CHECK_RECONCILE_LIMIT = RECONCILE_DEFAULTS.checkSelectLimit;
 /**
  * Backoff after the Nth failed recovery attempt (spec §7.11.1's ladder, which
  * §7.11.2's bounded Check recovery inherits); indexed by `attempts - 1`.
@@ -778,7 +773,7 @@ export async function claimCheckRecovery(
   id: string,
   holder: string,
   nowMs: number,
-  maxAttempts: number = CHECK_MAX_ATTEMPTS,
+  maxAttempts: number,
 ): Promise<Lease | null> {
   // Suspension is a CLAIM FENCE, not merely a selector filter (spec §7.6): a
   // disabled/deleted App's rows are recoverable again only after the explicit
@@ -1821,8 +1816,8 @@ export async function listReenableableCheckPairs(
 export async function listCheckReconcileBatch(
   db: D1Like,
   nowMs: number,
-  maxAttempts: number = CHECK_MAX_ATTEMPTS,
-  limit: number = CHECK_RECONCILE_LIMIT,
+  maxAttempts: number,
+  limit: number,
 ): Promise<CheckAttempt[]> {
   const { results } = await db
     .prepare(
