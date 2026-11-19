@@ -149,11 +149,18 @@ and not a boolean flag.
   refuses the share instead of letting it land against a stale value. The FROM
   scope is guarded the same way, so two identical transitions land once — the
   loser reports the state the winner persisted, with no second audit row.
-- Unsharing is deliberately NOT gated on the official workspace: a stale share
-  must stay revocable by the only role that can revoke it.
-- The flag is a platform authorization, never workspace self-service. No
-  dashboard route, workspace-owner path or API key writes `scope`, and no
-  per-bot or per-workspace operator scope exists to widen it.
+- Unsharing is deliberately NOT gated on the official workspace (`setBotScope`'s
+  unshare statement carries no such guard), so the bot's owning workspace can
+  always revoke a stale share — see the member-side route below.
+- The designation itself stays a platform authorization: no workspace can write
+  `platform.official_workspace_id`, and no API key or per-bot/per-workspace
+  operator scope writes `scope`. The one bot-scope exception is the owning
+  workspace itself: `PATCH /dashboard/:workspaceRef/api/apps/:appId/bot/scope`
+  (`appBotScopeRoute`, `src/dashboard/index.ts`, declared in `APP_ROUTES` with
+  `access: "write"`) lets that workspace's owner/admin reach `setBotScope` —
+  a share still requires the official-workspace guard, an unshare does not.
+  A bot shared before a designation change therefore stays revocable through
+  that route; the bot page's UI may hide the control, the API path stays open.
 - Success is `200 {"botId","scope","sharedAt"}`; the row and its audit row land
   in ONE `batch`, and a re-share stamps a new `shared_at` — the earlier instant
   survives only in the audit ledger.
@@ -163,6 +170,28 @@ ordered by `name, id`, as
 `{"bots":[{"botId","name","githubAppId","workspaceId","scope","sharedAt","deletedAt"}]}`;
 the console read is unaudited. `GET /_internal_admin/api/runtime` additionally
 states `officialWorkspaceId: string | null`.
+
+The two console faces that carry this section (§3.5), registered against
+`ADMIN_PAGES` (`src/spa/admin/pages.ts`) — the Worker serves one document per
+page id (`src/admin/index.ts`) and the admin entry routes the same ids
+client-side (`src/spa/admin/main.tsx`):
+
+- **Workspaces page card** (`src/spa/admin/WorkspacesPage.tsx`): above the
+  tenant table, the official-workspace card reads its current value from
+  `GET /api/runtime` (`readRuntime`, `src/spa/admin/api.ts`) and writes
+  `PATCH /api/official-workspace` (`setOfficialWorkspace`) — the wire clear is
+  `{"workspaceId": null}`, never an empty string (a bare `null` body is a 400).
+- **Bots page** (`src/spa/admin/BotsPage.tsx`): reads `GET /api/bots` — the
+  `readBots` handler (`src/admin/index.ts`, SPA client in `src/spa/admin/api.ts`)
+  backed by `listBotScopes` (`src/dashboard/apps-store.ts`), one statement
+  whose `is_official` column joins the stored id to a live workspace, so a
+  designation pointing at a soft-deleted workspace reads as none — and writes
+  `PATCH /api/bots/:botId/scope` (`assignBotScope`). An unshare requires the
+  `confirm: true` body, mirrored by the page's own confirmation dialog.
+
+Both writes append their `platform_audit_events` row through the store —
+`runtime.official_workspace.set` (`runtime-config-store.ts`) and
+`runtime.bot_scope.set` (`apps-store.ts`) — never from the SPA.
 
 Table reuse, deliberate: `review_runtime_settings` is the **platform's parameter
 store**, whose keys group by domain prefix — `review.*` for review behaviour,
