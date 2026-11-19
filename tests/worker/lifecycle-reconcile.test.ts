@@ -49,7 +49,15 @@ import {
   type VerifiedResolution,
 } from "../../src/store/finding-lifecycle";
 import type { D1Like } from "../../src/store/types";
-import { createReviewThreads, sha256Hex, type GraphqlOctokit } from "../../src/pipeline/review-threads";
+import {
+  buildLineCommentBody,
+  createReviewThreads,
+  fetchThreadConversation,
+  issueDigestOf,
+  sha256Hex,
+  threadDigestOf,
+  type GraphqlOctokit,
+} from "../../src/pipeline/review-threads";
 import { listDiscussionWithOctokit } from "../../src/pipeline/discussion-context";
 import {
   reconcileReviewLifecycle,
@@ -783,6 +791,7 @@ describe("suspended-pair scan fairness", () => {
     const db = createMigratedTestD1();
     const fingerprint = await sha256Hex("enc-pem");
     const kinds = ["disabled", "missing", "deleted", "identity-mismatch"] as const;
+    const repairedAssociationId = "22222222-3333-4444-5555-666666666666";
     for (let i = 0; i < RECONCILE_SELECT_LIMIT + 2; i += 1) {
       const appId = `scan-${String(i).padStart(3, "0")}`;
       const scope = { ...SCOPE, appId };
@@ -795,27 +804,78 @@ describe("suspended-pair scan fairness", () => {
         deletedAt: suspensionKind === "deleted" ? new Date(T0).toISOString() : null,
       });
       const suspension = { kind: suspensionKind, reason: "operator correction required", credentialFingerprint: fingerprint };
-      await seedPrepared(db, `pub-${i}`, degradedPayload(scope), 0);
+      const publicationId = lane === "thread" && repaired ? "33333333-4444-5555-6666-777777777777" : `pub-${i}`;
+      await seedPrepared(db, publicationId, degradedPayload(scope), 0);
       if (lane === "thread") {
-        seedFindingRow(db, `finding-${i}`, `pub-${i}`, scope, "addressed");
-        seedThreadRow(db, { id: `assoc-${i}`, publicationId: `pub-${i}`, findingRowId: `finding-${i}`, scope,
-          verified: verifiedFor(`assoc-${i}`, `finding-${i}`) });
+        const associationId = repaired ? repairedAssociationId : `assoc-${i}`;
+        seedFindingRow(db, `finding-${i}`, publicationId, scope, "addressed");
+        seedThreadRow(db, { id: associationId, publicationId, findingRowId: `finding-${i}`, scope,
+          verified: verifiedFor(associationId, `finding-${i}`) });
         await suspendResolutionRecovery(db, scope, suspension, T0);
       } else {
         await suspendPublicationRecovery(db, scope, suspension, T0);
       }
     }
 
+    const repairedId = RECONCILE_SELECT_LIMIT + 1;
+    let now = T0;
+    let reviewer = okReviewer();
+    if (lane === "thread") {
+      const associationId = repairedAssociationId;
+      const stored = db.raw.prepare("SELECT intent_json FROM review_threads WHERE id = ?").get(associationId) as { intent_json: string };
+      const intent = JSON.parse(stored.intent_json) as LineIntent;
+      let remotelyResolved = false;
+      const octokit = {
+        graphql: async (query: string) => {
+          if (query.includes("resolveReviewThread")) {
+            remotelyResolved = true;
+            return { resolveReviewThread: { thread: { id: "thread-1", isResolved: true } } };
+          }
+          const comments = { totalCount: 0, pageInfo: { hasPreviousPage: false }, nodes: [] };
+          if (query.includes("node(")) {
+            return { node: {
+              id: "thread-1", isResolved: remotelyResolved, isOutdated: false, path: intent.path, line: intent.line,
+              pullRequest: { number: SCOPE.prNumber, headRefOid: SHA, repository: { nameWithOwner: `${SCOPE.owner}/${SCOPE.repo}` } },
+              comments: { ...comments, totalCount: 1, nodes: [{
+                id: "comment-11", fullDatabaseId: "11", body: buildLineCommentBody(intent),
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+                author: { __typename: "Bot", login: "reconcile-bot" },
+              }] },
+            } };
+          }
+          return { repository: { pullRequest: { headRefOid: SHA, comments } } };
+        },
+      } as unknown as GraphqlOctokit;
+      const capture = await fetchThreadConversation(octokit, "thread-1");
+      const verified = verifiedFor(associationId, `finding-${repairedId}`);
+      verified.snapshot.digest = await threadDigestOf({ threadId: "thread-1", rootCommentId: "11", headSha: SHA, comments: capture.comments });
+      verified.issueDigest = await issueDigestOf({ headSha: SHA, comments: [] });
+      db.raw.prepare("UPDATE review_threads SET review_id = 777, comment_id = 11, thread_id = 'thread-1', verified_json = ? WHERE id = ?")
+        .run(JSON.stringify(verified), associationId);
+      const threads = createReviewThreads({
+        db,
+        nowMs: () => now,
+        getAppIdentity: async () => ({ githubAppId: 2000 + repairedId, slug: "reconcile-bot" }),
+        getOctokit: async () => octokit,
+      });
+      reviewer = okReviewer({ resolveFindingThread: threads.resolveFindingThread });
+    }
     for (let pass = 0; pass < 3; pass += 1) {
-      await reconcile(db, { now: () => T0 + pass, reviewer: okReviewer() });
+      now = T0 + pass;
+      await reconcile(db, { now: () => now, reviewer });
     }
 
-    const repairedId = RECONCILE_SELECT_LIMIT + 1;
     if (lane === "publication") {
       expect(pubRow(db, `pub-${repairedId}`).recovery_state).toBe("pending");
       expect(pubRow(db, "pub-0").recovery_state).toBe("suspended");
     } else {
-      expect(threadRow(db, `assoc-${repairedId}`).resolution_state).not.toBe("suspended");
+      expect(threadRow(db, repairedAssociationId)).toMatchObject({
+        resolution_state: "resolved",
+        attempts: 1,
+        last_error: null,
+        next_attempt_ms: null,
+        lease_until_ms: null,
+      });
       expect(threadRow(db, "assoc-0").resolution_state).toBe("suspended");
     }
     db.raw.close();
