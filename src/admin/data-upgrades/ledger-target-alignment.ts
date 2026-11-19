@@ -44,6 +44,7 @@
  * ever deleted.
  */
 import type { DashboardD1, DashboardD1Statement } from "../../dashboard/users";
+import { bindRepository } from "./bind";
 import type {
   DataUpgradeItem,
   UpgradeBatch,
@@ -226,20 +227,6 @@ const repointGroup = (table: string) => `
            WHERE t.deleted_at IS NULL AND t.bot_id = ?1
              AND t.repo_owner = ?2 COLLATE NOCASE AND t.repo_name = ?3 COLLATE NOCASE) = 1`;
 
-/**
- * Write the repository's numeric id onto the target. Guarded twice: only while
- * the claim is still absent, and never when another live target of the same bot
- * already holds that id — 0068's unique index would abort the whole batch on it.
- */
-const BIND_REPO_ID = `
-  UPDATE review_targets SET repo_id = ?1, updated_at = datetime('now')
-   WHERE deleted_at IS NULL AND bot_id = ?2
-     AND repo_owner = ?3 COLLATE NOCASE AND repo_name = ?4 COLLATE NOCASE
-     AND repo_id IS NULL
-     AND NOT EXISTS (SELECT 1 FROM review_targets o
-                      WHERE o.bot_id = ?2 AND o.repo_id = ?1 AND o.deleted_at IS NULL
-                        AND o.id <> review_targets.id)`;
-
 /** One resolved group, as the plan read states it. */
 type Group = {
   group_key: string;
@@ -268,22 +255,6 @@ type Plan = {
   unattributable: number;
   writes: GroupWrite[];
 };
-
-/** The bot's live installation whose account login is `owner`, if any. */
-async function liveInstallation(
-  db: DashboardD1,
-  botId: string,
-  owner: string,
-): Promise<number | null> {
-  const row = await db
-    .prepare(
-      `SELECT MIN(installation_id) AS n FROM bot_installations
-        WHERE bot_id = ?1 AND removed_at IS NULL AND account_login = ?2 COLLATE NOCASE`,
-    )
-    .bind(botId, owner)
-    .first<{ n: number | null }>();
-  return row?.n ?? null;
-}
 
 /**
  * Plan one batch. The target a group lands on is decided by the STATEMENTS,
@@ -352,33 +323,6 @@ async function planBatch(
     plan.writes.push(write);
   }
   return plan;
-}
-
-/**
- * Bind one group's target when the repository's owner still has a live
- * installation. The result is the batch log's bucket: `bound`, `unbound` (no
- * live installation, or a repository the installation does not grant) or
- * `binding_failed` (GitHub could not answer). Never throws.
- */
-async function bindGroup(
-  db: DashboardD1,
-  group: Group,
-  context: UpgradeRunContext | undefined,
-): Promise<"bound" | "unbound" | "binding_failed"> {
-  const botId = group.bot_id;
-  const lookup = context?.repoLookup;
-  if (botId === null || lookup === undefined) return "unbound";
-  const installationId = await liveInstallation(db, botId, group.owner);
-  // A removed installation is history: the first delivery claims the id.
-  if (installationId === null) return "unbound";
-  const found = await lookup(botId, installationId, group.owner, group.repo);
-  if (found.kind === "failed") return "binding_failed";
-  if (found.kind === "absent") return "unbound";
-  const written = await db
-    .prepare(BIND_REPO_ID)
-    .bind(found.repoId, botId, group.owner, group.repo)
-    .run();
-  return written.meta.changes > 0 ? "bound" : "unbound";
 }
 
 /**
@@ -470,7 +414,15 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
     for (const { group } of moved) {
       // An adopted target that already carries its id needs no call at all.
       if (group.targets === 1 && group.repo_id !== null) continue;
-      const outcome = await bindGroup(db, group, context);
+      if (group.bot_id === null) {
+        unbound += 1;
+        continue;
+      }
+      const outcome = await bindRepository(
+        db,
+        { botId: group.bot_id, owner: group.owner, repo: group.repo },
+        context,
+      );
       if (outcome === "bound") bound += 1;
       else if (outcome === "binding_failed") bindingFailed += 1;
       else unbound += 1;

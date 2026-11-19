@@ -294,19 +294,19 @@ describe("data upgrade screen — static faces", () => {
       },
     ];
     const markup = view({ data: { upgrades: zero, maintenance: RUNTIME.maintenance } });
+    // An empty worklist states itself and folds: the operator reads the answer
+    // without opening a card that has no action to offer. The counts and the
+    // (disabled) start control are behind the disclosure.
     expect(markup).toContain(t("en", "admin.dataUpgrades.nothingToMigrate"));
-    // The control is rendered but unusable — an operator reads why, not an absent button.
-    // (`disabled=""` is the rendered attribute; the base class string also says `disabled:`.)
-    const startLabel = t("en", "admin.dataUpgrades.startAction").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const start = new RegExp(`<button[^>]*disabled=""[^>]*>${startLabel}</button>`);
-    expect(markup).toMatch(start);
+    const showLabel = t("en", "admin.dataUpgrades.showDetails").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(markup).toMatch(new RegExp(`>${showLabel}</button>`));
     // Both dictionaries state it.
     const zh = view({ locale: "zh_CN", data: { upgrades: zero, maintenance: RUNTIME.maintenance } });
     expect(zh).toContain(t("zh_CN", "admin.dataUpgrades.nothingToMigrate"));
-    // A counter above zero is work: the control stays live.
+    // A counter above zero is work: no empty-worklist copy, and no fold.
     const live = viewOf(0);
     expect(live).not.toContain(t("en", "admin.dataUpgrades.nothingToMigrate"));
-    expect(live).not.toMatch(start);
+    expect(live).not.toContain(t("en", "admin.dataUpgrades.showDetails"));
   });
 
   test("the banner states the window, the current item, its progress and the last error", () => {
@@ -546,7 +546,12 @@ describe("data upgrade screen — mounted", () => {
     const text = card(surface.container, "finding-index")?.textContent ?? "";
     expect(text).toContain(t("en", "admin.dataUpgrades.statusPending"));
     expect(text).not.toContain("verify failed: orphan_rows=2");
-    // Pending again: the row offers start, and no verify (nothing ran yet).
+    // Pending again with an empty worklist folds; its counts and the start
+    // control live behind the disclosure.
+    await surface.click(
+      control(surface.container, "finding-index", t("en", "admin.dataUpgrades.showDetails")),
+    );
+    await surface.settle();
     expect(control(surface.container, "finding-index", t("en", "admin.dataUpgrades.startAction"))).not.toBeNull();
     await surface.close();
   });

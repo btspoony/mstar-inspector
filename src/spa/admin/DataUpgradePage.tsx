@@ -260,6 +260,11 @@ export function DataUpgradeView({
           const canRun =
             (state.status === "pending" || state.status === "running") && !nothingToMigrate;
           const done = state.status === "completed";
+          // A pending card with an empty worklist has nothing to offer but its
+          // counts, so it folds exactly like a finished run — "nothing to
+          // migrate" IS its answer. A failed or in-flight card never folds: its
+          // controls (retry, progress) are the only reason to look at it.
+          const foldable = done || (nothingToMigrate && state.status === "pending");
           const open = openCompleted[row.id] === true;
           const verifiable =
             state.status === "running" || state.status === "verifying" || state.status === "failed";
@@ -275,15 +280,18 @@ export function DataUpgradeView({
                     <StatusBadge tone="warn">{t(locale, "admin.dataUpgrades.downtimeBadge")}</StatusBadge>
                   ) : null}
                   <code className="text-xs text-muted-foreground">{row.id}</code>
-                  {done ? (
+                  {foldable ? (
                     <>
-                      {/* Folded, the row still answers what a finished item is
-                          for: how much it moved, and when it last ran. */}
+                      {/* Folded, the row still answers what the operator needs:
+                          how much a finished run moved, or that there is
+                          nothing to migrate. */}
                       <span className="text-sm text-muted-foreground">
-                        {t(locale, "admin.dataUpgrades.completedSummary", {
-                          count: state.processed,
-                          time: formatRelativeTime(state.finishedAt ?? state.startedAt, locale),
-                        })}
+                        {done
+                          ? t(locale, "admin.dataUpgrades.completedSummary", {
+                              count: state.processed,
+                              time: formatRelativeTime(state.finishedAt ?? state.startedAt, locale),
+                            })
+                          : t(locale, "admin.dataUpgrades.nothingToMigrate")}
                       </span>
                       <Button
                         type="button"
@@ -306,7 +314,7 @@ export function DataUpgradeView({
                   ) : null}
                 </div>
               </CardHeader>
-              {done && !open ? null : (
+              {foldable && !open ? null : (
               <CardContent className="flex flex-col gap-4">
                 <p className="text-sm">{row.impact}</p>
                 <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
