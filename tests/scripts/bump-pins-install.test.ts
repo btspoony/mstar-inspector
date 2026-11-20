@@ -259,7 +259,28 @@ describe("bump-pins edit plan", () => {
   });
 
   test("every planned literal really is in the committed file", () => {
-    for (const edit of planEdits(from, { omp: "18.23.0", engine: "4.8.0", harnessRef: "b".repeat(40) })) {
+    // The plan must be built from the pins the committed files actually carry.
+    // A hardcoded previous release turns a routine pin bump red for no defect
+    // (AGENTS.md: no dependency pins in tests).
+    const images = readFileSync(join(REPO_ROOT, "src/contracts/sandbox-images.ts"), "utf8");
+    const dockerfile = readFileSync(join(REPO_ROOT, "sandbox-image/Dockerfile"), "utf8");
+    const root = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+      dependencies: Record<string, string>;
+    };
+    const committed = {
+      omp: root.dependencies["@oh-my-pi/pi-coding-agent"]!,
+      engine: root.dependencies["@mstar-harness/engine"]!,
+      harness: /export const HARNESS_VERSION = "([^"]+)"/.exec(images)![1]!,
+      harnessRef: REF,
+      anchorTag: /# mstar-harness plugin, pinned ref [0-9a-f]{40} \(tag v([^,]+),/.exec(dockerfile)![1]!,
+      bumped: /bumped (\d{4}-\d{2}-\d{2})/.exec(dockerfile)![1]!,
+    };
+    const nextPatch = (version: string): string => version.replace(/(\d+)$/, (n) => String(Number(n) + 1));
+    for (const edit of planEdits(committed, {
+      omp: nextPatch(committed.omp),
+      engine: nextPatch(committed.harness),
+      harnessRef: "b".repeat(40),
+    })) {
       expect(readFileSync(join(REPO_ROOT, edit.file), "utf8"), edit.file).toContain(edit.from);
     }
   });
