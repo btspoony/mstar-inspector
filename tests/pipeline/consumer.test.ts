@@ -2021,7 +2021,7 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(1);
   });
 
-  test("a small diff requests the size-derived budget, and the anchored deadline never moves after the input write", async () => {
+  test("a small diff requests the size-derived budget — the request (not the cutoff) produces the effective value, and the anchored deadline never moves after the input write", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     let roundStart = 0;
@@ -2049,8 +2049,10 @@ describe("createReviewConsumer", () => {
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
     expect(line.fields.runner_work_units).toBe(17);
     expect(line.fields.runner_requested_ms).toBe(requestedMs);
-    // Nothing is spent before the anchor, so the request itself is effective.
+    // Request-bound: the request itself is the effective value — the logged
+    // cutoff is the derived one and strictly LATER than the deadline.
     expect(line.fields.runner_effective_ms).toBe(requestedMs);
+    expect(line.fields.runner_cutoff_ms).toBe(roundStart + 666_000);
     expect(line.fields.runner_deadline_ms).toBe(roundStart + requestedMs);
     // ONE deadline: the wire value, the logged deadline and the exec's own end
     // are the same instant, so the input write never moved it.
@@ -2099,6 +2101,11 @@ describe("createReviewConsumer", () => {
     expect(line.fields.runner_requested_ms).toBe(120_408);
     expect(line.fields.runner_effective_ms).toBe(66_000);
     expect(line.fields.runner_deadline_ms).toBe(roundStart + 666_000);
+    // Cutoff-bound: the derived pre-runner cutoff — not the request — is
+    // what produced the effective value, and the logged cutoff IS the
+    // deadline the exec ended at.
+    expect(line.fields.runner_cutoff_ms).toBe(roundStart + 666_000);
+    expect(line.fields.runner_deadline_ms).toBe(line.fields.runner_cutoff_ms);
     // The wire deadline is the anchored one: the input write spent nothing, so
     // the exec's end is still the derived cutoff.
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };

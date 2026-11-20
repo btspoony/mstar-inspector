@@ -225,11 +225,11 @@ describe("allocation: one min(), one absolute deadline", () => {
 });
 
 describe("size-aware request: floor → tier maximum at 20,000 work units", () => {
-  const size = (changedLines: number, files: readonly number[]) => ({ changedLines, files });
+  const size = (changedLines: number, workUnits: number) => ({ changedLines, workUnits });
 
   test("a zero-line diff requests the floor, not a refusal and not zero", () => {
     for (const level of LEVELS) {
-      const request = requestRunnerBudget(level, size(0, []));
+      const request = requestRunnerBudget(level, size(0, 0));
       expect(request.kind).toBe("requested");
       if (request.kind !== "requested") return;
       expect(request.requestedBudgetMs).toBe(RUNNER_BUDGET_FLOOR_MS);
@@ -251,7 +251,7 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
     // `git apply --numstat` prints "-\t-\tpath" for binary rows; the parser
     // reports 0 textual lines for them, and the per-file minimum turns each
     // into exactly one work unit.
-    const request = requestRunnerBudget("default", size(0, [0, 0, 0]));
+    const request = requestRunnerBudget("default", size(0, 3));
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
     expect(request.workUnits).toBe(3);
@@ -260,7 +260,7 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
   });
 
   test("a zero-text row beside real lines pays its own unit (the per-file minimum is per file)", () => {
-    const request = requestRunnerBudget("default", size(5, [5, 0, 0]));
+    const request = requestRunnerBudget("default", size(5, 7));
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
     // Σ max(1, linesInFile) = 5 + 1 + 1 = 7, not 5 — binary files cost a unit
@@ -270,7 +270,7 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
 
   test("a saturated diff requests the tier maximum and no more", () => {
     for (const level of LEVELS) {
-      const request = requestRunnerBudget(level, size(25_000, [25_000]));
+      const request = requestRunnerBudget(level, size(25_000, 25_000));
       expect(request.kind).toBe("requested");
       if (request.kind !== "requested") return;
       expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS[level]);
@@ -279,12 +279,12 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
   });
 
   test("units at exactly the saturation point land on the tier maximum; one below stays inside", () => {
-    const at = requestRunnerBudget("default", size(SIZE_SATURATION_WORK_UNITS, [SIZE_SATURATION_WORK_UNITS]));
+    const at = requestRunnerBudget("default", size(SIZE_SATURATION_WORK_UNITS, SIZE_SATURATION_WORK_UNITS));
     expect(at.kind).toBe("requested");
     if (at.kind !== "requested") return;
     expect(at.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
 
-    const below = requestRunnerBudget("default", size(SIZE_SATURATION_WORK_UNITS - 1, [SIZE_SATURATION_WORK_UNITS - 1]));
+    const below = requestRunnerBudget("default", size(SIZE_SATURATION_WORK_UNITS - 1, SIZE_SATURATION_WORK_UNITS - 1));
     expect(below.kind).toBe("requested");
     if (below.kind !== "requested") return;
     expect(below.requestedBudgetMs).toBeLessThan(RUNNER_MAX_BUDGET_MS.default);
@@ -294,7 +294,7 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
   test("the ramp honours floor and ceiling on every interior size and every tier", () => {
     for (const level of LEVELS) {
       for (const units of [1, 100, 1_000, 10_000, SIZE_SATURATION_WORK_UNITS + 500]) {
-        const request = requestRunnerBudget(level, size(units, [units]));
+        const request = requestRunnerBudget(level, size(units, units));
         expect(request.kind).toBe("requested");
         if (request.kind !== "requested") return;
         expect(Number.isInteger(request.requestedBudgetMs)).toBe(true);
@@ -304,17 +304,27 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
     }
   });
 
+  test("floor arithmetic is floor, not rounding: deep, 2 work units → 120_052 ms", () => {
+    // floor((646_000 − 120_000) × 2 / 20_000) = floor(52.6) = 52 — Math.round
+    // or Math.ceil would produce 120_053, so this literal is the only pin
+    // that distinguishes the contract's floor semantics from rounding.
+    const request = requestRunnerBudget("deep", size(2, 2));
+    expect(request.kind).toBe("requested");
+    if (request.kind !== "requested") return;
+    expect(request.requestedBudgetMs).toBe(120_052);
+  });
+
   test("malformed size input is invalid — never treated as an empty diff", () => {
-    const badSizes: [number, readonly number[]][] = [
-      [-1, []],              // negative total
-      [1.5, [1.5]],          // non-integer line count
-      [0, [1]],              // changedLines disagrees with the file rows
-      [1, []],               // lines with no files
-      [0, [0, -2]],          // negative per-file count
+    const badSizes: [number, number][] = [
+      [-1, 0],               // negative total
+      [1.5, 2],              // non-integer line count
+      [0, -1],               // negative work units
+      [1, 0],                // work units below the changed lines
+      [Number.MAX_SAFE_INTEGER + 1, 0], // an inexact scalar is not a count
     ];
     for (const level of LEVELS) {
-      for (const [changedLines, files] of badSizes) {
-        const refused = requestRunnerBudget(level, size(changedLines, files));
+      for (const [changedLines, workUnits] of badSizes) {
+        const refused = requestRunnerBudget(level, size(changedLines, workUnits));
         expect(refused.kind).toBe("invalid");
         if (refused.kind !== "invalid") return;
         // The refusal carries nothing a caller could mistake for a request.
@@ -326,7 +336,7 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
 
   test("the computed request feeds the one anchor — no second clamp, same cutoff math", () => {
     const budget = budgetFor("default", 10_000);
-    const request = requestRunnerBudget("default", size(2_000, [2_000]));
+    const request = requestRunnerBudget("default", size(2_000, 2_000));
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
     // 2,000 units → 120_000 + floor(480_000 * 2_000 / 20_000) = 168_000.
@@ -348,12 +358,12 @@ describe("admission windows cover the whole allocation range", () => {
   // ceiling-derived, so the earliest an acquisition may stamp them is the
   // round's own start: `roundStart + guardTtl` / `roundStart + checkLease` is
   // the lowest each expiry can ever be, and any later origin only widens it.
-  const size = (changedLines: number, files: readonly number[]) => ({ changedLines, files });
+  const size = (changedLines: number, workUnits: number) => ({ changedLines, workUnits });
 
   test("floor request: the smallest allocation still ends inside the earliest-acquired windows", () => {
     for (const level of LEVELS) {
       const budget = budgetFor(level, CHECK_TERMINALIZE_MAX);
-      const request = requestRunnerBudget(level, size(0, [0]));
+      const request = requestRunnerBudget(level, size(0, 1));
       expect(request.kind).toBe("requested");
       if (request.kind !== "requested") return;
       const anchor = anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
@@ -393,7 +403,7 @@ describe("admission windows cover the whole allocation range", () => {
     // — while the windows were stamped at the round's own start.
     const budget = budgetFor("deep", CHECK_TERMINALIZE_MAX);
     for (const request of [
-      requestRunnerBudget("deep", size(0, [0])),
+      requestRunnerBudget("deep", size(0, 1)),
       requestRunnerBudget("deep", null),
     ]) {
       expect(request.kind).toBe("requested");
@@ -414,7 +424,7 @@ describe("admission windows cover the whole allocation range", () => {
     // fields against themselves) is what fails if a future change routes the
     // allocation into `guardTtlSeconds`, `checkWindowMs` or `checkLeaseMs`.
     for (const level of LEVELS) {
-      const anchoredWindows = (diffSize: { changedLines: number; files: readonly number[] } | null) => {
+      const anchoredWindows = (diffSize: { changedLines: number; workUnits: number } | null) => {
         const budget = budgetFor(level, CHECK_TERMINALIZE_MAX);
         const request = requestRunnerBudget(level, diffSize);
         expect(request.kind).toBe("requested");
@@ -429,7 +439,7 @@ describe("admission windows cover the whole allocation range", () => {
           checkLeaseMs: budget.checkLeaseMs,
         };
       };
-      const floor = anchoredWindows(size(0, [0]));
+      const floor = anchoredWindows(size(0, 1));
       const ceiling = anchoredWindows(null);
       // Distinct inputs: the pair cannot pass by both runs taking the same
       // path — the requests, and so the allocations, differ.
@@ -457,7 +467,7 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
     // The same text with a valid terminator parses normally.
     expect(parseNumstatSize("10\t2\tsrc/auth.ts\n5\t0\tsrc/docs.md\n", false)).toEqual({
       changedLines: 17,
-      files: [12, 5],
+      workUnits: 17,
     });
   });
 
@@ -465,7 +475,7 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
     // `-\t-` is git's binary marker: deliberate data, not a failure — each
     // file still pays the per-file minimum unit inside the request.
     const size = parseNumstatSize("-\t-\tassets/logo.png\n-\t-\tassets/fonts.bin\n", false);
-    expect(size).toEqual({ changedLines: 0, files: [0, 0] });
+    expect(size).toEqual({ changedLines: 0, workUnits: 2 });
     const request = requestRunnerBudget("default", size);
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
@@ -477,13 +487,13 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
       "10\t2\tsrc/auth.ts\n-\t-\tassets/logo.png\n0\t3\tdocs/readme.md\n",
       false,
     );
-    expect(size).toEqual({ changedLines: 15, files: [12, 0, 3] });
+    expect(size).toEqual({ changedLines: 15, workUnits: 16 });
   });
 
   test("an empty diff is a known zero only when the diff file proved empty", () => {
     // The same empty stdout means two different things: the same round's
     // diff-file evidence decides which — the parser never guesses.
-    expect(parseNumstatSize("", true)).toEqual({ changedLines: 0, files: [] });
+    expect(parseNumstatSize("", true)).toEqual({ changedLines: 0, workUnits: 0 });
     expect(parseNumstatSize("", false)).toBeNull();
     // No stdout at all is unproven empty under any file state.
     expect(parseNumstatSize(undefined, true)).toBeNull();
@@ -514,5 +524,29 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
     expect(parseNumstatSize("1\t0\t \n", false)).toBeNull();
     // A whitespace-only line is a malformed row, not a blank to skip.
     expect(parseNumstatSize("1\t0\ta.ts\n \n2\t0\tb.ts\n", false)).toBeNull();
+  });
+
+  test("a row with extra fields or an inexact count is unknown size — never a small allocation", () => {
+    // More than the three expected fields means the parse cannot trust what
+    // it read: this row would otherwise look like ONE work unit (120_024 ms
+    // at the default tier instead of the 600_000 ms tier maximum).
+    expect(parseNumstatSize("1\t0\tfile\textra\n", false)).toBeNull();
+    // 9007199254740993 = 2^53 + 1: Number() silently rounds it to
+    // 9007199254740992, an exact-looking integer that never was the count.
+    expect(parseNumstatSize("9007199254740993\t0\tfile\n", false)).toBeNull();
+    // Two finite counts whose sum cannot be represented exactly are the same
+    // unknown — the totals must not overflow into a fabricated value.
+    expect(
+      parseNumstatSize("9007199254740991\t1\ta.ts\n9007199254740991\t1\tb.ts\n", false),
+    ).toBeNull();
+    // Unknown size keeps the tier-maximum request, never an exec-time refusal.
+    const request = requestRunnerBudget(
+      "default",
+      parseNumstatSize("9007199254740993\t0\tfile\n", false),
+    );
+    expect(request.kind).toBe("requested");
+    if (request.kind !== "requested") return;
+    expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
+    expect(request.workUnits).toBeNull();
   });
 });

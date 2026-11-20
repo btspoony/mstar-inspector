@@ -285,25 +285,26 @@ export type RunnerBudgetOutcome = RunnerBudgetAnchor | RunnerBudgetRefusal | Run
 
 /**
  * The size facts of the SELECTED numstat (full or incremental — the consumer
- * reads it once for the seat partition and passes it through unchanged):
- * `changedLines` is the textual adds+deletions sum the attempt reports
- * verbatim; `files` is the PER-FILE textual line count in row order, where a
- * binary `-/-` or zero-text row carries 0 so the file still pays its minimum
- * one work unit inside the request. `null` is a known-unknown size, never a
- * zero.
+ * reads it once for the seat partition and passes it through unchanged),
+ * computed in the parser's single pass: `changedLines` is the textual
+ * adds+deletions sum the attempt reports verbatim; `workUnits` is the
+ * per-file-minimum unit count the request sizes from — one unit per
+ * changed line, minimum one per file, so a binary `-/-` or zero-text row
+ * still pays its unit. `null` is a known-unknown size, never a zero.
  */
 export type ReviewDiffSize = {
   changedLines: number;
-  files: readonly number[];
+  workUnits: number;
 };
 
 /**
  * Parse the selected numstat stdout into `ReviewDiffSize`. `git apply
  * --numstat` emits one `<add>\t<del>\t<path>` row per file, every row
  * newline-terminated; a binary file prints `-\t-\t<path>`. `changedLines`
- * is the textual adds+deletions sum; each file contributes its textual
- * total to `files` (a binary or `0\t0` row contributes 0 and still pays
- * the allocator's per-file minimum unit).
+ * is the textual adds+deletions sum; `workUnits` sums one unit per changed
+ * line, minimum one per file (a binary or `0\t0` row contributes 0 textual
+ * lines and still pays its unit). Both scalars accumulate in this ONE
+ * pass — there is no per-file array and no second traversal.
  *
  * `null` is a KNOWN-UNKNOWN size — never a fabricated count and never a
  * zero — returned when:
@@ -314,9 +315,13 @@ export type ReviewDiffSize = {
  *    that the diff itself is empty);
  *  - a non-empty stdout is not newline-terminated (the stream cut mid-row
  *    — a truncated tail row must not silently size the diff);
- *  - any row is malformed: a path field absent or empty after trimming,
- *    or a count that is neither `-\t-` (binary) nor a non-empty
- *    digits-only non-negative integer.
+ *  - any row is malformed: other than the three expected fields, a path
+ *    field absent or empty after trimming, or a count that is neither
+ *    `-\t-` (binary) nor a non-empty digits-only non-negative integer;
+ *  - any count or running total cannot be represented exactly as a safe
+ *    integer — a value `Number()` rounds or a sum that overflows
+ *    `Number.MAX_SAFE_INTEGER` is unknown size, never a corrupted count
+ *    that would size the diff small.
  */
 export function parseNumstatSize(
   stdout: string | undefined,
@@ -328,21 +333,21 @@ export function parseNumstatSize(
   const rows = stdout.split("\n");
   if (rows[rows.length - 1] === "") rows.pop();
   if (rows.length === 0) {
-    return provenEmpty ? { changedLines: 0, files: [] } : null;
+    return provenEmpty ? { changedLines: 0, workUnits: 0 } : null;
   }
   if (!stdout.endsWith("\n")) return null;
-  const files: number[] = [];
   let changedLines = 0;
+  let workUnits = 0;
   for (const row of rows) {
     const fields = row.split("\t");
-    // The path field must exist and be non-empty even though its content is
-    // ignored; a row shorter than 3 fields is malformed or truncated.
+    // Exactly three fields: the path must exist and be non-empty even though
+    // its content is ignored, and a row that is short OR long is malformed —
+    // an extra field means the parse cannot trust what it read.
     const [adds = "", dels = "", path = ""] = fields;
-    if (fields.length < 3 || path.trim() === "") return null;
+    if (fields.length !== 3 || path.trim() === "") return null;
     if (adds === "-" && dels === "-") {
-      // Binary file: zero textual lines; the per-file minimum still applies
-      // inside the request.
-      files.push(0);
+      // Binary file: zero textual lines; the per-file minimum still applies.
+      workUnits += 1;
       continue;
     }
     // Number("") and Number(" ") are 0, so a blank or whitespace count must
@@ -350,13 +355,20 @@ export function parseNumstatSize(
     if (!/^\d+$/.test(adds) || !/^\d+$/.test(dels)) return null;
     const added = Number(adds);
     const deleted = Number(dels);
-    if (!Number.isInteger(added) || !Number.isInteger(deleted)) {
+    // Digits-only text still loses exactness past 2^53-1 (or becomes
+    // Infinity): an inexact count is unknown size, never a smaller one.
+    if (!Number.isSafeInteger(added) || !Number.isSafeInteger(deleted)) {
       return null;
     }
-    files.push(added + deleted);
     changedLines += added + deleted;
+    workUnits += Math.max(1, added + deleted);
+    // The same rule applies to the running totals: the moment either stops
+    // being a safe integer, the whole read is unknown.
+    if (!Number.isSafeInteger(changedLines) || !Number.isSafeInteger(workUnits)) {
+      return null;
+    }
   }
-  return { changedLines, files };
+  return { changedLines, workUnits };
 }
 
 /**
@@ -430,17 +442,15 @@ export function requestRunnerBudget(
   if (size === null) {
     return { kind: "requested", requestedBudgetMs: tierMaxMs, workUnits: null };
   }
-  const { changedLines, files } = size;
+  const { changedLines, workUnits } = size;
   const malformed =
-    !Array.isArray(files) ||
-    !Number.isInteger(changedLines) ||
+    !Number.isSafeInteger(changedLines) ||
     changedLines < 0 ||
-    files.some((lines) => !Number.isInteger(lines) || lines < 0) ||
-    files.reduce((sum, lines) => sum + lines, 0) !== changedLines;
+    !Number.isSafeInteger(workUnits) ||
+    workUnits < changedLines;
   if (malformed) {
     return { kind: "invalid", requestedBudgetMs: Number.NaN };
   }
-  const workUnits = files.reduce((sum, lines) => sum + Math.max(1, lines), 0);
   const saturatedUnits = Math.min(workUnits, SIZE_SATURATION_WORK_UNITS);
   const requestedBudgetMs =
     RUNNER_BUDGET_FLOOR_MS +

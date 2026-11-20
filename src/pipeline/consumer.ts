@@ -544,6 +544,8 @@ export type ConsumerLogFields = {
   runner_requested_ms?: number;
   /** `min(request, cutoff - anchor)` (ms): what the exec actually received. */
   runner_effective_ms?: number;
+  /** The absolute pre-runner cutoff the effective value was capped against. */
+  runner_cutoff_ms?: number;
   /** The absolute instant the input write, the wire deadline and the exec all end at. */
   runner_deadline_ms?: number;
   /** The diff-size estimate the request was sized from (null: size unknown → tier max). */
@@ -5891,6 +5893,7 @@ async function processMessage(
       ...fields,
       runner_requested_ms: anchor.requestedBudgetMs,
       runner_effective_ms: anchor.effectiveBudgetMs,
+      runner_cutoff_ms: budget.runnerCutoffMs,
       runner_deadline_ms: anchor.execDeadlineMs,
       // The estimate the request was sized from — one work unit per changed
       // line, minimum one per file; `null` records an unknown size, so an
