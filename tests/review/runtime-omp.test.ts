@@ -1129,6 +1129,20 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
     ]);
   });
 
+  test("a seat promise rejected with null keeps its cause as a fact, not an empty string", async () => {
+    // A nullish rejection reason is still the recorded cause of a lost seat —
+    // the declaration must carry it rather than print nothing beside the seat.
+    seatResults = [{ rejectWith: null }, { reject: "provider boom" }];
+
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    // The first rejection's recorded value rides the declared reason: `null`,
+    // never a causeless `…a usable payload`.
+    expect(envelope.incomplete?.reason).toBe("no dispatched seat produced a usable payload: null");
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+  });
+
   test("a cap that fired over an SDK error is still a budget stop, not a failure", async () => {
     // The cap accounts for the shortfall, so the seat is a stopped seat — and a
     // stopped seat is a budget stop, whatever else its settled result carried.
@@ -1340,6 +1354,31 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     expect(lost).toHaveLength(1);
     expect(lost[0]).toContain("changeset-2-lib");
     expect(lost[0]).toContain("provider boom");
+  });
+
+  test("a null rejection reason rides the sibling-loss line, not an empty detail", async () => {
+    // A seat promise that rejected with `null` still names its recorded cause
+    // beside the cap stop — the bounded detail is `null`, never absent.
+    seatResults = [
+      { status: "absent", aborted: true, abortReason: CAP_REASON },
+      { rejectWith: null },
+    ];
+    const errorCalls: unknown[][] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errorCalls.push(args);
+    });
+    let stop: RunnerBudgetExhausted;
+    try {
+      stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+    const lost = errorCalls.map((call) => String(call[0])).filter((line) => line.includes("lost beside a cap stop"));
+    expect(lost).toHaveLength(1);
+    expect(lost[0]).toContain("changeset-2-lib");
+    expect(lost[0]).toContain(": null");
   });
 
   test("a stopped deep turn still lands incomplete — no runner deadline evidence", async () => {

@@ -1961,7 +1961,10 @@ export const ompAgentRuntime: AgentRuntime = {
       // the shape the engine needs. Keep this marker until that lands so the
       // staging is visible rather than looking like a settled design.
       const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-      const lostSeatText = causeText(lostSeatDetail ?? rejectedReason ?? "");
+      // The rejection COUNT, not the reason's nullishness, decides whether a
+      // seat's cause exists: a promise that rejected with null/undefined still
+      // carries that recorded fact, and `?? ""` here would erase it.
+      const lostSeatText = causeText(lostSeatDetail ?? (rejectedSeats === 0 ? "" : rejectedReason));
       const lostSeatCause = lostSeatText === "" ? "" : `: ${lostSeatText}`;
       // The stopped seats are declared as the engine's `incomplete` fact,
       // synthesized — never post-edited onto the envelope. A wave that stopped
