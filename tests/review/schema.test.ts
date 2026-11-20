@@ -626,4 +626,31 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
     const clamped = clampFindingSizes(output);
     expect(clamped.findings[0]!.fingerprint_hint).toBe(hint);
   });
+
+  test("a suggestion fence crossing the body budget is dropped whole, prose survives", () => {
+    const prose = "P".repeat(1500);
+    const fence = ["```suggestion", "C".repeat(800), "```"].join("\n");
+    const body = prose + "\n\n" + fence; // fence starts before FINDING_BODY_MAX and ends after it // 2502 chars, fence straddles FINDING_BODY_MAX
+    const clamped = clampFindingSizes({ ...base, findings: [finding("t", body)] });
+    const clampedBody = clamped.findings[0]!.body;
+    expect(clampedBody.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
+    expect(clampedBody).not.toContain("```");
+    expect(clampedBody).not.toContain("…");
+    expect(clampedBody.startsWith(prose)).toBe(true);
+  });
+
+  test("fence-free over-budget bodies clamp byte-identically to the legacy rule", () => {
+    const body = "B".repeat(FINDING_BODY_MAX + 500);
+    const clamped = clampFindingSizes({ ...base, findings: [finding("t", body)] });
+    expect(clamped.findings[0]!.body).toBe(body.slice(0, FINDING_BODY_MAX - 1) + "…");
+  });
+
+  test("clamping is idempotent", () => {
+    const prose = "P".repeat(1500);
+    const fence = ["```suggestion", "fix it", "```"].join("\n");
+    const output = { ...base, findings: [finding("t", prose + "\n\n" + fence)] };
+    const once = clampFindingSizes(output);
+    const twice = clampFindingSizes(once);
+    expect(twice.findings[0]!.body).toBe(once.findings[0]!.body);
+  });
 });

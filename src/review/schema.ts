@@ -265,16 +265,65 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
         finding.title.length <= FINDING_TITLE_MAX
           ? finding.title
           : `${finding.title.slice(0, FINDING_TITLE_MAX - 1)}…`,
-      body:
-        finding.body.length <= FINDING_BODY_MAX
-          ? finding.body
-          : `${finding.body.slice(0, FINDING_BODY_MAX - 1)}…`,
+      body: clampFindingBody(finding.body),
       fingerprint_hint:
         finding.fingerprint_hint !== undefined && finding.fingerprint_hint.length > FINDING_TITLE_MAX
           ? `${finding.fingerprint_hint.slice(0, FINDING_TITLE_MAX - 1)}…`
           : finding.fingerprint_hint,
     })),
   };
+}
+
+/**
+ * Fenced suggestion blocks as [start, end) offsets; a block whose closing
+ * fence is missing runs to the end, so it is never half-emitted.
+ */
+export function suggestionFenceSpans(text: string): [number, number][] {
+  const spans: [number, number][] = [];
+  let open: number | null = null;
+  let offset = 0;
+  for (;;) {
+    const newline = text.indexOf("\n", offset);
+    const lineEnd = newline === -1 ? text.length : newline;
+    const line = text.slice(offset, lineEnd).trimStart();
+    if (open === null) {
+      if (line.startsWith("```suggestion")) open = offset;
+    } else if (line.startsWith("```")) {
+      spans.push([open, newline === -1 ? text.length : lineEnd + 1]);
+      open = null;
+    }
+    if (newline === -1) break;
+    offset = lineEnd + 1;
+  }
+  if (open !== null) spans.push([open, text.length]);
+  return spans;
+}
+
+/**
+ * Drop whole fenced `suggestion` blocks the `max` boundary would cut in
+ * half (so no partial fence survives a later truncation); the surrounding
+ * prose is kept. Shared by the schema clamp and the line-comment renderer
+ * so the two cannot drift.
+ */
+export function dropSuggestionFencesCrossing(text: string, max: number): {
+  text: string;
+  dropped: boolean;
+} {
+  let out = text;
+  let dropped = false;
+  for (;;) {
+    const fence = suggestionFenceSpans(out).find(([start, end]) => start < max && max < end);
+    if (fence === undefined) return { text: out, dropped };
+    out = `${out.slice(0, fence[0])}${out.slice(fence[1])}`;
+    dropped = true;
+  }
+}
+
+/** Clamp a finding body: drop fences the budget would cut, then clamp with an ellipsis. */
+function clampFindingBody(body: string): string {
+  if (body.length <= FINDING_BODY_MAX) return body;
+  const { text } = dropSuggestionFencesCrossing(body, FINDING_BODY_MAX);
+  return text.length <= FINDING_BODY_MAX ? text : `${text.slice(0, FINDING_BODY_MAX - 1)}…`;
 }
 
 /** Extract the first ```json fenced block, or null. */
