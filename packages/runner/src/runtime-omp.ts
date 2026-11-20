@@ -1322,10 +1322,10 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         // corrected re-yield is still observed.
         let gathered: { summary?: string; stopped?: string } | undefined;
         let resuming = false;
+        // The terminal-end release for the bounded continuation wait below:
+        // a no-op until the wait arms it, since only `agent_end` settles a
+        // parked turn — a yield never does.
         let outcomeKnown = () => {};
-        const outcome = new Promise<void>((resolve) => {
-          outcomeKnown = resolve;
-        });
         const unsubscribe = parentSession.subscribe((event) => {
           // A paused model loop is a scheduling pause, NOT the turn's stop: the
           // SDK resumes the run from the work that paused it (a steer, a
@@ -1381,11 +1381,9 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // with a payload count.
           if (record.status === "success" && !Array.isArray(record.type) && record.data !== undefined) {
             yielded = record.data;
-            // A non-parked turn's yield IS its outcome, so it releases the
-            // wait. A resumed continuation can yield again (a corrected
-            // payload), so while a parked end is in flight only the terminal
-            // end settles the wait — the last successful yield wins.
-            if (!resuming) outcomeKnown();
+            // A resumed continuation can yield again (a corrected payload), so
+            // while a parked end is in flight only the terminal end settles
+            // the wait — the last successful yield wins.
           }
         });
 
@@ -1419,26 +1417,35 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // expired into the budget-exhausted path below: the bound this wait
           // just spent IS the outer deadline, so an expired wait is deadline
           // evidence, not a fabricated stop. An unbounded wait would hang the
-          // review on a session that never comes back.
-          if (resuming && yielded === undefined && gathered === undefined) {
+          // review on a session that never comes back. The wait runs whenever
+          // a pause parked the turn without a terminal end — an earlier yield
+          // included, since a parked end is never final — and the gate is
+          // re-armed first: a pre-park yield already resolved `outcome`, and
+          // while the turn is parked only its terminal end settles it.
+          if (resuming && gathered === undefined) {
+            const terminal = new Promise<void>((resolve) => {
+              outcomeKnown = resolve;
+            });
             const settled = await waitTick(
               Math.max(1, remainingOuterMs(Date.now(), input.level) - PUBLICATION_TAIL_MS),
-              outcome,
+              terminal,
             );
             if (!settled) deadlineAbort();
           }
           clearTimeout(deadlineTimer);
           unsubscribe();
         }
+        // The run's own wall clock stopped this turn: a budget failure, not a
+        // review verdict. The deep parent is the ONE dispatched seat this
+        // path has (its `task` children are its own, invisible here), so the
+        // signal counts 1 of 1 — thrown before any yield is accepted and
+        // before any `incomplete` synthesis, whatever the transcript
+        // gathered. A yield emitted before the deadline does not outrank the
+        // stop that ended the turn.
+        if (stoppedByDeadline) {
+          throw new RunnerBudgetExhausted(1, 1);
+        }
         if (yielded === undefined) {
-          // The run's own wall clock stopped this turn: a budget failure, not
-          // a review verdict. The deep parent is the ONE dispatched seat this
-          // path has (its `task` children are its own, invisible here), so the
-          // signal counts 1 of 1 — thrown before any `incomplete` synthesis,
-          // whatever the transcript gathered.
-          if (stoppedByDeadline) {
-            throw new RunnerBudgetExhausted(1, 1);
-          }
           // A turn that ENDED without a yield is a stopped deep run, not an
           // exception: its gathered content and its declared cause/scope
           // become a synthesized `incomplete` envelope — the fact has ONE
@@ -1828,6 +1835,11 @@ export const ompAgentRuntime: AgentRuntime = {
         const rejections = results.filter((result) => result.status === "rejected");
         rejectedSeats = rejections.length;
         rejectedReason = rejections[0]?.reason;
+        // Positive deadline evidence: at least one settled seat declares the
+        // wall-clock cap stopped it. Decided here because it outranks both
+        // failure branches below — a wave the cap stopped publishes the budget
+        // signal, never a non-cap error or an `incomplete` verdict.
+        const capStopped = outcomes.some((outcome) => outcome.gap !== null);
         // The wave's verdict on a lost seat. A settled seat that failed without
         // a cap carries its own error; a seat promise that rejected outright
         // produced no outcome at all (the SDK threw, or a bug of ours). Both are
@@ -1839,7 +1851,10 @@ export const ompAgentRuntime: AgentRuntime = {
         // lost seat still aborts the recheck child.
         const rejected = results.find((result) => result.status === "rejected");
         const lostSeat = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-        if (outcomes.some((outcome) => outcome.output !== null)) {
+        // A cap stop is budget evidence for the whole wave and wins over every
+        // other loss shape: while one gap exists the budget path below owns
+        // the outcome, so the non-cap rethrow is skipped entirely.
+        if (!capStopped && outcomes.some((outcome) => outcome.output !== null)) {
           if (rejected?.status === "rejected") throw rejected.reason;
           if (lostSeat !== null) throw lostSeat;
         }
@@ -1863,22 +1878,15 @@ export const ompAgentRuntime: AgentRuntime = {
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
       const stoppedSeats =
         outcomes.filter((outcome) => outcome.gap !== null || outcome.output === null).length + rejectedSeats;
-      // The cause the outcome can state: the cap, when a cap caused every stop;
-      // a lost seat without cap evidence, which reaches synthesis only
-      // alongside an unusable wave — see the failure rule above, where it is
-      // exactly then that every dispatched seat was lost.
-      const everyStopWasCap = gaps.length === stoppedSeats;
-
       // A wall-clock-capped wave is a BUDGET stop, not a review verdict: the
       // runner reports the seat counts it observed via `RunnerBudgetExhausted`
       // and never synthesizes an envelope — findings a capped wave collected
       // stay unpublished by construction (already-published work is the
       // Worker's concern, not this process's). The stop reads ONLY the
-      // deadline evidence: `everyStopWasCap` means every seat the wave lost
-      // was stopped by its own cap; one cap-free loss keeps the non-budget
-      // `incomplete` path below, and a wave with usable output still rethrows
-      // a non-cap failure below before synthesis is ever reached.
-      if (stoppedSeats > 0 && everyStopWasCap) {
+      // deadline evidence: one positively identified cap stop decides it, and
+      // `seatsStopped` counts exactly the seats the cap itself stopped (the
+      // gaps), never losses a cap cannot account for.
+      if (gaps.length > 0) {
         recheckController.abort();
         const settled = recheckWork ? await recheckWork : null;
         // The SEATS served the round, not the host session: the same unanimous-

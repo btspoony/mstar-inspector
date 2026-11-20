@@ -1249,23 +1249,55 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     });
   });
 
-  test("a wave mixing a cap stop with a cap-free loss keeps the non-budget path", async () => {
-    // The deadline evidence explains only the capped seat: one loss the cap
-    // cannot account for, and no usable output to rethrow, leaves the wave a
-    // NON-BUDGET incomplete — the signal is never inferred from a mixture.
+  test("a wave mixing a cap stop with a cap-free loss is a budget stop, counting only the capped seat", async () => {
+    // The deadline evidence explains only the capped seat — but one observed
+    // cap stop IS budget evidence for the run: the wave publishes the signal
+    // over the cap-free loss, never an `incomplete` that hides the clock fact.
     seatResults = [
       { status: "absent", aborted: true, abortReason: CAP_REASON },
       { status: "absent" },
     ];
 
-    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
 
-    expect(envelope.verdict).toBe("incomplete");
-    expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.incomplete?.unscanned).toEqual([
-      expect.stringContaining("changeset-1-src"),
-      expect.stringContaining("changeset-2-lib"),
-    ]);
+    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+    expect(stop.seatsDispatched).toBe(2);
+    // Only the seat the cap stopped counts: the cap-free loss is not
+    // deadline evidence and never inflates the observed stop count.
+    expect(stop.seatsStopped).toBe(1);
+  });
+
+  test("a cap stop outranks a sibling's non-cap error even while the wave holds usable output", async () => {
+    // The capped seat delivered a valid payload before the wall clock fired
+    // (its output stays), its sibling failed outright — the usable-payload
+    // branch would rethrow that failure and mask the stop. The clock evidence
+    // wins: the run reports the budget signal instead.
+    seatResults = [
+      { aborted: true, abortReason: CAP_REASON, data: seatPayload() },
+      { error: "provider exploded" },
+    ];
+
+    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+
+    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+    expect(stop.seatsDispatched).toBe(2);
+    expect(stop.seatsStopped).toBe(1);
+  });
+
+  test("a cap stop outranks a seat promise that rejected outright", async () => {
+    // The rejected seat produced no outcome object at all, but the cap that
+    // stopped its sibling still stopped the review: budget signal, not the
+    // non-cap loss path.
+    seatResults = [
+      { status: "absent", aborted: true, abortReason: CAP_REASON },
+      { reject: "provider boom" },
+    ];
+
+    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+
+    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+    expect(stop.seatsDispatched).toBe(2);
+    expect(stop.seatsStopped).toBe(1);
   });
 
   test("a stopped deep turn still lands incomplete — no runner deadline evidence", async () => {
@@ -1295,6 +1327,52 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     );
     // The deadline abort is what stopped the turn: the session saw it.
     expect(parentAbortReasons).toEqual([{ reason: "runner deadline reached" }]);
+  });
+
+  test("a yield before the runner deadline does not outrank the stop that ends the turn", async () => {
+    // The yield lands while the turn is still live; the runner deadline then
+    // aborts the turn where it stands. The stop is the turn's outcome — the
+    // payload it emitted earlier is never accepted as the review verdict.
+    anchorRecheckDeadline(Date.now() - 60_000, "deep", Date.now() + 50);
+    parentPromptStarted = () => {
+      yieldListeners[yieldListeners.length - 1]?.({
+        type: "tool_execution_end",
+        toolCallId: "yield-early",
+        toolName: "yield",
+        isError: false,
+        result: { content: [], details: { data: deepEnvelope(), status: "success", type: undefined } },
+      });
+    };
+    // Held open like the no-yield stop above: only the deadline ends it.
+    parentPromptRelease = new Promise(() => {});
+
+    const stop = (await ompAgentRuntime.runReview({ ...DEEP_INPUT }).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+
+    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+    expect(stop.seatsDispatched).toBe(1);
+    expect(stop.seatsStopped).toBe(1);
+    expect(parentAbortReasons).toEqual([{ reason: "runner deadline reached" }]);
+  });
+
+  test("a parked turn that yielded before the pause still signals when its deadline stops the continuation", async () => {
+    // The turn yielded, then parked waiting for a continuation that never
+    // delivers. A parked end is never final, so the bounded wait still runs —
+    // and its expiry is the run's own deadline evidence: a budget stop, not
+    // the earlier yield.
+    anchorRecheckDeadline(Date.now(), "deep", Date.now() + 50);
+    parentYields = [deepEnvelope()];
+    parentParkedEnd = [{ role: "user", content: [{ type: "text", text: "parked" }] }];
+    parentResumeEnd = null;
+
+    const stop = (await ompAgentRuntime.runReview({ ...DEEP_INPUT }).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+
+    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+    expect(stop.seatsDispatched).toBe(1);
+    expect(stop.seatsStopped).toBe(1);
+    // The stop the session saw is the runner's own deadline abort, never a
+    // parked continuation finishing on its own.
+    expect(parentAbortReasons.length).toBeGreaterThan(0);
+    expect(parentAbortReasons.every((call) => call.reason === "runner deadline reached")).toBe(true);
   });
 });
 

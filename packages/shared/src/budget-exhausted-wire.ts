@@ -94,7 +94,12 @@ const SIGNAL_KEYS: Record<string, true> = { schema: true, seatsDispatched: true,
 export function isReviewBudgetExhaustedSignal(value: unknown): value is ReviewBudgetExhaustedSignal {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const doc = value as Record<string, unknown>;
-  if (Object.keys(doc).some((key) => !(key in SIGNAL_KEYS))) return false;
+  // The schema literal is the whole discriminator: without it the document
+  // is unrelated stdout, whatever counts it carries. Keys must be exact OWN
+  // names — `in` would admit inherited names like `constructor` as document
+  // keys, so the key table is probed with `Object.hasOwn`.
+  if (doc.schema !== REVIEW_BUDGET_EXHAUSTED_SCHEMA) return false;
+  if (Object.keys(doc).some((key) => !Object.hasOwn(SIGNAL_KEYS, key))) return false;
   const { seatsDispatched, seatsStopped } = doc;
   return (
     typeof seatsDispatched === "number" &&
