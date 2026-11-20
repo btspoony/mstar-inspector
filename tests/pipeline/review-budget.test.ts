@@ -408,22 +408,39 @@ describe("admission windows cover the whole allocation range", () => {
   });
 
   test("a small request never shortens either window — both read the ceiling, not the allocation", () => {
-    // The windows are members of the derived budget, computed BEFORE the
-    // request exists; pinning them against the floor AND the ceiling request
-    // proves a small PR cannot shrink the cover a retry or recovery needs.
+    // Two INDEPENDENT derivations — one exercised under a floor request, one
+    // under the tier maximum — must carry identical windows. Comparing the
+    // window triple of two separately-driven rounds (never one budget's
+    // fields against themselves) is what fails if a future change routes the
+    // allocation into `guardTtlSeconds`, `checkWindowMs` or `checkLeaseMs`.
     for (const level of LEVELS) {
-      const budget = budgetFor(level, CHECK_TERMINALIZE_MAX);
-      for (const request of [
-        requestRunnerBudget(level, size(0, [0])),
-        requestRunnerBudget(level, null),
-      ]) {
+      const anchoredWindows = (diffSize: { changedLines: number; files: readonly number[] } | null) => {
+        const budget = budgetFor(level, CHECK_TERMINALIZE_MAX);
+        const request = requestRunnerBudget(level, diffSize);
         expect(request.kind).toBe("requested");
-        if (request.kind !== "requested") return;
-        anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
-        expect(budget.guardTtlSeconds).toBe(reviewGuardTtlSeconds(level));
-        expect(budget.checkWindowMs).toBe(CHECK_WINDOW_MS);
-        expect(budget.checkLeaseMs).toBe(CHECK_WINDOW_MS);
-      }
+        if (request.kind !== "requested") throw new Error("unreachable");
+        const anchor = anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
+        expect(anchor.kind).toBe("allocated");
+        if (anchor.kind !== "allocated") throw new Error("unreachable");
+        return {
+          effectiveBudgetMs: anchor.effectiveBudgetMs,
+          guardTtlSeconds: budget.guardTtlSeconds,
+          checkWindowMs: budget.checkWindowMs,
+          checkLeaseMs: budget.checkLeaseMs,
+        };
+      };
+      const floor = anchoredWindows(size(0, [0]));
+      const ceiling = anchoredWindows(null);
+      // Distinct inputs: the pair cannot pass by both runs taking the same
+      // path — the requests, and so the allocations, differ.
+      expect(floor.effectiveBudgetMs).not.toBe(ceiling.effectiveBudgetMs);
+      expect(floor.guardTtlSeconds).toBe(ceiling.guardTtlSeconds);
+      expect(floor.checkWindowMs).toBe(ceiling.checkWindowMs);
+      expect(floor.checkLeaseMs).toBe(ceiling.checkLeaseMs);
+      // The windows are the level's own derivation, never the allocation's.
+      expect(floor.guardTtlSeconds).toBe(reviewGuardTtlSeconds(level));
+      expect(floor.checkWindowMs).toBe(CHECK_WINDOW_MS);
+      expect(floor.checkLeaseMs).toBe(CHECK_WINDOW_MS);
     }
   });
 });

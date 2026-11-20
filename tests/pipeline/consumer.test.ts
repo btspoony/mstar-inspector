@@ -4289,14 +4289,20 @@ describe("createReviewConsumer", () => {
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
   });
 
-  test("the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (deep, the tight bound)", async () => {
+  // The two maximum-terminalize fixtures below must differ in allocation:
+  // each pins its own logged `runner_effective_ms` and asserts it is not the
+  // sibling's, so the pair cannot pass by both runs taking the same path.
+  const LATE_SATURATED_EFFECTIVE_MS = 446_000;
+  const LATE_FLOOR_EFFECTIVE_MS = 120_024;
+
+  test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (saturated request)", async () => {
     // terminalizeMs = 30_000 is the supported ceiling the reserve charges,
-    // and deep's tier maximum is the only one that binds AT the derived
-    // cutoff — the tightest case the invariant can ever run. A millisecond
-    // short on either expiry is a real defect, not a rounding question.
+    // the request is the tier maximum, and 200s of preparation leaves the
+    // anchor 446s of the deep cutoff — the derived cutoff, not the request,
+    // binds the allocation, so the tail lands exactly at the round end. A
+    // millisecond short on either expiry is a real defect, not a rounding
+    // question.
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
-    // Saturated size ⇒ deep's tier maximum IS the request, keeping this the
-    // tight bound the invariant requires.
     h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
@@ -4313,18 +4319,28 @@ describe("createReviewConsumer", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
+        // 200s gone before the clone: the anchor lands at roundStart + 200s
+        // and takes the 446s the cutoff still owes — a real late start, not
+        // a fresh one.
+        ...clockSpendingSandbox("git init", 200_000, clock),
       });
       await consumer(h.makeBatch(makePayload()));
     });
 
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const execDeadlineMs = written.outerDeadlineEpochMs!;
-    // 900s − 254s reserve ⇒ deep's 646s maximum IS the derived cutoff.
+    // Cutoff-bound: 900s − 254s reserve ⇒ the late anchor ends AT 646s.
     expect(execDeadlineMs).toBe(roundStart + 646_000);
     const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
+    // The request asked the tier maximum (646s); the late start delivered a
+    // different, cutoff-bound allocation than the sibling floor fixture.
+    const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
+    expect(line.fields.runner_effective_ms).toBe(LATE_SATURATED_EFFECTIVE_MS);
+    expect(line.fields.runner_effective_ms).not.toBe(LATE_FLOOR_EFFECTIVE_MS);
 
     // Guard and Check were both taken at the round start; each must outlive
-    // the tail the runner's deadline cannot reach.
+    // the tail the runner's deadline cannot reach — `tailMs` IS the round
+    // end here, so `>=` covers the complete inequality.
     expect(guardRow).toBeDefined();
     expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
     expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(tailMs);
@@ -4334,14 +4350,15 @@ describe("createReviewConsumer", () => {
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
   });
 
-  test("a floor request at the maximum terminalize: a small PR's short budget never shortens the guard or Check windows", async () => {
-    // The other allocation extreme: a binary-only numstat requests the floor
-    // (120_024ms at 1 work unit), and a late start leaves far more than that
-    // — so the REQUEST, not the cutoff, binds the exec deadline. The invariant
-    // `execDeadline + reserve <= roundEnd <= min(guardExpiry, checkLease)`
-    // must still hold, and both expiries keep the CEILING's width: a retry or
-    // recovery needs the window the round actually owns, never the smaller
-    // window this PR's allocation happened to use.
+  test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (floor request)", async () => {
+    // The other allocation extreme, under the same late start and the same
+    // 30s terminalize ceiling: a binary-only numstat requests the floor
+    // (120_024ms at 1 work unit), and 200s spent leaves far more than that
+    // — so the REQUEST, not the cutoff, binds the exec deadline. The
+    // invariant `execDeadline + reserve <= roundEnd <= min(guardExpiry,
+    // checkLease)` must still hold, and both expiries keep the CEILING's
+    // width: a retry or recovery needs the window the round actually owns,
+    // never the smaller window this PR's allocation happened to use.
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     h.sandbox.numstatStdout = "-\t-\tdocs/diagram.png\n";
     const db = await createSeededTestD1();
@@ -4372,11 +4389,18 @@ describe("createReviewConsumer", () => {
     expect(execDeadlineMs).toBeLessThan(roundStart + 646_000);
     const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
     expect(tailMs).toBeLessThanOrEqual(roundStart + ROUND_BUDGET_MS);
+    // The floor delivered a different allocation than the sibling saturated
+    // fixture: the pair cannot pass by both runs taking the same path.
+    const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
+    expect(line.fields.runner_effective_ms).toBe(LATE_FLOOR_EFFECTIVE_MS);
+    expect(line.fields.runner_effective_ms).not.toBe(LATE_SATURATED_EFFECTIVE_MS);
 
-    // Equality, not just coverage: the acquired windows carry the whole
-    // ceiling — the floor request shortened neither of them.
+    // Coverage AND equality: the acquired windows outlive the whole reserved
+    // tail, and they still carry the ceiling-derived width — the floor
+    // request shortened neither of them.
     expect(guardRow).toBeDefined();
     expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
+    expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(tailMs);
     expect(Date.parse(String(guardRow!.expires_at))).toBe(
       roundStart + reviewGuardTtlSeconds("default") * 1000,
     );
