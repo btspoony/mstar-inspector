@@ -3629,6 +3629,40 @@ describe("budget-exhausted Check vocabulary", () => {
       `Review budget exhausted: quick review reached its 12.5s preparation budget (consumer deadline reached); 0/0 seats stopped before finishing${TAIL}`,
     );
   });
+  test("a non-positive or non-integral budget never names an impossible window", () => {
+    // `preparationBudgetMs` is `capMs - reserveMs` unclamped: a round cap
+    // below the reserve yields a negative record — the summary reports `0s`
+    // while the durable row keeps the raw value, and a fractional window
+    // renders exact decimal seconds.
+    for (const budgetMs of [-46_000, 0]) {
+      const summary = budgetExhaustedSummary({
+        kind: "budget-exhausted",
+        cause: "consumer-deadline",
+        budgetWindow: "preparation",
+        tier: "quick",
+        budgetMs,
+        seatsDispatched: null,
+        seatsStopped: null,
+        changedLines: null,
+      });
+      expect(summary).toBe(
+        `Review budget exhausted: quick review reached its 0s preparation budget (consumer deadline reached)${TAIL}`,
+      );
+    }
+    const fractional = budgetExhaustedSummary({
+      kind: "budget-exhausted",
+      cause: "consumer-deadline",
+      budgetWindow: "preparation",
+      tier: "quick",
+      budgetMs: 46_500,
+      seatsDispatched: null,
+      seatsStopped: null,
+      changedLines: null,
+    });
+    expect(fractional).toBe(
+      `Review budget exhausted: quick review reached its 46.5s preparation budget (consumer deadline reached)${TAIL}`,
+    );
+  });
 
   test("a killed exec with no seat evidence states the budget and omits the counters", () => {
     const summary = budgetExhaustedSummary({

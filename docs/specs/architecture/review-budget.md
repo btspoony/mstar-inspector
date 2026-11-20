@@ -36,7 +36,9 @@ Invariants:
 - There is exactly one `min()`, inside the derivation. A second clamp at a call site is a defect: it
   makes an unreachable tier value look shipped.
 - The tier `terminalizeMs` range has one owner — the operator-facing settings store; the derivation
-  imports it rather than repeating the bounds.
+  imports none of it, names the bounds in a comment, and the table test exercises both store
+  endpoints. Widening the store's range past the shipped deep ceiling fails the proof, never drifts
+  silently.
 - The guard TTL is `ceil((tierMax + 14 × 120 000 + 12 000 + 120 000) / 1000)`, derived from the same
   budget. Admission retry rungs stay below their TTL with a cumulative sum above it.
 
