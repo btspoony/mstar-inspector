@@ -25,6 +25,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   clampFindingSizes,
+  dropAllSuggestionFences,
   dropSuggestionFences,
   FINDING_BODY_MAX,
   FINDING_TITLE_MAX,
@@ -770,5 +771,29 @@ describe("suggestionFenceSpans (CommonMark fence grammar, QC R2)", () => {
   test("a tilde suggestion fence still counts as a suggestion", () => {
     const text = "~~~suggestion\nconst x = 1;\n~~~\nafter";
     expect(blocks(text)).toEqual([{ block: "~~~suggestion\nconst x = 1;\n~~~\n", closed: true }]);
+  });
+
+  test("an inline-code line on the first line is not a fence opener", () => {
+    const text = "```oldCall()```\n\n```suggestion\nconst x = 1;\n```\nafter";
+    expect(blocks(text)).toEqual([
+      { block: "```suggestion\nconst x = 1;\n```\n", closed: true },
+    ]);
+  });
+
+  test("the suggestion after such a line is still dropped from the body", () => {
+    const text = "```oldCall()```\n\n```suggestion\nconst x = 1;\n```\nafter";
+    expect(dropAllSuggestionFences(text)).toBe("```oldCall()```\n\nafter");
+  });
+
+  test("inline code whose info string holds inner backticks is not a fence either", () => {
+    for (const line of ["```use `code` here```", "````a`b```"]) {
+      const text = line + "\n```suggestion\nconst x = 1;\n```";
+      expect(blocks(text)).toEqual([{ block: "```suggestion\nconst x = 1;\n```", closed: true }]);
+    }
+  });
+
+  test("an ordinary ```js fence still opens a block", () => {
+    const text = "```js\nconst a = 1;\n```\n```suggestion\nconst x = 1;\n```";
+    expect(blocks(text)).toEqual([{ block: "```suggestion\nconst x = 1;\n```", closed: true }]);
   });
 });

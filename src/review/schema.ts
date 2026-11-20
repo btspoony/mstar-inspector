@@ -313,7 +313,10 @@ export function suggestionFenceSpans(text: string): { start: number; end: number
     const newline = text.indexOf("\n", offset);
     const lineEnd = newline === -1 ? text.length : newline;
     const fence = FENCE_LINE.exec(text.slice(offset, lineEnd));
-    if (fence !== null) {
+    // CommonMark: a backtick fence's info string may not contain a backtick, so
+    // a line like ```oldCall()``` is inline code - it neither opens nor closes.
+    const isFence = fence !== null && !(fence[2]![0] === "`" && (fence[3] ?? "").includes("`"));
+    if (isFence) {
       const ticks = fence[2]!.length;
       const char = fence[2]![0]!;
       const info = (fence[3] ?? "").trim();
