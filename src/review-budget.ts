@@ -131,6 +131,23 @@ export const ROUND_BUDGET_MS = 900_000;
 export const CHECK_WINDOW_MS = ROUND_BUDGET_MS;
 
 /**
+ * The documented request floor (ms): the existing 60s runner tail plus the
+ * only local timing anchor, one observed ~52s model call (spec:
+ * .mstar/iterations/v1.21-review-budget/specs/review-budget.md § Allocation).
+ * It bounds the REQUEST, never the available wall clock — a late anchor may
+ * still shrink the effective window below it.
+ */
+export const RUNNER_BUDGET_FLOOR_MS = 120_000;
+
+/**
+ * Work units at which the request reaches the tier maximum: the documented
+ * 20,000-line GitHub diff boundary — a sizing anchor, not a throughput
+ * measurement.
+ */
+export const SIZE_SATURATION_WORK_UNITS = 20_000;
+
+
+/**
  * The Check terminalize setting's supported range (ms) is owned by
  * `CHECK_TERMINALIZE_MIN`/`CHECK_TERMINALIZE_MAX` in
  * `src/dashboard/runtime-config-store.ts` — the operator-facing bounds the
@@ -267,6 +284,118 @@ export type RunnerBudgetInvalid = {
 export type RunnerBudgetOutcome = RunnerBudgetAnchor | RunnerBudgetRefusal | RunnerBudgetOversize | RunnerBudgetInvalid;
 
 /**
+ * The size facts of the SELECTED numstat (full or incremental — the consumer
+ * reads it once for the seat partition and passes it through unchanged),
+ * computed in the parser's single pass: `changedLines` is the textual
+ * adds+deletions sum the attempt reports verbatim; `workUnits` is the
+ * per-file-minimum unit count the request sizes from — one unit per
+ * changed line, minimum one per file, so a binary `-/-` or zero-text row
+ * still pays its unit. `null` is a known-unknown size, never a zero.
+ */
+export type ReviewDiffSize = {
+  changedLines: number;
+  workUnits: number;
+};
+
+/**
+ * Parse the selected numstat stdout into `ReviewDiffSize`. `git apply
+ * --numstat` emits one `<add>\t<del>\t<path>` row per file, every row
+ * newline-terminated; a binary file prints `-\t-\t<path>`. `changedLines`
+ * is the textual adds+deletions sum; `workUnits` sums one unit per changed
+ * line, minimum one per file (a binary or `0\t0` row contributes 0 textual
+ * lines and still pays its unit). Both scalars accumulate in this ONE
+ * pass — there is no per-file array and no second traversal.
+ *
+ * `null` is a KNOWN-UNKNOWN size — never a fabricated count and never a
+ * zero — returned when:
+ *  - the stdout never arrived (`undefined`);
+ *  - the stdout is empty while `provenEmpty` is false (empty-but-not-proven:
+ *    an unproven empty read cannot be told apart from a lost or truncated
+ *    one; only `provenEmpty`, the same round's diff-file evidence, settles
+ *    that the diff itself is empty);
+ *  - a non-empty stdout is not newline-terminated (the stream cut mid-row
+ *    — a truncated tail row must not silently size the diff);
+ *  - any row is malformed: other than the three expected fields, a path
+ *    field absent or empty after trimming, or a count that is neither
+ *    `-\t-` (binary) nor a non-empty digits-only non-negative integer;
+ *  - any count or running total cannot be represented exactly as a safe
+ *    integer — a value `Number()` rounds or a sum that overflows
+ *    `Number.MAX_SAFE_INTEGER` is unknown size, never a corrupted count
+ *    that would size the diff small.
+ */
+export function parseNumstatSize(
+  stdout: string | undefined,
+  provenEmpty: boolean,
+): ReviewDiffSize | null {
+  if (stdout === undefined) return null;
+  // Every complete row is newline-terminated, so the split's trailing empty
+  // segment is an artifact, not a row; every other line must parse as a row.
+  const rows = stdout.split("\n");
+  if (rows[rows.length - 1] === "") rows.pop();
+  if (rows.length === 0) {
+    return provenEmpty ? { changedLines: 0, workUnits: 0 } : null;
+  }
+  if (!stdout.endsWith("\n")) return null;
+  let changedLines = 0;
+  let workUnits = 0;
+  for (const row of rows) {
+    const fields = row.split("\t");
+    // Exactly three fields: the path must exist and be non-empty even though
+    // its content is ignored, and a row that is short OR long is malformed —
+    // an extra field means the parse cannot trust what it read.
+    const [adds = "", dels = "", path = ""] = fields;
+    if (fields.length !== 3 || path.trim() === "") return null;
+    if (adds === "-" && dels === "-") {
+      // Binary file: zero textual lines; the per-file minimum still applies.
+      // The unit must pass the same safe-total check as the textual branch —
+      // a trailing binary row may not slip an overflowing total past it.
+      workUnits += 1;
+      if (!Number.isSafeInteger(workUnits)) return null;
+      continue;
+    }
+    // Number("") and Number(" ") are 0, so a blank or whitespace count must
+    // be refused by shape, not by the numeric check below.
+    if (!/^\d+$/.test(adds) || !/^\d+$/.test(dels)) return null;
+    const added = Number(adds);
+    const deleted = Number(dels);
+    // Digits-only text still loses exactness past 2^53-1 (or becomes
+    // Infinity): an inexact count is unknown size, never a smaller one.
+    if (!Number.isSafeInteger(added) || !Number.isSafeInteger(deleted)) {
+      return null;
+    }
+    changedLines += added + deleted;
+    workUnits += Math.max(1, added + deleted);
+    // The same rule applies to the running totals: the moment either stops
+    // being a safe integer, the whole read is unknown.
+    if (!Number.isSafeInteger(changedLines) || !Number.isSafeInteger(workUnits)) {
+      return null;
+    }
+  }
+  return { changedLines, workUnits };
+}
+
+/**
+ * A computed size-aware request: `floor + (tierMax - floor) * units/20_000`,
+ * units saturated at `SIZE_SATURATION_WORK_UNITS`. The caller feeds
+ * `requestedBudgetMs` into `anchorRunnerBudget` as `requestMs` — the ONE
+ * tier clamp still lives there.
+ */
+export type RunnerBudgetRequest = {
+  kind: "requested";
+  /** Integer ms in [RUNNER_BUDGET_FLOOR_MS, tierMax]; the tier maximum when the size is unknown. */
+  requestedBudgetMs: number;
+  /**
+   * The work units the request was sized from — one per textual changed
+   * line, minimum one per file — `null` when the size was unknown.
+   */
+  workUnits: number | null;
+};
+
+/** The size-aware request, or the reused `invalid` refusal on malformed size input. */
+export type RunnerBudgetRequestOutcome = RunnerBudgetRequest | RunnerBudgetInvalid;
+
+
+/**
  * Derive the round's budget. The output names every window a consumer bills
  * from the same clock: the reserve, the absolute pre-runner cutoff, the
  * preparation budget, the tier maximum, the admission guard TTL, and the
@@ -286,6 +415,52 @@ export function deriveReviewBudget(inputs: ReviewBudgetInputs): ReviewBudget {
     checkWindowMs: CHECK_WINDOW_MS,
     checkLeaseMs: CHECK_WINDOW_MS,
   };
+}
+
+/**
+ * Convert the selected numstat's size into the runner's requested budget —
+ * the deterministic request that `anchorRunnerBudget` clamps against the
+ * live cutoff; it never overrides the tier ceiling and never decides the
+ * outcome. Capped linear interpolation in whole ms:
+ *
+ *   workUnits         = Σ max(1, linesInFile)   (binary/zero-text files pay 1)
+ *   requestedMs(null) = tierMaxMs
+ *   requestedMs       = 120_000 + floor((tierMaxMs - 120_000) * min(workUnits, 20_000) / 20_000)
+ *
+ * Zero work requests the floor; 20,000 units and beyond request exactly the
+ * tier maximum — adjacent sizes ramp smoothly, there are no buckets. `null`
+ * (numstat absent or unavailable) requests the tier maximum: an unmeasurable
+ * diff is never short-changed, and the numstat is never fetched twice.
+ *
+ * Malformed size input — a non-integer or negative count, or a `changedLines`
+ * that disagrees with the file lines — is refused with the existing
+ * `invalid` vocabulary: invalid data is not treated as empty, and a
+ * corrupted size must not launder into a request the review would trust.
+ */
+export function requestRunnerBudget(
+  level: ReviewLevel,
+  size: ReviewDiffSize | null,
+): RunnerBudgetRequestOutcome {
+  const tierMaxMs = RUNNER_MAX_BUDGET_MS[level];
+  if (size === null) {
+    return { kind: "requested", requestedBudgetMs: tierMaxMs, workUnits: null };
+  }
+  const { changedLines, workUnits } = size;
+  const malformed =
+    !Number.isSafeInteger(changedLines) ||
+    changedLines < 0 ||
+    !Number.isSafeInteger(workUnits) ||
+    workUnits < changedLines;
+  if (malformed) {
+    return { kind: "invalid", requestedBudgetMs: Number.NaN };
+  }
+  const saturatedUnits = Math.min(workUnits, SIZE_SATURATION_WORK_UNITS);
+  const requestedBudgetMs =
+    RUNNER_BUDGET_FLOOR_MS +
+    Math.floor(
+      ((tierMaxMs - RUNNER_BUDGET_FLOOR_MS) * saturatedUnits) / SIZE_SATURATION_WORK_UNITS,
+    );
+  return { kind: "requested", requestedBudgetMs, workUnits };
 }
 
 /**
