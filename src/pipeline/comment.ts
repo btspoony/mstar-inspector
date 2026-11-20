@@ -1916,7 +1916,10 @@ export function parseDiffHunkRanges(diff: string): Map<string, Array<[number, nu
  *     AND inside that SAME hunk; anything else yields `lineStart: null` so
  *     the poster never invents a multi-line anchor.
  * With `diff` undefined (prefetch failed) the base layer alone decides —
- * draft-attempt semantics: GitHub's own validation is the backstop.
+ * and because no diff can verify the range, NONE is published: every result
+ * carries `lineStart: null` and only the single-line anchor at
+ * `line_end` rides the wire (a 422 on a guessed range takes the whole
+ * batch down).
  *
  * Each result pairs the finding with the range start it may publish, and the
  * finding object is returned UNTOUCHED: the consumer keys its row ids by the
@@ -1942,7 +1945,9 @@ export function filterLineCommentFindings(
       finding.line_end >= 1,
   );
   if (diff === undefined) {
-    return base.map((finding) => ({ finding, lineStart: finding.line_start ?? null }));
+    // Fail-closed: without the prefetched diff the range is unverified, so it
+    // never rides the wire — single-line anchor at line_end only.
+    return base.map((finding) => ({ finding, lineStart: null }));
   }
   const hunksByPath = parseDiffHunkRanges(diff);
   const qualified: LineCommentAnchor[] = [];

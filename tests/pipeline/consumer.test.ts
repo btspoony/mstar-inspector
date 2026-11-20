@@ -4121,12 +4121,19 @@ describe("line comments (AL-3 layered delivery)", () => {
     expect(h.sandbox.destroyCalls).toBe(1);
   });
 
-  test("no diff text + a ranged finding → the stored range rides unvalidated (draft semantics, QC R5)", async () => {
+  test("no diff text + a ranged finding → no unverified range rides the wire (single-line anchor only, QC1 F-001)", async () => {
     h.sandbox.diffStdout = "";
     h.sandbox.runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       findings: [
-        { mergeClass: "must-fix", file_path: "src/auth.ts", line_start: 19, line_end: 21, title: "Ranged", body: "B." },
+        {
+          mergeClass: "must-fix",
+          file_path: "src/auth.ts",
+          line_start: 19,
+          line_end: 21,
+          title: "Ranged",
+          body: "B.\n\n```suggestion\nconst x = 1;\nconst y = 2;\n```",
+        },
       ],
     });
     const db = await createSeededTestD1();
@@ -4135,10 +4142,14 @@ describe("line comments (AL-3 layered delivery)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     const lineInput = h.commenterCalls.find((c) => c.op === "line-comments")!.args as {
-      intents: Array<{ line: number; lineStart: number | null }>;
+      intents: Array<{ line: number; lineStart: number | null; body: string }>;
     };
     expect(lineInput.intents).toHaveLength(1);
-    expect(lineInput.intents[0]).toMatchObject({ line: 21, lineStart: 19 });
+    // Undiffed range is unverified → single-line anchor at line_end, no start.
+    expect(lineInput.intents[0]).toMatchObject({ line: 21, lineStart: null });
+    // The demotion strips the applyable multi-line replacement.
+    expect(lineInput.intents[0]!.body).not.toContain("```");
+    expect(lineInput.intents[0]!.body).not.toContain("const x = 1;");
   });
 
   test("a cross-hunk range is demoted to the single-line anchor and its suggestion block is dropped (QC R3)", async () => {
