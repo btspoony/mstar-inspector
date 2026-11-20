@@ -65,7 +65,6 @@ import { attachCheckAtAcceptance, createCheckLifecycle } from "../pipeline/check
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardMaintenanceGate, dashboardTenantGate } from "../dashboard/index";
-import { handleSetupGet, handleSetupPost } from "./install-setup";
 import { adminApp } from "../admin/index";
 import { isFlagEnabled } from "../admin/flags";
 import { trailingSlashRedirect } from "./redirects";
@@ -84,7 +83,7 @@ const app = new Hono<{ Bindings: Env }>();
 // reason: `spaDispatch` answers `GET /dashboard` and every browser page load
 // before `app.route("/dashboard", dashboardApp)` is ever reached, so a gate
 // inside `dashboardApp` alone would close the API and leave the shell open.
-// `/healthz` and `/bot/setup` are `app` routes and `/_internal_admin/*` mounts
+// `/healthz` is an `app` route and `/_internal_admin/*` mounts
 // on the operator sub-app, so no ungated surface carries this prefix.
 app.use("*", trailingSlashRedirect());
 app.use("/dashboard/*", dashboardTenantGate);
@@ -428,13 +427,6 @@ app.get("/healthz", (c) => c.json({ ok: true, version: `v${APP_VERSION}` }));
 // 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
 // module never imports pipeline/store/review (architect decision Q2).
 app.route("/dashboard", dashboardApp);
-// GitHub's Setup URL (`{origin}/bot/setup`, configured in the App's settings —
-// not by this code). Mounted on `app` so it serves both deployment modes: a
-// callback carries no `:workspaceRef`, and an `APP_ROUTES` entry would widen
-// the operator-read ceiling for workspace routes.
-app.get("/bot/setup", handleSetupGet);
-app.post("/bot/setup", handleSetupPost);
-
 /**
  * Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review
  * entry — the legacy bare `/webhook` face is

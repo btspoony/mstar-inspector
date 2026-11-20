@@ -1,0 +1,14 @@
+-- 0081_drop_install_claims.sql — the install-claim intent table is dead code.
+--
+-- The claim existed to attribute a GitHub App installation through the Setup
+-- URL redirect, which carries no `state`. The app creation manifest never set
+-- `setup_url`, so GitHub never calls back into `/bot/setup` and no claim is
+-- ever consumed. Installations are recorded instead by the
+-- `installation.created` webhook into `bot_installations`, and the target
+-- page's "bind" action upserts that same table directly — the claim round
+-- trip served no remaining purpose.
+--
+-- In-flight rows are dropped with the table: an unconsumed claim was an intent
+-- only, and with the callback gone it can never bind anything. No table reads
+-- `install_claims` after this migration.
+DROP TABLE install_claims;

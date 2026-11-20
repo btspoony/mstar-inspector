@@ -42,7 +42,6 @@ import {
   modelChainTabs,
   parseCheckMinScoreSettings,
   parseConcurrencySettings,
-  parseInstallClaimResult,
   parseStoredCheckMinScore,
   parseStoredConcurrency,
   removeChanged,
@@ -525,14 +524,13 @@ export function AppInfoSection({
 /**
  * The Installed tab's first block: the GitHub installation entry point.
  *
- * An `owned` bot keeps the plain share link (derived from the cached GitHub
+ * Both scopes keep the same plain share link (derived from the cached GitHub
  * slug; an App whose metadata has not synced explains that instead of
- * rendering a dead link). A `shared` bot instead offers the CLAIM action: the
- * claim row is the only thing that lets GitHub's stateless setup redirect bind
- * this target, so sending the user straight to `installations/new` would create
- * an installation no target can attribute. Either way the block names the
- * target's bound installation — its account, and when GitHub no longer has it,
- * that reviews stopped until it comes back.
+ * rendering a dead link). Installing on GitHub is what records the
+ * installation — the `installation.created` webhook writes `bot_installations`,
+ * and the operator binds it to this target afterwards from the pending list
+ * below. The block also names the target's bound installation — its account,
+ * and when GitHub no longer has it, that reviews stopped until it comes back.
  */
 export function AppInstallSection({
   locale,
@@ -550,15 +548,13 @@ export function AppInstallSection({
   installation: SettingsManagePayload["installation"];
   /** The bot's live installations no target references — the bind source. */
   pendingInstallations: SettingsManagePayload["pending_installations"];
-  /** The server-derived Blocked state: no install/claim action while true. */
+  /** The server-derived Blocked state: no install action while true. */
   blocked: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const slug = app.github_slug;
   const name = appDisplayName(app);
   const href = appInstallHref(slug);
-  const [claiming, setClaiming] = useState(false);
-  const [claimFailed, setClaimFailed] = useState(false);
   /** The installation id being bound, so one row's action is not doubled. */
   const [binding, setBinding] = useState<number | null>(null);
   const [bindFailed, setBindFailed] = useState(false);
@@ -588,27 +584,6 @@ export function AppInstallSection({
     }
   }
 
-  /** Record the claim, then leave for GitHub's install page. */
-  async function startClaim(): Promise<void> {
-    setClaiming(true);
-    setClaimFailed(false);
-    try {
-      const res = await postForm(`${apiBase()}/apps/${encodeURIComponent(appId)}/claim`, {});
-      const result = res.status === 200 ? parseInstallClaimResult(JSON.parse(res.body)) : null;
-      if (result === null) {
-        setClaimFailed(true);
-        return;
-      }
-      // A full navigation out to GitHub; the claim row carries the intent, so
-      // the callback can attribute the installation the user creates there.
-      window.location.assign(result.installationUrl);
-    } catch {
-      setClaimFailed(true);
-    } finally {
-      setClaiming(false);
-    }
-  }
-
   return (
     <FlowSection title={t(locale, "settings.install")} subtitle={href === null ? undefined : t(locale, "settings.installCopy")}>
       <AppInstallIdentity
@@ -616,27 +591,12 @@ export function AppInstallSection({
         name={name}
         avatarSrc={app.github_avatar_url}
         appId={app.github_app_id}
-        href={blocked || (app.scope === "shared" && installation === null) ? null : href}
+        href={blocked ? null : href}
       >
         {blocked ? null : href === null ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
-        ) : app.scope === "shared" && installation === null ? (
+        ) : installation === null ? (
           <>
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.installClaimCopy")}</p>
-            <Button
-              type="button"
-              variant="secondary"
-              className="w-fit"
-              disabled={claiming}
-              onClick={() => void startClaim()}
-            >
-              {t(locale, "settings.installClaim")}
-            </Button>
-            {claimFailed ? (
-              <p role="status" className="text-sm text-(--tone-warn-fg)">
-                {t(locale, "settings.installClaimFailed")}
-              </p>
-            ) : null}
             {pendingInstallations.length === 0 ? null : (
               <div className="flex flex-col gap-2">
                 <p className="text-sm font-medium">{t(locale, "settings.installPending")}</p>

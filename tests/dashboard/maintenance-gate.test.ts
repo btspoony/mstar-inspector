@@ -5,9 +5,8 @@
  *   - a page load answers 503 with the J7 HTML (reason + start time);
  *   - an `/api/` path answers 503 with `{ maintenance: true, reason, since }`,
  *     so the SPA parses a state instead of rendering a page;
- *   - `/healthz`, the operator console and `/bot/setup` stay 200 — the operator
- *     must be able to open the platform again, and GitHub's install redirect
- *     must not land on a maintenance page;
+ *   - `/healthz` and the operator console stay 200 — the operator must be able
+ *     to open the platform again;
  *   - with no window set (the absent-row default) every surface is unchanged.
  *
  * The page case is the reason the gate also mounts in `src/worker/index.ts`:
@@ -107,12 +106,11 @@ describe("the maintenance gate", () => {
     expect(html).not.toContain("Reason:");
   });
 
-  test("healthz, the operator console, the login page and /bot/setup stay open", async () => {
+  test("healthz, the operator console and the login page stay open", async () => {
     const { db } = await fixture();
     await close(db);
     expect((await get(db, "/healthz", null)).status).toBe(200);
     expect((await get(db, "/_internal_admin/api/runtime", OPERATOR)).status).toBe(200);
-    expect((await get(db, "/bot/setup?installation_id=4242&setup_action=install", MEMBER, true)).status).toBe(200);
     // The console that ends the window needs a session, so signing in must stay
     // possible while it runs.
     expect((await get(db, "/dashboard/login", null, true)).status).toBe(200);

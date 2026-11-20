@@ -535,8 +535,8 @@ export type CheckGateSettings = {
  * A bot's scope (migration 0058) — the `review_bots.scope` closed vocabulary,
  * mirrored across the bundle boundary (the REVIEW_TRIGGER_MODES convention:
  * documented, deliberately not imported). `owned` serves its own workspace
- * only; `shared` is offered platform-wide and resolves nothing until a claim
- * binds an installation.
+ * only; `shared` is offered platform-wide and resolves nothing until an
+ * installation is bound to a target.
  */
 export const BOT_SCOPES = ["owned", "shared"] as const;
 export type BotScope = (typeof BOT_SCOPES)[number];
@@ -2738,31 +2738,6 @@ function isBoundInstallation(value: unknown): value is BoundInstallation {
     isNullableString(value.account_login) &&
     typeof value.removed === "boolean"
   );
-}
-
-/** The claim entry's 200 face. */
-export type InstallClaimResult = {
-  claimId: string;
-  expiresAt: string;
-  installationUrl: string;
-};
-
-/**
- * Parse the claim route's answer. Fail-closed, and the URL is checked against
- * GitHub's own installation page: this value becomes a navigation target, so a
- * drifted or hostile body must not send the user anywhere else.
- */
-export function parseInstallClaimResult(data: unknown): InstallClaimResult | null {
-  if (!isRecord(data)) return null;
-  if (typeof data.claimId !== "string" || data.claimId.length === 0) return null;
-  if (typeof data.expiresAt !== "string" || data.expiresAt.length === 0) return null;
-  if (typeof data.installationUrl !== "string") return null;
-  if (!data.installationUrl.startsWith("https://github.com/apps/")) return null;
-  return {
-    claimId: data.claimId,
-    expiresAt: data.expiresAt,
-    installationUrl: data.installationUrl,
-  };
 }
 
 export function parseModels(data: unknown): ModelsPayload | null {

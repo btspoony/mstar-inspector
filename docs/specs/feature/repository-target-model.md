@@ -69,13 +69,13 @@ A row that migration produced now carries three NULL repository columns (`repo_i
 | A3 | The write refuses before the first insert: an empty or malformed selection is `400`, an invisible or unknown bot is `404 unknown app`, a non-manager is `403`, a `repo_id` outside the application's granted set is `400 repository_not_installed` with zero rows written, and an incomplete installation walk is `502` (fail closed — an incomplete walk proves nothing). |
 | A4 | The list read (`GET …/api/targets`) answers each live target with `target_id, repo_id, repo_owner, repo_name, bot_id, app_name, review_enabled, follow_workspace_defaults, last_reviewed_at`, where `repo_id: null` is the only 待安装 discriminator. |
 
-### Installation claims
+### Installation binding
 
 | ID | Contract |
 |----|----------|
-| C1 | `install_claims` is bot-level: `(id, user_id, workspace_id, bot_id, created_at, expires_at, consumed_at, consumed_token)` with at most one live claim per `(user_id, bot_id)`. A claim bridges the stateless GitHub setup redirect to the application; it names no target. |
-| C2 | `/bot/setup` survives as the install callback and binds `bot_installations` only — it never touches `review_targets`. Installation state is read from `bot_installations`; the 已安装 tab and the bind action both read that table. |
-| C3 | `POST …/api/apps/:appId/bind-installation` keeps its path and its shared-only bar; it consumes the claim, upserts the installation and writes no target binding. Its `no target` and `target already bound` refusals are gone with the binding column, and the installation it is given must answer the pending read. |
+| C1 | There is no install-claim table. Migration 0081 drops `install_claims`; an installation is recorded by the `installation.created` webhook into `bot_installations`, and nothing carries a pre-install intent. |
+| C2 | There is no `/bot/setup` callback. The app-creation manifest sets no `setup_url`, so GitHub never redirects there; installation state is read from `bot_installations`, which the 已安装 tab and the bind action both read. |
+| C3 | `POST …/api/apps/:appId/bind-installation` keeps its path and its shared-only bar; it upserts the installation directly (the webhook's own `bot_installations` upsert) and writes no target binding. The installation it is given must answer the pending read. |
 | C4 | The operator `POST …/api/targets/:targetId/unbind` route is deleted with the binding column. A wrong installation is repaired through `bot_installations` handling, not by clearing a target column. |
 
 ### Application settings gates
@@ -131,7 +131,6 @@ Execution reads — webhook bot lookup, consumer credential load, publication re
 - `src/dashboard/targets-store.ts` (`resolveByRepo`, `create`, `listLiveWithApp`, `countLive`, `getInWorkspace`, `getForExecution`, `readEffectiveTargetSettings`, `setInheritance`, `setReviewConfig`, `setReviewEnabled`)
 - `src/worker/index.ts`, `src/worker/webhooks.ts` (repository classifier and target resolution)
 - `src/dashboard/index.ts` (the target and defaults routes, the application-settings gates), `src/dashboard/apps-store.ts` (application visibility and installations)
-- `src/dashboard/install-claims-store.ts`, `src/worker/install-setup.ts` (bot-level claims and the setup callback)
 - `src/pipeline/consumer.ts`, `src/contracts/review-job.ts` (execution reads)
 - `tests/dashboard/targets-store.test.ts`, `tests/worker/webhook-routing.test.ts`
 

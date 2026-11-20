@@ -27,34 +27,17 @@ A retained target grants its workspace no bot-scope write; the bot's lifecycle, 
 
 The store is not renamed: `review_runtime_settings` is the platform parameter store, and keys group by domain prefix (`review.*`, `platform.*`). A future rename is its own mechanical migration.
 
-### Installation claims
+### Installation binding
 
-GitHub's setup redirect carries `installation_id` and `setup_action` but **not** `state`, so attribution is session-based.
+An installation belongs to the app, never to a target. The `installation.created`
+webhook records it in `bot_installations` (authoritative `account_login` when the
+payload carries the installation's own account); the 已安装 tab lists those rows
+and offers the bind action for each one this target has not bound yet. There is
+no pre-install intent table and no callback route: the app-creation manifest sets
+no `setup_url`, so GitHub never redirects to one.
 
-```
-install_claims(id, user_id, workspace_id, bot_id, created_at, expires_at, consumed_at, consumed_token)
-```
-
-- A claim is created (or refreshed in place) by a manager on the application's 已安装 face; TTL 15 minutes, enforced by the writer, no sweeper.
-- The live predicate is one string everywhere: `consumed_at IS NULL AND expires_at > now`. A partial unique index keeps at most one live claim per `(user_id, bot_id)`; a bot-level claim names no target.
-- A claim belongs to its creator: another session sees none, and the two states are indistinguishable.
-
-### Setup callback
-
-`GET` **never binds**. It is reached by a top-level browser navigation, and its
-`installation_id` is caller-supplied and unverified — nothing in a `GET` can
-prove that installation belongs to the claim's bot. Binding is a state change,
-so it happens only on the explicit `POST`; the `GET` renders what it was told
-and one form per claim.
-
-| Request | Behaviour |
-|---|---|
-| `GET /bot/setup?installation_id=…&setup_action=install` | Requires a signed session (401 HTML otherwise). 0 live claims → a page that says `no_live_claim` and links back to the dashboard. 1 or N claims → a `confirm_required` page showing the installation id it was given, the claims (application, workspace, claimed instant) and one `POST` form per claim, carrying the claim's server-side id. **Writes nothing.** |
-| `POST /bot/setup` | The only bind. Body: `installation_id`, `claim_id`. Refusals are JSON envelopes (`404 {"error":"claim not found"}`); the bind refusals keep their text bodies and the `GET` pages stay HTML/text. The session cookie is `SameSite=Lax`, so a cross-site `POST` cannot reach it — the confirm page is also the CSRF boundary. |
-
-Binding is one batch: consume the claim, then upsert `bot_installations` (copying `account_login` from the row, never inventing it). It writes no target column. Ownership inside the batch is a per-call `consumed_token`, never the timestamp — two callbacks in the same millisecond must not let the loser mutate anything. The upsert is deliberately conflict-tolerant (`ON CONFLICT (bot_id, installation_id) DO UPDATE`).
-
-The webhook never writes an installation binding. It refreshes a target's repository caches and, when the target's `repo_id` is still null, claims it inside that delivery.
+Migration 0081 drops `install_claims`; migration 0067 dropped the target-keyed
+variant before it.
 
 ### Resolution guards
 
@@ -95,10 +78,9 @@ verdict per delivery, recorded once.
 
 ## Where it lives
 
-- `migrations/0058_review_bot_scope.sql`, `migrations/0067_repo_target_identity.sql` (bot-level claims)
+- `migrations/0058_review_bot_scope.sql`, `migrations/0067_repo_target_identity.sql`, `migrations/0081_drop_install_claims.sql`
 - `migrations/0062_review_usage_indexes.sql` (the usage read's composite indexes)
 - `src/dashboard/runtime-config-store.ts` (key + domain registry), `src/dashboard/apps-store.ts` (`setBotScope`, `listBotScopes`, `getInstallation`)
-- `src/dashboard/install-claims-store.ts`, `src/worker/install-setup.ts`
 - `src/dashboard/targets-store.ts` (`resolveByRepo`), `src/admin/index.ts` (`GET /api/usage`)
 - `src/dashboard/review-usage-store.ts` (`readReviewUsage`, `reviewUsageMonth`), `src/dashboard/index.ts` (`GET /dashboard/<ref>/api/settings/review-usage`)
 - `src/spa/pages/ReviewUsageCard.tsx`, `src/spa/admin/UsagePage.tsx`
@@ -120,7 +102,7 @@ A workspace may read a target when it holds that live target: the repository cla
 
 ### Derived Blocked state
 
-Both detail payload faces carry `blocked` and, when true, `blocked_reason = "bot_not_shared"`. It is derived per request from the bot row and the target's workspace — true exactly when the bot is `owned` and the target's workspace is not the bot's workspace. There is no column and no projection. The page names the reason and hides the install/claim action, pointing it at the application's 已安装 face; the repository detail keeps rendering trigger, depth, gate and pause.
+Both detail payload faces carry `blocked` and, when true, `blocked_reason = "bot_not_shared"`. It is derived per request from the bot row and the target's workspace — true exactly when the bot is `owned` and the target's workspace is not the bot's workspace. There is no column and no projection. The page names the reason and hides the install action, pointing it at the application's 已安装 face; the repository detail keeps rendering trigger, depth, gate and pause.
 
 ### Shared bots are read-only for their consumers
 

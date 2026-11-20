@@ -18,7 +18,7 @@ Ordinary schema migrations stay forward-only SQL files and are never upgrade ite
 | M4 | A workspace API request answers `503 { "maintenance": true, "reason": …, "since": … }`. A webhook delivery answers `503` so GitHub retries it: the user-facing claim is that a delivery made during the window is retried after recovery, not dropped. |
 | M5 | The queue face defers instead of running: every message of the batch is retried 300 seconds out. When the runtime offers no delayed redelivery, or a message has exhausted the queue's attempt budget, the delivery is recorded as a `review_failures` row (`stage = maintenance_deferred`, the payload's target/installation/repository/PR identity, error prefixed `maintenance_window:`) and acked, so the sweep counts it and alerts; the invocation writes one `maintenance_defer` line naming the queue and the batch size. A deferral spends one delivery attempt, so the window must stay shorter than the queue's retry budget. |
 | M6 | A cron invocation does not run its work while the window is open: it records a `maintenance_skip` line naming the cron expression and returns, so the next scheduled invocation runs. |
-| M7 | Not gated: `/healthz` (liveness is not maintenance), the operator console and its API, `/bot/setup` (the short-lived install callback that writes claims only), and the two pre-session dashboard paths `/dashboard/login` and `/dashboard/oauth/callback`. `/dashboard/locale` and `/dashboard/logout` stay reachable for the same reason — a session-less language toggle and burning one's own cookie are not tenant reads. |
+| M7 | Not gated: `/healthz` (liveness is not maintenance), the operator console and its API, and the two pre-session dashboard paths `/dashboard/login` and `/dashboard/oauth/callback`. `/dashboard/locale` and `/dashboard/logout` stay reachable for the same reason — a session-less language toggle and burning one's own cookie are not tenant reads. |
 | M8 | The operator writes the window through the existing `PATCH /_internal_admin/api/runtime` route, which accepts exactly one of `concurrency`, `checkBudgets`, `commentClaim`, `reviewLevel`, `recheckAssignment`, `maintenance` per request; the `maintenance` body is `{ enabled, reason? }`. The store writes the three keys with one platform audit event in the same batch, and enabling stamps `since` with the request's instant. |
 | M9 | The upgrade runner opens and closes the window through the same helper, so there is exactly one writer path and no second API. A window the runner opened and a window the operator opened are distinguishable in state (`maintenance_owned`), never by inspecting the reason text. |
 
@@ -93,7 +93,6 @@ Ordinary schema migrations stay forward-only SQL files and are never upgrade ite
 |---|---|---|
 | `/dashboard/*` HTML, workspace API | 503 maintenance page / `503` JSON while the window is open (role cannot bypass it) | same |
 | `/healthz` | 200 | 200 |
-| `/bot/setup` | reachable (session required) | reachable |
 | `/_internal_admin/*` console and API, including the upgrade routes | 404 | visible; the console shows state, preflight counts, the window reason and start time, the current item, progress, the last error and a stop control for the step loop |
 | Webhook route, queue consumer, cron entries | no session; gated by the window (503 / defer / skip) | same |
 
