@@ -1156,6 +1156,22 @@ describe("Blocked and pending installations (static SSR)", () => {
     expect(bound).not.toContain(t("en", "settings.installPendingBind"));
   });
 
+  test("an owned target offers no bind action — the route refuses a non-shared bot", () => {
+    const ownedPending: SettingsManagePayload = {
+      ...sharedPayload(),
+      app: { ...sharedPayload().app, scope: "owned" },
+      pending_installations: [
+        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+      ],
+    };
+    const markup = renderDetail(ownedPending, "installations");
+    // The bind route answers 404 "bot is not shared" for an owned bot, so the
+    // control must not be offered — an offered control that always fails is the
+    // bug this pins. The plain install link stays available to both scopes.
+    expect(markup).not.toContain(t("en", "settings.installPendingBind"));
+    expect(markup).toContain('href="https://github.com/apps/demo/installations/new"');
+  });
+
   test("the new fields parse fail-closed on both manager faces", () => {
     expect(parseSettings(managePayload)?.can_manage).toBe(true);
     expect(parseSettings(identityPayload)?.can_manage).toBe(false);

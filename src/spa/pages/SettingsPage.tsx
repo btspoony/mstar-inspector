@@ -560,10 +560,10 @@ export function AppInstallSection({
   const [bindFailed, setBindFailed] = useState(false);
 
   /**
-   * Bind one pending installation to this target. The route runs the same
-   * consume-and-bind batch the GitHub setup redirect does, so a refusal (a
-   * lost race, an unshared bot) is reported here instead of silently
-   * reloading.
+   * Bind one pending installation to this target. The route upserts
+   * `bot_installations` directly (the webhook's own upsert) after checking the
+   * id answers the pending read, so a refusal (an unshared bot, an id the bot
+   * never reported) is reported here instead of silently reloading.
    */
   async function bindInstallation(installationId: number): Promise<void> {
     setBinding(installationId);
@@ -595,7 +595,7 @@ export function AppInstallSection({
       >
         {blocked ? null : href === null ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.installNoSlug")}</p>
-        ) : installation === null ? (
+        ) : app.scope === "shared" && installation === null ? (
           <>
             {pendingInstallations.length === 0 ? null : (
               <div className="flex flex-col gap-2">

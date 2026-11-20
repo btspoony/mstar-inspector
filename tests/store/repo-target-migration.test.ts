@@ -2,10 +2,11 @@
  * Migration 0067: a review target is keyed by repository, not by installation.
  *
  * The interesting halves are what the file must ADD and what it must REMOVE.
- * Added: the repository identity columns and the workspace defaults a target
- * can inherit from. Removed: the installation-keyed trio on the target, the
- * one-target-per-installation index, and the owner allowlist table with its
- * rows.
+ * Added: the repository identity columns, the workspace defaults a target can
+ * inherit from, and the bot-level `install_claims` (absent at 0066; migration
+ * 0081 retires the table again). Removed: the installation-keyed trio on the
+ * target, the one-target-per-installation index, and the owner allowlist table
+ * with its rows.
  *
  * Nothing is backfilled, so a migrated row keeps `repo_id NULL` — the
  * "awaiting claim" state the resolution path treats as a fallback, which is why

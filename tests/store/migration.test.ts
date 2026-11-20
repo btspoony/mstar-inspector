@@ -3372,6 +3372,64 @@ describe("migrations/0058_review_bot_scope.sql", () => {
   });
 });
 
+/**
+ * Migration 0081 retires the claim table the earlier migrations built: 0067
+ * recreated it bot-level for a setup redirect this deployment never receives,
+ * so the table's whole life is two statements — created by 0067, dropped here.
+ */
+describe("migrations/0081_drop_install_claims.sql", () => {
+  const RETIRE = "0081_drop_install_claims.sql";
+  const CREATE = "0067_repo_target_identity.sql";
+
+  /** The schema exactly before 0067 — 0059's target-keyed claim table is live. */
+  function dbAt0066(): TestD1 {
+    const db = createTestD1();
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) <= 66,
+    )) {
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("0067 still recreates the claim table bot-level, so 0081 has something to drop", () => {
+    const db = dbAt0066();
+    // 0059's target-keyed table is what 0067 finds: same name, other key.
+    expect(columnNames(db, "install_claims")).toContain("target_id");
+    expect(columnNames(db, "install_claims")).not.toContain("bot_id");
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, CREATE), "utf8"));
+    expect(schemaNames(db, "table")).toContain("install_claims");
+    expect(columnNames(db, "install_claims")).toEqual([
+      "id",
+      "user_id",
+      "workspace_id",
+      "bot_id",
+      "created_at",
+      "expires_at",
+      "consumed_at",
+      "consumed_token",
+    ]);
+    expect(schemaNames(db, "index")).toEqual(
+      expect.arrayContaining(["install_claims_user_open", "install_claims_live_bot"]),
+    );
+  });
+
+  test("0081 removes the table and both of its indexes from the shipped schema", () => {
+    const db = createMigratedTestD1();
+    expect(schemaNames(db, "table")).not.toContain("install_claims");
+    expect(schemaNames(db, "index")).not.toContain("install_claims_user_open");
+    expect(schemaNames(db, "index")).not.toContain("install_claims_live_bot");
+    // The retirement is the file's only statement: applying it over the
+    // 0067-era schema leaves the claim table gone and nothing else touched.
+    const before = dbAt0066();
+    execMigrationScript(before.raw, readFileSync(join(MIGRATIONS_DIR, CREATE), "utf8"));
+    const otherTables = schemaNames(before, "table").filter((name) => name !== "install_claims");
+    execMigrationScript(before.raw, readFileSync(join(MIGRATIONS_DIR, RETIRE), "utf8"));
+    expect(schemaNames(before, "table")).not.toContain("install_claims");
+    expect(schemaNames(before, "table")).toEqual(otherTables);
+  });
+});
+
 describe("migrations/0060_execution_ledger_target.sql", () => {
   const LEDGER_TARGET_MIGRATION = "0060_execution_ledger_target.sql";
 

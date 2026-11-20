@@ -2,7 +2,7 @@
 
 ## Scope
 
-The data and execution contract behind the repository surface: target identity and schema, webhook resolution, effective review settings, the target store, the add-repository API, installation claims, and the application-settings gates that survive the surface split. This page also states what the previous installation-bound model no longer does.
+The data and execution contract behind the repository surface: target identity and schema, webhook resolution, effective review settings, the target store, the add-repository API, installation binding, and the application-settings gates that survive the surface split. This page also states what the previous installation-bound model no longer does.
 
 Page layouts and journey states live in the repository surface page; the operator window and the historical backfill live in the operator data-upgrade page. Out of scope: cross-workspace sharing of one repository, billing and quota semantics, and any compatibility layer for the retired application-scoped surfaces.
 
@@ -136,4 +136,4 @@ Execution reads — webhook bot lookup, consumer credential load, publication re
 
 ## Change obligations
 
-A change to target identity, the uniqueness claim, resolution order or the claim paths, effective settings and inheritance, the add-repository API, the claims shape, the tenant read predicates, or the workspace default columns updates this page in the same change. A second target per bot is ordinary: the execution ledgers already carry `target_id`. A change to the repository claim or the resolution order updates this page and the repository surface page together. A new admission mechanism replaces the Admission rules of the repository surface page and the retired-model section here in the same change.
+A change to target identity, the uniqueness claim, resolution order or the claim paths, effective settings and inheritance, the add-repository API, the installation binding, the tenant read predicates, or the workspace default columns updates this page in the same change. A second target per bot is ordinary: the execution ledgers already carry `target_id`. A change to the repository claim or the resolution order updates this page and the repository surface page together. A new admission mechanism replaces the Admission rules of the repository surface page and the retired-model section here in the same change.

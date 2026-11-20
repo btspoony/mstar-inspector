@@ -1,8 +1,8 @@
-# Feature: bot scope and installation claiming
+# Feature: bot scope and installation binding
 
 ## Scope
 
-A review bot's visibility (`owned` / `shared`), the platform's official workspace, the installation-claim loop that attaches a shared bot installation to the application, and the guards that decide whether a delivery reviews at all.
+A review bot's visibility (`owned` / `shared`), the platform's official workspace, the bind that attaches a shared bot installation to the application, and the guards that decide whether a delivery reviews at all.
 
 ## Current state
 
@@ -70,8 +70,7 @@ verdict per delivery, recorded once.
 ## Invariants
 
 - `shared` is platform-authorized and batch-verified against the current designation.
-- The bind's ownership proof is the request token; a losing consume mutates nothing.
-- A `GET` never writes: the bind needs the explicit confirm `POST`, so a mailed or prefetched `installation_id` cannot attach anything.
+- The bind writes only an installation the bot already reported: the pending read is the gate, so an id the bot never saw attaches nothing.
 - A wrong installation is repaired at the installation level; no per-target binding column exists to clear.
 - The webhook writes installations and deliveries; it claims a null repository identity on its target and writes no installation binding.
 - A delivery whose repository matches no live target, and one matching two unclaimed rows, resolves to nothing; silently falling back would re-attribute a review.
@@ -88,7 +87,7 @@ verdict per delivery, recorded once.
 
 ## Change obligations
 
-Any change to scope authority, the claim lifecycle, the bind batch or the resolution guards updates this page. A chooser for non-operator workspaces, a Blocked state after a designation change, and quota live in later phases and must record their own contract here.
+Any change to scope authority, the bind write or the resolution guards updates this page. A chooser for non-operator workspaces, a Blocked state after a designation change, and quota live in later phases and must record their own contract here.
 
 ### Resolving a target for a workspace
 
@@ -98,7 +97,7 @@ A workspace may read a target when it holds that live target: the repository cla
 
 `GET`-side payload field `pending_installations` lists live `bot_installations` of the target's bot that no live target references (`removed_at` excluded), and is empty unless the bot is `shared` or mapped to the addressed workspace.
 
-`POST /api/apps/:appId/bind-installation` (manager, `access: write`) creates-or-refreshes a claim and then runs the same guarded batch as the setup confirm. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared` (no claim written); malformed id → 400; id absent from the pending read → 404 `unknown installation`.
+`POST /api/apps/:appId/bind-installation` (manager, `access: write`) upserts `bot_installations` directly — the webhook's own conflict-tolerant `ON CONFLICT (bot_id, installation_id)` upsert. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared` (nothing written); malformed id → 400; id absent from the pending read → 404 `unknown installation`.
 
 ### Derived Blocked state
 
