@@ -4801,7 +4801,10 @@ async function processMessage(
       // row carries it so a later conflicting delivery can tell whether the
       // live review covers its own sha.
       headSha: payload.head_sha ?? null,
-      now: new Date().toISOString(),
+      // One clock for the whole round: `new Date()` bypasses the mocked
+      // `Date.now()` every deadline in this invocation is measured on, so
+      // the row's origin is stamped from the same instant the budget reads.
+      now: new Date(Date.now()).toISOString(),
     });
     if (!admission.ok) {
       // §1.3 observability: one admission decision, one refusal record — the

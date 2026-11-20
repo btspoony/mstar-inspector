@@ -4098,6 +4098,96 @@ describe("createReviewConsumer", () => {
       expect(delays.reduce((sum, delay) => sum + delay, 0)).toBeGreaterThan(ttl);
     }
   });
+
+  test("a late runner start: the guard and Check expiries cover execDeadline + reserve from their own origins", async () => {
+    // The origins are the ROWS the production paths wrote — the inflight
+    // row's acquired_at/expires_at pair and the Check claim's created_ms /
+    // execution_deadline_ms pair — never the derived windows re-computed.
+    // The frozen clock makes every production Date.now() read exact, so the
+    // coverage is measured, not assumed.
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    let guardRow: Record<string, unknown> | undefined;
+    h.sandbox.probe = () => {
+      guardRow = inflightRows(db)[0];
+    };
+    let roundStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const adapter = checksAdapterFor(db);
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+        // 200s of the 900s round is gone before the clone: the anchor happens
+        // well after the round start, so the derived cutoff — not the tier
+        // maximum — binds the allocation.
+        ...clockSpendingSandbox("git init", 200_000, clock),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    const execDeadlineMs = written.outerDeadlineEpochMs!;
+    // Late start ⇒ the 666s cutoff binds: exec end + reserve IS the round end.
+    expect(execDeadlineMs).toBe(roundStart + 666_000);
+    const tailMs = execDeadlineMs + postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
+
+    // Guard: the row the consumer ACQUIRED at round start outlives the whole
+    // reserved tail — its own expiry, not the TTL arithmetic.
+    expect(guardRow).toBeDefined();
+    expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
+    expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(tailMs);
+
+    // Check: claimed at ADMISSION — before the 200s was spent — so its
+    // execution deadline is exactly the end of this round's reserved tail,
+    // the tightest the lease may ever run.
+    const claim = checkRowFor(db, SHA);
+    expect(claim.created_ms).toBe(roundStart);
+    expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
+    expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
+  });
+
+  test("the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (deep, the tight bound)", async () => {
+    // terminalizeMs = 30_000 is the supported ceiling the reserve charges,
+    // and deep's tier maximum is the only one that binds AT the derived
+    // cutoff — the tightest case the invariant can ever run. A millisecond
+    // short on either expiry is a real defect, not a rounding question.
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    setAppReviewLevel(db, TEST_APP_ID, "deep");
+    // The operator's ceiling value, read per message exactly like the hook's.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "30000");
+    let guardRow: Record<string, unknown> | undefined;
+    h.sandbox.probe = () => {
+      guardRow = inflightRows(db)[0];
+    };
+    let roundStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const adapter = checksAdapterFor(db);
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    const execDeadlineMs = written.outerDeadlineEpochMs!;
+    // 900s − 254s reserve ⇒ deep's 646s maximum IS the derived cutoff.
+    expect(execDeadlineMs).toBe(roundStart + 646_000);
+    const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
+
+    // Guard and Check were both taken at the round start; each must outlive
+    // the tail the runner's deadline cannot reach.
+    expect(guardRow).toBeDefined();
+    expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
+    expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(tailMs);
+    const claim = checkRowFor(db, SHA);
+    expect(claim.created_ms).toBe(roundStart);
+    expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
+    expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
+  });
 });
 
 describe("line comments (AL-3 layered delivery)", () => {
@@ -6156,6 +6246,8 @@ type CheckRowShape = {
   terminal_ms: number | null;
   terminalize_outcome: string | null;
   terminalize_elapsed_ms: number | null;
+  /** The claim's own origin — the `nowMs` the insert was stamped with. */
+  created_ms: number;
   execution_deadline_ms: number;
 };
 
