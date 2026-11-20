@@ -1100,12 +1100,18 @@ describe("createReviewConsumer", () => {
       seatsStopped: 3,
     });
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
 
     // No throw → the handler acks; the review never reached an envelope, so
     // no publication, no comment and no review row.
     await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
 
+    // ACKED, never retried: a confirmed stop is terminal.
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(failureRows(db)).toHaveLength(1);
@@ -1114,6 +1120,21 @@ describe("createReviewConsumer", () => {
     expect(row).toContain('"cause":"runner-deadline"');
     expect(row).toContain('"seatsDispatched":5');
     expect(row).toContain('"seatsStopped":3');
+
+    // The Check this stop owes is the FULL sentence — the runner window and
+    // every counter (5 dispatched, 3 stopped, the numstat's 17 changed lines)
+    // were all observed before the signal resolved.
+    const outcome = JSON.parse(row.slice(row.indexOf("{"), row.lastIndexOf("}") + 1)) as { budgetMs: number };
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.status).toBe("completed");
+    expect(terminal.conclusion).toBe("failure");
+    expect(terminal.output.summary).toBe(
+      `Review budget exhausted: default review stopped at ${outcome.budgetMs / 1000}s ` +
+        "with 3/5 seats stopped before finishing (17 changed lines) — a time-budget failure, " +
+        "not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.",
+    );
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
   });
 
   test("a sandbox kill at the anchored deadline acks with the typed outcome and unknown counters", async () => {
@@ -9196,15 +9217,29 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const db = await createSeededTestD1();
     // An OLDER completed Check and the review it published, both for the head
     // this delivery will check out: a re-trigger must leave them untouched.
+    // The publication's own payload is a REAL prior review's record — its body
+    // is the durable form of the already-published GitHub comment — so the
+    // byte-identical assertion below actually protects an existing comment,
+    // not an empty fixture. Its `ship it` verdict also pins that an earlier
+    // same-head PASS never softens this attempt's `failure`.
+    const PRIOR_PUBLICATION_PAYLOAD =
+      '{"scope":{"appId":"' +
+      TEST_APP_ID +
+      '","installationId":123,"owner":"acme","repo":"widgets","prNumber":42,"headSha":"' +
+      SHA +
+      '"},"round":1,"targetCommentId":4242,' +
+      '"body":"<!-- mstar-inspector:review:v1 round=1 -->\\n## ✅ Verdict: `ship it`\\nAll good. ⚡",' +
+      '"bodySha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",' +
+      '"artifact":{"payload":{"verdict":"ship it","scorePct":95}},"lifecycle":null}';
     db.raw
       .prepare(
         `INSERT INTO review_publications
            (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, created_ms, updated_ms)
          VALUES ('prior-publication', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'applied',
-                 '{}', '{"prior":true}', 1, 1)`,
+                 ?, '{"prior":true}', 1, 1)`,
       )
-      .run(TEST_APP_ID, SHA);
+      .run(TEST_APP_ID, SHA, PRIOR_PUBLICATION_PAYLOAD);
     db.raw
       .prepare(
         `INSERT INTO review_checks
@@ -9280,9 +9315,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(prior.last_error).toBeNull();
     expect(prior.updated_ms).toBe(1);
     const priorPublication = db.raw
-      .query("SELECT phase, proof_json, updated_ms FROM review_publications WHERE id = 'prior-publication'")
-      .get() as { phase: string; proof_json: string; updated_ms: number };
-    expect(priorPublication).toEqual({ phase: "applied", proof_json: '{"prior":true}', updated_ms: 1 });
+      .query("SELECT phase, payload_json, proof_json, updated_ms FROM review_publications WHERE id = 'prior-publication'")
+      .get() as { phase: string; payload_json: string; proof_json: string; updated_ms: number };
+    expect(priorPublication).toEqual({
+      phase: "applied",
+      payload_json: PRIOR_PUBLICATION_PAYLOAD,
+      proof_json: '{"prior":true}',
+      updated_ms: 1,
+    });
   });
 
   test("check lifecycle: a sandbox kill publishes the no-counter short form, never an invented count", async () => {
@@ -9346,13 +9386,25 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
+    // ACKED, never retried: the parked send is handed to recovery, and a
+    // confirmed stop is terminal regardless of how its send ended.
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
     // This invocation's terminal send parked on the wire and never answered, so
     // the scripted run is still the promoted one — nothing landed.
     const frozen = checkRowFor(db, SHA);
     expect(checkRuns.get(frozen.check_run_id!)!.status).toBe("in_progress");
     expect(frozen.desired).toBe("failure");
-    expect(frozen.desired_summary).toContain("Review budget exhausted: default review reached its");
-    expect(frozen.desired_summary).toContain("(sandbox execution killed at its deadline)");
+    // The exact text the freeze owes — derived here from the attempt's own
+    // recorded facts (same budget the failure row carries, no seat counts,
+    // the numstat's 17 changed lines), never echoed back from the row.
+    const row = String(failureRows(db)[0]!.error);
+    const outcome = JSON.parse(row.slice(row.indexOf("{"), row.lastIndexOf("}") + 1)) as { budgetMs: number };
+    const expectedSummary =
+      `Review budget exhausted: default review reached its ${outcome.budgetMs / 1000}s runner budget ` +
+      "(sandbox execution killed at its deadline); 17 changed lines — a time-budget failure, " +
+      "not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.";
+    expect(frozen.desired_summary).toBe(expectedSummary);
     expect(frozen.holder).toBeNull();
     expect(frozen.terminal_ms).toBeNull();
     expect(frozen.recovery_state).toBe("remote-unconfirmed");
