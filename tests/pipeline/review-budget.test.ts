@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import {
   anchorRunnerBudget,
   requestRunnerBudget,
+  parseNumstatSize,
   deriveReviewBudget,
   ROUND_BUDGET_MS,
   RUNNER_BUDGET_FLOOR_MS,
@@ -333,5 +334,65 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
     if (anchor.kind !== "allocated") return;
     expect(anchor.requestedBudgetMs).toBe(168_000);
     expect(anchor.effectiveBudgetMs).toBe(168_000);
+  });
+
+});
+
+describe("numstat size parse: complete vs truncated vs unknown", () => {
+  test("a truncated tail row is unknown size — never an undersized complete set", () => {
+    // Every complete row the parser accepts ends in a newline; a stdout that
+    // stops mid-row cannot be told apart from a complete set whose counts
+    // happen to be self-consistent — so it must not size the diff at all.
+    expect(parseNumstatSize("10\t2\tsrc/auth.ts\n5\tsrc/docs.md", false)).toBeNull();
+    // A row that lost its path field is truncated the same way even when the
+    // newline happened to survive.
+    expect(parseNumstatSize("10\t2\n", false)).toBeNull();
+    // The same text with a valid terminator parses normally.
+    expect(parseNumstatSize("10\t2\tsrc/auth.ts\n5\t0\tsrc/docs.md\n", false)).toEqual({
+      changedLines: 17,
+      files: [12, 5],
+    });
+  });
+
+  test("a binary-only diff carries zero textual lines per file, not null", () => {
+    // `-\t-` is git's binary marker: deliberate data, not a failure — each
+    // file still pays the per-file minimum unit inside the request.
+    const size = parseNumstatSize("-\t-\tassets/logo.png\n-\t-\tassets/fonts.bin\n", false);
+    expect(size).toEqual({ changedLines: 0, files: [0, 0] });
+    const request = requestRunnerBudget("default", size);
+    expect(request.kind).toBe("requested");
+    if (request.kind !== "requested") return;
+    expect(request.workUnits).toBe(2);
+  });
+
+  test("a complete mixed diff sums textual lines and keeps binary rows at zero", () => {
+    const size = parseNumstatSize(
+      "10\t2\tsrc/auth.ts\n-\t-\tassets/logo.png\n0\t3\tdocs/readme.md\n",
+      false,
+    );
+    expect(size).toEqual({ changedLines: 15, files: [12, 0, 3] });
+  });
+
+  test("an empty diff is a known zero only when the diff file proved empty", () => {
+    // The same empty stdout means two different things: the same round's
+    // diff-file evidence decides which — the parser never guesses.
+    expect(parseNumstatSize("", true)).toEqual({ changedLines: 0, files: [] });
+    expect(parseNumstatSize("", false)).toBeNull();
+    // No stdout at all is unproven empty under any file state.
+    expect(parseNumstatSize(undefined, true)).toBeNull();
+  });
+
+  test("a negative or non-numeric count row is unknown size, never a count", () => {
+    expect(parseNumstatSize("-3\t1\tsrc/auth.ts\n", false)).toBeNull();
+    expect(parseNumstatSize("abc\t1\tsrc/auth.ts\n", false)).toBeNull();
+    // `abc` on one side is not the `-\t-` binary pair.
+    expect(parseNumstatSize("-\t1\tsrc/auth.ts\n", false)).toBeNull();
+    // A non-integer count is malformed the same way.
+    expect(parseNumstatSize("1.5\t0\tsrc/auth.ts\n", false)).toBeNull();
+    // An unproven-empty read still yields the tier maximum, not the floor.
+    const request = requestRunnerBudget("default", parseNumstatSize("abc\t1\tx.ts\n", false));
+    expect(request.kind).toBe("requested");
+    if (request.kind !== "requested") return;
+    expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
   });
 });

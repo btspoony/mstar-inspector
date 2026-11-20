@@ -283,6 +283,8 @@ import {
   reviewGuardTtlSeconds,
   ROUND_BUDGET_MS,
   runnerTimeoutMs,
+  parseNumstatSize,
+  requestRunnerBudget,
   type ReviewBudget,
 } from "../review-budget";
 
@@ -5855,6 +5857,14 @@ async function processMessage(
     // write, the wire value and the exec timeout all spend its absolute end.
     // Its refusals — an oversized request, a spent cutoff — throw before any
     // paid work — never a 1ms exec.
+    // The same numstat stdout the seat partition consumed sizes the runner
+    // request — one read, one size value, `null` when the read cannot prove
+    // a complete row set (unavailable, unproven-empty or truncated/malformed
+    // rows). The request is what the allocation asks for inside the tier;
+    // `anchorRunnerBudget` remains the only clamp that decides the outcome.
+    const diffSize = parseNumstatSize(numstat.stdout, diffFileState === "empty");
+    const sizeRequest = requestRunnerBudget(level, diffSize);
+
     const anchor = anchorRunnerBudget(budget, Date.now());
     if (anchor.kind === "invalid") {
       throw new Error(

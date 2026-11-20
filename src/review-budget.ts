@@ -298,6 +298,61 @@ export type ReviewDiffSize = {
 };
 
 /**
+ * Parse the selected numstat stdout into `ReviewDiffSize`. `git apply
+ * --numstat` emits one `<add>\t<del>\t<path>` row per file, every row
+ * newline-terminated; a binary file prints `-\t-\t<path>`. `changedLines`
+ * is the textual adds+deletions sum; each file contributes its textual
+ * total to `files` (a binary or `0\t0` row contributes 0 and still pays
+ * the allocator's per-file minimum unit).
+ *
+ * `null` is a KNOWN-UNKNOWN size — never a fabricated count and never a
+ * zero — returned when:
+ *  - the stdout never arrived (`undefined`);
+ *  - the stdout is empty while `provenEmpty` is false (empty-but-not-proven:
+ *    an unproven empty read cannot be told apart from a lost or truncated
+ *    one; only `provenEmpty`, the same round's diff-file evidence, settles
+ *    that the diff itself is empty);
+ *  - a non-empty stdout is not newline-terminated (the stream cut mid-row
+ *    — a truncated tail row must not silently size the diff);
+ *  - any row is malformed: a path field absent, a count that is neither
+ *    `-\t-` (binary) nor a non-negative integer, or a negative count.
+ */
+export function parseNumstatSize(
+  stdout: string | undefined,
+  provenEmpty: boolean,
+): ReviewDiffSize | null {
+  if (stdout === undefined) return null;
+  const rows = stdout.split("\n").filter((line) => line.trimEnd() !== "");
+  if (rows.length === 0) {
+    return provenEmpty ? { changedLines: 0, files: [] } : null;
+  }
+  if (!stdout.endsWith("\n")) return null;
+  const files: number[] = [];
+  let changedLines = 0;
+  for (const row of rows) {
+    const fields = row.split("\t");
+    // The path field must exist even though its content is ignored; a row
+    // shorter than 3 fields is a malformed or truncated line.
+    if (fields.length < 3) return null;
+    const [adds, dels] = fields;
+    if (adds === "-" && dels === "-") {
+      // Binary file: zero textual lines; the per-file minimum still applies
+      // inside the request.
+      files.push(0);
+      continue;
+    }
+    const added = Number(adds);
+    const deleted = Number(dels);
+    if (!Number.isInteger(added) || added < 0 || !Number.isInteger(deleted) || deleted < 0) {
+      return null;
+    }
+    files.push(added + deleted);
+    changedLines += added + deleted;
+  }
+  return { changedLines, files };
+}
+
+/**
  * A computed size-aware request: `floor + (tierMax - floor) * units/20_000`,
  * units saturated at `SIZE_SATURATION_WORK_UNITS`. The caller feeds
  * `requestedBudgetMs` into `anchorRunnerBudget` as `requestMs` — the ONE
