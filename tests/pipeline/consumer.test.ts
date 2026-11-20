@@ -4396,11 +4396,16 @@ describe("createReviewConsumer", () => {
     expect(line.fields.runner_effective_ms).not.toBe(LATE_SATURATED_EFFECTIVE_MS);
 
     // Coverage AND equality: the acquired windows outlive the whole reserved
-    // tail, and they still carry the ceiling-derived width — the floor
-    // request shortened neither of them.
+    // tail AND the round end — the tail stops short of the round here, so both
+    // halves of `execDeadline + reserve <= roundEnd <= expiry` are pinned —
+    // and they still carry the ceiling-derived width: the floor request
+    // shortened neither of them.
     expect(guardRow).toBeDefined();
     expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
     expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(tailMs);
+    expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(
+      roundStart + ROUND_BUDGET_MS,
+    );
     expect(Date.parse(String(guardRow!.expires_at))).toBe(
       roundStart + reviewGuardTtlSeconds("default") * 1000,
     );
@@ -4408,6 +4413,7 @@ describe("createReviewConsumer", () => {
     expect(claim.created_ms).toBe(roundStart);
     expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
+    expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(roundStart + ROUND_BUDGET_MS);
   });
 });
 
