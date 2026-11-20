@@ -639,6 +639,28 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
     expect(clampedBody.startsWith(prose)).toBe(true);
   });
 
+  test("a fence whose closing fence ends exactly at FINDING_BODY_MAX is dropped whole, prose kept", () => {
+    // Span end (just past the closing fence line) lands exactly on the budget, so
+    // the final truncation would otherwise cut into that closing fence.
+    const code = "const x = 1;";
+    const pad = FINDING_BODY_MAX - 21 - code.length;
+    const body = `${"P".repeat(pad)}\n\n\`\`\`suggestion\n${code}\n\`\`\`\n\ntail`;
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", body)] }).findings[0]!.body;
+    expect(clampedBody).toBe(`${"P".repeat(pad)}\n\n\ntail`);
+    expect(clampedBody).not.toContain("```");
+    expect(clampedBody).not.toContain("…");
+    // Clamping the already-clamped body is a no-op, so the boundary case stays idempotent.
+    expect(clampFindingSizes({ ...base, findings: [finding("t", clampedBody)] }).findings[0]!.body).toBe(clampedBody);
+  });
+
+  test("a fence opening exactly at FINDING_BODY_MAX leaves no partial fence", () => {
+    const prose = "P".repeat(FINDING_BODY_MAX - 1);
+    const body = `${prose}\n\`\`\`suggestion\nconst x = 1;\n\`\`\``;
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", body)] }).findings[0]!.body;
+    expect(clampedBody).toBe(`${prose}…`);
+    expect(clampedBody).not.toContain("```");
+  });
+
   test("fence-free over-budget bodies clamp byte-identically to the legacy rule", () => {
     const body = "B".repeat(FINDING_BODY_MAX + 500);
     const clamped = clampFindingSizes({ ...base, findings: [finding("t", body)] });

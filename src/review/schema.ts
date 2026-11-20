@@ -312,7 +312,9 @@ export function dropSuggestionFencesCrossing(text: string, max: number): {
   let out = text;
   let dropped = false;
   for (;;) {
-    const fence = suggestionFenceSpans(out).find(([start, end]) => start < max && max < end);
+    // A boundary that lands on the closing fence's end (max === end) still cuts
+    // that fence once the trailing ellipsis is appended, so treat it as crossing.
+    const fence = suggestionFenceSpans(out).find(([start, end]) => start < max && max <= end);
     if (fence === undefined) return { text: out, dropped };
     out = `${out.slice(0, fence[0])}${out.slice(fence[1])}`;
     dropped = true;
