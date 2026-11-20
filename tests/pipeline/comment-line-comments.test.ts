@@ -697,10 +697,16 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
     const { calls, octokit } = mockPullsOctok({ createReviewResponse: echoResponse });
     await postLineCommentsWithOctokit(octokit, input);
     const comments = calls.createReviewParams!.comments as Record<string, unknown>[];
-    expect(comments.map((comment) => Object.keys(comment))).toEqual([
-      ["path", "side", "line", "body"],
-      ["path", "side", "line", "body"],
+    // Contract, not key insertion order: exactly path/side/line/body, no start_* keys.
+    expect(comments.map((comment) => Object.keys(comment).sort())).toEqual([
+      ["body", "line", "path", "side"],
+      ["body", "line", "path", "side"],
     ]);
+    expect(comments.map(({ path, side, line }) => ({ path, side, line }))).toEqual([
+      { path: "src/auth.ts", side: "RIGHT", line: 21 },
+      { path: "src/auth.ts", side: "RIGHT", line: 33 },
+    ]);
+    expect(comments.every((comment) => typeof comment.body === "string" && comment.body.length > 0)).toBe(true);
   });
 
   test("a real range rides as start_line + start_side RIGHT alongside the anchored line", async () => {

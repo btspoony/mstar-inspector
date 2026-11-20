@@ -25,6 +25,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   clampFindingSizes,
+  dropSuggestionFences,
   FINDING_BODY_MAX,
   FINDING_TITLE_MAX,
   capFindings,
@@ -693,13 +694,33 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
     expect(clampedBody).not.toContain("```");
   });
 
-  test("clamping is idempotent", () => {
-    const prose = "P".repeat(1500);
-    const fence = ["```suggestion", "fix it", "```"].join("\n");
+  test("clamping is idempotent on a real overflow (drop + truncate both run)", () => {
+    const prose = "P".repeat(2500);
+    const fence = ["```suggestion", "C".repeat(800), "```"].join("\n");
     const output = { ...base, findings: [finding("t", prose + "\n\n" + fence)] };
     const once = clampFindingSizes(output);
+    expect(once.findings[0]!.body).not.toBe(output.findings[0]!.body);
+    expect(once.findings[0]!.body.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
     const twice = clampFindingSizes(once);
     expect(twice.findings[0]!.body).toBe(once.findings[0]!.body);
+  });
+
+  test("a suggestion-only body clamps to the non-empty fallback and still parses (persistable)", () => {
+    // Long enough that the closed fence crosses FINDING_BODY_MAX and must be dropped.
+    const body = "```suggestion\n" + "C".repeat(2000) + "\n```";
+    const raw = { ...base, findings: [finding("t", body)] };
+    expect(parseReviewOutput(JSON.stringify(raw)).ok).toBe(true);
+    const clamped = clampFindingSizes(raw);
+    expect(clamped.findings[0]!.body).toBe("(suggestion omitted)");
+    // The clamped envelope re-parses: persistence and line comments still happen.
+    expect(parseReviewOutput(JSON.stringify(clamped)).ok).toBe(true);
+  });
+
+  test("a closed fence ending exactly at the budget with no truncation is kept verbatim", () => {
+    const fence = "```suggestion\nconst x = 1;\n```";
+    const text = "P".repeat(FINDING_BODY_MAX - fence.length) + fence;
+    expect(text.length).toBe(FINDING_BODY_MAX);
+    expect(dropSuggestionFences(text, FINDING_BODY_MAX)).toEqual({ text, dropped: false });
   });
 });
 
@@ -732,5 +753,22 @@ describe("suggestionFenceSpans (CommonMark fence grammar, QC R2)", () => {
   test("a block without its closing fence is reported unclosed and runs to the end", () => {
     const text = "prose\n\n```suggestion\nconst x = 1;";
     expect(blocks(text)).toEqual([{ block: "```suggestion\nconst x = 1;", closed: false }]);
+  });
+
+  test("a literal ```suggestion line inside an ordinary backtick fence is content, not a suggestion", () => {
+    for (const lang of ["js", "markdown"]) {
+      const text = ["```" + lang, "prose", "```suggestion", "this is prose, not code", "```", "after"].join("\n");
+      expect(blocks(text)).toEqual([]);
+    }
+  });
+
+  test("a literal ```suggestion line inside a tilde fence is content, not a suggestion", () => {
+    const text = "~~~markdown\nprose\n```suggestion\nthis is prose, not code\n~~~\nafter";
+    expect(blocks(text)).toEqual([]);
+  });
+
+  test("a tilde suggestion fence still counts as a suggestion", () => {
+    const text = "~~~suggestion\nconst x = 1;\n~~~\nafter";
+    expect(blocks(text)).toEqual([{ block: "~~~suggestion\nconst x = 1;\n~~~\n", closed: true }]);
   });
 });
