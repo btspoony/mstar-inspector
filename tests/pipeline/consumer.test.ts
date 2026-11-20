@@ -4333,6 +4333,58 @@ describe("createReviewConsumer", () => {
     expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
   });
+
+  test("a floor request at the maximum terminalize: a small PR's short budget never shortens the guard or Check windows", async () => {
+    // The other allocation extreme: a binary-only numstat requests the floor
+    // (120_024ms at 1 work unit), and a late start leaves far more than that
+    // — so the REQUEST, not the cutoff, binds the exec deadline. The invariant
+    // `execDeadline + reserve <= roundEnd <= min(guardExpiry, checkLease)`
+    // must still hold, and both expiries keep the CEILING's width: a retry or
+    // recovery needs the window the round actually owns, never the smaller
+    // window this PR's allocation happened to use.
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    h.sandbox.numstatStdout = "-\t-\tdocs/diagram.png\n";
+    const db = await createSeededTestD1();
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "30000");
+    let guardRow: Record<string, unknown> | undefined;
+    h.sandbox.probe = () => {
+      guardRow = inflightRows(db)[0];
+    };
+    let roundStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const adapter = checksAdapterFor(db);
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+        // 200s gone before the clone: the anchor lands at roundStart + 200s
+        // and still has 446s of cutoff left — well above the floor request.
+        ...clockSpendingSandbox("git init", 200_000, clock),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    const execDeadlineMs = written.outerDeadlineEpochMs!;
+    // request-bound, not cutoff-bound: the request ended BEFORE the cutoff,
+    // so the reserve tail is strictly inside the round — and the windows that
+    // cover it were stamped at the round's own start at the ceiling's width.
+    expect(execDeadlineMs).toBeLessThan(roundStart + 646_000);
+    const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
+    expect(tailMs).toBeLessThanOrEqual(roundStart + ROUND_BUDGET_MS);
+
+    // Equality, not just coverage: the acquired windows carry the whole
+    // ceiling — the floor request shortened neither of them.
+    expect(guardRow).toBeDefined();
+    expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
+    expect(Date.parse(String(guardRow!.expires_at))).toBe(
+      roundStart + reviewGuardTtlSeconds("default") * 1000,
+    );
+    const claim = checkRowFor(db, SHA);
+    expect(claim.created_ms).toBe(roundStart);
+    expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
+    expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
+  });
 });
 
 describe("line comments (AL-3 layered delivery)", () => {

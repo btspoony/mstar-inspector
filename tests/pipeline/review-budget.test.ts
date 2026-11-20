@@ -14,10 +14,12 @@ import {
   requestRunnerBudget,
   parseNumstatSize,
   deriveReviewBudget,
+  CHECK_WINDOW_MS,
   ROUND_BUDGET_MS,
   RUNNER_BUDGET_FLOOR_MS,
   SIZE_SATURATION_WORK_UNITS,
   postRunnerReserveMs,
+  reviewGuardTtlSeconds,
 } from "../../src/review-budget";
 import { CHECK_TERMINALIZE_MAX, CHECK_TERMINALIZE_MIN } from "../../src/dashboard/runtime-config-store";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../packages/shared/src/runtime";
@@ -336,6 +338,94 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
     expect(anchor.effectiveBudgetMs).toBe(168_000);
   });
 
+});
+
+describe("admission windows cover the whole allocation range", () => {
+  // The invariant `execDeadline + reserve <= roundEnd <= min(guardExpiry,
+  // checkLeaseExpiry)` must hold for EVERY allocation the tier can produce —
+  // not only the tier maximum — so the two allocation extremes run under the
+  // tightest reserve (the supported 30s terminalize ceiling). The windows are
+  // ceiling-derived, so the earliest an acquisition may stamp them is the
+  // round's own start: `roundStart + guardTtl` / `roundStart + checkLease` is
+  // the lowest each expiry can ever be, and any later origin only widens it.
+  const size = (changedLines: number, files: readonly number[]) => ({ changedLines, files });
+
+  test("floor request: the smallest allocation still ends inside the earliest-acquired windows", () => {
+    for (const level of LEVELS) {
+      const budget = budgetFor(level, CHECK_TERMINALIZE_MAX);
+      const request = requestRunnerBudget(level, size(0, [0]));
+      expect(request.kind).toBe("requested");
+      if (request.kind !== "requested") return;
+      const anchor = anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
+      expect(anchor.kind).toBe("allocated");
+      if (anchor.kind !== "allocated") return;
+      // One work unit still requests the floor (its ms may sit above the
+      // literal floor by the ramp's rounding — assert the contract, not the
+      // arithmetic, which the request cases already pin).
+      expect(anchor.effectiveBudgetMs).toBe(request.requestedBudgetMs);
+      expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
+      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.guardTtlSeconds * 1000);
+      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.checkLeaseMs);
+    }
+  });
+
+  test("ceiling request: the tier maximum leaves the tail exactly at the round end", () => {
+    for (const level of LEVELS) {
+      const budget = budgetFor(level, CHECK_TERMINALIZE_MAX);
+      const request = requestRunnerBudget(level, null);
+      expect(request.kind).toBe("requested");
+      if (request.kind !== "requested") return;
+      const anchor = anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
+      expect(anchor.kind).toBe("allocated");
+      if (anchor.kind !== "allocated") return;
+      expect(anchor.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS[level]);
+      // deep binds AT the cutoff: the tail IS the round end — the tightest
+      // the invariant runs; quick/default end earlier by the same windows.
+      expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
+      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.guardTtlSeconds * 1000);
+      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.checkLeaseMs);
+    }
+  });
+
+  test("late start at the maximum terminalize: a spent preparation still leaves the tail inside both windows", () => {
+    // 200s of preparation under a 30s terminalize: the cutoff binds, so the
+    // exec ends at `roundEnd - reserve` and the tail is exactly the round end
+    // — while the windows were stamped at the round's own start.
+    const budget = budgetFor("deep", CHECK_TERMINALIZE_MAX);
+    for (const request of [
+      requestRunnerBudget("deep", size(0, [0])),
+      requestRunnerBudget("deep", null),
+    ]) {
+      expect(request.kind).toBe("requested");
+      if (request.kind !== "requested") return;
+      const anchor = anchorRunnerBudget(budget, ROUND_START + 200_000, request.requestedBudgetMs);
+      expect(anchor.kind).toBe("allocated");
+      if (anchor.kind !== "allocated") return;
+      expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
+      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.guardTtlSeconds * 1000);
+      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.checkLeaseMs);
+    }
+  });
+
+  test("a small request never shortens either window — both read the ceiling, not the allocation", () => {
+    // The windows are members of the derived budget, computed BEFORE the
+    // request exists; pinning them against the floor AND the ceiling request
+    // proves a small PR cannot shrink the cover a retry or recovery needs.
+    for (const level of LEVELS) {
+      const budget = budgetFor(level, CHECK_TERMINALIZE_MAX);
+      for (const request of [
+        requestRunnerBudget(level, size(0, [0])),
+        requestRunnerBudget(level, null),
+      ]) {
+        expect(request.kind).toBe("requested");
+        if (request.kind !== "requested") return;
+        anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
+        expect(budget.guardTtlSeconds).toBe(reviewGuardTtlSeconds(level));
+        expect(budget.checkWindowMs).toBe(CHECK_WINDOW_MS);
+        expect(budget.checkLeaseMs).toBe(CHECK_WINDOW_MS);
+      }
+    }
+  });
 });
 
 describe("numstat size parse: complete vs truncated vs unknown", () => {
