@@ -249,9 +249,9 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
       expect(RUNNER_BUDGET_FLOOR_MS[level]).toBe(Math.min(seatPriced, RUNNER_MAX_BUDGET_MS[level]));
       expect(RUNNER_BUDGET_FLOOR_MS[level]).toBeLessThanOrEqual(RUNNER_MAX_BUDGET_MS[level]);
     }
-    // quick 60s + 1 × 150s, default 60s + 2 × 150s, deep 60s + 4 × 150s = 660s
+    // quick 60s + 1 × 220s, default 60s + 2 × 220s, deep 60s + 4 × 220s = 940s
     // clamped to its 646s ceiling.
-    expect(RUNNER_BUDGET_FLOOR_MS).toEqual({ quick: 210_000, default: 360_000, deep: 646_000 });
+    expect(RUNNER_BUDGET_FLOOR_MS).toEqual({ quick: 280_000, default: 500_000, deep: 646_000 });
   });
 
   test("an unknown size requests the tier maximum — never the floor and never a second numstat", () => {
@@ -272,8 +272,8 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
     expect(request.workUnits).toBe(3);
-    // 360_000 + floor(240_000 * 3 / 5_000) = 360_144.
-    expect(request.requestedBudgetMs).toBe(360_144);
+    // 500_000 + floor(100_000 * 3 / 5_000) = 500_060.
+    expect(request.requestedBudgetMs).toBe(500_060);
   });
 
   test("a zero-text row beside real lines pays its own unit (the per-file minimum is per file)", () => {
@@ -326,7 +326,7 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
   });
 
   test("a tier whose seat-priced floor clamps to its ceiling has no ramp — deep, 2 work units → 646_000 ms", () => {
-    // 60_000 + 4 × 150_000 = 660_000 is above the 646_000 ceiling, so deep's
+    // 60_000 + 4 × 220_000 = 940_000 is above the 646_000 ceiling, so deep's
     // floor IS its maximum: even a two-line diff requests the whole ceiling
     // and the ramp term is exactly zero.
     const request = requestRunnerBudget("deep", size(2, 2));
@@ -361,13 +361,13 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
     const request = requestRunnerBudget("default", size(2_000, 2_000));
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
-    // 2,000 units → 360_000 + floor(240_000 * 2_000 / 5_000) = 456_000.
-    expect(request.requestedBudgetMs).toBe(456_000);
+    // 2,000 units → 500_000 + floor(100_000 * 2_000 / 5_000) = 540_000.
+    expect(request.requestedBudgetMs).toBe(540_000);
     const anchor = anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
     expect(anchor.kind).toBe("allocated");
     if (anchor.kind !== "allocated") return;
-    expect(anchor.requestedBudgetMs).toBe(456_000);
-    expect(anchor.effectiveBudgetMs).toBe(456_000);
+    expect(anchor.requestedBudgetMs).toBe(540_000);
+    expect(anchor.effectiveBudgetMs).toBe(540_000);
   });
 
 });

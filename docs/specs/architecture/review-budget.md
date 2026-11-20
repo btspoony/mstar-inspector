@@ -42,14 +42,18 @@ partition. That size allocates the budget within the tier:
 
 - One work unit per textual changed line, with a minimum of one unit per file.
 - The floor is priced per tier by the seats that tier dispatches, never by one model call:
-  `floor(tier) = 60 000 + PR_REVIEW_TIER_BUDGETS[tier].maxSeats × 150 000`, clamped to
-  `tierMaxMs`. The 60 000 ms tail mirrors the runner's `PUBLICATION_TAIL_MS`; the 150 000 ms seat
-  figure is the observed 280 s two-seat round (staging PR #334) plus headroom, not a guess. The seat
-  counts come from the engine table — quick 1, default 2, deep 4.
+  `floor(tier) = 60 000 + PR_REVIEW_TIER_BUDGETS[tier].maxSeats × 220 000`, clamped to
+  `tierMaxMs`. The 60 000 ms tail mirrors the runner's `PUBLICATION_TAIL_MS`. The 220 000 ms seat
+  figure is measured, not a guess: over 30 days of successful reviews (n = 1 361) the round
+  duration sat at p50 304 584 ms and p90 508 800 ms, so the earlier 150 000 ms price put the
+  two-seat `default` floor at 360 000 ms — above the median round but below the p90, cutting
+  into the slowest tenth of ordinary rounds. The observed failure was sharper still: one head
+  was stopped at 362 s and then passed inside the same budget. The seat counts come from the
+  engine table — quick 1, default 2, deep 4.
 - `requestedMs = floor(tier) + floor((tierMax − floor(tier)) × min(units, 5 000) / 5 000)`.
-- The resulting smallest allocations are quick 210 000, default 360 000 and deep 646 000 ms. `deep`
-  dispatches four seats whose seat price is 660 000 ms, above its 646 000 ms ceiling, so its floor
-  clamps to the ceiling and its curve has no ramp.
+- The resulting smallest allocations are quick 280 000, default 500 000 and deep 646 000 ms. `deep`
+  dispatches four seats whose pre-clamp floor is 940 000 ms (four seat prices plus the 60 000 ms
+  tail), above its 646 000 ms ceiling, so its floor clamps to the ceiling and its curve has no ramp.
 - 5 000 work units is the saturation point: real PRs cluster at 100–1 000 changed lines, so the
   curve lifts them off their floor. The old 20 000-unit boundary reached them as well, but added
   only about 2.4–24 s across 100–1 000 units — too little to change what a round could finish.

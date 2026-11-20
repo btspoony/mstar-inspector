@@ -140,18 +140,22 @@ export const CHECK_WINDOW_MS = ROUND_BUDGET_MS;
 export const PUBLICATION_TAIL_MS = 60_000;
 
 /**
- * Wall clock one review seat costs (ms): the observed 280 s two-seat round
- * (staging PR #334) plus headroom, not a guess. A tier runs `maxSeats`
- * concurrent model calls plus their tool turns, so pricing one call
- * underfunds every round.
+ * Wall clock one review seat costs (ms), from the measured round distribution
+ * rather than one round: over 30 days of successful reviews (n = 1361) the
+ * duration sat at p50 304 584 ms, p90 508 800 ms and max 647 553 ms. A seat
+ * priced at 150 s put the two-seat `default` floor at 360 s — above p50, below
+ * p90 — so the floor cut into the slowest tenth of ordinary rounds. The
+ * observed failure was sharper than that: one head was stopped at 362 s and
+ * then passed inside the same budget. A tier runs `maxSeats` concurrent model
+ * calls plus their tool turns, so pricing one call underfunds every round.
  */
-export const PER_SEAT_ALLOCATION_MS = 150_000;
+export const PER_SEAT_ALLOCATION_MS = 220_000;
 
 /**
  * The documented request floor per tier (ms): the publication tail plus one
  * allocation per dispatched seat, clamped to the tier maximum. The seat
  * counts live in `PR_REVIEW_TIER_BUDGETS` (engine: quick 1 / default 2 /
- * deep 4). A four-seat `deep` round would need 660 s, above its 646 s
+ * deep 4). A four-seat `deep` round would need 940 s, above its 646 s
  * ceiling, so it clamps and its curve has no ramp. It bounds the REQUEST,
  * never the available wall clock — a late anchor may still shrink the
  * effective window below it.
