@@ -44,7 +44,17 @@ import {
   type MstarReviewV1,
   type PrIncomplete,
 } from "@mstar-harness/engine";
+import { isReviewBudgetExhaustedSignal, type ReviewBudgetExhaustedSignal } from "../../packages/shared/src/budget-exhausted-wire";
 import { z } from "zod";
+
+// The budget-exhausted outcome vocabulary lives in the shared wire module
+// (packages/shared/src/budget-exhausted-wire.ts) — re-exported here so the
+// Worker's publication surfaces import the vocabulary from the same file as
+// the envelope schema it sits outside of.
+export type {
+  BudgetExhaustedOutcome,
+  ReviewBudgetExhaustedSignal,
+} from "../../packages/shared/src/budget-exhausted-wire";
 
 export type ReviewFinding = MstarReviewFinding;
 export type ReviewOutput = MstarReviewV1;
@@ -482,4 +492,30 @@ export function parseReviewOutput(
       : { ok: false, error: result.error.message };
   }
   return { ok: false, error: lastError };
+}
+
+/**
+ * Parse raw runner stdout into the `mstar.review-budget-exhausted/v1`
+ * signal — the runner's exit-0 alternative to an envelope when its own
+ * deadline evidence stopped the review (packages/shared/src/budget-exhausted-wire.ts).
+ *
+ * Deliberately NOT the envelope transport: the runner prints this document
+ * whole, so the whole text must parse and validate — no fenced/brace
+ * fallback, which is how a model-authored block stays impossible here (the
+ * signal is produced by runner code at the stdout boundary, never a yield).
+ * `{ ok: false }` means the stdout is NOT this signal — the caller then runs
+ * the envelope parse; a document that claims the literal but breaks the
+ * shape (exact keys, safe-integer counts, `0 <= stopped <= dispatched`) is
+ * not a runner fact and never parses as one.
+ */
+export function parseBudgetExhaustedSignal(
+  raw: string,
+): { ok: true; signal: ReviewBudgetExhaustedSignal } | { ok: false } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.trim());
+  } catch {
+    return { ok: false };
+  }
+  return isReviewBudgetExhaustedSignal(parsed) ? { ok: true, signal: parsed } : { ok: false };
 }

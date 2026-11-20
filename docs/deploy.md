@@ -2459,12 +2459,16 @@ parameter). The body takes the same `reviewLevel` group the GET reports, so the
 read result is a valid save body. It applies only to Apps that have not chosen a
 depth of their own.
 
-The tier decides three bounds, all defined in `src/pipeline/consumer.ts`:
-`runnerTimeoutMs` (600 s for `quick`/`default`, 840 s for `deep`),
-`reviewGuardTtlSeconds` (2292 s / 2292 s / 2532 s) and
-`guardRetryDelaysSeconds`. None of it is a deploy-time var: a change applies to
-the next message with no redeploy, so one deployment can run two Apps at two
-depths.
+The tier decides three bounds: the runner budget and the guard TTL are
+derived in `src/review-budget.ts` — `runnerTimeoutMs` (480 s / 600 s / 646 s)
+and `reviewGuardTtlSeconds` (2292 s / 2412 s / 2458 s) — and the retry
+schedule `guardRetryDelaysSeconds` lives in `src/pipeline/consumer.ts`. The
+review's Check is bounded separately: `CHECK_WINDOW_MS` (the round budget,
+900,000 ms) is both the execution window and the attempt lease, measured from
+each claim's or adoption's own begin instant rather than from one invocation,
+so a claim may outlive the invocation that opened it. None of it is a
+deploy-time var: a change applies to the next message with no redeploy, so one
+deployment can run two Apps at two depths.
 
 ### Owner allowlist and App visibility (per App)
 
