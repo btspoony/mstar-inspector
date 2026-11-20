@@ -174,6 +174,8 @@ export type BuildLineIntentInput = {
   round: number;
   path: string;
   line: number;
+  /** First line of a multi-line anchor; absent/null = single-line at `line`. */
+  lineStart?: number | null;
   /** The assembled comment body — untrusted model text, redacted/clamped upstream. */
   body: string;
 };
@@ -199,6 +201,7 @@ export async function buildLineIntent(input: BuildLineIntentInput): Promise<Line
     round: input.round,
     path: input.path,
     line: input.line,
+    lineStart: input.lineStart ?? null,
     body: input.body,
     bodySha256,
   };

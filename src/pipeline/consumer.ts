@@ -6465,7 +6465,7 @@ async function processMessage(
       diffText !== "" ? diffText : undefined,
     );
     const lineIntents: LineIntent[] = [];
-    for (const finding of qualifying) {
+    for (const { finding, lineStart } of qualifying) {
       const rowId = seenRowIdByFindingId.get(computeFindingFingerprint(finding));
       if (rowId === undefined) continue; // unreachable — seen covers every finding
       lineIntents.push(
@@ -6478,6 +6478,7 @@ async function processMessage(
           round,
           path: finding.file_path!,
           line: finding.line_end!,
+          lineStart,
           body: renderLineCommentText(finding),
         }),
       );

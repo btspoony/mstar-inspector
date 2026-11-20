@@ -5,13 +5,15 @@
  *     content lines that masquerade as `+++ ` file headers
  *   - filterLineCommentFindings: base layer (file_path non-empty AND
  *     line_end ≥ 1), hunk layer (b-side exact path match + line_end inside
- *     a right-side hunk range), prefetch-failed draft semantics (diff
+ *     a right-side hunk range), multi-line range demotion (both endpoints
+ *     inside ONE hunk), prefetch-failed draft semantics (diff
  *     undefined → base layer alone)
  *   - buildLineCommentBody: title + merge-class tag + body, FINDING_BODY_MAX
  *     clamp on the assembled comment
  *   - postLineCommentsWithOctokit: createReview request-body pin (path /
- *     side / line / event + REQUIRED top-level marker body), empty
- *     qualifying set → zero API calls, missing pulls surface → named error
+ *     side / line / event + REQUIRED top-level marker body), the multi-line
+ *     start_line + start_side shape, empty qualifying set → zero API calls,
+ *     missing pulls surface → named error
  *   - fetchPrDiffWithOctokit: pulls.get diff-mediaType pin + response
  *     extraction (the consumer-level prefetch-failure → base-filter attempt
  *     and 422 → line_comments_fallback behaviors live in consumer.test.ts)
@@ -204,9 +206,9 @@ describe("filterLineCommentFindings", () => {
       findingAt("src/auth.ts", 0, "zero-line"),
       findingAt("src/auth.ts", 11, "ok"),
     ];
-    expect(filterLineCommentFindings(findings).map((f) => f.title)).toEqual(["ok"]);
+    expect(filterLineCommentFindings(findings).map(({ finding }) => finding.title)).toEqual(["ok"]);
     // diff undefined (prefetch failed) → base layer alone, no hunk check.
-    expect(filterLineCommentFindings(findings, undefined).map((f) => f.title)).toEqual(["ok"]);
+    expect(filterLineCommentFindings(findings, undefined).map(({ finding }) => finding.title)).toEqual(["ok"]);
   });
 
   test("hunk layer: b-side exact path match + line_end inside a right-side hunk range (boundaries inclusive)", () => {
@@ -220,7 +222,7 @@ describe("filterLineCommentFindings", () => {
       findingAt("src/old-name.ts", 2, "a-side-only"),
       findingAt("src/new-name.ts", 2, "renamed-hit"),
     ];
-    expect(filterLineCommentFindings(findings, `${AUTH_DIFF}\n${MIXED_DIFF}`).map((f) => f.title)).toEqual([
+    expect(filterLineCommentFindings(findings, `${AUTH_DIFF}\n${MIXED_DIFF}`).map(({ finding }) => finding.title)).toEqual([
       "hunk-start",
       "hunk-end",
       "second-hunk",
@@ -237,6 +239,38 @@ describe("filterLineCommentFindings", () => {
     const findings = [findingAt("src/auth.ts", 100, "would-be-excluded")];
     expect(filterLineCommentFindings(findings)).toHaveLength(1);
     expect(filterLineCommentFindings(findings, AUTH_DIFF)).toHaveLength(0);
+  });
+
+  test("multi-line range: both endpoints inside ONE right hunk survive; cross-hunk or non-ascending ranges fall back to the single-line anchor", () => {
+    const ranged = (start: number | null, end: number): ReviewFinding => ({
+      ...findingAt("src/auth.ts", end, "range-" + String(start) + "-" + String(end)),
+      line_start: start,
+      line_end: end,
+    });
+    const findings = [
+      ranged(11, 13), // inside hunk [10,13]
+      ranged(10, 13), // hunk-start boundary is a valid start
+      ranged(13, 13), // start == end: no range (end inside the hunk)
+      ranged(9, 13), // start outside the hunk
+      ranged(12, 35), // spans hunks: end in [33,37], start not
+      ranged(null, 13), // absent range stays absent
+    ];
+    expect(filterLineCommentFindings(findings, AUTH_DIFF).map(({ finding, lineStart }) => [finding.title, lineStart])).toEqual([
+      ["range-11-13", 11],
+      ["range-10-13", 10],
+      ["range-13-13", null],
+      ["range-9-13", null],
+      ["range-12-35", null],
+      ["range-null-13", null],
+    ]);
+  });
+
+  test("deleted and binary files stay excluded even when the finding carries a range", () => {
+    const findings = [
+      { ...findingAt("src/dead.ts", 2, "deleted"), line_start: 1, line_end: 2 },
+      { ...findingAt("assets/logo.png", 2, "binary"), line_start: 1, line_end: 2 },
+    ];
+    expect(filterLineCommentFindings(findings, MIXED_DIFF)).toEqual([]);
   });
 });
 
@@ -597,5 +631,40 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
     const unprocessable = Object.assign(new Error("Validation Failed"), { status: 422 });
     const { octokit } = mockPullsOctok({ createReviewError: unprocessable });
     await expect(postLineCommentsWithOctokit(octokit, input)).rejects.toThrow("Validation Failed");
+  });
+
+  test("single-line intent: the comment object carries exactly path/side/line/body — no start_line key", async () => {
+    const { calls, octokit } = mockPullsOctok({ createReviewResponse: echoResponse });
+    await postLineCommentsWithOctokit(octokit, input);
+    const comments = calls.createReviewParams!.comments as Record<string, unknown>[];
+    expect(comments.map((comment) => Object.keys(comment))).toEqual([
+      ["path", "side", "line", "body"],
+      ["path", "side", "line", "body"],
+    ]);
+  });
+
+  test("a real range rides as start_line + start_side RIGHT alongside the anchored line", async () => {
+    const { calls, octokit } = mockPullsOctok({ createReviewResponse: echoResponse });
+    await postLineCommentsWithOctokit(octokit, {
+      ...input,
+      intents: [
+        { ...intents[0]!, lineStart: 19, line: 21 },
+        { ...intents[1]!, lineStart: 33, line: 37 },
+      ],
+    });
+    const comments = calls.createReviewParams!.comments as Record<string, unknown>[];
+    expect(
+      comments.map(({ path, side, line, start_line, start_side }) => ({ path, side, line, start_line, start_side })),
+    ).toEqual([
+      { path: "src/auth.ts", side: "RIGHT", line: 21, start_line: 19, start_side: "RIGHT" },
+      { path: "src/auth.ts", side: "RIGHT", line: 37, start_line: 33, start_side: "RIGHT" },
+    ]);
+  });
+
+  test("a non-ascending range never rides the wire (GitHub range shape is start < line)", async () => {
+    const { calls, octokit } = mockPullsOctok({ createReviewResponse: echoResponse });
+    await postLineCommentsWithOctokit(octokit, { ...input, intents: [{ ...intents[0]!, lineStart: 21, line: 21 }] });
+    const [comment] = calls.createReviewParams!.comments as Record<string, unknown>[];
+    expect(comment === undefined ? null : "start_line" in comment).toBe(false);
   });
 });

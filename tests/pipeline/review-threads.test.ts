@@ -467,6 +467,21 @@ describe("opaque marker wire (§7.5)", () => {
     });
     expect(intent.bodySha256).toBe(await sha256Hex(buildLineCommentBody(intent)));
     expect(intent.scope).toEqual(SCOPE);
+    // Multi-line anchor threading: absent -> null, present -> carried verbatim.
+    expect(intent.lineStart).toBeNull();
+    const ranged = await buildLineIntent({
+      findingRowId: FINDING_ROW_ID,
+      publicationId: PUB_ID,
+      associationId: ASSOC_ID,
+      scope: SCOPE,
+      originalSha: SHA,
+      round: 1,
+      path: PATH,
+      line: LINE,
+      lineStart: LINE - 2,
+      body: "body",
+    });
+    expect(ranged.lineStart).toBe(LINE - 2);
     // A non-opaque (hint-like) association id can never become a marker.
     await expect(
       buildLineIntent({

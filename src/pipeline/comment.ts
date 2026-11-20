@@ -59,8 +59,10 @@
  * right-side hunk of the prefetched PR diff) are anchored as ONE
  * pulls.createReview call with `event: "COMMENT"` (D4 permanent event lock —
  * never APPROVE/REQUEST_CHANGES) and `comments: [{path, side: "RIGHT",
- * line, body}]`. The top-level `body` is REQUIRED for COMMENT events
- * (installed octokit schema) and is a short marker line only
+ * line, body}]` plus `start_line` / `start_side: "RIGHT"` when the
+ * finding's `line_start` and `line_end` both sit inside that one hunk.
+ * The top-level `body` is REQUIRED for COMMENT events (installed octokit
+ * schema) and is a short marker line only
  * (`mstar-inspector line comments · round N · <short sha>`) — never a copy
  * of the overall review body. The consumer prefetches the diff via
  * `pulls.get` + `mediaType: { format: "diff" }` on this module's extended
@@ -70,8 +72,9 @@
  * line → whole request 422), attempts the review, and on residual 422/any
  * Octokit error falls back to overall-comment-only (structured log, never
  * throws after the overall comment succeeded). Empty qualifying set → zero
- * API calls. No `start_line` for now; old rounds' line comments
- * stay in place.
+ * API calls. A finding whose range is absent, malformed or spans a hunk
+ * boundary is posted as the single-line anchor at `line_end` (never an
+ * invented range); old rounds' line comments stay in place.
  */
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
@@ -1902,11 +1905,30 @@ export function parseDiffHunkRanges(diff: string): Map<string, Array<[number, nu
  *   - hunk layer (only when the prefetched diff is available): the b-side
  *     path must exact-match a diff file AND `line_end` must fall inside one
  *     of its right-side hunk ranges (binary/deleted files have no right
- *     hunks → excluded).
+ *     hunks → excluded);
+ *   - range layer (during the hunk pass): the published range start is
+ *     `line_start` ONLY when it is a positive line strictly before `line_end`
+ *     AND inside that SAME hunk; anything else yields `lineStart: null` so
+ *     the poster never invents a multi-line anchor.
  * With `diff` undefined (prefetch failed) the base layer alone decides —
  * draft-attempt semantics: GitHub's own validation is the backstop.
+ *
+ * Each result pairs the finding with the range start it may publish, and the
+ * finding object is returned UNTOUCHED: the consumer keys its row ids by the
+ * finding's fingerprint (which covers `line_start`), so rewriting the field
+ * here would silently drop the anchor it is meant to qualify.
  */
-export function filterLineCommentFindings(findings: ReviewFinding[], diff?: string): ReviewFinding[] {
+export type LineCommentAnchor = {
+  /** The qualifying finding, unchanged. */
+  finding: ReviewFinding;
+  /** The `start_line` this finding may publish; null = single-line anchor. */
+  lineStart: number | null;
+};
+
+export function filterLineCommentFindings(
+  findings: ReviewFinding[],
+  diff?: string,
+): LineCommentAnchor[] {
   const base = findings.filter(
     (finding) =>
       typeof finding.file_path === "string" &&
@@ -1914,14 +1936,27 @@ export function filterLineCommentFindings(findings: ReviewFinding[], diff?: stri
       typeof finding.line_end === "number" &&
       finding.line_end >= 1,
   );
-  if (diff === undefined) return base;
+  if (diff === undefined) {
+    return base.map((finding) => ({ finding, lineStart: finding.line_start ?? null }));
+  }
   const hunksByPath = parseDiffHunkRanges(diff);
-  return base.filter((finding) => {
+  const qualified: LineCommentAnchor[] = [];
+  for (const finding of base) {
     const ranges = hunksByPath.get(finding.file_path ?? "");
-    if (ranges === undefined) return false;
+    if (ranges === undefined) continue;
     const line = finding.line_end ?? 0;
-    return ranges.some(([start, end]) => line >= start && line <= end);
-  });
+    const hunk = ranges.find(([start, end]) => line >= start && line <= end);
+    if (hunk === undefined) continue;
+    // The range start is published ONLY when both endpoints sit in that SAME
+    // right-side hunk; a range crossing a hunk boundary (or one that is not
+    // strictly ascending) falls back to the single-line anchor at `line`.
+    const start = finding.line_start;
+    qualified.push({
+      finding,
+      lineStart: typeof start === "number" && start >= hunk[0] && start < line ? start : null,
+    });
+  }
+  return qualified;
 }
 
 /**
@@ -1970,6 +2005,17 @@ export type PostPreparedLineCommentsInput = {
 };
 
 /**
+ * The range start to publish, or null for the single-line anchor. GitHub range
+ * shape needs a start strictly before the end line with matching sides; a
+ * start at/after `line` is a 422, so it never rides the wire. (The hunk half
+ * of the rule is the filter: both endpoints inside one right-side hunk.)
+ */
+function publishedRangeStart(intent: LineIntent): number | null {
+  const start = intent.lineStart;
+  return typeof start === "number" && start >= 1 && start < intent.line ? start : null;
+}
+
+/**
  * Post the INTENT-prepared line-comments review against a caller-provided
  * octokit (§7.7 step 10 / §7.5): ONE pulls.createReview,
  * `event: "COMMENT"` (D4 permanent event lock — never APPROVE/
@@ -1977,8 +2023,10 @@ export type PostPreparedLineCommentsInput = {
  * REQUIRED top-level body carrying the trusted line-batch marker
  * (`mstar-inspector:line-batch:v1`), and per-intent comments whose bodies
  * come from the §7.5 `buildLineCommentBody` — untrusted intent text stripped
- * of Inspector marker syntax, trusted thread marker appended. The intents'
- * bodies/digests were durably staged before any mutation (§7.7 step 7).
+ * of Inspector marker syntax, trusted thread marker appended. A comment
+ * carries `start_line` + `start_side: "RIGHT"` only when the intent holds a
+ * real range; otherwise it keeps the single-line `{path, side, line}` shape.
+ * The intents' bodies/digests were durably staged before any mutation (§7.7 step 7).
  *
  * Returns the §7.7 capture result: returned comment ids matched back to the
  * intents by their trusted thread marker, with the row anchor as the fallback
@@ -2005,16 +2053,23 @@ export async function postLineCommentsWithOctokit(
     commit_id: input.headSha,
     event: "COMMENT",
     body: `mstar-inspector line comments · round ${input.round} · ${input.headSha.slice(0, 7)}\n${buildLineBatchMarker(input.publicationId)}`,
-    comments: input.intents.map((intent) => ({
-      path: intent.path,
-      side: "RIGHT",
-      line: intent.line,
-      body: buildLineCommentBody({
-        body: intent.body,
-        publicationId: intent.publicationId,
-        associationId: intent.associationId,
-      }),
-    })),
+    comments: input.intents.map((intent) => {
+      const start = publishedRangeStart(intent);
+      return {
+        path: intent.path,
+        side: "RIGHT",
+        line: intent.line,
+        // A range rides only when it is a real one (strictly ascending, both
+        // endpoints inside one hunk — the filter already demoted the rest);
+        // otherwise this object keeps the single-line shape byte for byte.
+        ...(start === null ? {} : { start_line: start, start_side: "RIGHT" }),
+        body: buildLineCommentBody({
+          body: intent.body,
+          publicationId: intent.publicationId,
+          associationId: intent.associationId,
+        }),
+      };
+    }),
   })) as {
     data?: {
       id?: unknown;
