@@ -63,7 +63,6 @@ import {
   type ManifestHoldPayload,
 } from "./manifest";
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
-import { createInstallClaimsStore } from "./install-claims-store";
 import {
   AppCountExceededError,
   createReviewBotsStore,
@@ -870,8 +869,8 @@ export function maintenanceResponse(c: DashboardContext, mode: MaintenanceMode):
  * the `dashboardApp` mount (after the workspace/member gate) keeps a direct
  * mount correct. The first run wins, so the read happens once per request.
  *
- * Ungated: `/healthz` and `/bot/setup` are `app` routes and `/_internal_admin/*`
- * mounts on the operator sub-app, so none is under the `/dashboard/*` prefix
+ * Ungated: `/healthz` is an `app` route and `/_internal_admin/*` mounts on the
+ * operator sub-app, so none is under the `/dashboard/*` prefix
  * this gate is mounted on. `/dashboard/login` and `/dashboard/oauth/callback`
  * stay open (the member guard's own exempt pair): the console that reopens the
  * platform needs a session, so an expired cookie must be renewable during the
@@ -4014,9 +4013,8 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // rides base.app on every manager read — including an App with no
         // repository (the target-owned slice is the conditional part).
         github_visibility: githubVisibility,
-        // The bot's scope (migration 0058). MANAGER face only: it decides
-        // whether the install block offers the claim action, and only a
-        // manager can claim.
+        // The bot's scope (migration 0058). MANAGER face only: the install
+        // block and the bind action read it, and only a manager can bind.
         scope: app.scope,
         // The local App UID — with the workspace id it composes the absolute
         // delivery URL the manager identity card shows (the repoint surface).
@@ -5849,58 +5847,15 @@ async function requireTargetManagerJson(
 }
 
 /**
- * `POST /api/apps/:appId/claim` — record (or refresh) this session's intent to
- * install the App, and hand the SPA the GitHub page to send the user to.
- * `access: "write"` like every other manager mutation: `requireMember` +
- * `canManageApp`, so a granted support operator reaches the existing write-route
- * refusal and no impersonated principal creates a claim.
- *
- * A claim names the APP (migration 0067 / D19), never a target: an installation
- * belongs to the App, and the repositories it reviews are targets a manager
- * adds afterwards. The refusals are the contract's, in order: an unknown,
- * foreign, soft-deleted or non-numeric App is `404 unknown app` (never 403); a
- * caller who cannot manage it is `403 forbidden`; a bot that is not `shared`
- * advertises nothing, so `404 bot is not shared` rather than "forbidden"; a
- * never-synced slug is `409 bot has no installation url` because there is no
- * page to send the user to.
- */
-const appClaimRoute = async (c: DashboardContext): Promise<Response> => {
-  const member = await requireMember(c);
-  if (!member.ok) return member.response;
-  const apps = createReviewBotsStore(member.db);
-  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
-  if (!app) return c.json({ error: "unknown app" }, 404);
-  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
-  if (app.scope !== "shared") return c.json({ error: "bot is not shared" }, 404);
-  if (app.github_slug === null) return c.json({ error: "bot has no installation url" }, 409);
-
-  const claim = await createInstallClaimsStore(member.db).createOrRefreshClaim({
-    userId: member.user.id,
-    workspaceId: member.scope.workspaceId,
-    botId: app.id,
-    now: new Date().toISOString(),
-  });
-  // No `state`: GitHub preserves none, so the claim row is the only carrier of
-  // intent and `/bot/setup` treats the signed-in session as the identity.
-  return c.json({
-    claimId: claim.id,
-    expiresAt: claim.expiresAt,
-    installationUrl: `https://github.com/apps/${encodeURIComponent(app.github_slug)}/installations/new`,
-  });
-};
-
-/**
  * `POST /api/apps/:appId/bind-installation` — the target page's bind action:
- * a workspace manager picks one pending installation of the bot and binds it to
+ * a workspace manager picks one of the bot's live installations and binds it to
  * the workspace's target without leaving the dashboard.
  *
- * The write is the setup callback's OWN batch — the caller's claim is
- * recorded and consumed in this request — so the unique index and the
- * shared-bot guard still decide, and it writes `bot_installations` only
- * (migration 0067: an installation belongs to the App, never to a target).
- * This route adds one guard of its own: the installation must answer the
- * pending read, because the batch's upsert is conflict-tolerant and would
- * accept an id the bot never reported.
+ * The write is the same `bot_installations` upsert the `installation.created`
+ * webhook performs (migration 0067: an installation belongs to the App, never
+ * to a target). The only guard this route adds on top of the app/member checks
+ * is that the named installation must be one the bot actually reported — the
+ * upsert is conflict-tolerant and would otherwise accept an id it never saw.
  *
  * Refusals keep the family's vocabulary: an unknown, foreign or soft-deleted
  * App is `404 unknown app`; a caller who cannot manage it is `403 forbidden`;
@@ -5929,28 +5884,8 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
   if (!pending.some((row) => row.installation_id === installationId)) {
     return c.json({ error: "unknown installation" }, 404);
   }
-  const claims = createInstallClaimsStore(member.db);
-  const now = new Date().toISOString();
-  const claim = await claims.createOrRefreshClaim({
-    userId: member.user.id,
-    workspaceId: member.scope.workspaceId,
-    botId: app.id,
-    now,
-  });
-  const bound = await claims.consumeAndBind({
-    claimId: claim.id,
-    userId: member.user.id,
-    installationId,
-    now,
-  });
-  switch (bound.outcome) {
-    case "bound":
-      return c.json({ botId: bound.botId, installationId });
-    case "bot_not_shared":
-      return c.json({ error: "bot is not shared" }, 404);
-    case "claim_not_found":
-      return c.json({ error: "claim not found" }, 404);
-  }
+  await apps.upsertInstallation({ appId: app.id, installationId });
+  return c.json({ botId: app.id, installationId });
 };
 
 /**
@@ -6947,7 +6882,6 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
     access: "write",
   },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
-  { method: "post", path: "/api/apps/:appId/claim", handler: appClaimRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/bind-installation", handler: appBindInstallationRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/keys/usage", handler: appKeyUsageRoute, access: "write" },

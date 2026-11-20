@@ -968,7 +968,7 @@ describe("header metric band on the manage face (static SSR)", () => {
   });
 });
 
-describe("install claim entry (static SSR)", () => {
+describe("install entry (static SSR)", () => {
   /** The manager face of a SHARED bot with no bound installation. */
   const sharedPayload = (): SettingsManagePayload => ({
     ...managePayload,
@@ -976,38 +976,31 @@ describe("install claim entry (static SSR)", () => {
     installation: null,
   });
 
-  test("the claim action renders for a shared bot only, and an owned bot keeps the plain link", () => {
+  test("an unbound shared bot keeps the plain install link, like an owned bot", () => {
     const shared = renderDetail(sharedPayload(), "installations");
-    expect(shared).toContain(t("en", "settings.installClaim"));
-    expect(shared).toContain(t("en", "settings.installClaimCopy"));
-    // The claim is the entry point: the raw install link would skip the claim
-    // record that makes the callback's 0/1/N split possible.
-    expect(shared).not.toContain('href="https://github.com/apps/demo/installations/new"');
+    expect(shared).toContain('href="https://github.com/apps/demo/installations/new"');
+    expect(shared).toContain(t("en", "settings.installLink"));
+    expect(shared).toContain(t("en", "settings.installCopy"));
 
     const owned = renderDetail(
       { ...sharedPayload(), app: { ...sharedPayload().app, scope: "owned" } },
       "installations",
     );
-    expect(owned).not.toContain(t("en", "settings.installClaim"));
     expect(owned).toContain('href="https://github.com/apps/demo/installations/new"');
-    // Everything else on the block is unchanged copy.
     expect(owned).toContain(t("en", "settings.installLink"));
     expect(owned).toContain(t("en", "settings.installCopy"));
   });
 
-  test("the claim block renders the bound installation's account", () => {
+  test("the install block renders the bound installation's account", () => {
     const bound = renderDetail(
       { ...sharedPayload(), installation: { id: 4242, account_login: "acme", removed: false } },
       "installations",
     );
     expect(bound).toContain(t("en", "settings.installBoundAccount", { account: "acme" }));
     expect(bound).not.toContain(t("en", "settings.installRemoved"));
-    // A bound target cannot start a claim (the route answers 409), so the
-    // action is not rendered: the operator's unbind is the way to re-bind.
-    expect(bound).not.toContain(t("en", "settings.installClaim"));
   });
 
-  test("the claim block separates an unknown account from a removed installation", () => {
+  test("the install block separates an unknown account from a removed installation", () => {
     const unknownAccount = renderDetail(
       { ...sharedPayload(), installation: { id: 4242, account_login: null, removed: false } },
       "installations",
@@ -1023,7 +1016,7 @@ describe("install claim entry (static SSR)", () => {
     expect(removed).toContain(t("en", "settings.installBoundAccount", { account: "acme" }));
   });
 
-  test("the claim payload fields parse fail-closed", () => {
+  test("the install payload fields parse fail-closed", () => {
     expect(parseSettings(sharedPayload())?.can_manage).toBe(true);
     // An off-vocabulary scope or a malformed installation fails the whole read
     // instead of rendering a control the server would refuse.
@@ -1117,9 +1110,8 @@ describe("Blocked and pending installations (static SSR)", () => {
     expect(member).toContain(t("en", "appDetail.blockedBotNotShared"));
   });
 
-  test("a Blocked target hides the install and claim actions, and keeps its review settings", async () => {
+  test("a Blocked target hides the install action and keeps its review settings", async () => {
     const installed = renderDetail(blockedPayload(), "installations");
-    expect(installed).not.toContain(t("en", "settings.installClaim"));
     expect(installed).not.toContain(t("en", "settings.installLink"));
     expect(installed).not.toContain('href="https://github.com/apps/demo/installations/new"');
     // Nothing is pending for a bot this workspace may not use.
@@ -1162,6 +1154,22 @@ describe("Blocked and pending installations (static SSR)", () => {
       "installations",
     );
     expect(bound).not.toContain(t("en", "settings.installPendingBind"));
+  });
+
+  test("an owned target offers no bind action — the route refuses a non-shared bot", () => {
+    const ownedPending: SettingsManagePayload = {
+      ...sharedPayload(),
+      app: { ...sharedPayload().app, scope: "owned" },
+      pending_installations: [
+        { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+      ],
+    };
+    const markup = renderDetail(ownedPending, "installations");
+    // The bind route answers 404 "bot is not shared" for an owned bot, so the
+    // control must not be offered — an offered control that always fails is the
+    // bug this pins. The plain install link stays available to both scopes.
+    expect(markup).not.toContain(t("en", "settings.installPendingBind"));
+    expect(markup).toContain('href="https://github.com/apps/demo/installations/new"');
   });
 
   test("the new fields parse fail-closed on both manager faces", () => {

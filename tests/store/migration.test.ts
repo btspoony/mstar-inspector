@@ -3373,48 +3373,33 @@ describe("migrations/0058_review_bot_scope.sql", () => {
 });
 
 /**
- * Install claims at the shipped schema: 0067 recreated the table bot-level (D19)
- * — a claim bridges the stateless setup redirect to the App a signed-in user
- * installs, so it names the bot, never a target.
+ * Migration 0081 retires the claim table the earlier migrations built: 0067
+ * recreated it bot-level for a setup redirect this deployment never receives,
+ * so the table's whole life is two statements — created by 0067, dropped here.
  */
-describe("install_claims (bot-level, 0067)", () => {
-  /** The claim's three foreign keys need a user, a workspace and a bot. */
-  function seedClaimParents(db: TestD1): void {
-    db.raw
-      .prepare(
-        `INSERT INTO users (id, github_login, role, created_at)
-         VALUES ('user-claims', 'mallory', 'member', '2026-01-01T00:00:00.000Z')`,
-      )
-      .run();
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
-           (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
-            status, created_at, updated_at)
-         VALUES ('bot-claims', 9101, 'bot-claims', 'enc', 'enc', 'acme', 'active',
-                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
-      )
-      .run();
+describe("migrations/0081_drop_install_claims.sql", () => {
+  const RETIRE = "0081_drop_install_claims.sql";
+  const CREATE = "0067_repo_target_identity.sql";
+
+  /** The schema exactly before 0067 — 0059's target-keyed claim table is live. */
+  function dbAt0066(): TestD1 {
+    const db = createTestD1();
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) <= 66,
+    )) {
+      execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
   }
 
-  function insertClaim(db: TestD1, id: string, consumedAt: string | null = null): void {
-    db.raw
-      .prepare(
-        `INSERT INTO install_claims (id, user_id, workspace_id, bot_id, created_at, expires_at, consumed_at)
-         VALUES (?, 'user-claims', 'default', 'bot-claims',
-                 '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', ?)`,
-      )
-      .run(id, consumedAt);
-  }
-
-  test("install_claims carries the contract's eight columns, a NULL consume pair and its two indexes", () => {
-    const db = createMigratedTestD1();
-    const columns = db.raw.query("PRAGMA table_info(install_claims)").all() as Array<{
-      name: string;
-      notnull: number;
-      dflt_value: unknown;
-    }>;
-    expect(columns.map((column) => column.name)).toEqual([
+  test("0067 still recreates the claim table bot-level, so 0081 has something to drop", () => {
+    const db = dbAt0066();
+    // 0059's target-keyed table is what 0067 finds: same name, other key.
+    expect(columnNames(db, "install_claims")).toContain("target_id");
+    expect(columnNames(db, "install_claims")).not.toContain("bot_id");
+    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, CREATE), "utf8"));
+    expect(schemaNames(db, "table")).toContain("install_claims");
+    expect(columnNames(db, "install_claims")).toEqual([
       "id",
       "user_id",
       "workspace_id",
@@ -3424,64 +3409,24 @@ describe("install_claims (bot-level, 0067)", () => {
       "consumed_at",
       "consumed_token",
     ]);
-    for (const column of ["user_id", "workspace_id", "bot_id", "created_at", "expires_at"]) {
-      expect(columns.find((c) => c.name === column)?.notnull, column).toBe(1);
-    }
-    // `consumed_at` is the live predicate: unclaimed means NULL, and nothing
-    // writes a default into it. `consumed_token` is the consuming REQUEST's
-    // identity — the instant alone cannot prove ownership inside the batch.
-    expect(columns.find((c) => c.name === "consumed_at")).toMatchObject({ notnull: 0, dflt_value: null });
-    expect(columns.find((c) => c.name === "consumed_token")).toMatchObject({ notnull: 0, dflt_value: null });
-
-    const indexNames = (
-      db.raw.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'install_claims'").all() as Array<{
-        name: string;
-      }>
-    ).map((row) => row.name);
-    expect(indexNames).toContain("install_claims_user_open");
-    expect(indexNames).toContain("install_claims_live_bot");
-
-    const openColumns = (
-      db.raw.query("PRAGMA index_info(install_claims_user_open)").all() as Array<{ name: string }>
-    ).map((row) => row.name);
-    expect(openColumns).toEqual(["user_id", "consumed_at"]);
-
-    const liveColumns = (
-      db.raw.query("PRAGMA index_info(install_claims_live_bot)").all() as Array<{ name: string }>
-    ).map((row) => row.name);
-    expect(liveColumns).toEqual(["user_id", "bot_id"]);
-    const liveSqlRow = db.raw
-      .query("SELECT sql FROM sqlite_master WHERE name = 'install_claims_live_bot'")
-      .get();
-    if (liveSqlRow === null || typeof liveSqlRow !== "object" || !("sql" in liveSqlRow) || typeof liveSqlRow.sql !== "string") {
-      throw new Error("install_claims_live_bot is missing from the migrated schema");
-    }
-    // Partial: only an UNCONSUMED claim holds the slot.
-    expect(liveSqlRow.sql).toContain("WHERE consumed_at IS NULL");
+    expect(schemaNames(db, "index")).toEqual(
+      expect.arrayContaining(["install_claims_user_open", "install_claims_live_bot"]),
+    );
   });
 
-  test("install_claims_live_bot refuses a second live claim for one bot and admits consumed rows", () => {
+  test("0081 removes the table and both of its indexes from the shipped schema", () => {
     const db = createMigratedTestD1();
-    seedClaimParents(db);
-    insertClaim(db, "claim-live");
-    expect(db.raw.query("SELECT consumed_at, consumed_token FROM install_claims WHERE id = 'claim-live'").get()).toEqual({
-      consumed_at: null,
-      consumed_token: null,
-    });
-
-    // A second LIVE claim for the same (user, bot) is refused: "N claims"
-    // always means N different Apps.
-    expect(() => insertClaim(db, "claim-live-2")).toThrow();
-
-    // Consuming the first frees the slot, so the same bot can be claimed again.
-    db.raw
-      .prepare("UPDATE install_claims SET consumed_at = '2026-01-01T00:05:00.000Z' WHERE id = 'claim-live'")
-      .run();
-    insertClaim(db, "claim-live-3");
-    // A consumed row is outside the partial index: history may stack.
-    insertClaim(db, "claim-consumed", "2026-01-01T00:06:00.000Z");
-
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM install_claims").get()).toEqual({ n: 3 });
+    expect(schemaNames(db, "table")).not.toContain("install_claims");
+    expect(schemaNames(db, "index")).not.toContain("install_claims_user_open");
+    expect(schemaNames(db, "index")).not.toContain("install_claims_live_bot");
+    // The retirement is the file's only statement: applying it over the
+    // 0067-era schema leaves the claim table gone and nothing else touched.
+    const before = dbAt0066();
+    execMigrationScript(before.raw, readFileSync(join(MIGRATIONS_DIR, CREATE), "utf8"));
+    const otherTables = schemaNames(before, "table").filter((name) => name !== "install_claims");
+    execMigrationScript(before.raw, readFileSync(join(MIGRATIONS_DIR, RETIRE), "utf8"));
+    expect(schemaNames(before, "table")).not.toContain("install_claims");
+    expect(schemaNames(before, "table")).toEqual(otherTables);
   });
 });
 

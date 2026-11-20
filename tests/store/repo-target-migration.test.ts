@@ -3,9 +3,10 @@
  *
  * The interesting halves are what the file must ADD and what it must REMOVE.
  * Added: the repository identity columns, the workspace defaults a target can
- * inherit from, and a bot-level `install_claims`. Removed: the
- * installation-keyed trio on the target, the one-target-per-installation
- * index, and the owner allowlist table with its rows.
+ * inherit from, and the bot-level `install_claims` (absent at 0066; migration
+ * 0081 retires the table again). Removed: the installation-keyed trio on the
+ * target, the one-target-per-installation index, and the owner allowlist table
+ * with its rows.
  *
  * Nothing is backfilled, so a migrated row keeps `repo_id NULL` — the
  * "awaiting claim" state the resolution path treats as a fallback, which is why
@@ -183,30 +184,6 @@ describe("migration 0067: repository-keyed review targets", () => {
     ).toThrow();
   });
 
-  test("install claims are bot-level: one live claim per user and bot, history stacks", () => {
-    const db = dbAt0066();
-    applyMigrations(db, [MIGRATION]);
-
-    // The dropped target-keyed claim left no rows behind.
-    expect((db.raw.query("SELECT count(*) AS n FROM install_claims").get() as { n: number }).n).toBe(0);
-    const claimColumns = columns(db, "install_claims").map((column) => column.name);
-    expect(claimColumns).toContain("bot_id");
-    expect(claimColumns).not.toContain("target_id");
-
-    const claim = (id: string, consumedAt: string | null) =>
-      db.raw
-        .prepare(
-          `INSERT INTO install_claims (id, user_id, workspace_id, bot_id, created_at, expires_at, consumed_at)
-           VALUES (?, 'user-1', 'default', 'bot-1', '2026-01-01', '2026-01-01T00:05:00.000Z', ?)`,
-        )
-        .run(id, consumedAt);
-
-    claim("claim-live", null);
-    expect(() => claim("claim-second", null)).toThrow();
-    claim("claim-consumed", "2026-01-01T00:04:00.000Z");
-    expect(indexNames(db).has("install_claims_user_open")).toBe(true);
-    expect(indexNames(db).has("install_claims_live_bot")).toBe(true);
-  });
 });
 
 const MIGRATION_0068 = "0068_target_repo_global_unique.sql";

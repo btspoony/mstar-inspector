@@ -14,4 +14,4 @@ These specifications describe current contracts; decision history lives in the A
 | Feature | [Repository surface](feature/repository-surface.md) |
 | Feature | [Repository target model](feature/repository-target-model.md) |
 | Feature | [Operator data upgrade](feature/operator-data-upgrade.md) |
-| Feature | [Bot scope and installation claiming](feature/bot-scope-and-claiming.md) |
+| Feature | [Bot scope and installation binding](feature/bot-scope-and-claiming.md) |
