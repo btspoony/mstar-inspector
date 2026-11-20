@@ -983,8 +983,10 @@ export async function main(
         // The side documents carry this round's attribution exactly as on the
         // envelope path: the applied model when one served, the recheck round's
         // document and status (the seat the stop aborted still accounts for
-        // its round). A document write failure keeps the envelope contract:
-        // exit 1, no stdout.
+        // its round). A side write that fails is a stderr diagnostic, never a
+        // failed run — exit 1 here would take the Worker's runner-failure
+        // path and silently convert a CONFIRMED terminal stop into a queue
+        // retry, so the signal below must reach stdout regardless.
         if (error.appliedModel !== undefined) {
           try {
             writeFileSync(appliedModelPath, JSON.stringify({ appliedModel: error.appliedModel } satisfies AppliedModelDoc));
@@ -1003,7 +1005,6 @@ export async function main(
             writeFileSync(recheckOutPath, JSON.stringify(error.recheck));
           } catch (writeError) {
             console.error(`review: cannot write recheck output ${recheckOutPath}: ${(writeError as Error).message}`);
-            return 1;
           }
         }
         if (recheckOutPath !== undefined && error.recheckStatus !== undefined) {

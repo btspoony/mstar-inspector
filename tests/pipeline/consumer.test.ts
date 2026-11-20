@@ -1153,6 +1153,26 @@ describe("createReviewConsumer", () => {
     expect(row).toContain('"seatsStopped":null');
   });
 
+  test("a sandbox kill persists only trusted fields — provider stderr rides the log, never the row", async () => {
+    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerStdout = "";
+    // Untrusted provider text: the durable row must carry only the typed
+    // budget fields and fixed diagnostics — never model-controlled stderr.
+    h.sandbox.runnerStderr = "provider stderr: leaked seat transcript tail";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).not.toContain("leaked seat transcript tail");
+    // The diagnosis still exists — on the redacted log line, not the row.
+    const warn = h.logLines.find((l) => l.level === "warn" && typeof l.fields.stderr_tail === "string");
+    expect(warn).toBeDefined();
+    expect(String(warn!.fields.stderr_tail)).toContain("leaked seat transcript tail");
+  });
+
   test("runner failure keeps the CAUSE and the counted chain fold inside the persisted tail", async () => {
     // The runner's OWN bounded representation, built the way runner.ts builds it
     // for a chain whose full disposition is far longer than the 600-character
@@ -2224,6 +2244,54 @@ describe("createReviewConsumer", () => {
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(h.sandbox.destroyCalls).toBe(1);
+  });
+
+  test("an input write the anchored deadline killed acks the typed stop — the runner never ran, so 0/0 is KNOWN", async () => {
+    h.sandbox.writeInputExitCode = 124;
+    const db = await createSeededTestD1();
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            // 580s of clone leaves 86s of the 666s derived deadline — under the
+            // 120s step cap, so the anchored deadline is what bound the write
+            // and the kill it reports is that deadline's, not the cap's.
+            if (cmd.includes("git init")) clock.now += 580_000;
+            return h.fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: h.fakeSandbox.destroy,
+        }),
+      });
+      // A confirmed stop is terminal: ack, never a paid retry for the same clock.
+      await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+    });
+
+    expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).toContain('"budgetWindow":"runner"');
+    // The runner never started: the seats are provably 0/0, not null.
+    expect(row).toContain('"seatsDispatched":0');
+    expect(row).toContain('"seatsStopped":0');
+  });
+
+  test("an input write its own step cap killed stays a generic write error", async () => {
+    h.sandbox.writeInputExitCode = 124;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
+
+    // ~666s of derived deadline remain at the write: the step's own 120s cap
+    // bound it, so the 124 is a plain write failure — the queue retries.
+    await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
+      /runner input write failed: exit 124/,
+    );
+
+    expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).not.toContain("budget-exhausted:");
   });
 
   test("App row NULL + missing default row → runner runs the landing tier 'default' (one default read)", async () => {

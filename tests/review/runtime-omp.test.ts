@@ -62,7 +62,7 @@ import type {
 } from "../../packages/shared/src/runtime";
 import { RunnerBudgetExhausted } from "../../packages/shared/src/budget-exhausted-wire";
 import { servedModel, type SupervisedSeat } from "../../packages/runner/src/runtime-omp";
-import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
+import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes, resetRecheckAnchor } from "../../packages/runner/src/recheck";
 import { REPORT_OUTPUT_SCHEMA } from "../../packages/runner/src/report";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
 import { RECHECK_STATUS_ERROR_MAX_CHARS, type RecheckDoc, type RecheckInput } from "../../packages/shared/src/recheck-wire";
@@ -640,6 +640,9 @@ afterEach(() => {
   // Supervision tests install fake timers; every other test runs on the real clock.
   jest.useRealTimers();
   delete process.env.OMP_REVIEW_MODEL;
+  // The anchored outer deadline is process-global: a spent anchor would
+  // decline the NEXT test's deep dispatch at the boundary check.
+  resetRecheckAnchor();
 });
 
 describe("ompAgentRuntime.runReview — parent session", () => {
@@ -1454,6 +1457,56 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     // parked continuation finishing on its own.
     expect(parentAbortReasons.length).toBeGreaterThan(0);
     expect(parentAbortReasons.every((call) => call.reason === "runner deadline reached")).toBe(true);
+  });
+
+  test("an assignment read that blocks past the deadline declines the turn — 0/0 seats, never a dispatched 1/1", async () => {
+    // The deadline fires while the command file is still being read: the deep
+    // parent was never prompted, so the signal counts 0 of 0 — a seat stop
+    // must never be reported for a seat that was never dispatched.
+    const pluginRoot = mkdtempSync(join(tmpdir(), "mstar-harness-slow-"));
+    cpSync(PLUGIN_ROOT_FIXTURE, pluginRoot, { recursive: true });
+    const commandPath = join(pluginRoot, "commands", "amazing-pr-review.md");
+    rmSync(commandPath);
+    Bun.spawnSync(["mkfifo", commandPath]);
+    // The read blocks until the delayed writer opens the fifo — well past the
+    // 50ms deadline below, then the read still completes.
+    const writer = Bun.spawn(
+      ["sh", "-c", `sleep 0.15; printf 'fixture command' > ${commandPath}`],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    const previousRoot = process.env.HARNESS_PLUGIN_ROOT;
+    process.env.HARNESS_PLUGIN_ROOT = pluginRoot;
+    try {
+      anchorRecheckDeadline(Date.now() - 60_000, "deep", Date.now() + 50);
+      const stop = (await ompAgentRuntime.runReview({ ...DEEP_INPUT }).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+
+      expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+      expect(stop.seatsDispatched).toBe(0);
+      expect(stop.seatsStopped).toBe(0);
+      // No prompt and no abort ever reached the session: nothing was dispatched.
+      expect(promptTexts).toHaveLength(0);
+      expect(parentAbortReasons).toHaveLength(0);
+    } finally {
+      if (previousRoot === undefined) delete process.env.HARNESS_PLUGIN_ROOT;
+      else process.env.HARNESS_PLUGIN_ROOT = previousRoot;
+      writer.kill();
+      rmSync(pluginRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a read that resolves after the deadline declined the turn still counts 0/0", async () => {
+    // The outer deadline is already spent when the assignment read resolves:
+    // the dispatch boundary declines the prompt instead of starting a 1ms
+    // turn the timer would kill — and the signal reports what really ran.
+    anchorRecheckDeadline(Date.now() - 60_000, "deep", Date.now() - 1);
+
+    const stop = (await ompAgentRuntime.runReview({ ...DEEP_INPUT }).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+
+    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+    expect(stop.seatsDispatched).toBe(0);
+    expect(stop.seatsStopped).toBe(0);
+    expect(promptTexts).toHaveLength(0);
+    expect(parentAbortReasons).toHaveLength(0);
   });
 });
 

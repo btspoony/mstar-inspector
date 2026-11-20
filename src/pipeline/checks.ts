@@ -1308,6 +1308,26 @@ export function decideConclusion(input: {
   budgetExhaustion?: BudgetExhaustedOutcome;
 }): CheckConclusion {
   const { proof, outcome, gate, review, inherited } = input;
+  // A wall-clock stop resolves BEFORE any persisted proof: this attempt
+  // published nothing, so a readable same-head proof can only be a PRIOR
+  // generation's applied publication, and its gate result must never freeze
+  // this attempt's Check (RL-12 reuses the head SHA). The summary is a
+  // failure record, never a verdict: the Check says so once with this
+  // attempt's derived facts. `budgetExhaustion` is required by contract —
+  // the two seams that supply this outcome always carry the record they
+  // resolved, so a missing one is a caller defect, named on the throw.
+  if (outcome === "budget-exhausted") {
+    if (input.budgetExhaustion === undefined) {
+      throw new Error(
+        'decideConclusion: outcome "budget-exhausted" requires the resolved budgetExhaustion record',
+      );
+    }
+    return {
+      desired: "failure",
+      title: CHECK_NAME,
+      summary: budgetExhaustedSummary(input.budgetExhaustion),
+    };
+  }
   if (proof !== null) {
     if (proof.kind === "degraded") {
       return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degraded };
@@ -1419,17 +1439,6 @@ export function decideConclusion(input: {
   }
   if (outcome === "degraded-not-posted") {
     return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degradedNotPosted };
-  }
-  if (outcome === "budget-exhausted") {
-    // A wall-clock stop is a failure record, never a verdict: the Check says
-    // so once with this attempt's derived facts. `budgetExhaustion` is
-    // required by contract — the two seams that supply this outcome always
-    // carry the record they resolved.
-    return {
-      desired: "failure",
-      title: CHECK_NAME,
-      summary: budgetExhaustedSummary(input.budgetExhaustion!),
-    };
   }
   // publication-unknown and expired-without-proof are both unconfirmed. The
   // deadline path names which proof it could not read; without that
@@ -2271,8 +2280,12 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // EMPTY increment reads the reviewed head's `reviews` row instead — the
       // head whose content this round covers.
       const ownPublicationId = input.publicationId ?? undefined;
+      // A `budget-exhausted` outcome is decided from its own typed record
+      // alone — a same-head proof could only be a PRIOR generation's applied
+      // publication, so the fallback read is suppressed for that outcome too.
       const readProof =
-        ownPublicationId === undefined && input.inheritedHeadSha === undefined
+        input.outcome === "budget-exhausted" ||
+        (ownPublicationId === undefined && input.inheritedHeadSha === undefined)
           ? null
           : await readPublicationProof(deps.db, {
               scope: handle.scope,

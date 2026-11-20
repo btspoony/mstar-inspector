@@ -701,6 +701,11 @@ export type ConsumerLogFields = {
   report_doc_head_sha?: string;
   /** The resolved `budget-exhausted` record, on the one `review failed` line the stop emits. */
   budget_outcome?: BudgetExhaustedOutcome;
+  /**
+   * A sandbox kill's redacted provider stderr tail: untrusted text that rides
+   * ONE log line so the durable row can carry only trusted budget fields.
+   */
+  stderr_tail?: string;
 };
 
 export type ConsumerLog = {
@@ -6053,12 +6058,37 @@ async function processMessage(
     // The document rides the exec stdin pipe: as an argv string it became one
     // argument, and a recheck round above ~98 KiB breaches Linux's 128 KiB cap.
     // Two deadlines compete here: the anchored exec deadline below and the
-    // later pre-runner cutoff; the write must bill the anchored one.
+    // later pre-runner cutoff; the write must bill the anchored one. What the
+    // anchored deadline owes the write is sampled HERE — before the helper's
+    // own clock read — so a kill the write reports can be attributed to the
+    // clock that bound it.
+    const inputWriteWindowMs = runnerExecDeadlineMs - Date.now();
     const writeInput = await sandbox.runCommand(writeJsonCommand(RUNNER_INPUT_PATH), {
       stdin: toBase64Utf8(JSON.stringify(runnerInput)),
       timeout: boundedStepTimeout(runnerExecDeadlineMs, EXEC_TIMEOUT_GIT_MS, "runner input write", "runner"),
     });
     if (writeInput.exitCode !== 0) {
+      // A kill under the anchored runner deadline (its remainder bound the
+      // write, not the step's own cap) is the typed stop, not a generic
+      // write error: the runner never started, so every observed counter is
+      // KNOWN — provably 0/0 seats — and the attempt acks rather than paying
+      // a queue retry for the same clock. A `124` the step's own cap fired
+      // keeps the generic path: that kill was not the frozen deadline's.
+      if (writeInput.exitCode === 124 && inputWriteWindowMs <= EXEC_TIMEOUT_GIT_MS) {
+        throw new BudgetExhaustedError(
+          {
+            kind: "budget-exhausted",
+            cause: "sandbox-kill",
+            tier: level,
+            budgetWindow: "runner",
+            budgetMs: runnerAnchor!.effectiveBudgetMs,
+            seatsDispatched: 0,
+            seatsStopped: 0,
+            changedLines: observedChangedLines,
+          },
+          "runner input write killed at the anchored runner deadline",
+        );
+      }
       throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
     }
 
@@ -6119,7 +6149,17 @@ async function processMessage(
       // The sandbox's GNU-timeout wrapper killed the exec at the anchored
       // instant — the runner could not print its own signal, so neither seat
       // counts nor the stop instant are observable. `sandbox-kill` records
-      // the frozen runner budget and leaves every counter null.
+      // the frozen runner budget and leaves every counter null. The persisted
+      // outcome carries only trusted budget fields plus fixed diagnostics:
+      // provider stderr is untrusted text, so it rides one redacted log line
+      // and never the durable row the outcome builds below.
+      deps.log.warn(
+        {
+          ...fields,
+          stderr_tail: redactExactSecrets(redactSecrets(run.stderr), secretValues).slice(-STDERR_TAIL_MAX),
+        },
+        "runner exec killed at the anchored deadline (provider stderr on this line only)",
+      );
       throw new BudgetExhaustedError(
         {
           kind: "budget-exhausted",
@@ -6131,7 +6171,7 @@ async function processMessage(
           seatsStopped: null,
           changedLines: observedChangedLines,
         },
-        runnerFailureDetail(run, secretValues),
+        `runner exec killed at its deadline: exit 124, stdout ${new TextEncoder().encode(run.stdout).length}B`,
       );
     }
     if (run.exitCode !== 0) {

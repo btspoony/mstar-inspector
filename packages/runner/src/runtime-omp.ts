@@ -1414,10 +1414,24 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             console.error("deep parent deadline abort failed", error);
           });
         };
-        const deadlineTimer = setTimeout(deadlineAbort, seatMaxRuntimeMs(Date.now(), input.level));
         let turnError: unknown;
+        // The timer starts at the dispatch boundary, after the assignment
+        // read below — a blocked read must not let this abort fire on a seat
+        // that was never prompted. Undefined until then; the outer finally's
+        // clearTimeout is a no-op before dispatch.
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-          await parentSession.prompt(await deepAssignment(input, pluginRoot));
+          const assignment = await deepAssignment(input, pluginRoot);
+          // A read that spent the deadline declines the turn: the deep parent
+          // was never dispatched, so the signal counts 0 of 0 — only an
+          // actually dispatched seat can be counted dispatched or stopped.
+          // An IMMINENT deadline still dispatches: the deadline timer owns
+          // the mid-turn stop and honestly counts that seat 1 of 1.
+          if (remainingOuterMs(Date.now(), input.level) <= 0) {
+            throw new RunnerBudgetExhausted(0, 0);
+          }
+          deadlineTimer = setTimeout(deadlineAbort, seatMaxRuntimeMs(Date.now(), input.level));
+          await parentSession.prompt(assignment);
         } catch (error) {
           turnError = error;
         } finally {

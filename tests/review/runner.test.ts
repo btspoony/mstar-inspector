@@ -869,6 +869,41 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  test("a --recheck-out write failure still emits the budget signal: exit 0 + stderr diagnostic", async () => {
+    // A side write must not override a confirmed terminal stop: exit 1 sends
+    // the Worker's runner-failure path down a paid queue retry for the same
+    // clock. The lost document keeps its stderr diagnostic while the closed
+    // signal still owns stdout.
+    const exhausted = new RunnerBudgetExhausted(1, 1);
+    exhausted.recheck = {
+      schema: "mstar.recheck/v1",
+      headSha: "abc123",
+      results: [],
+    };
+    runtimeError = exhausted;
+    const dir = mkdtempSync(join(tmpdir(), "runner-budget-side-"));
+    try {
+      const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+      const { code, stdout, stderr } = await runCli([
+        "--level",
+        "quick",
+        "--input",
+        inputPath,
+        "--recheck-out",
+        join(dir, "missing", "recheck.json"),
+      ]);
+
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout)).toEqual({
+        schema: "mstar.review-budget-exhausted/v1",
+        seatsDispatched: 1,
+        seatsStopped: 1,
+      });
+      expect(stderr).toContain("cannot write recheck output");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test("ALWAYS synthesizes: a zero-custom run rides an agentDir whose models.yml is a bare providers header", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
