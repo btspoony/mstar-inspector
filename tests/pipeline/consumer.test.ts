@@ -168,24 +168,29 @@ import {
   attributionEntries,
   formatFailureAttribution,
 } from "../../packages/runner/src/seat-failover-probe";
+// The budget owner is a pure module with no workerd dependency: imported
+// directly, so the suite pins the same values both the consumer and the Check
+// store bill.
+import {
+  CHECK_HOOK_TIMEOUT_MS,
+  EXEC_TIMEOUT_GIT_MS,
+  GUARD_TIMED_SANDBOX_STEPS,
+  POST_RUNNER_READ_TIMEOUT_MS,
+  ROUND_BUDGET_MS,
+  postRunnerReserveMs,
+  reviewGuardTtlSeconds,
+  runnerTimeoutMs,
+} from "../../src/review-budget";
 
 // The consumer under test and the binding helper it exports, through ONE
 // loader: the harness registers the workerd shim before this dynamic import.
 const {
   BIND_UNBOUND_THREADS_MAX_ENTRIES,
-  CHECK_HOOK_TIMEOUT_MS,
-  EXEC_TIMEOUT_GIT_MS,
-  GUARD_TIMED_SANDBOX_STEPS,
   INLINE_RESOLVE_MAX_ENTRIES,
-  POST_RUNNER_READ_TIMEOUT_MS,
   PR_CONTEXT_EXEC_TIMEOUT_MS,
-  ROUND_BUDGET_MS,
   bindUnboundThreads,
   createReviewConsumer,
   guardRetryDelaysSeconds,
-  postRunnerReserveMs,
-  reviewGuardTtlSeconds,
-  runnerTimeoutMs,
 } = await loadConsumer();
 
 /** This file's harness instance: rebuilt per test, so no case inherits a double. */
@@ -1776,9 +1781,10 @@ describe("createReviewConsumer", () => {
     });
 
     // The capture runs and the round completes; the runner exec gets the
-    // derived 666s deadline (below its 840s table) instead of the whole table.
+    // deeper of the two limits — its 646s table maximum, still inside the
+    // default 666s pre-runner cutoff.
     expect(execTimeout(h.sandbox.calls[2]!)).toBe(EXEC_TIMEOUT_GIT_MS);
-    expect(runnerExecTimeout()).toBe(666_000);
+    expect(runnerExecTimeout()).toBe(646_000);
     expect(h.logLines.some((l) => l.fields.diff_source === "oversized-local")).toBe(true);
     expect(reviewCount(db)).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
@@ -1896,6 +1902,79 @@ describe("createReviewConsumer", () => {
     expect(writtenInput.outerDeadlineEpochMs).toBe(roundStart + 600_000);
     expect(reviewCount(db)).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a tier-bound input write that spends time bills the ONE anchored deadline, not the later cutoff", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    let roundStart = 0;
+    let writeStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            // 50s of clone leaves 650s before the derived 666s cutoff: the
+            // 600s tier maximum binds the allocation instead of the cutoff.
+            // The input write then spends 80s of the anchored deadline.
+            if (cmd.includes("git init")) clock.now += 50_000;
+            if (cmd.startsWith("base64 -d >")) {
+              writeStart = clock.now;
+              clock.now += 80_000;
+            }
+            return h.fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: h.fakeSandbox.destroy,
+        }),
+      });
+      // No await separates the anchor from the write-timeout read, but the
+      // input construction between them is real synchronous work: a scoped
+      // stringify spy (self-restoring on the first runner-input document)
+      // spends 500s of the clock there, so at the read the anchored exec
+      // deadline owes 100s and the later 666s cutoff owes 116s — both under
+      // the 120s step cap, so the recorded timeout shows which was billed.
+      const realStringify = JSON.stringify;
+      JSON.stringify = ((value: unknown, ...rest: unknown[]) => {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          (value as Record<string, unknown>).worktreePath === CLONE_DIR &&
+          typeof (value as Record<string, unknown>).outerDeadlineEpochMs === "number"
+        ) {
+          JSON.stringify = realStringify;
+          clock.now += 500_000;
+        }
+        return Reflect.apply(realStringify, JSON, [value, ...rest]) as string;
+      }) as typeof JSON.stringify;
+      try {
+        await consumer(h.makeBatch(makePayload()));
+      } finally {
+        JSON.stringify = realStringify;
+      }
+    });
+
+    const writtenInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    const deadline = writtenInput.outerDeadlineEpochMs!;
+    const inputWrite = h.sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
+    // The wire deadline is the ANCHOR's exec end — anchor + 600s tier max —
+    // not the 666s pre-runner cutoff a tier-bound write never reaches.
+    expect(deadline).toBe(roundStart + 650_000);
+    // Serialization ended 500s after the anchor, so the write-timeout read
+    // gets min(120s cap, 100s anchored remainder) = 100s. The cutoff still
+    // owed 116s there: under the old defect the write would have billed it.
+    expect(writeStart).toBe(roundStart + 550_000);
+    expect(execTimeout(inputWrite)).toBe(100_000);
+    expect(execTimeout(inputWrite)).not.toBe(116_000);
+    const runnerLine = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
+    expect(runnerLine.fields.runner_deadline_ms).toBe(roundStart + 650_000);
+    expect(runnerLine.fields.runner_effective_ms).toBe(600_000);
+    expect(runnerLine.fields.runner_requested_ms).toBe(600_000);
+    // The exec gets what the ONE deadline still owes after the write spent
+    // its 80s — 20s, never the write's own window added back onto it.
+    expect(runnerExecTimeout()).toBe(deadline - (writeStart + 80_000));
+    expect(runnerExecTimeout()).toBe(20_000);
+    expect(reviewCount(db)).toBe(1);
   });
 
   test("an input write that spends the derived deadline declines the runner with the explicit budget failure", async () => {
@@ -2043,7 +2122,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(2);
   });
 
-  test("App row review_level 'deep' → derived runner exec timeout 666_000 + admission TTL 2652; quick/default stay 600_000 (AC-S10-clock)", async () => {
+  test("App row review_level 'deep' → derived runner exec timeout 646_000 + admission TTL 2458; quick/default are 480_000/600_000 (AC-S10-clock)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
@@ -2058,19 +2137,22 @@ describe("createReviewConsumer", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // Deep's 14-min table budget is the CEILING, not the reservation: the exec
-    // gets what the round deadline still owes (900s − the 234s live post-runner
-    // reserve), so an oversized-diff fallback fits inside the same 900s cap.
-    expect(runnerExecTimeout()).toBe(666_000);
+    // Deep's table maximum is the CEILING, not the reservation: the exec gets
+    // the smaller of that maximum and what the round deadline still owes
+    // (900s − the 234s live post-runner reserve), so an oversized-diff
+    // fallback fits inside the same 900s cap.
+    expect(runnerExecTimeout()).toBe(646_000);
     // The admission row's TTL follows the same level table (AC-S10-guard):
-    // deep is 2652s. Pinned as the table's figure, like the runner budgets
+    // deep is 2458s. Pinned as the table's figure, like the runner budgets
     // below — the arithmetic that produces it is pinned once, by the guard
     // test.
-    expect(admissionTtlMs).toBe(2_652_000);
-    // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
-    expect(runnerTimeoutMs("quick")).toBe(600_000);
+    expect(admissionTtlMs).toBe(2_458_000);
+    // The table is tiered INSIDE the worst-case ceiling: quick one 120s step
+    // window below default, default at the frozen 10 minutes, deep at the
+    // minimum platform-derived ceiling over the whole terminalize range.
+    expect(runnerTimeoutMs("quick")).toBe(480_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);
-    expect(runnerTimeoutMs("deep")).toBe(840_000);
+    expect(runnerTimeoutMs("deep")).toBe(646_000);
   });
 
   test("the reserve uses the message's LIVE terminalize budget: a 30s operator value shrinks the runner deadline by 20s (qc2 F-001 / qc3 F-801)", async () => {
@@ -2115,7 +2197,7 @@ describe("createReviewConsumer", () => {
     expect(line!.fields.orchestration).toBe("bun-fanout");
   });
 
-  test("App row review_level 'deep' → runner log: level=deep, budget 840_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
+  test("App row review_level 'deep' → runner log: level=deep, budget 646_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
@@ -2126,7 +2208,7 @@ describe("createReviewConsumer", () => {
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"));
     expect(line).toBeDefined();
     expect(line!.fields.level).toBe("deep");
-    expect(line!.fields.runner_timeout_ms).toBe(840_000);
+    expect(line!.fields.runner_timeout_ms).toBe(646_000);
     expect(typeof line!.fields.elapsed_ms).toBe("number");
     // Deep runs the three-stage parent session — never a fabricated Bun
     // seat count (spec § Queue visibility: 禁止写假 seat_count: 7).
@@ -3874,25 +3956,27 @@ describe("createReviewConsumer", () => {
     expect(warnLine!.msg).toContain("expires by TTL");
   });
   test("reviewGuardTtlSeconds covers the full step-budget arithmetic per level (qc3 F-301 pin / AC-S10-guard)", () => {
-    // Exact pin: THIRTEEN timed sandbox commands (clone, rev-parse, compare
+    // Exact pin: FOURTEEN timed sandbox steps (clone, rev-parse, compare
     // status, full diff, increment diff, numstat, runner-input write, report
-    // `gh pr view`, up to 3 report `gh issue view` reads, recheck-doc read,
-    // report-document read) × 120s + the LEVEL's runner budget + the 12s
-    // inline-resolution budget + 120s slack for the untimed steps (token
-    // mint, sandbox create, comment post, KV/D1 puts) = 2412s quick/default,
-    // 2652s deep (spec d5-budget L4). Every earlier step addition (numstat,
-    // the input write, the recheck read, now the increment/report reads) went
+    // `gh pr view`, up to 3 report `gh issue view` reads, recheck reads,
+    // report-document read, applied-model read) × 120s + the LEVEL's tier
+    // maximum + the 12s inline-resolution budget + 120s slack for the untimed
+    // steps (token mint, sandbox create, comment post, KV/D1 puts) = 2292s
+    // quick, 2412s default, 2458s deep. Every earlier step addition (numstat,
+    // the input write, the recheck read, the increment/report reads) went
     // uncounted — any future step or ceiling change must recompute this
     // helper ON PURPOSE.
-    expect(reviewGuardTtlSeconds("quick")).toBe(2412);
+    expect(reviewGuardTtlSeconds("quick")).toBe(2292);
     expect(reviewGuardTtlSeconds("default")).toBe(2412);
-    expect(reviewGuardTtlSeconds("deep")).toBe(2652);
+    expect(reviewGuardTtlSeconds("deep")).toBe(2458);
   });
 
-  test("round budget: the reserve covers the live post-runner tail and derives the runner deadline", () => {
+  test("round budget: the reserve covers the live post-runner tail and derives the runner cutoff", () => {
     // Every term is pinned by value: a move in any one of them, in the cap or
     // in the reserve must fail this case, not drift silently.
-    expect(runnerTimeoutMs("deep")).toBe(840_000);
+    expect(runnerTimeoutMs("quick")).toBe(480_000);
+    expect(runnerTimeoutMs("default")).toBe(600_000);
+    expect(runnerTimeoutMs("deep")).toBe(646_000);
     expect(CHECK_HOOK_TIMEOUT_MS).toBe(2_000);
     expect(CHECK_TERMINALIZE_DEFAULT).toBe(10_000);
     // The reserve is composed from existing values, never a new knob:
@@ -3901,13 +3985,21 @@ describe("createReviewConsumer", () => {
     expect(postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT)).toBe(234_000);
     // An operator-tunable terminalize moves the reserve 1:1 (its 30s ceiling).
     expect(postRunnerReserveMs(30_000)).toBe(254_000);
-    // So deep's 840s TABLE is a ceiling, never a reservation: the derived
-    // deadline is 666s, and 546s of it remain once the fallback's single 120s
-    // capture is allowed for — the capture stays reachable on every level.
+    // The table is a ceiling, never a reservation: at the default reserve the
+    // cutoff is 666s, so quick/default/deep all fit inside it with 186s/66s/20s
+    // to spare — and the 120s fallback capture still fits ahead of the cutoff.
     const runnerDeadlineMs = ROUND_BUDGET_MS - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
     expect(runnerDeadlineMs).toBe(666_000);
-    expect(Math.min(runnerTimeoutMs("deep"), runnerDeadlineMs)).toBe(666_000);
+    expect(runnerDeadlineMs - runnerTimeoutMs("deep")).toBe(20_000);
     expect(runnerDeadlineMs - EXEC_TIMEOUT_GIT_MS).toBe(546_000);
+    // The tier invariants hold over the whole supported terminalize range:
+    // quick < default < deep <= cap - reserve.
+    for (const terminalizeMs of [1_000, 10_000, 30_000]) {
+      const cutoff = ROUND_BUDGET_MS - postRunnerReserveMs(terminalizeMs);
+      expect(runnerTimeoutMs("quick")).toBeLessThan(runnerTimeoutMs("default"));
+      expect(runnerTimeoutMs("default")).toBeLessThan(runnerTimeoutMs("deep"));
+      expect(runnerTimeoutMs("deep")).toBeLessThanOrEqual(cutoff);
+    }
   });
 
   test("a maximal round issues exactly the steps the guard TTL bills", async () => {
@@ -3986,7 +4078,8 @@ describe("createReviewConsumer", () => {
     // quick/default 60/300/300/900/900; deep 90/480/300/900/900.
     // GUARD_RETRY_DELAYS_SECONDS is a literal table — nothing derives it — so
     // this test is what keeps it honest as the TTL moves: every entry must stay
-    // BELOW reviewGuardTtlSeconds(level) (2412s quick/default, 2652s deep) so
+    // BELOW reviewGuardTtlSeconds(level) (2292s quick, 2412s default, 2458s
+    // deep) so
     // no single delay outlives the lock, and the cumulative sum (2460s / 2670s)
     // must EXCEED it, so the final delayed attempt finds the row expired and
     // reclaims it instead of being dropped. The rungs after the first two are
@@ -4004,6 +4097,96 @@ describe("createReviewConsumer", () => {
       }
       expect(delays.reduce((sum, delay) => sum + delay, 0)).toBeGreaterThan(ttl);
     }
+  });
+
+  test("a late runner start: the guard and Check expiries cover execDeadline + reserve from their own origins", async () => {
+    // The origins are the ROWS the production paths wrote — the inflight
+    // row's acquired_at/expires_at pair and the Check claim's created_ms /
+    // execution_deadline_ms pair — never the derived windows re-computed.
+    // The frozen clock makes every production Date.now() read exact, so the
+    // coverage is measured, not assumed.
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    let guardRow: Record<string, unknown> | undefined;
+    h.sandbox.probe = () => {
+      guardRow = inflightRows(db)[0];
+    };
+    let roundStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const adapter = checksAdapterFor(db);
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+        // 200s of the 900s round is gone before the clone: the anchor happens
+        // well after the round start, so the derived cutoff — not the tier
+        // maximum — binds the allocation.
+        ...clockSpendingSandbox("git init", 200_000, clock),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    const execDeadlineMs = written.outerDeadlineEpochMs!;
+    // Late start ⇒ the 666s cutoff binds: exec end + reserve IS the round end.
+    expect(execDeadlineMs).toBe(roundStart + 666_000);
+    const tailMs = execDeadlineMs + postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
+
+    // Guard: the row the consumer ACQUIRED at round start outlives the whole
+    // reserved tail — its own expiry, not the TTL arithmetic.
+    expect(guardRow).toBeDefined();
+    expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
+    expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(tailMs);
+
+    // Check: claimed at ADMISSION — before the 200s was spent — so its
+    // execution deadline is exactly the end of this round's reserved tail,
+    // the tightest the lease may ever run.
+    const claim = checkRowFor(db, SHA);
+    expect(claim.created_ms).toBe(roundStart);
+    expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
+    expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
+  });
+
+  test("the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (deep, the tight bound)", async () => {
+    // terminalizeMs = 30_000 is the supported ceiling the reserve charges,
+    // and deep's tier maximum is the only one that binds AT the derived
+    // cutoff — the tightest case the invariant can ever run. A millisecond
+    // short on either expiry is a real defect, not a rounding question.
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    const db = await createSeededTestD1();
+    setAppReviewLevel(db, TEST_APP_ID, "deep");
+    // The operator's ceiling value, read per message exactly like the hook's.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "30000");
+    let guardRow: Record<string, unknown> | undefined;
+    h.sandbox.probe = () => {
+      guardRow = inflightRows(db)[0];
+    };
+    let roundStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const adapter = checksAdapterFor(db);
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    const execDeadlineMs = written.outerDeadlineEpochMs!;
+    // 900s − 254s reserve ⇒ deep's 646s maximum IS the derived cutoff.
+    expect(execDeadlineMs).toBe(roundStart + 646_000);
+    const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
+
+    // Guard and Check were both taken at the round start; each must outlive
+    // the tail the runner's deadline cannot reach.
+    expect(guardRow).toBeDefined();
+    expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
+    expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(tailMs);
+    const claim = checkRowFor(db, SHA);
+    expect(claim.created_ms).toBe(roundStart);
+    expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
+    expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
   });
 });
 
@@ -6063,6 +6246,8 @@ type CheckRowShape = {
   terminal_ms: number | null;
   terminalize_outcome: string | null;
   terminalize_elapsed_ms: number | null;
+  /** The claim's own origin — the `nowMs` the insert was stamped with. */
+  created_ms: number;
   execution_deadline_ms: number;
 };
 
