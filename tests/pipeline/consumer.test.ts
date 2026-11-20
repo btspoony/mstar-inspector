@@ -1904,6 +1904,53 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(0);
   });
 
+  test("a tier-bound input write that spends time bills the ONE anchored deadline, not the later cutoff", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    let roundStart = 0;
+    let writeStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            // 50s of clone leaves 650s before the derived 666s cutoff: the
+            // 600s tier maximum binds the allocation instead of the cutoff.
+            // The input write then spends 80s of the anchored deadline —
+            // under the old defect it would have billed the later 666s
+            // pre-runner cutoff instead.
+            if (cmd.includes("git init")) clock.now += 50_000;
+            if (cmd.startsWith("base64 -d >")) {
+              writeStart = clock.now;
+              clock.now += 80_000;
+            }
+            return h.fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: h.fakeSandbox.destroy,
+        }),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    const writtenInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    const deadline = writtenInput.outerDeadlineEpochMs!;
+    const inputWrite = h.sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
+    // The wire deadline is the ANCHOR's exec end — anchor + 600s tier max —
+    // not the 666s pre-runner cutoff a tier-bound write never reaches.
+    expect(deadline).toBe(roundStart + 650_000);
+    // The write's window is min(120s, deadline - writeStart): capped here,
+    // but drawn from the same 650s anchor.
+    expect(writeStart).toBe(roundStart + 50_000);
+    expect(execTimeout(inputWrite)).toBe(Math.min(EXEC_TIMEOUT_GIT_MS, deadline - writeStart));
+    // The exec gets what the ONE deadline still owes after the write: its
+    // 80s is spent, never re-added — a cutoff-bound write would have claimed
+    // 536s instead of 520s.
+    expect(runnerExecTimeout()).toBe(deadline - (writeStart + 80_000));
+    expect(runnerExecTimeout()).toBe(520_000);
+    expect(reviewCount(db)).toBe(1);
+  });
+
   test("an input write that spends the derived deadline declines the runner with the explicit budget failure", async () => {
     const db = await createSeededTestD1();
     await withFrozenClock(async (clock) => {

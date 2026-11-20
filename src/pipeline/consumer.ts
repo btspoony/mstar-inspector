@@ -5850,8 +5850,14 @@ async function processMessage(
     // Anchor the derived budget HERE, just before the input write: the one
     // tier clamp the whole pipeline applies (`anchorRunnerBudget`), and the
     // write, the wire value and the exec timeout all spend its absolute end.
-    // A spent cutoff is a refusal before any paid work — never a 1ms exec.
+    // Its refusals — an oversized request, a spent cutoff — throw before any
+    // paid work — never a 1ms exec.
     const anchor = anchorRunnerBudget(budget, Date.now());
+    if (anchor.kind === "oversized") {
+      throw new Error(
+        `runner request declined — ${anchor.requestedBudgetMs}ms exceeds the tier maximum (${anchor.tierMaxMs}ms)`,
+      );
+    }
     if (anchor.kind === "exhausted") {
       throw new Error(
         `round budget spent: runner declined — the pre-runner cutoff is spent (${anchor.remainingMs}ms left for it)`,

@@ -125,6 +125,32 @@ describe("allocation: one min(), one absolute deadline", () => {
     expect(anchor.effectiveBudgetMs).toBe(120_000);
   });
 
+  test("a request is bound to the tier maximum: AT it allocates, above it refuses", () => {
+    const budget = budgetFor("default", 10_000);
+    const tierMax = RUNNER_MAX_BUDGET_MS.default;
+
+    // The boundary itself is a valid request — the ceiling is inclusive.
+    const atMax = anchorRunnerBudget(budget, ROUND_START, tierMax);
+    expect(atMax.kind).toBe("allocated");
+    if (atMax.kind === "allocated") {
+      expect(atMax.effectiveBudgetMs).toBe(tierMax);
+      expect(atMax.requestedBudgetMs).toBe(tierMax);
+    }
+
+    // One ms over is a typed refusal inside the ONE derivation — the
+    // requestedMs <= tierMaxMs invariant is enforced here, never by a
+    // second silent clamp, and no caller can out-request the table.
+    const over = anchorRunnerBudget(budget, ROUND_START, tierMax + 1);
+    expect(over.kind).toBe("oversized");
+    if (over.kind === "oversized") {
+      expect(over.requestedBudgetMs).toBe(tierMax + 1);
+      expect(over.tierMaxMs).toBe(tierMax);
+    }
+    // The refusal carries nothing a caller could mistake for a budget.
+    expect("effectiveBudgetMs" in over).toBe(false);
+    expect("execDeadlineMs" in over).toBe(false);
+  });
+
   test("time spent on the input write and startup comes out of the one deadline", () => {
     const budget = budgetFor("deep", 10_000);
     const anchor = anchorRunnerBudget(budget, ROUND_START + 5_000);

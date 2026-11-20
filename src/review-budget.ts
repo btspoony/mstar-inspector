@@ -243,7 +243,21 @@ export type RunnerBudgetRefusal = {
   remainingMs: number;
 };
 
-export type RunnerBudgetOutcome = RunnerBudgetAnchor | RunnerBudgetRefusal;
+/**
+ * A request above the tier maximum: refused inside the ONE derivation, never
+ * silently clamped to the table. The `requestedMs <= tierMaxMs` half of the
+ * invariant holds because no allocation can carry a request the tier never
+ * granted.
+ */
+export type RunnerBudgetOversize = {
+  kind: "oversized";
+  /** The request that overreached. */
+  requestedBudgetMs: number;
+  /** The tier ceiling the derivation enforces. */
+  tierMaxMs: number;
+};
+
+export type RunnerBudgetOutcome = RunnerBudgetAnchor | RunnerBudgetRefusal | RunnerBudgetOversize;
 
 /**
  * Derive the round's budget. The output names every window a consumer bills
@@ -273,9 +287,10 @@ export function deriveReviewBudget(inputs: ReviewBudgetInputs): ReviewBudget {
  * a size-based allocation is a later caller's smaller `requestMs`. The single
  * `min()` lives HERE and nowhere else: neither the input write nor the exec
  * applies its own tier clamp or restarts the clock — both spend the same
- * `execDeadlineMs` passed on the wire. A nonpositive remainder is a typed
- * refusal carrying the exhausted window, so no paid exec ever starts past the
- * cutoff.
+ * `execDeadlineMs` passed on the wire. Two typed refusals: a `requestMs`
+ * above `tierMaxMs` is `oversized` (the bound cannot be bypassed by asking),
+ * and a nonpositive remainder is `exhausted`, so no paid exec ever starts
+ * past the cutoff.
  */
 export function anchorRunnerBudget(
   budget: ReviewBudget,
@@ -283,6 +298,9 @@ export function anchorRunnerBudget(
   requestMs?: number,
 ): RunnerBudgetOutcome {
   const requestedBudgetMs = requestMs ?? budget.tierMaxMs;
+  if (requestedBudgetMs > budget.tierMaxMs) {
+    return { kind: "oversized", requestedBudgetMs, tierMaxMs: budget.tierMaxMs };
+  }
   const effectiveBudgetMs = Math.min(requestedBudgetMs, budget.runnerCutoffMs - anchorMs);
   if (effectiveBudgetMs <= 0) {
     return { kind: "exhausted", remainingMs: budget.runnerCutoffMs - anchorMs };
