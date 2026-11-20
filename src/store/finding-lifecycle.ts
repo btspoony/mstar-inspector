@@ -79,6 +79,8 @@ export type LineIntent = {
   associationId: string; findingRowId: string; publicationId: string;
   scope: Scope; originalSha: string; round: number;
   path: string; line: number; body: string; bodySha256: string;
+  /** First line of a multi-line anchor; absent/null = the single-line anchor at `line`. */
+  lineStart?: number | null;
 };
 export type VerifiedResolution = {
   assessment: Assessment; snapshot: ThreadSnapshot;

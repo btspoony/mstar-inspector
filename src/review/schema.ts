@@ -254,14 +254,18 @@ export const FINDING_BODY_MAX = 2000;
   * away by computeFindingFingerprint (W-1).
  */
  /**
- * Clamp every finding's title/body/fingerprint_hint to the budgets above; a
- * fully within-budget output is returned unchanged (same reference).
+ * Clamp every finding's title/body/fingerprint_hint to the budgets above, and
+ * drop an unclosed suggestion fence at any length; a fence-free within-budget
+ * output is returned unchanged (same reference).
  */
 export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
   const oversized = output.findings.some(
     (finding) =>
       finding.title.length > FINDING_TITLE_MAX ||
-      finding.body.length > FINDING_BODY_MAX ||
+      // Covers an over-budget body, an unclosed suggestion fence (unsafe at ANY
+      // length: it would swallow the trusted marker appended after the body),
+      // and a body left EMPTY after unpublishable fences are dropped.
+      clampFindingBody(finding.body) !== finding.body ||
       (finding.fingerprint_hint?.length ?? 0) > FINDING_TITLE_MAX,
   );
   if (!oversized) {
@@ -275,16 +279,113 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
         finding.title.length <= FINDING_TITLE_MAX
           ? finding.title
           : `${finding.title.slice(0, FINDING_TITLE_MAX - 1)}…`,
-      body:
-        finding.body.length <= FINDING_BODY_MAX
-          ? finding.body
-          : `${finding.body.slice(0, FINDING_BODY_MAX - 1)}…`,
+      body: clampFindingBody(finding.body),
       fingerprint_hint:
         finding.fingerprint_hint !== undefined && finding.fingerprint_hint.length > FINDING_TITLE_MAX
           ? `${finding.fingerprint_hint.slice(0, FINDING_TITLE_MAX - 1)}…`
           : finding.fingerprint_hint,
     })),
   };
+}
+
+/** A backtick or tilde fence line per CommonMark: up to 3 leading spaces, 3+ fence chars, then the info string. */
+const FENCE_LINE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+
+/** Safe non-empty body shown when a finding consists only of dropped suggestion fences. */
+export const SUGGESTION_OMITTED = "(suggestion omitted)";
+
+/**
+ * Fenced `suggestion` blocks as [start, end) offsets, plus whether the closing
+ * fence arrived. ALL fenced blocks are tracked (backtick and tilde, CommonMark
+ * open/close rules), so a literal ```suggestion line inside an ordinary
+ * ```js / ```markdown / ~~~ fence is CONTENT, not a suggestion. A block
+ * counts as a suggestion only at the top level with an info string whose first
+ * token is exactly `suggestion` — `suggestions` / `suggestion-example` do not
+ * open — and only a same-char run at least as long as the opening one with NO
+ * info string closes it (an inner ```js line does not). An unclosed block
+ * runs to the end of the text.
+ */
+export function suggestionFenceSpans(text: string): { start: number; end: number; closed: boolean }[] {
+  const spans: { start: number; end: number; closed: boolean }[] = [];
+  let open: { start: number; ticks: number; char: string; suggestion: boolean } | null = null;
+  let offset = 0;
+  for (;;) {
+    const newline = text.indexOf("\n", offset);
+    const lineEnd = newline === -1 ? text.length : newline;
+    const fence = FENCE_LINE.exec(text.slice(offset, lineEnd));
+    // CommonMark: a backtick fence's info string may not contain a backtick, so
+    // a line like ```oldCall()``` is inline code - it neither opens nor closes.
+    const isFence = fence !== null && !(fence[2]![0] === "`" && (fence[3] ?? "").includes("`"));
+    if (isFence) {
+      const ticks = fence[2]!.length;
+      const char = fence[2]![0]!;
+      const info = (fence[3] ?? "").trim();
+      if (open === null) {
+        // Any fence opens a block; only a top-level suggestion opener counts.
+        open = { start: offset, ticks, char, suggestion: info.split(/\s+/)[0] === "suggestion" };
+      } else if (char === open.char && info === "" && ticks >= open.ticks) {
+        if (open.suggestion) {
+          spans.push({ start: open.start, end: newline === -1 ? text.length : lineEnd + 1, closed: true });
+        }
+        open = null;
+      }
+    }
+    if (newline === -1) break;
+    offset = lineEnd + 1;
+  }
+  if (open !== null && open.suggestion) spans.push({ start: open.start, end: text.length, closed: false });
+  return spans;
+}
+
+/**
+ * Drop whole fenced `suggestion` blocks that cannot be published safely: one
+ * the `max` boundary would cut in half (so no partial fence survives a later
+ * truncation), and one whose closing fence never arrives at ANY length (it
+ * would swallow the trusted marker appended after the body). The surrounding
+ * prose is kept. Shared by the schema clamp and the line-comment renderer so
+ * the two cannot drift.
+ */
+export function dropSuggestionFences(text: string, max: number): {
+  text: string;
+  dropped: boolean;
+} {
+  let out = text;
+  let dropped = false;
+  for (;;) {
+    // A boundary that lands on the end of the closing fence (max === end) still
+    // cuts that fence once the trailing ellipsis is appended, so it crosses too —
+    // but ONLY when truncation actually happens (out.length > max); a fence
+    // ending exactly at max with no truncation is published verbatim.
+    const fence = suggestionFenceSpans(out).find(
+      ({ start, end, closed }) => !closed || (out.length > max && start < max && max <= end),
+    );
+    if (fence === undefined) return { text: out, dropped };
+    out = out.slice(0, fence.start) + out.slice(fence.end);
+    dropped = true;
+  }
+}
+
+/** Drop every fenced `suggestion` block (closed or not); the surrounding prose is kept, or the safe fallback when nothing survives. */
+export function dropAllSuggestionFences(text: string): string {
+  const spans = suggestionFenceSpans(text);
+  if (spans.length === 0) return text;
+  let out = "";
+  let cursor = 0;
+  for (const { start, end } of spans) {
+    out += text.slice(cursor, start);
+    cursor = end;
+  }
+  out += text.slice(cursor);
+  return out.trim() === "" ? SUGGESTION_OMITTED : out;
+}
+
+/** Clamp a finding body: drop unpublishable fences, then clamp with an ellipsis. */
+function clampFindingBody(body: string): string {
+  let { text } = dropSuggestionFences(body, FINDING_BODY_MAX);
+  // A body that was ONLY suggestion fences would fail the non-blank schema and
+  // lose persistence + line comments; keep a non-empty safe fallback instead.
+  if (text.trim() === "") text = SUGGESTION_OMITTED;
+  return text.length <= FINDING_BODY_MAX ? text : text.slice(0, FINDING_BODY_MAX - 1) + "…";
 }
 
 /** Extract the first ```json fenced block, or null. */

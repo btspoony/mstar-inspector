@@ -4748,6 +4748,69 @@ describe("line comments (AL-3 layered delivery)", () => {
     expect(h.sandbox.destroyCalls).toBe(1);
   });
 
+  test("no diff text + a ranged finding → no unverified range rides the wire (single-line anchor only, QC1 F-001)", async () => {
+    h.sandbox.diffStdout = "";
+    h.sandbox.runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [
+        {
+          mergeClass: "must-fix",
+          file_path: "src/auth.ts",
+          line_start: 19,
+          line_end: 21,
+          title: "Ranged",
+          body: "B.\n\n```suggestion\nconst x = 1;\nconst y = 2;\n```",
+        },
+      ],
+    });
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const lineInput = h.commenterCalls.find((c) => c.op === "line-comments")!.args as {
+      intents: Array<{ line: number; lineStart: number | null; body: string }>;
+    };
+    expect(lineInput.intents).toHaveLength(1);
+    // Undiffed range is unverified → single-line anchor at line_end, no start.
+    expect(lineInput.intents[0]).toMatchObject({ line: 21, lineStart: null });
+    // The demotion strips the applyable multi-line replacement.
+    expect(lineInput.intents[0]!.body).not.toContain("```");
+    expect(lineInput.intents[0]!.body).not.toContain("const x = 1;");
+  });
+
+  test("a cross-hunk range is demoted to the single-line anchor and its suggestion block is dropped (QC R3)", async () => {
+    // VALID_DIFF covers right range [18,23]; the appended hunk covers [40,43].
+    // The finding ends at 41 but starts at 19, so the range is not publishable.
+    h.sandbox.diffStdout = `${VALID_DIFF}@@ -40,3 +40,4 @@\n keep\n+added\n keep2\n keep3\n`;
+    h.sandbox.runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [
+        {
+          mergeClass: "must-fix",
+          file_path: "src/auth.ts",
+          line_start: 19,
+          line_end: 41,
+          title: "Ranged",
+          body: "Replace both lines.\n\n```suggestion\nconst x = 1;\nconst y = 2;\n```",
+        },
+      ],
+    });
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const lineInput = h.commenterCalls.find((c) => c.op === "line-comments")!.args as {
+      intents: Array<{ line: number; lineStart: number | null; body: string }>;
+    };
+    expect(lineInput.intents).toHaveLength(1);
+    expect(lineInput.intents[0]).toMatchObject({ line: 41, lineStart: null });
+    expect(lineInput.intents[0]!.body).toContain("Replace both lines.");
+    expect(lineInput.intents[0]!.body).not.toContain("```");
+    expect(lineInput.intents[0]!.body).not.toContain("const x = 1;");
+  });
+
   test("residual 422 / network error on createReview → line_comments_fallback log + continue, never throws", async () => {
     for (const failure of [
       Object.assign(new Error("Validation Failed: line is not part of the diff"), { status: 422 }),

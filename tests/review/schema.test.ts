@@ -25,10 +25,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   clampFindingSizes,
+  dropAllSuggestionFences,
+  dropSuggestionFences,
   FINDING_BODY_MAX,
   FINDING_TITLE_MAX,
   capFindings,
   parseReviewOutput,
+  suggestionFenceSpans,
   type ReviewOutput,
 } from "../../src/review/schema";
 import type { PrTallyResult } from "@mstar-harness/engine";
@@ -625,5 +628,172 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
     const output = { ...base, findings: [{ ...finding("t", "b"), fingerprint_hint: hint }] };
     const clamped = clampFindingSizes(output);
     expect(clamped.findings[0]!.fingerprint_hint).toBe(hint);
+  });
+
+  test("a suggestion fence crossing the body budget is dropped whole, prose survives", () => {
+    const prose = "P".repeat(1500);
+    const fence = ["```suggestion", "C".repeat(800), "```"].join("\n");
+    const body = prose + "\n\n" + fence; // fence starts before FINDING_BODY_MAX and ends after it // 2502 chars, fence straddles FINDING_BODY_MAX
+    const clamped = clampFindingSizes({ ...base, findings: [finding("t", body)] });
+    const clampedBody = clamped.findings[0]!.body;
+    expect(clampedBody.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
+    expect(clampedBody).not.toContain("```");
+    expect(clampedBody).not.toContain("…");
+    expect(clampedBody.startsWith(prose)).toBe(true);
+  });
+
+  test("a fence whose closing fence ends exactly at FINDING_BODY_MAX is dropped whole, prose kept", () => {
+    // Span end (just past the closing fence line) lands exactly on the budget, so
+    // the final truncation would otherwise cut into that closing fence.
+    const code = "const x = 1;";
+    const pad = FINDING_BODY_MAX - 21 - code.length;
+    const body = `${"P".repeat(pad)}\n\n\`\`\`suggestion\n${code}\n\`\`\`\n\ntail`;
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", body)] }).findings[0]!.body;
+    expect(clampedBody).toBe(`${"P".repeat(pad)}\n\n\ntail`);
+    expect(clampedBody).not.toContain("```");
+    expect(clampedBody).not.toContain("…");
+    // Clamping the already-clamped body is a no-op, so the boundary case stays idempotent.
+    expect(clampFindingSizes({ ...base, findings: [finding("t", clampedBody)] }).findings[0]!.body).toBe(clampedBody);
+  });
+
+  test("a fence opening exactly at FINDING_BODY_MAX leaves no partial fence", () => {
+    const prose = "P".repeat(FINDING_BODY_MAX - 1);
+    const body = `${prose}\n\`\`\`suggestion\nconst x = 1;\n\`\`\``;
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", body)] }).findings[0]!.body;
+    expect(clampedBody).toBe(`${prose}…`);
+    expect(clampedBody).not.toContain("```");
+  });
+
+  test("fence-free over-budget bodies clamp byte-identically to the legacy rule", () => {
+    const body = "B".repeat(FINDING_BODY_MAX + 500);
+    const clamped = clampFindingSizes({ ...base, findings: [finding("t", body)] });
+    expect(clamped.findings[0]!.body).toBe(body.slice(0, FINDING_BODY_MAX - 1) + "…");
+  });
+
+  test("an unclosed suggestion fence under the budget is dropped whole, prose kept (QC R1)", () => {
+    const body = "Move this.\n\n```suggestion\nconst x = 1;";
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", body)] }).findings[0]!.body;
+    expect(clampedBody).toBe("Move this.\n\n");
+    expect(clampedBody).not.toContain("```");
+  });
+
+  test("a 4-backtick suggestion fence crossing the budget is dropped whole (QC R2)", () => {
+    const prose = "P".repeat(1500);
+    const fence = ["````suggestion", "C".repeat(800), "````"].join("\n");
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", prose + "\n\n" + fence)] })
+      .findings[0]!.body;
+    expect(clampedBody).toBe(prose + "\n\n");
+    expect(clampedBody).not.toContain("`");
+  });
+
+  test("an inner ```js line does not close the fence, so the whole crossing block is dropped (QC R2)", () => {
+    const prose = "P".repeat(1500);
+    const fence = ["```suggestion", "C".repeat(600), "```js", "C".repeat(20), "```"].join("\n");
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", prose + "\n\n" + fence)] })
+      .findings[0]!.body;
+    expect(clampedBody).toBe(prose + "\n\n");
+    expect(clampedBody).not.toContain("```");
+  });
+
+  test("clamping is idempotent on a real overflow (drop + truncate both run)", () => {
+    const prose = "P".repeat(2500);
+    const fence = ["```suggestion", "C".repeat(800), "```"].join("\n");
+    const output = { ...base, findings: [finding("t", prose + "\n\n" + fence)] };
+    const once = clampFindingSizes(output);
+    expect(once.findings[0]!.body).not.toBe(output.findings[0]!.body);
+    expect(once.findings[0]!.body.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
+    const twice = clampFindingSizes(once);
+    expect(twice.findings[0]!.body).toBe(once.findings[0]!.body);
+  });
+
+  test("a suggestion-only body clamps to the non-empty fallback and still parses (persistable)", () => {
+    // Long enough that the closed fence crosses FINDING_BODY_MAX and must be dropped.
+    const body = "```suggestion\n" + "C".repeat(2000) + "\n```";
+    const raw = { ...base, findings: [finding("t", body)] };
+    expect(parseReviewOutput(JSON.stringify(raw)).ok).toBe(true);
+    const clamped = clampFindingSizes(raw);
+    expect(clamped.findings[0]!.body).toBe("(suggestion omitted)");
+    // The clamped envelope re-parses: persistence and line comments still happen.
+    expect(parseReviewOutput(JSON.stringify(clamped)).ok).toBe(true);
+  });
+
+  test("a closed fence ending exactly at the budget with no truncation is kept verbatim", () => {
+    const fence = "```suggestion\nconst x = 1;\n```";
+    const text = "P".repeat(FINDING_BODY_MAX - fence.length) + fence;
+    expect(text.length).toBe(FINDING_BODY_MAX);
+    expect(dropSuggestionFences(text, FINDING_BODY_MAX)).toEqual({ text, dropped: false });
+  });
+});
+
+describe("suggestionFenceSpans (CommonMark fence grammar, QC R2)", () => {
+  const blocks = (text: string) =>
+    suggestionFenceSpans(text).map(({ start, end, closed }) => ({ block: text.slice(start, end), closed }));
+
+  test("a 4-backtick opening is closed only by a run of at least four backticks", () => {
+    const text = "````suggestion\nconst md = \"```\";\n```\n````\nafter";
+    expect(blocks(text)).toEqual([
+      { block: "````suggestion\nconst md = \"```\";\n```\n````\n", closed: true },
+    ]);
+  });
+
+  test("only an info string whose first token is exactly suggestion opens a block", () => {
+    expect(blocks("```suggestions\nx\n```")).toEqual([]);
+    expect(blocks("```suggestion-example\nx\n```")).toEqual([]);
+    expect(blocks("```suggestion js\nx\n```")).toEqual([
+      { block: "```suggestion js\nx\n```", closed: true },
+    ]);
+  });
+
+  test("an inner ```js line is not a closing fence", () => {
+    const text = "```suggestion\nconst md = \"```js\";\n```js\nconst y = 2;\n```\nafter";
+    expect(blocks(text)).toEqual([
+      { block: "```suggestion\nconst md = \"```js\";\n```js\nconst y = 2;\n```\n", closed: true },
+    ]);
+  });
+
+  test("a block without its closing fence is reported unclosed and runs to the end", () => {
+    const text = "prose\n\n```suggestion\nconst x = 1;";
+    expect(blocks(text)).toEqual([{ block: "```suggestion\nconst x = 1;", closed: false }]);
+  });
+
+  test("a literal ```suggestion line inside an ordinary backtick fence is content, not a suggestion", () => {
+    for (const lang of ["js", "markdown"]) {
+      const text = ["```" + lang, "prose", "```suggestion", "this is prose, not code", "```", "after"].join("\n");
+      expect(blocks(text)).toEqual([]);
+    }
+  });
+
+  test("a literal ```suggestion line inside a tilde fence is content, not a suggestion", () => {
+    const text = "~~~markdown\nprose\n```suggestion\nthis is prose, not code\n~~~\nafter";
+    expect(blocks(text)).toEqual([]);
+  });
+
+  test("a tilde suggestion fence still counts as a suggestion", () => {
+    const text = "~~~suggestion\nconst x = 1;\n~~~\nafter";
+    expect(blocks(text)).toEqual([{ block: "~~~suggestion\nconst x = 1;\n~~~\n", closed: true }]);
+  });
+
+  test("an inline-code line on the first line is not a fence opener", () => {
+    const text = "```oldCall()```\n\n```suggestion\nconst x = 1;\n```\nafter";
+    expect(blocks(text)).toEqual([
+      { block: "```suggestion\nconst x = 1;\n```\n", closed: true },
+    ]);
+  });
+
+  test("the suggestion after such a line is still dropped from the body", () => {
+    const text = "```oldCall()```\n\n```suggestion\nconst x = 1;\n```\nafter";
+    expect(dropAllSuggestionFences(text)).toBe("```oldCall()```\n\nafter");
+  });
+
+  test("inline code whose info string holds inner backticks is not a fence either", () => {
+    for (const line of ["```use `code` here```", "````a`b```"]) {
+      const text = line + "\n```suggestion\nconst x = 1;\n```";
+      expect(blocks(text)).toEqual([{ block: "```suggestion\nconst x = 1;\n```", closed: true }]);
+    }
+  });
+
+  test("an ordinary ```js fence still opens a block", () => {
+    const text = "```js\nconst a = 1;\n```\n```suggestion\nconst x = 1;\n```";
+    expect(blocks(text)).toEqual([{ block: "```suggestion\nconst x = 1;\n```", closed: true }]);
   });
 });

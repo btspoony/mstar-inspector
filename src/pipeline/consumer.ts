@@ -94,7 +94,7 @@ import {
   putAbandonClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
-import { parseBudgetExhaustedSignal, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
+import { dropAllSuggestionFences, parseBudgetExhaustedSignal, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import { APPLIED_MODEL_MAX_CHARS, APPLIED_MODEL_PATH, APPLIED_MODEL_PATTERN } from "../../packages/shared/src/runtime";
 import type { CustomProviderDeclaration, ReviewLevel } from "../../packages/shared/src/runtime";
@@ -6569,9 +6569,16 @@ async function processMessage(
       diffText !== "" ? diffText : undefined,
     );
     const lineIntents: LineIntent[] = [];
-    for (const finding of qualifying) {
+    for (const { finding, lineStart } of qualifying) {
       const rowId = seenRowIdByFindingId.get(computeFindingFingerprint(finding));
       if (rowId === undefined) continue; // unreachable — seen covers every finding
+      // A range the wire cannot publish (cross-hunk, or a start that is not a
+      // real range) falls back to the single-line anchor at line_end; the body
+      // must not keep an applyable multi-line replacement for the dropped range.
+      const rangeDemoted =
+        typeof finding.line_start === "number" &&
+        finding.line_start < finding.line_end! &&
+        !(typeof lineStart === "number" && lineStart >= 1 && lineStart < finding.line_end!);
       lineIntents.push(
         await buildLineIntent({
           findingRowId: rowId,
@@ -6582,7 +6589,10 @@ async function processMessage(
           round,
           path: finding.file_path!,
           line: finding.line_end!,
-          body: renderLineCommentText(finding),
+          lineStart,
+          body: renderLineCommentText(
+            rangeDemoted ? { ...finding, body: dropAllSuggestionFences(finding.body) } : finding,
+          ),
         }),
       );
     }

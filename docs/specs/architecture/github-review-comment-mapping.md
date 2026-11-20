@@ -34,8 +34,12 @@ Issues Comments API has no event field and follows the same discipline; it must 
 - Render verdict and finding class verbatim; never translate them into M1 verdict/severity vocabulary.
 - For `incomplete`, immediately after verdict and any tally, render its required facts exactly once: `cause:` = `reason`, `unscanned:` = uncovered scope (`none` for an empty list). Rendering has a display budget; persistence retains validated original values. Other verdict bodies remain byte-identical.
 - The overall comment is the publication authority for the round. Line-comment anchoring follows the existing line-comment implementation.
+- Line-comment anchor range: a single-line comment sends `path` + `side: "RIGHT"` + `line`. When the prefetched diff is available and the finding's `line_start` and `line_end` both sit inside the same right-side hunk, the payload adds `start_line` + `start_side: "RIGHT"`; a range that is absent, not strictly ascending, or not fully inside one hunk falls back to the single-line anchor at `line_end` — a multi-line range is never invented. When the diff is unavailable (`diff === undefined`), no range is published at all: the range is unverified, so every finding keeps the single-line anchor at `line_end` — nothing unverified rides the wire and a guessed range can never 422 the whole batch. A finding whose path matches no right-side hunk in the diff — including deleted/binary files — is not anchored at all: no line comment is posted for it.
 - A prior-round closure block may show typed finding status/evidence; repeat findings do not add to the new tally. Finding disposition (`addressed`) is distinct from actual remote thread resolution. Engine verdict/score authority is unchanged. The closure placement and bounds are in [review lifecycle](../feature/review-lifecycle.md), RL-8 and §7.10.
 - `summary_md` is capped at 8000 characters. Redact model text before GitHub or D1 writes.
+- Suggestion fence safety: a finding body may carry one fenced ```suggestion block, parsed per CommonMark — an opening run of 3+ backticks (up to 3 leading spaces) whose info string first token is exactly `suggestion`, closed only by a run at least as long with no info string. The publisher never truncates inside a fence: `clampFindingSizes` (schema) and `renderLineCommentText` (pipeline) share one rule (`dropSuggestionFences` at `FINDING_BODY_MAX` = 2000) — a fence intersecting the boundary, and a fence whose closing fence never arrives at any length, are dropped whole; the surrounding prose is kept, and a fence-free body clamps byte-identically to the pre-suggestion behavior. A dropped fence is silent in the published body. The trusted thread marker, appended after the body, therefore never lands inside a suggestion fence. A body left with no prose after a dropped fence falls back to the title/tag line.
+- GitHub co-author fact: when a user applies a suggested change, GitHub credits the suggesting account as a co-author of the resulting commit (GitHub docs: applying feedback in a pull request, <https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/incorporating-feedback-in-your-pull-request>). The app posts as `<slug>[bot]`, so the bot is that co-author.
+- Non-goals: this repo does not generate suggestion text (the review engine/skills own that), does not apply suggestions, and never commits on the author's behalf.
 
 ### Ordering and failures
 
@@ -62,7 +66,9 @@ Issues Comments API has no event field and follows the same discipline; it must 
 
 ## Where it lives
 
-- `src/pipeline/comment.ts`: primary upsert, markers, body rendering, scoped token grants and line batches.
+- `src/pipeline/comment.ts`: primary upsert, markers, body rendering, scoped token grants, line batches, line-comment anchor qualification (`filterLineCommentFindings`) and the range wire shape (`postLineCommentsWithOctokit`).
+- `src/review/schema.ts`: `FINDING_BODY_MAX`, `clampFindingSizes`, `dropSuggestionFences` — the one fence-drop rule shared with the pipeline renderer.
+- `src/pipeline/review-threads.ts`: line-batch/thread markers, `<slug>[bot]` identity (`sameAppBotLogin`) and thread discovery/resolution.
 - `src/pipeline/consumer.ts`: publication staging/proof/apply order.
 - `src/pipeline/checks.ts`, `src/store/review-checks.ts`: Check gates, intent and observation.
 - `src/store/artifact-store.ts`: complete envelope validation and result persistence.
