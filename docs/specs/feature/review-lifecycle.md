@@ -448,7 +448,7 @@ export type ReviewRunResult = { envelope: MstarReviewV1; recheck: RecheckDoc | n
 export function recheckBudget(outerDeadlineMs: number, nowMs: number, capMs?: number): number; // 0 = skip
 ```
 
-Runner stdout remains envelope JSON only, exit codes unchanged. Optional `--recheck-out` emits the separate validated JSON file; no targets/invalid output emits no file. Worker reads it through an audited fixed-path bounded read (262144 bytes plus overflow detection), not arbitrary model file paths. Existing callers/runtime doubles unwrap `envelope`; no envelope field/category/hint overloading.
+Runner stdout is the envelope JSON — plus the one other permitted stdout shape, the exit-0 `mstar.review-budget-exhausted/v1` signal above — exit codes unchanged. The Worker validates the signal separately from the envelope. Optional `--recheck-out` emits the separate validated JSON file; no targets/invalid output emits no file. Worker reads it through an audited fixed-path bounded read (262144 bytes plus overflow detection), not arbitrary model file paths. Existing callers/runtime doubles unwrap `envelope`; no envelope field/category/hint overloading.
 
 **Status document:** the seat writes `mstar.recheck-status/v1` (same 262144-byte bounded read) on every exit path — `ok` with the dropped rows (`rejected_row_ids`, sorted, and `rejected` derived from its length, so the named count and the list always agree), `skipped` when the budget left no room to start or when the runner cancelled the seat by design (`reason: aborted` — normal-review failure or an outer deadline with no room left; see §7.8), or `failed` carrying the bounded `reason`/`error` (redacted first, then 500 chars). `reason` is a closed vocabulary — `budget`, `aborted`, `all-rows-rejected`, `empty-result`, `seat-failed`, `invalid-document` — because the consumer's per-row accounting branches on those exact literals; `null` for a clean round, and an off-vocabulary value is dropped on read (never guessed into a branch). A row the gate dropped without a usable rowId cannot be named: `rejected_unnamed` counts those, and it is the only record of them once the seat has filtered its own document. A round whose document the gate accepted but with **no** surviving row reports `failed` with reason `all-rows-rejected`: it delivered nothing usable, so it must not read as clean. The same holds when the gate dropped nothing and the seat answered a non-empty target list with zero results — reason `empty-result` — so the round is attributable and its sent rows are `invalid-output` (answered badly), never `omitted` (never ran). The Worker consumes it next to the document: an absent or foreign-schema/HEAD status attributes nothing, a missing or failed document records a `review_failures` row with `stage: recheck` whose text leads with the READ cause (absent / overflow / validation) rather than the seat's clean-looking `ok: null: null`, and the status's `rejected_row_ids` is what keeps the seat's already-filtered named drops `unverifiable/invalid-output` instead of `omitted` — minus any row the surviving document actually answered, whose real assessment outranks a stale drop note. A `skipped`/`aborted` round is the exception: the runner stopped the seat, so it is neither a failure (no `review_failures` row) nor an attempted-and-bad answer — its rows stay `unverifiable/omitted` with `last_assessed_ms` untouched. Nameless drops are attributed by POSITION: the first `rejected_unnamed` rows among the sent-and-unanswered ones (in rotation order, never a catalog- or budget-excluded row) become `invalid-output`, so a runner-written drop is never mistaken for a row the seat never received.
 
@@ -574,7 +574,13 @@ export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number
 export type CheckLifecycleHooks = {
   begin(input: { scope: Scope; githubAppId: number; headSha: string; triggeredBy: string; action: string; executionDeadlineMs: number }): Promise<CheckHandle | null>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
-    outcome: CheckTerminalOutcome; budgetExhaustion?: BudgetExhaustedOutcome }): Promise<void>;
+    outcome: CheckTerminalOutcome;
+    /** The reviewed head an empty increment inherits; omitted → nothing to inherit. */
+    inheritedHeadSha?: string;
+    /** Required with `outcome: "budget-exhausted"`. */
+    budgetExhaustion?: BudgetExhaustedOutcome;
+    /** The operator-configured bound on the terminal `checks.update`. */
+    updateBudgetMs: number }): Promise<void>;
   /**
    * Give-up handoff: freeze a terminal intent only where none is frozen yet
    * (`superseded` when the checkout contradicted the claim, otherwise the
@@ -584,7 +590,7 @@ export type CheckLifecycleHooks = {
    * expired), so a caller about to claim again does not take a second
    * ownership. A store fault rejects.
    */
-  abandonTerminalize?(input: { handle: CheckHandle; reason: string; outcome?: CheckTerminalOutcome; budgetExhaustion?: BudgetExhaustedOutcome }): Promise<boolean>;
+  abandonTerminalize?(input: { handle: CheckHandle; reason: string; outcome?: CheckTerminalOutcome; budgetExhaustion?: BudgetExhaustedOutcome; inheritedHeadSha?: string }): Promise<boolean>;
 };
 ```
 
