@@ -225,4 +225,4 @@ differ a month later, because usage moves. A publish echoes the preview it was s
 refused without one, or when the numbers moved since — a stale count is worse
 than none.
 
-Decision history: [shared bot scope and claiming](../../../.agents/adr/implemented/feature/2026-11-15-shared-bot-scope-and-claiming.md), [derived Blocked and park](../../../.agents/adr/implemented/feature/2026-11-15-derived-blocked-and-park.md).
+Decision history: [shared bot scope and claiming](../../../.agents/adr/implemented/feature/2026-11-15-shared-bot-scope-and-claiming.md), [retire the install claim](../../../.agents/adr/implemented/feature/2026-11-20-retire-install-claim.md), [derived Blocked and park](../../../.agents/adr/implemented/feature/2026-11-15-derived-blocked-and-park.md).
