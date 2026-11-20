@@ -284,11 +284,55 @@ describe("renderLineCommentText (the LineIntent.body payload — marker appended
   });
 
   test("assembled text clamps to FINDING_BODY_MAX (title+tag+body can exceed the per-field clamps)", () => {
+    const head = `**big** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\n`;
     const oversized = findingAt("src/auth.ts", 21, "big");
     oversized.body = "x".repeat(FINDING_BODY_MAX);
     const body = renderLineCommentText(oversized);
+    expect(body).toBe(`${head}${"x".repeat(FINDING_BODY_MAX - head.length - 1)}…`);
     expect(body).toHaveLength(FINDING_BODY_MAX);
-    expect(body.endsWith("…")).toBe(true);
+  });
+
+  test("a suggestion fence wholly inside the budget is kept verbatim", () => {
+    const body = "Prose before.\n\n  ```suggestion\nconst x = 1;\n  ```\n\nProse after.";
+    const finding = findingAt("src/auth.ts", 21, "Fence inside");
+    finding.body = body;
+    expect(renderLineCommentText(finding)).toBe(
+      `**Fence inside** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\n${body}`,
+    );
+  });
+
+  test("a fence straddling FINDING_BODY_MAX is dropped whole and the prose kept", () => {
+    const head = `**Straddle** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\n`;
+    const fence = "```suggestion\nconst x = 1;\n```";
+    // The fence opens at budget-25 and closes past the budget.
+    const pad = FINDING_BODY_MAX - 25 - head.length - 2;
+    const finding = findingAt("src/auth.ts", 21, "Straddle");
+    finding.body = `${"A".repeat(pad)}\n\n${fence}\n\nafter`;
+    const result = renderLineCommentText(finding);
+    expect(result).toBe(`${head}${"A".repeat(pad)}\n\n\nafter`);
+    expect(result).not.toContain("```");
+    expect(result.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
+  });
+
+  test("a fence-only body falls back to the title/tag line — no fence, no ellipsis", () => {
+    const finding = findingAt("src/auth.ts", 21, "Fence only");
+    finding.body = `\`\`\`suggestion\n${"const x = 1;\n".repeat(400)}\`\`\``;
+    const result = renderLineCommentText(finding);
+    expect(result).toBe(`**Fence only** · ${REVIEW_EMOJI["must-fix"]} must-fix`);
+    expect(result).not.toContain("```");
+    expect(result).not.toContain("…");
+  });
+
+  test("only the fence straddling the budget is dropped; a wholly-inside fence and the prose survive", () => {
+    const head = `**Many** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\n`;
+    const kept = "```suggestion\nconst keep = true;\n```";
+    const big = `\`\`\`suggestion\n${"const y = 2;\n".repeat(300)}\`\`\``;
+    const finding = findingAt("src/auth.ts", 21, "Many");
+    finding.body = `${kept}\n\n${"A".repeat(100)}\n\n${big}\n\ntail`;
+    const result = renderLineCommentText(finding);
+    expect(result).toBe(`${head}${kept}\n\n${"A".repeat(100)}\n\n\ntail`);
+    expect(result.split("```suggestion").length - 1).toBe(1);
+    expect(result).not.toContain("const y = 2;");
   });
 
   test("the §7.5 intent body builder strips forged markers and appends the trusted thread marker", async () => {

@@ -1960,17 +1960,57 @@ export function filterLineCommentFindings(
 }
 
 /**
+ * Fenced suggestion blocks as [start, end) offsets; a block whose closing
+ * fence is missing runs to the end, so it is never half-emitted.
+ */
+function suggestionFenceSpans(text: string): [number, number][] {
+  const spans: [number, number][] = [];
+  let open: number | null = null;
+  let offset = 0;
+  for (;;) {
+    const newline = text.indexOf("\n", offset);
+    const lineEnd = newline === -1 ? text.length : newline;
+    const line = text.slice(offset, lineEnd).trimStart();
+    if (open === null) {
+      if (line.startsWith("```suggestion")) open = offset;
+    } else if (line.startsWith("```")) {
+      spans.push([open, newline === -1 ? text.length : lineEnd + 1]);
+      open = null;
+    }
+    if (newline === -1) break;
+    offset = lineEnd + 1;
+  }
+  if (open !== null) spans.push([open, text.length]);
+  return spans;
+}
+
+/**
  * The marker-LESS per-finding comment text (title + merge-class tag +
  * finding body, clamped to the FINDING_BODY_MAX budget). This is the
  * `LineIntent.body` payload — the TRUSTED thread marker is appended later by
  * the §7.5 `buildLineCommentBody` at send time (the legacy
  * marker-less posting path is replaced by the intent-driven path, so thread
  * discovery has a marker to pin).
+ *
+ * A suggestion fence the clamp would cut in half is dropped whole (the
+ * surrounding prose survives); a body left with no prose falls back to the
+ * title/tag line. Text without a suggestion fence clamps exactly as before.
  */
 export function renderLineCommentText(finding: ReviewFinding): string {
   const tag = `${REVIEW_EMOJI[finding.mergeClass]} ${finding.mergeClass}`;
-  const body = `**${finding.title}** · ${tag}\n\n${finding.body}`;
-  return body.length <= FINDING_BODY_MAX ? body : `${body.slice(0, FINDING_BODY_MAX - 1)}…`;
+  const head = `**${finding.title}** · ${tag}\n\n`;
+  let text = `${head}${finding.body}`;
+  let droppedFence = false;
+  while (text.length > FINDING_BODY_MAX) {
+    const fence = suggestionFenceSpans(text).find(
+      ([start, end]) => start < FINDING_BODY_MAX && FINDING_BODY_MAX < end,
+    );
+    if (fence === undefined) break;
+    text = `${text.slice(0, fence[0])}${text.slice(fence[1])}`;
+    droppedFence = true;
+  }
+  if (droppedFence && text.slice(head.length).trim() === "") return head.trimEnd();
+  return text.length <= FINDING_BODY_MAX ? text : `${text.slice(0, FINDING_BODY_MAX - 1)}…`;
 }
 
 /**
