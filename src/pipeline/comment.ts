@@ -324,14 +324,21 @@ export function buildReviewBody(
   // this publisher keeps the head from there (runtime-omp.ts). Without the cap
   // a long narrative inflates the body toward REVIEW_BODY_LIMIT, and that clamp
   // keeps the head — so the findings and the closure would be what is lost.
+  // pr-review § Comment posting: the suggestion block belongs to the finding's
+  // inline body, not this summary — drop it on the summary-only COPY of the
+  // fields that reach the render and the truncation (summary_md + findings'
+  // bodies), so no unclosed fence can survive into truncateSummary and swallow
+  // the findings after it. The caller's findings stay untouched; a body
+  // without fences is returned byte-identical.
+  rendered = {
+    ...rendered,
+    summary_md: rendered.summary_md === undefined ? undefined : dropAllSuggestionFences(rendered.summary_md),
+    findings: rendered.findings.map((fnd) => ({ ...fnd, body: dropAllSuggestionFences(fnd.body) })),
+  };
   if (rendered.summary_md !== undefined) {
     rendered = { ...rendered, summary_md: truncateSummary(rendered.summary_md) };
   }
   let core = renderReviewMarkdown(rendered);
-  // pr-review § Comment posting: the suggestion block belongs to the finding's
-  // inline body, not this summary — drop it here; the caller's findings are
-  // untouched, and a body without fences is returned byte-identical.
-  core = dropAllSuggestionFences(core);
   // Preserved parts: each states something a head-keeping cut would silently
   // remove. The closure is where the round's prior-findings verdicts are
   // published, and the footer discloses the findings the merge-class cap

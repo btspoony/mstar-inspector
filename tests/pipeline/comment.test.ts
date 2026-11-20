@@ -200,8 +200,23 @@ describe("buildReviewBody", () => {
     expect(body).toContain("After the fence.");
     // never mutates the caller's findings: the fence stays for the inline path
     expect(fenced.findings[0]!.body).toBe(stored.findings[0]!.body);
-    // fence-free bodies stay byte-identical
-    expect(buildReviewBody(output)).toBe(buildReviewBody(output));
+    // fence-free bodies stay byte-identical: the exact pre-change rendering
+    expect(buildReviewBody(output)).toBe(
+      "## \u26a0\ufe0f Verdict: \u0060needs fixes\u0060\n\n## \ud83d\udccb Review\n\nTwo issues found in the diff.\n\n### Findings\n\n#### \ud83d\udfe0 Fractional expiry comparison\n\n- **Evidence**: \u0060Fractional expiry comparison\u0060 body.\n- **Location**: \u0060src/auth.ts:21\u0060\n- **Category**: logic\n- **Merge class**: should-fix",
+    );
+  });
+
+  test("an unclosed suggestion fence at the summary budget cannot swallow a following finding (qc re-check)", () => {
+    const narrative = "Intro prose.\n\n\u0060\u0060\u0060suggestion\n" + "x".repeat(SUMMARY_MD_LIMIT) + "\nEnd of narrative.";
+    const body = buildReviewBody({
+      ...output,
+      summary_md: narrative,
+      findings: [finding("must-fix", "Survivor finding")],
+    });
+    expect(body).not.toContain("\u0060\u0060\u0060suggestion");
+    expect(body).toContain("Survivor finding");
+    expect(body).toContain("Survivor finding\u0060 body.");
+    expect(body).toContain("Intro prose.");
   });
 
   test("a summary cut inside a fence keeps the findings outside the code block", () => {
