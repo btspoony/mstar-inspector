@@ -314,15 +314,19 @@ export type ReviewDiffSize = {
  *    that the diff itself is empty);
  *  - a non-empty stdout is not newline-terminated (the stream cut mid-row
  *    — a truncated tail row must not silently size the diff);
- *  - any row is malformed: a path field absent, a count that is neither
- *    `-\t-` (binary) nor a non-negative integer, or a negative count.
+ *  - any row is malformed: a path field absent or empty after trimming,
+ *    or a count that is neither `-\t-` (binary) nor a non-empty
+ *    digits-only non-negative integer.
  */
 export function parseNumstatSize(
   stdout: string | undefined,
   provenEmpty: boolean,
 ): ReviewDiffSize | null {
   if (stdout === undefined) return null;
-  const rows = stdout.split("\n").filter((line) => line.trimEnd() !== "");
+  // Every complete row is newline-terminated, so the split's trailing empty
+  // segment is an artifact, not a row; every other line must parse as a row.
+  const rows = stdout.split("\n");
+  if (rows[rows.length - 1] === "") rows.pop();
   if (rows.length === 0) {
     return provenEmpty ? { changedLines: 0, files: [] } : null;
   }
@@ -331,19 +335,22 @@ export function parseNumstatSize(
   let changedLines = 0;
   for (const row of rows) {
     const fields = row.split("\t");
-    // The path field must exist even though its content is ignored; a row
-    // shorter than 3 fields is a malformed or truncated line.
-    if (fields.length < 3) return null;
-    const [adds, dels] = fields;
+    // The path field must exist and be non-empty even though its content is
+    // ignored; a row shorter than 3 fields is malformed or truncated.
+    const [adds = "", dels = "", path = ""] = fields;
+    if (fields.length < 3 || path.trim() === "") return null;
     if (adds === "-" && dels === "-") {
       // Binary file: zero textual lines; the per-file minimum still applies
       // inside the request.
       files.push(0);
       continue;
     }
+    // Number("") and Number(" ") are 0, so a blank or whitespace count must
+    // be refused by shape, not by the numeric check below.
+    if (!/^\d+$/.test(adds) || !/^\d+$/.test(dels)) return null;
     const added = Number(adds);
     const deleted = Number(dels);
-    if (!Number.isInteger(added) || added < 0 || !Number.isInteger(deleted) || deleted < 0) {
+    if (!Number.isInteger(added) || !Number.isInteger(deleted)) {
       return null;
     }
     files.push(added + deleted);

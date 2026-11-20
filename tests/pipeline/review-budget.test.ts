@@ -343,7 +343,7 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
     // Every complete row the parser accepts ends in a newline; a stdout that
     // stops mid-row cannot be told apart from a complete set whose counts
     // happen to be self-consistent — so it must not size the diff at all.
-    expect(parseNumstatSize("10\t2\tsrc/auth.ts\n5\tsrc/docs.md", false)).toBeNull();
+    expect(parseNumstatSize("10\t2\tsrc/auth.ts\n5\t0\tsrc/docs.md", false)).toBeNull();
     // A row that lost its path field is truncated the same way even when the
     // newline happened to survive.
     expect(parseNumstatSize("10\t2\n", false)).toBeNull();
@@ -394,5 +394,18 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
     expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
+  });
+
+  test("a blank count or an empty path row is unknown size, never a count", () => {
+    // Number("") and Number(" ") are 0, so a missing or whitespace count
+    // would parse as a real zero without a shape check.
+    expect(parseNumstatSize("\t1\tfile\n", false)).toBeNull();
+    expect(parseNumstatSize(" \t1\tfile\n", false)).toBeNull();
+    expect(parseNumstatSize("1\t\tfile\n", false)).toBeNull();
+    // A present-but-empty path field is the same malformed row.
+    expect(parseNumstatSize("1\t0\t\n", false)).toBeNull();
+    expect(parseNumstatSize("1\t0\t \n", false)).toBeNull();
+    // A whitespace-only line is a malformed row, not a blank to skip.
+    expect(parseNumstatSize("1\t0\ta.ts\n \n2\t0\tb.ts\n", false)).toBeNull();
   });
 });
