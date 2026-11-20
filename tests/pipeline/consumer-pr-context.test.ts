@@ -34,14 +34,16 @@ import {
   REPORT_OUTPUT_PATH,
 } from "../../packages/shared/src/report-wire";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
+import {
+  POST_RUNNER_READ_BUDGET_MS,
+  POST_RUNNER_READ_TIMEOUT_MS,
+  postRunnerReserveMs,
+} from "../../src/review-budget";
 
 const {
   createReviewConsumer,
-  postRunnerReserveMs,
   PR_CONTEXT_EXEC_TIMEOUT_MS,
   PR_CONTEXT_WORST_CASE_MS,
-  POST_RUNNER_READ_TIMEOUT_MS,
-  POST_RUNNER_READ_BUDGET_MS,
 } = await loadConsumer();
 
 let h = createConsumerHarness();

@@ -46,6 +46,7 @@
  * call, no clock of its own (one supplied `nowMs` per transaction, §7.0).
  */
 
+import { CHECK_WINDOW_MS } from "../review-budget";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import { suspensionCredentialOf, type Lease, type SuspensionKind } from "./finding-lifecycle";
 import type { D1Like, ReviewCheckRow } from "./types";
@@ -202,15 +203,21 @@ export type CheckClock = number;
 export const CHECK_NAME = "mstar-inspector review";
 /** Immutability anchor for `external_id` (spec §7.9's `mstar-check:v1:` prefix). */
 export const CHECK_EXTERNAL_ID_PREFIX = "mstar-check:v1:";
-/** Claim lease == immutable execution deadline (spec §7.9: claim time + 900,000ms). */
-export const CHECK_LEASE_MS = 900_000;
+/**
+ * Claim lease == immutable execution deadline (spec §7.9: claim time +
+ * `CHECK_WINDOW_MS`) — derived from the ONE round budget
+ * (`src/review-budget.ts`), never an independent literal: the claim, adoption
+ * and recovery fencing all cover `execDeadline + reserve` measured from their
+ * actual origins.
+ */
+export const CHECK_LEASE_MS = CHECK_WINDOW_MS;
 /**
  * The delivery-side attach window (spec §7.9). The run is created when the
  * delivery is ACCEPTED, but the queue may only hand the message to a consumer
  * minutes later, so the attach row's deadline has to outlive that delay. It is
- * NOT an execution window: the consumer narrows the row to
- * `CHECK_EXECUTION_WINDOW_MS` the moment it adopts it, and a row nobody ever
- * adopts is closed by the reconciler when this window expires.
+ * NOT an execution window: the consumer narrows the row to `CHECK_WINDOW_MS`
+ * the moment it adopts it, and a row nobody ever adopts is closed by the
+ * reconciler when this window expires.
  */
 export const CHECK_ATTACH_WINDOW_MS = 3_600_000;
 /**
@@ -835,7 +842,7 @@ export async function claimCheckRecovery(
  * `execution_deadline_ms` is NARROWED here to the adopted lease: the attach
  * window is long only so a queued message can still find its run, while the
  * execution window is whatever the caller passes as `executionDeadlineMs`
- * (the consumer's `now + 900,000`).
+ * (the consumer's `now + CHECK_WINDOW_MS`).
  */
 export async function adoptReleasedCheckAttempt(
   db: D1Like,
@@ -844,7 +851,7 @@ export async function adoptReleasedCheckAttempt(
     /** The App these credentials authenticate as — never a foreign App's row. */
     githubAppId: number;
     holder: string;
-    /** The execution deadline the adopting invocation owns (`now + 900,000`). */
+    /** The execution deadline the adopting invocation owns (`now + CHECK_WINDOW_MS`). */
     executionDeadlineMs: number;
     nowMs: number;
   },
@@ -939,7 +946,7 @@ export async function claimAttachedCheckForSettlement(
      */
     attachDeliveryId?: string;
     holder: string;
-    /** The settling invocation's execution deadline (`now + 900,000`). */
+    /** The settling invocation's execution deadline (`now + CHECK_WINDOW_MS`). */
     executionDeadlineMs: number;
     nowMs: number;
   },
