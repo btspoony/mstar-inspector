@@ -34,8 +34,12 @@ Issues Comments API has no event field and follows the same discipline; it must 
 - Render verdict and finding class verbatim; never translate them into M1 verdict/severity vocabulary.
 - For `incomplete`, immediately after verdict and any tally, render its required facts exactly once: `cause:` = `reason`, `unscanned:` = uncovered scope (`none` for an empty list). Rendering has a display budget; persistence retains validated original values. Other verdict bodies remain byte-identical.
 - The overall comment is the publication authority for the round. Line-comment anchoring follows the existing line-comment implementation.
+- Line-comment anchor range: a single-line comment sends `path` + `side: "RIGHT"` + `line`. When the finding carries `line_start` and `line_end` and both endpoints sit inside the same right-side hunk, the payload adds `start_line` + `start_side: "RIGHT"`. Anything else — absent `line_start`, a start not strictly before `line_end`, a range crossing a hunk boundary, or a path with no matching hunk — falls back to the single-line anchor at `line_end`; a multi-line range is never invented. Deleted/binary files have no right-side hunks and never anchor.
 - A prior-round closure block may show typed finding status/evidence; repeat findings do not add to the new tally. Finding disposition (`addressed`) is distinct from actual remote thread resolution. Engine verdict/score authority is unchanged. The closure placement and bounds are in [review lifecycle](../feature/review-lifecycle.md), RL-8 and §7.10.
 - `summary_md` is capped at 8000 characters. Redact model text before GitHub or D1 writes.
+- Suggestion fence safety: a finding body may carry one fenced ```suggestion block. The publisher never truncates inside a fence: `clampFindingSizes` (schema) and `renderLineCommentText` (pipeline) share one rule (`dropSuggestionFencesCrossing` at `FINDING_BODY_MAX` = 2000) — a fence intersecting the boundary is dropped whole, the surrounding prose is kept, and a fence-free body clamps byte-identically to the pre-suggestion behavior. The trusted thread marker is appended after the body and can therefore never land inside a fence. A body left with no prose after a dropped fence falls back to the title/tag line.
+- GitHub co-author fact: when a user applies a suggested change, GitHub credits the suggesting account as a co-author of the resulting commit (GitHub docs: applying feedback in a pull request, <https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/incorporating-feedback-in-your-pull-request>). The app posts as `<slug>[bot]`, so the bot is that co-author.
+- Non-goals: this repo does not generate suggestion text (the review engine/skills own that), does not apply suggestions, and never commits on the author's behalf.
 
 ### Ordering and failures
 
@@ -62,7 +66,9 @@ Issues Comments API has no event field and follows the same discipline; it must 
 
 ## Where it lives
 
-- `src/pipeline/comment.ts`: primary upsert, markers, body rendering, scoped token grants and line batches.
+- `src/pipeline/comment.ts`: primary upsert, markers, body rendering, scoped token grants, line batches, line-comment anchor qualification (`filterLineCommentFindings`) and the range wire shape (`postLineCommentsWithOctokit`).
+- `src/review/schema.ts`: `FINDING_BODY_MAX`, `clampFindingSizes`, `dropSuggestionFencesCrossing` — the one fence-drop rule shared with the pipeline renderer.
+- `src/pipeline/review-threads.ts`: line-batch/thread markers, `<slug>[bot]` identity (`sameAppBotLogin`) and thread discovery/resolution.
 - `src/pipeline/consumer.ts`: publication staging/proof/apply order.
 - `src/pipeline/checks.ts`, `src/store/review-checks.ts`: Check gates, intent and observation.
 - `src/store/artifact-store.ts`: complete envelope validation and result persistence.
