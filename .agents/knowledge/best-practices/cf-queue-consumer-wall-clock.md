@@ -1,7 +1,7 @@
 ---
 module: pipeline-consumer
 date: 2026-08-29
-last_updated: 2026-11-04
+last_updated: 2026-11-20
 problem_type: best_practice
 category: best-practices
 severity: high
@@ -24,7 +24,35 @@ v0.4 D5 originally locked a 30 minute deep runner (`1_800_000` ms). Plan QC foun
 
 ## Guidance
 
-Size the in-consumer runner **under 15 minutes with headroom**. v0.4 pin: deep `840_000` (14 min). Recompute guard TTL from the same formula: `ceil((runner + N×git + inline + slack) / 1000)`, where `N` is `GUARD_TIMED_SANDBOX_STEPS.length` — one entry per 120s window, and the recheck document/status reads share one window because they run in a single `Promise.all`. That list is pinned against a real maximal round by the consumer suite, so a new sandbox step fails the suite until it is billed. Keep retry delays strictly below that TTL, with a cumulative sum above it.
+Derive the runner budget from the cap in one place, never by typing a number per tier. `src/review-budget.ts` owns the derivation: the 900 000 ms cap minus the named post-runner costs (90 s bounded output reads + 12 s inline resolution + 2 s Check begin + 120 s Worker tail + the live `terminalizeMs`, 1–30 s) yields the ceiling, and the tier table declares maxima that must sit inside it. Shipped maxima are `quick 480 s / default 600 s / deep 646 s`; the ceiling is 666 000 ms at the 10 s default terminalize and 646 000 ms at the supported 30 s maximum. A test asserts every tier maximum against the ceiling as a function of `terminalizeMs`, so a table that advertises a budget the consumer cannot finish fails CI instead of shipping.
+
+**There is one `min()` and it lives inside the derivation.** A second clamp at the call site hides exactly this class of defect: with `Math.min(runnerDeadline, now + tierMs)` the derived deadline silently won, the `deep` entry above the ceiling became dead code, and the published `deep 840 s` was never reachable. If a caller wants more than its tier maximum, the shared entry must refuse it explicitly rather than trim it.
+
+Recompute guard TTL from the same formula: `ceil((runner + N×git + inline + slack) / 1000)`, where `N` is `GUARD_TIMED_SANDBOX_STEPS.length` — one entry per 120s window, and the recheck document/status reads share one window because they run in a single `Promise.all`. That list is pinned against a real maximal round by the consumer suite, so a new sandbox step fails the suite until it is billed. Keep retry delays strictly below that TTL, with a cumulative sum above it.
+
+
+### Allocate within the tier, never past it
+
+A tier maximum is a ceiling, not a quota. When the diff size is already known, spend it: `src/review-budget.ts` derives a requested budget from the numstat the consumer already reads — one work unit per textual changed line with a minimum of one unit per file, a 120 s floor, and a linear ramp saturated at 20 000 units. Unknown size requests the tier maximum, so an unreadable numstat can never shrink a review's budget.
+
+Three properties keep the allocation safe:
+
+- **The size is parsed once, from the same stdout the seat partition consumes.** No second read. `parseNumstatSize` returns `{ changedLines, workUnits }` or `null`; a row that is not exactly three fields, a count that is not a safe integer, or a total that leaves the safe-integer range is `null` (unknown size), never a small diff and never an exec-time refusal.
+- **Truncation is detected by the terminating newline.** The sandbox exec reports no truncation flag, so a non-empty stdout that does not end with a newline is treated as truncated; the residual limit is a cut exactly at a line boundary, which no available signal distinguishes.
+- **The allocation never reaches the admission windows.** Guard TTL and the Check lease derive from the tier ceiling, so a small PR's shorter budget cannot shorten the window a retry or recovery needs. A test asserts the two are request-independent.
+
+
+### A spent budget is a failure, not a verdict
+
+When the wall clock runs out, say so. `budget-exhausted` is a terminal execution outcome **outside** the review verdict envelope: the attempt's Check concludes `failure` with a sentence that names the tier, the freeze-time budget and — only when observed — the stopped/dispatched seats and changed lines. `incomplete` keeps its narrower meaning: a run that published partial work under a healthy budget.
+
+Three rules make the outcome trustworthy:
+
+- **The runner reports, the Worker publishes.** The runner emits one exit-0 stdout document (`mstar.review-budget-exhausted/v1`) with safe-integer counts; the Worker validates it by exact schema and own keys, then decides the Check. A model payload never supplies it, and the runner never computes a tier budget or a Check conclusion.
+- **Unobservable is `null`, never zero.** A deadline before numstat, or a sandbox kill with no stdout, knows no seat counts; the short sentence states the cause (`runner deadline reached` / `consumer deadline reached` / `sandbox execution killed at its deadline`) and omits the numbers. A fabricated count is worse than an absent one.
+- **Nothing is rewritten and nothing is retried.** Already-published review comments stay as written, an older same-head Check is never mutated, and a confirmed exhaustion is ACKed — a retry would re-spend the same budget on the same diff and end the same way.
+
+The resolved outcome must precede verdict parsing, journal staging and every publication step, and it must outrank a prior generation's same-head publication proof: otherwise a rerun on an already-reviewed head can freeze the old result. Persist only trusted budget fields in the failure row; provider stderr belongs in logs.
 
 Do not advertise a runner budget the consumer cannot finish.
 
@@ -56,4 +84,4 @@ False 30 minute product locks fail closed as DLQ storms, not as honest timeouts.
 
 ### After
 
-`RUNNER_TIMEOUT_MS.deep = 840_000`; TTL 1560 s; delays `[180, 360, 720]`. Longer runs need a Durable Object / Workflow handoff, not a bigger consumer timeout.
+`RUNNER_MAX_BUDGET_MS = { quick: 480_000, default: 600_000, deep: 646_000 }` derived from the cap; guard TTLs 2 292 / 2 412 / 2 458 s; admission delays stay below their TTL with cumulative sums above it (2 460 / 2 670 s). A run that needs more than the ceiling needs a Durable Object / Workflow handoff, not a bigger consumer timeout.
