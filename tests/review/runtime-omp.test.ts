@@ -1253,51 +1253,93 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     // The deadline evidence explains only the capped seat — but one observed
     // cap stop IS budget evidence for the run: the wave publishes the signal
     // over the cap-free loss, never an `incomplete` that hides the clock fact.
+    // The sibling's loss evidence cannot ride the closed signal, so it goes
+    // to stderr instead of being dropped with the wave.
     seatResults = [
       { status: "absent", aborted: true, abortReason: CAP_REASON },
       { status: "absent" },
     ];
 
-    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    const errorCalls: unknown[][] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errorCalls.push(args);
+    });
+    let stop: RunnerBudgetExhausted;
+    try {
+      stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    } finally {
+      spy.mockRestore();
+    }
 
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
     expect(stop.seatsDispatched).toBe(2);
     // Only the seat the cap stopped counts: the cap-free loss is not
     // deadline evidence and never inflates the observed stop count.
     expect(stop.seatsStopped).toBe(1);
+    // One redacted stderr line per non-cap sibling loss, seat named.
+    const lost = errorCalls.map((call) => String(call[0])).filter((line) => line.includes("lost beside a cap stop"));
+    expect(lost).toHaveLength(1);
+    expect(lost[0]).toContain("changeset-2-lib");
   });
 
   test("a cap stop outranks a sibling's non-cap error even while the wave holds usable output", async () => {
     // The capped seat delivered a valid payload before the wall clock fired
     // (its output stays), its sibling failed outright — the usable-payload
     // branch would rethrow that failure and mask the stop. The clock evidence
-    // wins: the run reports the budget signal instead.
+    // wins: the run reports the budget signal instead, and the sibling's
+    // error goes to stderr rather than being dropped with the outcome.
     seatResults = [
       { aborted: true, abortReason: CAP_REASON, data: seatPayload() },
       { error: "provider exploded" },
     ];
-
-    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    const errorCalls: unknown[][] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errorCalls.push(args);
+    });
+    let stop: RunnerBudgetExhausted;
+    try {
+      stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    } finally {
+      spy.mockRestore();
+    }
 
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
     expect(stop.seatsDispatched).toBe(2);
     expect(stop.seatsStopped).toBe(1);
+    const lost = errorCalls.map((call) => String(call[0])).filter((line) => line.includes("lost beside a cap stop"));
+    expect(lost).toHaveLength(1);
+    expect(lost[0]).toContain("changeset-2-lib");
+    expect(lost[0]).toContain("provider exploded");
   });
 
   test("a cap stop outranks a seat promise that rejected outright", async () => {
     // The rejected seat produced no outcome object at all, but the cap that
     // stopped its sibling still stopped the review: budget signal, not the
-    // non-cap loss path.
+    // non-cap loss path. Its rejection reason is still reported on stderr —
+    // a promise that never settled is the only place that diagnosis lives.
     seatResults = [
       { status: "absent", aborted: true, abortReason: CAP_REASON },
       { reject: "provider boom" },
     ];
-
-    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    const errorCalls: unknown[][] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errorCalls.push(args);
+    });
+    let stop: RunnerBudgetExhausted;
+    try {
+      stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    } finally {
+      spy.mockRestore();
+    }
 
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
     expect(stop.seatsDispatched).toBe(2);
     expect(stop.seatsStopped).toBe(1);
+    // The rejected seat's own cause rides its stderr line.
+    const lost = errorCalls.map((call) => String(call[0])).filter((line) => line.includes("lost beside a cap stop"));
+    expect(lost).toHaveLength(1);
+    expect(lost[0]).toContain("changeset-2-lib");
+    expect(lost[0]).toContain("provider boom");
   });
 
   test("a stopped deep turn still lands incomplete — no runner deadline evidence", async () => {

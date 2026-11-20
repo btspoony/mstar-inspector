@@ -56,6 +56,21 @@ describe("isReviewBudgetExhaustedSignal", () => {
     expect(isReviewBudgetExhaustedSignal(forged)).toBe(false);
   });
 
+  test("rejects a required field that exists only on the prototype", () => {
+    // Own keys alone prove nothing: `Object.keys` sees no extra keys on a
+    // document whose fields ride the prototype, and property reads traverse
+    // it — so each required field must be demanded as an OWN property.
+    for (const field of ["schema", "seatsDispatched", "seatsStopped"] as const) {
+      const { [field]: lifted, ...own } = SIGNAL;
+      const forged = Object.assign(Object.create({ [field]: lifted }), own);
+      expect(isReviewBudgetExhaustedSignal(forged)).toBe(false);
+    }
+  });
+
+  test("rejects a document whose every required field is inherited", () => {
+    expect(isReviewBudgetExhaustedSignal(Object.create(SIGNAL))).toBe(false);
+  });
+
   test("rejects a document missing a count key", () => {
     const { seatsStopped: _stopped, ...missing } = SIGNAL;
     expect(isReviewBudgetExhaustedSignal(missing)).toBe(false);

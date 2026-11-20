@@ -801,6 +801,19 @@ function fittedSummary(summary: string, budget: number): string {
 }
 
 /**
+ * A thrown error's one-line, bounded message: whitespace flattened and the
+ * text cut at `SEAT_GAP_MAX_CHARS` with a marker, so a multi-line seat error
+ * stays a single stderr/disclosure line like every other bounded diagnostic.
+ * Empty for a reason that carries no message.
+ */
+function causeText(reason: unknown): string {
+  const text = String(reason instanceof Error ? reason.message : reason)
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length <= SEAT_GAP_MAX_CHARS ? text : `${text.slice(0, SEAT_GAP_MAX_CHARS - 1)}…`;
+}
+
+/**
  * The SDK's own reason for a wall-clock stop: its abort-reason resolver returns
  * exactly this wording — and only this wording — when the per-subagent runtime
  * limit it was handed fires, and it carries the cap that fired. Every other
@@ -1821,20 +1834,30 @@ export const ompAgentRuntime: AgentRuntime = {
         })),
       });
       let outcomes: SeatOutcome[];
-      // Seats whose promise rejected outright: no outcome object at all, and
-      // still a lost seat — the results array is index-aligned with the dispatch
-      // list, so every rejection maps back to the seat it was dispatched for.
       let rejectedSeats = 0;
       // A rejected seat promise carries its cause in the rejection itself —
       // there is no outcome object to read it from, so capture it here or the
       // only diagnosis of a dead seat is lost with the promise.
       let rejectedReason: unknown = undefined;
+      // Every seat lost to a cause that is NOT the cap, with its seat id: the
+      // evidence a budget stop would otherwise drop when a sibling's cap
+      // claims the whole wave. Gathered beside the fan-out (results stay
+      // index-aligned with the dispatch list) so the budget path below can
+      // log them before it throws.
+      const siblingLosses: { seat: string; detail: string }[] = [];
       try {
         const results = await group; // never rejects: the barrier absorbs every seat
         outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
         const rejections = results.filter((result) => result.status === "rejected");
         rejectedSeats = rejections.length;
         rejectedReason = rejections[0]?.reason;
+        results.forEach((result, seatIndex) => {
+          if (result.status === "rejected") {
+            siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.reason) });
+          } else if (result.value.failure !== null) {
+            siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.value.failure) });
+          }
+        });
         // Positive deadline evidence: at least one settled seat declares the
         // wall-clock cap stopped it. Decided here because it outranks both
         // failure branches below — a wave the cap stopped publishes the budget
@@ -1865,6 +1888,7 @@ export const ompAgentRuntime: AgentRuntime = {
       } finally {
         // Supervision never outlives the fan-out it supervises (no pending
         // timer can survive the review) and never masks its outcome.
+
         await supervision;
       }
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
@@ -1900,6 +1924,15 @@ export const ompAgentRuntime: AgentRuntime = {
         const exhausted = new RunnerBudgetExhausted(seats.length, gaps.length);
         exhausted.recheck = settled?.doc ?? null;
         if (settled !== null) exhausted.recheckStatus = settled.status;
+        // The cap explains only its own seats: every sibling the cap did NOT
+        // stop is a non-cap loss the closed signal cannot carry, so its seat
+        // and bounded cause go to stderr here — the run's only other channel —
+        // or the failure is dropped the moment the budget signal wins.
+        for (const { seat, detail } of siblingLosses) {
+          console.error(
+            `review seat ${seat} lost beside a cap stop${detail.length === 0 ? "" : `: ${detail}`}`,
+          );
+        }
         if (served.size === 1) exhausted.appliedModel = [...served][0]!;
         throw exhausted;
       }
@@ -1928,23 +1961,8 @@ export const ompAgentRuntime: AgentRuntime = {
       // the shape the engine needs. Keep this marker until that lands so the
       // staging is visible rather than looking like a settled design.
       const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-      const rawLostSeat =
-        lostSeatDetail !== null
-          ? lostSeatDetail.message
-          : rejectedReason === undefined
-            ? ""
-            : rejectedReason instanceof Error
-              ? rejectedReason.message
-              : String(rejectedReason);
-      const lostSeatText = rawLostSeat.replace(/\s+/g, " ").trim();
-      const lostSeatCause =
-        lostSeatText === ""
-          ? ""
-          : `: ${
-              lostSeatText.length <= SEAT_GAP_MAX_CHARS
-                ? lostSeatText
-                : `${lostSeatText.slice(0, SEAT_GAP_MAX_CHARS - 1)}…`
-            }`;
+      const lostSeatText = causeText(lostSeatDetail ?? rejectedReason ?? "");
+      const lostSeatCause = lostSeatText === "" ? "" : `: ${lostSeatText}`;
       // The stopped seats are declared as the engine's `incomplete` fact,
       // synthesized — never post-edited onto the envelope. A wave that stopped
       // everywhere still synthesizes with `findings: []`: throwing would lose

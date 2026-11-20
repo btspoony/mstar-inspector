@@ -99,6 +99,11 @@ export function isReviewBudgetExhaustedSignal(value: unknown): value is ReviewBu
   // names — `in` would admit inherited names like `constructor` as document
   // keys, so the key table is probed with `Object.hasOwn`.
   if (doc.schema !== REVIEW_BUDGET_EXHAUSTED_SCHEMA) return false;
+  // Reads traverse the prototype, so the required keys must be own properties
+  // too — `Object.keys` alone cannot see an inherited `seatsStopped`.
+  for (const key of Object.keys(SIGNAL_KEYS)) {
+    if (!Object.hasOwn(doc, key)) return false;
+  }
   if (Object.keys(doc).some((key) => !Object.hasOwn(SIGNAL_KEYS, key))) return false;
   const { seatsDispatched, seatsStopped } = doc;
   return (
