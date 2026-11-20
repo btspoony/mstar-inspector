@@ -148,6 +148,11 @@ import {
 /** The review gate the seeded test App carries (the product's default floor). */
 const GATE = { minScore: 60, passVerdicts: ["ship it"] } as const;
 
+/** A numstat that saturates the size request at the work-unit bound: the
+ * request is the tier maximum, so budget cases below can pin tier-bound
+ * arithmetic without a mid-ramp request diluting the pin. */
+const SATURATED_NUMSTAT = "9000\t11000\tsrc/generated.ts\n";
+
 // --- shared runtime doubles -------------------------------------------------
 // One `createConsumerHarness()` per test owns the sandbox/commenter/KV doubles,
 // the payload + batch builders and the log sink (tests/helpers/consumer-harness,
@@ -177,6 +182,8 @@ import {
   GUARD_TIMED_SANDBOX_STEPS,
   POST_RUNNER_READ_TIMEOUT_MS,
   ROUND_BUDGET_MS,
+  RUNNER_BUDGET_FLOOR_MS,
+  SIZE_SATURATION_WORK_UNITS,
   postRunnerReserveMs,
   reviewGuardTtlSeconds,
   runnerTimeoutMs,
@@ -600,8 +607,11 @@ describe("createReviewConsumer", () => {
       timeout: expect.any(Number),
     });
     // The exec gets what the declared instant still owes, read after the input
-    // write: the frozen clock makes that the full 600s default cap, exactly.
-    expect(runnerExecTimeout()).toBe(600_000);
+    // write: the frozen clock makes that the whole request. The fixture's
+    // numstat is 17 work units, so the size-derived request — 120_000 +
+    // (600_000 − 120_000) × 17/20_000 = 120_408ms, not the tier maximum — is
+    // what the anchor allocates.
+    expect(runnerExecTimeout()).toBe(120_408);
     // inside VALID_DIFF's right hunk [18,23]). §7.7 order: the
     // intent-prepared line comments run after the apply; the degraded-comment
     // delete runs last, only after the normal publication proof.
@@ -1772,6 +1782,9 @@ describe("createReviewConsumer", () => {
   test("deep reaches the fallback: its runner budget is capped by the derived deadline, not reserved in full", async () => {
     h.sandbox.diffExitCode = 1;
     h.sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
+    // Saturated size ⇒ the request IS the tier maximum, so the exec timeout
+    // below still pins the deep ceiling rather than a mid-ramp request.
+    h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
@@ -1839,6 +1852,9 @@ describe("createReviewConsumer", () => {
 
   test("a slow runner-input write shrinks the exec timeout by exactly the time it spent", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Saturated size ⇒ the anchor requests the 600s tier maximum, so this
+    // case still pins the cutoff-bound arithmetic it was written for.
+    h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     let roundStart = 0;
     await withFrozenClock(async (clock) => {
@@ -1872,6 +1888,8 @@ describe("createReviewConsumer", () => {
 
   test("the declared instant is exactly where the exec ends when the tier cap binds", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Saturated size ⇒ the tier cap binds exactly as this case pins.
+    h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     let roundStart = 0;
     let execStart = 0;
@@ -1906,6 +1924,9 @@ describe("createReviewConsumer", () => {
 
   test("a tier-bound input write that spends time bills the ONE anchored deadline, not the later cutoff", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Saturated size ⇒ the tier maximum binds at the anchor, the case this
+    // test isolates (anchored deadline vs the later cutoff).
+    h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     let roundStart = 0;
     let writeStart = 0;
@@ -1996,6 +2017,119 @@ describe("createReviewConsumer", () => {
       await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/round budget spent: runner declined/);
     });
 
+    expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("a small diff requests the size-derived budget, and the anchored deadline never moves after the input write", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    let roundStart = 0;
+    let execStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            if (cmd.includes("bun run")) execStart = clock.now;
+            return h.fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: h.fakeSandbox.destroy,
+        }),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    // The default fixture is 17 work units, so the request is the floor plus
+    // the ramp: 120_000 + (600_000 − 120_000) × 17/20_000 = 120_408ms.
+    const requestedMs =
+      RUNNER_BUDGET_FLOOR_MS +
+      ((600_000 - RUNNER_BUDGET_FLOOR_MS) * 17) / SIZE_SATURATION_WORK_UNITS;
+    const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
+    expect(line.fields.runner_work_units).toBe(17);
+    expect(line.fields.runner_requested_ms).toBe(requestedMs);
+    // Nothing is spent before the anchor, so the request itself is effective.
+    expect(line.fields.runner_effective_ms).toBe(requestedMs);
+    expect(line.fields.runner_deadline_ms).toBe(roundStart + requestedMs);
+    // ONE deadline: the wire value, the logged deadline and the exec's own end
+    // are the same instant, so the input write never moved it.
+    const deadlineMs = line.fields.runner_deadline_ms as number;
+    const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    expect(written.outerDeadlineEpochMs).toBe(deadlineMs);
+    expect(execStart + runnerExecTimeout()!).toBe(deadlineMs);
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("a saturated diff requests the tier maximum and records its work units", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.numstatStdout = SATURATED_NUMSTAT;
+    const db = await createSeededTestD1();
+    let roundStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
+    expect(line.fields.runner_work_units).toBe(SIZE_SATURATION_WORK_UNITS);
+    expect(line.fields.runner_requested_ms).toBe(600_000);
+    expect(line.fields.runner_effective_ms).toBe(600_000);
+    expect(line.fields.runner_deadline_ms).toBe(roundStart + 600_000);
+    expect(runnerExecTimeout()).toBe(600_000);
+  });
+
+  test("setup that leaves less than the request caps the effective budget at the cutoff", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    let roundStart = 0;
+    await withFrozenClock(async (clock) => {
+      roundStart = clock.now;
+      // 600s of clone leaves 66s of the 666s cutoff — under the 120_408ms
+      // request, so the cutoff (not the request) decides the allocation.
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        ...clockSpendingSandbox("git init", 600_000, clock),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
+    expect(line.fields.runner_requested_ms).toBe(120_408);
+    expect(line.fields.runner_effective_ms).toBe(66_000);
+    expect(line.fields.runner_deadline_ms).toBe(roundStart + 666_000);
+    // The wire deadline is the anchored one: the input write spent nothing, so
+    // the exec's end is still the derived cutoff.
+    const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    expect(written.outerDeadlineEpochMs).toBe(roundStart + 666_000);
+    expect(runnerExecTimeout()).toBe(66_000);
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("setup that leaves nothing at the anchor declines with the pre-runner cutoff failure", async () => {
+    const db = await createSeededTestD1();
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            // 600s of clone, then the numstat itself spends the last 66s: the
+            // cutoff is exactly spent when the anchor runs.
+            if (cmd.includes("git init")) clock.now += 600_000;
+            if (cmd === numstatCommand(DIFF_PATH)) clock.now += 66_000;
+            return h.fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: h.fakeSandbox.destroy,
+        }),
+      });
+      await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
+        /round budget spent: runner declined — the pre-runner cutoff is spent \(0ms left for it\)/,
+      );
+    });
+
+    // No payload write, no paid exec: the refusal landed BEFORE both.
+    expect(h.sandbox.calls.some((c) => c.cmd.startsWith("base64 -d >"))).toBe(false);
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(failureRows(db)).toHaveLength(1);
   });
@@ -2124,6 +2258,9 @@ describe("createReviewConsumer", () => {
 
   test("App row review_level 'deep' → derived runner exec timeout 646_000 + admission TTL 2458; quick/default are 480_000/600_000 (AC-S10-clock)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Saturated size ⇒ deep's exec timeout pins its tier maximum, not a
+    // mid-ramp request.
+    h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
     let admissionTtlMs = -1;
@@ -2157,6 +2294,9 @@ describe("createReviewConsumer", () => {
 
   test("the reserve uses the message's LIVE terminalize budget: a 30s operator value shrinks the runner deadline by 20s (qc2 F-001 / qc3 F-801)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Saturated size ⇒ the request is deep's tier maximum, so the pin below
+    // isolates the LIVE terminalize budget, not the size interpolation.
+    h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
     // The operator's ceiling value, read per message exactly like the hook's.
@@ -2525,9 +2665,8 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     // The round runs under a FROZEN clock: the fake spends no wall time, so the
-    // runner exec gets exactly what the derived deadline still owes — the full
-    // 600s default cap. On the real clock it is 600_000 minus the milliseconds
-    // the input write and the round itself spent.
+    // runner exec gets exactly what the derived deadline still owes — the
+    // size-derived 120_408ms request from the fixture's 17 work units.
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
 
     const runnerCall = h.sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
@@ -2539,7 +2678,7 @@ describe("createReviewConsumer", () => {
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
         OMP_REVIEW_MODEL: "ark/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
       },
-      timeout: 600_000,
+      timeout: 120_408,
     });
     expect(JSON.parse(stdin!)).toEqual({
       version: 1,
@@ -4106,6 +4245,9 @@ describe("createReviewConsumer", () => {
     // The frozen clock makes every production Date.now() read exact, so the
     // coverage is measured, not assumed.
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    // Saturated size ⇒ the request exceeds what the late start leaves, so the
+    // derived cutoff binds the exec deadline this case measures.
+    h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     let guardRow: Record<string, unknown> | undefined;
     h.sandbox.probe = () => {
@@ -4153,6 +4295,9 @@ describe("createReviewConsumer", () => {
     // cutoff — the tightest case the invariant can ever run. A millisecond
     // short on either expiry is a real defect, not a rounding question.
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    // Saturated size ⇒ deep's tier maximum IS the request, keeping this the
+    // tight bound the invariant requires.
+    h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
     // The operator's ceiling value, read per message exactly like the hook's.

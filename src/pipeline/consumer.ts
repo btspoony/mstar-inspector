@@ -546,6 +546,8 @@ export type ConsumerLogFields = {
   runner_effective_ms?: number;
   /** The absolute instant the input write, the wire deadline and the exec all end at. */
   runner_deadline_ms?: number;
+  /** The diff-size estimate the request was sized from (null: size unknown → tier max). */
+  runner_work_units?: number | null;
   /** Runner exec elapsed wall-clock (ms) — set on runner-attempt log lines. */
   elapsed_ms?: number;
   /** Runner orchestration: deep = parent session; quick/default = Bun fan-out. */
@@ -5862,10 +5864,13 @@ async function processMessage(
     // a complete row set (unavailable, unproven-empty or truncated/malformed
     // rows). The request is what the allocation asks for inside the tier;
     // `anchorRunnerBudget` remains the only clamp that decides the outcome.
+    // A malformed size outcome reuses the `invalid` vocabulary: it carries
+    // NaN, which the anchor's entry check rejects the same way an explicit
+    // bad request is — no second refusal path, no silent fallback.
     const diffSize = parseNumstatSize(numstat.stdout, diffFileState === "empty");
     const sizeRequest = requestRunnerBudget(level, diffSize);
 
-    const anchor = anchorRunnerBudget(budget, Date.now());
+    const anchor = anchorRunnerBudget(budget, Date.now(), sizeRequest.requestedBudgetMs);
     if (anchor.kind === "invalid") {
       throw new Error(
         `runner request declined — an explicit ${anchor.requestedBudgetMs}ms is not a usable duration`,
@@ -5887,6 +5892,10 @@ async function processMessage(
       runner_requested_ms: anchor.requestedBudgetMs,
       runner_effective_ms: anchor.effectiveBudgetMs,
       runner_deadline_ms: anchor.execDeadlineMs,
+      // The estimate the request was sized from — one work unit per changed
+      // line, minimum one per file; `null` records an unknown size, so an
+      // investigation can tell a tier-max request from a sized one.
+      runner_work_units: sizeRequest.kind === "requested" ? sizeRequest.workUnits : null,
     };
     // The input carries the SAME absolute deadline every post-diff step bills —
     // the exec's own end instant, never a duration. The runner anchors its own
