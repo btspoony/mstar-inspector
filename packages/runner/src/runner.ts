@@ -34,8 +34,13 @@
  *         declaration whose id collides with a base provider is skipped
  *         (base wins, AL-23-1) with a structured stderr warn
  *         (id + count, no keys); absent/empty = the (empty) base alone.
- *   - stdout carries ONLY the mstar.review/v1 envelope JSON (validated by
- *     validateMstarReviewV1 inside the runtime); all diagnostics to stderr;
+ *   - stdout carries ONLY one JSON document: the mstar.review/v1 envelope
+ *     (validated by validateMstarReviewV1 inside the runtime), OR — when the
+ *     runner's own deadline evidence stops the review — the
+ *     mstar.review-budget-exhausted/v1 signal ({ schema, seatsDispatched,
+ *     seatsStopped }) the runtime throws as `RunnerBudgetExhausted`. The
+ *     signal is produced by runner code only: no model payload can supply
+ *     it. All diagnostics to stderr;
  *   - optional `--recheck-out <path>` (spec review-lifecycle
  *     §7.8): when the runtime result carries a recheck document, its JSON is
  *     written to <path> BEFORE the envelope reaches stdout (a write failure
@@ -112,6 +117,10 @@ import {
   walkSeatGates,
 } from "./seat-failover-probe";
 import { writePerReviewModelsYaml } from "./models-synthesis";
+import {
+  isReviewBudgetExhaustedSignal,
+  RunnerBudgetExhausted,
+} from "../../shared/src/budget-exhausted-wire";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
 import { APPLIED_MODEL_PATH, type AppliedModelDoc } from "../../shared/src/runtime";
 import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
@@ -959,6 +968,50 @@ export async function main(
       console.log(JSON.stringify(envelope));
       return 0;
     } catch (error) {
+      if (error instanceof RunnerBudgetExhausted) {
+        // The runner's own deadline evidence stopped the review — a budget
+        // fact, never a failure to attribute or a verdict to publish. stdout
+        // gets the closed mstar.review-budget-exhausted/v1 document and the
+        // process still exits 0: the Worker terminalizes the failure from
+        // this fact, so a non-zero exit would only launder the same stop
+        // through the generic runner-failure path.
+        const signal = error.signal();
+        if (!isReviewBudgetExhaustedSignal(signal)) {
+          console.error(`review: budget-exhausted signal failed its own shape: ${JSON.stringify(signal)}`);
+          return 1;
+        }
+        // The side documents carry this round's attribution exactly as on the
+        // envelope path: the applied model when one served, the recheck round's
+        // document and status (the seat the stop aborted still accounts for
+        // its round). A document write failure keeps the envelope contract:
+        // exit 1, no stdout.
+        if (error.appliedModel !== undefined) {
+          try {
+            writeFileSync(appliedModelPath, JSON.stringify({ appliedModel: error.appliedModel } satisfies AppliedModelDoc));
+          } catch (writeError) {
+            console.error(
+              JSON.stringify({
+                event: "applied_model_write_failed",
+                path: appliedModelPath,
+                reason: (writeError as Error).message,
+              }),
+            );
+          }
+        }
+        if (recheckOutPath !== undefined && error.recheck !== null) {
+          try {
+            writeFileSync(recheckOutPath, JSON.stringify(error.recheck));
+          } catch (writeError) {
+            console.error(`review: cannot write recheck output ${recheckOutPath}: ${(writeError as Error).message}`);
+            return 1;
+          }
+        }
+        if (recheckOutPath !== undefined && error.recheckStatus !== undefined) {
+          writeRecheckStatus(error.recheckStatus, statusPath);
+        }
+        console.log(JSON.stringify(signal));
+        return 0;
+      }
       const cause = (error as Error).message;
       // The round is over, but the CONFIGURED chain's eligibility is still
       // knowable: the probe's gate walker runs over this run's own inputs (the

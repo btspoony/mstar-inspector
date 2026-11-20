@@ -65,6 +65,7 @@ import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, Rev
 import type { CapabilityHost } from "../../packages/shared/src/runtime";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { RecheckStatus } from "../../packages/shared/src/recheck-wire";
+import { RunnerBudgetExhausted } from "../../packages/shared/src/budget-exhausted-wire";
 import { readRecheckStatusCommand } from "../../src/pipeline/gitops";
 import {
   chainAttributionBlock,
@@ -792,6 +793,81 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(stdout).toBe("");
     expect(stderr).toContain("runtime failed");
     expect(stderr).toContain("provider boom");
+  });
+
+  test("runner budget stop → exit 0 and stdout is ONLY the mstar.review-budget-exhausted/v1 signal", async () => {
+    // The runtime's typed stop carries the seat counts it observed; the CLI
+    // publishes them as the whole stdout document, no wrapper, no envelope.
+    runtimeError = new RunnerBudgetExhausted(2, 1);
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    const { code, stdout } = await runCli(["--level", "default", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({
+      schema: "mstar.review-budget-exhausted/v1",
+      seatsDispatched: 2,
+      seatsStopped: 1,
+    });
+  });
+
+  test("a budget stop still writes its side documents: applied model, recheck doc and status", async () => {
+    // The seat counts end the review, not the round's attribution: a model
+    // that served and a recheck round that settled are written exactly as on
+    // the envelope path.
+    const exhausted = new RunnerBudgetExhausted(1, 1);
+    exhausted.appliedModel = "ark/claude-opus-4-7";
+    exhausted.recheck = {
+      schema: "mstar.recheck/v1",
+      headSha: "abc123",
+      results: [],
+    };
+    exhausted.recheckStatus = {
+      schema: "mstar.recheck-status/v1",
+      headSha: "abc123",
+      outcome: "ok",
+      reason: null,
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: null,
+    };
+    runtimeError = exhausted;
+    const dir = mkdtempSync(join(tmpdir(), "runner-budget-side-"));
+    const outPath = join(dir, "recheck.json");
+    const appliedPath = join(dir, "applied.json");
+    try {
+      const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+      const { code, stdout, statusPath } = await runCli(
+        ["--level", "quick", "--input", inputPath, "--recheck-out", outPath],
+        undefined,
+        appliedPath,
+      );
+
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout)).toEqual({
+        schema: "mstar.review-budget-exhausted/v1",
+        seatsDispatched: 1,
+        seatsStopped: 1,
+      });
+      expect(JSON.parse(readFileSync(appliedPath, "utf8"))).toEqual({ appliedModel: "ark/claude-opus-4-7" });
+      expect(JSON.parse(readFileSync(outPath, "utf8"))).toEqual({
+        schema: "mstar.recheck/v1",
+        headSha: "abc123",
+        results: [],
+      });
+      expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual({
+        schema: "mstar.recheck-status/v1",
+        headSha: "abc123",
+        outcome: "ok",
+        reason: null,
+        rejected: 0,
+        rejected_row_ids: [],
+        rejected_unnamed: 0,
+        error: null,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("ALWAYS synthesizes: a zero-custom run rides an agentDir whose models.yml is a bare providers header", async () => {
