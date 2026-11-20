@@ -81,6 +81,7 @@ import { Octokit } from "@octokit/rest";
 import { REVIEW_EMOJI, renderReviewMarkdown } from "@mstar-harness/engine";
 import {
   FINDING_BODY_MAX,
+  dropAllSuggestionFences,
   dropSuggestionFences,
   type ReviewFinding,
   type ReviewOutput,
@@ -327,6 +328,10 @@ export function buildReviewBody(
     rendered = { ...rendered, summary_md: truncateSummary(rendered.summary_md) };
   }
   let core = renderReviewMarkdown(rendered);
+  // pr-review § Comment posting: the suggestion block belongs to the finding's
+  // inline body, not this summary — drop it here; the caller's findings are
+  // untouched, and a body without fences is returned byte-identical.
+  core = dropAllSuggestionFences(core);
   // Preserved parts: each states something a head-keeping cut would silently
   // remove. The closure is where the round's prior-findings verdicts are
   // published, and the footer discloses the findings the merge-class cap

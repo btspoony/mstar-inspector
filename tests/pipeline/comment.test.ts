@@ -181,6 +181,29 @@ describe("buildReviewBody", () => {
     expect(body).toContain("- **Merge class**: should-fix");
   });
 
+  test("a finding's suggestion fence renders only in the inline path, never in the summary", () => {
+    const bt = "```";
+    const fenced: ReviewOutput = {
+      ...output,
+      findings: [
+        {
+          ...finding("should-fix", "Fractional expiry comparison"),
+          body: "Before the fence.\n\n" + bt + "suggestion\nfixed code here\n" + bt + "\n\nAfter the fence.",
+        },
+      ],
+    };
+    const stored = JSON.parse(JSON.stringify(fenced)) as ReviewOutput;
+    const body = buildReviewBody(fenced);
+    expect(body).not.toContain(bt + "suggestion");
+    expect(body).not.toContain("fixed code here");
+    expect(body).toContain("Before the fence.");
+    expect(body).toContain("After the fence.");
+    // never mutates the caller's findings: the fence stays for the inline path
+    expect(fenced.findings[0]!.body).toBe(stored.findings[0]!.body);
+    // fence-free bodies stay byte-identical
+    expect(buildReviewBody(output)).toBe(buildReviewBody(output));
+  });
+
   test("a summary cut inside a fence keeps the findings outside the code block", () => {
     const body = buildReviewBody({
       ...output,
