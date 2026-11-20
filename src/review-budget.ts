@@ -133,7 +133,7 @@ export const CHECK_WINDOW_MS = ROUND_BUDGET_MS;
 /**
  * The documented request floor (ms): the existing 60s runner tail plus the
  * only local timing anchor, one observed ~52s model call (spec:
- * .mstar/iterations/v1.21-review-budget/specs/review-budget.md § Allocation).
+ * docs/specs/architecture/review-budget.md § Allocation, promoted 2026-11).
  * It bounds the REQUEST, never the available wall clock — a late anchor may
  * still shrink the effective window below it.
  */
