@@ -2112,6 +2112,77 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"runner"');
   });
 
+  test("an input write at the step-cap boundary with the deadline inside it attributes its 124 to the deadline", async () => {
+    // qc1 F5: the write's armed bound and its `124` attribution read ONE
+    // clock sample taken after serialization. Here serialization pushes the
+    // deadline remainder from 122s to exactly the 120s step cap: the write's
+    // bound is the deadline's remainder (never the pre-serialization window),
+    // so its kill is the typed stop — the stale first sample would have read
+    // `122s > cap` and retried the same clock.
+    h.sandbox.writeInputExitCode = 124;
+    // 150 work units requests 123.6s, so the anchored deadline lands at the
+    // cutoff (roundStart + 666s) without needing saturation.
+    h.sandbox.numstatStdout = "100\t50\tsrc/big.ts\n";
+    const db = await createSeededTestD1();
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            // 544s of clone leaves the anchored 666s deadline 122s of
+            // remaining — strictly above the 120s write cap.
+            if (cmd.includes("git init")) clock.now += 544_000;
+            return h.fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: h.fakeSandbox.destroy,
+        }),
+      });
+      // Real synchronous serialization runs between the payload build and the
+      // write's clock read: this self-restoring spy spends 2s there, so the
+      // single sample sees the deadline remainder sit EXACTLY at the cap —
+      // and the two-sample code read its stale 122s remainder instead.
+      const realStringify = JSON.stringify;
+      let serialized = false;
+      JSON.stringify = ((value: unknown, ...rest: unknown[]) => {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          (value as Record<string, unknown>).worktreePath === CLONE_DIR &&
+          typeof (value as Record<string, unknown>).outerDeadlineEpochMs === "number"
+        ) {
+          JSON.stringify = realStringify;
+          serialized = true;
+          clock.now += 2_000;
+        }
+        return Reflect.apply(realStringify, JSON, [value, ...rest]) as string;
+      }) as typeof JSON.stringify;
+      try {
+        // ACK, not a retry: a confirmed deadline kill is terminal.
+        await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+      } finally {
+        JSON.stringify = realStringify;
+      }
+      expect(serialized).toBe(true);
+    });
+
+    const inputWrite = h.sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
+    // The armed bound is min(120s cap, 120s deadline remainder): the write
+    // sits exactly at the step-cap boundary and the frozen deadline is the
+    // same instant — attribution to exhaustion is the safe direction (a
+    // retry would only lose the same clock again).
+    expect(execTimeout(inputWrite)).toBe(120_000);
+    expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain("budget-exhausted:");
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).toContain('"budgetWindow":"runner"');
+    expect(row).toContain('"seatsDispatched":0');
+    expect(row).toContain('"seatsStopped":0');
+  });
+
   test("a small diff requests the size-derived budget — the request (not the cutoff) produces the effective value, and the anchored deadline never moves after the input write", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();

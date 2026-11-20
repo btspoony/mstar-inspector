@@ -1364,15 +1364,19 @@ class BudgetExhaustedError extends Error {
  * once spent: a spent deadline must decline the step, never manufacture a
  * positive (1ms) timeout that starts paid work and then fails it for the
  * wrong cause. The runner's own budget is derived once, at the anchor below
- * (`anchorRunnerBudget`), and never re-clamped here.
+ * (`anchorRunnerBudget`), and never re-clamped here. `nowMs` fixes the clock
+ * when the caller must reuse its own sample — a step whose timeout AND whose
+ * kill attribution read one instant (the runner input write below) passes it;
+ * everyone else takes the fresh read.
  */
 function boundedStepTimeout(
   runnerDeadlineMs: number,
   capMs: number,
   step: string,
   window: BudgetExhaustedOutcome["budgetWindow"],
+  nowMs = Date.now(),
 ): number {
-  const left = Math.min(capMs, runnerDeadlineMs - Date.now());
+  const left = Math.min(capMs, runnerDeadlineMs - nowMs);
   if (left <= 0) {
     throw new RoundBudgetSpent(
       `round budget spent: ${step} declined — the derived runner deadline is spent (${left}ms left for it)`,
@@ -6057,15 +6061,24 @@ async function processMessage(
     };
     // The document rides the exec stdin pipe: as an argv string it became one
     // argument, and a recheck round above ~98 KiB breaches Linux's 128 KiB cap.
-    // Two deadlines compete here: the anchored exec deadline below and the
-    // later pre-runner cutoff; the write must bill the anchored one. What the
-    // anchored deadline owes the write is sampled HERE — before the helper's
-    // own clock read — so a kill the write reports can be attributed to the
-    // clock that bound it.
+    // Serialization is paid BEFORE the write's one clock sample, so the armed
+    // bound and the `124` attribution below both read the instant the write
+    // actually started at — a straddling sample cannot arm the deadline's
+    // shorter remainder and then classify its kill as the step cap's.
+    const runnerInputStdin = toBase64Utf8(JSON.stringify(runnerInput));
     const inputWriteWindowMs = runnerExecDeadlineMs - Date.now();
     const writeInput = await sandbox.runCommand(writeJsonCommand(RUNNER_INPUT_PATH), {
-      stdin: toBase64Utf8(JSON.stringify(runnerInput)),
-      timeout: boundedStepTimeout(runnerExecDeadlineMs, EXEC_TIMEOUT_GIT_MS, "runner input write", "runner"),
+      stdin: runnerInputStdin,
+      timeout: boundedStepTimeout(
+        runnerExecDeadlineMs,
+        EXEC_TIMEOUT_GIT_MS,
+        "runner input write",
+        "runner",
+        // The SAME sample both bounds the write and decides whether a `124`
+        // was that bound's: two reads could disagree across the cap/deadline
+        // crossover and retry a stop the clock already spent.
+        runnerExecDeadlineMs - inputWriteWindowMs,
+      ),
     });
     if (writeInput.exitCode !== 0) {
       // A kill under the anchored runner deadline (its remainder bound the
