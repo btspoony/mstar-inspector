@@ -47,6 +47,8 @@
  * single min() below grants, never the table.
  */
 
+import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
+
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../packages/shared/src/runtime";
 
 /** Per-call bound for the bounded reads issued AFTER the paid runner (ms):
@@ -131,20 +133,49 @@ export const ROUND_BUDGET_MS = 900_000;
 export const CHECK_WINDOW_MS = ROUND_BUDGET_MS;
 
 /**
- * The documented request floor (ms): the existing 60s runner tail plus the
- * only local timing anchor, one observed ~52s model call (spec:
- * docs/specs/architecture/review-budget.md § Allocation, promoted 2026-11).
- * It bounds the REQUEST, never the available wall clock — a late anchor may
- * still shrink the effective window below it.
+ * Tail every round keeps after the paid seats (ms): mirrors the runner's
+ * `PUBLICATION_TAIL_MS` so a finished seat still has room to publish its
+ * report and comment before the exec window closes.
  */
-export const RUNNER_BUDGET_FLOOR_MS = 120_000;
+export const PUBLICATION_TAIL_MS = 60_000;
 
 /**
- * Work units at which the request reaches the tier maximum: the documented
- * 20,000-line GitHub diff boundary — a sizing anchor, not a throughput
- * measurement.
+ * Wall clock one review seat costs (ms): the observed 280 s two-seat round
+ * (staging PR #334) plus headroom, not a guess. A tier runs `maxSeats`
+ * concurrent model calls plus their tool turns, so pricing one call
+ * underfunds every round.
  */
-export const SIZE_SATURATION_WORK_UNITS = 20_000;
+export const PER_SEAT_ALLOCATION_MS = 150_000;
+
+/**
+ * The documented request floor per tier (ms): the publication tail plus one
+ * allocation per dispatched seat, clamped to the tier maximum. The seat
+ * counts live in `PR_REVIEW_TIER_BUDGETS` (engine: quick 1 / default 2 /
+ * deep 4). A four-seat `deep` round would need 660 s, above its 646 s
+ * ceiling, so it clamps and its curve has no ramp. It bounds the REQUEST,
+ * never the available wall clock — a late anchor may still shrink the
+ * effective window below it.
+ */
+function seatPricedFloorMs(level: ReviewLevel): number {
+  return Math.min(
+    PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS[level].maxSeats * PER_SEAT_ALLOCATION_MS,
+    RUNNER_MAX_BUDGET_MS[level],
+  );
+}
+
+export const RUNNER_BUDGET_FLOOR_MS: Record<ReviewLevel, number> = {
+  quick: seatPricedFloorMs("quick"),
+  default: seatPricedFloorMs("default"),
+  deep: seatPricedFloorMs("deep"),
+};
+
+/**
+ * Work units at which the request reaches the tier maximum. Real PRs cluster
+ * at 100–1,000 changed lines, so 5,000 is reachable; the documented
+ * 20,000-line GitHub diff boundary never lifted an ordinary PR off the
+ * floor. A sizing anchor, not a throughput measurement.
+ */
+export const SIZE_SATURATION_WORK_UNITS = 5_000;
 
 
 /**
@@ -375,14 +406,14 @@ export function parseNumstatSize(
 }
 
 /**
- * A computed size-aware request: `floor + (tierMax - floor) * units/20_000`,
- * units saturated at `SIZE_SATURATION_WORK_UNITS`. The caller feeds
- * `requestedBudgetMs` into `anchorRunnerBudget` as `requestMs` — the ONE
- * tier clamp still lives there.
+ * A computed size-aware request: `floor(tier) + (tierMax - floor(tier)) *
+ * units/5_000`, units saturated at `SIZE_SATURATION_WORK_UNITS`. The caller
+ * feeds `requestedBudgetMs` into `anchorRunnerBudget` as `requestMs` — the
+ * ONE tier clamp still lives there.
  */
 export type RunnerBudgetRequest = {
   kind: "requested";
-  /** Integer ms in [RUNNER_BUDGET_FLOOR_MS, tierMax]; the tier maximum when the size is unknown. */
+  /** Integer ms in [RUNNER_BUDGET_FLOOR_MS[level], tierMax]; the tier maximum when the size is unknown. */
   requestedBudgetMs: number;
   /**
    * The work units the request was sized from — one per textual changed
@@ -425,10 +456,12 @@ export function deriveReviewBudget(inputs: ReviewBudgetInputs): ReviewBudget {
  *
  *   workUnits         = Σ max(1, linesInFile)   (binary/zero-text files pay 1)
  *   requestedMs(null) = tierMaxMs
- *   requestedMs       = 120_000 + floor((tierMaxMs - 120_000) * min(workUnits, 20_000) / 20_000)
+ *   requestedMs       = floor(level)
+ *                     + floor((tierMaxMs - floor(level)) * min(workUnits, 5_000) / 5_000)
  *
- * Zero work requests the floor; 20,000 units and beyond request exactly the
- * tier maximum — adjacent sizes ramp smoothly, there are no buckets. `null`
+ * Zero work requests the floor; 5,000 units and beyond request exactly the
+ * tier maximum — adjacent sizes ramp smoothly, there are no buckets; a tier
+ * whose seat-priced floor clamps to its ceiling has no ramp at all. `null`
  * (numstat absent or unavailable) requests the tier maximum: an unmeasurable
  * diff is never short-changed, and the numstat is never fetched twice.
  *
@@ -455,11 +488,10 @@ export function requestRunnerBudget(
     return { kind: "invalid", requestedBudgetMs: Number.NaN };
   }
   const saturatedUnits = Math.min(workUnits, SIZE_SATURATION_WORK_UNITS);
+  const floorMs = RUNNER_BUDGET_FLOOR_MS[level];
   const requestedBudgetMs =
-    RUNNER_BUDGET_FLOOR_MS +
-    Math.floor(
-      ((tierMaxMs - RUNNER_BUDGET_FLOOR_MS) * saturatedUnits) / SIZE_SATURATION_WORK_UNITS,
-    );
+    floorMs +
+    Math.floor(((tierMaxMs - floorMs) * saturatedUnits) / SIZE_SATURATION_WORK_UNITS);
   return { kind: "requested", requestedBudgetMs, workUnits };
 }
 
