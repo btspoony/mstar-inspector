@@ -29,6 +29,7 @@ import {
   FINDING_TITLE_MAX,
   capFindings,
   parseReviewOutput,
+  suggestionFenceSpans,
   type ReviewOutput,
 } from "../../src/review/schema";
 import type { PrTallyResult } from "@mstar-harness/engine";
@@ -667,6 +668,31 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
     expect(clamped.findings[0]!.body).toBe(body.slice(0, FINDING_BODY_MAX - 1) + "…");
   });
 
+  test("an unclosed suggestion fence under the budget is dropped whole, prose kept (QC R1)", () => {
+    const body = "Move this.\n\n```suggestion\nconst x = 1;";
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", body)] }).findings[0]!.body;
+    expect(clampedBody).toBe("Move this.\n\n");
+    expect(clampedBody).not.toContain("```");
+  });
+
+  test("a 4-backtick suggestion fence crossing the budget is dropped whole (QC R2)", () => {
+    const prose = "P".repeat(1500);
+    const fence = ["````suggestion", "C".repeat(800), "````"].join("\n");
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", prose + "\n\n" + fence)] })
+      .findings[0]!.body;
+    expect(clampedBody).toBe(prose + "\n\n");
+    expect(clampedBody).not.toContain("`");
+  });
+
+  test("an inner ```js line does not close the fence, so the whole crossing block is dropped (QC R2)", () => {
+    const prose = "P".repeat(1500);
+    const fence = ["```suggestion", "C".repeat(600), "```js", "C".repeat(20), "```"].join("\n");
+    const clampedBody = clampFindingSizes({ ...base, findings: [finding("t", prose + "\n\n" + fence)] })
+      .findings[0]!.body;
+    expect(clampedBody).toBe(prose + "\n\n");
+    expect(clampedBody).not.toContain("```");
+  });
+
   test("clamping is idempotent", () => {
     const prose = "P".repeat(1500);
     const fence = ["```suggestion", "fix it", "```"].join("\n");
@@ -674,5 +700,37 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
     const once = clampFindingSizes(output);
     const twice = clampFindingSizes(once);
     expect(twice.findings[0]!.body).toBe(once.findings[0]!.body);
+  });
+});
+
+describe("suggestionFenceSpans (CommonMark fence grammar, QC R2)", () => {
+  const blocks = (text: string) =>
+    suggestionFenceSpans(text).map(({ start, end, closed }) => ({ block: text.slice(start, end), closed }));
+
+  test("a 4-backtick opening is closed only by a run of at least four backticks", () => {
+    const text = "````suggestion\nconst md = \"```\";\n```\n````\nafter";
+    expect(blocks(text)).toEqual([
+      { block: "````suggestion\nconst md = \"```\";\n```\n````\n", closed: true },
+    ]);
+  });
+
+  test("only an info string whose first token is exactly suggestion opens a block", () => {
+    expect(blocks("```suggestions\nx\n```")).toEqual([]);
+    expect(blocks("```suggestion-example\nx\n```")).toEqual([]);
+    expect(blocks("```suggestion js\nx\n```")).toEqual([
+      { block: "```suggestion js\nx\n```", closed: true },
+    ]);
+  });
+
+  test("an inner ```js line is not a closing fence", () => {
+    const text = "```suggestion\nconst md = \"```js\";\n```js\nconst y = 2;\n```\nafter";
+    expect(blocks(text)).toEqual([
+      { block: "```suggestion\nconst md = \"```js\";\n```js\nconst y = 2;\n```\n", closed: true },
+    ]);
+  });
+
+  test("a block without its closing fence is reported unclosed and runs to the end", () => {
+    const text = "prose\n\n```suggestion\nconst x = 1;";
+    expect(blocks(text)).toEqual([{ block: "```suggestion\nconst x = 1;", closed: false }]);
   });
 });

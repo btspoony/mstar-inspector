@@ -81,7 +81,7 @@ import { Octokit } from "@octokit/rest";
 import { REVIEW_EMOJI, renderReviewMarkdown } from "@mstar-harness/engine";
 import {
   FINDING_BODY_MAX,
-  dropSuggestionFencesCrossing,
+  dropSuggestionFences,
   type ReviewFinding,
   type ReviewOutput,
 } from "../review/schema";
@@ -1979,14 +1979,8 @@ export function filterLineCommentFindings(
 export function renderLineCommentText(finding: ReviewFinding): string {
   const tag = `${REVIEW_EMOJI[finding.mergeClass]} ${finding.mergeClass}`;
   const head = `**${finding.title}** · ${tag}\n\n`;
-  let text = `${head}${finding.body}`;
-  let droppedFence = false;
-  if (text.length > FINDING_BODY_MAX) {
-    const reduced = dropSuggestionFencesCrossing(text, FINDING_BODY_MAX);
-    text = reduced.text;
-    droppedFence = reduced.dropped;
-  }
-  if (droppedFence && text.slice(head.length).trim() === "") return head.trimEnd();
+  const { text, dropped } = dropSuggestionFences(`${head}${finding.body}`, FINDING_BODY_MAX);
+  if (dropped && text.slice(head.length).trim() === "") return head.trimEnd();
   return text.length <= FINDING_BODY_MAX ? text : `${text.slice(0, FINDING_BODY_MAX - 1)}…`;
 }
 

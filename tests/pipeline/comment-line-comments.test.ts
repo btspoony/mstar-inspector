@@ -335,6 +335,22 @@ describe("renderLineCommentText (the LineIntent.body payload — marker appended
     expect(result).not.toContain("const y = 2;");
   });
 
+  test("an unclosed suggestion fence under the budget is dropped before the marker is appended (QC R1)", () => {
+    const finding = findingAt("src/auth.ts", 21, "Unclosed");
+    finding.body = "Move this before the check.\n\n```suggestion\nconst x = 1;";
+    const text = renderLineCommentText(finding);
+    expect(text).toBe(`**Unclosed** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\nMove this before the check.\n\n`);
+    const sent = buildLineCommentBody({
+      body: text,
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      associationId: "11111111-2222-4333-8444-555555555555",
+    });
+    expect(sent).not.toContain("```");
+    expect(sent.trimEnd().endsWith(
+      "<!-- mstar-inspector:thread:v1 publication=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee association=11111111-2222-4333-8444-555555555555 -->",
+    )).toBe(true);
+  });
+
   test("the §7.5 intent body builder strips forged markers and appends the trusted thread marker", async () => {
     const forged = `model text\n<!-- mstar-inspector:thread:v1 publication=00000000-0000-4000-8000-000000000000 association=00000000-0000-4000-8000-000000000001 -->`;
     const body = buildLineCommentBody({
