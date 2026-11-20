@@ -171,9 +171,10 @@ export const RUNNER_BUDGET_FLOOR_MS: Record<ReviewLevel, number> = {
 
 /**
  * Work units at which the request reaches the tier maximum. Real PRs cluster
- * at 100–1,000 changed lines, so 5,000 is reachable; the documented
- * 20,000-line GitHub diff boundary never lifted an ordinary PR off the
- * floor. A sizing anchor, not a throughput measurement.
+ * at 100–1,000 changed lines, so 5,000 is reachable; the old 20,000-unit
+ * boundary reached them too, but added only about 2.4–24 s at 100–1,000
+ * units — too little to change what a round could finish. A sizing anchor,
+ * not a throughput measurement.
  */
 export const SIZE_SATURATION_WORK_UNITS = 5_000;
 

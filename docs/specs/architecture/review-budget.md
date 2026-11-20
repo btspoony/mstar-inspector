@@ -51,7 +51,8 @@ partition. That size allocates the budget within the tier:
   dispatches four seats whose seat price is 660 000 ms, above its 646 000 ms ceiling, so its floor
   clamps to the ceiling and its curve has no ramp.
 - 5 000 work units is the saturation point: real PRs cluster at 100–1 000 changed lines, so the
-  curve lifts them off their floor; the documented 20 000-line GitHub boundary never did.
+  curve lifts them off their floor. The old 20 000-unit boundary reached them as well, but added
+  only about 2.4–24 s across 100–1 000 units — too little to change what a round could finish.
 - Unknown size (absent, malformed, truncated, non-safe-integer counts) requests `tierMaxMs`; it never
   shrinks a review.
 - `parseNumstatSize` returns `{ changedLines, workUnits }` in one pass, or `null`. A non-empty stdout
