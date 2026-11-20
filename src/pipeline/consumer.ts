@@ -5902,6 +5902,8 @@ async function processMessage(
     };
     // The document rides the exec stdin pipe: as an argv string it became one
     // argument, and a recheck round above ~98 KiB breaches Linux's 128 KiB cap.
+    // Two deadlines compete here: the anchored exec deadline below and the
+    // later pre-runner cutoff; the write must bill the anchored one.
     const writeInput = await sandbox.runCommand(writeJsonCommand(RUNNER_INPUT_PATH), {
       stdin: toBase64Utf8(JSON.stringify(runnerInput)),
       timeout: boundedStepTimeout(runnerExecDeadlineMs, EXEC_TIMEOUT_GIT_MS, "runner input write"),

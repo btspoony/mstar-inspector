@@ -1939,13 +1939,21 @@ describe("createReviewConsumer", () => {
     // The wire deadline is the ANCHOR's exec end — anchor + 600s tier max —
     // not the 666s pre-runner cutoff a tier-bound write never reaches.
     expect(deadline).toBe(roundStart + 650_000);
-    // The write's window is min(120s, deadline - writeStart): capped here,
-    // but drawn from the same 650s anchor.
+    // The write's window is min(120s, deadline - writeStart): the 120s step
+    // cap, not the 600s anchored remainder, is what the call gets here.
     expect(writeStart).toBe(roundStart + 50_000);
     expect(execTimeout(inputWrite)).toBe(Math.min(EXEC_TIMEOUT_GIT_MS, deadline - writeStart));
+    expect(deadline - writeStart).toBe(600_000);
+    // The two competing deadlines at the write: the anchored one owes 600s,
+    // the later cutoff owes 616s. The step cap hides that 16s gap in the
+    // timeout, so the anchor's own record must carry the difference.
+    expect(roundStart + 666_000 - writeStart).toBe(616_000);
+    const runnerLine = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
+    expect(runnerLine.fields.runner_deadline_ms).toBe(roundStart + 650_000);
+    expect(runnerLine.fields.runner_effective_ms).toBe(600_000);
+    expect(runnerLine.fields.runner_requested_ms).toBe(600_000);
     // The exec gets what the ONE deadline still owes after the write: its
-    // 80s is spent, never re-added — a cutoff-bound write would have claimed
-    // 536s instead of 520s.
+    // 80s is spent, never re-added.
     expect(runnerExecTimeout()).toBe(deadline - (writeStart + 80_000));
     expect(runnerExecTimeout()).toBe(520_000);
     expect(reviewCount(db)).toBe(1);
