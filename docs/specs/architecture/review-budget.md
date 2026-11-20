@@ -1,9 +1,16 @@
 # Review budget — one derivation from the platform cap
 
-Status: implemented. Owner module: `src/review-budget.ts`. The lifecycle contract that consumes
-it is [`review-lifecycle.md`](../feature/review-lifecycle.md).
+## Scope
 
-## One round clock
+The runner's per-round wall-clock allocation and its exhaustion outcome: the round clock, the tier
+ceilings, the per-tier size curve, and the typed `budget-exhausted` stop. The review lifecycle that
+consumes these windows lives in [`review-lifecycle.md`](../feature/review-lifecycle.md).
+
+## Current state
+
+Owner module: `src/review-budget.ts`; status: implemented.
+
+### One round clock
 
 A Cloudflare Queue consumer invocation is capped at 900 000 ms (platform limit, not configurable).
 One review runs inside one message (`max_batch_size: 1`), so that cap is the round clock.
@@ -28,27 +35,24 @@ runnerCeilingMs = 900 000 − reserveMs
 | `default` | 600 000 | 2 412 s |
 | `deep` | 646 000 | 2 458 s |
 
-Invariants:
-
-- Every tier maximum satisfies `tierMaxMs <= runnerCeilingMs` for the whole supported
-  `terminalizeMs` range. A test asserts it, so a table that advertises a budget the consumer cannot
-  finish fails CI instead of shipping.
-- There is exactly one `min()`, inside the derivation. A second clamp at a call site is a defect: it
-  makes an unreachable tier value look shipped.
-- The tier `terminalizeMs` range has one owner — the operator-facing settings store; the derivation
-  imports none of it, names the bounds in a comment, and the table test exercises both store
-  endpoints. Widening the store's range past the shipped deep ceiling fails the proof, never drifts
-  silently.
-- The guard TTL is `ceil((tierMax + 14 × 120 000 + 12 000 + 120 000) / 1000)`, derived from the same
-  budget. Admission retry rungs stay below their TTL with a cumulative sum above it.
-
-## Allocation inside the tier
+### Allocation inside the tier
 
 The diff size is known before the runner starts because the numstat is already read for the seat
 partition. That size allocates the budget within the tier:
 
 - One work unit per textual changed line, with a minimum of one unit per file.
-- `requestedMs = 120 000 + floor((tierMax − 120 000) × min(units, 20 000) / 20 000)`.
+- The floor is priced per tier by the seats that tier dispatches, never by one model call:
+  `floor(tier) = 60 000 + PR_REVIEW_TIER_BUDGETS[tier].maxSeats × 150 000`, clamped to
+  `tierMaxMs`. The 60 000 ms tail mirrors the runner's `PUBLICATION_TAIL_MS`; the 150 000 ms seat
+  figure is the observed 280 s two-seat round (staging PR #334) plus headroom, not a guess. The seat
+  counts come from the engine table — quick 1, default 2, deep 4.
+- `requestedMs = floor(tier) + floor((tierMax − floor(tier)) × min(units, 5 000) / 5 000)`.
+- The resulting smallest allocations are quick 210 000, default 360 000 and deep 646 000 ms. `deep`
+  dispatches four seats whose seat price is 660 000 ms, above its 646 000 ms ceiling, so its floor
+  clamps to the ceiling and its curve has no ramp.
+- 5 000 work units is the saturation point: real PRs cluster at 100–1 000 changed lines, so the
+  curve lifts them off their floor. The old 20 000-unit boundary reached them as well, but added
+  only about 2.4–24 s across 100–1 000 units — too little to change what a round could finish.
 - Unknown size (absent, malformed, truncated, non-safe-integer counts) requests `tierMaxMs`; it never
   shrinks a review.
 - `parseNumstatSize` returns `{ changedLines, workUnits }` in one pass, or `null`. A non-empty stdout
@@ -56,10 +60,8 @@ partition. That size allocates the budget within the tier:
   truncation flag.
 - An explicit request above `tierMaxMs` is refused as `oversized`, not clamped. A non-finite or
   non-positive request is refused as `invalid`.
-- The allocation never reaches the admission windows: guard TTL and the Check lease derive from the
-  ceiling, so a small PR cannot shorten the window a retry or recovery needs.
 
-## Exhaustion outcome
+### Exhaustion outcome
 
 A wall-clock stop is a terminal execution outcome, **outside** the review verdict envelope.
 
@@ -96,6 +98,35 @@ The runner reports, the Worker publishes:
 - A confirmed exhaustion is ACKed without another paid queue retry. The failure row carries only
   trusted budget fields and fixed diagnostics; provider stderr stays in the logs.
 - `incomplete` keeps its narrower meaning: a run that published partial work under a healthy budget.
+
+## Invariants
+
+- Every tier maximum satisfies `tierMaxMs <= runnerCeilingMs` for the whole supported
+  `terminalizeMs` range. A test asserts it, so a table that advertises a budget the consumer cannot
+  finish fails CI instead of shipping.
+- A round's allocation is clamped by exactly one `min()`, inside `anchorRunnerBudget`; the tier
+  table's own `deep` floor clamp (see Current state) is fixed derivation, not a per-round clamp. A
+  second clamp at a call site is a defect: it makes an unreachable tier value look shipped.
+- The tier `terminalizeMs` range has one owner — the operator-facing settings store; the derivation
+  imports none of it, names the bounds in a comment, and the table test exercises both store
+  endpoints. Widening the store's range past the shipped deep ceiling fails the proof, never drifts
+  silently.
+- The guard TTL is `ceil((tierMax + 14 × 120 000 + 12 000 + 120 000) / 1000)`, derived from the same
+  budget. Admission retry rungs stay below their TTL with a cumulative sum above it.
+- The allocation never reaches the admission windows: guard TTL and the Check lease derive from the
+  ceiling, so a small PR cannot shorten the window a retry or recovery needs.
+
+## Where it lives
+
+- `src/review-budget.ts` — the derivation, constants and types above.
+- `tests/pipeline/review-budget.test.ts` — the tier-table and allocation cases.
+- `docs/specs/architecture/review-budget.md` — this page.
+
+## Change obligations
+
+A change to the platform cap, the reserve ledger, the tier table, the per-tier floors, the
+saturation point or the refusal vocabulary updates this page and
+`tests/pipeline/review-budget.test.ts` in the same change.
 
 ## Known limits
 

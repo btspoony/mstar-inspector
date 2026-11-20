@@ -16,12 +16,15 @@ import {
   deriveReviewBudget,
   CHECK_WINDOW_MS,
   ROUND_BUDGET_MS,
+  PUBLICATION_TAIL_MS,
+  PER_SEAT_ALLOCATION_MS,
   RUNNER_BUDGET_FLOOR_MS,
   SIZE_SATURATION_WORK_UNITS,
   postRunnerReserveMs,
   reviewGuardTtlSeconds,
 } from "../../src/review-budget";
 import { CHECK_TERMINALIZE_MAX, CHECK_TERMINALIZE_MIN } from "../../src/dashboard/runtime-config-store";
+import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../packages/shared/src/runtime";
 
 const LEVELS: readonly ReviewLevel[] = ["quick", "default", "deep"];
@@ -224,17 +227,31 @@ describe("allocation: one min(), one absolute deadline", () => {
   });
 });
 
-describe("size-aware request: floor → tier maximum at 20,000 work units", () => {
+describe("size-aware request: floor → tier maximum at 5,000 work units", () => {
   const size = (changedLines: number, workUnits: number) => ({ changedLines, workUnits });
 
-  test("a zero-line diff requests the floor, not a refusal and not zero", () => {
+  test("a zero-line diff requests the tier floor, not a refusal and not zero", () => {
     for (const level of LEVELS) {
       const request = requestRunnerBudget(level, size(0, 0));
       expect(request.kind).toBe("requested");
       if (request.kind !== "requested") return;
-      expect(request.requestedBudgetMs).toBe(RUNNER_BUDGET_FLOOR_MS);
+      expect(request.requestedBudgetMs).toBe(RUNNER_BUDGET_FLOOR_MS[level]);
       expect(request.workUnits).toBe(0);
     }
+  });
+
+  test("each tier floor prices its seat count between the tail and the tier maximum", () => {
+    for (const level of LEVELS) {
+      const seatPriced =
+        PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS[level].maxSeats * PER_SEAT_ALLOCATION_MS;
+      // The seat price is the floor unless the tier ceiling is lower — then
+      // the floor clamps to that ceiling and the tier gets no size ramp.
+      expect(RUNNER_BUDGET_FLOOR_MS[level]).toBe(Math.min(seatPriced, RUNNER_MAX_BUDGET_MS[level]));
+      expect(RUNNER_BUDGET_FLOOR_MS[level]).toBeLessThanOrEqual(RUNNER_MAX_BUDGET_MS[level]);
+    }
+    // quick 60s + 1 × 150s, default 60s + 2 × 150s, deep 60s + 4 × 150s = 660s
+    // clamped to its 646s ceiling.
+    expect(RUNNER_BUDGET_FLOOR_MS).toEqual({ quick: 210_000, default: 360_000, deep: 646_000 });
   });
 
   test("an unknown size requests the tier maximum — never the floor and never a second numstat", () => {
@@ -255,8 +272,8 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
     expect(request.workUnits).toBe(3);
-    // 120_000 + floor(480_000 * 3 / 20_000) = 120_072.
-    expect(request.requestedBudgetMs).toBe(120_072);
+    // 360_000 + floor(240_000 * 3 / 5_000) = 360_144.
+    expect(request.requestedBudgetMs).toBe(360_144);
   });
 
   test("a zero-text row beside real lines pays its own unit (the per-file minimum is per file)", () => {
@@ -292,7 +309,7 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
     expect(below.kind).toBe("requested");
     if (below.kind !== "requested") return;
     expect(below.requestedBudgetMs).toBeLessThan(RUNNER_MAX_BUDGET_MS.default);
-    expect(below.requestedBudgetMs).toBeGreaterThan(RUNNER_BUDGET_FLOOR_MS);
+    expect(below.requestedBudgetMs).toBeGreaterThan(RUNNER_BUDGET_FLOOR_MS.default);
   });
 
   test("the ramp honours floor and ceiling on every interior size and every tier", () => {
@@ -302,20 +319,21 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
         expect(request.kind).toBe("requested");
         if (request.kind !== "requested") return;
         expect(Number.isInteger(request.requestedBudgetMs)).toBe(true);
-        expect(request.requestedBudgetMs).toBeGreaterThanOrEqual(RUNNER_BUDGET_FLOOR_MS);
+        expect(request.requestedBudgetMs).toBeGreaterThanOrEqual(RUNNER_BUDGET_FLOOR_MS[level]);
         expect(request.requestedBudgetMs).toBeLessThanOrEqual(RUNNER_MAX_BUDGET_MS[level]);
       }
     }
   });
 
-  test("floor arithmetic is floor, not rounding: deep, 2 work units → 120_052 ms", () => {
-    // floor((646_000 − 120_000) × 2 / 20_000) = floor(52.6) = 52 — Math.round
-    // or Math.ceil would produce 120_053, so this literal is the only pin
-    // that distinguishes the contract's floor semantics from rounding.
+  test("a tier whose seat-priced floor clamps to its ceiling has no ramp — deep, 2 work units → 646_000 ms", () => {
+    // 60_000 + 4 × 150_000 = 660_000 is above the 646_000 ceiling, so deep's
+    // floor IS its maximum: even a two-line diff requests the whole ceiling
+    // and the ramp term is exactly zero.
     const request = requestRunnerBudget("deep", size(2, 2));
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
-    expect(request.requestedBudgetMs).toBe(120_052);
+    expect(request.requestedBudgetMs).toBe(646_000);
+    expect(request.requestedBudgetMs).toBe(RUNNER_BUDGET_FLOOR_MS.deep);
   });
 
   test("malformed size input is invalid — never treated as an empty diff", () => {
@@ -343,13 +361,13 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
     const request = requestRunnerBudget("default", size(2_000, 2_000));
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
-    // 2,000 units → 120_000 + floor(480_000 * 2_000 / 20_000) = 168_000.
-    expect(request.requestedBudgetMs).toBe(168_000);
+    // 2,000 units → 360_000 + floor(240_000 * 2_000 / 5_000) = 456_000.
+    expect(request.requestedBudgetMs).toBe(456_000);
     const anchor = anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
     expect(anchor.kind).toBe("allocated");
     if (anchor.kind !== "allocated") return;
-    expect(anchor.requestedBudgetMs).toBe(168_000);
-    expect(anchor.effectiveBudgetMs).toBe(168_000);
+    expect(anchor.requestedBudgetMs).toBe(456_000);
+    expect(anchor.effectiveBudgetMs).toBe(456_000);
   });
 
 });
@@ -445,9 +463,15 @@ describe("admission windows cover the whole allocation range", () => {
       };
       const floor = anchoredWindows(size(0, 1));
       const ceiling = anchoredWindows(null);
-      // Distinct inputs: the pair cannot pass by both runs taking the same
-      // path — the requests, and so the allocations, differ.
-      expect(floor.effectiveBudgetMs).not.toBe(ceiling.effectiveBudgetMs);
+      // Where the seat-priced floor sits below the ceiling the two inputs
+      // take different allocation paths, so the pair cannot pass by both
+      // runs landing on the same value; `deep` clamps its floor to the
+      // ceiling and legitimately has no such difference to prove.
+      if (RUNNER_BUDGET_FLOOR_MS[level] < RUNNER_MAX_BUDGET_MS[level]) {
+        expect(floor.effectiveBudgetMs).not.toBe(ceiling.effectiveBudgetMs);
+      } else {
+        expect(floor.effectiveBudgetMs).toBe(ceiling.effectiveBudgetMs);
+      }
       expect(floor.guardTtlSeconds).toBe(ceiling.guardTtlSeconds);
       expect(floor.checkWindowMs).toBe(ceiling.checkWindowMs);
       expect(floor.checkLeaseMs).toBe(ceiling.checkLeaseMs);
@@ -532,7 +556,7 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
 
   test("a row with extra fields or an inexact count is unknown size — never a small allocation", () => {
     // More than the three expected fields means the parse cannot trust what
-    // it read: this row would otherwise look like ONE work unit (120_024 ms
+    // it read: this row would otherwise look like ONE work unit (360_048 ms
     // at the default tier instead of the 600_000 ms tier maximum).
     expect(parseNumstatSize("1\t0\tfile\textra\n", false)).toBeNull();
     // 9007199254740993 = 2^53 + 1: Number() silently rounds it to
