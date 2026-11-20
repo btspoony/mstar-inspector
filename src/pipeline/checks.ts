@@ -85,6 +85,7 @@ import {
 } from "../store/review-checks";
 import { redactSecrets } from "./redact";
 import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
+import type { BudgetExhaustedOutcome } from "../../packages/shared/src/budget-exhausted-wire";
 
 // ---------------------------------------------------------------------------
 // Transport seam (spec §7.6: one credential path; §7.9: typed responses)
@@ -1152,6 +1153,55 @@ export const CHECK_SUMMARIES = {
     `Review was skipped for this head: ${boundedText(reason, "the delivery was skipped before execution")}. No review was published.`,
 } as const;
 
+/** The cause phrase the public summary carries for each typed stop. */
+const BUDGET_EXHAUSTED_CAUSE_TEXT: Record<BudgetExhaustedOutcome["cause"], string> = {
+  "runner-deadline": "runner deadline reached",
+  "consumer-deadline": "consumer deadline reached",
+  "sandbox-kill": "sandbox execution killed at its deadline",
+};
+
+/**
+ * The Check's completeness statement for a budget stop (Review budget spec
+ * § Exhaustion and Check publication). Full form when the runner window and
+ * every counter are known; otherwise the short form appends only observed
+ * counters, in order, and never implies a rerun would succeed. A counter the
+ * attempt never observed stays out — it is null in the record, never 0.
+ * Milliseconds render as exact decimal seconds with no trailing zeros.
+ */
+export function budgetExhaustedSummary(outcome: BudgetExhaustedOutcome): string {
+  const budget = String(outcome.budgetMs / 1000);
+  const tail =
+    " — a time-budget failure, not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.";
+  const { seatsDispatched, seatsStopped, changedLines } = outcome;
+  if (
+    outcome.budgetWindow === "runner" &&
+    seatsStopped !== null &&
+    seatsDispatched !== null &&
+    changedLines !== null
+  ) {
+    return (
+      `Review budget exhausted: ${outcome.tier} review stopped at ${budget}s ` +
+      `with ${seatsStopped}/${seatsDispatched} seats stopped before finishing ` +
+      `(${changedLines} changed lines)${tail}`
+    );
+  }
+  const counters: string[] = [];
+  if (seatsStopped !== null && seatsDispatched !== null) {
+    counters.push(`${seatsStopped}/${seatsDispatched} seats stopped before finishing`);
+  } else if (seatsStopped !== null) {
+    counters.push(`${seatsStopped} seats stopped`);
+  } else if (seatsDispatched !== null) {
+    counters.push(`${seatsDispatched} seats dispatched`);
+  }
+  if (changedLines !== null) counters.push(`${changedLines} changed lines`);
+  return (
+    `Review budget exhausted: ${outcome.tier} review reached its ${budget}s ${outcome.budgetWindow} budget ` +
+    `(${BUDGET_EXHAUSTED_CAUSE_TEXT[outcome.cause]})` +
+    (counters.length === 0 ? "" : `; ${counters.join("; ")}`) +
+    tail
+  );
+}
+
 /**
  * Why no proof was readable when the deadline ended the proof wait. Only the
  * Check reconciliation lane's deadline path supplies one; every other
@@ -1183,7 +1233,13 @@ export type CheckTerminalOutcome =
    * The attempt was claimed ahead of the checkout and the authoritative head
    * proved a DIFFERENT commit: this run reviewed nothing for its own SHA.
    */
-  | "superseded";
+  | "superseded"
+  /**
+   * The attempt's wall clock ended the review before an envelope existed —
+   * the typed terminal outcome outside the verdict envelope, published once
+   * in the Check summary from the `budgetExhaustion` input.
+   */
+  | "budget-exhausted";
 
 /**
  * Decide the Check conclusion from spec §7.9's matrix:
@@ -1245,6 +1301,11 @@ export function decideConclusion(input: {
    */
   unconfirmedCause?: UnconfirmedCause;
   reason?: string;
+  /**
+   * Required with `outcome: "budget-exhausted"`: this attempt's typed stop
+   * record — the summary's sole source of tier, budget and observed counters.
+   */
+  budgetExhaustion?: BudgetExhaustedOutcome;
 }): CheckConclusion {
   const { proof, outcome, gate, review, inherited } = input;
   if (proof !== null) {
@@ -1358,6 +1419,17 @@ export function decideConclusion(input: {
   }
   if (outcome === "degraded-not-posted") {
     return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degradedNotPosted };
+  }
+  if (outcome === "budget-exhausted") {
+    // A wall-clock stop is a failure record, never a verdict: the Check says
+    // so once with this attempt's derived facts. `budgetExhaustion` is
+    // required by contract — the two seams that supply this outcome always
+    // carry the record they resolved.
+    return {
+      desired: "failure",
+      title: CHECK_NAME,
+      summary: budgetExhaustedSummary(input.budgetExhaustion!),
+    };
   }
   // publication-unknown and expired-without-proof are both unconfirmed. The
   // deadline path names which proof it could not read; without that
@@ -1479,6 +1551,11 @@ export type CheckLifecycle = {
      * Omitted → no result to inherit (`neutral` for `skipped`).
      */
     inheritedHeadSha?: string;
+    /**
+     * Required with `outcome: "budget-exhausted"`: this attempt's typed stop
+     * record — the frozen Check summary's sole source of budget facts.
+     */
+    budgetExhaustion?: BudgetExhaustedOutcome;
     /**
      * The operator-configured bound on the one terminal `checks.update`
      * (`review.check.update_timeout_ms`). Omitted → the adapter's own fallback,
@@ -1603,6 +1680,11 @@ export type CheckLifecycle = {
      * corrects the frozen intent.
      */
     outcome?: CheckTerminalOutcome;
+    /**
+     * Required with `outcome: "budget-exhausted"`: the same typed record the
+     * terminal path carries, so a deferred send freezes the same summary.
+     */
+    budgetExhaustion?: BudgetExhaustedOutcome;
     /**
      * Set with `outcome: "skipped"`: the reviewed head whose result the run
      * inherits, read exactly as `terminalize` reads it.
@@ -2238,6 +2320,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         review,
         inherited,
         headSha: handle.headSha,
+        ...(input.budgetExhaustion === undefined ? {} : { budgetExhaustion: input.budgetExhaustion }),
       });
       // Freeze the boundary title/summary and the proof link BEFORE any remote
       // update, fenced on the CURRENT lease with a clock sampled for THIS write
@@ -2314,6 +2397,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
                 ? {}
                 : { inherited: { headSha: handle.headSha, reviewedHeadSha: input.inheritedHeadSha } }),
               headSha: handle.headSha,
+              ...(input.budgetExhaustion === undefined ? {} : { budgetExhaustion: input.budgetExhaustion }),
             });
       // Sample the fence clock for THIS write, after the reads above: the
       // inherited-head reads are D1 round trips, and a snapshot taken before

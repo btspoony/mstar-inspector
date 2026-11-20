@@ -57,6 +57,7 @@ import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
   attachCheckAtAcceptance,
+  budgetExhaustedSummary,
   createChecksAdapter,
   createCheckBeginLatch,
   createCheckLifecycle,
@@ -3508,5 +3509,82 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     expect(fake.updates).toHaveLength(1);
     expect(fake.updates[0]!.params.output).toEqual({ title: CHECK_NAME, summary });
     expect(warns).toHaveLength(0);
+  });
+});
+
+describe("budget-exhausted Check vocabulary", () => {
+  const TAIL =
+    " — a time-budget failure, not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.";
+
+  test("full form states tier, seconds, both seat counts and the changed lines", () => {
+    const summary = budgetExhaustedSummary({
+      kind: "budget-exhausted",
+      cause: "runner-deadline",
+      budgetWindow: "runner",
+      tier: "default",
+      budgetMs: 600_000,
+      seatsDispatched: 5,
+      seatsStopped: 3,
+      changedLines: 402,
+    });
+    expect(summary).toBe(
+      `Review budget exhausted: default review stopped at 600s with 3/5 seats stopped before finishing (402 changed lines)${TAIL}`,
+    );
+  });
+
+  test("short form appends only the observed counters, in order", () => {
+    const summary = budgetExhaustedSummary({
+      kind: "budget-exhausted",
+      cause: "consumer-deadline",
+      budgetWindow: "preparation",
+      tier: "quick",
+      budgetMs: 12_500,
+      seatsDispatched: 0,
+      seatsStopped: 0,
+      changedLines: null,
+    });
+    expect(summary).toBe(
+      `Review budget exhausted: quick review reached its 12.5s preparation budget (consumer deadline reached); 0/0 seats stopped before finishing${TAIL}`,
+    );
+  });
+
+  test("a killed exec with no seat evidence states the budget and omits the counters", () => {
+    const summary = budgetExhaustedSummary({
+      kind: "budget-exhausted",
+      cause: "sandbox-kill",
+      budgetWindow: "runner",
+      tier: "deep",
+      budgetMs: 900_000,
+      seatsDispatched: null,
+      seatsStopped: null,
+      changedLines: 17,
+    });
+    expect(summary).toBe(
+      `Review budget exhausted: deep review reached its 900s runner budget (sandbox execution killed at its deadline); 17 changed lines${TAIL}`,
+    );
+  });
+
+  test("decideConclusion publishes one failure with that summary and no pass", () => {
+    const outcome = {
+      kind: "budget-exhausted" as const,
+      cause: "runner-deadline" as const,
+      budgetWindow: "runner" as const,
+      tier: "default" as const,
+      budgetMs: 600_000,
+      seatsDispatched: 5,
+      seatsStopped: 3,
+      changedLines: 402,
+    };
+    const conclusion = decideConclusion({
+      proof: null,
+      outcome: "budget-exhausted",
+      gate: null,
+      review: null,
+      headSha: "a".repeat(40),
+      budgetExhaustion: outcome,
+    });
+    expect(conclusion.desired).toBe("failure");
+    expect(conclusion.title).toBe(CHECK_NAME);
+    expect(conclusion.summary).toBe(budgetExhaustedSummary(outcome));
   });
 });

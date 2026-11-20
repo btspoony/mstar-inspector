@@ -1052,18 +1052,18 @@ describe("createReviewConsumer", () => {
   });
 
   test("runner failure with empty stderr says so explicitly", async () => {
-    h.sandbox.runnerExitCode = 124; // the exec bound fired — the run leaves nothing on stderr
+    h.sandbox.runnerExitCode = 1; // a plain runner fault — nothing on stderr
     h.sandbox.runnerStderr = "";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
-      /runner failed: exit 124, stdout 0B, stderr empty/,
+      /runner failed: exit 1, stdout 0B, stderr empty/,
     );
   });
 
   test("runner failure reports stdout in UTF-8 bytes, not UTF-16 units", async () => {
-    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerExitCode = 1;
     // Two code units, six UTF-8 bytes: `String.length` would print 2.
     h.sandbox.runnerStdout = "✓✓";
     const db = await createSeededTestD1();
@@ -1079,7 +1079,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("runner failure keeps the stderr TAIL, bounded", async () => {
-    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerExitCode = 1;
     h.sandbox.runnerStderr = `${"x".repeat(5000)}\nrunner: seat budget exceeded after 600s\n`;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
@@ -1090,6 +1090,46 @@ describe("createReviewConsumer", () => {
     );
     expect(message).toContain("runner: seat budget exceeded after 600s");
     expect(message.length).toBeLessThan(700);
+  });
+
+  test("the runner's exit-0 budget signal acks with the typed outcome, not a verdict", async () => {
+    h.sandbox.runnerExitCode = 0;
+    h.sandbox.runnerStdout = JSON.stringify({
+      schema: "mstar.review-budget-exhausted/v1",
+      seatsDispatched: 5,
+      seatsStopped: 3,
+    });
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    // No throw → the handler acks; the review never reached an envelope, so
+    // no publication, no comment and no review row.
+    await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+
+    expect(reviewCount(db)).toBe(0);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain("budget-exhausted:");
+    expect(row).toContain('"cause":"runner-deadline"');
+    expect(row).toContain('"seatsDispatched":5');
+    expect(row).toContain('"seatsStopped":3');
+  });
+
+  test("a sandbox kill at the anchored deadline acks with the typed outcome and unknown counters", async () => {
+    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerStdout = "";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).toContain('"seatsDispatched":null');
+    expect(row).toContain('"seatsStopped":null');
   });
 
   test("runner failure keeps the CAUSE and the counted chain fold inside the persisted tail", async () => {
@@ -1651,14 +1691,16 @@ describe("createReviewConsumer", () => {
       roundBudgetMs: 1,
     });
 
-    await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
-      /round budget spent: diff capture declined/,
-    );
+    // A confirmed stop is terminal: the handler acks (no throw → no queue
+    // retry) after the Check row and the typed failure row landed.
+    await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
 
     // Clone → rev-parse only: no exec ran on a spent deadline.
     expect(h.sandbox.calls).toHaveLength(2);
     expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).toContain("round budget spent");
+    expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
+    expect(String(failureRows(db)[0]!.error)).toContain('"cause":"consumer-deadline"');
+    expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"preparation"');
   });
 
   test("the fallback's steps shrink to what the refused capture left of the ONE diff window", async () => {
@@ -1753,7 +1795,7 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(0);
   });
 
-  test("a round past the derived runner deadline declines the fallback and rethrows the 406", async () => {
+  test("a round past the derived runner deadline declines the fallback and records the 406 under the budget outcome", async () => {
     h.sandbox.diffExitCode = 1;
     h.sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
     const db = await createSeededTestD1();
@@ -1764,9 +1806,10 @@ describe("createReviewConsumer", () => {
         // the 120s capture allowance — a fallback could only starve the runner.
         ...clockSpendingSandbox("git init", 600_000, clock),
       });
-      await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
-        /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
-      );
+      // The 406 and the derived deadline together end the attempt: the row
+      // keeps the git-stage cause verbatim under the typed prefix, and the
+      // handler acks instead of retrying a spent clock.
+      await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
     });
 
     expect(h.sandbox.calls).toHaveLength(3);
@@ -1777,6 +1820,8 @@ describe("createReviewConsumer", () => {
       diff_fallback_step: "admission",
     });
     expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
+    expect(String(failureRows(db)[0]!.error)).toContain("HTTP 406: Sorry, the diff exceeded");
   });
 
   test("deep reaches the fallback: its runner budget is capped by the derived deadline, not reserved in full", async () => {
@@ -2014,11 +2059,16 @@ describe("createReviewConsumer", () => {
           destroy: h.fakeSandbox.destroy,
         }),
       });
-      await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/round budget spent: runner declined/);
+      // The write spent the whole anchored window, so the exec is declined
+      // with the typed outcome instead of starting a 1ms run: the handler
+      // acks (a retry would only lose the same clock) after the failure row.
+      await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
     });
 
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
+    expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"runner"');
   });
 
   test("a small diff requests the size-derived budget — the request (not the cutoff) produces the effective value, and the anchored deadline never moves after the input write", async () => {
@@ -2130,15 +2180,15 @@ describe("createReviewConsumer", () => {
           destroy: h.fakeSandbox.destroy,
         }),
       });
-      await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
-        /round budget spent: runner declined — the pre-runner cutoff is spent \(0ms left for it\)/,
-      );
+      await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
     });
 
     // No payload write, no paid exec: the refusal landed BEFORE both.
     expect(h.sandbox.calls.some((c) => c.cmd.startsWith("base64 -d >"))).toBe(false);
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
+    expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"preparation"');
   });
 
   test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
