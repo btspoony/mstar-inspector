@@ -131,6 +131,23 @@ export const ROUND_BUDGET_MS = 900_000;
 export const CHECK_WINDOW_MS = ROUND_BUDGET_MS;
 
 /**
+ * The documented request floor (ms): the existing 60s runner tail plus the
+ * only local timing anchor, one observed ~52s model call (spec:
+ * .mstar/iterations/v1.21-review-budget/specs/review-budget.md § Allocation).
+ * It bounds the REQUEST, never the available wall clock — a late anchor may
+ * still shrink the effective window below it.
+ */
+export const RUNNER_BUDGET_FLOOR_MS = 120_000;
+
+/**
+ * Work units at which the request reaches the tier maximum: the documented
+ * 20,000-line GitHub diff boundary — a sizing anchor, not a throughput
+ * measurement.
+ */
+export const SIZE_SATURATION_WORK_UNITS = 20_000;
+
+
+/**
  * The Check terminalize setting's supported range (ms) is owned by
  * `CHECK_TERMINALIZE_MIN`/`CHECK_TERMINALIZE_MAX` in
  * `src/dashboard/runtime-config-store.ts` — the operator-facing bounds the
@@ -267,6 +284,41 @@ export type RunnerBudgetInvalid = {
 export type RunnerBudgetOutcome = RunnerBudgetAnchor | RunnerBudgetRefusal | RunnerBudgetOversize | RunnerBudgetInvalid;
 
 /**
+ * The size facts of the SELECTED numstat (full or incremental — the consumer
+ * reads it once for the seat partition and passes it through unchanged):
+ * `changedLines` is the textual adds+deletions sum the attempt reports
+ * verbatim; `files` is the PER-FILE textual line count in row order, where a
+ * binary `-/-` or zero-text row carries 0 so the file still pays its minimum
+ * one work unit inside the request. `null` is a known-unknown size, never a
+ * zero.
+ */
+export type ReviewDiffSize = {
+  changedLines: number;
+  files: readonly number[];
+};
+
+/**
+ * A computed size-aware request: `floor + (tierMax - floor) * units/20_000`,
+ * units saturated at `SIZE_SATURATION_WORK_UNITS`. The caller feeds
+ * `requestedBudgetMs` into `anchorRunnerBudget` as `requestMs` — the ONE
+ * tier clamp still lives there.
+ */
+export type RunnerBudgetRequest = {
+  kind: "requested";
+  /** Integer ms in [RUNNER_BUDGET_FLOOR_MS, tierMax]; the tier maximum when the size is unknown. */
+  requestedBudgetMs: number;
+  /**
+   * The work units the request was sized from — one per textual changed
+   * line, minimum one per file — `null` when the size was unknown.
+   */
+  workUnits: number | null;
+};
+
+/** The size-aware request, or the reused `invalid` refusal on malformed size input. */
+export type RunnerBudgetRequestOutcome = RunnerBudgetRequest | RunnerBudgetInvalid;
+
+
+/**
  * Derive the round's budget. The output names every window a consumer bills
  * from the same clock: the reserve, the absolute pre-runner cutoff, the
  * preparation budget, the tier maximum, the admission guard TTL, and the
@@ -286,6 +338,54 @@ export function deriveReviewBudget(inputs: ReviewBudgetInputs): ReviewBudget {
     checkWindowMs: CHECK_WINDOW_MS,
     checkLeaseMs: CHECK_WINDOW_MS,
   };
+}
+
+/**
+ * Convert the selected numstat's size into the runner's requested budget —
+ * the deterministic request that `anchorRunnerBudget` clamps against the
+ * live cutoff; it never overrides the tier ceiling and never decides the
+ * outcome. Capped linear interpolation in whole ms:
+ *
+ *   workUnits         = Σ max(1, linesInFile)   (binary/zero-text files pay 1)
+ *   requestedMs(null) = tierMaxMs
+ *   requestedMs       = 120_000 + floor((tierMaxMs - 120_000) * min(workUnits, 20_000) / 20_000)
+ *
+ * Zero work requests the floor; 20,000 units and beyond request exactly the
+ * tier maximum — adjacent sizes ramp smoothly, there are no buckets. `null`
+ * (numstat absent or unavailable) requests the tier maximum: an unmeasurable
+ * diff is never short-changed, and the numstat is never fetched twice.
+ *
+ * Malformed size input — a non-integer or negative count, or a `changedLines`
+ * that disagrees with the file lines — is refused with the existing
+ * `invalid` vocabulary: invalid data is not treated as empty, and a
+ * corrupted size must not launder into a request the review would trust.
+ */
+export function requestRunnerBudget(
+  level: ReviewLevel,
+  size: ReviewDiffSize | null,
+): RunnerBudgetRequestOutcome {
+  const tierMaxMs = RUNNER_MAX_BUDGET_MS[level];
+  if (size === null) {
+    return { kind: "requested", requestedBudgetMs: tierMaxMs, workUnits: null };
+  }
+  const { changedLines, files } = size;
+  const malformed =
+    !Array.isArray(files) ||
+    !Number.isInteger(changedLines) ||
+    changedLines < 0 ||
+    files.some((lines) => !Number.isInteger(lines) || lines < 0) ||
+    files.reduce((sum, lines) => sum + lines, 0) !== changedLines;
+  if (malformed) {
+    return { kind: "invalid", requestedBudgetMs: Number.NaN };
+  }
+  const workUnits = files.reduce((sum, lines) => sum + Math.max(1, lines), 0);
+  const saturatedUnits = Math.min(workUnits, SIZE_SATURATION_WORK_UNITS);
+  const requestedBudgetMs =
+    RUNNER_BUDGET_FLOOR_MS +
+    Math.floor(
+      ((tierMaxMs - RUNNER_BUDGET_FLOOR_MS) * saturatedUnits) / SIZE_SATURATION_WORK_UNITS,
+    );
+  return { kind: "requested", requestedBudgetMs, workUnits };
 }
 
 /**

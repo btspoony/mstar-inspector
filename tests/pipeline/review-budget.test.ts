@@ -11,8 +11,11 @@ import { describe, expect, test } from "bun:test";
 
 import {
   anchorRunnerBudget,
+  requestRunnerBudget,
   deriveReviewBudget,
   ROUND_BUDGET_MS,
+  RUNNER_BUDGET_FLOOR_MS,
+  SIZE_SATURATION_WORK_UNITS,
   postRunnerReserveMs,
 } from "../../src/review-budget";
 import { CHECK_TERMINALIZE_MAX, CHECK_TERMINALIZE_MIN } from "../../src/dashboard/runtime-config-store";
@@ -215,5 +218,120 @@ describe("allocation: one min(), one absolute deadline", () => {
     expect(anchor.kind).toBe("allocated");
     if (anchor.kind !== "allocated") return;
     expect(anchor.effectiveBudgetMs).toBe(166_000);
+  });
+});
+
+describe("size-aware request: floor → tier maximum at 20,000 work units", () => {
+  const size = (changedLines: number, files: readonly number[]) => ({ changedLines, files });
+
+  test("a zero-line diff requests the floor, not a refusal and not zero", () => {
+    for (const level of LEVELS) {
+      const request = requestRunnerBudget(level, size(0, []));
+      expect(request.kind).toBe("requested");
+      if (request.kind !== "requested") return;
+      expect(request.requestedBudgetMs).toBe(RUNNER_BUDGET_FLOOR_MS);
+      expect(request.workUnits).toBe(0);
+    }
+  });
+
+  test("an unknown size requests the tier maximum — never the floor and never a second numstat", () => {
+    for (const level of LEVELS) {
+      const request = requestRunnerBudget(level, null);
+      expect(request.kind).toBe("requested");
+      if (request.kind !== "requested") return;
+      expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS[level]);
+      expect(request.workUnits).toBeNull();
+    }
+  });
+
+  test("binary-only files pay one unit each — zero textual lines still size the diff", () => {
+    // `git apply --numstat` prints "-\t-\tpath" for binary rows; the parser
+    // reports 0 textual lines for them, and the per-file minimum turns each
+    // into exactly one work unit.
+    const request = requestRunnerBudget("default", size(0, [0, 0, 0]));
+    expect(request.kind).toBe("requested");
+    if (request.kind !== "requested") return;
+    expect(request.workUnits).toBe(3);
+    // 120_000 + floor(480_000 * 3 / 20_000) = 120_072.
+    expect(request.requestedBudgetMs).toBe(120_072);
+  });
+
+  test("a zero-text row beside real lines pays its own unit (the per-file minimum is per file)", () => {
+    const request = requestRunnerBudget("default", size(5, [5, 0, 0]));
+    expect(request.kind).toBe("requested");
+    if (request.kind !== "requested") return;
+    // Σ max(1, linesInFile) = 5 + 1 + 1 = 7, not 5 — binary files cost a unit
+    // even when a sibling file carries the lines.
+    expect(request.workUnits).toBe(7);
+  });
+
+  test("a saturated diff requests the tier maximum and no more", () => {
+    for (const level of LEVELS) {
+      const request = requestRunnerBudget(level, size(25_000, [25_000]));
+      expect(request.kind).toBe("requested");
+      if (request.kind !== "requested") return;
+      expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS[level]);
+      expect(request.workUnits).toBe(25_000);
+    }
+  });
+
+  test("units at exactly the saturation point land on the tier maximum; one below stays inside", () => {
+    const at = requestRunnerBudget("default", size(SIZE_SATURATION_WORK_UNITS, [SIZE_SATURATION_WORK_UNITS]));
+    expect(at.kind).toBe("requested");
+    if (at.kind !== "requested") return;
+    expect(at.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
+
+    const below = requestRunnerBudget("default", size(SIZE_SATURATION_WORK_UNITS - 1, [SIZE_SATURATION_WORK_UNITS - 1]));
+    expect(below.kind).toBe("requested");
+    if (below.kind !== "requested") return;
+    expect(below.requestedBudgetMs).toBeLessThan(RUNNER_MAX_BUDGET_MS.default);
+    expect(below.requestedBudgetMs).toBeGreaterThan(RUNNER_BUDGET_FLOOR_MS);
+  });
+
+  test("the ramp honours floor and ceiling on every interior size and every tier", () => {
+    for (const level of LEVELS) {
+      for (const units of [1, 100, 1_000, 10_000, SIZE_SATURATION_WORK_UNITS + 500]) {
+        const request = requestRunnerBudget(level, size(units, [units]));
+        expect(request.kind).toBe("requested");
+        if (request.kind !== "requested") return;
+        expect(Number.isInteger(request.requestedBudgetMs)).toBe(true);
+        expect(request.requestedBudgetMs).toBeGreaterThanOrEqual(RUNNER_BUDGET_FLOOR_MS);
+        expect(request.requestedBudgetMs).toBeLessThanOrEqual(RUNNER_MAX_BUDGET_MS[level]);
+      }
+    }
+  });
+
+  test("malformed size input is invalid — never treated as an empty diff", () => {
+    const badSizes: [number, readonly number[]][] = [
+      [-1, []],              // negative total
+      [1.5, [1.5]],          // non-integer line count
+      [0, [1]],              // changedLines disagrees with the file rows
+      [1, []],               // lines with no files
+      [0, [0, -2]],          // negative per-file count
+    ];
+    for (const level of LEVELS) {
+      for (const [changedLines, files] of badSizes) {
+        const refused = requestRunnerBudget(level, size(changedLines, files));
+        expect(refused.kind).toBe("invalid");
+        if (refused.kind !== "invalid") return;
+        // The refusal carries nothing a caller could mistake for a request.
+        expect("effectiveBudgetMs" in refused).toBe(false);
+        expect("workUnits" in refused).toBe(false);
+      }
+    }
+  });
+
+  test("the computed request feeds the one anchor — no second clamp, same cutoff math", () => {
+    const budget = budgetFor("default", 10_000);
+    const request = requestRunnerBudget("default", size(2_000, [2_000]));
+    expect(request.kind).toBe("requested");
+    if (request.kind !== "requested") return;
+    // 2,000 units → 120_000 + floor(480_000 * 2_000 / 20_000) = 168_000.
+    expect(request.requestedBudgetMs).toBe(168_000);
+    const anchor = anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
+    expect(anchor.kind).toBe("allocated");
+    if (anchor.kind !== "allocated") return;
+    expect(anchor.requestedBudgetMs).toBe(168_000);
+    expect(anchor.effectiveBudgetMs).toBe(168_000);
   });
 });
