@@ -1166,10 +1166,12 @@ const BUDGET_EXHAUSTED_CAUSE_TEXT: Record<BudgetExhaustedOutcome["cause"], strin
  * every counter are known; otherwise the short form appends only observed
  * counters, in order, and never implies a rerun would succeed. A counter the
  * attempt never observed stays out — it is null in the record, never 0.
- * Milliseconds render as exact decimal seconds with no trailing zeros.
+ * Milliseconds render as exact decimal seconds with no trailing zeros, and a
+ * non-positive window reports `0s` — the durable row keeps the raw `budgetMs`,
+ * the summary never names an impossible budget.
  */
 export function budgetExhaustedSummary(outcome: BudgetExhaustedOutcome): string {
-  const budget = String(outcome.budgetMs / 1000);
+  const budget = String(Math.max(0, outcome.budgetMs) / 1000);
   const tail =
     " — a time-budget failure, not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.";
   const { seatsDispatched, seatsStopped, changedLines } = outcome;

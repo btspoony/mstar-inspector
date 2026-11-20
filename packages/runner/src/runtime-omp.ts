@@ -1335,10 +1335,11 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         // corrected re-yield is still observed.
         let gathered: { summary?: string; stopped?: string } | undefined;
         let resuming = false;
-        // The terminal-end release for the bounded continuation wait below:
-        // a no-op until the wait arms it, since only `agent_end` settles a
-        // parked turn — a yield never does.
-        let outcomeKnown = () => {};
+        // The terminal-end latch, armed BEFORE the prompt so an `agent_end`
+        // that lands while the prompt is settling still settles it — only the
+        // terminal end resolves it (a yield never ends a parked turn), and the
+        // bounded continuation wait below reads this one latch.
+        const { promise: outcome, resolve: outcomeKnown } = Promise.withResolvers<void>();
         const unsubscribe = parentSession.subscribe((event) => {
           // A paused model loop is a scheduling pause, NOT the turn's stop: the
           // SDK resumes the run from the work that paused it (a steer, a
@@ -1446,16 +1447,14 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // evidence, not a fabricated stop. An unbounded wait would hang the
           // review on a session that never comes back. The wait runs whenever
           // a pause parked the turn without a terminal end — an earlier yield
-          // included, since a parked end is never final — and the gate is
-          // re-armed first: a pre-park yield already resolved `outcome`, and
-          // while the turn is parked only its terminal end settles it.
+          // included, since a parked end is never final. `gathered` is the
+          // "end already observed" short-circuit and `outcome` the replay for
+          // an end delivered before this point — both settle the wait without
+          // burning budget on an end the turn already produced.
           if (resuming && gathered === undefined) {
-            const terminal = new Promise<void>((resolve) => {
-              outcomeKnown = resolve;
-            });
             const settled = await waitTick(
               Math.max(1, remainingOuterMs(Date.now(), input.level) - PUBLICATION_TAIL_MS),
-              terminal,
+              outcome,
             );
             if (!settled) deadlineAbort();
           }

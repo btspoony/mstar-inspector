@@ -2041,6 +2041,28 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(disposeCalls).toBe(1);
   });
 
+  test("a parked turn whose terminal end lands as the prompt settles reports that end, not a deadline stop", async () => {
+    // The SDK can deliver the run's `agent_end` inside the same settle that
+    // returns the prompt — after the pause, before `await prompt` resumes.
+    // The continuation latch is armed before the prompt, so that end is
+    // replayed into the bounded wait instead of the wait burning the
+    // remaining budget and throwing a fabricated deadline stop
+    // (`runner-deadline` on a turn that was not deadline-stopped).
+    parentParkedEnd = [stoppedTurn("Interrupted mid-review.", "Deadline exceeded")];
+    parentResumeEnd = null;
+    parentAgentEnd = [stoppedTurn("Settled as the prompt unwound.", "Cancelled after the pause")];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    expect(envelope.incomplete?.reason).toBe("Cancelled after the pause");
+    expect(envelope.summary_md).toContain("Settled as the prompt unwound.");
+    // No RunnerBudgetExhausted(1,1), and no deadline abort ever fired.
+    expect(parentAbortReasons.every((call) => call.reason !== "runner deadline reached")).toBe(true);
+    expect(disposeCalls).toBe(1);
+  });
+
   test("a parked turn that never comes back expires its bounded wait into the budget signal", async () => {
     // The wait's bound is the anchored OUTER deadline minus the publication
     // tail, so its expiry is the run's own deadline evidence — a budget stop,

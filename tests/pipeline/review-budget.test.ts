@@ -260,7 +260,11 @@ describe("size-aware request: floor → tier maximum at 20,000 work units", () =
   });
 
   test("a zero-text row beside real lines pays its own unit (the per-file minimum is per file)", () => {
-    const request = requestRunnerBudget("default", size(5, 7));
+    // The parser owns the per-file minimum: each `-\t-` binary row reports 0
+    // textual lines and still costs one work unit.
+    const size = parseNumstatSize("5\t0\ta.ts\n-\t-\tb.bin\n-\t-\tc.bin\n", false);
+    expect(size).toEqual({ changedLines: 5, workUnits: 7 });
+    const request = requestRunnerBudget("default", size);
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
     // Σ max(1, linesInFile) = 5 + 1 + 1 = 7, not 5 — binary files cost a unit
