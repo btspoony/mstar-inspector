@@ -347,7 +347,10 @@ export function parseNumstatSize(
     if (fields.length !== 3 || path.trim() === "") return null;
     if (adds === "-" && dels === "-") {
       // Binary file: zero textual lines; the per-file minimum still applies.
+      // The unit must pass the same safe-total check as the textual branch —
+      // a trailing binary row may not slip an overflowing total past it.
       workUnits += 1;
+      if (!Number.isSafeInteger(workUnits)) return null;
       continue;
     }
     // Number("") and Number(" ") are 0, so a blank or whitespace count must

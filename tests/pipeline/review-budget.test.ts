@@ -549,4 +549,24 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
     expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
     expect(request.workUnits).toBeNull();
   });
+  test("a trailing binary row after a near-maximum total is unknown size — the unit must not overflow", () => {
+    // workUnits hits 2^53-1 on the first row; the binary row's per-file unit
+    // pushes it to 2^53, past Number.MAX_SAFE_INTEGER. Without the same
+    // post-row check the binary branch would skip, the total escapes as an
+    // inexact "known" size, and allocation refuses at exec time instead of
+    // requesting the tier maximum.
+    expect(parseNumstatSize("9007199254740991\t0\ta.ts\n-\t-\tb.bin\n", false)).toBeNull();
+    // The same boundary in reverse: binary row first, overflowing count last.
+    expect(parseNumstatSize("-\t-\tb.bin\n9007199254740991\t0\ta.ts\n", false)).toBeNull();
+    // Unknown size still requests the tier maximum — never a refusal and
+    // never a capped value laundered from an inexact total.
+    const request = requestRunnerBudget(
+      "default",
+      parseNumstatSize("9007199254740991\t0\ta.ts\n-\t-\tb.bin\n", false),
+    );
+    expect(request.kind).toBe("requested");
+    if (request.kind !== "requested") return;
+    expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
+    expect(request.workUnits).toBeNull();
+  });
 });
