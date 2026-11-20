@@ -1917,9 +1917,7 @@ describe("createReviewConsumer", () => {
           runCommand: async (cmd: string, opts?: unknown) => {
             // 50s of clone leaves 650s before the derived 666s cutoff: the
             // 600s tier maximum binds the allocation instead of the cutoff.
-            // The input write then spends 80s of the anchored deadline —
-            // under the old defect it would have billed the later 666s
-            // pre-runner cutoff instead.
+            // The input write then spends 80s of the anchored deadline.
             if (cmd.includes("git init")) clock.now += 50_000;
             if (cmd.startsWith("base64 -d >")) {
               writeStart = clock.now;
@@ -1930,7 +1928,30 @@ describe("createReviewConsumer", () => {
           destroy: h.fakeSandbox.destroy,
         }),
       });
-      await consumer(h.makeBatch(makePayload()));
+      // No await separates the anchor from the write-timeout read, but the
+      // input construction between them is real synchronous work: a scoped
+      // stringify spy (self-restoring on the first runner-input document)
+      // spends 500s of the clock there, so at the read the anchored exec
+      // deadline owes 100s and the later 666s cutoff owes 116s — both under
+      // the 120s step cap, so the recorded timeout shows which was billed.
+      const realStringify = JSON.stringify;
+      JSON.stringify = ((value: unknown, ...rest: unknown[]) => {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          (value as Record<string, unknown>).worktreePath === CLONE_DIR &&
+          typeof (value as Record<string, unknown>).outerDeadlineEpochMs === "number"
+        ) {
+          JSON.stringify = realStringify;
+          clock.now += 500_000;
+        }
+        return Reflect.apply(realStringify, JSON, [value, ...rest]) as string;
+      }) as typeof JSON.stringify;
+      try {
+        await consumer(h.makeBatch(makePayload()));
+      } finally {
+        JSON.stringify = realStringify;
+      }
     });
 
     const writtenInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
@@ -1939,23 +1960,20 @@ describe("createReviewConsumer", () => {
     // The wire deadline is the ANCHOR's exec end — anchor + 600s tier max —
     // not the 666s pre-runner cutoff a tier-bound write never reaches.
     expect(deadline).toBe(roundStart + 650_000);
-    // The write's window is min(120s, deadline - writeStart): the 120s step
-    // cap, not the 600s anchored remainder, is what the call gets here.
-    expect(writeStart).toBe(roundStart + 50_000);
-    expect(execTimeout(inputWrite)).toBe(Math.min(EXEC_TIMEOUT_GIT_MS, deadline - writeStart));
-    expect(deadline - writeStart).toBe(600_000);
-    // The two competing deadlines at the write: the anchored one owes 600s,
-    // the later cutoff owes 616s. The step cap hides that 16s gap in the
-    // timeout, so the anchor's own record must carry the difference.
-    expect(roundStart + 666_000 - writeStart).toBe(616_000);
+    // Serialization ended 500s after the anchor, so the write-timeout read
+    // gets min(120s cap, 100s anchored remainder) = 100s. The cutoff still
+    // owed 116s there: under the old defect the write would have billed it.
+    expect(writeStart).toBe(roundStart + 550_000);
+    expect(execTimeout(inputWrite)).toBe(100_000);
+    expect(execTimeout(inputWrite)).not.toBe(116_000);
     const runnerLine = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
     expect(runnerLine.fields.runner_deadline_ms).toBe(roundStart + 650_000);
     expect(runnerLine.fields.runner_effective_ms).toBe(600_000);
     expect(runnerLine.fields.runner_requested_ms).toBe(600_000);
-    // The exec gets what the ONE deadline still owes after the write: its
-    // 80s is spent, never re-added.
+    // The exec gets what the ONE deadline still owes after the write spent
+    // its 80s — 20s, never the write's own window added back onto it.
     expect(runnerExecTimeout()).toBe(deadline - (writeStart + 80_000));
-    expect(runnerExecTimeout()).toBe(520_000);
+    expect(runnerExecTimeout()).toBe(20_000);
     expect(reviewCount(db)).toBe(1);
   });
 
