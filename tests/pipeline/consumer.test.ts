@@ -168,24 +168,29 @@ import {
   attributionEntries,
   formatFailureAttribution,
 } from "../../packages/runner/src/seat-failover-probe";
+// The budget owner is a pure module with no workerd dependency: imported
+// directly, so the suite pins the same values both the consumer and the Check
+// store bill.
+import {
+  CHECK_HOOK_TIMEOUT_MS,
+  EXEC_TIMEOUT_GIT_MS,
+  GUARD_TIMED_SANDBOX_STEPS,
+  POST_RUNNER_READ_TIMEOUT_MS,
+  ROUND_BUDGET_MS,
+  postRunnerReserveMs,
+  reviewGuardTtlSeconds,
+  runnerTimeoutMs,
+} from "../../src/review-budget";
 
 // The consumer under test and the binding helper it exports, through ONE
 // loader: the harness registers the workerd shim before this dynamic import.
 const {
   BIND_UNBOUND_THREADS_MAX_ENTRIES,
-  CHECK_HOOK_TIMEOUT_MS,
-  EXEC_TIMEOUT_GIT_MS,
-  GUARD_TIMED_SANDBOX_STEPS,
   INLINE_RESOLVE_MAX_ENTRIES,
-  POST_RUNNER_READ_TIMEOUT_MS,
   PR_CONTEXT_EXEC_TIMEOUT_MS,
-  ROUND_BUDGET_MS,
   bindUnboundThreads,
   createReviewConsumer,
   guardRetryDelaysSeconds,
-  postRunnerReserveMs,
-  reviewGuardTtlSeconds,
-  runnerTimeoutMs,
 } = await loadConsumer();
 
 /** This file's harness instance: rebuilt per test, so no case inherits a double. */
@@ -1776,9 +1781,10 @@ describe("createReviewConsumer", () => {
     });
 
     // The capture runs and the round completes; the runner exec gets the
-    // derived 666s deadline (below its 840s table) instead of the whole table.
+    // deeper of the two limits — its 646s table maximum, still inside the
+    // default 666s pre-runner cutoff.
     expect(execTimeout(h.sandbox.calls[2]!)).toBe(EXEC_TIMEOUT_GIT_MS);
-    expect(runnerExecTimeout()).toBe(666_000);
+    expect(runnerExecTimeout()).toBe(646_000);
     expect(h.logLines.some((l) => l.fields.diff_source === "oversized-local")).toBe(true);
     expect(reviewCount(db)).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
@@ -2043,7 +2049,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(2);
   });
 
-  test("App row review_level 'deep' → derived runner exec timeout 666_000 + admission TTL 2652; quick/default stay 600_000 (AC-S10-clock)", async () => {
+  test("App row review_level 'deep' → derived runner exec timeout 646_000 + admission TTL 2458; quick/default are 480_000/600_000 (AC-S10-clock)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
@@ -2058,19 +2064,22 @@ describe("createReviewConsumer", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // Deep's 14-min table budget is the CEILING, not the reservation: the exec
-    // gets what the round deadline still owes (900s − the 234s live post-runner
-    // reserve), so an oversized-diff fallback fits inside the same 900s cap.
-    expect(runnerExecTimeout()).toBe(666_000);
+    // Deep's table maximum is the CEILING, not the reservation: the exec gets
+    // the smaller of that maximum and what the round deadline still owes
+    // (900s − the 234s live post-runner reserve), so an oversized-diff
+    // fallback fits inside the same 900s cap.
+    expect(runnerExecTimeout()).toBe(646_000);
     // The admission row's TTL follows the same level table (AC-S10-guard):
-    // deep is 2652s. Pinned as the table's figure, like the runner budgets
+    // deep is 2458s. Pinned as the table's figure, like the runner budgets
     // below — the arithmetic that produces it is pinned once, by the guard
     // test.
-    expect(admissionTtlMs).toBe(2_652_000);
-    // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
-    expect(runnerTimeoutMs("quick")).toBe(600_000);
+    expect(admissionTtlMs).toBe(2_458_000);
+    // The table is tiered INSIDE the worst-case ceiling: quick one 120s step
+    // window below default, default at the frozen 10 minutes, deep at the
+    // minimum platform-derived ceiling over the whole terminalize range.
+    expect(runnerTimeoutMs("quick")).toBe(480_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);
-    expect(runnerTimeoutMs("deep")).toBe(840_000);
+    expect(runnerTimeoutMs("deep")).toBe(646_000);
   });
 
   test("the reserve uses the message's LIVE terminalize budget: a 30s operator value shrinks the runner deadline by 20s (qc2 F-001 / qc3 F-801)", async () => {
@@ -2115,7 +2124,7 @@ describe("createReviewConsumer", () => {
     expect(line!.fields.orchestration).toBe("bun-fanout");
   });
 
-  test("App row review_level 'deep' → runner log: level=deep, budget 840_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
+  test("App row review_level 'deep' → runner log: level=deep, budget 646_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
@@ -2126,7 +2135,7 @@ describe("createReviewConsumer", () => {
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"));
     expect(line).toBeDefined();
     expect(line!.fields.level).toBe("deep");
-    expect(line!.fields.runner_timeout_ms).toBe(840_000);
+    expect(line!.fields.runner_timeout_ms).toBe(646_000);
     expect(typeof line!.fields.elapsed_ms).toBe("number");
     // Deep runs the three-stage parent session — never a fabricated Bun
     // seat count (spec § Queue visibility: 禁止写假 seat_count: 7).
@@ -3874,25 +3883,27 @@ describe("createReviewConsumer", () => {
     expect(warnLine!.msg).toContain("expires by TTL");
   });
   test("reviewGuardTtlSeconds covers the full step-budget arithmetic per level (qc3 F-301 pin / AC-S10-guard)", () => {
-    // Exact pin: THIRTEEN timed sandbox commands (clone, rev-parse, compare
+    // Exact pin: FOURTEEN timed sandbox steps (clone, rev-parse, compare
     // status, full diff, increment diff, numstat, runner-input write, report
-    // `gh pr view`, up to 3 report `gh issue view` reads, recheck-doc read,
-    // report-document read) × 120s + the LEVEL's runner budget + the 12s
-    // inline-resolution budget + 120s slack for the untimed steps (token
-    // mint, sandbox create, comment post, KV/D1 puts) = 2412s quick/default,
-    // 2652s deep (spec d5-budget L4). Every earlier step addition (numstat,
-    // the input write, the recheck read, now the increment/report reads) went
+    // `gh pr view`, up to 3 report `gh issue view` reads, recheck reads,
+    // report-document read, applied-model read) × 120s + the LEVEL's tier
+    // maximum + the 12s inline-resolution budget + 120s slack for the untimed
+    // steps (token mint, sandbox create, comment post, KV/D1 puts) = 2292s
+    // quick, 2412s default, 2458s deep. Every earlier step addition (numstat,
+    // the input write, the recheck read, the increment/report reads) went
     // uncounted — any future step or ceiling change must recompute this
     // helper ON PURPOSE.
-    expect(reviewGuardTtlSeconds("quick")).toBe(2412);
+    expect(reviewGuardTtlSeconds("quick")).toBe(2292);
     expect(reviewGuardTtlSeconds("default")).toBe(2412);
-    expect(reviewGuardTtlSeconds("deep")).toBe(2652);
+    expect(reviewGuardTtlSeconds("deep")).toBe(2458);
   });
 
-  test("round budget: the reserve covers the live post-runner tail and derives the runner deadline", () => {
+  test("round budget: the reserve covers the live post-runner tail and derives the runner cutoff", () => {
     // Every term is pinned by value: a move in any one of them, in the cap or
     // in the reserve must fail this case, not drift silently.
-    expect(runnerTimeoutMs("deep")).toBe(840_000);
+    expect(runnerTimeoutMs("quick")).toBe(480_000);
+    expect(runnerTimeoutMs("default")).toBe(600_000);
+    expect(runnerTimeoutMs("deep")).toBe(646_000);
     expect(CHECK_HOOK_TIMEOUT_MS).toBe(2_000);
     expect(CHECK_TERMINALIZE_DEFAULT).toBe(10_000);
     // The reserve is composed from existing values, never a new knob:
@@ -3901,13 +3912,21 @@ describe("createReviewConsumer", () => {
     expect(postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT)).toBe(234_000);
     // An operator-tunable terminalize moves the reserve 1:1 (its 30s ceiling).
     expect(postRunnerReserveMs(30_000)).toBe(254_000);
-    // So deep's 840s TABLE is a ceiling, never a reservation: the derived
-    // deadline is 666s, and 546s of it remain once the fallback's single 120s
-    // capture is allowed for — the capture stays reachable on every level.
+    // The table is a ceiling, never a reservation: at the default reserve the
+    // cutoff is 666s, so quick/default/deep all fit inside it with 186s/66s/20s
+    // to spare — and the 120s fallback capture still fits ahead of the cutoff.
     const runnerDeadlineMs = ROUND_BUDGET_MS - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
     expect(runnerDeadlineMs).toBe(666_000);
-    expect(Math.min(runnerTimeoutMs("deep"), runnerDeadlineMs)).toBe(666_000);
+    expect(runnerDeadlineMs - runnerTimeoutMs("deep")).toBe(20_000);
     expect(runnerDeadlineMs - EXEC_TIMEOUT_GIT_MS).toBe(546_000);
+    // The tier invariants hold over the whole supported terminalize range:
+    // quick < default < deep <= cap - reserve.
+    for (const terminalizeMs of [1_000, 10_000, 30_000]) {
+      const cutoff = ROUND_BUDGET_MS - postRunnerReserveMs(terminalizeMs);
+      expect(runnerTimeoutMs("quick")).toBeLessThan(runnerTimeoutMs("default"));
+      expect(runnerTimeoutMs("default")).toBeLessThan(runnerTimeoutMs("deep"));
+      expect(runnerTimeoutMs("deep")).toBeLessThanOrEqual(cutoff);
+    }
   });
 
   test("a maximal round issues exactly the steps the guard TTL bills", async () => {
@@ -3986,7 +4005,8 @@ describe("createReviewConsumer", () => {
     // quick/default 60/300/300/900/900; deep 90/480/300/900/900.
     // GUARD_RETRY_DELAYS_SECONDS is a literal table — nothing derives it — so
     // this test is what keeps it honest as the TTL moves: every entry must stay
-    // BELOW reviewGuardTtlSeconds(level) (2412s quick/default, 2652s deep) so
+    // BELOW reviewGuardTtlSeconds(level) (2292s quick, 2412s default, 2458s
+    // deep) so
     // no single delay outlives the lock, and the cumulative sum (2460s / 2670s)
     // must EXCEED it, so the final delayed attempt finds the row expired and
     // reclaims it instead of being dropped. The rungs after the first two are

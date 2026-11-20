@@ -54,6 +54,7 @@ import { sk, fakePem } from "../helpers/fake-secrets";
 import { withFrozenClock } from "../helpers/clock";
 import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
+import { runnerTimeoutMs } from "../../src/review-budget";
 
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
@@ -278,7 +279,7 @@ const testOverrides = {
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---
 
-const { createReviewConsumer, runnerTimeoutMs } = await import(
+const { createReviewConsumer } = await import(
   "../../src/pipeline/consumer"
 );
 
