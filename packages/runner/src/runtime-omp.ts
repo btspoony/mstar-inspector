@@ -38,9 +38,13 @@
  *      is re-validated with validateMstarReviewV1, and a turn whose TERMINAL
  *      end arrives without one (the SDK's agent_end carries the gathered
  *      messages) is synthesized into an `incomplete` envelope instead of
- *      failing the whole review — a paused loop is a scheduling pause
- *      whose resumed continuation is awaited first (spec Architect locks
- *      L1/L2).
+ *      failing the whole review — UNLESS the run's own wall clock stopped
+ *      it: a runner-deadline stop is a terminal budget failure, not a
+ *      verdict, and the run throws `RunnerBudgetExhausted` carrying the
+ *      seat counts it observed (the CLI turns that into the exit-0
+ *      `mstar.review-budget-exhausted/v1` stdout alternative). A paused loop
+ *      is a scheduling pause whose resumed continuation is awaited first
+ *      (spec Architect locks L1/L2).
  *   6. recheck (spec §7.8): when the input carries a typed
  *      recheck document, runRecheckSeat runs CONCURRENTLY with the review
  *      work — quick/default as one more structured child on the same
@@ -111,6 +115,7 @@ import {
 import { runReportSeat, revalidatedNotes } from "./report";
 import type { ReportDoc } from "../../shared/src/report-wire";
 import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
+import { RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
 
 /**
  * Environment override for the mstar-harness plugin root — the primary,
@@ -709,10 +714,12 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
 }
 
 /**
- * One capped seat's coverage gap: the seat, what stopped it, and the scope
- * whose coverage the body has to declare incomplete.
+ * One capped seat's coverage gap: which seat the wall-clock cap stopped —
+ * the fact the budget-exhausted signal counts and the non-cap `incomplete`
+ * fact's unscanned list names. The cap itself needs no text here: its only
+ * readers are the count and the seat's scope.
  */
-type SeatGap = { plan: SeatPlan; stoppedBy: string };
+type SeatGap = { plan: SeatPlan };
 
 /**
  * One settled seat: the payload it collected (`null` = nothing usable), the
@@ -765,17 +772,6 @@ function scopeList(paths: readonly string[], budget: number): string {
 }
 
 /**
- * The shortest honest disclosure for one capped seat: which seat, what stopped
- * it, and that its assigned scope is not fully covered.
- */
-function gapHead(gap: SeatGap): string {
-  return (
-    `- notes: seat ${gap.plan.domain}-${gap.plan.seat} was stopped by ${gap.stoppedBy}; ` +
-    `its assigned scope is not fully covered`
-  );
-}
-
-/**
  * One scope line: `head` plus the scope list, never longer than `maxChars`.
  * The list gets the budget the head and `separator` leave, is `the whole diff`
  * for a seat with no file scope, and is omitted behind the head when that
@@ -794,7 +790,8 @@ function scopeLine(head: string, separator: string, maxChars: number, scope: rea
 /**
  * The engine summary fitted into `budget` characters, its cut MARKED. The
  * publisher's head-keeping truncation semantics, applied here and earlier so
- * the coverage notes keep the space reserved for them.
+ * a gathered deep transcript keeps inside the body the publisher truncates
+ * at.
  */
 function fittedSummary(summary: string, budget: number): string {
   if (summary.length <= budget) return summary;
@@ -804,39 +801,16 @@ function fittedSummary(summary: string, budget: number): string {
 }
 
 /**
- * Fit the capped seats' coverage notes into the published body and hand back
- * both halves: the summary shortened to make room, and the notes block.
- *
- * The publisher truncates `summary_md` from the HEAD at
- * {@link SUMMARY_MD_BUDGET}, so whatever runs last is lost first — and the
- * disclosure must never be what is lost. The order is therefore: RESERVE every
- * capped seat's disclosure first, then fit the summary into what the reserves
- * leave (marking its cut), and only then widen the scope lists from the
- * remainder. A long summary can shorten a note's list; it can never erase a
- * note.
+ * A thrown error's one-line, bounded message: whitespace flattened and the
+ * text cut at `SEAT_GAP_MAX_CHARS` with a marker, so a multi-line seat error
+ * stays a single stderr/disclosure line like every other bounded diagnostic.
+ * Empty for a reason that carries no message.
  */
-function coverageBlock(summary: string, gaps: readonly SeatGap[]): { summary: string; notes: string } {
-  if (gaps.length === 0) return { summary, notes: "" };
-  const separators = 2 + gaps.length - 1; // "\n\n" before the first line + "\n" between lines
-  const heads = gaps.map(gapHead);
-  // One reserve may not exceed an equal share of the note budget: an outsized
-  // stop reason would otherwise reserve the whole body for a single seat.
-  const reserveCap = Math.floor((SUMMARY_MD_BUDGET - separators) / gaps.length);
-  const reserves = heads.map((head) => Math.min(head.length, reserveCap));
-  const reserved = reserves.reduce((total, size) => total + size, 0);
-  const fitted = fittedSummary(summary, SUMMARY_MD_BUDGET - separators - reserved);
-  let leftover = SUMMARY_MD_BUDGET - separators - fitted.length - reserved;
-  const notes = gaps.map((gap, index) => {
-    const share = Math.floor(leftover / (gaps.length - index));
-    const maxChars = Math.min(SEAT_GAP_MAX_CHARS, reserves[index]! + share);
-    // The scope is named as the seat's ASSIGNED scope whose coverage is
-    // incomplete — never as untouched, which a finding the same seat returned
-    // from that very scope would contradict.
-    const note = scopeLine(gapHead(gap), ": ", maxChars, gap.plan.scope);
-    leftover -= Math.max(0, note.length - reserves[index]!);
-    return note;
-  });
-  return { summary: fitted, notes: `\n\n${notes.join("\n")}` };
+function causeText(reason: unknown): string {
+  const text = String(reason instanceof Error ? reason.message : reason)
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length <= SEAT_GAP_MAX_CHARS ? text : `${text.slice(0, SEAT_GAP_MAX_CHARS - 1)}…`;
 }
 
 /**
@@ -854,11 +828,11 @@ const RUNTIME_LIMIT_ABORT_RE = /Subagent runtime limit exceeded \(task\.maxRunti
  *
  * The CAP decides the classification, and it is checked FIRST: a seat the
  * wall-clock cap stopped is a STOPPED seat, never a failure — the cap explains
- * the shortfall, and the run declares its scope as uncovered coverage, whatever
- * else the settled result carries. What the cap does NOT excuse is composing a
- * payload the seat did not deliver cleanly: an SDK error, or a payload the
- * strict schema rejected, is dropped rather than merged, because a stop
- * explains a MISSING payload, never a bad one.
+ * the shortfall, and the run counts it for the budget-exhausted signal,
+ * whatever else the settled result carries. What the cap does NOT excuse is
+ * composing a payload the seat did not deliver cleanly: an SDK error, or a
+ * payload the strict schema rejected, is dropped rather than merged, because
+ * a stop explains a MISSING payload, never a bad one.
  *
  * WITHOUT the cap ({@link RUNTIME_LIMIT_ABORT_RE} is the only cap evidence), a
  * result that carries no admissible payload is returned as a FAILURE. It stays
@@ -878,7 +852,7 @@ function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatP
     (structured !== undefined && (structured.status !== "valid" || structured.data === undefined));
   const stoppedByCap = single.abortReason?.match(RUNTIME_LIMIT_ABORT_RE)?.[0];
   if (stoppedByCap !== undefined) {
-    return { output: rejectedPayload ? null : collected, gap: { plan, stoppedBy: stoppedByCap }, failure: null };
+    return { output: rejectedPayload ? null : collected, gap: { plan }, failure: null };
   }
   if (single.error) {
     return {
@@ -1128,9 +1102,11 @@ async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): 
     "  a negative figure means the review is already over its cap).",
     "- The cap is SOFT: reaching it aborts nothing, so the turn keeps going —",
     "  but as you approach it, stop expanding, summarize what you already have",
-    "  and return it. Yielding is MANDATORY here: this turn has no cap-stop",
-    "  path, so ending it without a valid `yield` fails the whole review.",
-    "  Return a partial review that declares its unscanned scope — never empty.",
+    "  and return it. The hard deadline DOES stop this turn: a turn the outer",
+    "  budget kills ends as a budget failure, not a review. Yielding is",
+    "  MANDATORY before that line: ending without a valid `yield` fails the",
+    "  whole review. Return a partial review that declares its unscanned scope",
+    "  — never empty.",
     "- You are the parent the caller can reach: the `task` seats you dispatch",
     "  yourself are invisible to it, so supervising them is YOURS — while each",
     "  one runs, relay it this same clock (the minutes left, or the overrun)",
@@ -1359,10 +1335,11 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         // corrected re-yield is still observed.
         let gathered: { summary?: string; stopped?: string } | undefined;
         let resuming = false;
-        let outcomeKnown = () => {};
-        const outcome = new Promise<void>((resolve) => {
-          outcomeKnown = resolve;
-        });
+        // The terminal-end latch, armed BEFORE the prompt so an `agent_end`
+        // that lands while the prompt is settling still settles it — only the
+        // terminal end resolves it (a yield never ends a parked turn), and the
+        // bounded continuation wait below reads this one latch.
+        const { promise: outcome, resolve: outcomeKnown } = Promise.withResolvers<void>();
         const unsubscribe = parentSession.subscribe((event) => {
           // A paused model loop is a scheduling pause, NOT the turn's stop: the
           // SDK resumes the run from the work that paused it (a steer, a
@@ -1418,16 +1395,44 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // with a payload count.
           if (record.status === "success" && !Array.isArray(record.type) && record.data !== undefined) {
             yielded = record.data;
-            // A non-parked turn's yield IS its outcome, so it releases the
-            // wait. A resumed continuation can yield again (a corrected
-            // payload), so while a parked end is in flight only the terminal
-            // end settles the wait — the last successful yield wins.
-            if (!resuming) outcomeKnown();
+            // A resumed continuation can yield again (a corrected payload), so
+            // while a parked end is in flight only the terminal end settles
+            // the wait — the last successful yield wins.
           }
         });
+
+        // The deep parent carries NO SDK runtime limit (a structured seat's
+        // `task.maxRuntimeMs` never applies to it), so the run's own deadline
+        // evidence is this timer at the SAME bound a fan-out seat gets. When
+        // it fires the turn is aborted at the wall clock and
+        // `stoppedByDeadline` is what separates a deadline stop — the
+        // budget-exhausted signal, never an `incomplete` verdict — from every
+        // other no-yield stop below.
+        let stoppedByDeadline = false;
+        const deadlineAbort = (): void => {
+          stoppedByDeadline = true;
+          void parentSession.abort({ reason: "runner deadline reached" }).catch((error: unknown) => {
+            console.error("deep parent deadline abort failed", error);
+          });
+        };
         let turnError: unknown;
+        // The timer starts at the dispatch boundary, after the assignment
+        // read below — a blocked read must not let this abort fire on a seat
+        // that was never prompted. Undefined until then; the outer finally's
+        // clearTimeout is a no-op before dispatch.
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-          await parentSession.prompt(await deepAssignment(input, pluginRoot));
+          const assignment = await deepAssignment(input, pluginRoot);
+          // A read that spent the deadline declines the turn: the deep parent
+          // was never dispatched, so the signal counts 0 of 0 — only an
+          // actually dispatched seat can be counted dispatched or stopped.
+          // An IMMINENT deadline still dispatches: the deadline timer owns
+          // the mid-turn stop and honestly counts that seat 1 of 1.
+          if (remainingOuterMs(Date.now(), input.level) <= 0) {
+            throw new RunnerBudgetExhausted(0, 0);
+          }
+          deadlineTimer = setTimeout(deadlineAbort, seatMaxRuntimeMs(Date.now(), input.level));
+          await parentSession.prompt(assignment);
         } catch (error) {
           turnError = error;
         } finally {
@@ -1437,13 +1442,34 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // yield or terminal end. Wait for it here, bounded by the run's own
           // remaining allowance (never the tail held clear for merge/synthesis/
           // validation) — released the moment the continuation settles, and
-          // expired into the fatal path below rather than into a fabricated
-          // stop. An unbounded wait would hang the review on a session that
-          // never comes back.
-          if (resuming && yielded === undefined && gathered === undefined) {
-            await waitTick(Math.max(1, remainingOuterMs(Date.now(), input.level) - PUBLICATION_TAIL_MS), outcome);
+          // expired into the budget-exhausted path below: the bound this wait
+          // just spent IS the outer deadline, so an expired wait is deadline
+          // evidence, not a fabricated stop. An unbounded wait would hang the
+          // review on a session that never comes back. The wait runs whenever
+          // a pause parked the turn without a terminal end — an earlier yield
+          // included, since a parked end is never final. `gathered` is the
+          // "end already observed" short-circuit and `outcome` the replay for
+          // an end delivered before this point — both settle the wait without
+          // burning budget on an end the turn already produced.
+          if (resuming && gathered === undefined) {
+            const settled = await waitTick(
+              Math.max(1, remainingOuterMs(Date.now(), input.level) - PUBLICATION_TAIL_MS),
+              outcome,
+            );
+            if (!settled) deadlineAbort();
           }
+          clearTimeout(deadlineTimer);
           unsubscribe();
+        }
+        // The run's own wall clock stopped this turn: a budget failure, not a
+        // review verdict. The deep parent is the ONE dispatched seat this
+        // path has (its `task` children are its own, invisible here), so the
+        // signal counts 1 of 1 — thrown before any yield is accepted and
+        // before any `incomplete` synthesis, whatever the transcript
+        // gathered. A yield emitted before the deadline does not outrank the
+        // stop that ended the turn.
+        if (stoppedByDeadline) {
+          throw new RunnerBudgetExhausted(1, 1);
         }
         if (yielded === undefined) {
           // A turn that ENDED without a yield is a stopped deep run, not an
@@ -1535,10 +1561,18 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       try {
         envelope = await parentTurn;
       } catch (error) {
-        // Normal-review failure aborts the recheck seat too (spec §7.8);
+        // Review failure aborts the recheck seat too (spec §7.8);
         // runRecheckSeat never rejects — awaiting only reaps the seat.
         recheckController.abort();
-        if (recheckWork) await recheckWork;
+        const settled = recheckWork ? await recheckWork : null;
+        if (error instanceof RunnerBudgetExhausted) {
+          // The budget stop still owns this round's attribution: the settled
+          // recheck round (the seat was aborted by the stop, never left
+          // running) and the model the parent session actually served.
+          error.recheck = settled?.doc ?? null;
+          if (settled !== null) error.recheckStatus = settled.status;
+          error.appliedModel = servedModel(parentSession);
+        }
         throw error;
       } finally {
         // Supervision never outlives the turn it supervises (no pending timer
@@ -1813,20 +1847,35 @@ export const ompAgentRuntime: AgentRuntime = {
         })),
       });
       let outcomes: SeatOutcome[];
-      // Seats whose promise rejected outright: no outcome object at all, and
-      // still a lost seat — the results array is index-aligned with the dispatch
-      // list, so every rejection maps back to the seat it was dispatched for.
       let rejectedSeats = 0;
       // A rejected seat promise carries its cause in the rejection itself —
       // there is no outcome object to read it from, so capture it here or the
       // only diagnosis of a dead seat is lost with the promise.
       let rejectedReason: unknown = undefined;
+      // Every seat lost to a cause that is NOT the cap, with its seat id: the
+      // evidence a budget stop would otherwise drop when a sibling's cap
+      // claims the whole wave. Gathered beside the fan-out (results stay
+      // index-aligned with the dispatch list) so the budget path below can
+      // log them before it throws.
+      const siblingLosses: { seat: string; detail: string }[] = [];
       try {
         const results = await group; // never rejects: the barrier absorbs every seat
         outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
         const rejections = results.filter((result) => result.status === "rejected");
         rejectedSeats = rejections.length;
         rejectedReason = rejections[0]?.reason;
+        results.forEach((result, seatIndex) => {
+          if (result.status === "rejected") {
+            siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.reason) });
+          } else if (result.value.failure !== null) {
+            siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.value.failure) });
+          }
+        });
+        // Positive deadline evidence: at least one settled seat declares the
+        // wall-clock cap stopped it. Decided here because it outranks both
+        // failure branches below — a wave the cap stopped publishes the budget
+        // signal, never a non-cap error or an `incomplete` verdict.
+        const capStopped = outcomes.some((outcome) => outcome.gap !== null);
         // The wave's verdict on a lost seat. A settled seat that failed without
         // a cap carries its own error; a seat promise that rejected outright
         // produced no outcome at all (the SDK threw, or a bug of ours). Both are
@@ -1838,7 +1887,10 @@ export const ompAgentRuntime: AgentRuntime = {
         // lost seat still aborts the recheck child.
         const rejected = results.find((result) => result.status === "rejected");
         const lostSeat = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-        if (outcomes.some((outcome) => outcome.output !== null)) {
+        // A cap stop is budget evidence for the whole wave and wins over every
+        // other loss shape: while one gap exists the budget path below owns
+        // the outcome, so the non-cap rethrow is skipped entirely.
+        if (!capStopped && outcomes.some((outcome) => outcome.output !== null)) {
           if (rejected?.status === "rejected") throw rejected.reason;
           if (lostSeat !== null) throw lostSeat;
         }
@@ -1849,14 +1901,9 @@ export const ompAgentRuntime: AgentRuntime = {
       } finally {
         // Supervision never outlives the fan-out it supervises (no pending
         // timer can survive the review) and never masks its outcome.
+
         await supervision;
       }
-      // The review settled: await the already-running recheck on ITS OWN
-      // budget — bounded by the same anchored outer deadline, never a fresh
-      // cap. Abort only when the outer deadline leaves no room to finish.
-      if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
-      const settled = recheckWork ? await recheckWork : null;
-
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
       // The seats this wave did not settle: every dispatched seat that stopped
       // short (the wall-clock cap fired, or it delivered nothing usable without
@@ -1868,11 +1915,46 @@ export const ompAgentRuntime: AgentRuntime = {
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
       const stoppedSeats =
         outcomes.filter((outcome) => outcome.gap !== null || outcome.output === null).length + rejectedSeats;
-      // The cause the fact can state: the cap, when a cap caused every stop; the
-      // empty result, when a seat was lost without one (which reaches synthesis
-      // only alongside an unusable wave — see the failure rule above, where it
-      // is exactly then that every dispatched seat was lost).
-      const everyStopWasCap = gaps.length === stoppedSeats;
+      // A wall-clock-capped wave is a BUDGET stop, not a review verdict: the
+      // runner reports the seat counts it observed via `RunnerBudgetExhausted`
+      // and never synthesizes an envelope — findings a capped wave collected
+      // stay unpublished by construction (already-published work is the
+      // Worker's concern, not this process's). The stop reads ONLY the
+      // deadline evidence: one positively identified cap stop decides it, and
+      // `seatsStopped` counts exactly the seats the cap itself stopped (the
+      // gaps), never losses a cap cannot account for.
+      if (gaps.length > 0) {
+        recheckController.abort();
+        const settled = recheckWork ? await recheckWork : null;
+        // The SEATS served the round, not the host session: the same unanimous-
+        // served rule the success path applies — attribution is still the
+        // round's fact on a budget stop.
+        const served = new Set<string>();
+        for (const { id } of seats) {
+          const applied = servedBySeat.get(id);
+          if (applied !== undefined) served.add(applied);
+        }
+        const exhausted = new RunnerBudgetExhausted(seats.length, gaps.length);
+        exhausted.recheck = settled?.doc ?? null;
+        if (settled !== null) exhausted.recheckStatus = settled.status;
+        // The cap explains only its own seats: every sibling the cap did NOT
+        // stop is a non-cap loss the closed signal cannot carry, so its seat
+        // and bounded cause go to stderr here — the run's only other channel —
+        // or the failure is dropped the moment the budget signal wins.
+        for (const { seat, detail } of siblingLosses) {
+          console.error(
+            `review seat ${seat} lost beside a cap stop${detail.length === 0 ? "" : `: ${detail}`}`,
+          );
+        }
+        if (served.size === 1) exhausted.appliedModel = [...served][0]!;
+        throw exhausted;
+      }
+
+      // The review settled: await the already-running recheck on ITS OWN
+      // budget — bounded by the same anchored outer deadline, never a fresh
+      // cap. Abort only when the outer deadline leaves no room to finish.
+      if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
+      const settled = recheckWork ? await recheckWork : null;
       const findings = mergeSeatOutputs(outputs);
       // Why the wave produced nothing. The failure message is the ONLY
       // diagnosis a lost seat carries (its payload never arrived, so there is
@@ -1892,28 +1974,17 @@ export const ompAgentRuntime: AgentRuntime = {
       // the shape the engine needs. Keep this marker until that lands so the
       // staging is visible rather than looking like a settled design.
       const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-      const rawLostSeat =
-        lostSeatDetail !== null
-          ? lostSeatDetail.message
-          : rejectedReason === undefined
-            ? ""
-            : rejectedReason instanceof Error
-              ? rejectedReason.message
-              : String(rejectedReason);
-      const lostSeatText = rawLostSeat.replace(/\s+/g, " ").trim();
-      const lostSeatCause =
-        lostSeatText === ""
-          ? ""
-          : `: ${
-              lostSeatText.length <= SEAT_GAP_MAX_CHARS
-                ? lostSeatText
-                : `${lostSeatText.slice(0, SEAT_GAP_MAX_CHARS - 1)}…`
-            }`;
+      // The rejection COUNT, not the reason's nullishness, decides whether a
+      // seat's cause exists: a promise that rejected with null/undefined still
+      // carries that recorded fact, and `?? ""` here would erase it.
+      const lostSeatText = causeText(lostSeatDetail ?? (rejectedSeats === 0 ? "" : rejectedReason));
+      const lostSeatCause = lostSeatText === "" ? "" : `: ${lostSeatText}`;
       // The stopped seats are declared as the engine's `incomplete` fact,
       // synthesized — never post-edited onto the envelope. A wave that stopped
       // everywhere still synthesizes with `findings: []`: throwing would lose
       // the review entirely, and a zero-finding envelope reporting a clean
       // verdict over a wave that reviewed nothing is the dishonest outcome.
+      // Reached only by a NON-BUDGET wave: every cap-stopped wave exited above.
       const envelope = synthesizeReview({
         findings,
         target: parseTarget(input.reconFacts),
@@ -1921,34 +1992,19 @@ export const ompAgentRuntime: AgentRuntime = {
           ? {}
           : {
               incomplete: {
-                reason: everyStopWasCap
-                  ? `wall-clock cap stopped ${stoppedSeats} of ${seats.length} dispatched seats` +
-                    ` before their assigned scope was covered`
-                  : `no dispatched seat produced a usable payload${lostSeatCause}`,
+                reason: `no dispatched seat produced a usable payload${lostSeatCause}`,
                 // Every dispatched seat is lost in the unusable-wave branch, so
                 // the dispatch list IS the unscanned set there — rejected seats
                 // included, and no seat silently dropped from the disclosure.
                 // Each entry is the terse seat/scope list the fact is read for,
                 // bounded by the same per-seat budget as the coverage note; the
                 // note, never the entry, carries which cap fired.
-                unscanned: (everyStopWasCap ? gaps.map((gap) => gap.plan) : seats.map((seat) => seat.plan)).map(
-                  (plan) => scopeLine(`${plan.domain}-${plan.seat}:`, " ", SEAT_GAP_MAX_CHARS, plan.scope),
+                unscanned: seats.map((seat) =>
+                  scopeLine(`${seat.plan.domain}-${seat.plan.seat}:`, " ", SEAT_GAP_MAX_CHARS, seat.plan.scope),
                 ),
               },
             }),
       });
-      // A capped seat's gap is also declared on the body the user reads (the
-      // narrative under `## 📋 Review`) — never only in a log, and never past
-      // that body's character budget: its disclosure is reserved before the
-      // seat narrative is fitted around it. The envelope schema and the
-      // engine's tally semantics stay untouched: an uncollected seat keeps
-      // the count-derived grade of the findings that DID land, and a wave with
-      // no stopped seat is synthesized and fitted exactly as before. With no
-      // narrative and no gap the key stays ABSENT: the engine renders the bare
-      // `## 📋 Review` heading instead of a fabricated summary.
-      const block = coverageBlock(envelope.summary_md ?? "", gaps);
-      const summary = `${block.summary}${block.notes}`;
-      if (summary !== "") envelope.summary_md = summary;
       const gate = validateMstarReviewV1(envelope);
       if (!gate.ok) {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");

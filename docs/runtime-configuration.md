@@ -121,19 +121,23 @@ tuning parameters (see `.env.example`).
 
 ### Review depth
 
-`review_level` (and its operator default) selects three bounds, all stated once
-in `src/pipeline/consumer.ts`:
+`review_level` (and its operator default) selects three bounds — the runner
+budget and the guard TTL derived in `src/review-budget.ts`, and the retry
+schedule in `src/pipeline/consumer.ts`:
 
 | Level | Tenant label | Orchestration | Runner budget | `review_inflight` TTL |
 |---|---|---|---|---|
-| `quick` | Quick | Bun fan-out, 1 seat | 600 s | 2292 s |
-| `default` | Standard | Bun fan-out, 2 seats | 600 s | 2292 s |
-| `deep` | Deep | one parent session, no seat split | 840 s | 2532 s |
+| `quick` | Quick | Bun fan-out, 1 seat | 480 s | 2292 s |
+| `default` | Standard | Bun fan-out, 2 seats | 600 s | 2412 s |
+| `deep` | Deep | one parent session, no seat split | 646 s | 2458 s |
 
 `runnerTimeoutMs`, `reviewGuardTtlSeconds` and `guardRetryDelaysSeconds` are the
-only consumers of the tier. The resolved tier rides the `guard-held` outcome, so
-the retry path never re-reads it. An off-vocabulary stored value is treated as
-absent, never a throw: a review must still run.
+only consumers of the tier. The review's Check window and attempt lease are the
+same constant (`CHECK_WINDOW_MS`, the 900,000 ms round budget) measured from
+each claim's or adoption's own begin instant — a claim is not bound to the
+invocation that opened it. The resolved tier rides the `guard-held` outcome,
+so the retry path never re-reads it. An off-vocabulary stored value is treated
+as absent, never a throw: a review must still run.
 
 ## Deploy-time layer — `wrangler.jsonc`
 

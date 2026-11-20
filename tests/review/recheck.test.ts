@@ -282,15 +282,15 @@ describe("recheckBudget (spec §7.8: min(cap, deadline-now-5000); 0 = skip)", ()
 /**
  * The cap each tier actually gets, as a literal table — NOT a copy of the
  * implementation's `min` formula, so the expectation cannot move with the
- * implementation. Quick's 5-minute clock fits inside its 10-minute outer
- * window (600,000); default's 10-minute clock is bounded by the outer guard's
+ * implementation. Quick's 5-minute clock fits inside its 8-minute outer
+ * window (480,000); default's 10-minute clock is bounded by the outer guard's
  * 60s tail (600,000 - 60,000 = 540,000); deep's 15-minute clock is bounded by
- * its 14-minute outer guard (840,000 - 60,000 = 780,000).
+ * its 646-second outer guard (646,000 - 60,000 = 586,000).
  */
 const TIER_CAP_MS: Record<keyof typeof OUTER_RUNNER_CAP_MS, number> = {
   quick: 300_000,
   default: 540_000,
-  deep: 780_000,
+  deep: 586_000,
 };
 
 describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 tier budgets)", () => {
@@ -414,7 +414,7 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
     const start = 4_000_000;
     anchorRecheckDeadline(start, "deep");
     // An instant past BOTH deadlines: the tier's soft cap AND the outer exec
-    // guard (840,000 ms deep). Derived from the engine cap with margin rather
+    // guard (646,000 ms deep). Derived from the engine cap with margin rather
     // than re-pinning either constant.
     const pastBoth = start + Math.max(DEEP_CAP + 2, 20) * 60_000;
 
@@ -463,7 +463,7 @@ describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)"
 
   test("a supplied absolute deadline replaces the tier cap — the exec the runner really has", () => {
     const start = 6_000_000;
-    // deep's tier cap is 840,000, but this round's exec is killed at start+240,000.
+    // deep's tier cap is 646,000, but this round's exec is killed at start+240,000.
     // Everything derived from the anchor must plan against the exec the runner
     // actually runs under, not the table entry it would have got alone.
     const deadline = start + 240_000;

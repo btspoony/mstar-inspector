@@ -57,6 +57,7 @@ import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
   attachCheckAtAcceptance,
+  budgetExhaustedSummary,
   createChecksAdapter,
   createCheckBeginLatch,
   createCheckLifecycle,
@@ -1981,6 +1982,88 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     // The frozen link is THIS attempt's own publication, never the prior row.
     expect(row.publication_id).toBe(ownId);
   });
+  test("a budget-exhausted rerun never adopts a prior same-head publication's verdict", async () => {
+    const db = await seededDb();
+    // RL-12: the exhausted rerun shares the head SHA with a PRIOR generation
+    // whose applied `review` proof meets the gate — under the reader's head
+    // fallback that proof is readable, so the typed stop must suppress the
+    // read itself instead of trusting the foreign-id guard alone.
+    const priorId = crypto.randomUUID();
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
+            confirmed_ms, applied_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'applied', ?, ?, 1, 'done', ?, ?, ?, ?)`,
+      )
+      .run(
+        priorId, APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA,
+        JSON.stringify({ version: 1, artifact: { payload: { verdict: "ship it", tally: { scorePct: 90 } } } }),
+        JSON.stringify({
+          publicationId: priorId,
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 1,
+          commentId: 9001,
+          bodySha256: "b".repeat(64),
+          confirmedMs: T0 - 10_000,
+        } satisfies PublicationProof),
+        T0 - 20_000, T0 - 10_000, T0 - 10_000, T0 - 5_000,
+      );
+
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    const fake = fakeChecks({
+      update: () => runPayload(attempt.identity, { status: "completed", conclusion: "failure" }),
+    });
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    const outcome = {
+      kind: "budget-exhausted" as const,
+      cause: "runner-deadline" as const,
+      budgetWindow: "runner" as const,
+      tier: "default" as const,
+      budgetMs: 600_000,
+      seatsDispatched: 5,
+      seatsStopped: 3,
+      changedLines: 402,
+    };
+    // The exhaustion catch publishes nothing of its own (publicationId null);
+    // an inherited head is set here only to keep the proof READ reachable —
+    // under the defect it was the channel the prior verdict arrived through.
+    await lifecycle.terminalize({
+      handle: {
+        attemptId: attempt.identity.attemptId,
+        scope: SCOPE,
+        githubAppId: GITHUB_APP_ID,
+        headSha: SHA,
+        lease,
+      },
+      publicationId: null,
+      outcome: "budget-exhausted",
+      inheritedHeadSha: "f".repeat(40),
+      budgetExhaustion: outcome,
+    });
+
+    expect(fake.updates).toHaveLength(1);
+    expect(fake.updates[0]!.raw.conclusion).toBe("failure");
+    expect((fake.updates[0]!.raw.output as { summary: string }).summary).toBe(
+      budgetExhaustedSummary(outcome),
+    );
+    const row = await rowOf(db, attempt);
+    expect(row.desired).toBe("failure");
+    // The frozen intent claims no publication: the prior generation's link is
+    // not this attempt's evidence.
+    expect(row.publication_id).toBeNull();
+  });
+
 });
 
 describe("identity helpers", () => {
@@ -3509,4 +3592,161 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     expect(fake.updates[0]!.params.output).toEqual({ title: CHECK_NAME, summary });
     expect(warns).toHaveLength(0);
   });
+});
+
+describe("budget-exhausted Check vocabulary", () => {
+  const TAIL =
+    " — a time-budget failure, not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.";
+
+  test("full form states tier, seconds, both seat counts and the changed lines", () => {
+    const summary = budgetExhaustedSummary({
+      kind: "budget-exhausted",
+      cause: "runner-deadline",
+      budgetWindow: "runner",
+      tier: "default",
+      budgetMs: 600_000,
+      seatsDispatched: 5,
+      seatsStopped: 3,
+      changedLines: 402,
+    });
+    expect(summary).toBe(
+      `Review budget exhausted: default review stopped at 600s with 3/5 seats stopped before finishing (402 changed lines)${TAIL}`,
+    );
+  });
+
+  test("short form appends only the observed counters, in order", () => {
+    const summary = budgetExhaustedSummary({
+      kind: "budget-exhausted",
+      cause: "consumer-deadline",
+      budgetWindow: "preparation",
+      tier: "quick",
+      budgetMs: 12_500,
+      seatsDispatched: 0,
+      seatsStopped: 0,
+      changedLines: null,
+    });
+    expect(summary).toBe(
+      `Review budget exhausted: quick review reached its 12.5s preparation budget (consumer deadline reached); 0/0 seats stopped before finishing${TAIL}`,
+    );
+  });
+  test("a non-positive or non-integral budget never names an impossible window", () => {
+    // `preparationBudgetMs` is `capMs - reserveMs` unclamped: a round cap
+    // below the reserve yields a negative record — the summary reports `0s`
+    // while the durable row keeps the raw value, and a fractional window
+    // renders exact decimal seconds.
+    for (const budgetMs of [-46_000, 0]) {
+      const summary = budgetExhaustedSummary({
+        kind: "budget-exhausted",
+        cause: "consumer-deadline",
+        budgetWindow: "preparation",
+        tier: "quick",
+        budgetMs,
+        seatsDispatched: null,
+        seatsStopped: null,
+        changedLines: null,
+      });
+      expect(summary).toBe(
+        `Review budget exhausted: quick review reached its 0s preparation budget (consumer deadline reached)${TAIL}`,
+      );
+    }
+    const fractional = budgetExhaustedSummary({
+      kind: "budget-exhausted",
+      cause: "consumer-deadline",
+      budgetWindow: "preparation",
+      tier: "quick",
+      budgetMs: 46_500,
+      seatsDispatched: null,
+      seatsStopped: null,
+      changedLines: null,
+    });
+    expect(fractional).toBe(
+      `Review budget exhausted: quick review reached its 46.5s preparation budget (consumer deadline reached)${TAIL}`,
+    );
+  });
+
+  test("a killed exec with no seat evidence states the budget and omits the counters", () => {
+    const summary = budgetExhaustedSummary({
+      kind: "budget-exhausted",
+      cause: "sandbox-kill",
+      budgetWindow: "runner",
+      tier: "deep",
+      budgetMs: 900_000,
+      seatsDispatched: null,
+      seatsStopped: null,
+      changedLines: 17,
+    });
+    expect(summary).toBe(
+      `Review budget exhausted: deep review reached its 900s runner budget (sandbox execution killed at its deadline); 17 changed lines${TAIL}`,
+    );
+  });
+
+  test("decideConclusion publishes one failure with that summary and no pass", () => {
+    const outcome = {
+      kind: "budget-exhausted" as const,
+      cause: "runner-deadline" as const,
+      budgetWindow: "runner" as const,
+      tier: "default" as const,
+      budgetMs: 600_000,
+      seatsDispatched: 5,
+      seatsStopped: 3,
+      changedLines: 402,
+    };
+    const conclusion = decideConclusion({
+      proof: null,
+      outcome: "budget-exhausted",
+      gate: null,
+      review: null,
+      headSha: "a".repeat(40),
+      budgetExhaustion: outcome,
+    });
+    expect(conclusion.desired).toBe("failure");
+    expect(conclusion.title).toBe(CHECK_NAME);
+    expect(conclusion.summary).toBe(budgetExhaustedSummary(outcome));
+  });
+  test("a same-head proof never outranks the typed stop — the outcome wins over a passing verdict", () => {
+    const exhaustion = {
+      kind: "budget-exhausted" as const,
+      cause: "runner-deadline" as const,
+      budgetWindow: "runner" as const,
+      tier: "default" as const,
+      budgetMs: 600_000,
+      seatsDispatched: 5,
+      seatsStopped: 3,
+      changedLines: 402,
+    };
+    const conclusion = decideConclusion({
+      // A prior generation's applied publication under RL-12: gate-meeting —
+      // under the defect this froze `success` on an exhausted rerun.
+      proof: {
+        publicationId: "prior",
+        scope: SCOPE,
+        headSha: SHA,
+        kind: "review",
+        round: 1,
+        commentId: 9001,
+        bodySha256: "b".repeat(64),
+        confirmedMs: T0 - 10_000,
+      },
+      outcome: "budget-exhausted",
+      gate: GATE,
+      review: { verdict: "ship it", scorePct: 90 },
+      headSha: SHA,
+      budgetExhaustion: exhaustion,
+    });
+    expect(conclusion.desired).toBe("failure");
+    expect(conclusion.summary).toBe(budgetExhaustedSummary(exhaustion));
+  });
+
+  test("a missing record is a named refusal, never a bare TypeError", () => {
+    expect(() =>
+      decideConclusion({
+        proof: null,
+        outcome: "budget-exhausted",
+        gate: null,
+        review: null,
+        headSha: SHA,
+      }),
+    ).toThrow(/requires the resolved budgetExhaustion record/);
+  });
+
 });

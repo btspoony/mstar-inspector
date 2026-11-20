@@ -66,7 +66,7 @@ import {
   type RecheckStatusReason,
 } from "../../shared/src/recheck-wire";
 import { redactSecretShapes } from "../../shared/src/secret-shapes";
-import type { ReviewLevel } from "../../shared/src/runtime";
+import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../shared/src/runtime";
 
 // The ask's prose, its fit and its default budget are the shared wire module's
 // pure rule (the consumer fits the same rule); they stay exported here for the
@@ -134,17 +134,14 @@ export const RECHECK_OUTPUT_SCHEMA = {
 const RECHECK_START_MARGIN_MS = 5_000;
 
 /**
- * Outer runner caps per review level (spec §7.8) — the same frozen table as
- * the consumer's RUNNER_TIMEOUT_MS (quick/default 600,000ms, deep 840,000ms).
- * Restated HERE because the in-image runner graph cannot import the workerd
- * consumer face; the values are pinned by spec §7.8. Exported so the module's
- * tests derive their expectations from this table instead of retyping it.
+ * Outer runner caps per review level (spec §7.8) — the worker's shipped tier
+ * maxima (`RUNNER_MAX_BUDGET_MS` in the shared module, quick 480,000ms /
+ * default 600,000ms / deep 646,000ms), reached here because the in-image
+ * runner graph cannot import the workerd derivation (`src/review-budget.ts`)
+ * itself. Exported under this name so the module's tests and the fallback
+ * below derive from the one table instead of restating it.
  */
-export const OUTER_RUNNER_CAP_MS: Record<ReviewLevel, number> = {
-  quick: 600_000,
-  default: 600_000,
-  deep: 840_000,
-};
+export const OUTER_RUNNER_CAP_MS: Record<ReviewLevel, number> = RUNNER_MAX_BUDGET_MS;
 
 /**
  * The absolute outer deadline the runner anchored for this process
