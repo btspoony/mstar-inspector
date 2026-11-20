@@ -12,13 +12,11 @@ import { describe, expect, test } from "bun:test";
 import {
   anchorRunnerBudget,
   deriveReviewBudget,
-  RUNNER_MAX_BUDGET_MS,
   ROUND_BUDGET_MS,
-  TERMINALIZE_MAX_MS,
-  TERMINALIZE_MIN_MS,
   postRunnerReserveMs,
 } from "../../src/review-budget";
-import type { ReviewLevel } from "../../packages/shared/src/runtime";
+import { CHECK_TERMINALIZE_MAX, CHECK_TERMINALIZE_MIN } from "../../src/dashboard/runtime-config-store";
+import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../packages/shared/src/runtime";
 
 const LEVELS: readonly ReviewLevel[] = ["quick", "default", "deep"];
 const ROUND_START = 1_700_000_000_000;
@@ -37,7 +35,7 @@ describe("tier table inside the derived ceiling", () => {
   // The shipped maxima are only honest if every one of them fits the cutoff
   // the SMALLEST supported reserve leaves; testing the endpoints as a table is
   // the whole point of the contract.
-  for (const terminalizeMs of [TERMINALIZE_MIN_MS, 10_000, TERMINALIZE_MAX_MS]) {
+  for (const terminalizeMs of [CHECK_TERMINALIZE_MIN, 10_000, CHECK_TERMINALIZE_MAX]) {
     test(`terminalize ${terminalizeMs}ms: quick < default < deep <= cap - reserve`, () => {
       const cutoff = ROUND_BUDGET_MS - postRunnerReserveMs(terminalizeMs);
       expect(RUNNER_MAX_BUDGET_MS.quick).toBeLessThan(RUNNER_MAX_BUDGET_MS.default);
@@ -50,15 +48,24 @@ describe("tier table inside the derived ceiling", () => {
   }
 
   test("the cutoff is the platform cap less the live reserve at each endpoint", () => {
-    expect(budgetFor("deep", TERMINALIZE_MIN_MS).runnerCutoffMs - ROUND_START).toBe(675_000);
+    expect(budgetFor("deep", CHECK_TERMINALIZE_MIN).runnerCutoffMs - ROUND_START).toBe(675_000);
     expect(budgetFor("deep", 10_000).runnerCutoffMs - ROUND_START).toBe(666_000);
-    expect(budgetFor("deep", TERMINALIZE_MAX_MS).runnerCutoffMs - ROUND_START).toBe(646_000);
+    expect(budgetFor("deep", CHECK_TERMINALIZE_MAX).runnerCutoffMs - ROUND_START).toBe(646_000);
     // The reserve is charged 1:1, never rounded: the cutoff moves by exactly
     // the terminalize delta.
     expect(
-      budgetFor("deep", TERMINALIZE_MAX_MS).runnerCutoffMs -
-        budgetFor("deep", TERMINALIZE_MIN_MS).runnerCutoffMs,
-    ).toBe(-(TERMINALIZE_MAX_MS - TERMINALIZE_MIN_MS));
+      budgetFor("deep", CHECK_TERMINALIZE_MAX).runnerCutoffMs -
+        budgetFor("deep", CHECK_TERMINALIZE_MIN).runnerCutoffMs,
+    ).toBe(-(CHECK_TERMINALIZE_MAX - CHECK_TERMINALIZE_MIN));
+  });
+
+  test("the deep ceiling holds at the store's own maximum — raising it breaks this proof", () => {
+    // The range endpoints are the store's declarations, never a test-local
+    // copy: one millisecond of drift in CHECK_TERMINALIZE_MAX shrinks the
+    // cutoff below the shipped deep maximum and this assertion catches it.
+    expect(RUNNER_MAX_BUDGET_MS.deep).toBeLessThanOrEqual(
+      ROUND_BUDGET_MS - postRunnerReserveMs(CHECK_TERMINALIZE_MAX),
+    );
   });
 
   test("preparation budget is what the round may spend before the cutoff", () => {
@@ -149,6 +156,24 @@ describe("allocation: one min(), one absolute deadline", () => {
     // The refusal carries nothing a caller could mistake for a budget.
     expect("effectiveBudgetMs" in over).toBe(false);
     expect("execDeadlineMs" in over).toBe(false);
+  });
+
+  test("a malformed explicit request is invalid, never an allocation or a false exhaustion", () => {
+    const budget = budgetFor("default", 10_000);
+    for (const requestMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const refused = anchorRunnerBudget(budget, ROUND_START, requestMs);
+      expect(refused.kind).toBe("invalid");
+      if (refused.kind !== "invalid") return;
+      expect(refused.requestedBudgetMs).toBe(requestMs);
+      // The refusal carries nothing a caller could mistake for a budget or a
+      // clock report — `exhausted` stays reserved for a spent cutoff.
+      expect("effectiveBudgetMs" in refused).toBe(false);
+      expect("execDeadlineMs" in refused).toBe(false);
+      expect("remainingMs" in refused).toBe(false);
+    }
+    // A spent cutoff with a VALID request is still exhaustion — the new kind
+    // sits on the request, not on the remaining clock.
+    expect(anchorRunnerBudget(budget, budget.runnerCutoffMs).kind).toBe("exhausted");
   });
 
   test("time spent on the input write and startup comes out of the one deadline", () => {

@@ -5856,6 +5856,11 @@ async function processMessage(
     // Its refusals — an oversized request, a spent cutoff — throw before any
     // paid work — never a 1ms exec.
     const anchor = anchorRunnerBudget(budget, Date.now());
+    if (anchor.kind === "invalid") {
+      throw new Error(
+        `runner request declined — an explicit ${anchor.requestedBudgetMs}ms is not a usable duration`,
+      );
+    }
     if (anchor.kind === "oversized") {
       throw new Error(
         `runner request declined — ${anchor.requestedBudgetMs}ms exceeds the tier maximum (${anchor.tierMaxMs}ms)`,

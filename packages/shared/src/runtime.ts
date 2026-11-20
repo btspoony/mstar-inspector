@@ -30,6 +30,21 @@ export type ReviewLevel = (typeof REVIEW_LEVELS)[number];
 export const REVIEW_SEATS: Record<Exclude<ReviewLevel, "deep">, number> = { quick: 1, default: 2 };
 
 /**
+ * Runner wall-clock maximum per review level (ms) — the shipped ceiling the
+ * round-budget derivation (`src/review-budget.ts`) enforces, sized inside the
+ * worst-case pre-runner cutoff: quick 480s, default 600s, deep 646s.
+ * `Record<ReviewLevel, …>` makes a future level widen fail at compile time,
+ * never silently fall back. Lives in the shared module because the in-image
+ * runner (`packages/runner/src/recheck.ts`) reads the same table for its
+ * unanchored outer-guard fallback and cannot import the workerd derivation.
+ */
+export const RUNNER_MAX_BUDGET_MS: Record<ReviewLevel, number> = {
+  quick: 480_000,
+  default: 600_000,
+  deep: 646_000,
+};
+
+/**
  * One custom-provider declaration as the runner input JSON carries it
  * (AL-23-1): the SETTINGS declaration, keyless — the API key rides ONLY the
  * runner's STDIN credential payload, pooled per provider under its own id,

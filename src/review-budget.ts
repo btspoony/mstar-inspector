@@ -47,7 +47,7 @@
  * single min() below grants, never the table.
  */
 
-import type { ReviewLevel } from "../packages/shared/src/runtime";
+import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../packages/shared/src/runtime";
 
 /** Per-call bound for the bounded reads issued AFTER the paid runner (ms):
  * the recheck document, the recheck status, the report document and the
@@ -130,21 +130,15 @@ export const ROUND_BUDGET_MS = 900_000;
  */
 export const CHECK_WINDOW_MS = ROUND_BUDGET_MS;
 
-/** The Check terminalize setting's supported range (ms): the live value the reserve charges. */
-export const TERMINALIZE_MIN_MS = 1_000;
-export const TERMINALIZE_MAX_MS = 30_000;
-
 /**
- * Runner wall-clock maximum per review level (ms) — the shipped ceiling the
- * derivation enforces, sized inside the worst-case pre-runner cutoff:
- * quick 480s, default 600s, deep 646s. `Record<ReviewLevel, …>` makes a
- * future level widen fail at compile time, never silently fall back.
+ * The Check terminalize setting's supported range (ms) is owned by
+ * `CHECK_TERMINALIZE_MIN`/`CHECK_TERMINALIZE_MAX` in
+ * `src/dashboard/runtime-config-store.ts` — the operator-facing bounds the
+ * live reader and writer share. The tier-table contract above is proved
+ * against THAT range (tests/pipeline/review-budget.test.ts), so raising the
+ * store's maximum past the shipped deep ceiling breaks the proof, never
+ * silently widens past the table.
  */
-export const RUNNER_MAX_BUDGET_MS: Record<ReviewLevel, number> = {
-  quick: 480_000,
-  default: 600_000,
-  deep: 646_000,
-};
 
 /** Runner maximum for `level` — the naming SSOT consumers log against. */
 export function runnerTimeoutMs(level: ReviewLevel): number {
@@ -219,7 +213,7 @@ export type ReviewBudget = {
    * re-breaks loudly.
    */
   guardTtlSeconds: number;
-  /** Check execution window (ms): the platform cap — one row's run never outlives one invocation. */
+  /** Check execution window (ms): the platform cap, opened at each claim/adoption origin (begin's `now`), so it can outlive the invocation that opened it. */
   checkWindowMs: number;
   /** Check attempt lease (ms): the same platform cap, from the claim's own origin. */
   checkLeaseMs: number;
@@ -257,7 +251,20 @@ export type RunnerBudgetOversize = {
   tierMaxMs: number;
 };
 
-export type RunnerBudgetOutcome = RunnerBudgetAnchor | RunnerBudgetRefusal | RunnerBudgetOversize;
+/**
+ * A malformed explicit request: non-finite or non-positive. Refused at the
+ * shared entry BEFORE the tier bound and the cutoff math — a `NaN` request
+ * must never ride the comparisons into an `allocated` with a `NaN` deadline,
+ * and an explicit `0`/`negative` is `invalid`, not the `exhausted` a live
+ * window would report.
+ */
+export type RunnerBudgetInvalid = {
+  kind: "invalid";
+  /** The request that was not a usable duration. */
+  requestedBudgetMs: number;
+};
+
+export type RunnerBudgetOutcome = RunnerBudgetAnchor | RunnerBudgetRefusal | RunnerBudgetOversize | RunnerBudgetInvalid;
 
 /**
  * Derive the round's budget. The output names every window a consumer bills
@@ -287,16 +294,21 @@ export function deriveReviewBudget(inputs: ReviewBudgetInputs): ReviewBudget {
  * a size-based allocation is a later caller's smaller `requestMs`. The single
  * `min()` lives HERE and nowhere else: neither the input write nor the exec
  * applies its own tier clamp or restarts the clock — both spend the same
- * `execDeadlineMs` passed on the wire. Two typed refusals: a `requestMs`
- * above `tierMaxMs` is `oversized` (the bound cannot be bypassed by asking),
- * and a nonpositive remainder is `exhausted`, so no paid exec ever starts
- * past the cutoff.
+ * `execDeadlineMs` passed on the wire. Three typed refusals: an explicit
+ * `requestMs` that is non-finite or non-positive is `invalid` (rejected at
+ * the entry, before any comparison can launder it into a deadline), a
+ * request above `tierMaxMs` is `oversized` (the bound cannot be bypassed by
+ * asking), and a nonpositive remainder is `exhausted`, so no paid exec ever
+ * starts past the cutoff.
  */
 export function anchorRunnerBudget(
   budget: ReviewBudget,
   anchorMs: number,
   requestMs?: number,
 ): RunnerBudgetOutcome {
+  if (requestMs !== undefined && (!Number.isFinite(requestMs) || requestMs <= 0)) {
+    return { kind: "invalid", requestedBudgetMs: requestMs };
+  }
   const requestedBudgetMs = requestMs ?? budget.tierMaxMs;
   if (requestedBudgetMs > budget.tierMaxMs) {
     return { kind: "oversized", requestedBudgetMs, tierMaxMs: budget.tierMaxMs };
