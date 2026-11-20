@@ -48,7 +48,7 @@ When the wall clock runs out, say so. `budget-exhausted` is a terminal execution
 
 Three rules make the outcome trustworthy:
 
-- **The runner reports, the Worker publishes.** The runner emits one exit-0 stdout document (`mstar.review-budget-exhausted/v1`) with safe-integer counts; the Worker validates it by exact schema and own keys, then decides the Check. A model payload never supplies it, and the runner never computes the Worker's runner budget or a Check conclusion — its engine-owned seat soft cap (`PR_REVIEW_TIER_BUDGETS`) is a different clock that bounds an individual seat, not the round.
+- **The runner reports, the Worker publishes.** The runner emits one exit-0 stdout document (`mstar.review-budget-exhausted/v1`) with safe-integer counts; the Worker validates it by exact schema and own keys, then decides the Check. A model payload never supplies it, and the runner never computes the Worker's runner budget or a Check conclusion — its engine-owned soft clock (`PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes`, with `maxSeats` fixing how many seats share it) governs the round's seat work, not the anchored deadline the Worker passes in.
 - **Unobservable is `null`, never zero.** A deadline before numstat, or a sandbox kill with no stdout, knows no seat counts; the short sentence states the cause (`runner deadline reached` / `consumer deadline reached` / `sandbox execution killed at its deadline`) and omits the numbers. A fabricated count is worse than an absent one.
 - **Nothing is rewritten and nothing is retried.** Already-published review comments stay as written, an older same-head Check is never mutated, and a confirmed exhaustion is ACKed — a retry would re-spend the same budget on the same diff and end the same way.
 
