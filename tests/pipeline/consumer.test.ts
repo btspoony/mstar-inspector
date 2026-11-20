@@ -6533,6 +6533,7 @@ type CheckRowShape = {
   /** The claim's own origin — the `nowMs` the insert was stamped with. */
   created_ms: number;
   execution_deadline_ms: number;
+  updated_ms: number;
 };
 
 function checkRows(db: TestD1): CheckRowShape[] {
@@ -8388,6 +8389,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.last_error).toContain("terminalize boom");
     expect(row.desired).toBe("failure");
     expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    // The failed hook is its OWN outcome: without it, this hand-off is
+    // indistinguishable from a terminal send that landed.
+    expect(row.terminalize_outcome).toBe("hook-failed");
     // Nothing escaped the Check lane, and the review still published.
     expect(publicationRow(db).phase).toBe("applied");
   }, 10_000);
@@ -9187,6 +9191,192 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.next_attempt_ms).toBe(checkState.clockMs + 60_000);
     expect(released.attempts).toBe(1);
   });
+
+  test("check lifecycle: a pre-numstat exhaustion with no knowable SHA still publishes the failure Check and acks", async () => {
+    const db = await createSeededTestD1();
+    // An OLDER completed Check and the review it published, both for the head
+    // this delivery will check out: a re-trigger must leave them untouched.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, created_ms, updated_ms)
+         VALUES ('prior-publication', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'applied',
+                 '{}', '{"prior":true}', 1, 1)`,
+      )
+      .run(TEST_APP_ID, SHA);
+    db.raw
+      .prepare(
+        `INSERT INTO review_checks
+           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+            triggered_by, action, attempt_key, generation, external_id, check_run_id,
+            create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
+            desired, desired_title, desired_summary, observed, recovery_state,
+            publication_id, attempts, next_attempt_ms, last_error, terminal_ms,
+            created_ms, updated_ms)
+         VALUES ('prior-check', ?, 424242, 123, 'acme', 'widgets', 42, ?,
+                 'pull_request', 'opened', 'prior-attempt-key', 1, 'mstar-check:v1:prior:1', 7001,
+                 'known', NULL, 1, NULL, 900, 'success', 'mstar review', 'prior summary',
+                 'success', 'done', 'prior-publication', 1, NULL, NULL, 900, 1, 1)`,
+      )
+      .run(TEST_APP_ID, SHA);
+    const adapter = checksAdapterFor(db);
+
+    // An issue comment: no payload SHA and no ledger watermark, so the
+    // admission-time claim is skipped and the post-checkout fallback claim sits
+    // AFTER the numstat. The whole derived preparation window is gone before
+    // the diff stage, so the stop lands in that gap.
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+        ...clockSpendingSandbox("git init", 666_000, clock),
+      });
+      await consumer(
+        h.makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })),
+      );
+    });
+
+    // ACKED, never retried: a confirmed stop is terminal.
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    // No review, no comment: the stop published a Check and a failure row only.
+    expect(reviewCount(db)).toBe(0);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+
+    // The Check this stop owes is published against the CHECKOUT sha — the fact
+    // that became known after the admission claim had already been skipped.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    expect((checkRequests[0]!.params as unknown as ChecksCreateParams).head_sha).toBe(SHA);
+    const terminal = checkRequests[2]!.params as unknown as ChecksUpdateParams;
+    expect(terminal.status).toBe("completed");
+    expect(terminal.conclusion).toBe("failure");
+    expect(terminal.output.title).toBe(CHECK_NAME);
+    // The SHORT form: counters that were observed, in order, and no invented
+    // changed-line count (the numstat never ran).
+    expect(terminal.output.summary).toBe(
+      "Review budget exhausted: default review reached its 666s preparation budget (consumer deadline reached); " +
+        "0/0 seats stopped before finishing — a time-budget failure, not a verdict on the PR; " +
+        "shrink the diff or use a tier whose ceiling covers it.",
+    );
+
+    const rows = checkRows(db);
+    expect(rows).toHaveLength(2);
+    const fresh = rows.find((row) => row.id !== "prior-check")!;
+    expect(fresh.head_sha).toBe(SHA);
+    expect(fresh.desired).toBe("failure");
+    expect(fresh.observed).toBe("failure");
+    // This attempt published nothing, so its run carries no publication link.
+    expect(fresh.publication_id).toBeNull();
+    // The older Check and its published review are exactly as they were.
+    const prior = db.raw
+      .query("SELECT * FROM review_checks WHERE id = 'prior-check'")
+      .get() as CheckRowShape;
+    expect(prior.desired).toBe("success");
+    expect(prior.observed).toBe("success");
+    expect(prior.publication_id).toBe("prior-publication");
+    expect(prior.check_run_id).toBe(7001);
+    expect(prior.terminal_ms).toBe(900);
+    expect(prior.last_error).toBeNull();
+    expect(prior.updated_ms).toBe(1);
+    const priorPublication = db.raw
+      .query("SELECT phase, proof_json, updated_ms FROM review_publications WHERE id = 'prior-publication'")
+      .get() as { phase: string; proof_json: string; updated_ms: number };
+    expect(priorPublication).toEqual({ phase: "applied", proof_json: '{"prior":true}', updated_ms: 1 });
+  });
+
+  test("check lifecycle: a sandbox kill publishes the no-counter short form, never an invented count", async () => {
+    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerStdout = "";
+    // A malformed numstat row: the diff SIZE is unobserved, so the summary must
+    // carry no changed-line count at all.
+    h.sandbox.numstatStdout = "not-a-numstat-row\n";
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).toContain('"seatsDispatched":null');
+    expect(row).toContain('"seatsStopped":null');
+    expect(row).toContain('"changedLines":null');
+
+    // The Check renders the outcome this attempt actually recorded — the same
+    // derived runner budget the failure row carries, and nothing else.
+    const outcome = JSON.parse(row.slice(row.indexOf("{"), row.lastIndexOf("}") + 1)) as { budgetMs: number };
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("failure");
+    expect(terminal.output.summary).toBe(
+      `Review budget exhausted: default review reached its ${outcome.budgetMs / 1000}s runner budget ` +
+        "(sandbox execution killed at its deadline) — a time-budget failure, not a verdict on the PR; " +
+        "shrink the diff or use a tier whose ceiling covers it.",
+    );
+    expect(terminal.output.summary).not.toContain("seats");
+    expect(terminal.output.summary).not.toContain("changed lines");
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
+    expect(reviewCount(db)).toBe(0);
+  });
+
+  test("check lifecycle: an abandoned terminal send hands the exhaustion intent to recovery, which sends it", async () => {
+    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerStdout = "";
+    const db = await createSeededTestD1();
+    // The terminal send parks forever, so the consumer gives up at its own
+    // bound and hands the attempt over instead of writing the run itself.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
+    checkRequestOverrides.update = (params) => {
+      if ("conclusion" in params) return Promise.withResolvers<CheckRunPayload>().promise;
+      const run = checkRuns.get(params.check_run_id)!;
+      const promoted: CheckRunPayload = { ...run, status: "in_progress" };
+      checkRuns.set(params.check_run_id, promoted);
+      return promoted;
+    };
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // This invocation's terminal send parked on the wire and never answered, so
+    // the scripted run is still the promoted one — nothing landed.
+    const frozen = checkRowFor(db, SHA);
+    expect(checkRuns.get(frozen.check_run_id!)!.status).toBe("in_progress");
+    expect(frozen.desired).toBe("failure");
+    expect(frozen.desired_summary).toContain("Review budget exhausted: default review reached its");
+    expect(frozen.desired_summary).toContain("(sandbox execution killed at its deadline)");
+    expect(frozen.holder).toBeNull();
+    expect(frozen.terminal_ms).toBeNull();
+    expect(frozen.recovery_state).toBe("remote-unconfirmed");
+    expect(frozen.publication_id).toBeNull();
+
+    // The recovery lane owns the conclusion: at the attempt's own deadline it
+    // sends the SAME frozen intent — no re-derivation and no paid rerun. The
+    // parked transport is cleared first: it was THIS invocation's abandoned
+    // send, not the lane's.
+    checkRequestOverrides = {};
+    seedAppInstallation(db);
+    const dueAt = frozen.execution_deadline_ms + 1;
+    const pass = await reconcileReviewChecks({ DB: db as never } as never, {
+      now: () => dueAt,
+      credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => dueAt) }),
+      log: { warn: () => {}, info: () => {} },
+    });
+    expect(pass.completed).toBe(1);
+    const sent = checkRequests.filter((request) => "conclusion" in request.params).at(-1)!
+      .params as unknown as ChecksUpdateParams;
+    expect(sent.conclusion).toBe("failure");
+    expect(sent.output.summary).toBe(frozen.desired_summary!);
+    expect(checkRowFor(db, SHA).observed).toBe("failure");
+  }, 20_000);
 });
 
 describe("workspace attribution gate (one read face)", () => {

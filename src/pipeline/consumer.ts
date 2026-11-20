@@ -4228,6 +4228,20 @@ async function processMessage(
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
+  // The authoritative checkout SHA once `rev-parse` answered, and the App's
+  // numeric GitHub id once the credential row resolved. Both are the facts a
+  // pre-numstat exhaustion needs to claim the Check it owes: an issue-comment
+  // delivery has no payload SHA and may have no readable head watermark, so
+  // the admission claim never ran, yet the stop happens after both are known.
+  let resolvedHeadSha: string | null = null;
+  let resolvedGithubAppId: number | undefined;
+  // §7.10 Check lane scope — the same App/PR identity the publication journal
+  // and the attempt key use, derivable from the payload alone. Hoisted (not
+  // built here) because the terminal catch needs it to claim a Check this
+  // round never got to claim before the checkout; it is ASSIGNED inside the
+  // try so a legacy payload with no `botRef` still throws through the
+  // structured channel instead of escaping before the catch.
+  let lifecycleScope: Scope | undefined;
   // The facts a `budget-exhausted` resolution is built from: the ONE derived
   // round clock (set at the diff stage), the runner allocation frozen just
   // before the input write (null = the runner never received one), and the
@@ -4480,6 +4494,10 @@ async function processMessage(
         },
         `check terminalize hook failed (isolated): ${detail}`,
       );
+      // The hook never sent a conclusion, so this exit is NOT a completed
+      // send. Recorded while the row still has no outcome, so a failed hook
+      // stays distinguishable from one that ran and landed.
+      await record("hook-failed");
       const release = abandonCheck(handle, `terminalize hook threw: ${detail}`, {
         ...(outcome === "budget-exhausted" ? { outcome, budgetExhaustion } : {}),
       });
@@ -4705,6 +4723,7 @@ async function processMessage(
     // charged to the target's workspace — the tenant that asked (see
     // `CommenterResolution.usageWorkspaceId`).
     const { commenter, githubAppId, workspaceId, usageWorkspaceId } = resolution;
+    resolvedGithubAppId = githubAppId;
     // Supersede skip (migration 0044): a queued delivery whose PR head has
     // already advanced must cost nothing that can fail it, hold the guard, or
     // start work — no admission row, no sandbox, no Check, no publication.
@@ -4862,9 +4881,9 @@ async function processMessage(
     });
     // The Check lane's scope (§7.10) — the same App/PR identity the
     // publication journal and the attempt key use, derivable from the payload
-    // alone. Declared HERE because the admission-time Check claim needs it
-    // before the container and the checkout.
-    const lifecycleScope: Scope = {
+    // alone. Read HERE because the admission-time Check claim needs it before
+    // the container and the checkout.
+    lifecycleScope = {
       appId: payload.botRef.appId,
       installationId: payload.installation_id,
       owner: payload.owner,
@@ -5017,6 +5036,7 @@ async function processMessage(
       throw new Error(`cannot resolve head sha: git exit ${rev.exitCode}, stdout ${rev.stdout.length}B`);
     }
     const headSha = rev.stdout.trim();
+    resolvedHeadSha = headSha;
 
     // §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
     // authoritative checkout HERE — before any dedup/journal early exit, so a
@@ -6943,6 +6963,26 @@ async function processMessage(
               seatsStopped: 0,
               changedLines: observedChangedLines,
             };
+      // A stop that fired BEFORE the fallback claim (the diff stage, its
+      // oversized substitute, or the numstat that follows) can reach here with
+      // no Check at all: an issue-comment delivery carries no payload SHA and
+      // may have no readable head watermark, so the admission-time claim was
+      // skipped and the fallback never ran. The checkout SHA IS known by then,
+      // so claim here — an ACK that publishes nothing would leave the frozen
+      // failure this stop owes with no trace and no recovery intent. A claim
+      // already ATTEMPTED is never retried: the claim insert is the one
+      // race-decided gate, and a second try could mint a second generation.
+      if (
+        deps.checks !== undefined &&
+        checkHandle === null &&
+        !checkClaimAttempted &&
+        lifecycleScope !== undefined &&
+        resolvedHeadSha !== null &&
+        resolvedGithubAppId !== undefined
+      ) {
+        checkClaimAttempted = true;
+        checkHandle = await beginCheck(lifecycleScope, resolvedGithubAppId, resolvedHeadSha);
+      }
       await terminalizeCheck(null, "budget-exhausted", undefined, budgetOutcome);
       const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${err instanceof Error ? err.message : String(err)}`;
       deps.log.error(
