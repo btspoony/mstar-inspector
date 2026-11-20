@@ -1052,18 +1052,18 @@ describe("createReviewConsumer", () => {
   });
 
   test("runner failure with empty stderr says so explicitly", async () => {
-    h.sandbox.runnerExitCode = 124; // the exec bound fired — the run leaves nothing on stderr
+    h.sandbox.runnerExitCode = 1; // a plain runner fault — nothing on stderr
     h.sandbox.runnerStderr = "";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
-      /runner failed: exit 124, stdout 0B, stderr empty/,
+      /runner failed: exit 1, stdout 0B, stderr empty/,
     );
   });
 
   test("runner failure reports stdout in UTF-8 bytes, not UTF-16 units", async () => {
-    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerExitCode = 1;
     // Two code units, six UTF-8 bytes: `String.length` would print 2.
     h.sandbox.runnerStdout = "✓✓";
     const db = await createSeededTestD1();
@@ -1079,7 +1079,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("runner failure keeps the stderr TAIL, bounded", async () => {
-    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerExitCode = 1;
     h.sandbox.runnerStderr = `${"x".repeat(5000)}\nrunner: seat budget exceeded after 600s\n`;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
@@ -1090,6 +1090,87 @@ describe("createReviewConsumer", () => {
     );
     expect(message).toContain("runner: seat budget exceeded after 600s");
     expect(message.length).toBeLessThan(700);
+  });
+
+  test("the runner's exit-0 budget signal acks with the typed outcome, not a verdict", async () => {
+    h.sandbox.runnerExitCode = 0;
+    h.sandbox.runnerStdout = JSON.stringify({
+      schema: "mstar.review-budget-exhausted/v1",
+      seatsDispatched: 5,
+      seatsStopped: 3,
+    });
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    // No throw → the handler acks; the review never reached an envelope, so
+    // no publication, no comment and no review row.
+    await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+
+    // ACKED, never retried: a confirmed stop is terminal.
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain("budget-exhausted:");
+    expect(row).toContain('"cause":"runner-deadline"');
+    expect(row).toContain('"seatsDispatched":5');
+    expect(row).toContain('"seatsStopped":3');
+
+    // The Check this stop owes is the FULL sentence — the runner window and
+    // every counter (5 dispatched, 3 stopped, the numstat's 17 changed lines)
+    // were all observed before the signal resolved.
+    const outcome = JSON.parse(row.slice(row.indexOf("{"), row.lastIndexOf("}") + 1)) as { budgetMs: number };
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.status).toBe("completed");
+    expect(terminal.conclusion).toBe("failure");
+    expect(terminal.output.summary).toBe(
+      `Review budget exhausted: default review stopped at ${outcome.budgetMs / 1000}s ` +
+        "with 3/5 seats stopped before finishing (17 changed lines) — a time-budget failure, " +
+        "not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.",
+    );
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
+  });
+
+  test("a sandbox kill at the anchored deadline acks with the typed outcome and unknown counters", async () => {
+    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerStdout = "";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).toContain('"seatsDispatched":null');
+    expect(row).toContain('"seatsStopped":null');
+  });
+
+  test("a sandbox kill persists only trusted fields — provider stderr rides the log, never the row", async () => {
+    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerStdout = "";
+    // Untrusted provider text: the durable row must carry only the typed
+    // budget fields and fixed diagnostics — never model-controlled stderr.
+    h.sandbox.runnerStderr = "provider stderr: leaked seat transcript tail";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).not.toContain("leaked seat transcript tail");
+    // The diagnosis still exists — on the redacted log line, not the row.
+    const warn = h.logLines.find((l) => l.level === "warn" && typeof l.fields.stderr_tail === "string");
+    expect(warn).toBeDefined();
+    expect(String(warn!.fields.stderr_tail)).toContain("leaked seat transcript tail");
   });
 
   test("runner failure keeps the CAUSE and the counted chain fold inside the persisted tail", async () => {
@@ -1651,14 +1732,16 @@ describe("createReviewConsumer", () => {
       roundBudgetMs: 1,
     });
 
-    await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
-      /round budget spent: diff capture declined/,
-    );
+    // A confirmed stop is terminal: the handler acks (no throw → no queue
+    // retry) after the Check row and the typed failure row landed.
+    await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
 
     // Clone → rev-parse only: no exec ran on a spent deadline.
     expect(h.sandbox.calls).toHaveLength(2);
     expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).toContain("round budget spent");
+    expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
+    expect(String(failureRows(db)[0]!.error)).toContain('"cause":"consumer-deadline"');
+    expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"preparation"');
   });
 
   test("the fallback's steps shrink to what the refused capture left of the ONE diff window", async () => {
@@ -1753,7 +1836,7 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(0);
   });
 
-  test("a round past the derived runner deadline declines the fallback and rethrows the 406", async () => {
+  test("a round past the derived runner deadline declines the fallback and records the 406 under the budget outcome", async () => {
     h.sandbox.diffExitCode = 1;
     h.sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
     const db = await createSeededTestD1();
@@ -1764,9 +1847,10 @@ describe("createReviewConsumer", () => {
         // the 120s capture allowance — a fallback could only starve the runner.
         ...clockSpendingSandbox("git init", 600_000, clock),
       });
-      await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
-        /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded/,
-      );
+      // The 406 and the derived deadline together end the attempt: the row
+      // keeps the git-stage cause verbatim under the typed prefix, and the
+      // handler acks instead of retrying a spent clock.
+      await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
     });
 
     expect(h.sandbox.calls).toHaveLength(3);
@@ -1777,6 +1861,8 @@ describe("createReviewConsumer", () => {
       diff_fallback_step: "admission",
     });
     expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
+    expect(String(failureRows(db)[0]!.error)).toContain("HTTP 406: Sorry, the diff exceeded");
   });
 
   test("deep reaches the fallback: its runner budget is capped by the derived deadline, not reserved in full", async () => {
@@ -2014,11 +2100,87 @@ describe("createReviewConsumer", () => {
           destroy: h.fakeSandbox.destroy,
         }),
       });
-      await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/round budget spent: runner declined/);
+      // The write spent the whole anchored window, so the exec is declined
+      // with the typed outcome instead of starting a 1ms run: the handler
+      // acks (a retry would only lose the same clock) after the failure row.
+      await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
     });
 
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
+    expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"runner"');
+  });
+
+  test("an input write at the step-cap boundary with the deadline inside it attributes its 124 to the deadline", async () => {
+    // qc1 F5: the write's armed bound and its `124` attribution read ONE
+    // clock sample taken after serialization. Here serialization pushes the
+    // deadline remainder from 122s to exactly the 120s step cap: the write's
+    // bound is the deadline's remainder (never the pre-serialization window),
+    // so its kill is the typed stop — the stale first sample would have read
+    // `122s > cap` and retried the same clock.
+    h.sandbox.writeInputExitCode = 124;
+    // 150 work units requests 123.6s, so the anchored deadline lands at the
+    // cutoff (roundStart + 666s) without needing saturation.
+    h.sandbox.numstatStdout = "100\t50\tsrc/big.ts\n";
+    const db = await createSeededTestD1();
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            // 544s of clone leaves the anchored 666s deadline 122s of
+            // remaining — strictly above the 120s write cap.
+            if (cmd.includes("git init")) clock.now += 544_000;
+            return h.fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: h.fakeSandbox.destroy,
+        }),
+      });
+      // Real synchronous serialization runs between the payload build and the
+      // write's clock read: this self-restoring spy spends 2s there, so the
+      // single sample sees the deadline remainder sit EXACTLY at the cap —
+      // and the two-sample code read its stale 122s remainder instead.
+      const realStringify = JSON.stringify;
+      let serialized = false;
+      JSON.stringify = ((value: unknown, ...rest: unknown[]) => {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          (value as Record<string, unknown>).worktreePath === CLONE_DIR &&
+          typeof (value as Record<string, unknown>).outerDeadlineEpochMs === "number"
+        ) {
+          JSON.stringify = realStringify;
+          serialized = true;
+          clock.now += 2_000;
+        }
+        return Reflect.apply(realStringify, JSON, [value, ...rest]) as string;
+      }) as typeof JSON.stringify;
+      try {
+        // ACK, not a retry: a confirmed deadline kill is terminal.
+        await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+      } finally {
+        JSON.stringify = realStringify;
+      }
+      expect(serialized).toBe(true);
+    });
+
+    const inputWrite = h.sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
+    // The armed bound is min(120s cap, 120s deadline remainder): the write
+    // sits exactly at the step-cap boundary and the frozen deadline is the
+    // same instant — attribution to exhaustion is the safe direction (a
+    // retry would only lose the same clock again).
+    expect(execTimeout(inputWrite)).toBe(120_000);
+    expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain("budget-exhausted:");
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).toContain('"budgetWindow":"runner"');
+    expect(row).toContain('"seatsDispatched":0');
+    expect(row).toContain('"seatsStopped":0');
   });
 
   test("a small diff requests the size-derived budget — the request (not the cutoff) produces the effective value, and the anchored deadline never moves after the input write", async () => {
@@ -2130,15 +2292,15 @@ describe("createReviewConsumer", () => {
           destroy: h.fakeSandbox.destroy,
         }),
       });
-      await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
-        /round budget spent: runner declined — the pre-runner cutoff is spent \(0ms left for it\)/,
-      );
+      await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
     });
 
     // No payload write, no paid exec: the refusal landed BEFORE both.
     expect(h.sandbox.calls.some((c) => c.cmd.startsWith("base64 -d >"))).toBe(false);
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
+    expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"preparation"');
   });
 
   test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
@@ -2153,6 +2315,54 @@ describe("createReviewConsumer", () => {
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(h.sandbox.destroyCalls).toBe(1);
+  });
+
+  test("an input write the anchored deadline killed acks the typed stop — the runner never ran, so 0/0 is KNOWN", async () => {
+    h.sandbox.writeInputExitCode = 124;
+    const db = await createSeededTestD1();
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        getSandbox: async () => ({
+          runCommand: async (cmd: string, opts?: unknown) => {
+            // 580s of clone leaves 86s of the 666s derived deadline — under the
+            // 120s step cap, so the anchored deadline is what bound the write
+            // and the kill it reports is that deadline's, not the cap's.
+            if (cmd.includes("git init")) clock.now += 580_000;
+            return h.fakeSandbox.runCommand(cmd, opts);
+          },
+          destroy: h.fakeSandbox.destroy,
+        }),
+      });
+      // A confirmed stop is terminal: ack, never a paid retry for the same clock.
+      await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
+    });
+
+    expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).toContain('"budgetWindow":"runner"');
+    // The runner never started: the seats are provably 0/0, not null.
+    expect(row).toContain('"seatsDispatched":0');
+    expect(row).toContain('"seatsStopped":0');
+  });
+
+  test("an input write its own step cap killed stays a generic write error", async () => {
+    h.sandbox.writeInputExitCode = 124;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
+
+    // ~666s of derived deadline remain at the write: the step's own 120s cap
+    // bound it, so the 124 is a plain write failure — the queue retries.
+    await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
+      /runner input write failed: exit 124/,
+    );
+
+    expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).not.toContain("budget-exhausted:");
   });
 
   test("App row NULL + missing default row → runner runs the landing tier 'default' (one default read)", async () => {
@@ -6483,6 +6693,7 @@ type CheckRowShape = {
   /** The claim's own origin — the `nowMs` the insert was stamped with. */
   created_ms: number;
   execution_deadline_ms: number;
+  updated_ms: number;
 };
 
 function checkRows(db: TestD1): CheckRowShape[] {
@@ -8338,6 +8549,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.last_error).toContain("terminalize boom");
     expect(row.desired).toBe("failure");
     expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    // The failed hook is its OWN outcome: without it, this hand-off is
+    // indistinguishable from a terminal send that landed.
+    expect(row.terminalize_outcome).toBe("hook-failed");
     // Nothing escaped the Check lane, and the review still published.
     expect(publicationRow(db).phase).toBe("applied");
   }, 10_000);
@@ -9137,6 +9351,223 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.next_attempt_ms).toBe(checkState.clockMs + 60_000);
     expect(released.attempts).toBe(1);
   });
+
+  test("check lifecycle: a pre-numstat exhaustion with no knowable SHA still publishes the failure Check and acks", async () => {
+    const db = await createSeededTestD1();
+    // An OLDER completed Check and the review it published, both for the head
+    // this delivery will check out: a re-trigger must leave them untouched.
+    // The publication's own payload is a REAL prior review's record — its body
+    // is the durable form of the already-published GitHub comment — so the
+    // byte-identical assertion below actually protects an existing comment,
+    // not an empty fixture. Its `ship it` verdict also pins that an earlier
+    // same-head PASS never softens this attempt's `failure`.
+    const PRIOR_PUBLICATION_PAYLOAD =
+      '{"scope":{"appId":"' +
+      TEST_APP_ID +
+      '","installationId":123,"owner":"acme","repo":"widgets","prNumber":42,"headSha":"' +
+      SHA +
+      '"},"round":1,"targetCommentId":4242,' +
+      '"body":"<!-- mstar-inspector:review:v1 round=1 -->\\n## ✅ Verdict: `ship it`\\nAll good. ⚡",' +
+      '"bodySha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",' +
+      '"artifact":{"payload":{"verdict":"ship it","scorePct":95}},"lifecycle":null}';
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, created_ms, updated_ms)
+         VALUES ('prior-publication', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'applied',
+                 ?, '{"prior":true}', 1, 1)`,
+      )
+      .run(TEST_APP_ID, SHA, PRIOR_PUBLICATION_PAYLOAD);
+    db.raw
+      .prepare(
+        `INSERT INTO review_checks
+           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+            triggered_by, action, attempt_key, generation, external_id, check_run_id,
+            create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
+            desired, desired_title, desired_summary, observed, recovery_state,
+            publication_id, attempts, next_attempt_ms, last_error, terminal_ms,
+            created_ms, updated_ms)
+         VALUES ('prior-check', ?, 424242, 123, 'acme', 'widgets', 42, ?,
+                 'pull_request', 'opened', 'prior-attempt-key', 1, 'mstar-check:v1:prior:1', 7001,
+                 'known', NULL, 1, NULL, 900, 'success', 'mstar review', 'prior summary',
+                 'success', 'done', 'prior-publication', 1, NULL, NULL, 900, 1, 1)`,
+      )
+      .run(TEST_APP_ID, SHA);
+    const adapter = checksAdapterFor(db);
+
+    // An issue comment: no payload SHA and no ledger watermark, so the
+    // admission-time claim is skipped and the post-checkout fallback claim sits
+    // AFTER the numstat. The whole derived preparation window is gone before
+    // the diff stage, so the stop lands in that gap.
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+        ...clockSpendingSandbox("git init", 666_000, clock),
+      });
+      await consumer(
+        h.makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })),
+      );
+    });
+
+    // ACKED, never retried: a confirmed stop is terminal.
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    // No review, no comment: the stop published a Check and a failure row only.
+    expect(reviewCount(db)).toBe(0);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+
+    // The Check this stop owes is published against the CHECKOUT sha — the fact
+    // that became known after the admission claim had already been skipped.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    expect((checkRequests[0]!.params as unknown as ChecksCreateParams).head_sha).toBe(SHA);
+    const terminal = checkRequests[2]!.params as unknown as ChecksUpdateParams;
+    expect(terminal.status).toBe("completed");
+    expect(terminal.conclusion).toBe("failure");
+    expect(terminal.output.title).toBe(CHECK_NAME);
+    // The SHORT form: counters that were observed, in order, and no invented
+    // changed-line count (the numstat never ran).
+    expect(terminal.output.summary).toBe(
+      "Review budget exhausted: default review reached its 666s preparation budget (consumer deadline reached); " +
+        "0/0 seats stopped before finishing — a time-budget failure, not a verdict on the PR; " +
+        "shrink the diff or use a tier whose ceiling covers it.",
+    );
+
+    const rows = checkRows(db);
+    expect(rows).toHaveLength(2);
+    const fresh = rows.find((row) => row.id !== "prior-check")!;
+    expect(fresh.head_sha).toBe(SHA);
+    expect(fresh.desired).toBe("failure");
+    expect(fresh.observed).toBe("failure");
+    // This attempt published nothing, so its run carries no publication link.
+    expect(fresh.publication_id).toBeNull();
+    // The older Check and its published review are exactly as they were.
+    const prior = db.raw
+      .query("SELECT * FROM review_checks WHERE id = 'prior-check'")
+      .get() as CheckRowShape;
+    expect(prior.desired).toBe("success");
+    expect(prior.observed).toBe("success");
+    expect(prior.publication_id).toBe("prior-publication");
+    expect(prior.check_run_id).toBe(7001);
+    expect(prior.terminal_ms).toBe(900);
+    expect(prior.last_error).toBeNull();
+    expect(prior.updated_ms).toBe(1);
+    const priorPublication = db.raw
+      .query("SELECT phase, payload_json, proof_json, updated_ms FROM review_publications WHERE id = 'prior-publication'")
+      .get() as { phase: string; payload_json: string; proof_json: string; updated_ms: number };
+    expect(priorPublication).toEqual({
+      phase: "applied",
+      payload_json: PRIOR_PUBLICATION_PAYLOAD,
+      proof_json: '{"prior":true}',
+      updated_ms: 1,
+    });
+  });
+
+  test("check lifecycle: a sandbox kill publishes the no-counter short form, never an invented count", async () => {
+    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerStdout = "";
+    // A malformed numstat row: the diff SIZE is unobserved, so the summary must
+    // carry no changed-line count at all.
+    h.sandbox.numstatStdout = "not-a-numstat-row\n";
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    const row = String(failureRows(db)[0]!.error);
+    expect(row).toContain('"cause":"sandbox-kill"');
+    expect(row).toContain('"seatsDispatched":null');
+    expect(row).toContain('"seatsStopped":null');
+    expect(row).toContain('"changedLines":null');
+
+    // The Check renders the outcome this attempt actually recorded — the same
+    // derived runner budget the failure row carries, and nothing else.
+    const outcome = JSON.parse(row.slice(row.indexOf("{"), row.lastIndexOf("}") + 1)) as { budgetMs: number };
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("failure");
+    expect(terminal.output.summary).toBe(
+      `Review budget exhausted: default review reached its ${outcome.budgetMs / 1000}s runner budget ` +
+        "(sandbox execution killed at its deadline) — a time-budget failure, not a verdict on the PR; " +
+        "shrink the diff or use a tier whose ceiling covers it.",
+    );
+    expect(terminal.output.summary).not.toContain("seats");
+    expect(terminal.output.summary).not.toContain("changed lines");
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
+    expect(reviewCount(db)).toBe(0);
+  });
+
+  test("check lifecycle: an abandoned terminal send hands the exhaustion intent to recovery, which sends it", async () => {
+    h.sandbox.runnerExitCode = 124;
+    h.sandbox.runnerStdout = "";
+    const db = await createSeededTestD1();
+    // The terminal send parks forever, so the consumer gives up at its own
+    // bound and hands the attempt over instead of writing the run itself.
+    seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
+    checkRequestOverrides.update = (params) => {
+      if ("conclusion" in params) return Promise.withResolvers<CheckRunPayload>().promise;
+      const run = checkRuns.get(params.check_run_id)!;
+      const promoted: CheckRunPayload = { ...run, status: "in_progress" };
+      checkRuns.set(params.check_run_id, promoted);
+      return promoted;
+    };
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // ACKED, never retried: the parked send is handed to recovery, and a
+    // confirmed stop is terminal regardless of how its send ended.
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    // This invocation's terminal send parked on the wire and never answered, so
+    // the scripted run is still the promoted one — nothing landed.
+    const frozen = checkRowFor(db, SHA);
+    expect(checkRuns.get(frozen.check_run_id!)!.status).toBe("in_progress");
+    expect(frozen.desired).toBe("failure");
+    // The exact text the freeze owes — derived here from the attempt's own
+    // recorded facts (same budget the failure row carries, no seat counts,
+    // the numstat's 17 changed lines), never echoed back from the row.
+    const row = String(failureRows(db)[0]!.error);
+    const outcome = JSON.parse(row.slice(row.indexOf("{"), row.lastIndexOf("}") + 1)) as { budgetMs: number };
+    const expectedSummary =
+      `Review budget exhausted: default review reached its ${outcome.budgetMs / 1000}s runner budget ` +
+      "(sandbox execution killed at its deadline); 17 changed lines — a time-budget failure, " +
+      "not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.";
+    expect(frozen.desired_summary).toBe(expectedSummary);
+    expect(frozen.holder).toBeNull();
+    expect(frozen.terminal_ms).toBeNull();
+    expect(frozen.recovery_state).toBe("remote-unconfirmed");
+    expect(frozen.publication_id).toBeNull();
+
+    // The recovery lane owns the conclusion: at the attempt's own deadline it
+    // sends the SAME frozen intent — no re-derivation and no paid rerun. The
+    // parked transport is cleared first: it was THIS invocation's abandoned
+    // send, not the lane's.
+    checkRequestOverrides = {};
+    seedAppInstallation(db);
+    const dueAt = frozen.execution_deadline_ms + 1;
+    const pass = await reconcileReviewChecks({ DB: db as never } as never, {
+      now: () => dueAt,
+      credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => dueAt) }),
+      log: { warn: () => {}, info: () => {} },
+    });
+    expect(pass.completed).toBe(1);
+    const sent = checkRequests.filter((request) => "conclusion" in request.params).at(-1)!
+      .params as unknown as ChecksUpdateParams;
+    expect(sent.conclusion).toBe("failure");
+    expect(sent.output.summary).toBe(frozen.desired_summary!);
+    expect(checkRowFor(db, SHA).observed).toBe("failure");
+  }, 20_000);
 });
 
 describe("workspace attribution gate (one read face)", () => {

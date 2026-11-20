@@ -94,8 +94,8 @@ import {
   putAbandonClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
-import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
-import type { ReviewFinding, ReviewOutput } from "../review/schema";
+import { parseBudgetExhaustedSignal, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
+import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import { APPLIED_MODEL_MAX_CHARS, APPLIED_MODEL_PATH, APPLIED_MODEL_PATTERN } from "../../packages/shared/src/runtime";
 import type { CustomProviderDeclaration, ReviewLevel } from "../../packages/shared/src/runtime";
 import { providerEnvName } from "./provider-catalog";
@@ -286,6 +286,7 @@ import {
   parseNumstatSize,
   requestRunnerBudget,
   type ReviewBudget,
+  type RunnerBudgetAnchor,
 } from "../review-budget";
 
 export type PipelineEnv = {
@@ -698,6 +699,13 @@ export type ConsumerLogFields = {
   report_doc?: "absent" | "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document" | "stale-head";
   report_doc_error?: string;
   report_doc_head_sha?: string;
+  /** The resolved `budget-exhausted` record, on the one `review failed` line the stop emits. */
+  budget_outcome?: BudgetExhaustedOutcome;
+  /**
+   * A sandbox kill's redacted provider stderr tail: untrusted text that rides
+   * ONE log line so the durable row can carry only trusted budget fields.
+   */
+  stderr_tail?: string;
 };
 
 export type ConsumerLog = {
@@ -767,7 +775,7 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
 
 /**
  * Outcome of one message pass (bugbot BB-3 + architect lock L4 + AL-1).
- * FOUR DISTINCT typed outcomes never throw: a guard-held message
+ * FIVE DISTINCT typed outcomes never throw: a guard-held message
  * is scheduled for a per-message delayed retry and finally acked with a
  * warning — it is never rethrown into the immediate-retry ×3 → DLQ path; a
  * PAUSED message (the App's review_enabled=0) is acked directly after its
@@ -777,8 +785,11 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
  * best-effort review_failures row + degraded comment and a `degraded` claim
  * stamp — a deterministic model-output failure where retry is deterministic
  * waste; a SUPERSEDED message is acked
- * directly because the ledger already holds a newer commit for its PR.
- * Infra failures keep the
+ * directly because the ledger already holds a newer commit for its PR; a
+ * BUDGET-EXHAUSTED message (the wall clock ended the review) is acked
+ * directly after its Check `failure` and `budget-exhausted:` failure row —
+ * a confirmed stop is terminal, so another paid delivery can only lose the
+ * same clock again. Infra failures keep the
  * existing throw → retry → DLQ behavior (plus the AL-6 best-effort failure
  * row before the rethrow).
  */
@@ -810,7 +821,14 @@ export type ProcessOutcome =
    * or publication — no retry, no DLQ, no failure row. The next delivery for
    * the PR reviews the newest commit.
    */
-  | { kind: "superseded" };
+  | { kind: "superseded" }
+  /**
+   * The wall clock ended the attempt: a `budget-exhausted:` failure row and
+   * a Check `failure` already landed inside `processMessage`; the message is
+   * acked directly — terminal, so no paid queue retry and no DLQ entry. The
+   * typed record rides for the report.
+   */
+  | { kind: "budget-exhausted"; outcome: BudgetExhaustedOutcome };
 
 /**
  * Why the guard held a message plus the caps it was measured against
@@ -1230,6 +1248,8 @@ export type CheckLifecycleHooks = {
      * inherit.
      */
     inheritedHeadSha?: string;
+    /** Required with `outcome: "budget-exhausted"`: this attempt's typed stop record — the frozen Check summary's budget facts. */
+    budgetExhaustion?: BudgetExhaustedOutcome;
     /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
     updateBudgetMs: number }): Promise<void>;
   /**
@@ -1257,6 +1277,8 @@ export type CheckLifecycleHooks = {
     reason: string;
     /** The terminal knowledge this hand-off carries; omitted → `unconfirmed`. */
     outcome?: CheckTerminalOutcome;
+    /** Required with `outcome: "budget-exhausted"`: the same record the terminal path carries. */
+    budgetExhaustion?: BudgetExhaustedOutcome;
     /** Set with `outcome: "skipped"`: the head whose result the run inherits. */
     inheritedHeadSha?: string;
     /** Delay this row's first recovery attempt past an abandoned send's lifetime. */
@@ -1304,18 +1326,61 @@ export type CheckLifecycleHooks = {
 };
 
 /**
+ * The derived-deadline refusal: the consumer's own clock declined a step or a
+ * paid exec. `window` names which derived window was spent — the runner
+ * window frozen at the anchor (`runner`), or the preparation window before
+ * the runner received an allocation (`preparation`). The catch resolves it
+ * into `cause: "consumer-deadline"` of the typed `budget-exhausted` outcome.
+ */
+class RoundBudgetSpent extends Error {
+  constructor(
+    message: string,
+    readonly window: BudgetExhaustedOutcome["budgetWindow"],
+  ) {
+    super(message);
+    this.name = "RoundBudgetSpent";
+  }
+}
+
+/**
+ * The resolved wall-clock stop: the outcome is built at the site that
+ * observed the evidence (the runner's exit-0 signal, or the sandbox exec
+ * killed at the anchored deadline) and carried to the single publication
+ * catch, which publishes it once — Check, durable failure row, then ack.
+ */
+class BudgetExhaustedError extends Error {
+  constructor(
+    readonly outcome: BudgetExhaustedOutcome,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BudgetExhaustedError";
+  }
+}
+
+/**
  * What the derived pre-runner cutoff still owes a bounded preparation step,
  * capped at the step's own budget. THROWS the explicit round-budget failure
  * once spent: a spent deadline must decline the step, never manufacture a
  * positive (1ms) timeout that starts paid work and then fails it for the
  * wrong cause. The runner's own budget is derived once, at the anchor below
- * (`anchorRunnerBudget`), and never re-clamped here.
+ * (`anchorRunnerBudget`), and never re-clamped here. `nowMs` fixes the clock
+ * when the caller must reuse its own sample — a step whose timeout AND whose
+ * kill attribution read one instant (the runner input write below) passes it;
+ * everyone else takes the fresh read.
  */
-function boundedStepTimeout(runnerDeadlineMs: number, capMs: number, step: string): number {
-  const left = Math.min(capMs, runnerDeadlineMs - Date.now());
+function boundedStepTimeout(
+  runnerDeadlineMs: number,
+  capMs: number,
+  step: string,
+  window: BudgetExhaustedOutcome["budgetWindow"],
+  nowMs = Date.now(),
+): number {
+  const left = Math.min(capMs, runnerDeadlineMs - nowMs);
   if (left <= 0) {
-    throw new Error(
+    throw new RoundBudgetSpent(
       `round budget spent: ${step} declined — the derived runner deadline is spent (${left}ms left for it)`,
+      window,
     );
   }
   return left;
@@ -4001,6 +4066,13 @@ export function createReviewConsumer(
         // is a leftover, acked directly before any container. No retry (the
         // newer delivery is the one that reviews) and no DLQ.
         message.ack();
+      } else if (outcome.kind === "budget-exhausted") {
+        // The round's wall clock ended the review and its Check `failure` +
+        // `budget-exhausted:` row already landed inside processMessage. A
+        // confirmed stop is terminal: a paid retry spends a fresh queue
+        // attempt to lose the same deadline, so ack directly — no retry, no
+        // DLQ, no comment.
+        message.ack();
       }
     }
   };
@@ -4165,6 +4237,30 @@ async function processMessage(
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
+  // The authoritative checkout SHA once `rev-parse` answered, and the App's
+  // numeric GitHub id once the credential row resolved. Both are the facts a
+  // pre-numstat exhaustion needs to claim the Check it owes: an issue-comment
+  // delivery has no payload SHA and may have no readable head watermark, so
+  // the admission claim never ran, yet the stop happens after both are known.
+  let resolvedHeadSha: string | null = null;
+  let resolvedGithubAppId: number | undefined;
+  // §7.10 Check lane scope — the same App/PR identity the publication journal
+  // and the attempt key use, derivable from the payload alone. Hoisted (not
+  // built here) because the terminal catch needs it to claim a Check this
+  // round never got to claim before the checkout; it is ASSIGNED inside the
+  // try so a legacy payload with no `botRef` still throws through the
+  // structured channel instead of escaping before the catch.
+  let lifecycleScope: Scope | undefined;
+  // The facts a `budget-exhausted` resolution is built from: the ONE derived
+  // round clock (set at the diff stage), the runner allocation frozen just
+  // before the input write (null = the runner never received one), and the
+  // selected numstat's textual line count (null = unobserved). Hoisted so the
+  // catch can resolve a consumer deadline refusal into the same typed outcome
+  // a runner signal or sandbox kill carries — an unobserved fact stays null,
+  // never inferred.
+  let roundBudget: ReviewBudget | null = null;
+  let runnerAnchor: RunnerBudgetAnchor | null = null;
+  let observedChangedLines: number | null = null;
   /**
    * The attempt whose promotion was ABANDONED (its update budget ended the
    * wait while the PATCH may still be in flight). This invocation must then
@@ -4213,7 +4309,7 @@ async function processMessage(
   const abandonCheck = (
     handle: CheckHandle,
     reason: string,
-    options?: { outcome?: CheckTerminalOutcome; inheritedHeadSha?: string },
+    options?: { outcome?: CheckTerminalOutcome; inheritedHeadSha?: string; budgetExhaustion?: BudgetExhaustedOutcome },
   ): Promise<boolean> => {
     const abandon = deps.checks?.abandonTerminalize;
     // No give-up seam (test doubles only; production always supplies it):
@@ -4239,6 +4335,7 @@ async function processMessage(
       reason,
       ...(options?.outcome === undefined ? {} : { outcome: options.outcome }),
       ...(options?.inheritedHeadSha === undefined ? {} : { inheritedHeadSha: options.inheritedHeadSha }),
+      ...(options?.budgetExhaustion === undefined ? {} : { budgetExhaustion: options.budgetExhaustion }),
       ...(firstRecoveryDelayMs === undefined ? {} : { firstRecoveryDelayMs }),
     }).then(
       (released) => {
@@ -4276,6 +4373,7 @@ async function processMessage(
     publicationId: string | null,
     outcome: CheckTerminalOutcome,
     inheritedHeadSha?: string,
+    budgetExhaustion?: BudgetExhaustedOutcome,
   ): Promise<void> => {
     // The per-message read always precedes every terminal path; the fallback
     // keeps a future caller bounded by the store's documented defaults.
@@ -4320,6 +4418,7 @@ async function processMessage(
         "check promotion exceeded its update budget (the terminal send is left to recovery)",
         {
           outcome,
+          ...(budgetExhaustion === undefined ? {} : { budgetExhaustion }),
           ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
         },
       );
@@ -4337,6 +4436,7 @@ async function processMessage(
         handle,
         publicationId,
         outcome,
+        ...(budgetExhaustion === undefined ? {} : { budgetExhaustion }),
         ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
         updateBudgetMs: budgets.updateMs,
       });
@@ -4378,7 +4478,12 @@ async function processMessage(
           // hold its lease until the immutable execution deadline, which is
           // what made the Check terminalize up to 15 minutes late. The promise
           // is awaited right below when no invocation context can own it.
-          giveUpRelease = abandonCheck(handle, `terminalize budget exceeded (${budgets.terminalizeMs}ms)`);
+          giveUpRelease = abandonCheck(handle, `terminalize budget exceeded (${budgets.terminalizeMs}ms)`, {
+            // A wall-clock stop's frozen intent is decidable from the outcome
+            // alone, so the hand-off carries it; every other outcome keeps the
+            // generic unconfirmed fallback the recovery lane corrects.
+            ...(outcome === "budget-exhausted" ? { outcome, budgetExhaustion } : {}),
+          });
           recordDetached("budget-exceeded");
         },
       );
@@ -4398,9 +4503,14 @@ async function processMessage(
         },
         `check terminalize hook failed (isolated): ${detail}`,
       );
+      // The hook never sent a conclusion, so this exit is NOT a completed
+      // send. Recorded while the row still has no outcome, so a failed hook
+      // stays distinguishable from one that ran and landed.
       await record("hook-failed");
+      const release = abandonCheck(handle, `terminalize hook threw: ${detail}`, {
+        ...(outcome === "budget-exhausted" ? { outcome, budgetExhaustion } : {}),
+      });
       // Awaited only when no invocation context can own it (one fenced write).
-      const release = abandonCheck(handle, `terminalize hook threw: ${detail}`);
       if (deps.background === undefined) await release;
     }
   };
@@ -4409,10 +4519,11 @@ async function processMessage(
     publicationId: string | null,
     outcome: CheckTerminalOutcome,
     inheritedHeadSha?: string,
+    budgetExhaustion?: BudgetExhaustedOutcome,
   ): Promise<void> => {
     if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
     checkTerminalized = true;
-    await runTerminalize(checkHandle, publicationId, outcome, inheritedHeadSha);
+    await runTerminalize(checkHandle, publicationId, outcome, inheritedHeadSha, budgetExhaustion);
   };
 
   /**
@@ -4621,6 +4732,7 @@ async function processMessage(
     // charged to the target's workspace — the tenant that asked (see
     // `CommenterResolution.usageWorkspaceId`).
     const { commenter, githubAppId, workspaceId, usageWorkspaceId } = resolution;
+    resolvedGithubAppId = githubAppId;
     // Supersede skip (migration 0044): a queued delivery whose PR head has
     // already advanced must cost nothing that can fail it, hold the guard, or
     // start work — no admission row, no sandbox, no Check, no publication.
@@ -4778,9 +4890,9 @@ async function processMessage(
     });
     // The Check lane's scope (§7.10) — the same App/PR identity the
     // publication journal and the attempt key use, derivable from the payload
-    // alone. Declared HERE because the admission-time Check claim needs it
-    // before the container and the checkout.
-    const lifecycleScope: Scope = {
+    // alone. Read HERE because the admission-time Check claim needs it before
+    // the container and the checkout.
+    lifecycleScope = {
       appId: payload.botRef.appId,
       installationId: payload.installation_id,
       owner: payload.owner,
@@ -4933,6 +5045,7 @@ async function processMessage(
       throw new Error(`cannot resolve head sha: git exit ${rev.exitCode}, stdout ${rev.stdout.length}B`);
     }
     const headSha = rev.stdout.trim();
+    resolvedHeadSha = headSha;
 
     // §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
     // authoritative checkout HERE — before any dedup/journal early exit, so a
@@ -5325,15 +5438,15 @@ async function processMessage(
     // ONE derivation for the whole round: the platform cap, the live
     // terminalize budget and the tier decide the reserve, the absolute
     // pre-runner cutoff and every window other owners bill from it.
-    const budget: ReviewBudget = deriveReviewBudget({
+    roundBudget = deriveReviewBudget({
       roundStartMs: roundStartedAt,
       capMs: deps.roundBudgetMs,
       terminalizeMs: terminalizeBudgetMs,
       level,
     });
-    const runnerDeadlineMs = budget.runnerCutoffMs;
+    const runnerDeadlineMs = roundBudget.runnerCutoffMs;
     const diffStageNow = Date.now();
-    const diffWindowMs = boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "diff capture");
+    const diffWindowMs = boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "diff capture", "preparation");
     const diffCaptureDeadlineMs = diffStageNow + diffWindowMs;
     const diff = await sandbox.runCommand(cmds.diff, {
       env: { GH_TOKEN: token },
@@ -5374,6 +5487,15 @@ async function processMessage(
             (captured.run === undefined ? ", no exec ran" : `, exit ${captured.run.exitCode}`) +
             (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
         );
+        if (captured.reason === "budget") {
+          // The derived deadline, not a code fault, declined the fallback —
+          // resolve it into the same `budget-exhausted` outcome the runner
+          // window produces (the record keeps the git-stage cause verbatim).
+          throw new RoundBudgetSpent(
+            `${gitStageFailureDetail("diff", diff, secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`,
+            "preparation",
+          );
+        }
         throw new Error(`${gitStageFailureDetail("diff", diff, secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`);
       }
       diffStdout = captured.run.stdout;
@@ -5411,7 +5533,7 @@ async function processMessage(
         incrementDiffCommand(payload.owner, payload.repo, sinceSha, headSha, DIFF_PATH),
         {
           env: { GH_TOKEN: token },
-          timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "increment diff"),
+          timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "increment diff", "preparation"),
         },
       );
       if (increment.exitCode !== 0) {
@@ -5737,7 +5859,7 @@ async function processMessage(
     // work done since the last review instead of the whole PR. Its window is
     // what the DERIVED runner deadline still owes (declines once spent).
     const numstat = await sandbox.runCommand(cmds.numstat, {
-      timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat"),
+      timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat", "preparation"),
     });
     // A non-zero exit is the FILE's answer about itself: an empty file is what
     // `git apply` rejects as unusable input (exit 128, "unrecognized input"),
@@ -5870,9 +5992,12 @@ async function processMessage(
     // NaN, which the anchor's entry check rejects the same way an explicit
     // bad request is — no second refusal path, no silent fallback.
     const diffSize = parseNumstatSize(numstat.stdout, diffFileState === "empty");
+    // The outcome's own counter: the selected numstat's textual line count —
+    // a null size is the recorded unknown, never invented.
+    observedChangedLines = diffSize?.changedLines ?? null;
     const sizeRequest = requestRunnerBudget(level, diffSize);
 
-    const anchor = anchorRunnerBudget(budget, Date.now(), sizeRequest.requestedBudgetMs);
+    const anchor = anchorRunnerBudget(roundBudget, Date.now(), sizeRequest.requestedBudgetMs);
     if (anchor.kind === "invalid") {
       throw new Error(
         `runner request declined — an explicit ${anchor.requestedBudgetMs}ms is not a usable duration`,
@@ -5884,16 +6009,20 @@ async function processMessage(
       );
     }
     if (anchor.kind === "exhausted") {
-      throw new Error(
+      throw new RoundBudgetSpent(
         `round budget spent: runner declined — the pre-runner cutoff is spent (${anchor.remainingMs}ms left for it)`,
+        "preparation",
       );
     }
+    // The allocation is immutable from here on: the typed record's runner
+    // budget is this frozen effective duration.
+    runnerAnchor = anchor;
     const runnerExecDeadlineMs = anchor.execDeadlineMs;
     fields = {
       ...fields,
       runner_requested_ms: anchor.requestedBudgetMs,
       runner_effective_ms: anchor.effectiveBudgetMs,
-      runner_cutoff_ms: budget.runnerCutoffMs,
+      runner_cutoff_ms: roundBudget.runnerCutoffMs,
       runner_deadline_ms: anchor.execDeadlineMs,
       // The estimate the request was sized from — one work unit per changed
       // line, minimum one per file; `null` records an unknown size, so an
@@ -5932,13 +6061,47 @@ async function processMessage(
     };
     // The document rides the exec stdin pipe: as an argv string it became one
     // argument, and a recheck round above ~98 KiB breaches Linux's 128 KiB cap.
-    // Two deadlines compete here: the anchored exec deadline below and the
-    // later pre-runner cutoff; the write must bill the anchored one.
+    // Serialization is paid BEFORE the write's one clock sample, so the armed
+    // bound and the `124` attribution below both read the instant the write
+    // actually started at — a straddling sample cannot arm the deadline's
+    // shorter remainder and then classify its kill as the step cap's.
+    const runnerInputStdin = toBase64Utf8(JSON.stringify(runnerInput));
+    const inputWriteWindowMs = runnerExecDeadlineMs - Date.now();
     const writeInput = await sandbox.runCommand(writeJsonCommand(RUNNER_INPUT_PATH), {
-      stdin: toBase64Utf8(JSON.stringify(runnerInput)),
-      timeout: boundedStepTimeout(runnerExecDeadlineMs, EXEC_TIMEOUT_GIT_MS, "runner input write"),
+      stdin: runnerInputStdin,
+      timeout: boundedStepTimeout(
+        runnerExecDeadlineMs,
+        EXEC_TIMEOUT_GIT_MS,
+        "runner input write",
+        "runner",
+        // The SAME sample both bounds the write and decides whether a `124`
+        // was that bound's: two reads could disagree across the cap/deadline
+        // crossover and retry a stop the clock already spent.
+        runnerExecDeadlineMs - inputWriteWindowMs,
+      ),
     });
     if (writeInput.exitCode !== 0) {
+      // A kill under the anchored runner deadline (its remainder bound the
+      // write, not the step's own cap) is the typed stop, not a generic
+      // write error: the runner never started, so every observed counter is
+      // KNOWN — provably 0/0 seats — and the attempt acks rather than paying
+      // a queue retry for the same clock. A `124` the step's own cap fired
+      // keeps the generic path: that kill was not the frozen deadline's.
+      if (writeInput.exitCode === 124 && inputWriteWindowMs <= EXEC_TIMEOUT_GIT_MS) {
+        throw new BudgetExhaustedError(
+          {
+            kind: "budget-exhausted",
+            cause: "sandbox-kill",
+            tier: level,
+            budgetWindow: "runner",
+            budgetMs: runnerAnchor!.effectiveBudgetMs,
+            seatsDispatched: 0,
+            seatsStopped: 0,
+            changedLines: observedChangedLines,
+          },
+          "runner input write killed at the anchored runner deadline",
+        );
+      }
       throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
     }
 
@@ -5981,8 +6144,9 @@ async function processMessage(
     // wrong cause. No tier clamp is re-applied — the derivation was the only.
     const runnerTimeout = runnerExecDeadlineMs - Date.now();
     if (runnerTimeout <= 0) {
-      throw new Error(
+      throw new RoundBudgetSpent(
         `round budget spent: runner declined — the exec deadline is spent (${runnerTimeout}ms left for it)`,
+        "runner",
       );
     }
     const run = await sandbox.runCommand(runnerCmd, {
@@ -5994,6 +6158,35 @@ async function processMessage(
       timeout: runnerTimeout,
     });
     const runnerElapsedMs = Date.now() - runnerStartedAt;
+    if (run.exitCode === 124) {
+      // The sandbox's GNU-timeout wrapper killed the exec at the anchored
+      // instant — the runner could not print its own signal, so neither seat
+      // counts nor the stop instant are observable. `sandbox-kill` records
+      // the frozen runner budget and leaves every counter null. The persisted
+      // outcome carries only trusted budget fields plus fixed diagnostics:
+      // provider stderr is untrusted text, so it rides one redacted log line
+      // and never the durable row the outcome builds below.
+      deps.log.warn(
+        {
+          ...fields,
+          stderr_tail: redactExactSecrets(redactSecrets(run.stderr), secretValues).slice(-STDERR_TAIL_MAX),
+        },
+        "runner exec killed at the anchored deadline (provider stderr on this line only)",
+      );
+      throw new BudgetExhaustedError(
+        {
+          kind: "budget-exhausted",
+          cause: "sandbox-kill",
+          tier: level,
+          budgetWindow: "runner",
+          budgetMs: runnerAnchor!.effectiveBudgetMs,
+          seatsDispatched: null,
+          seatsStopped: null,
+          changedLines: observedChangedLines,
+        },
+        `runner exec killed at its deadline: exit 124, stdout ${new TextEncoder().encode(run.stdout).length}B`,
+      );
+    }
     if (run.exitCode !== 0) {
       throw new Error(runnerFailureDetail(run, secretValues));
     }
@@ -6005,6 +6198,30 @@ async function processMessage(
       { ...fields, elapsed_ms: runnerElapsedMs },
       `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeout}ms)`,
     );
+
+    // The ONE typed terminal outcome outside the verdict envelope (spec §
+    // Exhaustion): the runner declared the round's wall clock spent and
+    // stopped review work BEFORE its own deadline fired — the signal is the
+    // outcome, not model content, so a malformed one is still a parse
+    // degrade below. It resolves before any verdict parsing and before the
+    // post-runner publication steps it made un-runnable; the single catch
+    // publishes it. failureStage stays "runner" for the row.
+    const budgetSignal = parseBudgetExhaustedSignal(run.stdout);
+    if (budgetSignal.ok) {
+      throw new BudgetExhaustedError(
+        {
+          kind: "budget-exhausted",
+          cause: "runner-deadline",
+          tier: level,
+          budgetWindow: "runner",
+          budgetMs: runnerAnchor!.effectiveBudgetMs,
+          seatsDispatched: budgetSignal.signal.seatsDispatched,
+          seatsStopped: budgetSignal.signal.seatsStopped,
+          changedLines: observedChangedLines,
+        },
+        `runner signalled budget exhaustion (seats ${budgetSignal.signal.seatsStopped}/${budgetSignal.signal.seatsDispatched})`,
+      );
+    }
 
     // AL-6 stage window: post-runner steps (parse has its own branch; the
     // post/KV/put orchestration is worker-side) are "pipeline" again.
@@ -6764,6 +6981,99 @@ async function processMessage(
     await terminalizeCheck(stagedId, "publication-unknown");
     return { kind: "ok" };
   } catch (err) {
+    // § Exhaustion (the ONE typed terminal outcome outside the verdict
+    // envelope): every wall-clock stop funnels here — the runner's own
+    // exit-0 signal, the sandbox exec killed at the anchored deadline, and
+    // the consumer's derived-deadline refusals, all already resolved to (or
+    // resolvable from) the attempt's own facts. A confirmed stop is terminal
+    // and is published with its own outcome FIRST — the generic outcome
+    // resolution below must never freeze `pre-publication-failure` over the
+    // Check this stop owes. Check `failure` with the typed record, the
+    // durable `budget-exhausted:` row, then `{kind:"budget-exhausted"}` so
+    // the handler acks — a paid queue retry can only lose the same clock
+    // again, and the spec forbids implying otherwise. Journal staging,
+    // recheck resolve/rotate and comment writes never ran (all post-parse),
+    // so this catch is the only publication step the outcome needs.
+    if (err instanceof BudgetExhaustedError || err instanceof RoundBudgetSpent) {
+      const budgetOutcome: BudgetExhaustedOutcome =
+        err instanceof BudgetExhaustedError
+          ? err.outcome
+          : {
+              kind: "budget-exhausted",
+              cause: "consumer-deadline",
+              // Every derived-deadline refusal sits past level resolution
+              // and budget derivation — the `!`s encode that ordering fact,
+              // never a guess.
+              tier: level!,
+              budgetWindow: err.window,
+              budgetMs:
+                err.window === "runner"
+                  ? runnerAnchor!.effectiveBudgetMs
+                  : roundBudget!.preparationBudgetMs,
+              // A consumer decline fires before the runner exec starts:
+              // provably no seat was dispatched or stopped.
+              seatsDispatched: 0,
+              seatsStopped: 0,
+              changedLines: observedChangedLines,
+            };
+      // A stop that fired BEFORE the fallback claim (the diff stage, its
+      // oversized substitute, or the numstat that follows) can reach here with
+      // no Check at all: an issue-comment delivery carries no payload SHA and
+      // may have no readable head watermark, so the admission-time claim was
+      // skipped and the fallback never ran. The checkout SHA IS known by then,
+      // so claim here — an ACK that publishes nothing would leave the frozen
+      // failure this stop owes with no trace and no recovery intent. A claim
+      // already ATTEMPTED is never retried: the claim insert is the one
+      // race-decided gate, and a second try could mint a second generation.
+      if (
+        deps.checks !== undefined &&
+        checkHandle === null &&
+        !checkClaimAttempted &&
+        lifecycleScope !== undefined &&
+        resolvedHeadSha !== null &&
+        resolvedGithubAppId !== undefined
+      ) {
+        checkClaimAttempted = true;
+        checkHandle = await beginCheck(lifecycleScope, resolvedGithubAppId, resolvedHeadSha);
+      }
+      await terminalizeCheck(null, "budget-exhausted", undefined, budgetOutcome);
+      const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${err instanceof Error ? err.message : String(err)}`;
+      deps.log.error(
+        {
+          ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+          ...(level === undefined
+            ? {}
+            : {
+                level,
+                runner_timeout_ms: runnerTimeoutMs(level),
+                orchestration: level === "deep" ? "parent" : "bun-fanout",
+              }),
+          ...(runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - runnerStartedAt }),
+          budget_outcome: budgetOutcome,
+        },
+        `review failed: ${budgetDetail}`,
+      );
+      try {
+        await deps.failureStore.record({
+          target_id: payload.targetId,
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: fields?.head_sha ?? payload.head_sha ?? "",
+          stage: failureStage,
+          error: redactExactSecrets(redactSecrets(budgetDetail), secretValues),
+        });
+      } catch (recordErr) {
+        const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+        deps.log.warn(
+          fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+          `review_failures insert failed (exhaustion path continues): ${recordDetail}`,
+        );
+      }
+      return { kind: "budget-exhausted", outcome: budgetOutcome };
+    }
+
     // §7.7 step 12 on the failure path: a Check begun at step 4 must
     // terminalize even when the pipeline throws. After a send ATTEMPT the
     // publication status is unknown (the request may have landed); before

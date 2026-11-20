@@ -231,7 +231,7 @@ export type ReviewRunResult = {
    * Why the recheck round ended — present whenever the input carried a
    * recheck document, so a round with `recheck: null` is still attributable
    * (budget skip / seat failure / invalid document). Absent = no recheck
-   * round ran (legacy input).
+   * round was requested.
    */
   recheckStatus?: RecheckStatus;
   /**
@@ -275,11 +275,15 @@ export const APPLIED_MODEL_MAX_CHARS = 256;
 
 export interface AgentRuntime {
   /**
-   * 跑一次审查。仅以「已通过 validateMstarReviewV1 的 mstar.review/v1」
-   * envelope resolve（result 形状为 { envelope, recheck }：recheck
-   * 要么是已通过 validateRecheckDoc 的文档，要么是 null——席位失败/超时/
-   * 无输出绝不冒充成功，也绝不丢失审查本体）；session/解析/校验失败一律
-   * throw（绝不返回 M1 形状冒充成功）。
+   * Runs a full review, resolving ONLY with a validated `mstar.review/v1`
+   * envelope (result shape `{ envelope, recheck, report }`: each side doc is
+   * either a validated document or `null` — a seat failure, timeout or empty
+   * output never masquerades as success and never loses the review body);
+   * session / parse / validation failures all throw. A runner-attributed
+   * wall-clock stop is neither envelope nor failure: it throws
+   * `RunnerBudgetExhausted` (./budget-exhausted-wire.ts) carrying the seat
+   * counts the CLI publishes as the exit-0
+   * `mstar.review-budget-exhausted/v1` signal.
    */
   runReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult>;
 }
