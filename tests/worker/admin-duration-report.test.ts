@@ -2,11 +2,11 @@
  * The operator's duration analysis report — the evidence for choosing the
  * attempt cap.
  *
- * These cases pin the three properties the report has to keep: the phase
- * buckets are disjoint and sum to the end-to-end interval; an empty window and
- * a missing boundary read as missing, never as a zero; and the publication
- * bucket runs to the attempt's own settlement, so a Check that concluded early
- * cannot truncate a still-due recovery.
+ * These cases pin the properties the report has to keep: the phase buckets are
+ * disjoint and sum to the end-to-end interval; an empty window and a missing
+ * boundary read as missing, never as a zero; and the cohort is only the
+ * attempts whose settlement instant is written AND whose obligations are proven
+ * closed — everything else lands in one of the four reasons the plan fixed.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -21,6 +21,9 @@ const SESSION_SECRET = ["test", "duration", "report", "session", "32-bytes!"].jo
 const OPERATOR = "Support-Bot";
 const OPERATOR_KEY = OPERATOR.toLowerCase();
 const DAY_MS = 86_400_000;
+/** The App a seeded Check row belongs to; `review_checks.bot_id` is a foreign key. */
+const APP_ID = "11111111-2222-3333-4444-555555555555";
+const APP_NUMERIC_ID = 1001;
 
 const PAYLOAD: ReviewJobPayload = {
   installation_id: 1,
@@ -52,6 +55,15 @@ function fixture(): TestD1 {
   db.raw
     .prepare("INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, 'member', ?, NULL)")
     .run(crypto.randomUUID(), OPERATOR, new Date().toISOString());
+  db.raw
+    .prepare(
+      `INSERT INTO review_bots
+         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, 'duration-bot', ?, 'duration-bot', 'enc', 'enc', ?, 'active', NULL,
+               datetime('now'), datetime('now'))`,
+    )
+    .run(APP_ID, APP_NUMERIC_ID, OPERATOR);
   return db;
 }
 
@@ -70,14 +82,21 @@ async function getReport(
 
 type AttemptSeed = {
   attemptId: string;
+  /** The handoff's create state; `failed` is a definite create rejection. */
+  handoffState?: "owed" | "ambiguous" | "created" | "failed";
   /** The original Queue send stamp; `null` models a pre-0087 row. */
   enqueuedMs: number | null;
   admittedMs: number;
   /** A `persisted` launch row's instant: the durable result ended execution. */
   persistedMs?: number;
+  /** A launch row whose paid step never produced a result (state `launched`). */
+  launchedOnly?: boolean;
   settlingMs?: number | null;
   settledMs: number | null;
-  settledEffects?: string[] | null;
+  /** The Check pair the attempt froze, and that Check row's terminal instant. */
+  check?: { key: string; generation: number; terminalMs: number | null };
+  /** A frozen pair whose Check row the database does not hold. */
+  omitCheckRow?: boolean;
 };
 
 /** One attempt: its handoff row, plus its launch row when a paid step ran. */
@@ -86,31 +105,68 @@ function seedAttempt(db: TestD1, seed: AttemptSeed): void {
     .prepare(
       `INSERT INTO review_attempt_handoffs
          (delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms,
-          created_ms, updated_ms, settling_ms, settled_ms, settled_effects)
-       VALUES (?, ?, ?, 'created', NULL, ?, ?, ?, ?, ?, ?)`,
+          created_ms, updated_ms, settling_ms, settled_ms)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
     )
     .run(
       seed.attemptId,
       seed.attemptId,
       JSON.stringify(PAYLOAD),
+      seed.handoffState ?? "created",
       seed.enqueuedMs,
       seed.admittedMs,
       seed.admittedMs,
       seed.settlingMs ?? null,
       seed.settledMs,
-      seed.settledEffects === undefined || seed.settledEffects === null
-        ? null
-        : JSON.stringify(seed.settledEffects),
     );
-  if (seed.persistedMs !== undefined) {
-    db.raw
-      .prepare(
-        `INSERT INTO review_launches
-           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
-         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
-      )
-      .run(seed.attemptId, seed.admittedMs, seed.persistedMs, seed.persistedMs);
-  }
+  const hasLaunch = seed.persistedMs !== undefined || seed.launchedOnly === true || seed.check !== undefined;
+  if (!hasLaunch) return;
+  db.raw
+    .prepare(
+      `INSERT INTO review_launches
+         (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json,
+          result_outcome, attempt_key, attempt_generation)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      seed.attemptId,
+      seed.persistedMs === undefined ? "launched" : "persisted",
+      seed.admittedMs,
+      seed.persistedMs ?? seed.admittedMs,
+      seed.persistedMs ?? null,
+      seed.persistedMs === undefined ? null : "{}",
+      seed.persistedMs === undefined ? null : "persisted",
+      seed.check?.key ?? null,
+      seed.check?.generation ?? null,
+    );
+  if (seed.check === undefined || seed.omitCheckRow === true) return;
+  db.raw
+    .prepare(
+      `INSERT INTO review_checks
+         (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+          triggered_by, action, attempt_key, generation, external_id, create_state,
+          execution_deadline_ms, desired, observed, recovery_state, attempts, terminal_ms,
+          created_ms, updated_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'duration-report', 'review', ?, ?, ?, 'not-sent',
+               ?, 'in_progress', 'unknown', 'pending', 0, ?, ?, ?)`,
+    )
+    .run(
+      crypto.randomUUID(),
+      APP_ID,
+      APP_NUMERIC_ID,
+      PAYLOAD.installation_id,
+      PAYLOAD.owner,
+      PAYLOAD.repo,
+      PAYLOAD.pr_number,
+      PAYLOAD.head_sha,
+      seed.check.key,
+      seed.check.generation,
+      `ext-${seed.attemptId}`,
+      seed.admittedMs + 4 * DAY_MS,
+      seed.check.terminalMs,
+      seed.admittedMs,
+      seed.check.terminalMs ?? seed.admittedMs,
+    );
 }
 
 describe("the phase buckets", () => {
@@ -194,11 +250,10 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.phases.execution).toEqual({ p50Ms: 20_000, p90Ms: 30_000, maxMs: 30_000 });
     expect(body.phases.publication).toEqual({ p50Ms: 8_000, p90Ms: 15_000, maxMs: 15_000 });
     expect(body.excluded).toEqual({
+      "check-open-at-settle": 0,
+      "no-boundary": 0,
       unsettled: 0,
-      skipped: 0,
-      missingQueueStamp: 0,
-      missingPhaseBoundary: 0,
-      invalid: 0,
+      "pre-prepare": 0,
     });
     expect(body.cutoff).toBeNull();
   });
@@ -250,7 +305,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(narrow.cutoff.crossed).toEqual({ queueWait: 1, execution: 2, publication: 0 });
   });
 
-  test("surfaces missing boundaries as exclusions instead of zeroes", async () => {
+  test("counts every unusable boundary as no-boundary instead of a zero", async () => {
     const db = fixture();
     const t0 = Date.now() - 3_600_000;
     // The one complete interval: queue 2s / execution 30s / publication 8s.
@@ -269,8 +324,16 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
       persistedMs: t0 + 10_000,
       settledMs: t0 + 20_000,
     });
-    // Settled, but neither a durable result nor a settlement start exists.
-    seedAttempt(db, { attemptId: "no-boundary", enqueuedMs: t0, admittedMs: t0, settledMs: t0 + 5_000 });
+    // Settled with no launch row at all (a moved-head skip leaves this shape).
+    seedAttempt(db, { attemptId: "no-launch", enqueuedMs: t0, admittedMs: t0, settledMs: t0 + 5_000 });
+    // A launch row whose paid step never produced a result.
+    seedAttempt(db, {
+      attemptId: "no-result",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      launchedOnly: true,
+      settledMs: t0 + 5_000,
+    });
     // A durable result BEFORE admission: the interval is not chronologically ordered.
     seedAttempt(db, {
       attemptId: "out-of-order",
@@ -278,16 +341,6 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
       admittedMs: t0 + 5_000,
       persistedMs: t0 + 2_000,
       settledMs: t0 + 9_000,
-    });
-    // Still running.
-    seedAttempt(db, { attemptId: "unsettled", enqueuedMs: t0, admittedMs: t0, settledMs: null });
-    // A moved-head skip never executed, so it has no phases at all.
-    seedAttempt(db, {
-      attemptId: "skipped",
-      enqueuedMs: t0,
-      admittedMs: t0,
-      settledMs: t0 + 1_000,
-      settledEffects: ["skip"],
     });
 
     const body = (await (await getReport(db)).json()) as {
@@ -299,12 +352,190 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     // The excluded rows never contribute a zero: the single interval stands alone.
     expect(body.total).toEqual({ p50Ms: 40_000, p90Ms: 40_000, maxMs: 40_000 });
     expect(body.excluded).toEqual({
-      unsettled: 1,
-      skipped: 1,
-      missingQueueStamp: 1,
-      missingPhaseBoundary: 1,
-      invalid: 1,
+      "check-open-at-settle": 0,
+      "no-boundary": 4,
+      unsettled: 0,
+      "pre-prepare": 0,
     });
+  });
+
+  test("unsettled: an admitted attempt with no settlement instant is counted, not zeroed", async () => {
+    const db = fixture();
+    const t0 = Date.now() - 3_600_000;
+    // Live work: a launch row and a durable result, but no settlement yet.
+    seedAttempt(db, {
+      attemptId: "running",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 10_000,
+      settledMs: null,
+    });
+    // Work that has not started a paid step either.
+    seedAttempt(db, { attemptId: "admitted", enqueuedMs: t0, admittedMs: t0, settledMs: null });
+
+    const body = (await (await getReport(db)).json()) as {
+      sampleSize: number;
+      total: unknown;
+      excluded: Record<string, number>;
+    };
+    expect(body.sampleSize).toBe(0);
+    expect(body.total).toBeNull();
+    expect(body.excluded).toEqual({
+      "check-open-at-settle": 0,
+      "no-boundary": 0,
+      unsettled: 2,
+      "pre-prepare": 0,
+    });
+  });
+
+  test("pre-prepare: a definite create rejection is named, not merged with no-boundary", async () => {
+    const db = fixture();
+    const t0 = Date.now() - 3_600_000;
+    // The consumer writes the handoff's `failed` state on a definite create
+    // rejection and never proceeds to prepare: no launch row, no settlement.
+    seedAttempt(db, { attemptId: "create-rejected", handoffState: "failed", enqueuedMs: t0, admittedMs: t0, settledMs: null });
+    // The same MISSING launch row on an attempt that was created normally is a
+    // boundary problem, not a pre-prepare failure: the two stay distinct.
+    seedAttempt(db, { attemptId: "settled-without-launch", enqueuedMs: t0, admittedMs: t0, settledMs: t0 + 5_000 });
+
+    const body = (await (await getReport(db)).json()) as { excluded: Record<string, number> };
+    expect(body.excluded).toEqual({
+      "check-open-at-settle": 0,
+      "no-boundary": 1,
+      unsettled: 0,
+      "pre-prepare": 1,
+    });
+  });
+
+  test("check-open-at-settle: a Check not proven closed at the settle instant is not measured", async () => {
+    const db = fixture();
+    const t0 = Date.now() - 3_600_000;
+    // A Check that concludes AFTER the claimed settlement: the claimed end
+    // truncated the interval, so its duration is not provable.
+    seedAttempt(db, {
+      attemptId: "check-late",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 30_000,
+      settledMs: t0 + 40_000,
+      check: { key: "check-late", generation: 1, terminalMs: t0 + 55_000 },
+    });
+    // A Check still open at the claimed settlement.
+    seedAttempt(db, {
+      attemptId: "check-open",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 30_000,
+      settledMs: t0 + 40_000,
+      check: { key: "check-open", generation: 1, terminalMs: null },
+    });
+    // A frozen pair whose Check row the database does not hold: missing is not
+    // proof of a conclusion.
+    seedAttempt(db, {
+      attemptId: "check-missing",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 30_000,
+      settledMs: t0 + 40_000,
+      check: { key: "check-missing", generation: 1, terminalMs: null },
+      omitCheckRow: true,
+    });
+
+    const body = (await (await getReport(db)).json()) as {
+      sampleSize: number;
+      total: unknown;
+      excluded: Record<string, number>;
+    };
+    expect(body.sampleSize).toBe(0);
+    expect(body.total).toBeNull();
+    expect(body.excluded).toEqual({
+      "check-open-at-settle": 3,
+      "no-boundary": 0,
+      unsettled: 0,
+      "pre-prepare": 0,
+    });
+  });
+
+  test("a Check concluded at or before the settle instant keeps its interval", async () => {
+    const db = fixture();
+    const t0 = Date.now() - 3_600_000;
+    // Concluded before the settlement: the obligation is proven closed.
+    seedAttempt(db, {
+      attemptId: "check-early",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 40_000,
+      check: { key: "check-early", generation: 1, terminalMs: t0 + 30_000 },
+    });
+    // Concluded AT the settlement instant: the boundary is inclusive.
+    seedAttempt(db, {
+      attemptId: "check-at-settle",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 40_000,
+      check: { key: "check-at-settle", generation: 1, terminalMs: t0 + 40_000 },
+    });
+    // A launch row with NO frozen pair owes no Check at all.
+    seedAttempt(db, {
+      attemptId: "no-check",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 40_000,
+    });
+
+    const body = (await (await getReport(db)).json()) as {
+      sampleSize: number;
+      total: unknown;
+      excluded: Record<string, number>;
+    };
+    expect(body.sampleSize).toBe(3);
+    expect(body.total).toEqual({ p50Ms: 40_000, p90Ms: 40_000, maxMs: 40_000 });
+    expect(body.excluded).toEqual({
+      "check-open-at-settle": 0,
+      "no-boundary": 0,
+      unsettled: 0,
+      "pre-prepare": 0,
+    });
+  });
+
+  test("the four reasons account for every admitted attempt, one row at a time", async () => {
+    const db = fixture();
+    const t0 = Date.now() - 3_600_000;
+    seedAttempt(db, {
+      attemptId: "measured",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 30_000,
+    });
+    seedAttempt(db, {
+      attemptId: "check-open",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 30_000,
+      check: { key: "check-open", generation: 1, terminalMs: null },
+    });
+    seedAttempt(db, { attemptId: "queueless", enqueuedMs: null, admittedMs: t0, persistedMs: t0 + 20_000, settledMs: t0 + 30_000 });
+    seedAttempt(db, { attemptId: "running", enqueuedMs: t0, admittedMs: t0, persistedMs: t0 + 10_000, settledMs: null });
+    seedAttempt(db, { attemptId: "create-rejected", handoffState: "failed", enqueuedMs: t0, admittedMs: t0, settledMs: null });
+
+    const body = (await (await getReport(db)).json()) as {
+      sampleSize: number;
+      excluded: Record<string, number>;
+    };
+    const excluded = body.excluded;
+    expect(excluded).toEqual({
+      "check-open-at-settle": 1,
+      "no-boundary": 1,
+      unsettled: 1,
+      "pre-prepare": 1,
+    });
+    // Every admitted row is either measured or counted exactly once.
+    expect(body.sampleSize + Object.values(excluded).reduce((sum, n) => sum + n, 0)).toBe(5);
   });
 
   test("an empty window reads as an empty sample, not as zeroes", async () => {
@@ -330,11 +561,10 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toBeNull();
     expect(body.phases).toEqual({ queueWait: null, execution: null, publication: null });
     expect(body.excluded).toEqual({
+      "check-open-at-settle": 0,
+      "no-boundary": 0,
       unsettled: 0,
-      skipped: 0,
-      missingQueueStamp: 0,
-      missingPhaseBoundary: 0,
-      invalid: 0,
+      "pre-prepare": 0,
     });
     expect(body.cutoff.over).toBe(0);
     // A share of no sample is not 0%.

@@ -381,11 +381,10 @@ export type DurationReport = {
     publication: DurationPercentiles | null;
   };
   excluded: {
+    "check-open-at-settle": number;
+    "no-boundary": number;
     unsettled: number;
-    skipped: number;
-    missingQueueStamp: number;
-    missingPhaseBoundary: number;
-    invalid: number;
+    "pre-prepare": number;
   };
   cutoff: DurationReportCutoff | null;
 };
@@ -435,11 +434,10 @@ export async function readDurationReport(capMs: number | null): Promise<Duration
       publication: percentilesOrNull(phases.publication, "duration publication"),
     },
     excluded: {
+      "check-open-at-settle": num(excluded, "check-open-at-settle"),
+      "no-boundary": num(excluded, "no-boundary"),
       unsettled: num(excluded, "unsettled"),
-      skipped: num(excluded, "skipped"),
-      missingQueueStamp: num(excluded, "missingQueueStamp"),
-      missingPhaseBoundary: num(excluded, "missingPhaseBoundary"),
-      invalid: num(excluded, "invalid"),
+      "pre-prepare": num(excluded, "pre-prepare"),
     },
     cutoff: body.cutoff === null || body.cutoff === undefined ? null : parseCutoff(body.cutoff),
   };

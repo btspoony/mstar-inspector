@@ -134,11 +134,13 @@ function DurationReportCard({ locale }: { locale: Locale }) {
             const cutoff = report.cutoff;
             const excluded = report.excluded;
             const excludedTotal =
-              excluded.unsettled +
-              excluded.skipped +
-              excluded.missingQueueStamp +
-              excluded.missingPhaseBoundary +
-              excluded.invalid;
+              excluded["check-open-at-settle"] + excluded["no-boundary"] + excluded.unsettled + excluded["pre-prepare"];
+            const excludedParams = {
+              checkOpen: excluded["check-open-at-settle"],
+              noBoundary: excluded["no-boundary"],
+              unsettled: excluded.unsettled,
+              prePrepare: excluded["pre-prepare"],
+            };
             return (
               <>
                 <p className="text-sm text-muted-foreground">
@@ -150,11 +152,7 @@ function DurationReportCard({ locale }: { locale: Locale }) {
                       ? t(locale, "admin.runtime.durationEmpty")
                       : t(locale, "admin.runtime.durationEmptyExcluded", {
                           n: excludedTotal,
-                          unsettled: excluded.unsettled,
-                          skipped: excluded.skipped,
-                          missingQueue: excluded.missingQueueStamp,
-                          missingBoundary: excluded.missingPhaseBoundary,
-                          invalid: excluded.invalid,
+                          ...excludedParams,
                         })}
                   </p>
                 ) : (
@@ -192,13 +190,7 @@ function DurationReportCard({ locale }: { locale: Locale }) {
                       {t(locale, "admin.runtime.durationBuckets")}
                     </p>
                     <p className="mt-3 text-xs text-muted-foreground" data-duration="excluded">
-                      {t(locale, "admin.runtime.durationExcluded", {
-                        unsettled: excluded.unsettled,
-                        skipped: excluded.skipped,
-                        missingQueue: excluded.missingQueueStamp,
-                        missingBoundary: excluded.missingPhaseBoundary,
-                        invalid: excluded.invalid,
-                      })}
+                      {t(locale, "admin.runtime.durationExcluded", excludedParams)}
                     </p>
                   </>
                 )}

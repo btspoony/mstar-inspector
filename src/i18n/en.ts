@@ -1580,10 +1580,10 @@ export const en = {
       /** The duration analysis: the evidence for choosing the attempt cap. */
       durationTitle: "Review duration distribution",
       durationDescription:
-        "Attempts admitted in the last {days} days. Percentiles use only complete end-to-end intervals, and an empty window stays empty — it never reads as a zero.",
+        "Attempts admitted in the last {days} days. Percentiles use only intervals whose settlement instant is written and whose obligations are all proven closed, and an empty window stays empty — it never reads as a zero.",
       durationEmpty: "No attempt was admitted in this window.",
       durationEmptyExcluded:
-        "No attempt was measured: all {n} admitted attempts were excluded — {unsettled} unsettled, {skipped} skipped, {missingQueue} without a queue stamp, {missingBoundary} without a phase boundary, {invalid} out of order.",
+        "No attempt was measured: all {n} admitted attempts were excluded — {checkOpen} with a Check still open at settlement, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
       durationSample: "{n} complete attempts",
       durationTotal: "End to end",
       durationQueueWait: "Queue wait",
@@ -1595,7 +1595,7 @@ export const en = {
       durationBuckets:
         "Every attempt's interval splits into these three phases. Percentiles are per row, so one column does not add up across rows.",
       durationExcluded:
-        "Excluded from the percentiles: {unsettled} unsettled, {skipped} skipped, {missingQueue} without a queue stamp, {missingBoundary} without a phase boundary, {invalid} out of order.",
+        "Excluded from the percentiles: {checkOpen} with a Check still open at settlement, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
       durationCandidateLabel: "Candidate cap (ms)",
       durationCandidateApply: "Show cutoff",
       durationCutoff: "A {cap} ms cap would exclude {over} of {n} attempts ({share}).",

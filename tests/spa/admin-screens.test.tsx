@@ -124,7 +124,7 @@ const DURATION_REPORT = {
   sampleSize: 0,
   total: null,
   phases: { queueWait: null, execution: null, publication: null },
-  excluded: { unsettled: 0, skipped: 0, missingQueueStamp: 0, missingPhaseBoundary: 0, invalid: 0 },
+  excluded: { "check-open-at-settle": 0, "no-boundary": 0, unsettled: 0, "pre-prepare": 0 },
   cutoff: null,
 };
 
@@ -847,12 +847,17 @@ describe("Runtime screen", () => {
         execution: { p50Ms: 20_000, p90Ms: 30_000, maxMs: 40_000 },
         publication: { p50Ms: 8_000, p90Ms: 9_000, maxMs: 10_000 },
       },
+      // Four reasons, each with its own count beside the measured sample.
+      excluded: { "check-open-at-settle": 3, "no-boundary": 2, unsettled: 1, "pre-prepare": 1 },
     };
     const surface = await runtimeScreen(() => json(RUNTIME), "en", report);
     expect(surface.text()).toContain("4 complete attempts");
     expect(surface.container.querySelector('[data-duration="queue-wait-p50"]')?.textContent).toBe("1000 ms");
     expect(surface.container.querySelector('[data-duration="total-max"]')?.textContent).toBe("50000 ms");
     expect(surface.text()).toContain("Every attempt's interval splits into these three phases.");
+    expect(surface.container.querySelector('[data-duration="excluded"]')?.textContent).toBe(
+      "Excluded from the percentiles: 3 with a Check still open at settlement, 2 without a measurable boundary, 1 unsettled, 1 stopped before prepare.",
+    );
     await surface.close();
   });
 
@@ -861,21 +866,22 @@ describe("Runtime screen", () => {
     expect(none.text()).toContain("No attempt was admitted in this window.");
     await none.close();
 
-    // A completed attempt whose queue stamp is missing is EXCLUDED, not
-    // uncompleted — the sentence must say so.
+    // A completed attempt whose obligation or boundary cannot be proven is
+    // EXCLUDED, not uncompleted — the sentence must say so, with the four counts.
     const report = {
       ...DURATION_REPORT,
-      excluded: { unsettled: 2, skipped: 1, missingQueueStamp: 1, missingPhaseBoundary: 0, invalid: 0 },
+      excluded: { "check-open-at-settle": 2, "no-boundary": 1, unsettled: 1, "pre-prepare": 0 },
     };
     const excluded = await runtimeScreen(() => json(RUNTIME), "en", report);
     expect(excluded.text()).toContain("No attempt was measured: all 4 admitted attempts were excluded");
-    expect(excluded.text()).toContain("1 without a queue stamp");
+    expect(excluded.text()).toContain("2 with a Check still open at settlement");
+    expect(excluded.text()).toContain("1 without a measurable boundary");
     expect(excluded.text()).not.toContain("No attempt was admitted in this window.");
     await excluded.close();
 
     const chinese = await runtimeScreen(() => json(RUNTIME), "zh_CN", report);
     expect(chinese.text()).toContain("此窗口内没有可测量的尝试");
-    expect(chinese.text()).toContain("1 个缺少队列时间戳");
+    expect(chinese.text()).toContain("2 个结算时 Check 仍未关闭");
     await chinese.close();
   });
 

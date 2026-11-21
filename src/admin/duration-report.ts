@@ -3,11 +3,14 @@
  * Task 3): the window, the sample size, percentiles, the three disjoint phase
  * buckets and a candidate cap's observed cutoff.
  *
- * Population: attempts ADMITTED in the window. Only a COMPLETE interval enters
- * the percentiles — every boundary present and chronologically ordered. An
- * unsettled attempt, a legacy row without its queue stamp, a skipped attempt or
- * an out-of-order interval is counted in `excluded` and never supplied as a
- * zero, because "not measured" and "took no time" are different answers.
+ * Population: attempts ADMITTED in the window. The COHORT a percentile may use
+ * is "`settled_ms` written AND every obligation of that attempt proven closed":
+ * the Check pair the attempt froze must read terminal at or before that instant,
+ * because a Check that concludes later (or a row the database does not hold)
+ * means the settlement instant truncated the interval. Everything else is
+ * counted under one of the four reasons below and never supplied as a zero,
+ * because "not measured" and "took no time" are different answers — and only a
+ * proven interval may steer the operator's cap.
  *
  * The buckets are the attempt's own durable stamps, half-open:
  *   queue wait            [enqueued_ms, created_ms)
@@ -49,18 +52,27 @@ export type DurationBuckets = {
 
 export type DurationPercentiles = { p50Ms: number; p90Ms: number; maxMs: number };
 
-export type DurationReportExclusions = {
-  /** Admitted in the window and never settled. */
-  unsettled: number;
-  /** A skip: the attempt concluded without executing, so it has no phases. */
-  skipped: number;
-  /** Settled, but the pre-0087 row carries no queue send stamp. */
-  missingQueueStamp: number;
-  /** Settled with neither a durable result nor a settlement start. */
-  missingPhaseBoundary: number;
-  /** Every boundary present, but not in chronological order. */
-  invalid: number;
-};
+/**
+ * Why an admitted attempt is not in the cohort. The four reasons are fixed by
+ * the plan's §7.9a ruling, and each names a fact this module reads:
+ *
+ * - `check-open-at-settle` — the attempt froze a Check pair whose row is
+ *   missing, still open, or concluded AFTER the instant it claims to have
+ *   settled: its end boundary is not proven.
+ * - `no-boundary` — no usable start or end instant: no launch row, a pre-0087
+ *   row without its queue stamp, or boundaries that do not run forwards.
+ * - `unsettled` — the record itself is not closed: no settlement instant.
+ * - `pre-prepare` — a definite create rejection: the attempt never reached
+ *   prepare, so it never had an attempt boundary to measure.
+ */
+export type DurationExclusionReason =
+  | "check-open-at-settle"
+  | "no-boundary"
+  | "unsettled"
+  | "pre-prepare";
+
+/** Every reason, so a caller renders all four counts and never one total. */
+export type DurationReportExclusions = Record<DurationExclusionReason, number>;
 
 export type DurationReportCutoff = {
   capMs: number;
@@ -125,12 +137,18 @@ function cutoffOf(buckets: readonly DurationBuckets[], capMs: number): DurationR
 }
 
 type DurationRow = {
+  /** The handoff's create state: `failed` is a definite create rejection. */
+  handoff_state: string;
   enqueued_ms: number | null;
   created_ms: number;
   settling_ms: number | null;
   settled_ms: number | null;
-  settled_effects: string | null;
   persisted_at_ms: number | null;
+  /** `null` when the attempt never had a launch row. */
+  launch_state: string | null;
+  /** The Check pair the attempt froze, and that Check row's terminal instant. */
+  check_key: string | null;
+  check_terminal_ms: number | null;
 };
 
 /** The earlier measured end of execution; `null` when neither stamp exists. */
@@ -140,15 +158,16 @@ function executionEndOf(row: DurationRow): number | null {
   return Math.min(row.persisted_at_ms, row.settling_ms);
 }
 
-function isSkip(row: DurationRow): boolean {
-  if (row.settled_effects === null) return false;
-  try {
-    return (JSON.parse(row.settled_effects) as unknown[]).includes("skip");
-  } catch {
-    // An unreadable effects array is not a skip claim; the row is classified by
-    // its boundaries alone.
-    return false;
-  }
+/**
+ * Is the Check obligation proven closed AT the instant the attempt settled? The
+ * pair the attempt froze is the only fact that says a Check exists; a terminal
+ * row is the only fact that says it concluded, and it must have concluded no
+ * later than the claimed settlement — otherwise the claimed end truncated the
+ * interval. A missing row is not proof: the Check may simply not be written yet.
+ */
+function checkClosedAt(row: DurationRow, settledMs: number): boolean {
+  if (row.check_key === null) return true;
+  return row.check_terminal_ms !== null && row.check_terminal_ms <= settledMs;
 }
 
 /**
@@ -160,51 +179,61 @@ export async function readReviewDurationReport(
   input: { nowMs: number; capMs: number | null },
 ): Promise<DurationReport> {
   const startMs = input.nowMs - DURATION_REPORT_WINDOW_DAYS * DAY_MS;
+  // `review_launches.attempt_id` is a primary key and `review_checks` is UNIQUE
+  // on (attempt_key, generation), so neither join can multiply a handoff row.
+  // The pair is the one the attempt FROZE (`attempt_key`/`attempt_generation`),
+  // never the owed-settlement columns (`check_*`) those live beside.
   const rows = await db
     .prepare(
-      `SELECT h.enqueued_ms, h.created_ms, h.settling_ms, h.settled_ms, h.settled_effects,
-              l.persisted_at_ms
+      `SELECT h.state AS handoff_state, h.enqueued_ms, h.created_ms, h.settling_ms, h.settled_ms,
+              l.state AS launch_state, l.persisted_at_ms, l.attempt_key AS check_key,
+              c.terminal_ms AS check_terminal_ms
          FROM review_attempt_handoffs h
          LEFT JOIN review_launches l ON l.attempt_id = h.attempt_id
+         LEFT JOIN review_checks c
+           ON c.attempt_key = l.attempt_key AND c.generation = l.attempt_generation
         WHERE h.created_ms >= ?1 AND h.created_ms < ?2`,
     )
     .bind(startMs, input.nowMs)
     .all<DurationRow>();
 
   const excluded: DurationReportExclusions = {
+    "check-open-at-settle": 0,
+    "no-boundary": 0,
     unsettled: 0,
-    skipped: 0,
-    missingQueueStamp: 0,
-    missingPhaseBoundary: 0,
-    invalid: 0,
+    "pre-prepare": 0,
   };
   const buckets: DurationBuckets[] = [];
   for (const row of rows.results) {
+    if (row.launch_state === null) {
+      // No launch row: there is no execution boundary to measure from. A
+      // definite create rejection never reached prepare, so it is named by that
+      // fact instead of borrowing the boundary reason.
+      if (row.handoff_state === "failed") excluded["pre-prepare"] += 1;
+      else if (row.settled_ms === null) excluded.unsettled += 1;
+      else excluded["no-boundary"] += 1;
+      continue;
+    }
     if (row.settled_ms === null) {
       excluded.unsettled += 1;
       continue;
     }
-    if (isSkip(row)) {
-      excluded.skipped += 1;
+    if (!checkClosedAt(row, row.settled_ms)) {
+      excluded["check-open-at-settle"] += 1;
       continue;
     }
     const executionEndMs = executionEndOf(row);
-    if (row.enqueued_ms === null) {
-      excluded.missingQueueStamp += 1;
-      continue;
-    }
-    if (executionEndMs === null) {
-      excluded.missingPhaseBoundary += 1;
-      continue;
-    }
-    const bucket = phaseBuckets({
-      enqueuedMs: row.enqueued_ms,
-      admittedMs: row.created_ms,
-      executionEndMs,
-      settledMs: row.settled_ms,
-    });
+    const bucket =
+      row.enqueued_ms === null || executionEndMs === null
+        ? null
+        : phaseBuckets({
+            enqueuedMs: row.enqueued_ms,
+            admittedMs: row.created_ms,
+            executionEndMs,
+            settledMs: row.settled_ms,
+          });
     if (bucket === null) {
-      excluded.invalid += 1;
+      excluded["no-boundary"] += 1;
       continue;
     }
     buckets.push(bucket);
