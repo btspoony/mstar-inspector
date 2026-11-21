@@ -38,15 +38,16 @@ import {
   abandonReviewLaunch,
   claimReviewAttempt,
   claimReviewLaunch,
+  freezeAttemptIdentity,
   readReviewLaunch,
 } from "../../src/pipeline/review-attempt";
-import { PUBLICATION_LEASE_MS, claimDegradedTarget, claimPublication, readLineBatchState, recordLineDispatchIntent, readPublication } from "../../src/store/finding-lifecycle";
+import { PUBLICATION_LEASE_MS, applyPublishedLifecycle, claimDegradedTarget, claimPublication, readLineBatchState, recordLineDispatchIntent, recordPublicationProof, readPublication } from "../../src/store/finding-lifecycle";
 import {
   deliveryKeyOf,
   readAttemptHandoff,
   reserveAttemptHandoff,
 } from "../../src/store/review-route-store";
-import { claimAttempt } from "../../src/store/review-checks";
+import { CHECK_NAME, attachCheckRunId, claimAttempt, claimCheckRecovery, releaseCheckClaim, setCheckCreateState } from "../../src/store/review-checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { Lease } from "../../src/store/finding-lifecycle";
@@ -77,6 +78,8 @@ const { PublicationDeadlineSpent, postLineCommentsWithOctokit, publicationSendGu
 );
 const { RoundBudgetSpent } = await import("../../src/pipeline/review-attempt");
 const { reconcileReviewLifecycle } = await import("../../src/worker/lifecycle-reconcile");
+const { createCheckLifecycle, createChecksAdapter } = await import("../../src/pipeline/checks");
+import type { ChecksOctokit } from "../../src/pipeline/checks";
 
 const ATTEMPT_ID = "attempt-4b-0001";
 const SCOPE: Scope = {
@@ -527,6 +530,183 @@ describe("§7.9a condition 1 — only a `prepared` row may be dispatched", () =>
       .get(publicationId) as { phase: string; holder: string | null };
     expect(row.phase).toBe("sending");
     expect(row.holder).toBe("consumer:earlier");
+  });
+});
+
+describe("§7.9a condition 1 — a refused dispatch keeps the publication link", () => {
+  test("the refusal links the Check, and a later confirmation concludes from the proof", async () => {
+    const { deps, db } = await makeDeps();
+    // A Check attempt with an attached run, released so the settlement adopts it.
+    const claimedCheck = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: `consumer:${ATTEMPT_ID}`,
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimedCheck.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${claimedCheck.kind}`);
+    const checkAttemptId = claimedCheck.attempt.identity.attemptId;
+    const identity = claimedCheck.attempt.identity;
+    expect(await setCheckCreateState(db as never, checkAttemptId, claimedCheck.lease, "sending", undefined, Date.now())).toBe(true);
+    expect(await attachCheckRunId(db as never, checkAttemptId, claimedCheck.lease, 4242, Date.now())).toBe(true);
+    expect(await releaseCheckClaim(db as never, checkAttemptId, claimedCheck.lease, Date.now())).toBe(true);
+
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publicationId = collected.collected.publicationId;
+    // The attempt's frozen Check identity (what the consumer's claim records in
+    // production), so the publish phase can adopt THIS generation's row.
+    const frozen = db.raw
+      .prepare(`SELECT attempt_key, generation FROM review_checks WHERE id = ?`)
+      .get(checkAttemptId) as { attempt_key: string; generation: number };
+    expect(await freezeAttemptIdentity(db as never, ref.attemptId, { key: frozen.attempt_key, generation: frozen.generation })).toBe(true);
+
+    // Another lane claimed the publication and lapsed: this send may not
+    // dispatch from `sending`.
+    expect(
+      await claimPublication(
+        db as never,
+        publicationId,
+        "consumer:earlier",
+        Date.now() - PUBLICATION_LEASE_MS - 1,
+        "prepared",
+      ),
+    ).not.toBeNull();
+
+    let now = Date.now();
+    let updates = 0;
+    let failedTerminal = false;
+    const octokit: ChecksOctokit = {
+      rest: {
+        checks: {
+          update: async (params) => {
+            updates += 1;
+            const terminal = "conclusion" in params ? params.conclusion : undefined;
+            if (terminal !== undefined && !failedTerminal) {
+              failedTerminal = true;
+              throw new Error("checks update unavailable");
+            }
+            return {
+              data: {
+                id: 4242,
+                name: CHECK_NAME,
+                head_sha: identity.headSha,
+                external_id: identity.externalId,
+                status: "completed",
+                conclusion: terminal,
+                app: { id: identity.githubAppId },
+              },
+            };
+          },
+          create: async () => {
+            throw new Error("no create expected");
+          },
+          get: async () => {
+            throw new Error("no get expected");
+          },
+          listForRef: async () => {
+            throw new Error("no list expected");
+          },
+        },
+      },
+    } as ChecksOctokit;
+    const adapter = createChecksAdapter({ db, nowMs: () => now, getOctokit: async () => octokit });
+    const gate = { minScore: 0, passVerdicts: ["needs fixes"] };
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => now,
+      getAdapter: () => adapter,
+      getCheckGate: async () => gate,
+    });
+
+    // The refusal: the phase sends nothing, and the Check freezes the
+    // unconfirmed failure LINKED to the publication it was about to send. The
+    // remote update fails, so the row stays recoverable.
+    const { deps: publishing } = await makeDeps({ db });
+    publishing.checks = lifecycle;
+    expect(await publishAttempt(publishing, ref, publicationId)).toEqual({ kind: "ok" });
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+    let row = db.raw
+      .prepare(`SELECT publication_id, desired, desired_summary, observed, recovery_state, terminal_ms FROM review_checks WHERE id = ?`)
+      .get(checkAttemptId) as {
+      publication_id: string | null;
+      desired: string;
+      desired_summary: string | null;
+      observed: string;
+      recovery_state: string;
+      terminal_ms: number | null;
+    };
+    expect(row.publication_id).toBe(publicationId);
+    expect(row.desired).toBe("failure");
+    expect(row.desired_summary).toBe(
+      "Review attempt could not be confirmed complete; publication status is unknown.",
+    );
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.terminal_ms).toBeNull();
+
+    // The publication is then confirmed through the normal proof path.
+    const confirmedAt = Date.now();
+    const proofLease = await claimPublication(db as never, publicationId, "proof-lane", confirmedAt, "sending");
+    if (proofLease === null) throw new Error("fixture: the proof claim was refused");
+    const staged = await readPublication(db as never, publicationId);
+    if (staged === null) throw new Error("fixture: the staged publication is gone");
+    expect(
+      await recordPublicationProof(db as never, publicationId, proofLease, {
+        publicationId,
+        scope: SCOPE,
+        headSha: SHA,
+        kind: "review",
+        round: staged.payload.round,
+        commentId: 9001,
+        bodySha256: staged.payload.bodySha256,
+        confirmedMs: confirmedAt,
+      }),
+    ).toBe(true);
+    expect(await applyPublishedLifecycle(db as never, publicationId, proofLease, confirmedAt)).toBe(true);
+
+    // The recovery conclusion reads THAT publication (the link), so the Check
+    // now concludes from the proof — a proof-derived summary, not the
+    // unconfirmed fallback.
+    now = confirmedAt + 120_000;
+    const recoveryLease = await claimCheckRecovery(db as never, checkAttemptId, "recovery-test", now);
+    if (recoveryLease === null) throw new Error("fixture: the recovery claim was refused");
+    await lifecycle.terminalize({
+      handle: { attemptId: checkAttemptId, scope: SCOPE, githubAppId: 424242, headSha: SHA, lease: recoveryLease },
+      publicationId,
+      outcome: "publication-unknown",
+    });
+
+    row = db.raw
+      .prepare(`SELECT publication_id, desired, desired_summary, observed, terminal_ms FROM review_checks WHERE id = ?`)
+      .get(checkAttemptId) as {
+      publication_id: string | null;
+      desired: string;
+      desired_summary: string | null;
+      observed: string;
+      recovery_state: string;
+      terminal_ms: number | null;
+    };
+    expect(row.publication_id).toBe(publicationId);
+    expect(row.desired_summary).not.toBe(
+      "Review attempt could not be confirmed complete; publication status is unknown.",
+    );
+    expect(row.desired_summary).toContain(`Review gate could not be evaluated for ${SHA.slice(0, 7)}`);
+    expect(row.observed).toBe(row.desired);
+    expect(row.terminal_ms).not.toBeNull();
   });
 });
 

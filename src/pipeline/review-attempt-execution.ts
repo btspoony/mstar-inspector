@@ -5442,7 +5442,11 @@ async function publishPhase(
       fields,
       `publication is no longer dispatchable from this phase (read ${publication.phase}) — nothing sent, handing it to recovery/discovery`,
     );
-    await check?.terminalize(null, "publication-unknown");
+    // The staged id is the fact this lane holds: passing it links the Check's
+    // frozen failure to its own publication, so a later confirmation can be
+    // read through the proof path instead of leaving an unlinked verdict that
+    // can never be corrected.
+    await check?.terminalize(stagedId, "publication-unknown");
     return { kind: "ok" };
   }
   sentRecord.publicationId = stagedId;
