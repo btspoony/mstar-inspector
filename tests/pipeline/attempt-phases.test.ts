@@ -29,7 +29,12 @@ import { createConsumerHarness, makePayload } from "../helpers/consumer-harness"
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
-import { claimReviewAttempt, claimReviewLaunch, readReviewLaunch } from "../../src/pipeline/review-attempt";
+import {
+  abandonReviewLaunch,
+  claimReviewAttempt,
+  claimReviewLaunch,
+  readReviewLaunch,
+} from "../../src/pipeline/review-attempt";
 import { readPublication } from "../../src/store/finding-lifecycle";
 import { claimAttempt } from "../../src/store/review-checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -356,6 +361,21 @@ describe("cleanupAttempt", () => {
     expect(h.sandbox.destroyCalls).toBe(0);
     // Cleanup did not rewrite the row it lost: the launch stands.
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");
+  });
+
+  test("a row another cleanup abandoned is unknown for the second cleanup", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now());
+    // The first cleanup won the CAS and is still destroying the container.
+    expect(await abandonReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toBe(true);
+
+    // The second cleanup loses the CAS, and the row DECODES as `abandoned`: it
+    // returns unknown and touches neither the container nor capacity — never
+    // `no-paid-work`, which would release a container somebody else owns.
+    expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("abandoned");
+    expect(await cleanupAttempt(deps, ref)).toEqual({ retention: "unknown" });
+    expect(h.sandbox.destroyCalls).toBe(0);
   });
 
   test("no launch row proves no paid work and destroys nothing", async () => {

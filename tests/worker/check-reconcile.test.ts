@@ -30,7 +30,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
-import { bumpCheckOwed } from "../../src/pipeline/review-attempt";
+import { bumpCheckOwed, clearConcludedCheckOwed } from "../../src/pipeline/review-attempt";
 import {
   attachCheckRunId,
   CHECK_ATTACH_GRACE_MS,
@@ -3856,6 +3856,27 @@ describe("the deadline conclusion names the missing proof", () => {
 });
 
 describe("an owed Check settlement has a reader and a clearer", () => {
+  test("the sweep clears only a CONCLUDED Check: a missing row is not a conclusion", async () => {
+    const db = seededDb();
+    const launchId = `attempt-row-${crypto.randomUUID()}`;
+    db.raw
+      .prepare(`INSERT INTO review_launches (attempt_id, state, claimed_at_ms) VALUES (?, 'provisioned', ?)`)
+      .run(launchId, T0);
+    db.raw
+      .prepare(
+        `UPDATE review_launches SET check_owed_ms = ?, check_key = ?, check_generation = ? WHERE attempt_id = ?`,
+      )
+      .run(T0, "key-with-no-check-row", 1, launchId);
+
+    // No Check row matches the mark: nothing concluded, so nothing is cleared.
+    expect(await clearConcludedCheckOwed(db)).toBe(0);
+    const still = db.raw
+      .prepare("SELECT check_owed_ms FROM review_launches WHERE attempt_id = ?")
+      .get(launchId) as { check_owed_ms: number | null };
+    expect(still.check_owed_ms).toBe(T0);
+  });
+
+
   test("a failed attempt advances the obligation's due instant, so the backoff is honoured", async () => {
     const db = seededDb();
     const { attempt } = await claim(db, { nowMs: T0, executionDeadlineMs: FUTURE_DEADLINE });

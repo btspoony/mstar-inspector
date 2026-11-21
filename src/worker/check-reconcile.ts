@@ -46,7 +46,7 @@
 
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
-import { bumpCheckOwed, clearCheckOwed, clearConcludedCheckOwed } from "../pipeline/review-attempt";
+import { clearCheckOwed, clearConcludedCheckOwed, deferCheckWithOwed } from "../pipeline/review-attempt";
 import type { D1Like } from "../store/types";
 import {
   attachCheckRunId,
@@ -60,8 +60,6 @@ import {
   type CheckAttempt,
   type CheckConclusion,
   type CheckRemote,
-  deferCheckForPendingPublication,
-  deferCheckRecovery,
   getCheckAttempt,
   getCheckOwnership,
   listCheckReconcileBatch,
@@ -888,7 +886,16 @@ async function reconcileCheckAttempt(
       // would only delay a proof that already exists. The deadline clamps it:
       // the wait never outlives the attempt's own hard stop.
       const nextAttemptMs = Math.min(now() + CHECK_BACKOFF_MS[0]!, row.executionDeadlineMs);
-      if (!(await deferCheckForPendingPublication(db, attemptId, waitingLease, nextAttemptMs, now()))) return;
+      // One call owns BOTH writes: the Check's next_attempt_ms and the owed
+      // obligation's due instant move together or not at all.
+      const rearmed = await deferCheckWithOwed(db, {
+        checkAttemptId: attemptId,
+        lease: waitingLease,
+        nextAttemptMs,
+        nowMs: now(),
+        kind: "proof-wait",
+      });
+      if (!rearmed) return;
       summary.deferred += 1;
       log.info(
         {
@@ -1285,19 +1292,19 @@ async function settleFailedAttempt(
     return;
   }
   const nextAttemptMs = now() + backoffFor(attemptsAfter);
-  const deferred = await deferCheckRecovery(
-    db,
-    attemptId,
+  // One call owns BOTH writes: the Check's backoff and the obligation's due
+  // instant move together, so a repeatedly failing row backs off instead of
+  // cycling.
+  const deferred = await deferCheckWithOwed(db, {
+    checkAttemptId: attemptId,
     lease,
-    { state: "remote-unconfirmed", nextAttemptMs, reason },
-    now(),
-  );
-  if (deferred) {
-    // The Check's own backoff advanced: the owed obligation's due instant
-    // follows it, so a repeatedly failing row backs off instead of cycling.
-    await bumpCheckOwed(db, attemptId, nextAttemptMs).catch(() => {});
-    summary.unconfirmed += 1;
-  }
+    nextAttemptMs,
+    nowMs: now(),
+    kind: "recovery",
+    state: "remote-unconfirmed",
+    reason,
+  });
+  if (deferred) summary.unconfirmed += 1;
   summary.errors += 1;
 }
 

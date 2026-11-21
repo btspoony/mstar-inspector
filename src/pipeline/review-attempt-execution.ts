@@ -110,6 +110,9 @@ import {
   prepareReviewAttempt,
   readReviewLaunch,
   abandonReviewLaunch,
+  launchVerdict,
+  observeCheckGeneration,
+  noLaunchState,
   noteCheckOwed,
   runReviewAttempt,
   AttemptUnknownError,
@@ -3058,7 +3061,13 @@ async function settlementFor(
  * two random UUIDs) and the due instant is the recovery lane's first backoff
  * rung, so the select honours it instead of bypassing `next_attempt_ms`.
  */
-async function noteOwedCheck(deps: ProcessDeps, ref: AttemptRef, headSha: string): Promise<void> {
+async function noteOwedCheck(
+  deps: ProcessDeps,
+  ref: AttemptRef,
+  headSha: string,
+  /** The Check row THIS attempt held, when its settlement had one. */
+  checkAttemptId?: string,
+): Promise<void> {
   const scope = scopeOf(ref.payload);
   if (scope === undefined || deps.checks === undefined) return;
   const checkKey = attemptKey({
@@ -3071,9 +3080,17 @@ async function noteOwedCheck(deps: ProcessDeps, ref: AttemptRef, headSha: string
     triggeredBy: ref.payload.triggered_by,
     action: ref.payload.action,
   });
+  // The generation OBSERVED here is bound into the mark; a later generation
+  // can never match it, and the write itself requires that row to still be open.
+  const checkGeneration = await observeCheckGeneration(deps.env.DB, {
+    checkKey,
+    ...(checkAttemptId === undefined ? {} : { checkAttemptId }),
+  });
+  if (checkGeneration === null) return; // no open Check of this attempt: nothing owed
   const owed = await noteCheckOwed(deps.env.DB, {
     attemptId: ref.attemptId,
     checkKey,
+    checkGeneration,
     dueMs: Date.now() + CHECK_BACKOFF_MS[0]!,
   });
   if (!owed) return; // the Check is settled (or has no open row): nothing is owed
@@ -3130,26 +3147,47 @@ function phaseFailure(
   return new AttemptPhaseError({ phase, ...facts }, err);
 }
 
-/** The launch row's own state — the durable outcome a phase reports. */
+/**
+ * The launch row's own state — the durable outcome a phase reports. Only a
+ * `persisted` row carries one; every other state (a container cleanup owns, a
+ * paid call with no durable outcome, a failed one, an unclaimed attempt) is
+ * `unknown` for this reader, and nothing may be published from it.
+ */
 async function readPersistedLaunch(deps: ProcessDeps, attemptId: string): Promise<ReviewOutcome> {
-  const state = await readReviewLaunch(deps.env.DB, attemptId);
-  if (state === null || state.state !== "persisted") {
-    throw new AttemptUnknownError(
-      `attempt ${attemptId}: the paid result is not durable (${state?.state ?? "no launch row"}) — nothing may be published from it`,
-    );
+  const verdict = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
+  switch (verdict.kind) {
+    case "persisted":
+      return { state: "persisted", persistedAtMs: verdict.persistedAtMs };
+    case "never-claimed":
+    case "never-paid":
+    case "owned-by-cleanup":
+    case "paid-unknown":
+    case "paid-failed":
+      throw new AttemptUnknownError(
+        `attempt ${attemptId}: the paid result is not durable (${verdict.kind}) — nothing may be published from it`,
+      );
+    default:
+      return noLaunchState(verdict);
   }
-  return { state: "persisted", persistedAtMs: state.persistedAtMs };
 }
 
 /** The paid result, read from the launch row rather than a predecessor's return value. */
 async function readPaidExecution(deps: ProcessDeps, attemptId: string): Promise<ReviewAttemptExecution> {
-  const state = await readReviewLaunch(deps.env.DB, attemptId);
-  if (state === null || state.state !== "persisted") {
-    throw new AttemptUnknownError(
-      `attempt ${attemptId}: the paid result is not durable (${state?.state ?? "no launch row"}) — nothing may be published from it`,
-    );
+  const verdict = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
+  switch (verdict.kind) {
+    case "persisted":
+      return verdict.execution;
+    case "never-claimed":
+    case "never-paid":
+    case "owned-by-cleanup":
+    case "paid-unknown":
+    case "paid-failed":
+      throw new AttemptUnknownError(
+        `attempt ${attemptId}: the paid result is not durable (${verdict.kind}) — nothing may be published from it`,
+      );
+    default:
+      return noLaunchState(verdict);
   }
-  return state.execution;
 }
 
 /**
@@ -4522,7 +4560,9 @@ async function collectPhase(
       // A durable degraded publication is the proof the Check concludes from:
       // the obligation is recorded from that fact, and the Check row decides
       // whether it is still open.
-      if (degradedOutcome.phase === "confirmed") await noteOwedCheck(deps, ref, headSha);
+      if (degradedOutcome.phase === "confirmed") {
+        await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
+      }
     }
     deps.log.warn(
       fields,
@@ -5276,7 +5316,7 @@ async function publishPhase(
   // Written from the DURABLE facts — a publication is confirmed, and the Check
   // row itself decides whether it is still open — never from whether this host
   // happened to cache a handle. A settled Check makes the note a no-op.
-  await noteOwedCheck(deps, ref, headSha);
+  await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
   return { kind: "ok" };
 }
 
@@ -5652,20 +5692,34 @@ export async function cleanupAttempt(
   let retention: RetentionProof | undefined;
   let containerMayExist = abandoned;
   if (abandoned) {
+    // This caller WON the row: the container, if any, is ours to destroy.
     retention = { kind: "no-paid-work" };
   } else {
-    const launch = await readReviewLaunch(deps.env.DB, attemptId);
-    if (launch === null) {
-      // Nothing was ever claimed, so nothing could have been launched.
-      retention = { kind: "no-paid-work" };
-    } else if (launch.state === "persisted" || launch.state === "failed") {
-      containerMayExist = true;
-      retention = { kind: "retained" };
-    } else {
-      containerMayExist = true;
-      // `launched` (or abandoned by another destroyer): the only states that
-      // authorise nothing. The schema refuses an outcome on `launched`.
-      retention = undefined;
+    const verdict = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
+    switch (verdict.kind) {
+      case "never-claimed":
+      case "never-paid":
+        // Nothing was ever claimed (or a concurrent caller held it at
+        // `provisioned` when we lost the CAS): nothing was charged.
+        retention = { kind: "no-paid-work" };
+        break;
+      case "persisted":
+      case "paid-failed":
+        containerMayExist = true;
+        retention = { kind: "retained" };
+        break;
+      case "owned-by-cleanup":
+        // ANOTHER cleanup owns this container: return unknown and touch
+        // neither the container nor capacity — never `no-paid-work`.
+        containerMayExist = false;
+        retention = undefined;
+        break;
+      case "paid-unknown":
+        containerMayExist = true;
+        retention = undefined;
+        break;
+      default:
+        return noLaunchState(verdict);
     }
   }
   let containerUnproven = retention === undefined || input.unproven === true;

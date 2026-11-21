@@ -833,7 +833,7 @@ function countingDb(db: TestD1): { db: TestD1; statements: () => number } {
 }
 
 describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
-  test("an attempt with no journal row pays the same five statements as any wait", async () => {
+  test("an attempt with no journal row pays the same six statements as any wait", async () => {
     const baseline = countingDb(seededDb());
     await run(baseline.db, { now: () => T0 + 120_000 });
     const selectorOnly = baseline.statements();
@@ -843,15 +843,15 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
     const before = dead.statements();
     const summary = await run(dead.db, { now: () => T0 + 120_000 });
 
-    // FIVE statements, the SAME cost as a journal-present wait: the D1 pair gate
+    // SIX statements, the SAME cost as a journal-present wait: the D1 pair gate
     // that LEADS the wait (spec §7.11.2 step 2), the journal probe, the claim
-    // UPDATE, the claim read and the fenced defer that gives the claim straight
-    // back on the first rung. A terminal-for-this-pass shape is NOT exempt from
-    // the claim — that claim is what moves the row's due time off the head of
-    // the due batch.
+    // UPDATE, the claim read, the fenced defer that gives the claim straight
+    // back on the first rung, and the owed-obligation bump that moves with that
+    // defer. A terminal-for-this-pass shape is NOT exempt from the claim — that
+    // claim is what moves the row's due time off the head of the due batch.
     expect(summary.examined).toBe(1);
     expect(summary.deferred).toBe(1);
-    expect(dead.statements() - before - selectorOnly).toBe(5);
+    expect(dead.statements() - before - selectorOnly).toBe(6);
     const row = await rawRow(dead.db, id);
     expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
     expect(row.holder).toBeNull();
@@ -877,7 +877,7 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
     );
   });
 
-  test("a journal-present wait costs the probe, the pair gate, the claim and the defer", async () => {
+  test("a journal-present wait costs the probe, the pair gate, the claim, the defer and the bump", async () => {
     const baseline = countingDb(seededDb());
     await run(baseline.db, { now: () => T0 + 120_000 });
     const selectorOnly = baseline.statements();
@@ -888,11 +888,13 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
     const before = counted.statements();
     const summary = await run(counted.db, { now: () => T0 + 120_000 });
 
-    // FIVE statements for the claim-taking wait — the journal probe, the D1
-    // pair gate that leads it, the claim UPDATE, the claim read and the
-    // re-leasing defer that gives the claim straight back on the first rung.
+    // SIX statements for the claim-taking wait — the journal probe, the D1
+    // pair gate that leads it, the claim UPDATE, the claim read, the re-leasing
+    // defer that gives the claim straight back on the first rung, and the
+    // owed-obligation bump that the defer owns (one statement even when no mark
+    // exists: the WHERE matches nothing).
     expect(summary.deferred).toBe(1);
-    expect(counted.statements() - before - selectorOnly).toBe(5);
+    expect(counted.statements() - before - selectorOnly).toBe(6);
     expect((await rawRow(counted.db, id)).holder).toBeNull();
   });
 

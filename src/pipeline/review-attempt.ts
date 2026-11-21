@@ -24,6 +24,7 @@ import { redactExactSecrets, redactSecrets } from "./redact";
 import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
 import type { D1Like } from "../store/types";
+import { deferCheckForPendingPublication, deferCheckRecovery, type Lease as CheckLease } from "../store/review-checks";
 import { parseBudgetExhaustedSignal, type BudgetExhaustedOutcome } from "../review/schema";
 import {
   isRecheckStatusReason,
@@ -192,15 +193,12 @@ WHERE attempt_id = ? AND state = 'provisioned'
  */
 const NOTE_CHECK_OWED_SQL = `
 UPDATE review_launches
-SET check_owed_ms = ?,
-    check_key = ?,
-    check_generation = (
-      SELECT c.generation FROM review_checks c
-       WHERE c.attempt_key = ? AND c.terminal_ms IS NULL
-       ORDER BY c.generation DESC LIMIT 1
-    )
+SET check_owed_ms = ?, check_key = ?, check_generation = ?
 WHERE attempt_id = ? AND check_owed_ms IS NULL
-  AND EXISTS (SELECT 1 FROM review_checks c WHERE c.attempt_key = ? AND c.terminal_ms IS NULL)
+  AND EXISTS (
+    SELECT 1 FROM review_checks c
+     WHERE c.attempt_key = ? AND c.generation = ? AND c.terminal_ms IS NULL
+  )
 `;
 
 /** Advance the obligation's due instant — the same backoff the Check row uses. */
@@ -230,16 +228,16 @@ const CLEAR_CONCLUDED_CHECK_OWED_SQL = `
 UPDATE review_launches
 SET check_owed_ms = NULL, check_key = NULL, check_generation = NULL
 WHERE check_owed_ms IS NOT NULL
-  AND NOT EXISTS (
+  AND EXISTS (
     SELECT 1 FROM review_checks c
      WHERE c.attempt_key = review_launches.check_key
        AND c.generation = review_launches.check_generation
-       AND c.terminal_ms IS NULL
+       AND c.terminal_ms IS NOT NULL
   )
 `;
 
 const READ_LAUNCH_SQL = `
-SELECT state, claimed_at_ms, launched_at_ms, persisted_at_ms, failed_at_ms, result_json, result_outcome, check_owed_ms
+SELECT state, claimed_at_ms, launched_at_ms, persisted_at_ms, failed_at_ms, abandoned_at_ms, result_json, result_outcome, check_owed_ms
 FROM review_launches
 WHERE attempt_id = ?
 `;
@@ -255,6 +253,50 @@ type LaunchRow = {
   result_outcome: string | null;
   check_owed_ms: number | null;
 };
+
+/** Unreachable by construction: the compiler proves every state is handled. */
+export function noLaunchState(state: never): never {
+  throw new Error(`review_launches: unhandled state ${JSON.stringify(state)}`);
+}
+
+/**
+ * THE plan's retention table, in code. `launchVerdict` is the ONLY place the
+ * row's state is turned into meaning; every reader switches on the verdict, so
+ * a seventh state cannot be added without the compiler naming every reader's
+ * answer (and `noLaunchState` proves the switch is complete).
+
+ *   absent      → never-claimed      (nothing was ever provisioned)
+ *   provisioned → never-paid         (a container may exist; no paid exec sent)
+ *   abandoned   → owned-by-cleanup   (another cleanup owns its destruction)
+ *   launched    → paid-unknown       (the paid exec was sent, no durable outcome)
+ *   persisted   → persisted          (the result is durable)
+ *   failed      → paid-failed        (the paid call returned a nonzero status)
+ */
+export type LaunchVerdict =
+  | { kind: "never-claimed" }
+  | { kind: "never-paid" }
+  | { kind: "owned-by-cleanup" }
+  | { kind: "paid-unknown" }
+  | { kind: "persisted"; execution: ReviewAttemptExecution; persistedAtMs: number }
+  | { kind: "paid-failed" };
+
+export function launchVerdict(state: ReviewLaunchState | null): LaunchVerdict {
+  if (state === null) return { kind: "never-claimed" };
+  switch (state.state) {
+    case "provisioned":
+      return { kind: "never-paid" };
+    case "abandoned":
+      return { kind: "owned-by-cleanup" };
+    case "launched":
+      return { kind: "paid-unknown" };
+    case "persisted":
+      return { kind: "persisted", execution: state.execution, persistedAtMs: state.persistedAtMs };
+    case "failed":
+      return { kind: "paid-failed" };
+    default:
+      return noLaunchState(state);
+  }
+}
 
 /**
  * The attempt's TERMINAL outcome as its own row records it — the only authority
@@ -328,12 +370,25 @@ export async function claimReviewLaunch(
   if (written.meta.changes === 1) return { ok: true };
   // A zero-row claim carries no cause, so the refusal costs one read — only on
   // the refusal path, and only to name it. It never decides anything.
-  const state = await readReviewLaunch(db, attemptId);
-  if (state === null) return { ok: false, reason: "no-claim" };
-  if (state.state === "persisted") return { ok: false, reason: "persisted", execution: state.execution };
-  if (state.state === "launched") return { ok: false, reason: "already-launched" };
-  if (state.state === "failed") return { ok: false, reason: "failed" };
-  return { ok: false, reason: "no-claim" };
+  const verdict = launchVerdict(await readReviewLaunch(db, attemptId));
+  switch (verdict.kind) {
+    case "persisted":
+      return { ok: false, reason: "persisted", execution: verdict.execution };
+    case "paid-unknown":
+      return { ok: false, reason: "already-launched" };
+    case "paid-failed":
+      return { ok: false, reason: "failed" };
+    case "never-claimed":
+    case "never-paid":
+      // No row, or a row a concurrent caller already moved past `provisioned`.
+      return { ok: false, reason: "no-claim" };
+    case "owned-by-cleanup":
+      // A cleanup claimed this attempt for destruction: the paid step must not
+      // start on a container that is being removed.
+      return { ok: false, reason: "no-claim" };
+    default:
+      return noLaunchState(verdict);
+  }
 }
 
 /**
@@ -377,13 +432,47 @@ export async function recordReviewFailure(
  */
 export async function noteCheckOwed(
   db: D1Like,
-  input: { attemptId: string; checkKey: string; dueMs: number },
+  input: { attemptId: string; checkKey: string; checkGeneration: number; dueMs: number },
 ): Promise<boolean> {
   const written = await db
     .prepare(NOTE_CHECK_OWED_SQL)
-    .bind(input.dueMs, input.checkKey, input.checkKey, input.attemptId, input.checkKey)
+    .bind(
+      input.dueMs,
+      input.checkKey,
+      input.checkGeneration,
+      input.attemptId,
+      input.checkKey,
+      input.checkGeneration,
+    )
     .run();
   return written.meta.changes === 1;
+}
+
+/**
+ * The generation this attempt OBSERVED for its Check: the row its own settlement
+ * holds when there is one, otherwise the open generation of that attempt key at
+ * this instant. The caller records exactly this — never a value re-resolved
+ * later, so a newer generation can never inherit the obligation.
+ */
+export async function observeCheckGeneration(
+  db: D1Like,
+  input: { checkKey: string; checkAttemptId?: string },
+): Promise<number | null> {
+  const row =
+    input.checkAttemptId === undefined
+      ? await db
+          .prepare(
+            `SELECT generation FROM review_checks
+              WHERE attempt_key = ? AND terminal_ms IS NULL
+              ORDER BY generation DESC LIMIT 1`,
+          )
+          .bind(input.checkKey)
+          .first<{ generation: number }>()
+      : await db
+          .prepare(`SELECT generation FROM review_checks WHERE id = ? AND terminal_ms IS NULL`)
+          .bind(input.checkAttemptId)
+          .first<{ generation: number }>();
+  return row?.generation ?? null;
 }
 
 /**
@@ -437,6 +526,46 @@ export async function abandonReviewLaunch(db: D1Like, attemptId: string, nowMs: 
 }
 
 /**
+ * Defer a Check to recovery AND advance the owed obligation in ONE call, so a
+ * caller cannot advance one without the other: the obligation's due instant is
+ * exactly the Check's own `next_attempt_ms`. SQL cannot update two tables in one
+ * statement, so the pairing is one store function rather than one SQL text.
+ *
+ * `recovery` spends one attempt and backs off; `proof-wait` gives the claim back
+ * without spending one (the publication may prove itself at any moment) and
+ * re-arms at the same instant.
+ */
+export async function deferCheckWithOwed(
+  db: D1Like,
+  input: {
+    checkAttemptId: string;
+    lease: CheckLease;
+    nextAttemptMs: number;
+    nowMs: number;
+    kind: "recovery" | "proof-wait";
+    state?: "pending" | "remote-unconfirmed";
+    reason?: string;
+  },
+): Promise<boolean> {
+  const deferred =
+    input.kind === "proof-wait"
+      ? await deferCheckForPendingPublication(db, input.checkAttemptId, input.lease, input.nextAttemptMs, input.nowMs)
+      : await deferCheckRecovery(
+          db,
+          input.checkAttemptId,
+          input.lease,
+          {
+            state: input.state ?? "remote-unconfirmed",
+            nextAttemptMs: input.nextAttemptMs,
+            reason: input.reason ?? "recovery deferred",
+          },
+          input.nowMs,
+        );
+  if (deferred) await bumpCheckOwed(db, input.checkAttemptId, input.nextAttemptMs).catch(() => {});
+  return deferred;
+}
+
+/**
  * The attempts whose Check settlement is still owed, oldest first — the durable
  * handoff the recovery lane reads. It grants nothing on the Check row: the
  * obligation lives on the attempt row, and the lane decides from that row plus
@@ -469,6 +598,17 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
       state: "launched",
       claimedAtMs: row.claimed_at_ms,
       launchedAtMs: row.launched_at_ms,
+      checkOwedMs: row.check_owed_ms,
+    };
+  }
+  if (
+    row.state === "abandoned" &&
+    row.abandoned_at_ms !== null
+  ) {
+    return {
+      state: "abandoned",
+      claimedAtMs: row.claimed_at_ms,
+      abandonedAtMs: row.abandoned_at_ms,
       checkOwedMs: row.check_owed_ms,
     };
   }
@@ -1582,9 +1722,9 @@ export async function runReviewAttempt(input: {
   // taken later, in the statement that is about to SEND the exec, so everything
   // before it — minting, the input write — leaves the row `provisioned`, which
   // cleanup may still release.
-  let entry: ReviewLaunchState | null;
+  let entry: LaunchVerdict;
   try {
-    entry = await readReviewLaunch(deps.env.DB, attemptId);
+    entry = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
   } catch (err) {
     const detail = redactExactSecrets(
       redactSecrets(err instanceof Error ? err.message : String(err)),
@@ -1595,26 +1735,34 @@ export async function runReviewAttempt(input: {
       `attempt ${attemptId}: the launch row could not be read — the paid step is not taken`,
     );
   }
-  if (entry !== null && entry.state === "persisted") {
-    // The paid step ran and its result is durable, even though this entry did
-    // not run it: a replay must never claim "no paid work started".
-    progress.runnerReturned = true;
-    return entry.execution;
-  }
-  if (entry !== null && entry.state === "launched") {
-    throw new AttemptUnknownError(
-      `attempt ${attemptId}: its paid step was already launched and its result is not durable — refusing a second launch`,
-    );
-  }
-  if (entry !== null && entry.state === "failed") {
-    throw new AttemptUnknownError(
-      `attempt ${attemptId}: its paid step returned a failure — refusing a second launch`,
-    );
-  }
-  if (entry === null) {
-    throw new AttemptUnknownError(
-      `attempt ${attemptId}: it holds no provisioning claim — nothing was launched for it`,
-    );
+  switch (entry.kind) {
+    case "persisted":
+      // The paid step ran and its result is durable, even though this entry did
+      // not run it: a replay must never claim "no paid work started".
+      progress.runnerReturned = true;
+      return entry.execution;
+    case "never-paid":
+      // `provisioned`: everything below may proceed; the fence is claimed at
+      // the send, so a failure here leaves the row releasable.
+      break;
+    case "paid-unknown":
+      throw new AttemptUnknownError(
+        `attempt ${attemptId}: its paid step was already launched and its result is not durable — refusing a second launch`,
+      );
+    case "paid-failed":
+      throw new AttemptUnknownError(
+        `attempt ${attemptId}: its paid step returned a failure — refusing a second launch`,
+      );
+    case "owned-by-cleanup":
+      throw new AttemptUnknownError(
+        `attempt ${attemptId}: a cleanup owns this container's destruction — refusing to run the paid step on it`,
+      );
+    case "never-claimed":
+      throw new AttemptUnknownError(
+        `attempt ${attemptId}: it holds no provisioning claim — nothing was launched for it`,
+      );
+    default:
+      return noLaunchState(entry);
   }
   // The input carries the SAME absolute deadline every post-diff step bills —
   // the exec's own end instant, never a duration. The runner anchors its own
