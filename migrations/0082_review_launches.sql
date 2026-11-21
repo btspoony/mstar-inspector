@@ -26,28 +26,38 @@
 -- row with an outcome is the plan's "may destroy" case; a `launched` row
 -- WITHOUT one is the only `unknown`, and only it holds container and capacity.
 --
--- `check_key` + `check_owed_ms` record an OWED Check settlement: the key is the
--- Check row's own `attempt_key` (the association is that derived identity, not
--- two random UUIDs), and the instant is the obligation's own due time, so the
--- recovery select honours the backoff instead of bypassing it. Both are written
--- together, only after a publication is durable and the Check has not
--- concluded, and cleared only by the conclusion.
+-- `abandoned` is a CLAIM, not an observation: cleanup CASes
+-- `provisioned → abandoned` and destroys only when the CAS won. A losing CAS
+-- means a concurrent attempt moved the row to `launched`, so the container may
+-- be paying and cleanup returns `unknown` instead of destroying it.
+--
+-- `check_key` + `check_generation` + `check_owed_ms` record an OWED Check
+-- settlement: the association is the Check row's own `attempt_key` PLUS its
+-- generation (a key alone names the attempt, and an older generation's mark
+-- must never match a newer row), and the instant is the obligation's own due
+-- time, advanced on every failed attempt so the backoff is honoured. All three
+-- are written together, only after a publication is durable and the Check has
+-- not concluded, and cleared only by a conclusion.
 CREATE TABLE review_launches (
   attempt_id TEXT PRIMARY KEY,
-  state TEXT NOT NULL CHECK (state IN ('provisioned', 'launched', 'persisted', 'failed')),
+  state TEXT NOT NULL CHECK (state IN ('provisioned', 'launched', 'persisted', 'failed', 'abandoned')),
   claimed_at_ms INTEGER NOT NULL,
   launched_at_ms INTEGER,
   persisted_at_ms INTEGER,
   failed_at_ms INTEGER,
+  abandoned_at_ms INTEGER,
   result_json TEXT,
   result_outcome TEXT CHECK (result_outcome IS NULL OR result_outcome IN ('persisted', 'failed')),
   check_key TEXT,
+  check_generation INTEGER,
   check_owed_ms INTEGER,
-  CHECK ((launched_at_ms IS NOT NULL) = (state <> 'provisioned')),
+  CHECK ((launched_at_ms IS NOT NULL) = (state IN ('launched', 'persisted', 'failed'))),
+  CHECK ((abandoned_at_ms IS NOT NULL) = (state = 'abandoned')),
   CHECK ((persisted_at_ms IS NOT NULL) = (state = 'persisted')),
   CHECK ((failed_at_ms IS NOT NULL) = (state = 'failed')),
   CHECK ((result_json IS NOT NULL) = (state = 'persisted')),
   CHECK ((result_outcome = 'persisted') = (state = 'persisted')),
   CHECK ((result_outcome = 'failed') = (state = 'failed')),
-  CHECK ((check_key IS NOT NULL) = (check_owed_ms IS NOT NULL))
+  CHECK ((check_key IS NOT NULL) = (check_owed_ms IS NOT NULL)),
+  CHECK ((check_generation IS NOT NULL) = (check_owed_ms IS NOT NULL))
 );

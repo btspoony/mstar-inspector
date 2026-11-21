@@ -307,6 +307,7 @@ const CHECK_DUE_PREDICATE = `recovery_state IN ('pending','remote-unconfirmed')
               EXISTS (
                 SELECT 1 FROM review_launches l
                  WHERE l.check_key = review_checks.attempt_key
+                   AND l.check_generation = review_checks.generation
                    AND l.check_owed_ms IS NOT NULL
                    AND l.check_owed_ms <= ?
               )

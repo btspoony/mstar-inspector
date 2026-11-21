@@ -332,6 +332,32 @@ describe("cleanupAttempt", () => {
     expect(h.sandbox.destroyCalls).toBe(0);
   });
 
+  test("a concurrent launch wins the race: the CAS loses and the container survives", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now());
+    // The attempt is still `provisioned` when this cleanup decides to destroy —
+    // and a concurrent review takes the paid step in between.
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
+
+    let resolved = 0;
+    const guarded = {
+      ...deps,
+      getSandbox: async (binding: unknown, id: string) => {
+        resolved += 1;
+        return h.overrides.getSandbox(binding, id);
+      },
+    };
+
+    // The CAS on `provisioned` loses, so nothing is destroyed and no handle is
+    // even resolved: the container may be paying.
+    expect(await cleanupAttempt(guarded, ref)).toEqual({ retention: "unknown" });
+    expect(resolved).toBe(0);
+    expect(h.sandbox.destroyCalls).toBe(0);
+    // Cleanup did not rewrite the row it lost: the launch stands.
+    expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");
+  });
+
   test("no launch row proves no paid work and destroys nothing", async () => {
     const { deps } = await makeDeps();
     const ref = makeRef(makePayload());
@@ -439,7 +465,7 @@ describe("a refused Check adoption", () => {
     expect(published?.proof).not.toBeNull();
     // And the handoff named itself on the log line.
     const warn = h.logLines.find((line) => line.fields.event === "check_settlement_owed");
-    expect(warn?.fields.check_recovery_owed).toBe(true);
+    expect(warn).toBeDefined();
   });
 });
 

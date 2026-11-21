@@ -46,7 +46,7 @@
 
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
-import { clearCheckOwed } from "../pipeline/review-attempt";
+import { bumpCheckOwed, clearCheckOwed, clearConcludedCheckOwed } from "../pipeline/review-attempt";
 import type { D1Like } from "../store/types";
 import {
   attachCheckRunId,
@@ -506,6 +506,10 @@ export async function reconcileReviewChecks(
     await reenableHealthyAppChecks(env, db, now, budget, credentials, transport, log, checkBudgets.updateMs);
 
     // 1. Due attempts, ONE bound nowMs at every predicate position.
+    // Retry path for the owed-Check marks: a clear that faulted, or a holder
+    // that concluded the Check itself, leaves a mark whose Check is terminal.
+    // One idempotent statement per pass, so the obligation cannot stay set.
+    await clearConcludedCheckOwed(db).catch(() => {});
     const rows = await listCheckReconcileBatch(db, now(), CHECK_MAX_ATTEMPTS, CHECK_RECONCILE_LIMIT);
     for (const row of rows) {
       summary.examined += 1;
@@ -1280,14 +1284,20 @@ async function settleFailedAttempt(
     }
     return;
   }
+  const nextAttemptMs = now() + backoffFor(attemptsAfter);
   const deferred = await deferCheckRecovery(
     db,
     attemptId,
     lease,
-    { state: "remote-unconfirmed", nextAttemptMs: now() + backoffFor(attemptsAfter), reason },
+    { state: "remote-unconfirmed", nextAttemptMs, reason },
     now(),
   );
-  if (deferred) summary.unconfirmed += 1;
+  if (deferred) {
+    // The Check's own backoff advanced: the owed obligation's due instant
+    // follows it, so a repeatedly failing row backs off instead of cycling.
+    await bumpCheckOwed(db, attemptId, nextAttemptMs).catch(() => {});
+    summary.unconfirmed += 1;
+  }
   summary.errors += 1;
 }
 

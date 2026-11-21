@@ -172,24 +172,70 @@ WHERE attempt_id = ? AND state = 'launched'
 `;
 
 /**
+ * Destruction CLAIMS the row first: `provisioned → abandoned` in one
+ * conditional statement. Only the winner (`meta.changes === 1`) may destroy; a
+ * loser means a concurrent attempt moved the row to `launched`, so the
+ * container may be paying and cleanup must report `unknown` instead.
+ */
+const ABANDON_LAUNCH_SQL = `
+UPDATE review_launches
+SET state = 'abandoned', abandoned_at_ms = ?
+WHERE attempt_id = ? AND state = 'provisioned'
+`;
+
+/**
  * The attempt's owed Check settlement, recorded on the ATTEMPT row and nowhere
- * else. `check_key` is the Check row's own `attempt_key` — the association is
- * that derived identity, never two random UUIDs — and `check_owed_ms` is the
- * obligation's own due instant, so the recovery select honours the backoff.
- * Written only while the Check has NOT concluded; one conditional statement.
+ * else. The association is the open Check row's own `attempt_key` AND its
+ * `generation` — a key alone names the attempt, so an older generation's mark
+ * could match a newer row — and `check_owed_ms` is the obligation's own due
+ * instant. Written only while that generation has NOT concluded.
  */
 const NOTE_CHECK_OWED_SQL = `
 UPDATE review_launches
-SET check_owed_ms = ?, check_key = ?
+SET check_owed_ms = ?,
+    check_key = ?,
+    check_generation = (
+      SELECT c.generation FROM review_checks c
+       WHERE c.attempt_key = ? AND c.terminal_ms IS NULL
+       ORDER BY c.generation DESC LIMIT 1
+    )
 WHERE attempt_id = ? AND check_owed_ms IS NULL
   AND EXISTS (SELECT 1 FROM review_checks c WHERE c.attempt_key = ? AND c.terminal_ms IS NULL)
 `;
 
-const CLEAR_CHECK_OWED_SQL = `
+/** Advance the obligation's due instant — the same backoff the Check row uses. */
+const BUMP_CHECK_OWED_SQL = `
 UPDATE review_launches
-SET check_owed_ms = NULL, check_key = NULL
+SET check_owed_ms = ?
 WHERE check_owed_ms IS NOT NULL
   AND check_key = (SELECT c.attempt_key FROM review_checks c WHERE c.id = ?)
+  AND check_generation = (SELECT c.generation FROM review_checks c WHERE c.id = ?)
+`;
+
+const CLEAR_CHECK_OWED_SQL = `
+UPDATE review_launches
+SET check_owed_ms = NULL, check_key = NULL, check_generation = NULL
+WHERE check_owed_ms IS NOT NULL
+  AND check_key = (SELECT c.attempt_key FROM review_checks c WHERE c.id = ?)
+  AND check_generation = (SELECT c.generation FROM review_checks c WHERE c.id = ?)
+`;
+
+/**
+ * Housekeeping for the marks whose conclusion already landed: a holder that
+ * terminated the Check, or a clear that faulted, leaves a mark whose Check row
+ * is terminal. Clearing it is idempotent and retried on EVERY pass, so the
+ * obligation cannot stay set after a conclusion.
+ */
+const CLEAR_CONCLUDED_CHECK_OWED_SQL = `
+UPDATE review_launches
+SET check_owed_ms = NULL, check_key = NULL, check_generation = NULL
+WHERE check_owed_ms IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM review_checks c
+     WHERE c.attempt_key = review_launches.check_key
+       AND c.generation = review_launches.check_generation
+       AND c.terminal_ms IS NULL
+  )
 `;
 
 const READ_LAUNCH_SQL = `
@@ -204,6 +250,7 @@ type LaunchRow = {
   launched_at_ms: number | null;
   persisted_at_ms: number | null;
   failed_at_ms: number | null;
+  abandoned_at_ms: number | null;
   result_json: string | null;
   result_outcome: string | null;
   check_owed_ms: number | null;
@@ -232,7 +279,8 @@ export type ReviewLaunchState =
       execution: ReviewAttemptExecution;
       checkOwedMs: number | null;
     }
-  | { state: "failed"; claimedAtMs: number; launchedAtMs: number; failedAtMs: number; checkOwedMs: number | null };
+  | { state: "failed"; claimedAtMs: number; launchedAtMs: number; failedAtMs: number; checkOwedMs: number | null }
+  | { state: "abandoned"; claimedAtMs: number; abandonedAtMs: number; checkOwedMs: number | null };
 
 /**
  * The launch decision. `ok` means this caller owns the one paid step of the
@@ -333,8 +381,58 @@ export async function noteCheckOwed(
 ): Promise<boolean> {
   const written = await db
     .prepare(NOTE_CHECK_OWED_SQL)
-    .bind(input.dueMs, input.checkKey, input.attemptId, input.checkKey)
+    .bind(input.dueMs, input.checkKey, input.checkKey, input.attemptId, input.checkKey)
     .run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * Advance the obligation's due instant after a FAILED recovery attempt, exactly
+ * as the Check row's own `next_attempt_ms` advances — otherwise a repeatedly
+ * failing row cycles without ever backing off.
+ */
+export async function bumpCheckOwed(
+  db: D1Like,
+  checkAttemptId: string,
+  dueMs: number,
+): Promise<boolean> {
+  const written = await db
+    .prepare(BUMP_CHECK_OWED_SQL)
+    .bind(dueMs, checkAttemptId, checkAttemptId)
+    .run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * The Check obligation is settled: clear it, so the reconciler stops selecting
+ * the attempt. Named by the CHECK's id — the association is the Check's own
+ * `attempt_key` + `generation`, which this statement resolves — because the
+ * acknowledgement comes from the lane that concluded the Check, never from the
+ * writer.
+ */
+export async function clearCheckOwed(db: D1Like, checkAttemptId: string): Promise<boolean> {
+  const written = await db.prepare(CLEAR_CHECK_OWED_SQL).bind(checkAttemptId, checkAttemptId).run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * Clear every mark whose Check has already concluded — the retry path for a
+ * clear that faulted, and the cleanup for a holder that terminated the Check
+ * itself. Idempotent, one statement, safe to run on every pass.
+ */
+export async function clearConcludedCheckOwed(db: D1Like): Promise<number> {
+  const written = await db.prepare(CLEAR_CONCLUDED_CHECK_OWED_SQL).run();
+  return written.meta.changes;
+}
+
+/**
+ * Claim the attempt for destruction: `provisioned → abandoned` in one
+ * conditional statement. `true` means THIS caller won and may destroy the
+ * container; `false` means the row moved on (a concurrent attempt launched the
+ * paid step) and no destruction may follow a read that is now stale.
+ */
+export async function abandonReviewLaunch(db: D1Like, attemptId: string, nowMs: number): Promise<boolean> {
+  const written = await db.prepare(ABANDON_LAUNCH_SQL).bind(nowMs, attemptId).run();
   return written.meta.changes === 1;
 }
 
@@ -357,17 +455,6 @@ export async function listCheckOwed(
     .bind(limit)
     .all<{ attempt_id: string; check_owed_ms: number }>();
   return results.map((row) => ({ attemptId: row.attempt_id, owedMs: row.check_owed_ms }));
-}
-
-/**
- * The Check obligation is settled: clear it, so the reconciler stops selecting
- * the attempt. Named by the CHECK's id — the association is the Check's own
- * `attempt_key`, which this statement resolves — because the acknowledgement
- * comes from the lane that concluded the Check, never from the writer.
- */
-export async function clearCheckOwed(db: D1Like, checkAttemptId: string): Promise<boolean> {
-  const written = await db.prepare(CLEAR_CHECK_OWED_SQL).bind(checkAttemptId).run();
-  return written.meta.changes === 1;
 }
 
 /** The attempt's launch row, or null when it never prepared. */

@@ -109,6 +109,7 @@ import {
   parseBoundedRead,
   prepareReviewAttempt,
   readReviewLaunch,
+  abandonReviewLaunch,
   noteCheckOwed,
   runReviewAttempt,
   AttemptUnknownError,
@@ -3075,11 +3076,10 @@ async function noteOwedCheck(deps: ProcessDeps, ref: AttemptRef, headSha: string
     checkKey,
     dueMs: Date.now() + CHECK_BACKOFF_MS[0]!,
   });
+  if (!owed) return; // the Check is settled (or has no open row): nothing is owed
   deps.log.warn(
-    { ...attemptFields(ref.payload, ref.level, ref.attemptId, headSha), event: "check_settlement_owed", check_recovery_owed: owed },
-    owed
-      ? "check settlement owed — the attempt row carries the obligation for the recovery lane"
-      : "check settlement owed — no open check row to hand over",
+    { ...attemptFields(ref.payload, ref.level, ref.attemptId, headSha), event: "check_settlement_owed" },
+    "check settlement owed — the attempt row carries the obligation for the recovery lane",
   );
 }
 
@@ -4519,11 +4519,10 @@ async function collectPhase(
       await check?.terminalize(null, "degraded-not-posted");
     } else {
       await check?.terminalize(degradedOutcome.publicationId, "publication-unknown");
-      // A durable degraded publication is the proof the Check concludes from;
-      // with no settlement in this host the obligation is recorded once.
-      if (check === undefined && degradedOutcome.phase === "confirmed") {
-        await noteOwedCheck(deps, ref, headSha);
-      }
+      // A durable degraded publication is the proof the Check concludes from:
+      // the obligation is recorded from that fact, and the Check row decides
+      // whether it is still open.
+      if (degradedOutcome.phase === "confirmed") await noteOwedCheck(deps, ref, headSha);
     }
     deps.log.warn(
       fields,
@@ -5012,11 +5011,6 @@ async function publishPhase(
     await check?.terminalize(stagedId, "publication-unknown");
     return { kind: "ok" };
   }
-  // The publication is durable and this host adopted no Check: record the owed
-  // settlement on the attempt row (its own backoff instant, the Check's own
-  // key) so the recovery lane concludes it after the holder releases.
-  if (check === undefined) await noteOwedCheck(deps, ref, headSha);
-
   // 13a. KV done-state fence (BUG-01): follows durable confirmation (the
   // persisted proof) — a crash in the steps below redelivers into the
   // journal handoff ack, never a duplicate paid review.
@@ -5279,6 +5273,10 @@ async function publishPhase(
   // from it, never a pass; the inline outcome value is only the honest
   // fallback when the proof is unreadable).
   await check?.terminalize(stagedId, "publication-unknown");
+  // Written from the DURABLE facts — a publication is confirmed, and the Check
+  // row itself decides whether it is still open — never from whether this host
+  // happened to cache a handle. A settled Check makes the note a no-op.
+  await noteOwedCheck(deps, ref, headSha);
   return { kind: "ok" };
 }
 
@@ -5646,15 +5644,30 @@ export async function cleanupAttempt(
   //   persisted | failed        → retained
   // No phase-local value participates: the row's state was written by whatever
   // observed the fact, and cleanup only reads it.
-  const launch = await readReviewLaunch(deps.env.DB, attemptId);
-  const retention: RetentionProof | undefined =
-    launch === null || launch.state === "provisioned"
-      ? { kind: "no-paid-work" }
-      : launch.state === "persisted" || launch.state === "failed"
-        ? { kind: "retained" }
-        : // `launched` with no outcome is the ONLY unknown; the schema refuses an
-          // outcome on a `launched` row, so this arm is the table's last cell.
-          undefined;
+  // DESTRUCTION CLAIMS THE ROW FIRST: reading `provisioned` is not permission,
+  // because a concurrent attempt can move the row to `launched` between the
+  // read and the destroy. The CAS is the authority — only a won CAS may destroy,
+  // and a loser reports `unknown` because the container may be paying.
+  const abandoned = await abandonReviewLaunch(deps.env.DB, attemptId, Date.now());
+  let retention: RetentionProof | undefined;
+  let containerMayExist = abandoned;
+  if (abandoned) {
+    retention = { kind: "no-paid-work" };
+  } else {
+    const launch = await readReviewLaunch(deps.env.DB, attemptId);
+    if (launch === null) {
+      // Nothing was ever claimed, so nothing could have been launched.
+      retention = { kind: "no-paid-work" };
+    } else if (launch.state === "persisted" || launch.state === "failed") {
+      containerMayExist = true;
+      retention = { kind: "retained" };
+    } else {
+      containerMayExist = true;
+      // `launched` (or abandoned by another destroyer): the only states that
+      // authorise nothing. The schema refuses an outcome on `launched`.
+      retention = undefined;
+    }
+  }
   let containerUnproven = retention === undefined || input.unproven === true;
   // Destroy FIRST, then release the admission row. Releasing first would let
   // the next attempt for this PR acquire the slot and start its container
@@ -5671,7 +5684,7 @@ export async function cleanupAttempt(
         ? "sandbox not destroyed: the failure left the container's state unknown — capacity held, nothing released"
         : "sandbox not destroyed: no durable outcome to justify it — capacity held, nothing released",
     );
-  } else if (launch !== null) {
+  } else if (containerMayExist) {
     try {
       // The handle is re-derived by attempt id — a resumed invocation has no
       // previous one — and the marker gate inside `destroyMarked` decides
