@@ -8,8 +8,9 @@
  * the Check pair the attempt froze must read terminal at or before that instant
  * (a Check that concludes later, or a row the database does not hold, means the
  * settlement instant truncated the interval), and the settlement's own completion
- * record must exist — the only durable proof that the obligations it incurred
- * were discharged. Everything else is counted under one of the five reasons below
+ * record must exist — a local transition proves its own effect, and delivery
+ * idempotency is never re-verified here. Everything else is counted under one of
+ * the five reasons below
  * and never supplied as a zero, because "not measured" and "took no time" are
  * different answers — and only a proven interval may steer the operator's cap.
  *
@@ -62,11 +63,12 @@ export type DurationPercentiles = { p50Ms: number; p90Ms: number; maxMs: number 
  * - `check-open-at-settle` — the attempt froze a Check pair whose row is
  *   missing, still open, or concluded AFTER the instant it claims to have
  *   settled: its end boundary is not proven.
- * - `claim-unproven` — the attempt has no settlement completion record: it was
- *   written before migration 0085 added `settled_effects`, or the record is
- *   unreadable. Excluded BY RULE — the delivery-time KV key expires and does not
- *   identify the attempt, so it can never prove what that attempt discharged at
- *   settlement, and an unproven obligation is not a closed one.
+ * - `no-settlement-record` — the attempt settled before migration 0085 added
+ *   `settled_effects`, or its record is unreadable, so it cannot show which
+ *   obligations it discharged. Excluded BY RULE: the delivery-time idempotency
+ *   key is a statement about the transporter, not about whether the review
+ *   finished, and it is unobservable after its TTL — it is never used as a
+ *   completion witness.
  * - `no-boundary` — no usable start or end instant: no launch row, a pre-0087
  *   row without its queue stamp, no durable result (the settlement's start is
  *   not an outcome), or boundaries that do not run forwards.
@@ -77,7 +79,7 @@ export type DurationPercentiles = { p50Ms: number; p90Ms: number; maxMs: number 
  */
 export type DurationExclusionReason =
   | "check-open-at-settle"
-  | "claim-unproven"
+  | "no-settlement-record"
   | "no-boundary"
   | "unsettled"
   | "pre-prepare";
@@ -224,7 +226,7 @@ export async function readReviewDurationReport(
 
   const excluded: DurationReportExclusions = {
     "check-open-at-settle": 0,
-    "claim-unproven": 0,
+    "no-settlement-record": 0,
     "no-boundary": 0,
     unsettled: 0,
     "pre-prepare": 0,
@@ -273,10 +275,9 @@ export async function readReviewDurationReport(
     // The completion record IS the discharge of every obligation the settlement
     // incurred: `settled_ms` is written together with it, only when the required
     // set for that lane is complete. A settled row without one was written
-    // before migration 0085 — and nothing else can prove that attempt's claim,
-    // because the delivery-time KV key expires and does not identify the attempt.
+    // before migration 0085, and nothing else witnesses what it discharged.
     if (!hasSettlementRecord(row.settled_effects)) {
-      excluded["claim-unproven"] += 1;
+      excluded["no-settlement-record"] += 1;
       continue;
     }
     buckets.push(bucket);

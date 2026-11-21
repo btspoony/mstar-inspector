@@ -1583,7 +1583,7 @@ export const en = {
         "Attempts admitted in the last {days} days. Percentiles use only intervals whose settlement instant is written and whose obligations — Check conclusion and success claim — are all proven closed, and an empty window stays empty — it never reads as a zero.",
       durationEmpty: "No attempt was admitted in this window.",
       durationEmptyExcluded:
-        "No attempt was measured: all {n} admitted attempts were excluded — {checkOpen} with a Check still open at settlement, {claimUnproven} with an unproven success claim, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
+        "No attempt was measured: all {n} admitted attempts were excluded — {checkOpen} with a Check still open at settlement, {recordMissing} with no settlement record, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
       durationSample: "{n} complete attempts",
       durationTotal: "End to end",
       durationQueueWait: "Queue wait",
@@ -1595,9 +1595,11 @@ export const en = {
       durationBuckets:
         "Every attempt's interval splits into these three phases. Percentiles are per row, so one column does not add up across rows.",
       durationExcluded:
-        "Excluded from the percentiles: {checkOpen} with a Check still open at settlement, {claimUnproven} with an unproven success claim, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
+        "Excluded from the percentiles: {checkOpen} with a Check still open at settlement, {recordMissing} with no settlement record, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
       durationFailureTail:
-        "Confirmed failures are not in this distribution — a failure's duration measures a different thing — and are counted elsewhere.",
+        "A launch whose paid step failed without a durable result has no interval to measure and is excluded as having no measurable boundary; an attempt that produced a result is measured even if a later step failed.",
+      durationSettlementBasis:
+        "The distribution is built from settlement records and does not re-verify delivery idempotency.",
       durationCandidateLabel: "Candidate cap (ms)",
       durationCandidateApply: "Show cutoff",
       durationCutoff: "A {cap} ms cap would exclude {over} of {n} attempts ({share}).",

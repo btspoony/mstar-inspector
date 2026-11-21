@@ -272,7 +272,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.phases.publication).toEqual({ p50Ms: 8_000, p90Ms: 15_000, maxMs: 15_000 });
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 0,
+      "no-settlement-record": 0,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,
@@ -367,7 +367,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toEqual({ p50Ms: 40_000, p90Ms: 40_000, maxMs: 40_000 });
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 0,
+      "no-settlement-record": 0,
       "no-boundary": 3,
       unsettled: 0,
       "pre-prepare": 0,
@@ -407,7 +407,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toBeNull();
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 0,
+      "no-settlement-record": 0,
       "no-boundary": 1,
       unsettled: 1,
       "pre-prepare": 0,
@@ -437,7 +437,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toBeNull();
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 0,
+      "no-settlement-record": 0,
       "no-boundary": 0,
       unsettled: 2,
       "pre-prepare": 0,
@@ -457,7 +457,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     const body = (await (await getReport(db)).json()) as { excluded: Record<string, number> };
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 0,
+      "no-settlement-record": 0,
       "no-boundary": 1,
       unsettled: 0,
       "pre-prepare": 1,
@@ -507,7 +507,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toBeNull();
     expect(body.excluded).toEqual({
       "check-open-at-settle": 3,
-      "claim-unproven": 0,
+      "no-settlement-record": 0,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,
@@ -553,19 +553,19 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toEqual({ p50Ms: 40_000, p90Ms: 40_000, maxMs: 40_000 });
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 0,
+      "no-settlement-record": 0,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,
     });
   });
 
-  test("claim-unproven: a settlement with no completion record is excluded by rule", async () => {
+  test("no-settlement-record: a settlement without its completion record is excluded by rule", async () => {
     const db = fixture();
     const t0 = Date.now() - 3_600_000;
     // A settlement written before migration 0085: `settled_ms` exists, the
-    // record that would prove its obligations does not. No key can stand in —
-    // it expires and never identifies this attempt — so the rows are excluded.
+    // record that would prove what it discharged does not. Nothing else can
+    // witness it, so the rows are excluded.
     seedAttempt(db, {
       attemptId: "legacy-a",
       enqueuedMs: t0,
@@ -592,7 +592,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toBeNull();
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 2,
+      "no-settlement-record": 2,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,
@@ -630,7 +630,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.sampleSize).toBe(2);
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 0,
+      "no-settlement-record": 0,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,
@@ -658,7 +658,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
       check: { key: "check-open", generation: 1, terminalMs: null },
     });
     seedAttempt(db, {
-      attemptId: "claim-unproven",
+      attemptId: "no-settlement-record",
       headSha: "b".repeat(40),
       enqueuedMs: t0,
       admittedMs: t0,
@@ -670,7 +670,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     seedAttempt(db, { attemptId: "running", enqueuedMs: t0, admittedMs: t0, persistedMs: t0 + 10_000, settledMs: null });
     seedAttempt(db, { attemptId: "create-rejected", handoffState: "failed", enqueuedMs: t0, admittedMs: t0, settledMs: null });
 
-    // The claim row has no completion record, so it cannot be proven discharged.
+    // The legacy row has no completion record, so its discharge is unproven.
     const body = (await (await getReport(db)).json()) as {
       sampleSize: number;
       excluded: Record<string, number>;
@@ -678,7 +678,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     const excluded = body.excluded;
     expect(excluded).toEqual({
       "check-open-at-settle": 1,
-      "claim-unproven": 1,
+      "no-settlement-record": 1,
       "no-boundary": 1,
       unsettled: 1,
       "pre-prepare": 1,
@@ -711,7 +711,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.phases).toEqual({ queueWait: null, execution: null, publication: null });
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 0,
+      "no-settlement-record": 0,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,

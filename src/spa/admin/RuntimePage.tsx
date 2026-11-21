@@ -135,13 +135,13 @@ function DurationReportCard({ locale }: { locale: Locale }) {
             const excluded = report.excluded;
             const excludedTotal =
               excluded["check-open-at-settle"] +
-              excluded["claim-unproven"] +
+              excluded["no-settlement-record"] +
               excluded["no-boundary"] +
               excluded.unsettled +
               excluded["pre-prepare"];
             const excludedParams = {
               checkOpen: excluded["check-open-at-settle"],
-              claimUnproven: excluded["claim-unproven"],
+              recordMissing: excluded["no-settlement-record"],
               noBoundary: excluded["no-boundary"],
               unsettled: excluded.unsettled,
               prePrepare: excluded["pre-prepare"],
@@ -201,6 +201,9 @@ function DurationReportCard({ locale }: { locale: Locale }) {
                 )}
                 <p className="mt-2 text-xs text-muted-foreground" data-duration="failure-tail">
                   {t(locale, "admin.runtime.durationFailureTail")}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground" data-duration="settlement-basis">
+                  {t(locale, "admin.runtime.durationSettlementBasis")}
                 </p>
                 <form
                   className="mt-4 flex flex-wrap items-end gap-2"

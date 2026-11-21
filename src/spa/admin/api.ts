@@ -382,7 +382,7 @@ export type DurationReport = {
   };
   excluded: {
     "check-open-at-settle": number;
-    "claim-unproven": number;
+    "no-settlement-record": number;
     "no-boundary": number;
     unsettled: number;
     "pre-prepare": number;
@@ -436,7 +436,7 @@ export async function readDurationReport(capMs: number | null): Promise<Duration
     },
     excluded: {
       "check-open-at-settle": num(excluded, "check-open-at-settle"),
-      "claim-unproven": num(excluded, "claim-unproven"),
+      "no-settlement-record": num(excluded, "no-settlement-record"),
       "no-boundary": num(excluded, "no-boundary"),
       unsettled: num(excluded, "unsettled"),
       "pre-prepare": num(excluded, "pre-prepare"),
