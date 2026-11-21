@@ -27,6 +27,13 @@ export type AttemptHandoff = {
   attemptId: string;
   payload: ReviewJobPayload;
   state: AttemptHandoffState;
+  /**
+   * The attempt's absolute hard stop, frozen when this row was first written:
+   * the delivery's Queue send stamp plus the operator's end-to-end cap. Every
+   * replay of the same attempt reads it instead of re-deriving it. `null` only
+   * on a row written before the column existed; the next admission freezes it.
+   */
+  deadlineMs: number | null;
   /** The settle-once mark the Workflow's settlement step takes after completing. */
   settledMs: number | null;
 };
@@ -92,6 +99,7 @@ type HandoffRow = {
   attempt_id: string;
   payload_json: string;
   state: AttemptHandoffState;
+  deadline_ms: number | null;
   settled_ms: number | null;
 };
 
@@ -101,6 +109,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
     attemptId: row.attempt_id,
     payload: JSON.parse(row.payload_json) as ReviewJobPayload,
     state: row.state,
+    deadlineMs: row.deadline_ms,
     settledMs: row.settled_ms,
   };
 }
@@ -109,7 +118,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
 export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promise<AttemptHandoff | null> {
   const row = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, settled_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, settled_ms
          FROM review_attempt_handoffs WHERE delivery_key = ?`,
     )
     .bind(deliveryKey)
@@ -122,19 +131,44 @@ export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promi
  * of the same message wrote. `INSERT … ON CONFLICT DO NOTHING` makes two
  * concurrent attempts to reserve the same delivery harmless: both read back the
  * one row, and the caller uses ITS attempt id.
+ *
+ * `deadlineMs` is frozen by the FIRST writer: a conflicting insert changes
+ * nothing, and the conditional UPDATE only fills the column a pre-migration row
+ * left NULL. So a redelivery, a concurrent duplicate or a recovery re-enqueue
+ * can never move the attempt's hard stop.
  */
 export async function reserveAttemptHandoff(
   db: D1Like,
-  input: { deliveryKey: string; attemptId: string; payload: ReviewJobPayload; nowMs: number },
+  input: {
+    deliveryKey: string;
+    attemptId: string;
+    payload: ReviewJobPayload;
+    nowMs: number;
+    deadlineMs: number;
+  },
 ): Promise<AttemptHandoff> {
   await db
     .prepare(
       `INSERT INTO review_attempt_handoffs
-         (delivery_key, attempt_id, payload_json, state, created_ms, updated_ms)
-       VALUES (?, ?, ?, 'owed', ?, ?)
+         (delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, updated_ms)
+       VALUES (?, ?, ?, 'owed', ?, ?, ?)
        ON CONFLICT (delivery_key) DO NOTHING`,
     )
-    .bind(input.deliveryKey, input.attemptId, JSON.stringify(input.payload), input.nowMs, input.nowMs)
+    .bind(
+      input.deliveryKey,
+      input.attemptId,
+      JSON.stringify(input.payload),
+      input.deadlineMs,
+      input.nowMs,
+      input.nowMs,
+    )
+    .run();
+  await db
+    .prepare(
+      `UPDATE review_attempt_handoffs SET deadline_ms = ?
+        WHERE delivery_key = ? AND deadline_ms IS NULL`,
+    )
+    .bind(input.deadlineMs, input.deliveryKey)
     .run();
   const row = await readAttemptHandoff(db, input.deliveryKey);
   if (row === null) {
@@ -191,7 +225,7 @@ export async function listHandoffsForRecovery(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, settled_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, settled_ms
          FROM review_attempt_handoffs
         WHERE state IN ('owed', 'ambiguous') AND updated_ms <= ?
         ORDER BY updated_ms

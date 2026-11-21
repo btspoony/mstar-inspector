@@ -1768,6 +1768,8 @@ export type CheckAttachResult =
  * message. The row keeps `create_state = 'known'` and the run id — the durable
  * facts the consumer's `begin` adopts — and the long
  * `CHECK_ATTACH_WINDOW_MS` deadline keeps it adoptable across the queue delay.
+ * That deadline is PROVISIONAL: the first execution admission narrows it, once,
+ * to the attempt's frozen absolute deadline (`queue send + operator cap`).
  *
  * One run per head: the claim goes through `claimAttempt`, so a duplicate
  * delivery, a queue redelivery or a synchronize event that finds the key

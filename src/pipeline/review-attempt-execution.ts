@@ -193,13 +193,12 @@ import {
   CHECK_UPDATE_DEFAULT,
   type CheckBudgets,
 } from "./check-budgets-reader";
-// The review round clock, its reserve ledger and the single runner-budget
+// The attempt budget: the reserve ledger and the single runner-budget
 // derivation. The Check store imports the same module, so neither side owns a
 // second copy of the arithmetic.
 import {
   anchorRunnerBudget,
   CHECK_HOOK_TIMEOUT_MS,
-  CHECK_WINDOW_MS,
   deriveReviewBudget,
   EXEC_TIMEOUT_GIT_MS,
   INLINE_RESOLVE_BUDGET_MS,
@@ -309,6 +308,9 @@ export type ConsumerLogFields = {
    * concurrency reader's degraded-read warn, relayed on this channel.
    * `review_check_budgets_degraded` (same channel, spec §7.10): the check-budget
    * reader's degraded-read warn.
+   * `review_attempt_cap_degraded` (same channel): the end-to-end attempt cap's
+   * degraded read — the delivery is retried so no attempt runs under a cap the
+   * platform invented.
    * `review_level_degraded` (same channel, migration 0047): the operator-default
    * review-level read's degraded warn — a corrupt row falls back to `default`
    * and says so here instead of degrading silently.
@@ -353,7 +355,7 @@ export type ConsumerLogFields = {
    * and the handoff row stays for recovery), and the moved-head path recorded
    * the observed head in the successor outbox (or named why it could not).
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -1122,12 +1124,12 @@ function clampContextText(text: string, maxChars: number): string {
  * `EXEC_TIMEOUT_GIT_MS` because the capture is best-effort narrative, and each
  * read is further capped by what the DERIVED runner deadline still owes.
  *
- * Round arithmetic (`ROUND_BUDGET_MS` = 900_000ms, 234_000ms reserve at the
- * defaults → a 666_000ms pre-runner cutoff): the gate needs the capture's
- * worst case (1 + PR_CONTEXT_MAX_ISSUES) × 30_000 = 120_000ms plus the
- * post-runner bounded reads (3 × POST_RUNNER_READ_TIMEOUT_MS = 90_000ms) still
- * ahead of that cutoff, so it fits on every level — `deep` included, whose
- * 646_000ms maximum is a ceiling the cutoff never grants in
+ * Budget arithmetic (the attempt's frozen deadline minus the 234_000 ms reserve
+ * at the defaults → a 966_000 ms pre-runner cutoff at the 20-minute cap): the
+ * gate needs the capture's worst case (1 + PR_CONTEXT_MAX_ISSUES) × 30_000 =
+ * 120_000 ms plus the post-runner bounded reads (3 × POST_RUNNER_READ_TIMEOUT_MS
+ * = 90_000 ms) still ahead of that cutoff, so it fits on every level — `deep`
+ * included, whose 646_000 ms maximum is a ceiling the cutoff never grants in
  * full. Changing any term re-derives the gate.
  */
 export const PR_CONTEXT_EXEC_TIMEOUT_MS = 30_000;
@@ -2151,12 +2153,13 @@ export type ProcessDeps = {
    */
   findIncrementBase: (db: PipelineEnv["DB"], scope: Scope) => Promise<string | null>;
   /**
-   * The round's wall-clock budget (ms), measured from the top of
-   * `processMessage`. Production is `ROUND_BUDGET_MS` (the queue consumer cap);
-   * the seam exists so a test can shrink the round to a budget where a step
-   * must be skipped instead of waiting for real time to pass.
+   * TEST SEAM ONLY: an explicit attempt cap (ms) that overrides the operator
+   * settings read at admission, so a suite can put the attempt's frozen
+   * deadline where it wants it. Production leaves it undefined — the cap comes
+   * from `review_runtime_settings`, and the deadline is then stored on the
+   * attempt, not carried here.
    */
-  roundBudgetMs: number;
+  attemptCapMs?: number;
   /**
    * The App's resolved runner config per App id — the HOST channel a phase
    * re-derives its live objects from (the adapter is in `appCommenters`, the
@@ -2450,8 +2453,14 @@ export type AttemptRef = {
   attemptId: string;
   payload: ReviewJobPayload;
   level: ReviewLevel;
-  /** The instant this delivery's round clock started — the budget derivation's anchor. */
+  /** The instant this delivery's admission entry began — the preparation anchor. */
   roundStartedAt: number;
+  /**
+   * The attempt's ONE absolute hard stop (`queue send + operator cap`), frozen
+   * when the attempt was first admitted and replayed by every later delivery.
+   * Every step and the container read THIS instant; none re-derives it.
+   */
+  deadlineMs: number;
   /** The App's numeric GitHub id (the credential row's identity). */
   githubAppId: number;
   /** The workspace the usage ledger charges. */
@@ -2556,6 +2565,12 @@ export type CheckSettlementInput = {
   payload: ReviewJobPayload;
   attemptId: string;
   checkBudgets: CheckBudgets | null;
+  /**
+   * The attempt's frozen absolute deadline. A claim or adoption writes it as the
+   * Check row's `execution_deadline_ms`, so the reconciler reads the SAME
+   * instant the execution fence does — never a fresh `now + window`.
+   */
+  deadlineMs: number;
 };
 
 /** A phase's early settlement: the attempt owes nothing more. */
@@ -2642,7 +2657,7 @@ export type CleanupOutcome = { retention: "no-paid-work" | "retained" | "unknown
  * exactly one outcome.
  */
 export function createCheckSettlement(input: CheckSettlementInput): CheckSettlement {
-  const { deps, payload, attemptId, checkBudgets } = input;
+  const { deps, payload, attemptId, checkBudgets, deadlineMs } = input;
   const sandboxId = attemptSandboxId(attemptId);
   /** The base log identity every line carries (the delivery's own facts). */
   const baseLog = (): ConsumerLogFields => toBaseFields(payload);
@@ -2945,7 +2960,10 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
           headSha,
           triggeredBy: payload.triggered_by,
           action: payload.action,
-          executionDeadlineMs: Date.now() + CHECK_WINDOW_MS,
+          // The check row's execution deadline IS the attempt's frozen hard
+          // stop (adoption narrows the attach window to this same instant), so
+          // the reconciler and the execution fence agree without a re-read.
+          executionDeadlineMs: deadlineMs,
           latch: beginLatch,
         }),
         null,
@@ -3050,6 +3068,7 @@ async function settlementFor(
     payload: ref.payload,
     attemptId: ref.attemptId,
     checkBudgets: ref.checkBudgets,
+    deadlineMs: ref.deadlineMs,
   });
   settlement.fields = attemptFields(ref.payload, ref.level, ref.attemptId, headSha);
   // Adoption IS a claim attempt: the fallback path must not claim twice.
@@ -3298,6 +3317,7 @@ async function preparePhase(
     payload,
     attemptId,
     checkBudgets: ref.checkBudgets,
+    deadlineMs: ref.deadlineMs,
   });
   deps.checkSettlements.set(attemptId, check);
   let baseFields: ConsumerLogFields | undefined;
@@ -3759,12 +3779,14 @@ async function preparePhase(
   // from this ONE derived deadline, and a spent deadline declines explicitly
   // — no step starts on a fresh 120s window once the fallback was admitted.
   const terminalizeBudgetMs = ref.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT;
-  // ONE derivation for the whole round: the platform cap, the live
-  // terminalize budget and the tier decide the reserve, the absolute
-  // pre-runner cutoff and every window other owners bill from it.
+  // ONE derivation for the whole attempt: the FROZEN deadline (queue send +
+  // operator cap, recorded at admission — never a fresh cap read here), the
+  // live terminalize budget and the tier decide the reserve, the absolute
+  // pre-runner cutoff and every window other owners bill from it. A replayed
+  // prepare therefore derives the SAME cutoff.
   roundBudget = deriveReviewBudget({
     roundStartMs: roundStartedAt,
-    capMs: deps.roundBudgetMs,
+    deadlineMs: ref.deadlineMs,
     terminalizeMs: terminalizeBudgetMs,
     level,
   });
@@ -5443,7 +5465,7 @@ export async function settleAttemptFailure(
   const terminalizeBudgetMs = ref.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT;
   const roundBudget = deriveReviewBudget({
     roundStartMs: ref.roundStartedAt,
-    capMs: deps.roundBudgetMs,
+    deadlineMs: ref.deadlineMs,
     terminalizeMs: terminalizeBudgetMs,
     level,
   });
@@ -5497,13 +5519,18 @@ export async function settleAttemptFailure(
     // failure this stop owes with no trace and no recovery intent. A claim
     // already ATTEMPTED is never retried: the claim insert is the one
     // race-decided gate, and a second try could mint a second generation.
+    // A deadline already SPENT cannot own a Check lease (the row's deadline IS
+    // that instant), so the claim is skipped there: the recovery lane closes
+    // the row at its own expiry and the durable failure above is the stop's
+    // record. Claiming would throw and mask the typed stop.
     if (
       deps.checks !== undefined &&
       check !== undefined &&
       check.handle === null &&
       !check.claimAttempted &&
       lifecycleScope !== undefined &&
-      headSha !== null
+      headSha !== null &&
+      ref.deadlineMs > Date.now()
     ) {
       check.claimAttempted = true;
       await check.begin(lifecycleScope, githubAppId, headSha);

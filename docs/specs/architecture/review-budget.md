@@ -1,8 +1,8 @@
-# Review budget — one derivation from the platform cap
+# Review budget — one derivation from the attempt's frozen deadline
 
 ## Scope
 
-The runner's per-round wall-clock allocation and its exhaustion outcome: the round clock, the tier
+The attempt's one absolute deadline, the runner's wall-clock allocation inside it, the tier
 ceilings, the per-tier size curve, and the typed `budget-exhausted` stop. The review lifecycle that
 consumes these windows lives in [`review-lifecycle.md`](../feature/review-lifecycle.md).
 
@@ -10,24 +10,50 @@ consumes these windows lives in [`review-lifecycle.md`](../feature/review-lifecy
 
 Owner module: `src/review-budget.ts`; status: implemented.
 
-### One round clock
+### One absolute deadline
 
-A Cloudflare Queue consumer invocation is capped at 900 000 ms (platform limit, not configurable).
-One review runs inside one message (`max_batch_size: 1`), so that cap is the round clock.
-
-The runner budget is derived, never typed per tier:
+An attempt's hard stop is ONE absolute instant, frozen when its delivery is first
+admitted:
 
 ```
-reserveMs      = 90 000 (bounded output reads)
-               + 12 000 (inline resolution)
-               +  2 000 (Check begin)
-               + 120 000 (Worker tail slack)
-               + terminalizeMs            (live Check terminalize window, 1 000–30 000)
-runnerCeilingMs = 900 000 − reserveMs
+deadlineMs = enqueued_ms + capMs
 ```
 
-`reserveMs` is 234 000 ms at the 10 000 ms default, so the ceiling is 666 000 ms; at the supported
-30 000 ms maximum it is 254 000 ms and the ceiling is 646 000 ms.
+`enqueued_ms` is the original Queue send stamp (the queue wait counts against
+the cap) and `capMs` is the operator's end-to-end cap: the system row
+`review.attempt.duration_cap_ms` in `review_runtime_settings`, whose absent-row
+default is `1 200 000 ms` (20 minutes — see
+[`docs/runtime-configuration.md`](../../runtime-configuration.md)). The instant
+is recorded on the delivery's handoff row and written as the Check attempt row's
+`execution_deadline_ms`, so a redelivery, a recovery replay and the independent
+Check reconciler all read the same value. No step re-derives it, and a
+present-but-untrusted cap leaves admission retryable instead of inventing one.
+
+The Queue consumer's 900 000 ms invocation cap remains an **admission**
+invariant — the guard TTL and the Check attach window derive from it — and no
+longer bounds execution.
+
+The runner budget is derived from that instant, never typed per tier:
+
+```
+reserveMs       = 90 000 (bounded output reads)
+                + 12 000 (inline resolution)
+                +  2 000 (Check begin)
+                + 120 000 (Worker tail slack)
+                + terminalizeMs            (live Check terminalize window, 1 000–30 000)
+runnerCutoffMs  = deadlineMs − reserveMs
+```
+
+At the 20-minute default and the 10 000 ms terminalize default the reserve is
+234 000 ms and the cutoff is 966 000 ms; at the supported 30 000 ms maximum it is
+254 000 ms and the cutoff is 946 000 ms. The tier table below is unchanged: every
+tier maximum fits inside the cutoff at each supported terminalize value.
+
+The paid exec is started with the remaining time to its anchored instant
+(`min(tier request, cutoff − anchor)`) and the sandbox's own timeout kills a hung
+child there. A returned status (`124` included) is a confirmed stop and is
+recorded as one; a lost reply is `unknown` — no Check conclusion, no destruction,
+no capacity release.
 
 | Tier | `tierMaxMs` | Guard TTL |
 |------|-------------|-----------|
@@ -105,9 +131,9 @@ The runner reports, the Worker publishes:
 
 ## Invariants
 
-- Every tier maximum satisfies `tierMaxMs <= runnerCeilingMs` for the whole supported
-  `terminalizeMs` range. A test asserts it, so a table that advertises a budget the consumer cannot
-  finish fails CI instead of shipping.
+- Every tier maximum satisfies `tierMaxMs <= deadlineMs − reserveMs` at the documented absent-row
+  cap for the whole supported `terminalizeMs` range. A test asserts it, so a table that advertises a
+  budget the attempt cannot finish fails CI instead of shipping.
 - A round's allocation is clamped by exactly one `min()`, inside `anchorRunnerBudget`; the tier
   table's own `deep` floor clamp (see Current state) is fixed derivation, not a per-round clamp. A
   second clamp at a call site is a defect: it makes an unreachable tier value look shipped.
@@ -117,20 +143,32 @@ The runner reports, the Worker publishes:
   silently.
 - The guard TTL is `ceil((tierMax + 14 × 120 000 + 12 000 + 120 000) / 1000)`, derived from the same
   budget. Admission retry rungs stay below their TTL with a cumulative sum above it.
-- The allocation never reaches the admission windows: guard TTL and the Check lease derive from the
-  ceiling, so a small PR cannot shorten the window a retry or recovery needs.
+- The allocation never reaches the admission windows: the guard TTL derives from the tier ceiling,
+  and the Check row's lease IS the attempt's frozen deadline, so a small PR cannot shorten the
+  window a retry or recovery needs.
+- The deadline is written once: the admission handoff freezes it, a redelivery or a recovery
+  re-enqueue replays it, and the Check row carries the same instant for the independent reconciler.
+  A step that re-derives it, or a redelivery that refreshes it, is a defect.
 
 ## Where it lives
 
-- `src/review-budget.ts` — the derivation, constants and types above.
+- `src/review-budget.ts` — the cap's read and structured warn, the derivation, constants and types
+  above.
+- `src/dashboard/runtime-config-store.ts` — the `review.attempt.duration_cap_ms` row's parse, the
+  absent-row default and the degraded answer.
+- `src/pipeline/consumer.ts` — freezes `deadlineMs` on the delivery's handoff row at admission.
+- `src/pipeline/review-attempt-execution.ts` — derives each phase's windows from that instant and
+  writes it as the Check row's `execution_deadline_ms`.
 - `tests/pipeline/review-budget.test.ts` — the tier-table and allocation cases.
+- `tests/pipeline/hard-stop.test.ts` — the container stop, the lost reply, the resume and the cap's
+  read path.
 - `docs/specs/architecture/review-budget.md` — this page.
 
 ## Change obligations
 
-A change to the platform cap, the reserve ledger, the tier table, the per-tier floors, the
-saturation point or the refusal vocabulary updates this page and
-`tests/pipeline/review-budget.test.ts` in the same change.
+A change to the cap's read or absent-row default, the reserve ledger, the tier table, the per-tier
+floors, the saturation point or the refusal vocabulary updates this page,
+`docs/runtime-configuration.md` and `tests/pipeline/review-budget.test.ts` in the same change.
 
 ## Known limits
 
@@ -139,5 +177,10 @@ saturation point or the refusal vocabulary updates this page and
   implementation.
 - A truncation exactly at a line boundary cannot be detected: the platform supplies no truncation
   flag.
-- A review that cannot finish even at the ceiling needs a Workflow or Durable Object handoff; the
-  budget derivation deliberately stops at the honest ceiling instead of advertising more.
+- The cap's own terminal Check category (`cap stop`) and its customer wording are owned by the
+  operator duration plan. Until that lands, an attempt that cannot start or finish inside the frozen
+  deadline reports the existing `budget-exhausted` outcome, whose Check summary names the budget
+  window rather than the cap.
+- A cap set far above the admission guard TTL would outlive the row that serialises the PR. The
+  documented range tops out at one hour, and the shipped guard TTLs (2 292–2 458 s) cover the
+  20-minute default with the queue wait inside it.

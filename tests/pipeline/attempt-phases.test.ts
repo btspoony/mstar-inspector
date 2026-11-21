@@ -97,7 +97,7 @@ async function makeDeps(
     getSandbox: h.overrides.getSandbox,
     selectPrHead: async () => null,
     findIncrementBase: async () => null,
-    roundBudgetMs: 900_000,
+    attemptCapMs: 900_000,
     runnerConfigs: new Map(),
     checkSettlements: new Map(),
     credentials: new Map(),
@@ -124,6 +124,7 @@ function makeRef(payload: ReviewJobPayload): AttemptRef {
     payload,
     level: "default",
     roundStartedAt: Date.now(),
+    deadlineMs: Date.now() + 900_000,
     githubAppId: 424242,
     usageWorkspaceId: "default",
     usageSource: "byok",
@@ -170,6 +171,7 @@ describe("createCheckSettlement", () => {
       payload: makePayload(),
       attemptId: ATTEMPT_ID,
       checkBudgets: null,
+      deadlineMs: Date.now() + 900_000,
     });
 
     expect(await settlement.begin(SCOPE, 424242, SHA)).toEqual(HANDLE);
@@ -196,6 +198,7 @@ describe("createCheckSettlement", () => {
       payload: makePayload(),
       attemptId: ATTEMPT_ID,
       checkBudgets: null,
+      deadlineMs: Date.now() + 900_000,
     });
     settlement.handle = HANDLE;
 

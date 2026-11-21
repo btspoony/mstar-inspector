@@ -909,8 +909,9 @@ export async function claimCheckRecovery(
  *
  * `execution_deadline_ms` is NARROWED here to the adopted lease: the attach
  * window is long only so a queued message can still find its run, while the
- * execution window is whatever the caller passes as `executionDeadlineMs`
- * (the consumer's `now + CHECK_WINDOW_MS`).
+ * execution window is whatever the caller passes as `executionDeadlineMs` —
+ * the attempt's frozen absolute deadline, so the reconciler reads the same
+ * instant the execution fence does.
  */
 export async function adoptReleasedCheckAttempt(
   db: D1Like,
@@ -919,7 +920,7 @@ export async function adoptReleasedCheckAttempt(
     /** The App these credentials authenticate as — never a foreign App's row. */
     githubAppId: number;
     holder: string;
-    /** The execution deadline the adopting invocation owns (`now + CHECK_WINDOW_MS`). */
+    /** The attempt's frozen absolute deadline (`queue send + operator cap`). */
     executionDeadlineMs: number;
     nowMs: number;
   },

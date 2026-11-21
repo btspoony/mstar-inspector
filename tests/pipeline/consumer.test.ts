@@ -62,6 +62,7 @@ import {
 import {
   CHECK_TERMINALIZE_DEFAULT,
   CHECK_UPDATE_DEFAULT,
+  REVIEW_ATTEMPT_CAP_DEFAULT_MS,
   REVIEW_LEVEL_KEY,
   SYSTEM_CONCURRENCY_DEFAULT,
   WORKSPACE_CONCURRENCY_DEFAULT,
@@ -2030,7 +2031,7 @@ describe("createReviewConsumer", () => {
       ...h.overrides,
       // The round window is already spent: decline BEFORE the diff exec rather
       // than start it with a manufactured 1ms timeout (or a fresh 120s one).
-      roundBudgetMs: 1,
+      attemptCapMs: 1,
     });
 
     // A confirmed stop is terminal: the handler acks (no throw → no queue
@@ -2117,7 +2118,7 @@ describe("createReviewConsumer", () => {
         ...h.overrides,
         // A round long enough for the budget gate: this case pins the DIFF
         // window, which the refused capture has already spent 100s of.
-        roundBudgetMs: 1_200_000,
+        attemptCapMs: 1_200_000,
         ...clockSpendingSandbox("gh pr diff", 100_000, clock),
       });
       await consumer(h.makeBatch(makePayload()));
@@ -2148,7 +2149,7 @@ describe("createReviewConsumer", () => {
         ...h.overrides,
         // The round still has 18 of its 20 minutes, so the budget gate passes:
         // what is gone is the shared diff window, at exactly 120s.
-        roundBudgetMs: 1_200_000,
+        attemptCapMs: 1_200_000,
         ...clockSpendingSandbox("gh pr diff", EXEC_TIMEOUT_GIT_MS, clock),
       });
       await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
@@ -2202,6 +2203,8 @@ describe("createReviewConsumer", () => {
     await withFrozenClock(async (clock) => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         // 600s elapsed: of the 666s derived deadline only 66s are left, below
         // the 120s capture allowance — a fallback could only starve the runner.
         ...clockSpendingSandbox("git init", 600_000, clock),
@@ -2258,6 +2261,8 @@ describe("createReviewConsumer", () => {
       roundStart = clock.now;
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
             // 500s before the diff stage, then 100s inside the fallback's
@@ -2309,6 +2314,8 @@ describe("createReviewConsumer", () => {
       roundStart = clock.now;
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         getSandbox: async () => {
           const observe = (cmd: string): void => {
             // 500s of the 666s derived deadline are gone before the write, and
@@ -2486,6 +2493,8 @@ describe("createReviewConsumer", () => {
     await withFrozenClock(async (clock) => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         getSandbox: async () => {
           const observe = (cmd: string): void => {
             // 546s elapsed leaves exactly the 120s write window; the write
@@ -2535,6 +2544,8 @@ describe("createReviewConsumer", () => {
     await withFrozenClock(async (clock) => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
             // 544s of clone leaves the anchored 666s deadline 122s of
@@ -2603,6 +2614,8 @@ describe("createReviewConsumer", () => {
       roundStart = clock.now;
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         getSandbox: async () => {
           const observe = (cmd: string): void => {
             if (cmd.includes("bun run")) execStart = clock.now;
@@ -2678,6 +2691,8 @@ describe("createReviewConsumer", () => {
       // request, so the cutoff (not the request) decides the allocation.
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         ...clockSpendingSandbox("git init", 600_000, clock),
       });
       await consumer(h.makeBatch(makePayload()));
@@ -2705,6 +2720,8 @@ describe("createReviewConsumer", () => {
     await withFrozenClock(async (clock) => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
             // 600s of clone, then the numstat itself spends the last 66s: the
@@ -2753,6 +2770,8 @@ describe("createReviewConsumer", () => {
     await withFrozenClock(async (clock) => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
             // 580s of clone leaves 86s of the 666s derived deadline — under the
@@ -4910,18 +4929,18 @@ describe("createReviewConsumer", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
-        // 200s of the 900s round is gone before the clone: the anchor happens
-        // well after the round start, so the derived cutoff — not the tier
-        // maximum — binds the allocation.
-        ...clockSpendingSandbox("git init", 200_000, clock),
+        // 400s of the 20-minute attempt is gone before the clone: the anchor
+        // happens well after the attempt start, so the derived cutoff (966s) —
+        // not the tier maximum — binds the allocation.
+        ...clockSpendingSandbox("git init", 400_000, clock),
       });
       await consumer(h.makeBatch(makePayload()));
     });
 
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const execDeadlineMs = written.outerDeadlineEpochMs!;
-    // Late start ⇒ the 666s cutoff binds: exec end + reserve IS the round end.
-    expect(execDeadlineMs).toBe(roundStart + 666_000);
+    // Late start ⇒ the 966s cutoff binds: exec end + reserve IS the deadline.
+    expect(execDeadlineMs).toBe(roundStart + 966_000);
     const tailMs = execDeadlineMs + postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
 
     // Guard: the row the consumer ACQUIRED at round start outlives the whole
@@ -4935,14 +4954,14 @@ describe("createReviewConsumer", () => {
     // the tightest the lease may ever run.
     const claim = checkRowFor(db, SHA);
     expect(claim.created_ms).toBe(roundStart);
-    expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
+    expect(claim.execution_deadline_ms).toBe(claim.created_ms + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
   });
 
   // The two maximum-terminalize fixtures below must differ in allocation:
   // each pins its own logged `runner_effective_ms` and asserts it is not the
   // sibling's, so the pair cannot pass by both runs taking the same path.
-  const LATE_SATURATED_EFFECTIVE_MS = 446_000;
+  const LATE_SATURATED_EFFECTIVE_MS = 546_000;
   const LATE_FLOOR_EFFECTIVE_MS = 500_020;
 
   test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (saturated request)", async () => {
@@ -4969,18 +4988,18 @@ describe("createReviewConsumer", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
-        // 200s gone before the clone: the anchor lands at roundStart + 200s
-        // and takes the 446s the cutoff still owes — a real late start, not
-        // a fresh one.
-        ...clockSpendingSandbox("git init", 200_000, clock),
+        // 400s gone before the clone: the anchor lands at roundStart + 400s
+        // and takes the 546s the cutoff (946s) still owes — a real late start,
+        // not a fresh one.
+        ...clockSpendingSandbox("git init", 400_000, clock),
       });
       await consumer(h.makeBatch(makePayload()));
     });
 
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const execDeadlineMs = written.outerDeadlineEpochMs!;
-    // Cutoff-bound: 900s − 254s reserve ⇒ the late anchor ends AT 646s.
-    expect(execDeadlineMs).toBe(roundStart + 646_000);
+    // Cutoff-bound: 1 200s − 254s reserve ⇒ the late anchor ends AT 946s.
+    expect(execDeadlineMs).toBe(roundStart + 946_000);
     const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
     // The request asked the tier maximum (646s); the late start delivered a
     // different, cutoff-bound allocation than the sibling floor fixture.
@@ -4996,7 +5015,7 @@ describe("createReviewConsumer", () => {
     expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(tailMs);
     const claim = checkRowFor(db, SHA);
     expect(claim.created_ms).toBe(roundStart);
-    expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
+    expect(claim.execution_deadline_ms).toBe(claim.created_ms + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
   });
 
@@ -5062,7 +5081,7 @@ describe("createReviewConsumer", () => {
     );
     const claim = checkRowFor(db, SHA);
     expect(claim.created_ms).toBe(roundStart);
-    expect(claim.execution_deadline_ms).toBe(claim.created_ms + CHECK_LEASE_MS);
+    expect(claim.execution_deadline_ms).toBe(claim.created_ms + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(roundStart + ROUND_BUDGET_MS);
   });
@@ -6280,11 +6299,12 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(beginInput.githubAppId).toBe(424242);
     expect(beginInput.headSha).toBe(SHA);
     expect(beginInput.triggeredBy).toBe("pull_request");
-    // §7.9: claim time + 900,000ms — the Queues per-invocation cap, not a
-    // tunable (a wider window would only delay recovery).
+    // The row's execution deadline is the ATTEMPT's frozen hard stop: the
+    // Queue send stamp plus the operator's end-to-end cap (the documented
+    // 20-minute absent-row default), never a fresh per-invocation window.
     const claimedWindowMs = beginInput.executionDeadlineMs - Date.now();
-    expect(claimedWindowMs).toBeGreaterThan(895_000);
-    expect(claimedWindowMs).toBeLessThanOrEqual(900_000);
+    expect(claimedWindowMs).toBeGreaterThan(REVIEW_ATTEMPT_CAP_DEFAULT_MS - 5_000);
+    expect(claimedWindowMs).toBeLessThanOrEqual(REVIEW_ATTEMPT_CAP_DEFAULT_MS);
     const shaIdx = h.sandbox.calls.findIndex((c) => c.cmd.includes("rev-parse"));
     const runnerIdx = h.sandbox.calls.findIndex((c) => c.cmd.includes("--input"));
     expect(beginCalls).toHaveLength(1);
@@ -10454,6 +10474,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
+        // These window-arithmetic cases pin the 15-minute platform clock.
+        attemptCapMs: ROUND_BUDGET_MS,
         ...clockSpendingSandbox("git init", 666_000, clock),
       });
       await consumer(

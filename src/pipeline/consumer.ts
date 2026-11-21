@@ -177,12 +177,12 @@ import {
   readCheckBudgets,
   type CheckBudgets,
 } from "./check-budgets-reader";
-// The review round clock, its reserve ledger and the single runner-budget
-// derivation. The Check store imports the same module, so neither side owns a
-// second copy of the arithmetic.
+// The attempt budget: the cap's read, the reserve ledger and the single
+// runner-budget derivation. The Check store imports the same module, so neither
+// side owns a second copy of the arithmetic.
 import {
+  readReviewAttemptCapMs,
   reviewGuardTtlSeconds,
-  ROUND_BUDGET_MS,
   runnerTimeoutMs,
 } from "../review-budget";
 // The admitted attempt's execution lives in its own module (layering:
@@ -1090,7 +1090,7 @@ type ConsumerOverrides = Partial<
     | "checks"
     | "selectPrHead"
     | "findIncrementBase"
-    | "roundBudgetMs"
+    | "attemptCapMs"
   >
 > & {
   /**
@@ -1235,7 +1235,7 @@ export function createProcessDeps(
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     selectPrHead: overrides.selectPrHead ?? appsStore.selectPrHead,
     findIncrementBase: overrides.findIncrementBase ?? findIncrementBase,
-    roundBudgetMs: overrides.roundBudgetMs ?? ROUND_BUDGET_MS,
+    attemptCapMs: overrides.attemptCapMs,
     log,
     background,
   };
@@ -1358,7 +1358,11 @@ export function createReviewConsumer(
       return;
     }
     for (const message of batch.messages) {
-      const outcome = await processMessage(message.body, deps, message.attempts, starter);
+      // The Queue send stamp is the attempt deadline's origin. It is a `Date`
+      // on the platform and may be absent in a hand-built test batch; a
+      // non-finite/absent value falls back to the admission instant.
+      const sentAtMs = message.timestamp instanceof Date ? message.timestamp.getTime() : Number(message.timestamp);
+      const outcome = await processMessage(message.body, deps, message.attempts, starter, sentAtMs);
       // BB-3: guard-held is a typed outcome — schedule the per-message
       // delayed retry (or the final ack-with-warning) instead of throwing
       // into the queue's immediate ×3 retry → DLQ path.
@@ -1446,18 +1450,25 @@ export async function hydrateAttemptHost(
  *   only the value past the queue's retry budget matters — it stamps the
  *   idempotency key `failed` so a DLQ-bound commit stops counting as reviewed-
  *   or-pending proof.
+ * @param queueSentAtMs the original Queue send stamp: the attempt deadline's
+ *   origin. A redelivery of an already-frozen attempt ignores it in favour of
+ *   the recorded deadline.
  */
 async function processMessage(
   payload: ReviewJobPayload,
   deps: ProcessDeps,
   attempts = 1,
   startAttempt?: AttemptStarter,
+  queueSentAtMs = Number.NaN,
 ): Promise<ProcessOutcome> {
-  // The round's wall clock starts HERE: every best-effort step that can spend a
-  // sandbox window (the PR-context capture) is measured against this instant and
-  // `deps.roundBudgetMs`, so it can never eat the window the paid run and its
-  // publication need.
+  // This invocation's entry instant. Every best-effort step that can spend a
+  // sandbox window is measured against it, and it is the fallback origin for
+  // an attempt whose Queue send stamp is unavailable.
   const roundStartedAt = Date.now();
+  // The attempt's clock starts at the ORIGINAL Queue send, not here: the queue
+  // wait is charged against the cap. A send stamp after "now" (clock skew) or
+  // an absent one is the admission instant instead.
+  const enqueuedMs = Number.isFinite(queueSentAtMs) ? Math.min(queueSentAtMs, roundStartedAt) : roundStartedAt;
   // The delivery key and the recorded attempt id are learned inside the try, so
   // a DB fault or a legacy payload still flows through the structured failure
   // channel. A redelivery of this message finds the row its predecessor wrote
@@ -2039,29 +2050,32 @@ async function processMessage(
     }
     const usageSource: AttemptRef["usageSource"] = resolution.scope === "shared" ? "shared" : "byok";
     deps.runnerConfigs.set(payload.botRef.appId, { appCfg, modelOverrides, customProviders });
-    const attemptRef: AttemptRef = {
-      attemptId,
-      payload,
-      level,
-      roundStartedAt,
-      githubAppId,
-      usageWorkspaceId,
-      usageSource,
-      checkBudgets,
-      checkClaimSha,
-      inflight,
-      attempts,
-    };
+    // THE ATTEMPT'S ONE HARD STOP is frozen HERE, at its first admission: the
+    // original Queue send stamp plus the operator's end-to-end cap, read once.
+    // A redelivery or a recovery re-enqueue replays the instant recorded on its
+    // handoff row — it never re-reads the cap (which an operator may have
+    // changed) and never takes a fresh origin, so being delivered again cannot
+    // extend an attempt. A degraded cap read throws, which leaves admission
+    // retryable instead of inventing a cap.
+    const deadlineMs =
+      previousHandoff?.deadlineMs ??
+      enqueuedMs +
+        (deps.attemptCapMs ??
+          (await readReviewAttemptCapMs(deps.env.DB, {
+            warn: (readerFields, msg) =>
+              deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
+          })));
     // THE HANDOFF IS A RECORD BEFORE IT IS AN EFFECT: write (or read back) the
-    // delivery's handoff row, with this attempt id and payload, BEFORE the
-    // instance is created. An interruption after this line leaves a row the
-    // recovery pass replays; a concurrent duplicate of the same message uses
-    // the id this row already holds.
+    // delivery's handoff row, with this attempt id, payload and deadline,
+    // BEFORE the instance is created. An interruption after this line leaves a
+    // row the recovery pass replays; a concurrent duplicate of the same message
+    // uses the id and instant this row already holds.
     const handoff = await reserveAttemptHandoff(deps.env.DB, {
       deliveryKey,
       attemptId,
       payload,
       nowMs: Date.now(),
+      deadlineMs,
     });
     if (handoff.attemptId !== attemptId) {
       // Two deliveries of the same message raced; the other one owns this
@@ -2077,6 +2091,20 @@ async function processMessage(
       );
       return { kind: "routed" };
     }
+    const attemptRef: AttemptRef = {
+      attemptId,
+      payload,
+      level,
+      roundStartedAt,
+      deadlineMs: handoff.deadlineMs ?? deadlineMs,
+      githubAppId,
+      usageWorkspaceId,
+      usageSource,
+      checkBudgets,
+      checkClaimSha,
+      inflight,
+      attempts,
+    };
     try {
       const verdict = await startAttempt(deps, attemptRef);
       await markAttemptHandoff(deps.env.DB, deliveryKey, "created", Date.now());
