@@ -4123,7 +4123,20 @@ async function processMessage(
     // own retry.
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.error(
-      { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+      {
+        ...(baseFields ?? payloadIdentityFields(payload)),
+        sandbox_id: sandboxId,
+        // Same level attribution the shared catch carried: once the level is
+        // resolved, an admission failure is attributed to it and to its
+        // runner/orchestration shape, exactly like every other failure line.
+        ...(level === undefined
+          ? {}
+          : {
+              level,
+              runner_timeout_ms: runnerTimeoutMs(level),
+              orchestration: level === "deep" ? "parent" : "bun-fanout",
+            }),
+      },
       `review failed: ${detail}`,
     );
     // The GitHub secondary-rate-limit cause is tagged HERE — once, before
