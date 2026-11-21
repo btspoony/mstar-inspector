@@ -68,6 +68,12 @@ import type { ShellCommand } from "./shell-command";
  * an exclusive create protects an existing file, not an absent one. That half
  * is the durable first-provisioning claim in the attempt's own row; until that
  * row exists, no recovery path may be enabled, and none is wired here.
+ *
+ * An unproven container is never destroyed: no counter, elapsed time or lost
+ * reply proves a paid child stopped, so it is left to the platform's inactivity
+ * reclamation (the sandbox DO's own idle bound), which is what makes the
+ * leftover acceptable. Nothing may "clean up" an unproven attempt — not a
+ * recovery path, not a reconciler, not a later same-name call.
  */
 export function attemptMarker(attemptId: string): string {
   return `mstar.review-attempt/v1:${attemptId.toLowerCase()}\n`;
@@ -132,6 +138,12 @@ export type ReviewAttemptProgress = {
   failureStage: FailureStage;
   secretValues: string[];
   runnerStartedAt: number | undefined;
+  /**
+   * The paid exec RETURNED (an exit status was observed). A rejection or a lost
+   * reply leaves this false: nothing then proves the child stopped, so the
+   * caller may not destroy its container.
+   */
+  runnerReturned: boolean;
 };
 
 /** The container, credential and checkout an attempt's paid step runs on. */
@@ -1112,6 +1124,9 @@ export async function runReviewAttempt(input: {
     ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
     timeout: runnerTimeout,
   });
+  // The exec answered with an exit status: the paid child's completion is
+  // observed, not inferred. A rejection above never reaches this line.
+  progress.runnerReturned = true;
   const runnerElapsedMs = Date.now() - progress.runnerStartedAt;
   if (run.exitCode === 124) {
     // The sandbox's GNU-timeout wrapper killed the exec at the anchored

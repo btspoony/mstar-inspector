@@ -451,6 +451,8 @@ export type FakeSandboxState = {
   runnerExitCode: number;
   /** Thrown from every exec instead of answering (sandbox transport failure). */
   error: Error | undefined;
+  /** Thrown by the paid runner exec alone: the container accepted it, the reply was lost. */
+  runnerError: Error | undefined;
   destroyCalls: number;
   destroyError: Error | undefined;
   /** What the marker claim answers ("written" = a fresh container). */
@@ -520,6 +522,7 @@ export function initialFakeSandboxState(): FakeSandboxState {
     runnerStderr: "",
     runnerExitCode: 0,
     error: undefined,
+    runnerError: undefined,
     destroyCalls: 0,
     destroyError: undefined,
     markerClaim: "written",
@@ -722,6 +725,7 @@ export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxSt
       state.calls.push({ cmd, opts });
       if (first && state.probe !== undefined) state.probe();
       if (state.error !== undefined) throw state.error;
+      if (state.runnerError !== undefined && RUNNER_CMDS.has(cmd)) throw state.runnerError;
       if (cmd.includes("--input") && state.gate !== undefined) {
         const gate = state.gate;
         state.gate = undefined; // only the first runner exec is held

@@ -123,11 +123,11 @@ export type ReviewSandbox = {
   runMarked(marker: string, command: ShellCommand, opts?: CommandOpts): Promise<MarkedRun>;
   /**
    * Destroy ONLY an already-running container whose marker is exactly `marker`
-   * AND whose result the caller has shown to be retained. A missing/different
-   * marker, a missing retention proof, or a paid run still in flight destroys
-   * nothing and reports `unknown`, so a replacement incarnation is never torn
-   * down on another attempt's behalf and a running paid command never loses its
-   * only result to a premature cleanup.
+   * AND whose result the caller has shown to be retained (or whose paid call
+   * never started). A missing/different marker or a missing proof destroys
+   * nothing and reports `unknown`: a replacement incarnation is never torn down
+   * on another attempt's behalf, and a paid command whose completion is
+   * unproven is left to the platform's inactivity reclamation.
    */
   destroyMarked(marker: string, retention: RetentionProof): Promise<"destroyed" | "unknown">;
   /**
@@ -140,24 +140,20 @@ export type ReviewSandbox = {
 /**
  * Why destroying this container cannot lose a result. A matching marker proves
  * WHICH container it is, never that anything in it is safe to discard, so the
- * caller must name the durable fact:
+ * caller must name a fact — and only two facts authorise destruction:
  *
- * - `retained`: this attempt's result, or its confirmed terminal no-result
- *   outcome, is persisted; `evidence` names the durable record.
- * - `no-paid-work`: the attempt never reached the paid call, so nothing in the
- *   container is the only copy.
+ * - `retained`: the paid call RETURNED and its result is durably persisted.
+ * - `no-paid-work`: the attempt never reached the paid call.
  *
- * A caller that cannot produce either (a timeout, a lost reply, a run still in
- * flight) must not destroy.
+ * Nothing else qualifies. A rejected exec, a lost reply, an output-stream
+ * error, a timeout or a DO restart is not evidence that a child stopped, so
+ * none of them authorises destruction — an unproven container is left to the
+ * platform's inactivity reclamation instead.
  */
-export type RetentionProof =
-  | { readonly kind: "retained"; readonly evidence: string }
-  | { readonly kind: "no-paid-work" };
+export type RetentionProof = { readonly kind: "retained" } | { readonly kind: "no-paid-work" };
 
 function isRetentionProof(proof: RetentionProof | undefined): proof is RetentionProof {
-  if (proof === undefined) return false;
-  if (proof.kind === "no-paid-work") return true;
-  return proof.kind === "retained" && proof.evidence.length > 0;
+  return proof?.kind === "retained" || proof?.kind === "no-paid-work";
 }
 
 /**
@@ -170,6 +166,12 @@ function isRetentionProof(proof: RetentionProof | undefined): proof is Retention
 const LOCKED_AWAIT_MARGIN_MS = 15_000;
 
 const LOCKED_AWAIT_TIMEOUT = Symbol("locked-await-timeout");
+
+/** The ONE clamp: a zero/negative/NaN override is not a duration (GNU `timeout 0` disables its bound). */
+function normalizedTimeoutMs(requested: number | undefined): number {
+  const ms = requested ?? DEFAULT_EXEC_TIMEOUT_MS;
+  return Number.isFinite(ms) ? Math.max(1, ms) : DEFAULT_EXEC_TIMEOUT_MS;
+}
 
 /** Bound one await inside the critical section; the work is abandoned, not cancelled. */
 async function boundedAwait<T>(work: Promise<T>, ms: number): Promise<T | typeof LOCKED_AWAIT_TIMEOUT> {
@@ -333,9 +335,6 @@ export class SandboxV1 extends DurableObject {
    */
   private gate: Promise<unknown> = Promise.resolve();
 
-  /** Paid/plain runs issued and not yet settled: a teardown must not race one. */
-  private inFlightRuns = 0;
-
   private exclusive<T>(run: () => Promise<T>): Promise<T> {
     const next = this.gate.then(run, run);
     this.gate = next.then(
@@ -367,22 +366,15 @@ export class SandboxV1 extends DurableObject {
     // container. The start is serialized with the guarded pair; the exec that
     // follows is not — a long run must not hold the queue.
     const prepared = { stdin: this.assertBounds(command, opts) };
-    // Registered BEFORE the start so a teardown that finds this run in flight
-    // refuses: its result may be the only copy.
-    this.inFlightRuns += 1;
-    try {
-      const container = await this.exclusive(async () => {
-        const handle = this.container;
-        const started = await boundedAwait(this.ensureRunning(handle), LOCKED_AWAIT_MARGIN_MS);
-        if (started === LOCKED_AWAIT_TIMEOUT) {
-          throw new Error(`container did not become ready within ${LOCKED_AWAIT_MARGIN_MS}ms`);
-        }
-        return handle;
-      });
-      return await this.execCommand(container, command, opts, prepared);
-    } finally {
-      this.inFlightRuns -= 1;
-    }
+    const container = await this.exclusive(async () => {
+      const handle = this.container;
+      const started = await boundedAwait(this.ensureRunning(handle), LOCKED_AWAIT_MARGIN_MS);
+      if (started === LOCKED_AWAIT_TIMEOUT) {
+        throw new Error(`container did not become ready within ${LOCKED_AWAIT_MARGIN_MS}ms`);
+      }
+      return handle;
+    });
+    return this.execCommand(container, command, opts, prepared);
   }
 
   /**
@@ -438,7 +430,7 @@ export class SandboxV1 extends DurableObject {
       try {
         const ran = await boundedAwait(
           this.execCommand(container, command, opts),
-          (opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS) + LOCKED_AWAIT_MARGIN_MS,
+          normalizedTimeoutMs(opts?.timeout) + LOCKED_AWAIT_MARGIN_MS,
         );
         return ran === LOCKED_AWAIT_TIMEOUT
           ? ({ kind: "unknown" } as const)
@@ -453,13 +445,18 @@ export class SandboxV1 extends DurableObject {
 
   /**
    * Prove sameness on the captured handle, then destroy that same container —
-   * but only when the caller shows nothing can be lost.
+   * but only on a fact that says nothing can be lost.
    *
-   * Refused (`unknown`, nothing destroyed) when:
-   * - no usable `retention` proof is passed — identity is not retention;
-   * - a run issued through `runCommand` is still in flight, so a timed-out or
-   *   lost reply may be leaving a paid command running;
-   * - the container is not live, carries other bytes, or any await stalls.
+   * Refused (`unknown`, nothing destroyed) when the proof is missing or is not
+   * one of the two facts, when the container is not live, when it carries other
+   * bytes, or when the marker read cannot be bounded. There is deliberately no
+   * allowance for an unsettled run: an in-memory count, elapsed time or a lost
+   * reply never proves a paid child stopped, and a leftover is reclaimed by the
+   * platform instead.
+   *
+   * `destroy()` is NOT bounded and never abandoned: when it is issued the
+   * attempt is already safe to lose, and abandoning it mid-flight would let it
+   * land later against a container another run has started.
    *
    * Destroying for an attempt this caller did not run (a Workflow recovery
    * deciding for someone else) is the durable attempt row's job: it must own
@@ -469,15 +466,13 @@ export class SandboxV1 extends DurableObject {
   async destroyMarked(marker: string, retention: RetentionProof): Promise<"destroyed" | "unknown"> {
     if (!isRetentionProof(retention)) return "unknown";
     return this.exclusive(async () => {
-      // Inside the lock: a run that registered before us is visible here, and
-      // one that registers after cannot have started a process yet.
-      if (this.inFlightRuns > 0) return "unknown";
       const container = this.container;
       if (!container.running) return "unknown";
       const proof = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
+      // A stalled proof never reaches the destroy below.
       if (proof === LOCKED_AWAIT_TIMEOUT || proof !== marker) return "unknown";
-      const destroyed = await boundedAwait(container.destroy(), LOCKED_AWAIT_MARGIN_MS);
-      return destroyed === LOCKED_AWAIT_TIMEOUT ? "unknown" : "destroyed";
+      await container.destroy();
+      return "destroyed";
     });
   }
 
@@ -532,9 +527,7 @@ export class SandboxV1 extends DurableObject {
     // Clamp before converting: a zero/negative value must never reach the argv
     // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
     // non-finite override (NaN/Infinity) is not a duration at all — default.
-    const requestedMs = opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS;
-    const timeoutMs = Number.isFinite(requestedMs) ? Math.max(1, requestedMs) : DEFAULT_EXEC_TIMEOUT_MS;
-    const timeoutSeconds = timeoutMs / 1000;
+    const timeoutSeconds = normalizedTimeoutMs(opts?.timeout) / 1000;
     const process = await container.exec(
       ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
       {

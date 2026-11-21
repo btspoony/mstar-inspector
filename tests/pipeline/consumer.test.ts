@@ -1002,6 +1002,22 @@ describe("createReviewConsumer", () => {
     expect(h.logLines.filter((line) => line.fields.event === "review_unresolved")).toHaveLength(1);
   });
 
+  test("a rejected paid exec after the container accepted it destroys nothing and holds capacity", async () => {
+    // The container accepted the paid command; the reply never came back. That
+    // event is NOT proof the child stopped, so it authorises no destruction.
+    h.sandbox.runnerError = new Error("exec reply lost");
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow("exec reply lost");
+
+    expect(h.sandbox.destroyCalls).toBe(0);
+    expect(inflightRows(db)).toHaveLength(1);
+    // The error itself is still recorded — it just never justifies a teardown.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(h.logLines.filter((line) => line.fields.event === "sandbox_teardown_unproven")).toHaveLength(1);
+  });
+
   test("a refused destroy proof after a matching collection keeps capacity and retries nothing", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // The review finished and published; only the teardown cannot prove the

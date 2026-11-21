@@ -32,8 +32,8 @@ const {
 const ATTEMPT_A = "2b0c4f8e-7a11-4a4e-9b1f-2a5f4f2f1c01";
 const ATTEMPT_B = "9d7e1a20-33c4-4f0b-8a6d-51c9d2e7b902";
 const SHA = "a".repeat(40);
-/** A retention proof a caller can produce only after its result is durable. */
-const RETAINED = { kind: "retained", evidence: "publication:test" } as const;
+/** The one post-paid authority: the paid call returned and its result is durable. */
+const RETAINED = { kind: "retained" } as const;
 
 const encoder = new TextEncoder();
 
@@ -207,7 +207,12 @@ const GRANT = {
 };
 
 function progress() {
-  return { failureStage: "pipeline" as const, secretValues: [] as string[], runnerStartedAt: undefined };
+  return {
+    failureStage: "pipeline" as const,
+    secretValues: [] as string[],
+    runnerStartedAt: undefined,
+    runnerReturned: false,
+  };
 }
 
 describe("attempt identity", () => {
@@ -454,46 +459,38 @@ describe("SandboxV1 marker gate", () => {
     expect(container.ran).toEqual(["slow-read", "later"]);
   });
 
-  test("a pending paid run refuses destruction, even with a retention proof", async () => {
-    const container = makeContainer(true);
-    const sandbox = makeDo(container);
-    const marker = attemptMarker(ATTEMPT_A);
-    container.marker = marker;
-    const { promise, resolve } = Promise.withResolvers<void>();
-    container.slow = promise;
-
-    const paidRun = sandbox.runCommand(shellCommand("slow"));
-    await Bun.sleep(0);
-
-    // The paid command is in flight: a caller that timed out or lost the reply
-    // must not take the container (and its only result) down.
-    expect(await sandbox.destroyMarked(marker, RETAINED)).toBe("unknown");
-    expect(container.destroyed).toBe(false);
-
-    resolve();
-    expect(await paidRun).toEqual({ stdout: "ran", stderr: "", exitCode: 0 });
-    // Once the run settled, retention is the caller's call again.
-    expect(await sandbox.destroyMarked(marker, RETAINED)).toBe("destroyed");
-    expect(container.destroyed).toBe(true);
-  });
-
-  test("without a retention proof nothing is destroyed", async () => {
+  test("a matching marker alone destroys nothing: only the two facts authorise it", async () => {
     const container = makeContainer(true);
     const sandbox = makeDo(container);
     const marker = attemptMarker(ATTEMPT_A);
     container.marker = marker;
 
+    // No proof at all.
     expect(await sandbox.destroyMarked(marker, undefined as never)).toBe("unknown");
-    expect(await sandbox.destroyMarked(marker, { kind: "retained", evidence: "" })).toBe("unknown");
+    // An error-derived "proof" is not one of the two facts.
+    expect(await sandbox.destroyMarked(marker, { kind: "failure" } as never)).toBe("unknown");
+    expect(await sandbox.destroyMarked(marker, { kind: "budget" } as never)).toBe("unknown");
     expect(container.destroyed).toBe(false);
+    // The refused proofs never even read the marker.
     expect(container.markerReads).toBe(0);
+  });
 
-    // A run that never reached the paid call is destroyable with its own proof.
-    expect(await sandbox.destroyMarked(marker, { kind: "no-paid-work" })).toBe("destroyed");
+  test("no-paid-work still requires the marker to match", async () => {
+    const container = makeContainer(true);
+    const sandbox = makeDo(container);
+    container.marker = attemptMarker(ATTEMPT_B);
+
+    // A run that never reached the paid call may be destroyed — but only on
+    // THIS attempt's container, which is what the marker proves.
+    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A), { kind: "no-paid-work" })).toBe("unknown");
+    expect(container.markerReads).toBe(1);
+    expect(container.destroyed).toBe(false);
+
+    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_B), { kind: "no-paid-work" })).toBe("destroyed");
     expect(container.destroyed).toBe(true);
   });
 
-  test("the prepared incarnation allows collect-then-destroy", async () => {
+  test("a matching marker with a retained proof allows collect-then-destroy", async () => {
     const container = makeContainer();
     const sandbox = makeDo(container);
     const marker = attemptMarker(ATTEMPT_A);

@@ -3564,10 +3564,10 @@ async function processMessage(
   // teardown: the other half is skipped too, and capacity is never released on
   // unknown evidence (a new attempt could start on a container that still runs).
   let containerUnproven = false;
-  // The durable record that makes destroying the container safe. Set ONLY where
-  // this invocation awaited a write that survives it; a paid run with this
-  // still unset must not be torn down.
-  let retainedOutcome: string | undefined;
+  // A durable outcome for this attempt. It authorises destroying the container
+  // ONLY together with an observed paid return (`runnerReturned`): an error
+  // event, a lost reply or a timeout is never proof a child stopped.
+  let durableOutcome = false;
   // Set once the sha is resolved from the checkout; the failure log carries
   // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
   // criteria: 失败路径错误日志含幂等键).
@@ -3607,6 +3607,7 @@ async function processMessage(
     failureStage: "pipeline",
     secretValues: [],
     runnerStartedAt: undefined,
+    runnerReturned: false,
   };
   // F-001 (QC wave-1): toBaseFields derefs payload.botRef.appId, so
   // an in-flight pre-deploy message (no `botRef` — AL-24-4 accepts the
@@ -5612,7 +5613,9 @@ async function processMessage(
         await terminalizeCheck(null, "degraded-not-posted");
       } else {
         await terminalizeCheck(degradedOutcome.publicationId, "publication-unknown");
-        retainedOutcome = `degraded:${degradedOutcome.publicationId}`;
+        // The paid call returned; the durable degraded notice is its terminal
+        // outcome — the container holds nothing this invocation will collect.
+        durableOutcome = true;
       }
       deps.log.warn(
         fields,
@@ -5959,9 +5962,8 @@ async function processMessage(
       return { kind: "ok" };
     }
     const stagedId = staged.id;
-    // The result is durable from here on: a later failure in this invocation
-    // cannot make destroying the container lose it.
-    retainedOutcome = `publication:${stagedId}`;
+    // The paid call returned and ITS result is now durably staged.
+    durableOutcome = true;
 
     // 13. §7.7 step 8 — epoch-fenced claim, phase sending, publish the EXACT
     // prepared upsert, validate the response id, persist proof BEFORE KV
@@ -6353,7 +6355,7 @@ async function processMessage(
         checkHandle = await beginCheck(lifecycleScope, resolvedGithubAppId, resolvedHeadSha);
       }
       await terminalizeCheck(null, "budget-exhausted", undefined, budgetOutcome);
-      retainedOutcome = `budget:${attemptId}`;
+      durableOutcome = true;
       const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${err instanceof Error ? err.message : String(err)}`;
       deps.log.error(
         {
@@ -6479,10 +6481,6 @@ async function processMessage(
         stage: progress.failureStage,
         error: redactExactSecrets(redactSecrets(persistedDetail), progress.secretValues),
       });
-      // The durable row is this attempt's terminal no-result outcome: the
-      // container holds nothing this invocation will ever collect. A failed
-      // insert leaves no durable fact, so nothing is claimed for teardown.
-      retainedOutcome = `failure:${attemptId}`;
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
       deps.log.warn(
@@ -6490,6 +6488,8 @@ async function processMessage(
         `review_failures insert failed (rethrow unchanged): ${recordDetail}`,
       );
     }
+    // A durable failure row is this attempt's terminal no-result outcome.
+    durableOutcome = true;
 
     // This delivery is the last one the queue will make (the next stop is the
     // DLQ), so the commit will never be reviewed: overwrite its idempotency
@@ -6528,15 +6528,15 @@ async function processMessage(
     // while this one is still alive, so live containers could exceed
     // min(system, workspace) by the destroy latency. Both blocks warn only.
     if (sandbox !== null && !containerUnproven) {
-      // Destruction authority is a durable fact, not the order this code ran
-      // in: a published/degraded/budget/failure outcome, or a run that never
-      // started a paid call. Anything else (a lost reply, a paid run whose
-      // only result is still in the container) destroys nothing.
+      // Two facts authorise destruction, and only two: the paid call returned
+      // with its result durably persisted, or it never started. An error event,
+      // a lost reply, a timeout or ambiguity destroys nothing — the container is
+      // then left to the platform's inactivity reclamation.
       const retention: RetentionProof | undefined =
-        retainedOutcome !== undefined
-          ? { kind: "retained", evidence: retainedOutcome }
-          : progress.runnerStartedAt === undefined
-            ? { kind: "no-paid-work" }
+        progress.runnerStartedAt === undefined
+          ? { kind: "no-paid-work" }
+          : progress.runnerReturned && durableOutcome
+            ? { kind: "retained" }
             : undefined;
       if (retention === undefined) {
         containerUnproven = true;
