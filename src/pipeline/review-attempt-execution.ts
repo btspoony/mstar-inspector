@@ -40,7 +40,7 @@ import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../rev
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { type D1ArtifactStore } from "../store/artifact-store";
-import { QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
+import { QUEUE_MAX_ATTEMPTS, hasFailureRowSince, type FailureStage, type FailureStore } from "../store/failure-store";
 import {
   hasUsageEventForExecutionToken,
   recordUsageEvent,
@@ -57,6 +57,7 @@ import {
   CHECK_BACKOFF_MS,
   deferCheckRecovery,
   linkCheckPublication,
+  noteCheckRecoveryOwed,
   recordTerminalizeOutcome,
 } from "../store/review-checks";
 import {
@@ -107,7 +108,6 @@ import {
   mintSandboxReadToken,
   parseBoundedRead,
   prepareReviewAttempt,
-  proveReviewAttemptMarker,
   readReviewLaunch,
   runReviewAttempt,
   AttemptUnknownError,
@@ -366,6 +366,8 @@ export type ConsumerLogFields = {
    * free-form detail, distinct from `reason`'s closed admission vocabulary.
    */
   check_reason?: string;
+  /** Whether a refused settlement adoption could name a live row to hand over. */
+  check_recovery_owed?: boolean;
   /**
    * The metered ledger identity (`usage_events.review_id`) and its workspace.
    * Carried on the usage-write failure lines so a dropped attempt can be
@@ -3026,17 +3028,34 @@ async function settlementFor(
     checkBudgets: ref.checkBudgets,
   });
   settlement.fields = attemptFields(ref.payload, ref.level, ref.attemptId, headSha);
-  deps.checkSettlements.set(ref.attemptId, settlement);
   // Adoption IS a claim attempt: the fallback path must not claim twice.
   settlement.claimAttempted = true;
   const handle = await settlement.begin(scope, ref.githubAppId, headSha);
   if (handle === null) {
+    // No adoption: a live holder owns the row (the real lifecycle refuses to
+    // take it) or nothing was adoptable. Cache NOTHING — a settlement without
+    // a handle is worse than none — and put the obligation on the row that
+    // outlives this invocation: the note is non-stealing (no holder, lease,
+    // desired or intent), so the owner's own conclusion still wins, and the
+    // recovery lane is due as soon as it is released. The publication's own
+    // confirmed proof is what that lane reads.
+    const owed = await noteCheckRecoveryOwed(deps.env.DB, {
+      scope,
+      headSha,
+      triggeredBy: ref.payload.triggered_by,
+      action: ref.payload.action,
+      reason: "settlement not adopted on a resumed step",
+      nextAttemptMs: Date.now(),
+    });
     deps.log.warn(
-      { ...settlement.fields, event: "check_settlement_not_adopted" },
-      "check settlement could not be re-adopted on a resumed step — the run (if any) is left to the reconciler",
+      { ...settlement.fields, event: "check_settlement_not_adopted", check_recovery_owed: owed },
+      owed
+        ? "check settlement not adopted on a resumed step — the recovery lane now owns the conclusion"
+        : "check settlement not adopted on a resumed step — no live check row to hand over",
     );
     return undefined;
   }
+  deps.checkSettlements.set(ref.attemptId, settlement);
   return settlement;
 }
 
@@ -4285,12 +4304,11 @@ export async function reviewAttempt(
   const { payload, attemptId, level } = ref;
   const runner = requireRunnerConfig(deps, payload);
   const progress = beginProgress();
-  // The live objects are this phase's own, and the container is PROVEN before
-  // anything acts on it: the launch row stops a second paid call, and the
-  // marker proves the incarnation that call would run in is still the one this
-  // attempt prepared (a replacement is `unknown`, never a review of a foreign
-  // checkout).
-  const sandbox = await proveReviewAttemptMarker({ deps, attemptId });
+  // The live objects are this phase's own. The container is resolved by attempt
+  // id (which never starts one) and every PAID action runs through the guarded
+  // form inside `runReviewAttempt`: ONE request proves the attempt's marker and
+  // executes, so there is no proof-then-act window to race.
+  const sandbox = await deps.getSandbox(deps.env.SANDBOX, attemptSandboxId(attemptId));
   const cached = deps.credentials.get(attemptId);
   const token = cached?.token ?? (await mintSandboxReadToken({ payload, commenter: requireCommenter(deps, payload) }));
   const fields = attemptFields(payload, level, attemptId, prepared.headSha, prepared.budget);
@@ -5260,6 +5278,12 @@ export async function settleAttemptFailure(
   const sandboxId = attemptSandboxId(attemptId);
   const headSha = facts?.headSha ?? null;
   if (cleanup.headSha === undefined) cleanup.headSha = headSha;
+  // The paid exec STARTED and its return was never observed: the child may
+  // still be running, so nothing may authorise destruction. This only REMOVES
+  // authorisation — the durable records remain the gate that grants it.
+  if (facts !== undefined && facts.runnerStartedAt !== undefined && !facts.runnerReturned) {
+    cleanup.unproven = true;
+  }
   const fields = headSha === null ? undefined : attemptFields(payload, level, attemptId, headSha);
   const baseFields: ConsumerLogFields | undefined = undefined;
   const lifecycleScope = scopeOf(payload);
@@ -5579,21 +5603,31 @@ export async function cleanupAttempt(
   const sandboxId = attemptSandboxId(attemptId);
   const fields = attemptFields(payload, ref.level, attemptId, input.headSha ?? null);
   const baseFields: ConsumerLogFields | undefined = undefined;
-  // ORDERING RULE, not a preference: the durable launch row is consulted first
-  // and is DECISIVE. It is the one record of how far the paid step got —
-  // `no row` / `pending` proves the paid call never started, `persisted` proves
-  // it returned WITH its result durable, and `launched` authorises nothing at
-  // all. A phase-local fact may only ever NARROW that answer (an `unknown`
-  // verdict removes authorisation); it can never widen it, so no freshly
-  // initialised progress can turn a `launched` row into destruction
-  // authorisation.
+  // The retention proof is DERIVED FROM DURABLE RECORDS, never from a
+  // phase-local value and never from the launch row alone:
+  //   no row / pending              → the paid call never started
+  //   persisted                     → it returned WITH its result retained
+  //   launched + a failure row that wrote → a terminal no-result outcome
+  //   launched + nothing            → unknown: hold the container and the row
+  // Holding a *confirmed* failure to the TTL would burn the guard's retry
+  // budget (2,400 s of backoff against a 2,412 s TTL), so the last delivery
+  // would be acked as a duplicate and the review would never run.
   const launch = await readReviewLaunch(deps.env.DB, attemptId);
-  const retention: RetentionProof | undefined =
-    launch === null || launch.state === "pending"
-      ? { kind: "no-paid-work" }
-      : launch.state === "persisted"
-        ? { kind: "retained" }
-        : undefined;
+  let retention: RetentionProof | undefined;
+  if (launch === null || launch.state === "pending") {
+    retention = { kind: "no-paid-work" };
+  } else if (launch.state === "persisted") {
+    retention = { kind: "retained" };
+  } else {
+    const wrote = await hasFailureRowSince(deps.env.DB, {
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      sinceMs: launch.launchedAtMs,
+    });
+    retention = wrote ? { kind: "retained" } : undefined;
+  }
   let containerUnproven = retention === undefined || input.unproven === true;
   // Destroy FIRST, then release the admission row. Releasing first would let
   // the next attempt for this PR acquire the slot and start its container

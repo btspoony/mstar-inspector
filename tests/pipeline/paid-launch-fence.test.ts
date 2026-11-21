@@ -109,6 +109,12 @@ function sandboxDouble(
     async runMarked(_marker: string, command: string) {
       events.push(`marked:${command}`);
       container.guardedCalls += 1;
+      // The paid exec runs through the guarded form, so this is where a paid
+      // call (and its lost reply) is observed now.
+      if (command.includes(RUNNER_PATH)) {
+        counts.paidCalls += 1;
+        if (decision.lostReply === true) throw new Error("container exec reply lost");
+      }
       if (
         decision.guardedThrows === "proof" ||
         (decision.guardedThrows === "command" && container.guardedCalls > 1)
@@ -218,9 +224,11 @@ describe("the paid step is taken at most once per attempt", () => {
     const db = createMigratedTestD1();
     await claimedAttempt(db);
 
-    await expect(runReviewAttempt(executionInput(sandboxDouble({ lostReply: true }), db))).rejects.toThrow(
-      "container exec reply lost",
-    );
+    // The container accepted the paid exec; the reply never came back. The
+    // guarded form needs a MARKED container to reach the exec at all.
+    await expect(
+      runReviewAttempt(executionInput(sandboxDouble({ marker: "present", lostReply: true }), db)),
+    ).rejects.toThrow("container exec reply lost");
     // The ambiguity is RECORDED, not resolved by retrying: the row says the
     // paid step was taken and no result is durable.
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");

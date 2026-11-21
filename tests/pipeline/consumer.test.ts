@@ -340,18 +340,6 @@ function inflightRows(db: TestD1): Array<Record<string, unknown>> {
 }
 
 /**
- * Expire the admission row a failed attempt HOLDS to its TTL: the launch row
- * is `launched`, so the durable record authorises no release, and the guard's
- * expired-reclaim branch is what lets a redelivery take the lock. A retry test
- * simulates that wait instead of asserting an immediate release.
- */
-function expireInflight(db: TestD1): void {
-  db.raw
-    .prepare("UPDATE review_inflight SET expires_at = ?")
-    .run(new Date(Date.now() - 3_600_000).toISOString());
-}
-
-/**
  * The `unknown` outcome's one contract: nothing was settled, nothing was
  * concluded, nothing was destroyed, and the admission row still holds the
  * capacity for the reconciler.
@@ -596,9 +584,6 @@ describe("createReviewConsumer", () => {
       // The report seat's PR context read (best-effort; `gh` failing here
       // only drops the narrative sections).
       expect.stringContaining("gh pr view '42' --repo 'acme/widgets' --json body"),
-      // The paid step proves the container's marker under the guarded,
-      // non-starting form before it writes anything (same-incarnation proof).
-      "true",
       expect.stringContaining("base64 -d > '/workspace/review-input.json'"),
       expect.stringContaining(
         "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'",
@@ -644,16 +629,13 @@ describe("createReviewConsumer", () => {
       env: { GH_TOKEN: gh("s", "installation_token") },
       timeout: PR_CONTEXT_EXEC_TIMEOUT_MS,
     });
-    // The paid step proves the container's marker first: the guarded,
-    // non-starting form runs exactly this no-op command.
-    expect(h.sandbox.calls[5]!.cmd).toBe("true");
     // Input write carries the document on the exec STDIN pipe (asserted decoded
-    // below), never in its command.
-    expect(h.sandbox.calls[6]!.opts).toMatchObject({ timeout: 120_000, stdin: expect.any(String) });
+    // below), never in its command — and it runs through the marker guard.
+    expect(h.sandbox.calls[5]!.opts).toMatchObject({ timeout: 120_000, stdin: expect.any(String) });
     // Runner: cwd = clone dir; harness paths + the model chain via exec env,
     // and the App's key pool via the exec STDIN payload (the only credential
     // channel — the env carries no key).
-    expect(h.sandbox.calls[7]!.opts).toEqual({
+    expect(h.sandbox.calls[6]!.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
@@ -1059,17 +1041,20 @@ describe("createReviewConsumer", () => {
 
   test("a rejected paid exec after the container accepted it destroys nothing and holds capacity", async () => {
     // The container accepted the paid command; the reply never came back. That
-    // event is NOT proof the child stopped, so it authorises no destruction.
+    // event is NOT proof the child stopped, so it authorises no destruction —
+    // and it is `unknown`, never a settleable failure a retry could re-pay.
     h.sandbox.runnerError = new Error("exec reply lost");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow("exec reply lost");
+    await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
 
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.sandbox.destroyCalls).toBe(0);
     expect(inflightRows(db)).toHaveLength(1);
-    // The error itself is still recorded — it just never justifies a teardown.
-    expect(failureRows(db)).toHaveLength(1);
+    // Nothing was concluded: no failure row, and the unknown outcome says so.
+    expect(failureRows(db)).toHaveLength(0);
     expect(h.logLines.filter((line) => line.fields.event === "sandbox_teardown_unproven")).toHaveLength(1);
   });
 
@@ -1322,7 +1307,7 @@ describe("createReviewConsumer", () => {
     expect(h.sandbox.destroyCalls).toBe(1);
   });
 
-  test("runner exitCode !== 0 → failure row (stage=runner) + rethrow, no post/insert, container held (AL-6)", async () => {
+  test("runner exitCode !== 0 → failure row (stage=runner) + rethrow, destroy, no post/insert (AL-6)", async () => {
     h.sandbox.runnerExitCode = 1;
     // The seeded App's ark key is "ark-key" — it rides the credential payload
     // and a prompt-injected seat can echo it onto stderr.
@@ -1346,11 +1331,10 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "runner", head_sha: SHA });
     expect(failureRows(db)[0]!.error).toContain("runner failed");
-    // The launch row is `launched` and never reached `persisted`, so the
-    // durable record authorises NOTHING: the container and the admission row
-    // are held until the TTL / the reconciler concludes the attempt.
-    expect(h.sandbox.destroyCalls).toBe(0);
-    expect(inflightRows(db)).toHaveLength(1);
+    // A failure row that WROTE is a terminal no-result outcome: the container
+    // is destroyed and capacity released, exactly as the retry contract needs.
+    expect(h.sandbox.destroyCalls).toBe(1);
+    expect(inflightRows(db)).toHaveLength(0);
   });
 
   test("runner failure with empty stderr says so explicitly", async () => {
@@ -2054,11 +2038,10 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"preparation"');
   });
 
-  test("a budget stop holds the container and the row: the launch row outranks the failure row", async () => {
+  test("a budget stop with no Check destroys only when its failure row actually wrote", async () => {
     // The paid exec was killed at its deadline and returned 124: a confirmed
-    // stop, no Check attached (no checks dependency). The failure row writes,
-    // but the launch row is `launched` — never `persisted` — and the ORDERING
-    // RULE makes that row decisive: nothing is destroyed, nothing released.
+    // stop, no Check attached (no checks dependency). The durable row is the
+    // terminal outcome record, so it is what authorises the teardown.
     h.sandbox.runnerExitCode = 124;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -2066,8 +2049,8 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(failureRows(db)).toHaveLength(1);
-    expect(h.sandbox.destroyCalls).toBe(0);
-    expect(inflightRows(db)).toHaveLength(1);
+    expect(h.sandbox.destroyCalls).toBe(1);
+    expect(inflightRows(db)).toHaveLength(0);
   });
 
   test("a budget stop whose failure row rejects terminalizes nothing, destroys nothing and holds capacity", async () => {
@@ -2319,19 +2302,27 @@ describe("createReviewConsumer", () => {
       roundStart = clock.now;
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
-        getSandbox: async () => ({
-          runCommand: async (cmd: string, opts?: unknown) => {
+        getSandbox: async () => {
+          const observe = (cmd: string): void => {
             // 500s of the 666s derived deadline are gone before the write, and
             // the write itself then spends 100s of the 166s that remained.
             if (cmd.includes("git init")) clock.now += 500_000;
             if (cmd.startsWith("base64 -d >")) clock.now += 100_000;
-            return h.fakeSandbox.runCommand(cmd, opts);
-          },
-          destroy: h.fakeSandbox.destroy,
-          claimMarker: h.fakeSandbox.claimMarker,
-          runMarked: h.fakeSandbox.runMarked,
-          destroyMarked: h.fakeSandbox.destroyMarked,
-        }),
+          };
+          return {
+            runCommand: async (cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runCommand(cmd, opts);
+            },
+            runMarked: async (marker: string, cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runMarked(marker, cmd, opts);
+            },
+            destroy: h.fakeSandbox.destroy,
+            claimMarker: h.fakeSandbox.claimMarker,
+            destroyMarked: h.fakeSandbox.destroyMarked,
+          };
+        },
       });
       await consumer(h.makeBatch(makePayload()));
     });
@@ -2361,16 +2352,26 @@ describe("createReviewConsumer", () => {
         // Nothing is spent before the runner: 666s of derived deadline remain,
         // but a quick/default exec is capped at 600s — the CAP, not the derived
         // deadline, decides where this exec is killed.
-        getSandbox: async () => ({
-          runCommand: async (cmd: string, opts?: unknown) => {
+        getSandbox: async () => {
+          const observe = (cmd: string): void => {
             if (cmd.includes("bun run")) execStart = clock.now;
-            return h.fakeSandbox.runCommand(cmd, opts);
-          },
-          destroy: h.fakeSandbox.destroy,
-          claimMarker: h.fakeSandbox.claimMarker,
-          runMarked: h.fakeSandbox.runMarked,
-          destroyMarked: h.fakeSandbox.destroyMarked,
-        }),
+          };
+          return {
+            runCommand: async (cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runCommand(cmd, opts);
+            },
+            // The paid commands run through the marker guard, so the same
+            // observation has to see them or the clock they spend is invisible.
+            runMarked: async (marker: string, cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runMarked(marker, cmd, opts);
+            },
+            destroy: h.fakeSandbox.destroy,
+            claimMarker: h.fakeSandbox.claimMarker,
+            destroyMarked: h.fakeSandbox.destroyMarked,
+          };
+        },
       });
       await consumer(h.makeBatch(makePayload()));
     });
@@ -2398,8 +2399,8 @@ describe("createReviewConsumer", () => {
       roundStart = clock.now;
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
-        getSandbox: async () => ({
-          runCommand: async (cmd: string, opts?: unknown) => {
+        getSandbox: async () => {
+          const observe = (cmd: string): void => {
             // 50s of clone leaves 650s before the derived 666s cutoff: the
             // 600s tier maximum binds the allocation instead of the cutoff.
             // The input write then spends 80s of the anchored deadline.
@@ -2408,13 +2409,21 @@ describe("createReviewConsumer", () => {
               writeStart = clock.now;
               clock.now += 80_000;
             }
-            return h.fakeSandbox.runCommand(cmd, opts);
-          },
-          destroy: h.fakeSandbox.destroy,
-          claimMarker: h.fakeSandbox.claimMarker,
-          runMarked: h.fakeSandbox.runMarked,
-          destroyMarked: h.fakeSandbox.destroyMarked,
-        }),
+          };
+          return {
+            runCommand: async (cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runCommand(cmd, opts);
+            },
+            runMarked: async (marker: string, cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runMarked(marker, cmd, opts);
+            },
+            destroy: h.fakeSandbox.destroy,
+            claimMarker: h.fakeSandbox.claimMarker,
+            destroyMarked: h.fakeSandbox.destroyMarked,
+          };
+        },
       });
       // No await separates the anchor from the write-timeout read, but the
       // input construction between them is real synchronous work: a scoped
@@ -2470,19 +2479,27 @@ describe("createReviewConsumer", () => {
     await withFrozenClock(async (clock) => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
-        getSandbox: async () => ({
-          runCommand: async (cmd: string, opts?: unknown) => {
+        getSandbox: async () => {
+          const observe = (cmd: string): void => {
             // 546s elapsed leaves exactly the 120s write window; the write
             // spends all of it, so nothing is left when the exec would start.
             if (cmd.includes("git init")) clock.now += 546_000;
             if (cmd.startsWith("base64 -d >")) clock.now += 120_000;
-            return h.fakeSandbox.runCommand(cmd, opts);
-          },
-          destroy: h.fakeSandbox.destroy,
-          claimMarker: h.fakeSandbox.claimMarker,
-          runMarked: h.fakeSandbox.runMarked,
-          destroyMarked: h.fakeSandbox.destroyMarked,
-        }),
+          };
+          return {
+            runCommand: async (cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runCommand(cmd, opts);
+            },
+            runMarked: async (marker: string, cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runMarked(marker, cmd, opts);
+            },
+            destroy: h.fakeSandbox.destroy,
+            claimMarker: h.fakeSandbox.claimMarker,
+            destroyMarked: h.fakeSandbox.destroyMarked,
+          };
+        },
       });
       // The write spent the whole anchored window, so the exec is declined
       // with the typed outcome instead of starting a 1ms run: the handler
@@ -2579,16 +2596,26 @@ describe("createReviewConsumer", () => {
       roundStart = clock.now;
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
-        getSandbox: async () => ({
-          runCommand: async (cmd: string, opts?: unknown) => {
+        getSandbox: async () => {
+          const observe = (cmd: string): void => {
             if (cmd.includes("bun run")) execStart = clock.now;
-            return h.fakeSandbox.runCommand(cmd, opts);
-          },
-          destroy: h.fakeSandbox.destroy,
-          claimMarker: h.fakeSandbox.claimMarker,
-          runMarked: h.fakeSandbox.runMarked,
-          destroyMarked: h.fakeSandbox.destroyMarked,
-        }),
+          };
+          return {
+            runCommand: async (cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runCommand(cmd, opts);
+            },
+            // The paid commands run through the marker guard, so the same
+            // observation has to see them or the clock they spend is invisible.
+            runMarked: async (marker: string, cmd: string, opts?: unknown) => {
+              observe(cmd);
+              return h.fakeSandbox.runMarked(marker, cmd, opts);
+            },
+            destroy: h.fakeSandbox.destroy,
+            claimMarker: h.fakeSandbox.claimMarker,
+            destroyMarked: h.fakeSandbox.destroyMarked,
+          };
+        },
       });
       await consumer(h.makeBatch(makePayload()));
     });
@@ -2696,7 +2723,7 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"preparation"');
   });
 
-  test("runner input write failure → no runner, no post, no insert, rethrow, container held", async () => {
+  test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
     h.sandbox.writeInputExitCode = 1;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -2707,10 +2734,9 @@ describe("createReviewConsumer", () => {
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    // The launch claim was taken before the write, so the row is `launched`:
-    // the durable record authorises nothing and the container is held.
-    expect(h.sandbox.destroyCalls).toBe(0);
-    expect(inflightRows(db)).toHaveLength(1);
+    // The failure row that wrote is the terminal outcome: destroy and release.
+    expect(h.sandbox.destroyCalls).toBe(1);
+    expect(inflightRows(db)).toHaveLength(0);
   });
 
   test("an input write the anchored deadline killed acks the typed stop — the runner never ran, so 0/0 is KNOWN", async () => {
@@ -4585,10 +4611,10 @@ describe("createReviewConsumer", () => {
     // real failure rethrows exactly as before.
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.messageAckCalls).toHaveLength(0);
-    // A runner failure leaves the launch row `launched`, so the durable record
-    // authorises no teardown and no capacity release: both are held to the TTL.
-    expect(h.sandbox.destroyCalls).toBe(0);
-    expect(inflightRows(db)).toHaveLength(1);
+    // Its failure row wrote, so the terminal outcome destroys and releases —
+    // the queue's next delivery is not blocked by a held row.
+    expect(h.sandbox.destroyCalls).toBe(1);
+    expect(inflightRows(db)).toHaveLength(0);
   });
 
   test("admission row is written before the first sandbox step and released after the post settles (WF-002)", async () => {
@@ -10856,12 +10882,10 @@ describe("usage ledger (migration 0031)", () => {
     await first(h.makeBatch(makePayload())).catch(() => undefined);
     expect(usageRows(db)).toHaveLength(1);
 
-    // The operator switches the App to quick, and the queue redelivers once the
-    // failed attempt's admission row has expired: nothing was published, so
-    // this is the same review's next attempt — a new `seq` priced at the depth
-    // that actually ran this time (quick + BYOK = 1 RP).
+    // The operator switches the App to quick, and the queue redelivers: nothing
+    // was published, so this is the same review's next attempt — a new seq
+    // priced at the depth that actually ran this time (quick + BYOK = 1 RP).
     setAppReviewLevel(db, TEST_APP_ID, "quick");
-    expireInflight(db);
     h.sandbox.runnerExitCode = 0;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const second = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -11083,11 +11107,9 @@ describe("usage ledger (migration 0031)", () => {
     expect(usageRows(db).map((row) => row.seq)).toEqual([1]);
 
     // The consumer stays bound to this instance's doubles; only the failed
-    // runner knob has to be cleared for the retry — and the failed attempt's
-    // admission row expires (the retry waits for it in production).
+    // runner knob has to be cleared for the retry.
     h.sandbox.runnerExitCode = 0;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    expireInflight(db);
     await consumer(h.makeBatch(makePayload()));
 
     const key = idemKey({

@@ -1575,6 +1575,50 @@ export async function deferCheckRecovery(
 }
 
 /**
+ * Record that a settlement is OWED for an attempt this invocation could not
+ * adopt — another holder owns the row, or it is not adoptable. It grants
+ * nothing: no holder, no lease, no `desired`, no frozen intent and no terminal
+ * stamp is touched, so a live holder's own conclusion still wins; it names the
+ * obligation and makes the row due for the reconciler the instant it is
+ * released. `false` = no open row for that attempt key, so there is nothing to
+ * hand over.
+ *
+ * The row is named by its ATTEMPT KEY, not by an id: a refused adoption never
+ * learns the generation's id, and the key is exactly what the caller knows.
+ */
+export async function noteCheckRecoveryOwed(
+  db: D1Like,
+  input: {
+    scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    reason: string;
+    nextAttemptMs: number;
+  },
+): Promise<boolean> {
+  const key = attemptKey({
+    appId: input.scope.appId,
+    installationId: input.scope.installationId,
+    owner: input.scope.owner,
+    repo: input.scope.repo,
+    prNumber: input.scope.prNumber,
+    headSha: input.headSha,
+    triggeredBy: input.triggeredBy,
+    action: input.action,
+  });
+  const written = await db
+    .prepare(
+      `UPDATE review_checks
+          SET next_attempt_ms = ?, last_error = ?
+        WHERE attempt_key = ? AND terminal_ms IS NULL`,
+    )
+    .bind(input.nextAttemptMs, checkReason(input.reason), key)
+    .run();
+  return written.meta.changes === 1;
+}
+
+/**
  * Give up honestly at the attempt cap (spec §7.11.2 step 4): `local-error` plus
  * `terminal_ms` under the current fence. The row, its external id and any known
  * remote run id are RETAINED — nothing here deletes work or claims the remote

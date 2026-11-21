@@ -1060,38 +1060,48 @@ function toBase64Utf8(text: string): string {
 }
 
 /**
- * Run one prepare command on the incarnation this entry proved. The first
- * provisioner may start the container it owns; a replay may only ACT on the
- * live incarnation it just proved — a container that vanished after the proof
- * runs nothing and is `unknown`, so a replay never starts, or acts on, a
- * replacement and never turns an old proof into evidence for new operations.
+ * Run one attempt command through the guarded form: `claimed` runs it plainly
+ * (this entry just provisioned the container), `already-claimed` runs it under
+ * the marker gate — ONE Durable Object request that proves the incarnation and
+ * acts on it, so proof and action can never straddle a replacement. A missing
+ * marker, a different one or a lost guarded reply is `unknown`: nothing ran on
+ * an unproven container.
+ *
+ * The options carry everything a paid command needs (`stdin` for the runner
+ * input and the credential payload, `cwd` for the clone, `env` for the model
+ * chain, `timeout` for the anchored window), so a guarded call replaces the
+ * unguarded one rather than being followed by it.
  */
 async function runPreparedCommand(
   sandbox: ReviewSandbox,
   marker: string,
   provisioning: "claimed" | "already-claimed",
   command: ShellCommand,
-  opts?: { env?: Record<string, string>; timeout?: number },
+  opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   if (provisioning === "claimed") return sandbox.runCommand(command, opts);
   let read: MarkedRun;
   try {
     read = await sandbox.runMarked(marker, command, opts);
-  } catch {
+  } catch (err) {
     // A lost reply is not an answer: the guarded command may have run on some
     // incarnation, and none is proven here. Unknown — never an ordinary
     // failure, which a caller could settle and then destroy the marked
-    // container on.
+    // container on. The cause rides the message so the log still names it.
+    const detail = err instanceof Error ? err.message : String(err);
     throw new AttemptUnknownError(
-      "the attempt container could not be proven while preparing (the guarded command's reply was lost) — nothing ran on a replacement",
+      `the attempt container could not be proven (the guarded command's reply was lost: ${detail}) — nothing ran on a replacement`,
     );
   }
   if (read.kind === "unknown") {
     throw new AttemptUnknownError(
-      "the attempt container could not be proven while preparing — nothing ran on a replacement",
+      "the attempt container could not be proven — nothing ran on a replacement",
     );
   }
-  return read;
+  // The guarded form answers `{kind:"ran", …}`; callers get the exec result
+  // they would have got unguarded, so the discriminant never reaches a durable
+  // record or a comparison.
+  return { stdout: read.stdout, stderr: read.stderr, exitCode: read.exitCode };
 }
 
 /**
@@ -1144,30 +1154,6 @@ export async function mintSandboxReadToken(input: {
   });
   assertSandboxGrant(grant, input.payload.repo);
   return grant.token;
-}
-
-/**
- * Prove this attempt's container before a LATER step acts on it. Resolves the
- * Durable Object by attempt id (which never starts a container) and then runs
- * the marker proof under the guarded, non-starting form: a missing or different
- * marker, or a lost guarded reply, is `unknown` — never an ordinary failure a
- * caller could settle and then act on. The handle is returned so the caller
- * acts on the SAME incarnation it proved.
- *
- * The paid step calls this before it writes the runner input or executes: the
- * launch row stops a second paid launch, and this proves the container the call
- * would run in is still the one this attempt prepared.
- */
-export async function proveReviewAttemptMarker(input: {
-  deps: {
-    env: { SANDBOX: unknown };
-    getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
-  };
-  attemptId: string;
-}): Promise<ReviewSandbox> {
-  const sandbox = await input.deps.getSandbox(input.deps.env.SANDBOX, attemptSandboxId(input.attemptId));
-  await runPreparedCommand(sandbox, attemptMarker(input.attemptId), "already-claimed", MARKER_PROOF_COMMAND);
-  return sandbox;
 }
 
 /**
@@ -1433,19 +1419,28 @@ export async function runReviewAttempt(input: {
   // shorter remainder and then classify its kill as the step cap's.
   const runnerInputStdin = toBase64Utf8(JSON.stringify(runnerInput));
   const inputWriteWindowMs = deadlineMs - Date.now();
-  const writeInput = await sandbox.runCommand(writeJsonCommand(RUNNER_INPUT_PATH), {
-    stdin: runnerInputStdin,
-    timeout: boundedStepTimeout(
-      deadlineMs,
-      EXEC_TIMEOUT_GIT_MS,
-      "runner input write",
-      "runner",
-      // The SAME sample both bounds the write and decides whether a `124`
-      // was that bound's: two reads could disagree across the cap/deadline
-      // crossover and retry a stop the clock already spent.
-      deadlineMs - inputWriteWindowMs,
-    ),
-  });
+  // Guarded: ONE request proves the attempt's marker and writes the input in
+  // the same call, so a container replaced after prepare cannot receive the
+  // document. `stdin` rides the guarded options — no second probe.
+  const writeInput = await runPreparedCommand(
+    sandbox,
+    attemptMarker(attemptId),
+    "already-claimed",
+    writeJsonCommand(RUNNER_INPUT_PATH),
+    {
+      stdin: runnerInputStdin,
+      timeout: boundedStepTimeout(
+        deadlineMs,
+        EXEC_TIMEOUT_GIT_MS,
+        "runner input write",
+        "runner",
+        // The SAME sample both bounds the write and decides whether a `124`
+        // was that bound's: two reads could disagree across the cap/deadline
+        // crossover and retry a stop the clock already spent.
+        deadlineMs - inputWriteWindowMs,
+      ),
+    },
+  );
   if (writeInput.exitCode !== 0) {
     // A kill under the anchored runner deadline (its remainder bound the
     // write, not the step's own cap) is the typed stop, not a generic
@@ -1515,7 +1510,9 @@ export async function runReviewAttempt(input: {
       "runner",
     );
   }
-  const run = await sandbox.runCommand(runnerCmd, {
+  // Guarded: the paid exec is proven and executed in ONE request, so a
+  // replacement container can never receive credentials or run the review.
+  const run = await runPreparedCommand(sandbox, attemptMarker(attemptId), "already-claimed", runnerCmd, {
     cwd: CLONE_DIR,
     env: runnerEnv,
     // The credential payload rides the exec STDIN pipe — present only when

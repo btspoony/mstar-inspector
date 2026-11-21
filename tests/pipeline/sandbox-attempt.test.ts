@@ -330,7 +330,9 @@ describe("collection refuses an unproven container", () => {
     expect(execution.run.exitCode).toBe(0);
     expect(execution.appliedProvider).toBeNull();
     // Recheck is not requested in this round; the report needs PR context.
-    expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(1);
+    // Every sandbox action of a paid round is guarded now: the runner-input
+    // write, the paid exec, and the result-document read.
+    expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(3);
   });
 });
 

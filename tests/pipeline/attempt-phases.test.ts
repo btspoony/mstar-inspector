@@ -31,6 +31,7 @@ import { createFailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { claimReviewAttempt, claimReviewLaunch, readReviewLaunch } from "../../src/pipeline/review-attempt";
 import { readPublication } from "../../src/store/finding-lifecycle";
+import { claimAttempt } from "../../src/store/review-checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { Lease } from "../../src/store/finding-lifecycle";
@@ -368,6 +369,73 @@ describe("runAdmittedReviewAttempt", () => {
     expect(outcome).toEqual({ kind: "ok" });
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
     expect(h.sandbox.destroyCalls).toBe(1);
+  });
+});
+
+describe("a refused Check adoption", () => {
+  test("names the obligation on the row it may not take", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    await reviewAttempt(deps, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+
+    // A LIVE original holder owns the attempt's Check: the real lifecycle
+    // refuses to adopt a row somebody else holds a lease on.
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: "consumer:original",
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`the test could not create the held row: ${claimed.kind}`);
+
+    let begun = 0;
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = {
+      begin: async () => {
+        begun += 1;
+        return null; // held: nothing here may take it
+      },
+      terminalize: async () => {},
+    };
+
+    expect(await publishAttempt(publishing.deps, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+
+    // Nothing was cached, nothing was stolen, and the obligation is on the row.
+    expect(begun).toBe(1);
+    expect(publishing.deps.checkSettlements.size).toBe(0);
+    const row = db.raw
+      .prepare("SELECT holder, terminal_ms, next_attempt_ms, last_error FROM review_checks WHERE holder = ?")
+      .get("consumer:original") as {
+      holder: string | null;
+      terminal_ms: number | null;
+      next_attempt_ms: number | null;
+      last_error: string | null;
+    };
+    expect(row.holder).toBe("consumer:original");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.last_error).toContain("not adopted");
+    expect(row.next_attempt_ms).toBeGreaterThan(0);
+    // The publication is the proof the recovery lane concludes from.
+    const published = await readPublication(db as never, collected.collected.publicationId);
+    expect(published?.proof).not.toBeNull();
+    // And the handoff named itself on the log line.
+    const warn = h.logLines.find((line) => line.fields.event === "check_settlement_not_adopted");
+    expect(warn?.fields.check_recovery_owed).toBe(true);
   });
 });
 
