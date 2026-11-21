@@ -37,6 +37,12 @@ export type AttemptHandoff = {
    */
   deadlineMs: number | null;
   /**
+   * The original Queue send stamp (migration 0087): the attempt's queue wait is
+   * `createdMs - enqueuedMs`. `null` on rows written before the column — the
+   * boundary is genuinely missing, never a zero.
+   */
+  enqueuedMs: number | null;
+  /**
    * When this row was first written — the immutable origin a pre-migration row
    * is anchored from. Read-only after its insert.
    */
@@ -174,6 +180,7 @@ type HandoffRow = {
   payload_json: string;
   state: AttemptHandoffState;
   deadline_ms: number | null;
+  enqueued_ms: number | null;
   created_ms: number;
   settled_ms: number | null;
   settled_effects: string | null;
@@ -187,6 +194,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
     payload: JSON.parse(row.payload_json) as ReviewJobPayload,
     state: row.state,
     deadlineMs: row.deadline_ms,
+    enqueuedMs: row.enqueued_ms,
     createdMs: row.created_ms,
     settledMs: row.settled_ms,
     settledEffects: row.settled_effects === null ? null : (JSON.parse(row.settled_effects) as SettlementEffect[]),
@@ -198,7 +206,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
 export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promise<AttemptHandoff | null> {
   const row = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
          FROM review_attempt_handoffs WHERE delivery_key = ?`,
     )
     .bind(deliveryKey)
@@ -229,13 +237,19 @@ export async function reserveAttemptHandoff(
     payload: ReviewJobPayload;
     nowMs: number;
     deadlineMs: number;
+    /**
+     * The original Queue send stamp. Copied here because the queue's own
+     * timestamp is not durable: after this delivery the only record of when
+     * the attempt started waiting is this column.
+     */
+    enqueuedMs: number;
   },
 ): Promise<AttemptHandoff> {
   await db
     .prepare(
       `INSERT INTO review_attempt_handoffs
-         (delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, updated_ms)
-       VALUES (?, ?, ?, 'owed', ?, ?, ?)
+         (delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, updated_ms)
+       VALUES (?, ?, ?, 'owed', ?, ?, ?, ?)
        ON CONFLICT (delivery_key) DO NOTHING`,
     )
     .bind(
@@ -243,6 +257,7 @@ export async function reserveAttemptHandoff(
       input.attemptId,
       JSON.stringify(input.payload),
       input.deadlineMs,
+      input.enqueuedMs,
       input.nowMs,
       input.nowMs,
     )
@@ -288,7 +303,7 @@ export async function touchAttemptHandoff(db: D1Like, deliveryKey: string, nowMs
 }
 
 /** The effects a settlement can make durable (see `settleAttemptFailure`). */
-export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip";
+export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip" | "publication";
 
 /**
  * Complete the settle-once mark. It is written by the settlement itself, and it
@@ -396,7 +411,7 @@ export async function listIncompleteSettlements(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
          FROM review_attempt_handoffs
         WHERE settled_ms IS NULL AND settling_ms IS NOT NULL AND settling_ms <= ?
         ORDER BY settling_ms
@@ -418,7 +433,7 @@ export async function listHandoffsForRecovery(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
          FROM review_attempt_handoffs
         WHERE state IN ('owed', 'ambiguous') AND updated_ms <= ?
         ORDER BY updated_ms

@@ -1313,6 +1313,31 @@ export const zhCN: Dictionary = {
       /** 没有消息在排队，因此计数没有最旧时间戳。 */
       queueEmpty: "空队列",
       githubRateLimitedLabel: "GitHub 次级限流（24 小时）",
+      /** 时长分析：运营方选择时长上限的依据。 */
+      durationTitle: "审查时长分布",
+      durationDescription:
+        "最近 {days} 天内被准入的尝试。百分位只统计端到端边界完整的区间，空窗口就显示为空，绝不当作 0。",
+      durationEmpty: "此窗口内没有完成任何尝试。",
+      durationSample: "{n} 个完整尝试",
+      durationTotal: "端到端",
+      durationQueueWait: "队列等待",
+      durationExecution: "执行",
+      durationPublication: "发布 / 恢复",
+      durationP50: "p50",
+      durationP90: "p90",
+      durationMax: "最大值",
+      durationBuckets: "每个尝试的区间都拆分为这三个阶段。百分位按行计算，同一列不可跨行相加。",
+      durationExcluded:
+        "未计入百分位：{unsettled} 个未结算、{skipped} 个已跳过、{missingQueue} 个缺少队列时间戳、{missingBoundary} 个缺少阶段边界、{invalid} 个边界乱序。",
+      durationCandidateLabel: "候选上限（毫秒）",
+      durationCandidateApply: "查看截断",
+      durationCutoff: "{cap} 毫秒的上限会排除 {n} 个尝试中的 {over} 个（{share}）。",
+      durationCutoffNone: "没有已完成的尝试会超过 {cap} 毫秒。",
+      durationCutoffEmpty: "没有可比对的样本。",
+      durationCrossed:
+        "首次越过上限的阶段：队列等待 {queueWait}、执行 {execution}、发布或恢复 {publication}。",
+      durationCaveat:
+        "被上限终止的尝试即为最终状态：它已经完成的工作不会自动重跑，而被上限终止的付费审查是否计费仍是未决问题。",
       // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

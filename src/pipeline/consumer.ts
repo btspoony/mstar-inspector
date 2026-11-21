@@ -2215,6 +2215,7 @@ async function processMessage(
       payload,
       nowMs: Date.now(),
       deadlineMs,
+      enqueuedMs,
     });
     if (handoff.attemptId !== attemptId) {
       // Two deliveries of the same message raced; the other one owns this

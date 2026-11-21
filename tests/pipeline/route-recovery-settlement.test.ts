@@ -112,6 +112,7 @@ async function seedHandoff(db: TestD1, payload: ReturnType<typeof makePayload>):
     attemptId: ATTEMPT_ID,
     payload,
     nowMs: 1_000,
+    enqueuedMs: 0,
     deadlineMs: Date.now() + 900_000,
   });
 }
@@ -400,6 +401,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       attemptId: "attempt-unknown",
       payload: unknownPayload,
       nowMs: 1_000,
+      enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
     db.raw
@@ -419,6 +421,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       attemptId: "attempt-skip",
       payload: skipPayload,
       nowMs: 1_000,
+      enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
     db.raw
@@ -478,6 +481,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       attemptId: identity.attemptId,
       payload,
       nowMs: 1_000,
+      enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
     db.raw

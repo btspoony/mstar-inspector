@@ -106,6 +106,7 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
       attemptId: "attempt-recovered",
       payload,
       nowMs: 1_000,
+      enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
     expect((await readAttemptHandoff(db as never, key))?.state).toBe("owed");
@@ -150,6 +151,7 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
         attemptId: `attempt-${state}`,
         payload,
         nowMs: 1_000,
+        enqueuedMs: 0,
         deadlineMs: Date.now() + 600_000,
       });
       await markAttemptHandoff(db as never, key, state, 1_000);

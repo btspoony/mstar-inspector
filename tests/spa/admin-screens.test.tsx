@@ -118,8 +118,24 @@ async function flagsScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Pro
   return mount(createElement(FlagsPage, { locale }), respond);
 }
 
+/** The duration report the runtime screen reads beside its config; empty sample. */
+const DURATION_REPORT = {
+  window: { days: 30, startMs: 0, endMs: 1 },
+  sampleSize: 0,
+  total: null,
+  phases: { queueWait: null, execution: null, publication: null },
+  excluded: { unsettled: 0, skipped: 0, missingQueueStamp: 0, missingPhaseBoundary: 0, invalid: 0 },
+  cutoff: null,
+};
+
 async function runtimeScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
-  return mount(createElement(RuntimePage, { locale }), respond);
+  // The screen reads the duration report beside the runtime config; a fixture
+  // answering every URL with the config would fail that one read.
+  return mount(createElement(RuntimePage, { locale }), (request) =>
+    request.url.startsWith("/_internal_admin/api/runtime/duration-report")
+      ? json(DURATION_REPORT)
+      : respond(request),
+  );
 }
 
 /**
@@ -535,7 +551,11 @@ describe("Runtime screen", () => {
     expect((surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement).value).toBe(
       "40",
     );
-    expect(surface.sent.filter((request) => request.method === "GET")).toHaveLength(1);
+    expect(
+      surface.sent.filter(
+        (request) => request.method === "GET" && request.url === "/_internal_admin/api/runtime",
+      ),
+    ).toHaveLength(1);
     expect(surface.text()).toContain("Saved.");
     await surface.close();
   });
@@ -880,7 +900,11 @@ describe("Runtime screen", () => {
     expect(cells.reason).toBe("repository backfill");
     // The server stamps `since`; the card renders it, never the request value.
     expect(cells.since).not.toBeNull();
-    expect(surface.sent.filter((request) => request.method === "GET")).toHaveLength(1);
+    expect(
+      surface.sent.filter(
+        (request) => request.method === "GET" && request.url === "/_internal_admin/api/runtime",
+      ),
+    ).toHaveLength(1);
     expect(surface.text()).toContain("Saved.");
     await surface.close();
   });

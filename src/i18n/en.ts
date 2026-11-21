@@ -1577,6 +1577,32 @@ export const en = {
       /** No message is waiting, so the gauge reports no oldest stamp. */
       queueEmpty: "Empty",
       githubRateLimitedLabel: "GitHub secondary limits (24 h)",
+      /** The duration analysis: the evidence for choosing the attempt cap. */
+      durationTitle: "Review duration distribution",
+      durationDescription:
+        "Attempts admitted in the last {days} days. Percentiles use only complete end-to-end intervals, and an empty window stays empty — it never reads as a zero.",
+      durationEmpty: "No attempt completed in this window.",
+      durationSample: "{n} complete attempts",
+      durationTotal: "End to end",
+      durationQueueWait: "Queue wait",
+      durationExecution: "Execution",
+      durationPublication: "Publication / recovery",
+      durationP50: "p50",
+      durationP90: "p90",
+      durationMax: "max",
+      durationBuckets:
+        "Every attempt's interval splits into these three phases. Percentiles are per row, so one column does not add up across rows.",
+      durationExcluded:
+        "Excluded from the percentiles: {unsettled} unsettled, {skipped} skipped, {missingQueue} without a queue stamp, {missingBoundary} without a phase boundary, {invalid} out of order.",
+      durationCandidateLabel: "Candidate cap (ms)",
+      durationCandidateApply: "Show cutoff",
+      durationCutoff: "A {cap} ms cap would exclude {over} of {n} attempts ({share}).",
+      durationCutoffNone: "No completed attempt would exceed {cap} ms.",
+      durationCutoffEmpty: "No sample to compare against.",
+      durationCrossed:
+        "First phase past the cap: queue wait {queueWait}, execution {execution}, publication or recovery {publication}.",
+      durationCaveat:
+        "A capped attempt is terminal: the work it already observed is not re-run automatically, and whether a cap-stopped paid review is billed remains an open question.",
       /**
        * Deployment version footer. `{version}` carries the
        * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

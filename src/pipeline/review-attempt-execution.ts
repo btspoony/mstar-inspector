@@ -5175,6 +5175,20 @@ async function publishPhase(
   // settlement is adopted from the D1 attempt row when this host has none.
   const check = await settlementFor(deps, ref, headSha);
   const stagedId = publicationId;
+  // The publication settlement's COMPLETION mark. This is the one instant every
+  // required publication and Check lane has closed (or was explicitly closed
+  // unconfirmed), so the operator's publication bucket ends here — never at the
+  // Check's own terminal stamp, which can precede a still-due recovery.
+  const markPublicationSettled = async (): Promise<void> => {
+    try {
+      await markAttemptSettled(deps.env.DB, deliveryKeyOf(payload), ["publication"], ["publication"], Date.now());
+    } catch (err) {
+      deps.log.warn(
+        fields,
+        `publication settlement mark failed — the attempt stays unsettled in the duration report: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
   // The frozen instant fences the FIRST send BEFORE the journal is claimed, so
   // a refused publication leaves no `sending` row behind for a reconciler to
   // read as an attempted send.
@@ -5224,6 +5238,7 @@ async function publishPhase(
       }
       await check?.terminalize(null, "pre-publication-failure");
       deps.log.warn(fields, `prepared review definitively rejected before send — recorded failed: ${err.message}`);
+      await markPublicationSettled();
       return { kind: "ok" };
     }
     throw err;
@@ -5254,6 +5269,7 @@ async function publishPhase(
       "publication proof could not be persisted after the send — retaining staged/sending for read-only discovery; no local completion is claimed",
     );
     await check?.terminalize(stagedId, "publication-unknown");
+    await markPublicationSettled();
     return { kind: "ok" };
   }
   // 13a. KV done-state fence (BUG-01): follows durable confirmation (the
@@ -5286,6 +5302,7 @@ async function publishPhase(
       "review published and confirmed but the lifecycle apply did not complete — publication stays confirmed for M8 recovery; acking to avoid a duplicate comment",
     );
     await check?.terminalize(stagedId, "publication-unknown");
+    await markPublicationSettled();
     return { kind: "ok" };
   }
 
@@ -5522,6 +5539,7 @@ async function publishPhase(
   // row itself decides whether it is still open — never from whether this host
   // happened to cache a handle. A settled Check makes the note a no-op.
   await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
+  await markPublicationSettled();
   return { kind: "ok" };
 }
 

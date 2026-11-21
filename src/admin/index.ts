@@ -62,6 +62,11 @@ import { createFailureStore } from "../store/failure-store";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, listFlags } from "./flags";
 import {
+  DURATION_REPORT_CAP_MAX_MS,
+  DURATION_REPORT_CAP_MIN_MS,
+  readReviewDurationReport,
+} from "./duration-report";
+import {
   findDataUpgrade,
   listDataUpgrades,
   resetDataUpgrade,
@@ -292,6 +297,35 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     // what `/dashboard/*` is answering rather than echoing its own last save.
     maintenance: await getMaintenanceMode(db),
   });
+}
+
+/**
+ * The duration analysis report (`GET /api/runtime/duration-report`): the
+ * observed distribution an operator reads before choosing the attempt cap.
+ * `capMs` is a candidate for the "what would this cut off" read only — this
+ * handler writes nothing and owns no configuration key. The report module owns
+ * the window, the sample and the exclusions.
+ */
+async function readDurationReport(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const rawCap = c.req.query("capMs");
+  let capMs: number | null = null;
+  if (rawCap !== undefined) {
+    const parsed = Number(rawCap);
+    if (!Number.isInteger(parsed) || parsed < DURATION_REPORT_CAP_MIN_MS || parsed > DURATION_REPORT_CAP_MAX_MS) {
+      return c.json(
+        {
+          error: `capMs must be an integer in ${DURATION_REPORT_CAP_MIN_MS}..${DURATION_REPORT_CAP_MAX_MS}`,
+        },
+        400,
+      );
+    }
+    capMs = parsed;
+  }
+  return c.json(await readReviewDurationReport(db, { nowMs: Date.now(), capMs }));
 }
 
 /** The accepted `commentClaim` body shape; the store owns the accepted ranges. */
@@ -1041,6 +1075,7 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/flags", handler: readFlags },
   { method: "patch", path: "/api/flags", handler: setFlag },
   { method: "get", path: "/api/runtime", handler: readRuntime },
+  { method: "get", path: "/api/runtime/duration-report", handler: readDurationReport },
   { method: "patch", path: "/api/runtime", handler: setRuntime },
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
   { method: "get", path: "/api/users", handler: readUsers },

@@ -356,6 +356,95 @@ export async function readRuntime(): Promise<RuntimeConfig> {
   };
 }
 
+export type DurationPercentiles = { p50Ms: number; p90Ms: number; maxMs: number };
+
+/** One candidate cap's observed cutoff: what it would exclude, and where. */
+export type DurationReportCutoff = {
+  capMs: number;
+  over: number;
+  /** `null` when the sample is empty — a share of nothing is not `0%`. */
+  share: number | null;
+  crossed: { queueWait: number; execution: number; publication: number };
+};
+
+/**
+ * The duration analysis report. Every percentile group is `null` when nothing
+ * completed in the window: the surface must render "no sample", never a zero.
+ */
+export type DurationReport = {
+  window: { days: number; startMs: number; endMs: number };
+  sampleSize: number;
+  total: DurationPercentiles | null;
+  phases: {
+    queueWait: DurationPercentiles | null;
+    execution: DurationPercentiles | null;
+    publication: DurationPercentiles | null;
+  };
+  excluded: {
+    unsettled: number;
+    skipped: number;
+    missingQueueStamp: number;
+    missingPhaseBoundary: number;
+    invalid: number;
+  };
+  cutoff: DurationReportCutoff | null;
+};
+
+function percentilesOrNull(raw: unknown, what: string): DurationPercentiles | null {
+  if (raw === null || raw === undefined) return null;
+  const group = map(raw, what);
+  return { p50Ms: num(group, "p50Ms"), p90Ms: num(group, "p90Ms"), maxMs: num(group, "maxMs") };
+}
+
+function parseCutoff(raw: unknown): DurationReportCutoff {
+  const cutoff = map(raw, "duration cutoff");
+  const crossed = map(cutoff.crossed, "duration cutoff crossed");
+  return {
+    capMs: num(cutoff, "capMs"),
+    over: num(cutoff, "over"),
+    share: maybeNum(cutoff, "share"),
+    crossed: {
+      queueWait: num(crossed, "queueWait"),
+      execution: num(crossed, "execution"),
+      publication: num(crossed, "publication"),
+    },
+  };
+}
+
+/**
+ * Read the operator's duration report. `capMs` is the candidate the operator
+ * typed; `null` asks for the distribution alone.
+ */
+export async function readDurationReport(capMs: number | null): Promise<DurationReport> {
+  const query = capMs === null ? "" : `?capMs=${encodeURIComponent(String(capMs))}`;
+  const body = map(await fetchJson(`${BASE}/runtime/duration-report${query}`), "duration report response");
+  const window = map(body.window, "duration window");
+  const phases = map(body.phases, "duration phases");
+  const excluded = map(body.excluded, "duration exclusions");
+  return {
+    window: {
+      days: num(window, "days"),
+      startMs: num(window, "startMs"),
+      endMs: num(window, "endMs"),
+    },
+    sampleSize: num(body, "sampleSize"),
+    total: percentilesOrNull(body.total, "duration total"),
+    phases: {
+      queueWait: percentilesOrNull(phases.queueWait, "duration queueWait"),
+      execution: percentilesOrNull(phases.execution, "duration execution"),
+      publication: percentilesOrNull(phases.publication, "duration publication"),
+    },
+    excluded: {
+      unsettled: num(excluded, "unsettled"),
+      skipped: num(excluded, "skipped"),
+      missingQueueStamp: num(excluded, "missingQueueStamp"),
+      missingPhaseBoundary: num(excluded, "missingPhaseBoundary"),
+      invalid: num(excluded, "invalid"),
+    },
+    cutoff: body.cutoff === null || body.cutoff === undefined ? null : parseCutoff(body.cutoff),
+  };
+}
+
 /**
  * Set or clear the platform's official workspace, answering the id the server
  * stored (`null` for a clear). `null` is the only clear — the server refuses

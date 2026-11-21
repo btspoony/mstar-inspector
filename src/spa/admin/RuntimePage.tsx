@@ -8,7 +8,7 @@
  * audit row, so this screen owns no ledger logic. Each field is a local draft
  * over the loaded value, so a reload cannot leave a stale value on screen.
  */
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import {
   Button,
   CardContent,
@@ -27,6 +27,7 @@ import { concurrencySubmitBlocked } from "../pages/data";
 import { formatRelativeTime } from "../relative-time";
 import {
   AdminWriteError,
+  readDurationReport,
   readRuntime,
   saveSweepSettings,
   setCheckBudgets,
@@ -38,6 +39,7 @@ import {
   type AdmissionDropCounts,
   type CheckBudgetConfig,
   type CommentClaimConfig,
+  type DurationPercentiles,
   type MaintenanceConfig,
   type QueueBacklog,
   type RecheckAssignmentConfig,
@@ -86,6 +88,162 @@ function CardOutcome({
     <div className="mt-4">
       <PageNotice kind={notice.kind} message={notice.message} />
     </div>
+  );
+}
+
+/**
+ * The duration analysis card — the evidence for choosing the attempt cap.
+ *
+ * It renders what the server measured and nothing more: percentiles are `null`
+ * when the window completed nothing (an empty sample, never zeros), and the
+ * candidate read is an observation about the same sample, not a prediction.
+ */
+function DurationReportCard({ locale }: { locale: Locale }) {
+  const [candidate, setCandidate] = useState("");
+  const [capMs, setCapMs] = useState<number | null>(null);
+  const read = useMemo(() => () => readDurationReport(capMs), [capMs]);
+  const { state, reload } = useLoaded(read);
+  const candidateValue = Number(candidate);
+  const candidateValid = Number.isInteger(candidateValue) && candidateValue > 0;
+  const formatMs = (value: number | null): string => (value === null ? "—" : `${Math.round(value)} ms`);
+
+  return (
+    <SectionCard tier="secondary">
+      <CardHeader>
+        <SectionCardTitle>{t(locale, "admin.runtime.durationTitle")}</SectionCardTitle>
+      </CardHeader>
+      <CardContent>
+        {state.status === "loading" ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "common.loading")}</p>
+        ) : state.status === "error" ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-sm text-muted-foreground">{t(locale, "common.loadFailed")}</p>
+            <Button type="button" variant="secondary" onClick={reload}>
+              {t(locale, "common.retry")}
+            </Button>
+          </div>
+        ) : (
+          (() => {
+            const report = state.data;
+            const rows: ReadonlyArray<{ key: string; label: DictionaryKey; value: DurationPercentiles | null }> = [
+              { key: "total", label: "admin.runtime.durationTotal", value: report.total },
+              { key: "queue-wait", label: "admin.runtime.durationQueueWait", value: report.phases.queueWait },
+              { key: "execution", label: "admin.runtime.durationExecution", value: report.phases.execution },
+              { key: "publication", label: "admin.runtime.durationPublication", value: report.phases.publication },
+            ];
+            const cutoff = report.cutoff;
+            return (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.durationDescription", { days: report.window.days })}
+                </p>
+                {report.sampleSize === 0 ? (
+                  <p className="mt-4 text-sm font-medium" data-duration="empty">
+                    {t(locale, "admin.runtime.durationEmpty")}
+                  </p>
+                ) : (
+                  <>
+                    <p className="mt-2 text-xs text-muted-foreground" data-duration="sample">
+                      {t(locale, "admin.runtime.durationSample", { n: report.sampleSize })}
+                    </p>
+                    <table className="mt-3 w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-muted-foreground">
+                          <th className="py-1 font-normal" />
+                          <th className="py-1 font-normal">{t(locale, "admin.runtime.durationP50")}</th>
+                          <th className="py-1 font-normal">{t(locale, "admin.runtime.durationP90")}</th>
+                          <th className="py-1 font-normal">{t(locale, "admin.runtime.durationMax")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((row) => (
+                          <tr key={row.key} className="border-t border-(--border-subtle)">
+                            <td className="py-1 text-muted-foreground">{t(locale, row.label)}</td>
+                            <td className="py-1 font-medium" data-duration={`${row.key}-p50`}>
+                              {formatMs(row.value?.p50Ms ?? null)}
+                            </td>
+                            <td className="py-1 font-medium" data-duration={`${row.key}-p90`}>
+                              {formatMs(row.value?.p90Ms ?? null)}
+                            </td>
+                            <td className="py-1 font-medium" data-duration={`${row.key}-max`}>
+                              {formatMs(row.value?.maxMs ?? null)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t(locale, "admin.runtime.durationBuckets")}
+                    </p>
+                  </>
+                )}
+                <p className="mt-3 text-xs text-muted-foreground" data-duration="excluded">
+                  {t(locale, "admin.runtime.durationExcluded", {
+                    unsettled: report.excluded.unsettled,
+                    skipped: report.excluded.skipped,
+                    missingQueue: report.excluded.missingQueueStamp,
+                    missingBoundary: report.excluded.missingPhaseBoundary,
+                    invalid: report.excluded.invalid,
+                  })}
+                </p>
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (candidateValid) setCapMs(candidateValue);
+                  }}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="duration-candidate-cap">
+                      {t(locale, "admin.runtime.durationCandidateLabel")}
+                    </label>
+                    <Input
+                      id="duration-candidate-cap"
+                      className="w-48"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={candidate}
+                      onChange={(event) => setCandidate(event.target.value)}
+                    />
+                  </div>
+                  <Button type="submit" variant="secondary" disabled={!candidateValid}>
+                    {t(locale, "admin.runtime.durationCandidateApply")}
+                  </Button>
+                </form>
+                {cutoff === null ? null : (
+                  <div className="mt-3 text-sm" data-duration="cutoff">
+                    {report.sampleSize === 0 ? (
+                      <p>{t(locale, "admin.runtime.durationCutoffEmpty")}</p>
+                    ) : cutoff.over === 0 ? (
+                      <p>{t(locale, "admin.runtime.durationCutoffNone", { cap: cutoff.capMs })}</p>
+                    ) : (
+                      <p>
+                        {t(locale, "admin.runtime.durationCutoff", {
+                          cap: cutoff.capMs,
+                          over: cutoff.over,
+                          n: report.sampleSize,
+                          share: cutoff.share === null ? "—" : `${(cutoff.share * 100).toFixed(1)}%`,
+                        })}
+                      </p>
+                    )}
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t(locale, "admin.runtime.durationCrossed", {
+                        queueWait: cutoff.crossed.queueWait,
+                        execution: cutoff.crossed.execution,
+                        publication: cutoff.crossed.publication,
+                      })}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t(locale, "admin.runtime.durationCaveat")}
+                    </p>
+                  </div>
+                )}
+              </>
+            );
+          })()
+        )}
+      </CardContent>
+    </SectionCard>
   );
 }
 
@@ -943,6 +1101,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 </dl>
               </CardContent>
             </SectionCard>
+            <DurationReportCard locale={locale} />
           </div>
           );
         }}
