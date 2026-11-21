@@ -134,9 +134,14 @@ function DurationReportCard({ locale }: { locale: Locale }) {
             const cutoff = report.cutoff;
             const excluded = report.excluded;
             const excludedTotal =
-              excluded["check-open-at-settle"] + excluded["no-boundary"] + excluded.unsettled + excluded["pre-prepare"];
+              excluded["check-open-at-settle"] +
+              excluded["claim-unproven"] +
+              excluded["no-boundary"] +
+              excluded.unsettled +
+              excluded["pre-prepare"];
             const excludedParams = {
               checkOpen: excluded["check-open-at-settle"],
+              claimUnproven: excluded["claim-unproven"],
               noBoundary: excluded["no-boundary"],
               unsettled: excluded.unsettled,
               prePrepare: excluded["pre-prepare"],

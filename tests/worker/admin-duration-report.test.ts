@@ -15,6 +15,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { DURATION_REPORT_WINDOW_DAYS, phaseBuckets } from "../../src/admin/duration-report";
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
+import { idemKey } from "../../src/contracts/idem";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const SESSION_SECRET = ["test", "duration", "report", "session", "32-bytes!"].join("-");
@@ -37,10 +38,35 @@ const PAYLOAD: ReviewJobPayload = {
   targetId: "target-1",
 };
 
-function envFor(db: TestD1): Env {
+/** The success-claim key a seeded attempt with this head owes. */
+function claimKeyFor(headSha: string): string {
+  return idemKey({
+    installation_id: PAYLOAD.installation_id,
+    owner: PAYLOAD.owner,
+    repo: PAYLOAD.repo,
+    pr_number: PAYLOAD.pr_number,
+    head_sha: headSha,
+  });
+}
+
+/** A KV double: `values` answers a key, `failKeys` throw like a KV fault. */
+function claimsKv(
+  values: Record<string, string> = {},
+  failKeys: readonly string[] = [],
+): NonNullable<Env["IDEMPOTENCY_KV"]> {
+  return {
+    get: async (key: string) => {
+      if (failKeys.includes(key)) throw new Error("kv read failed");
+      return values[key] ?? null;
+    },
+    put: async () => {},
+  } as unknown as NonNullable<Env["IDEMPOTENCY_KV"]>;
+}
+
+function envFor(db: TestD1, claims: NonNullable<Env["IDEMPOTENCY_KV"]> = claimsKv()): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} },
-    IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
+    IDEMPOTENCY_KV: claims,
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
     DEPLOYMENT_MODE: "saas",
@@ -71,12 +97,13 @@ async function getReport(
   db: TestD1,
   query = "",
   login: string | null = OPERATOR,
+  claims: NonNullable<Env["IDEMPOTENCY_KV"]> = claimsKv(),
 ): Promise<Response> {
   const headers: Record<string, string> = {};
   if (login !== null) headers.Cookie = `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}`;
   return worker.fetch(
     new Request(`https://worker.local/_internal_admin/api/runtime/duration-report${query}`, { headers }),
-    envFor(db),
+    envFor(db, claims),
   );
 }
 
@@ -84,15 +111,21 @@ type AttemptSeed = {
   attemptId: string;
   /** The handoff's create state; `failed` is a definite create rejection. */
   handoffState?: "owed" | "ambiguous" | "created" | "failed";
+  /** The delivery's head: the idempotency claim's identity. */
+  headSha?: string;
   /** The original Queue send stamp; `null` models a pre-0087 row. */
   enqueuedMs: number | null;
   admittedMs: number;
   /** A `persisted` launch row's instant: the durable result ended execution. */
   persistedMs?: number;
+  /** A `failed` launch row: the paid step returned a nonzero status. */
+  failedMs?: number;
   /** A launch row whose paid step never produced a result (state `launched`). */
   launchedOnly?: boolean;
   settlingMs?: number | null;
   settledMs: number | null;
+  /** The effects the settlement made durable — its record of which lane closed. */
+  settledEffects?: string[] | null;
   /** The Check pair the attempt froze, and that Check row's terminal instant. */
   check?: { key: string; generation: number; terminalMs: number | null };
   /** A frozen pair whose Check row the database does not hold. */
@@ -101,41 +134,52 @@ type AttemptSeed = {
 
 /** One attempt: its handoff row, plus its launch row when a paid step ran. */
 function seedAttempt(db: TestD1, seed: AttemptSeed): void {
+  const payload: ReviewJobPayload = { ...PAYLOAD, head_sha: seed.headSha ?? PAYLOAD.head_sha };
   db.raw
     .prepare(
       `INSERT INTO review_attempt_handoffs
          (delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms,
-          created_ms, updated_ms, settling_ms, settled_ms)
-       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+          created_ms, updated_ms, settling_ms, settled_ms, settled_effects)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       seed.attemptId,
       seed.attemptId,
-      JSON.stringify(PAYLOAD),
+      JSON.stringify(payload),
       seed.handoffState ?? "created",
       seed.enqueuedMs,
       seed.admittedMs,
       seed.admittedMs,
       seed.settlingMs ?? null,
       seed.settledMs,
+      seed.settledEffects === undefined || seed.settledEffects === null
+        ? null
+        : JSON.stringify(seed.settledEffects),
     );
-  const hasLaunch = seed.persistedMs !== undefined || seed.launchedOnly === true || seed.check !== undefined;
+  const hasLaunch =
+    seed.persistedMs !== undefined ||
+    seed.failedMs !== undefined ||
+    seed.launchedOnly === true ||
+    seed.check !== undefined;
   if (!hasLaunch) return;
+  const launchState =
+    seed.failedMs !== undefined ? "failed" : seed.persistedMs === undefined ? "launched" : "persisted";
   db.raw
     .prepare(
       `INSERT INTO review_launches
-         (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json,
-          result_outcome, attempt_key, attempt_generation)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, failed_at_ms,
+          result_json, result_outcome, attempt_key, attempt_generation)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       seed.attemptId,
-      seed.persistedMs === undefined ? "launched" : "persisted",
+      launchState,
       seed.admittedMs,
-      seed.persistedMs ?? seed.admittedMs,
+      seed.admittedMs,
       seed.persistedMs ?? null,
+      seed.failedMs ?? null,
       seed.persistedMs === undefined ? null : "{}",
-      seed.persistedMs === undefined ? null : "persisted",
+      launchState === "persisted" ? "persisted" : launchState === "failed" ? "failed" : null,
       seed.check?.key ?? null,
       seed.check?.generation ?? null,
     );
@@ -154,11 +198,11 @@ function seedAttempt(db: TestD1, seed: AttemptSeed): void {
       crypto.randomUUID(),
       APP_ID,
       APP_NUMERIC_ID,
-      PAYLOAD.installation_id,
-      PAYLOAD.owner,
-      PAYLOAD.repo,
-      PAYLOAD.pr_number,
-      PAYLOAD.head_sha,
+      payload.installation_id,
+      payload.owner,
+      payload.repo,
+      payload.pr_number,
+      payload.head_sha,
       seed.check.key,
       seed.check.generation,
       `ext-${seed.attemptId}`,
@@ -251,6 +295,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.phases.publication).toEqual({ p50Ms: 8_000, p90Ms: 15_000, maxMs: 15_000 });
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
+      "claim-unproven": 0,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,
@@ -326,14 +371,6 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     });
     // Settled with no launch row at all (a moved-head skip leaves this shape).
     seedAttempt(db, { attemptId: "no-launch", enqueuedMs: t0, admittedMs: t0, settledMs: t0 + 5_000 });
-    // A launch row whose paid step never produced a result.
-    seedAttempt(db, {
-      attemptId: "no-result",
-      enqueuedMs: t0,
-      admittedMs: t0,
-      launchedOnly: true,
-      settledMs: t0 + 5_000,
-    });
     // A durable result BEFORE admission: the interval is not chronologically ordered.
     seedAttempt(db, {
       attemptId: "out-of-order",
@@ -353,8 +390,49 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toEqual({ p50Ms: 40_000, p90Ms: 40_000, maxMs: 40_000 });
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "no-boundary": 4,
+      "claim-unproven": 0,
+      "no-boundary": 3,
       unsettled: 0,
+      "pre-prepare": 0,
+    });
+  });
+
+  test("a settled attempt with no durable result is not measured: the settling start is not a boundary", async () => {
+    const db = fixture();
+    const t0 = Date.now() - 3_600_000;
+    // The settlement started at +20s but the paid step never recorded a result:
+    // the launch row's own state says no outcome was ever confirmed.
+    seedAttempt(db, {
+      attemptId: "outcome-unconfirmed",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      launchedOnly: true,
+      settlingMs: t0 + 20_000,
+      settledMs: t0 + 30_000,
+    });
+    // A confirmed FAILURE with no result: the outcome is known, the boundary is
+    // not — `failed_at_ms` names the failure, never the end of the interval.
+    seedAttempt(db, {
+      attemptId: "confirmed-failure",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      failedMs: t0 + 20_000,
+      settlingMs: t0 + 25_000,
+      settledMs: t0 + 30_000,
+    });
+
+    const body = (await (await getReport(db)).json()) as {
+      sampleSize: number;
+      total: unknown;
+      excluded: Record<string, number>;
+    };
+    expect(body.sampleSize).toBe(0);
+    expect(body.total).toBeNull();
+    expect(body.excluded).toEqual({
+      "check-open-at-settle": 0,
+      "claim-unproven": 0,
+      "no-boundary": 1,
+      unsettled: 1,
       "pre-prepare": 0,
     });
   });
@@ -382,6 +460,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toBeNull();
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
+      "claim-unproven": 0,
       "no-boundary": 0,
       unsettled: 2,
       "pre-prepare": 0,
@@ -401,6 +480,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     const body = (await (await getReport(db)).json()) as { excluded: Record<string, number> };
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
+      "claim-unproven": 0,
       "no-boundary": 1,
       unsettled: 0,
       "pre-prepare": 1,
@@ -450,6 +530,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toBeNull();
     expect(body.excluded).toEqual({
       "check-open-at-settle": 3,
+      "claim-unproven": 0,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,
@@ -495,21 +576,97 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.total).toEqual({ p50Ms: 40_000, p90Ms: 40_000, maxMs: 40_000 });
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
+      "claim-unproven": 0,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,
     });
   });
 
-  test("the four reasons account for every admitted attempt, one row at a time", async () => {
+  test("claim-unproven: a success claim the report cannot prove discharged is not measured", async () => {
     const db = fixture();
     const t0 = Date.now() - 3_600_000;
+    const seen = (headSha: string) =>
+      seedAttempt(db, {
+        attemptId: `claim-${headSha.slice(0, 4)}`,
+        headSha,
+        enqueuedMs: t0,
+        admittedMs: t0,
+        persistedMs: t0 + 20_000,
+        settledMs: t0 + 30_000,
+        // The settlement's own record names a success publication, so the
+        // success claim is an obligation of this attempt.
+        settledEffects: ["publication"],
+      });
+    const expired = "b".repeat(40);
+    const queued = "c".repeat(40);
+    const faulted = "d".repeat(40);
+    const done = "e".repeat(40);
+    const doneTwin = "f".repeat(40);
+    for (const head of [expired, queued, faulted, done, doneTwin]) seen(head);
+
+    const claims = claimsKv(
+      { [claimKeyFor(queued)]: "1", [claimKeyFor(done)]: "done", [claimKeyFor(doneTwin)]: "done" },
+      [claimKeyFor(faulted)],
+    );
+    const body = (await (await getReport(db, "", OPERATOR, claims)).json()) as {
+      sampleSize: number;
+      total: { p50Ms: number; p90Ms: number; maxMs: number } | null;
+      excluded: Record<string, number>;
+    };
+    // Only the two whose claim reads `done` are measurable: an expired key, a
+    // still-queued claim and a read fault all leave the obligation unknown.
+    expect(body.sampleSize).toBe(2);
+    expect(body.total).toEqual({ p50Ms: 30_000, p90Ms: 30_000, maxMs: 30_000 });
+    expect(body.excluded).toEqual({
+      "check-open-at-settle": 0,
+      "claim-unproven": 3,
+      "no-boundary": 0,
+      unsettled: 0,
+      "pre-prepare": 0,
+    });
+  });
+
+  test("a settlement that names no success publication owes no claim", async () => {
+    const db = fixture();
+    const t0 = Date.now() - 3_600_000;
+    // A failure lane: its claim is the `claim-stamp` effect the settlement
+    // certifies, not the success claim KV holds.
     seedAttempt(db, {
-      attemptId: "measured",
+      attemptId: "failed-lane",
       enqueuedMs: t0,
       admittedMs: t0,
       persistedMs: t0 + 20_000,
       settledMs: t0 + 30_000,
+      settledEffects: ["failure-row", "claim-stamp"],
+    });
+
+    // The KV double answers nothing at all: that must not exclude this row.
+    const body = (await (await getReport(db)).json()) as {
+      sampleSize: number;
+      excluded: Record<string, number>;
+    };
+    expect(body.sampleSize).toBe(1);
+    expect(body.excluded).toEqual({
+      "check-open-at-settle": 0,
+      "claim-unproven": 0,
+      "no-boundary": 0,
+      unsettled: 0,
+      "pre-prepare": 0,
+    });
+  });
+
+  test("the five reasons account for every admitted attempt, one row at a time", async () => {
+    const db = fixture();
+    const t0 = Date.now() - 3_600_000;
+    seedAttempt(db, {
+      attemptId: "measured",
+      headSha: "e".repeat(40),
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 30_000,
+      settledEffects: ["publication"],
     });
     seedAttempt(db, {
       attemptId: "check-open",
@@ -519,23 +676,34 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
       settledMs: t0 + 30_000,
       check: { key: "check-open", generation: 1, terminalMs: null },
     });
+    seedAttempt(db, {
+      attemptId: "claim-unproven",
+      headSha: "b".repeat(40),
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 30_000,
+      settledEffects: ["publication"],
+    });
     seedAttempt(db, { attemptId: "queueless", enqueuedMs: null, admittedMs: t0, persistedMs: t0 + 20_000, settledMs: t0 + 30_000 });
     seedAttempt(db, { attemptId: "running", enqueuedMs: t0, admittedMs: t0, persistedMs: t0 + 10_000, settledMs: null });
     seedAttempt(db, { attemptId: "create-rejected", handoffState: "failed", enqueuedMs: t0, admittedMs: t0, settledMs: null });
 
-    const body = (await (await getReport(db)).json()) as {
+    const claims = claimsKv({ [claimKeyFor("e".repeat(40))]: "done" });
+    const body = (await (await getReport(db, "", OPERATOR, claims)).json()) as {
       sampleSize: number;
       excluded: Record<string, number>;
     };
     const excluded = body.excluded;
     expect(excluded).toEqual({
       "check-open-at-settle": 1,
+      "claim-unproven": 1,
       "no-boundary": 1,
       unsettled: 1,
       "pre-prepare": 1,
     });
     // Every admitted row is either measured or counted exactly once.
-    expect(body.sampleSize + Object.values(excluded).reduce((sum, n) => sum + n, 0)).toBe(5);
+    expect(body.sampleSize + Object.values(excluded).reduce((sum, n) => sum + n, 0)).toBe(6);
   });
 
   test("an empty window reads as an empty sample, not as zeroes", async () => {
@@ -562,6 +730,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     expect(body.phases).toEqual({ queueWait: null, execution: null, publication: null });
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
+      "claim-unproven": 0,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,

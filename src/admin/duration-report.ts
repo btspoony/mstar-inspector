@@ -5,25 +5,31 @@
  *
  * Population: attempts ADMITTED in the window. The COHORT a percentile may use
  * is "`settled_ms` written AND every obligation of that attempt proven closed":
- * the Check pair the attempt froze must read terminal at or before that instant,
- * because a Check that concludes later (or a row the database does not hold)
- * means the settlement instant truncated the interval. Everything else is
- * counted under one of the four reasons below and never supplied as a zero,
- * because "not measured" and "took no time" are different answers — and only a
- * proven interval may steer the operator's cap.
+ * the Check pair the attempt froze must read terminal at or before that instant
+ * (a Check that concludes later, or a row the database does not hold, means the
+ * settlement instant truncated the interval), and a success publication must
+ * have its idempotency claim reading `done` in KV. Everything else is counted
+ * under one of the five reasons below and never supplied as a zero, because
+ * "not measured" and "took no time" are different answers — and only a proven
+ * interval may steer the operator's cap.
  *
  * The buckets are the attempt's own durable stamps, half-open:
  *   queue wait            [enqueued_ms, created_ms)
  *   execution             [created_ms, min(persisted_at_ms, settling_ms))
  *   publication/recovery  [min(persisted_at_ms, settling_ms), settled_ms)
  *
- * `persisted_at_ms` is the launch row's durable result (execution ended), and
- * `settling_ms` is the failure settlement's own start; the EARLIER of the two is
- * the boundary, so a failure after the result was persisted is still charged to
- * execution, not to recovery. `settled_ms` is written after the publication and
- * Check lanes closed, so a Check that concluded while a publication recovery
- * was still due cannot truncate the third bucket.
+ * `persisted_at_ms` is the launch row's durable RESULT (execution ended), and
+ * `settling_ms` is the failure settlement's own start; when both exist the
+ * EARLIER is the boundary, so a failure after the result was persisted is still
+ * charged to execution, not to recovery. A launch row with no result has no
+ * execution boundary at all — the settlement's start is not a substitute for an
+ * outcome the attempt never recorded. `settled_ms` is written after the
+ * publication and Check lanes closed, so a Check that concluded while a
+ * publication recovery was still due cannot truncate the third bucket.
  */
+import type { KVNamespace } from "@cloudflare/workers-types";
+import { IDEM_DONE, idemKey } from "../contracts/idem";
+import type { ReviewJobPayload } from "../contracts/review-job";
 import type { D1Like } from "../store/types";
 
 /** The report's stated window: complete attempts admitted in the last 30 days. */
@@ -53,25 +59,32 @@ export type DurationBuckets = {
 export type DurationPercentiles = { p50Ms: number; p90Ms: number; maxMs: number };
 
 /**
- * Why an admitted attempt is not in the cohort. The four reasons are fixed by
- * the plan's §7.9a ruling, and each names a fact this module reads:
+ * Why an admitted attempt is not in the cohort. The reasons are fixed by the
+ * plan's §7.9a ruling, and each names a fact this module reads:
  *
  * - `check-open-at-settle` — the attempt froze a Check pair whose row is
  *   missing, still open, or concluded AFTER the instant it claims to have
  *   settled: its end boundary is not proven.
+ * - `claim-unproven` — the settlement names a success publication, and the
+ *   attempt's idempotency claim does not read `done`: a missing or expired key,
+ *   another value, a read fault or no KV binding leaves the obligation UNKNOWN,
+ *   and an unknown obligation is not a closed one.
  * - `no-boundary` — no usable start or end instant: no launch row, a pre-0087
- *   row without its queue stamp, or boundaries that do not run forwards.
- * - `unsettled` — the record itself is not closed: no settlement instant.
+ *   row without its queue stamp, no durable result (the settlement's start is
+ *   not an outcome), or boundaries that do not run forwards.
+ * - `unsettled` — the record itself is not closed: no settlement instant, or a
+ *   launch row whose state says no outcome was ever confirmed.
  * - `pre-prepare` — a definite create rejection: the attempt never reached
  *   prepare, so it never had an attempt boundary to measure.
  */
 export type DurationExclusionReason =
   | "check-open-at-settle"
+  | "claim-unproven"
   | "no-boundary"
   | "unsettled"
   | "pre-prepare";
 
-/** Every reason, so a caller renders all four counts and never one total. */
+/** Every reason, so a caller renders all five counts and never one total. */
 export type DurationReportExclusions = Record<DurationExclusionReason, number>;
 
 export type DurationReportCutoff = {
@@ -143,6 +156,10 @@ type DurationRow = {
   created_ms: number;
   settling_ms: number | null;
   settled_ms: number | null;
+  /** The effects the settlement made durable — the record that names its lane. */
+  settled_effects: string | null;
+  /** The delivery payload: the identity the idempotency claim is keyed from. */
+  payload_json: string;
   persisted_at_ms: number | null;
   /** `null` when the attempt never had a launch row. */
   launch_state: string | null;
@@ -151,11 +168,63 @@ type DurationRow = {
   check_terminal_ms: number | null;
 };
 
-/** The earlier measured end of execution; `null` when neither stamp exists. */
+/** The earlier measured end of execution; `null` when no durable result exists. */
 function executionEndOf(row: DurationRow): number | null {
-  if (row.persisted_at_ms === null) return row.settling_ms;
+  if (row.persisted_at_ms === null) return null;
   if (row.settling_ms === null) return row.persisted_at_ms;
   return Math.min(row.persisted_at_ms, row.settling_ms);
+}
+
+/** Does the settlement's own effect record name a success publication? */
+function namesSuccessPublication(settledEffects: string | null): boolean {
+  if (settledEffects === null) return false;
+  try {
+    return (JSON.parse(settledEffects) as unknown[]).includes("publication");
+  } catch {
+    // An unreadable effects array names no lane; the row is classified by the
+    // facts that are readable.
+    return false;
+  }
+}
+
+/**
+ * The delivery's success-claim key, or `null` when it owes no commit claim (a
+ * delivery without a head). An unreadable payload is not "no claim".
+ */
+function successClaimKeyOf(payloadJson: string): string | null | undefined {
+  let payload: ReviewJobPayload;
+  try {
+    payload = JSON.parse(payloadJson) as ReviewJobPayload;
+  } catch {
+    return undefined;
+  }
+  if (!payload.head_sha) return null;
+  return idemKey({
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+    head_sha: payload.head_sha,
+  });
+}
+
+/**
+ * Is the success claim proven discharged? The claim lives in KV, and the only
+ * proof is the key reading `done`: a missing or expired key (`null`), another
+ * value, a read fault or no KV binding all leave the obligation UNKNOWN, and an
+ * unknown obligation does not enter the cohort. A settlement that names no
+ * success publication owes no claim.
+ */
+async function claimDischarged(row: DurationRow, claims: KVNamespace | null): Promise<boolean> {
+  if (!namesSuccessPublication(row.settled_effects)) return true;
+  const key = successClaimKeyOf(row.payload_json);
+  if (key === null) return true;
+  if (key === undefined || claims === null) return false;
+  try {
+    return (await claims.get(key)) === IDEM_DONE;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -172,11 +241,13 @@ function checkClosedAt(row: DurationRow, settledMs: number): boolean {
 
 /**
  * Read the report. `capMs` is the operator's candidate (analysis only — this
- * module never writes configuration and owns no key).
+ * module never writes configuration and owns no key). `claims` is the KV the
+ * success claim lives in; without it a success publication cannot be proven
+ * discharged and is excluded.
  */
 export async function readReviewDurationReport(
   db: D1Like,
-  input: { nowMs: number; capMs: number | null },
+  input: { nowMs: number; capMs: number | null; claims: KVNamespace | null },
 ): Promise<DurationReport> {
   const startMs = input.nowMs - DURATION_REPORT_WINDOW_DAYS * DAY_MS;
   // `review_launches.attempt_id` is a primary key and `review_checks` is UNIQUE
@@ -186,6 +257,7 @@ export async function readReviewDurationReport(
   const rows = await db
     .prepare(
       `SELECT h.state AS handoff_state, h.enqueued_ms, h.created_ms, h.settling_ms, h.settled_ms,
+              h.settled_effects, h.payload_json,
               l.state AS launch_state, l.persisted_at_ms, l.attempt_key AS check_key,
               c.terminal_ms AS check_terminal_ms
          FROM review_attempt_handoffs h
@@ -199,11 +271,12 @@ export async function readReviewDurationReport(
 
   const excluded: DurationReportExclusions = {
     "check-open-at-settle": 0,
+    "claim-unproven": 0,
     "no-boundary": 0,
     unsettled: 0,
     "pre-prepare": 0,
   };
-  const buckets: DurationBuckets[] = [];
+  const candidates: Array<{ row: DurationRow; bucket: DurationBuckets }> = [];
   for (const row of rows.results) {
     if (row.launch_state === null) {
       // No launch row: there is no execution boundary to measure from. A
@@ -222,9 +295,17 @@ export async function readReviewDurationReport(
       excluded["check-open-at-settle"] += 1;
       continue;
     }
+    // The settlement's start is not an outcome: a row without a durable result
+    // has no execution end at all. The launch row's state says whether the
+    // attempt ever confirmed one.
     const executionEndMs = executionEndOf(row);
+    if (executionEndMs === null) {
+      if (row.launch_state === "launched") excluded.unsettled += 1;
+      else excluded["no-boundary"] += 1;
+      continue;
+    }
     const bucket =
-      row.enqueued_ms === null || executionEndMs === null
+      row.enqueued_ms === null
         ? null
         : phaseBuckets({
             enqueuedMs: row.enqueued_ms,
@@ -236,8 +317,20 @@ export async function readReviewDurationReport(
       excluded["no-boundary"] += 1;
       continue;
     }
-    buckets.push(bucket);
+    candidates.push({ row, bucket });
   }
+
+  // The claim is the one obligation that leaves the database. It is proven only
+  // for the rows that would otherwise be measured — never to rescue an excluded
+  // row, and never assumed for one whose settlement names a success publication.
+  const discharged = await Promise.all(
+    candidates.map((candidate) => claimDischarged(candidate.row, input.claims)),
+  );
+  const buckets: DurationBuckets[] = [];
+  candidates.forEach((candidate, index) => {
+    if (discharged[index] === true) buckets.push(candidate.bucket);
+    else excluded["claim-unproven"] += 1;
+  });
 
   return {
     window: { days: DURATION_REPORT_WINDOW_DAYS, startMs, endMs: input.nowMs },
