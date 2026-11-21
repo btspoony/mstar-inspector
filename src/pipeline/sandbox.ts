@@ -157,6 +157,14 @@ export type ReviewSandbox = {
    * own health-check sandbox). Attempt-owned containers use `destroyMarked`.
    */
   destroy(): Promise<void>;
+  /**
+   * Does this sandbox id still have a running container? Read-only and never
+   * starting one. Ids are unique per attempt, so `false` is an OBSERVATION
+   * about that one attempt — nothing is left that could act — while `true`
+   * means a successor must not reuse the attempt's PR or capacity. Absent
+   * means the host cannot answer, which is not a stop.
+   */
+  containerRunning?(): Promise<boolean>;
 };
 
 /**
@@ -691,6 +699,18 @@ export class SandboxV1 extends DurableObject {
   /** Terminate the container. Ids are never reused (see getSandbox). */
   async destroy(): Promise<void> {
     return this.exclusive(() => this.container.destroy());
+  }
+
+  /**
+   * The attempt's stop observation (spec §7.9). `running` is the platform's own
+   * answer for the container bound to this id and starting one is not on this
+   * path, so `false` means there is no container left that could act for the
+   * attempt — the one fact a successor may reassign the PR on. A missing
+   * container binding is not an answer, so it throws instead of reading as
+   * stopped.
+   */
+  async containerRunning(): Promise<boolean> {
+    return this.container.running;
   }
 }
 

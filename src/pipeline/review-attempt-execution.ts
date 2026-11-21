@@ -381,7 +381,7 @@ export type ConsumerLogFields = {
    * and the handoff row stays for recovery), and the moved-head path recorded
    * the observed head in the successor outbox (or named why it could not).
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "review_succession_refused" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -406,6 +406,11 @@ export type ConsumerLogFields = {
    * join key a give-up line carries: that row owns the remote run id.
    */
   attempt_id?: string;
+  /**
+   * The attempt whose admission row an expired successor refused
+   * (`review_succession_refused` only): the PR stays held by that attempt.
+   */
+  prior_attempt_id?: string;
   /**
    * Why the consumer stopped waiting on the Check hook (§7.10 give-up) — the
    * free-form detail, distinct from `reason`'s closed admission vocabulary.

@@ -16,6 +16,13 @@
  * replaces an EXPIRED row in place and refuses a live one; expired rows are
  * excluded from both cap counts, so a reclaimed row never counts twice.
  *
+ * Expiry is a fence, not evidence (spec §7.9). A DIFFERENT attempt may replace
+ * an expired row only when the caller observed that row's attempt stopped
+ * (`priorStopped`), and the write binds the observed id to the row's own
+ * `attempt_id`; the same attempt may always re-acquire its own expired row
+ * (a replay). So silence — a lapsed lease, a quiet Workflow, elapsed time —
+ * never reassigns the PR or its capacity.
+ *
  * A zero-row result carries no cause, so a refusal costs exactly one follow-up
  * read (spec §1.3 lists the four reasons). The read is diagnostic only — it
  * never decides admission; a raced read whose numbers no longer explain the
@@ -77,8 +84,11 @@ export type InflightAcquireResult =
    * `heldHeadSha` is the sha the live row was taken for (`""` = a
    * comment-triggered review carried none): the terminal drop record needs it
    * to tell a duplicate of that review from a commit it never covers.
+   * `heldAttemptId`/`heldExpired` name the row itself, so a successor can ask
+   * that attempt's sandbox whether it is still running — the one observation
+   * an expired row may be replaced on.
    */
-  | { ok: false; reason: "pr-held"; heldHeadSha: string }
+  | { ok: false; reason: "pr-held"; heldHeadSha: string; heldAttemptId: string; heldExpired: boolean }
   | { ok: false; reason: "error"; cause: InflightErrorCause };
 
 /** The operator-facing text of an `error` refusal (log field, drop row). */
@@ -105,6 +115,14 @@ export type AcquireInflightOptions = {
   headSha: string | null;
   /** ISO-8601 instant the acquisition is evaluated at. */
   now: string;
+  /**
+   * The PRIOR attempt whose sandbox the caller OBSERVED not running. It is the
+   * only way to reuse another attempt's expired row (spec §7.9): expiry alone
+   * never reassigns the PR or its capacity, and the write below binds this id
+   * to the row's own `attempt_id` so an observation taken for one attempt
+   * cannot replace another.
+   */
+  priorStopped?: { attemptId: string };
 };
 
 /**
@@ -125,8 +143,12 @@ const PAID_STATE_UNKNOWN = `EXISTS (SELECT 1 FROM review_launches l
  * new (or its expired predecessor was replaced). `0` means the PR is held, a
  * cap is reached, or the row raced away — disambiguated below.
  *
- * An expired row whose paid state is UNKNOWN is not replaceable: expiry only
- * schedules a check, never a replacement run.
+ * An expired row is replaceable only TWO ways (spec §7.9): by the attempt that
+ * already owns it (a replay of the same delivery), or by a successor that
+ * OBSERVED the owning attempt's sandbox not running (`priorStopped`). Expiry is
+ * a fence, never evidence: it only makes the row a candidate for a successor
+ * that has the observation. An expired row whose paid state is UNKNOWN is not
+ * replaceable at all — expiry only schedules a check, never a replacement run.
  */
 const ACQUIRE_SQL = `
 INSERT INTO review_inflight
@@ -146,21 +168,32 @@ WHERE review_inflight.expires_at <= ?
   AND NOT EXISTS (SELECT 1 FROM review_launches l
                    WHERE l.attempt_id = review_inflight.attempt_id
                      AND l.state = 'launched' AND l.result_outcome IS NULL)
+  AND (review_inflight.attempt_id = ? OR review_inflight.attempt_id = ?)
 `;
 
-/** The one follow-up read a zero-row acquire owes (diagnostic only). */
+/**
+ * The one follow-up read a zero-row acquire owes (diagnostic only).
+ *
+ * The two trailing columns name the PR's row whatever its state (it is unique
+ * per PR), so an expired row that the successor predicate refused can report
+ * WHO holds it and let the caller ask that attempt's sandbox for the stop
+ * observation.
+ */
 const REFUSAL_SQL = `
 SELECT
   (SELECT COUNT(*) FROM review_inflight r
     WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?
       AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) AS held,
   (SELECT r.head_sha FROM review_inflight r
-    WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?
-      AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) AS held_head_sha,
+    WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) AS held_head_sha,
   (SELECT COUNT(*) FROM review_inflight r
     WHERE r.expires_at > ? OR ${PAID_STATE_UNKNOWN}) AS total,
   (SELECT COUNT(*) FROM review_inflight r
-    WHERE r.workspace_id = ? AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) AS workspace_total
+    WHERE r.workspace_id = ? AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) AS workspace_total,
+  (SELECT r.attempt_id FROM review_inflight r
+    WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) AS held_attempt_id,
+  (SELECT r.expires_at FROM review_inflight r
+    WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) AS held_expires_at
 `;
 
 const RELEASE_SQL = `
@@ -227,6 +260,10 @@ export async function acquireInflight(
         opts.workspaceCap,
         // Reclaim guard: only an EXPIRED row may be replaced.
         now,
+        // …and only by its own attempt (a replay) or by the successor that
+        // observed THAT attempt's sandbox stopped. `""` never matches a row.
+        opts.attemptId,
+        opts.priorStopped?.attemptId ?? "",
       )
       .run();
     if (written.meta.changes === 1) return { ok: true };
@@ -244,15 +281,40 @@ export async function acquireInflight(
         key.repo,
         key.pr_number,
         now,
-        now,
         key.workspace_id,
         now,
+        key.installation_id,
+        key.owner,
+        key.repo,
+        key.pr_number,
+        key.installation_id,
+        key.owner,
+        key.repo,
+        key.pr_number,
       )
-      .first<{ held: number; held_head_sha: string; total: number; workspace_total: number }>();
+      .first<{
+        held: number;
+        held_head_sha: string | null;
+        total: number;
+        workspace_total: number;
+        held_attempt_id: string | null;
+        held_expires_at: string | null;
+      }>();
     if (row === null) {
       return { ok: false, reason: "error", cause: { kind: "fault", detail: "refusal read returned no row" } };
     }
-    if (row.held > 0) return { ok: false, reason: "pr-held", heldHeadSha: row.held_head_sha };
+    // A row exists for this PR and the write above refused it: it is live, its
+    // paid state is unknown, or it is expired without a successor observation.
+    // All three hold the PR — nothing was admitted either way.
+    if (row.held > 0 || row.held_attempt_id !== null) {
+      return {
+        ok: false,
+        reason: "pr-held",
+        heldHeadSha: row.held_head_sha ?? "",
+        heldAttemptId: row.held_attempt_id ?? "",
+        heldExpired: row.held_expires_at !== null && Date.parse(row.held_expires_at) <= nowMs,
+      };
+    }
     if (row.total >= opts.systemCap) return { ok: false, reason: "system-cap" };
     if (row.workspace_total >= opts.workspaceCap) return { ok: false, reason: "workspace-cap" };
     // The capacity this attempt was refused on was released between the two

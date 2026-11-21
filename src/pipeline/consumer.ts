@@ -125,7 +125,7 @@ import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 // linking the publication the probe found, and releasing the claim to recovery.
 import { type PublicationRow } from "../store/finding-lifecycle";
 import { type Scope } from "../../packages/shared/src/recheck-wire";
-import { getSandbox } from "./sandbox";
+import { getSandbox, type ReviewSandbox } from "./sandbox";
 import {
   attemptSandboxId,
   type RunnerAppConfig,
@@ -173,6 +173,7 @@ import {
   describeInflightError,
   extendInflightTtl,
   releaseInflight,
+  type AcquireInflightOptions,
   type InflightKey,
 } from "../store/inflight-store";
 import { readReviewConcurrency } from "./concurrency-reader";
@@ -1384,6 +1385,28 @@ function queueStampOf(timestamp: unknown): number | null {
 }
 
 /**
+ * The successor's stop observation (spec §7.9): did the PRIOR attempt's own
+ * sandbox answer that no container is running? Sandbox ids are unique per
+ * attempt, so `false` is an observation about that attempt and nobody else's.
+ * A live container, an absent capability, or a failed read is NOT a stop — the
+ * caller then refuses the takeover instead of guessing from the fence.
+ */
+export async function priorSandboxStopped(
+  getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>,
+  binding: unknown,
+  attemptId: string,
+): Promise<boolean> {
+  try {
+    const sandbox = await getSandbox(binding, attemptSandboxId(attemptId));
+    if (sandbox.containerRunning === undefined) return false;
+    return (await sandbox.containerRunning()) === false;
+  } catch {
+    // An unreadable sandbox is not a stopped one.
+    return false;
+  }
+}
+
+/**
  * Create the queue consumer: admission, dedupe, skip settlement and the
  * hand-off only. One admitted delivery becomes one Workflow instance through
  * the caller's `startAttempt` (or the `startAttempt` override); the consumer
@@ -2016,7 +2039,7 @@ async function processMessage(
     // can exceed the level's ceiling-derived TTL, and a guard that expired
     // first would let a second delivery start the same PR.
     const ttlSeconds = reviewGuardTtlForDeadline(deadlineMs, Date.now(), level);
-    const admission = await acquireInflight(deps.env.DB, inflightKey, {
+    const admissionOpts: AcquireInflightOptions = {
       // Each cap binds to its own predicate: `system` bounds the global live
       // count, `workspace` the tenant's — never the effective min here.
       systemCap: concurrency.system,
@@ -2031,7 +2054,28 @@ async function processMessage(
       // `Date.now()` every deadline in this invocation is measured on, so
       // the row's origin is stamped from the same instant the budget reads.
       now: new Date(Date.now()).toISOString(),
-    });
+    };
+    let admission = await acquireInflight(deps.env.DB, inflightKey, admissionOpts);
+    // §7.9: an expired row is a FENCE, not a stopped executor. This attempt is
+    // a successor only when the owning attempt's own sandbox answers that no
+    // container is running — never because the lease lapsed, a Workflow went
+    // quiet, or time passed. The acquisition then binds that observed id to the
+    // row it replaces, so an observation taken for one attempt cannot take
+    // another's PR.
+    if (!admission.ok && admission.reason === "pr-held" && admission.heldExpired) {
+      const priorAttemptId = admission.heldAttemptId;
+      if (await priorSandboxStopped(deps.getSandbox, deps.env.SANDBOX, priorAttemptId)) {
+        admission = await acquireInflight(deps.env.DB, inflightKey, {
+          ...admissionOpts,
+          priorStopped: { attemptId: priorAttemptId },
+        });
+      } else {
+        deps.log.warn(
+          { ...baseFields, prior_attempt_id: priorAttemptId, event: "review_succession_refused" },
+          "the prior attempt's sandbox is not observed stopped — the PR and its capacity stay with it, never reused on expiry",
+        );
+      }
+    }
     if (!admission.ok) {
       // §1.3 observability: one admission decision, one refusal record — the
       // caps are the ones this decision was measured against. An `error` also
