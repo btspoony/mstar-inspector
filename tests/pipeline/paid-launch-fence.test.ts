@@ -182,6 +182,7 @@ function executionInput(sandbox: SandboxDouble, db: TestD1) {
     observedChangedLines: null,
     progress: progress(),
     attemptId: ATTEMPT,
+    identity: null,
   };
 }
 
@@ -199,6 +200,7 @@ function prepareInput(db: TestD1, sandbox: SandboxDouble | null, envDb: D1Like =
     },
     commenter: { getInstallationToken: async () => GRANT as never },
     attemptId: ATTEMPT,
+    identity: null,
     sandbox: sandbox as never,
     onSandbox: () => {},
     progress: progress(),

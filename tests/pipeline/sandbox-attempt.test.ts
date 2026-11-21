@@ -246,6 +246,7 @@ describe("prepare writes the marker before any checkout work", () => {
       },
       commenter: { getInstallationToken: async () => GRANT as never },
       attemptId: ATTEMPT_A,
+      identity: null,
       sandbox: null,
       onSandbox: () => {},
       progress: progress(),
@@ -267,6 +268,7 @@ describe("prepare writes the marker before any checkout work", () => {
         deps: { env: { SANDBOX: {}, DB: db }, getSandbox: async () => sandbox as never },
         commenter: { getInstallationToken: async () => GRANT as never },
         attemptId: ATTEMPT_A,
+      identity: null,
         sandbox: null,
         onSandbox: () => {},
         progress: progress(),
@@ -302,6 +304,7 @@ describe("collection refuses an unproven container", () => {
     observedChangedLines: null,
     progress: progress(),
     attemptId: ATTEMPT_A,
+    identity: null,
   });
 
   test("a missing/different marker yields unknown, never a collected result", async () => {

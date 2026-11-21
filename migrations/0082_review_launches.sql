@@ -46,6 +46,9 @@ CREATE TABLE review_launches (
   -- row; none re-derives it. A head supersession is a new attempt with its own
   -- key, so the association never has to reconcile a key that moved underneath.
   attempt_key TEXT,
+  -- The Check generation that key belongs to, frozen at the SAME instant: a
+  -- later generation is another attempt's row, so it is never looked up.
+  attempt_generation INTEGER,
   state TEXT NOT NULL CHECK (state IN ('provisioned', 'launched', 'persisted', 'failed', 'abandoned')),
   claimed_at_ms INTEGER NOT NULL,
   launched_at_ms INTEGER,
@@ -64,6 +67,7 @@ CREATE TABLE review_launches (
   CHECK ((result_json IS NOT NULL) = (state = 'persisted')),
   CHECK ((result_outcome = 'persisted') = (state = 'persisted')),
   CHECK ((result_outcome = 'failed') = (state = 'failed')),
+  CHECK ((attempt_generation IS NOT NULL) = (attempt_key IS NOT NULL)),
   CHECK ((check_key IS NOT NULL) = (check_owed_ms IS NOT NULL)),
   CHECK ((check_generation IS NOT NULL) = (check_owed_ms IS NOT NULL))
 );

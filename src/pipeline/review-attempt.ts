@@ -141,18 +141,26 @@ export async function discardReviewAttempt(
  * never re-claimed, from the second entry on.
  */
 const CLAIM_ATTEMPT_SQL = `
-INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key)
-VALUES (?, 'provisioned', ?, ?)
+INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation)
+VALUES (?, 'provisioned', ?, ?, ?)
 ON CONFLICT (attempt_id) DO NOTHING
 `;
 
-/** Fill the frozen key ONCE, when a delivery that carried no head learns one. */
-const FREEZE_ATTEMPT_KEY_SQL = `
-UPDATE review_launches SET attempt_key = ?
+/**
+ * Fill the frozen IDENTITY once — key AND generation — for a delivery that had
+ * no head at creation. The CAS is `attempt_key IS NULL`: exactly one winner, and
+ * a loser means another caller froze a DIFFERENT head (a moved head), which the
+ * caller must settle as skipped, never continue on.
+ */
+const FREEZE_ATTEMPT_IDENTITY_SQL = `
+UPDATE review_launches SET attempt_key = ?, attempt_generation = ?
 WHERE attempt_id = ? AND attempt_key IS NULL
 `;
 
-const READ_ATTEMPT_KEY_SQL = `SELECT attempt_key FROM review_launches WHERE attempt_id = ?`;
+const READ_ATTEMPT_IDENTITY_SQL = `SELECT attempt_key, attempt_generation FROM review_launches WHERE attempt_id = ?`;
+
+/** One attempt's frozen Check identity: the key and the generation it belongs to. */
+export type AttemptIdentity = { key: string; generation: number };
 
 /**
  * The paid-step fence, taken in the statement that is ABOUT TO SEND the exec:
@@ -386,31 +394,48 @@ export async function claimReviewAttempt(
   db: D1Like,
   attemptId: string,
   nowMs: number,
-  /** The key frozen at creation; `null` when this delivery carried no head yet. */
-  attemptKey: string | null,
+  /**
+   * The identity frozen at creation — key AND generation — or `null` when this
+   * delivery had no admitted claim (the freeze then happens at the checkout).
+   */
+  identity: AttemptIdentity | null,
 ): Promise<"claimed" | "already-claimed"> {
-  const written = await db.prepare(CLAIM_ATTEMPT_SQL).bind(attemptId, nowMs, attemptKey).run();
+  const written = await db
+    .prepare(CLAIM_ATTEMPT_SQL)
+    .bind(attemptId, nowMs, identity?.key ?? null, identity?.generation ?? null)
+    .run();
   return written.meta.changes === 1 ? "claimed" : "already-claimed";
 }
 
 /**
- * Freeze the attempt's Check key the first time it is knowable (a delivery whose
- * payload carried no head learns it at the checkout). One conditional write, so
- * the key is never rewritten: every later phase reads it from this row.
+ * Freeze the attempt's Check identity the first time it is knowable. ONE
+ * conditional write whose CAS is `attempt_key IS NULL`: `true` means this caller
+ * won; `false` means another caller already froze a different head — a moved
+ * head — and the caller settles this attempt as skipped instead of continuing.
  */
-export async function freezeAttemptKey(
+export async function freezeAttemptIdentity(
   db: D1Like,
   attemptId: string,
-  attemptKey: string,
+  identity: AttemptIdentity,
 ): Promise<boolean> {
-  const written = await db.prepare(FREEZE_ATTEMPT_KEY_SQL).bind(attemptKey, attemptId).run();
+  const written = await db
+    .prepare(FREEZE_ATTEMPT_IDENTITY_SQL)
+    .bind(identity.key, identity.generation, attemptId)
+    .run();
   return written.meta.changes === 1;
 }
 
-/** The FROZEN key for this attempt — the only value later phases may use. */
-export async function readAttemptKey(db: D1Like, attemptId: string): Promise<string | null> {
-  const row = await db.prepare(READ_ATTEMPT_KEY_SQL).bind(attemptId).first<{ attempt_key: string | null }>();
-  return row?.attempt_key ?? null;
+/** The FROZEN identity for this attempt — the only value later phases may use. */
+export async function readAttemptIdentity(
+  db: D1Like,
+  attemptId: string,
+): Promise<AttemptIdentity | null> {
+  const row = await db
+    .prepare(READ_ATTEMPT_IDENTITY_SQL)
+    .bind(attemptId)
+    .first<{ attempt_key: string | null; attempt_generation: number | null }>();
+  if (row?.attempt_key == null || row.attempt_generation == null) return null;
+  return { key: row.attempt_key, generation: row.attempt_generation };
 }
 
 /**
@@ -509,36 +534,6 @@ export async function noteCheckOwed(
     )
     .run();
   return written.meta.changes === 1;
-}
-
-/**
- * The generation this attempt OBSERVED for its Check — read from the row the
- * attempt's own settlement held, never picked from "the open generation at that
- * instant": an unowned guess could be cleared by the wrong generation, which is
- * worse than a missing mark. `null` means nothing was observed (no settlement
- * row), and the caller then writes no mark at all.
- */
-export async function observeCheckGeneration(
-  db: D1Like,
-  input: { checkKey: string; checkAttemptId?: string },
-): Promise<number | null> {
-  const row =
-    input.checkAttemptId === undefined
-      ? // No handle: the key was FROZEN at attempt creation, so the open row for
-        // it IS this attempt's Check — not a guess about somebody else's.
-        await db
-          .prepare(
-            `SELECT generation FROM review_checks
-              WHERE attempt_key = ? AND terminal_ms IS NULL
-              ORDER BY generation DESC LIMIT 1`,
-          )
-          .bind(input.checkKey)
-          .first<{ generation: number }>()
-      : await db
-          .prepare(`SELECT generation FROM review_checks WHERE id = ? AND terminal_ms IS NULL`)
-          .bind(input.checkAttemptId)
-          .first<{ generation: number }>();
-  return row?.generation ?? null;
 }
 
 /**
@@ -1653,6 +1648,25 @@ function scopeOfPayload(payload: ReviewJobPayload): { appId: string; installatio
 }
 
 /**
+ * The attempt's observed head is not the head its identity was frozen for. The
+ * old attempt is settled as SKIPPED and this error starts a new one (the queue
+ * redelivers under a fresh attempt id); nothing is reviewed under the old
+ * identity.
+ */
+export class MovedHeadError extends Error {
+  constructor(
+    readonly attemptId: string,
+    readonly frozenKey: string,
+    readonly observedKey: string,
+  ) {
+    super(
+      `attempt ${attemptId}: the observed head is not the frozen one (${frozenKey} ≠ ${observedKey}) — settled as skipped, a new attempt owns this head`,
+    );
+    this.name = "MovedHeadError";
+  }
+}
+
+/**
  * Acquire the attempt's container, mint its purpose-scoped read credential,
  * clone the PR head and resolve the AUTHORITATIVE checkout SHA. The caller's
  * failure path reads `progress.failureStage` and `progress.secretValues`, so
@@ -1672,6 +1686,12 @@ export async function prepareReviewAttempt(input: {
   commenter: Pick<ReviewCommenter, "getInstallationToken">;
   /** The attempt identity: the container derives from it, and so does the marker written here. */
   attemptId: string;
+  /**
+   * The Check identity frozen at creation (key + generation). `null` for a
+   * delivery that had no admitted claim — its identity is frozen at the
+   * checkout, and the freeze CAS decides who owns the head.
+   */
+  identity: AttemptIdentity | null;
   sandbox: ReviewSandbox | null;
   /**
    * The caller owns the container's lifetime (its finally destroys it), so it
@@ -1703,14 +1723,25 @@ export async function prepareReviewAttempt(input: {
   // into a retry.
   let provisioning: "claimed" | "already-claimed";
   try {
-    provisioning = await claimReviewAttempt(
-      deps.env.DB,
-      attemptId,
-      Date.now(),
-      // FROZEN at creation: the head this delivery was admitted for, so no
-      // later phase has to re-derive a key that could have moved.
-      checkKeyOf(payload, payload.head_sha),
-    );
+    provisioning = await claimReviewAttempt(deps.env.DB, attemptId, Date.now(), input.identity);
+    // A row that predates this entry (a replay, or a claim seeded elsewhere) may
+    // carry no identity yet: freeze it under the SAME CAS. A loss means another
+    // caller froze a different head — a moved head — never a no-op.
+    if (provisioning === "already-claimed" && input.identity !== null) {
+      const existing = await readAttemptIdentity(deps.env.DB, attemptId);
+      if (existing === null) {
+        if (!(await freezeAttemptIdentity(deps.env.DB, attemptId, input.identity))) {
+          const winner = await readAttemptIdentity(deps.env.DB, attemptId);
+          throw new MovedHeadError(
+            attemptId,
+            winner?.key ?? "another caller's head",
+            input.identity.key,
+          );
+        }
+      } else if (existing.key !== input.identity.key) {
+        throw new MovedHeadError(attemptId, existing.key, input.identity.key);
+      }
+    }
   } catch (err) {
     const detail = redactExactSecrets(
       redactSecrets(err instanceof Error ? err.message : String(err)),

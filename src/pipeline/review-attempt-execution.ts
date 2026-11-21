@@ -57,6 +57,7 @@ import {
   CHECK_BACKOFF_MS,
   attemptKey,
   deferCheckRecovery,
+  readCheckIdentity,
   linkCheckPublication,
   recordTerminalizeOutcome,
 } from "../store/review-checks";
@@ -111,10 +112,11 @@ import {
   readReviewLaunch,
   abandonReviewLaunch,
   launchVerdict,
-  observeCheckGeneration,
-  readAttemptKey,
-  freezeAttemptKey,
+  readAttemptIdentity,
+  freezeAttemptIdentity,
+  type AttemptIdentity,
   checkKeyOf,
+  MovedHeadError,
   noLaunchState,
   noteCheckOwed,
   runReviewAttempt,
@@ -344,7 +346,7 @@ export type ConsumerLogFields = {
    * platform closed (D20) and deferred the whole batch instead of running it —
    * one line per invocation, not per message.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
   action: string;
   installation_id: number;
   owner: string;
@@ -3058,15 +3060,41 @@ async function settlementFor(
 }
 
 /**
- * The publication path may use ONLY the key the launch row froze. A row without
- * one means the attempt never learned its head — nothing can be associated, and
- * the miss is named rather than papered over with a recomputation.
+ * The publication path may use ONLY the identity the launch row froze. A row
+ * without one means the attempt never learned its head — nothing can be
+ * associated, and the miss is named rather than papered over with a guess.
  */
-function assertFrozenKey(checkKey: string | null, attemptId: string, headSha: string): void {
-  if (checkKey !== null) return;
+function assertFrozenIdentity(identity: AttemptIdentity | null, attemptId: string, headSha: string): void {
+  if (identity !== null) return;
   throw new Error(
-    `attempt ${attemptId}: the launch row carries no frozen attempt_key (head ${headSha}) — refusing to associate a re-derived one`,
+    `attempt ${attemptId}: the launch row carries no frozen attempt identity (head ${headSha}) — refusing to associate a derived one`,
   );
+}
+
+/**
+ * Settle a MOVED HEAD: this attempt concludes its Check as skipped, writes the
+ * skip row, and throws so the delivery retries under a fresh attempt id. It
+ * never reviews the observed head under the previous identity.
+ */
+async function settleMovedHead(
+  deps: ProcessDeps,
+  ref: AttemptRef,
+  check: CheckSettlement,
+  headSha: string,
+  frozenKey: string,
+  observedKey: string,
+): Promise<never> {
+  await check.terminalize(null, "skipped", headSha);
+  // A skip-settlement fault must not mask the moved head: the attempt is over
+  // either way, and the error below is what starts the new one.
+  await settleSkippedRow(deps, ref.payload, headSha, "the head moved between admission and the checkout", true).catch(
+    () => {},
+  );
+  deps.log.warn(
+    { ...attemptFields(ref.payload, ref.level, ref.attemptId, headSha), event: "review_moved_head" },
+    `observed head ${observedKey} is not the frozen ${frozenKey} — settled as skipped; the delivery retries under a new attempt`,
+  );
+  throw new MovedHeadError(ref.attemptId, frozenKey, observedKey);
 }
 
 /**
@@ -3085,23 +3113,26 @@ async function noteOwedCheck(
 ): Promise<void> {
   const scope = scopeOf(ref.payload);
   if (scope === undefined || deps.checks === undefined) return;
-  // The key comes from the ROW, never from a recomputation: a derived key
-  // recomputed here could differ from the one the launch fence used.
-  const checkKey = await readAttemptKey(deps.env.DB, ref.attemptId);
-  assertFrozenKey(checkKey, ref.attemptId, headSha);
-  if (checkKey === null) return;
-  // No handle is fine: the key is frozen, so the open row for it IS this
-  // attempt's Check. The obligation is derived from the durable publication and
-  // that row — the reconciler is the consumer.
-  const checkGeneration = await observeCheckGeneration(deps.env.DB, {
-    checkKey,
-    ...(checkAttemptId === undefined ? {} : { checkAttemptId }),
-  });
-  if (checkGeneration === null) return; // that row already concluded: nothing owed
+  // The identity comes from the ROW — key AND generation, both frozen at
+  // creation. Neither is re-derived and neither is looked up: with the key
+  // frozen, a later generation can only be another attempt's row.
+  const identity = await readAttemptIdentity(deps.env.DB, ref.attemptId);
+  if (identity === null) {
+    // No frozen identity means no Check was ever associated with this attempt,
+    // so there is nothing to owe. A REAL Check row behind the handle with no
+    // frozen identity is the genuine inconsistency — the assertion names it
+    // instead of deriving one (a stub handle has no row and is simply nothing).
+    if (checkAttemptId !== undefined && (await readCheckIdentity(deps.env.DB, checkAttemptId)) !== null) {
+      assertFrozenIdentity(identity, ref.attemptId, headSha);
+    }
+    return;
+  }
+  // No handle is fine: the obligation is derived from the durable publication
+  // and the frozen identity, and the reconciler is the consumer.
   const owed = await noteCheckOwed(deps.env.DB, {
     attemptId: ref.attemptId,
-    checkKey,
-    checkGeneration,
+    checkKey: identity.key,
+    checkGeneration: identity.generation,
     dueMs: Date.now() + CHECK_BACKOFF_MS[0]!,
   });
   if (!owed) return; // the Check is settled (or has no open row): nothing is owed
@@ -3312,6 +3343,9 @@ async function preparePhase(
     check.claimAttempted = true;
     await check.begin(lifecycleScope, githubAppId, ref.checkClaimSha);
   }
+  // The identity is NOT frozen here: the checkout may contradict the admitted
+  // claim, and the Check lane then re-claims at the authoritative head. The
+  // identity frozen is the one the LIVE claim owns, below.
   // 1-3. Container + purpose-scoped credential + authoritative checkout:
   // the attempt body acquires them and advances `progress.failureStage`.
   const prepared = await prepareReviewAttempt({
@@ -3319,6 +3353,7 @@ async function preparePhase(
     deps,
     commenter,
     attemptId,
+    identity: null,
     sandbox,
     onSandbox: (acquired) => {
       sandbox = acquired;
@@ -3330,12 +3365,10 @@ async function preparePhase(
   const cmds = prepared.cmds;
   const headSha = prepared.headSha;
   observed.headSha = headSha;
-  // A delivery that carried no head froze no key at creation: freeze it NOW,
-  // once, from the authoritative checkout. Later phases read it from the row.
-  if (checkKeyOf(payload, payload.head_sha) === null) {
-    const checkoutKey = checkKeyOf(payload, headSha);
-    if (checkoutKey !== null) await freezeAttemptKey(deps.env.DB, attemptId, checkoutKey);
-  }
+  // A MOVED HEAD never continues on the old identity. The identity frozen below
+  // is the one the LIVE claim owns — the claim the checkout settled on, after
+  // any supersede — so a frozen key that disagrees with it can only mean another
+  // caller froze a DIFFERENT head, and that attempt settles as skipped.
   // The host caches the credential it just minted, so the phases of THIS
   // invocation never re-mint; a resumed host starts empty and mints again.
   deps.credentials.set(attemptId, { token, secretValues: progress.secretValues });
@@ -4156,6 +4189,33 @@ async function preparePhase(
   if (deps.checks !== undefined && !check.claimAttempted) {
     check.claimAttempted = true;
     await check.begin(lifecycleScope, githubAppId, headSha);
+  }
+
+
+  // IDENTITY, frozen once, from the claim this attempt actually owns (the
+  // admitted one, or the authoritative re-claim the checkout forced). Every
+  // later phase reads it from the row; a concurrent freeze of a DIFFERENT head
+  // wins the CAS and this attempt settles as skipped instead of continuing.
+  if (check.handle !== null) {
+    const liveIdentity = await readCheckIdentity(deps.env.DB, check.handle.attemptId);
+    if (liveIdentity !== null) {
+      const frozenNow = await readAttemptIdentity(deps.env.DB, attemptId);
+      if (frozenNow === null) {
+        if (!(await freezeAttemptIdentity(deps.env.DB, attemptId, liveIdentity))) {
+          const winner = await readAttemptIdentity(deps.env.DB, attemptId);
+          await settleMovedHead(
+            deps,
+            ref,
+            check,
+            headSha,
+            winner?.key ?? "another caller's head",
+            liveIdentity.key,
+          );
+        }
+      } else if (frozenNow.key !== liveIdentity.key) {
+        await settleMovedHead(deps, ref, check, headSha, frozenNow.key, liveIdentity.key);
+      }
+    }
   }
 
   // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
@@ -5359,6 +5419,10 @@ export async function settleAttemptFailure(
   const failure = thrown instanceof AttemptPhaseError ? thrown : undefined;
   const facts = failure?.facts;
   const err = failure?.cause ?? thrown;
+  // A moved head is a SKIP that starts a new attempt, not a failure: the
+  // attempt already settled its Check as skipped and wrote its skip row, so no
+  // failure row is recorded — the throw only carries the delivery back around.
+  const movedHead = err instanceof MovedHeadError;
   const progress: ReviewAttemptProgress = {
     failureStage: facts?.stage ?? "pipeline",
     secretValues: facts?.secretValues ?? [],

@@ -777,6 +777,22 @@ export async function claimAttempt(
 }
 
 /** Read one attempt by row id (null = no such row). */
+/**
+ * The identity frozen on a Check row: its `attempt_key` and the generation that
+ * key belongs to. This is what an attempt's launch row records at creation, so
+ * no later phase has to look a generation up (a later one is another attempt's).
+ */
+export async function readCheckIdentity(
+  db: D1Like,
+  id: string,
+): Promise<{ key: string; generation: number } | null> {
+  const row = await db
+    .prepare(`SELECT attempt_key, generation FROM review_checks WHERE id = ?`)
+    .bind(id)
+    .first<{ attempt_key: string; generation: number }>();
+  return row === null ? null : { key: row.attempt_key, generation: row.generation };
+}
+
 export async function getCheckAttempt(db: D1Like, id: string): Promise<CheckAttempt | null> {
   const row = await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(id).first<ReviewCheckRow>();
   return row === null ? null : attemptOf(row);
