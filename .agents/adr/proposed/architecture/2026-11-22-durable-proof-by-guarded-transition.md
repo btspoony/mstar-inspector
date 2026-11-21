@@ -1,6 +1,6 @@
 # ADR: Make durable claims through evidence-coupled transitions
-Status: proposed — accepted for this iteration as the [§7.9a review contract](../../../../docs/specs/feature/review-lifecycle.md#79a-evidence-coupled-transitions); implementation is not yet complete
-Spec: docs/specs/feature/review-lifecycle.md § 7.7 Publication journal, complete payload and crash recovery
+Status: proposed — the guards are not yet implemented and verified
+Spec: docs/specs/feature/review-lifecycle.md § 7.9a Evidence-coupled transitions
 
 ## Problem
 
@@ -9,6 +9,8 @@ The same mistake keeps surviving local fixes: a writer stores what it expects to
 ## Proposal
 
 Adopt the **evidence-coupled transition** as the review rule for any durable record used to assert an outcome, close an obligation, or authorize a side effect.
+
+This iteration applies [§7.9a](../../../../docs/specs/feature/review-lifecycle.md#79a-evidence-coupled-transitions) as the review criterion. Promote this record to `implemented/` when the guards required by that criterion are implemented and verified.
 
 **Decision rule: A committed record proves a claim only if it binds the exact subject and generation, every writer of the claim commits it under a guard requiring sufficient evidence for that claim, and the evidence still applies at the point of use.**
 
