@@ -5458,10 +5458,16 @@ export async function settleAttemptFailure(
   /**
    * The settle-once mark is written HERE, at the settlement's own completion,
    * never at its entry: a host interrupted mid-settlement leaves the mark
-   * unset, so the next execution settles again. It is best-effort — a lost mark
-   * only means a replay settles twice, which the settlement already tolerates
-   * (a duplicate event row, never a second terminal claim) — and a delivery with
-   * no handoff row (a direct phase caller) matches no row.
+   * unset, so the next execution settles again. It certifies only effects that
+   * actually landed:
+   * - the failure row is a PRECONDITION (`durableOutcome`): a rejected insert
+   *   leaves no mark, so a replay finishes the settlement instead of skipping
+   *   it — that is why the generic path passes `durableOutcome` here;
+   * - the Check conclusion is a precondition by construction: a throwing
+   *   `terminalize` propagates before this is reached;
+   * - the failed-claim KV stamp is NOT: it is best-effort by its own contract,
+   *   and requiring a KV write would let a KV fault block settlement forever.
+   * A delivery with no handoff row (a direct phase caller) matches no row.
    */
   const markSettled = async (): Promise<void> => {
     try {
@@ -5797,8 +5803,9 @@ export async function settleAttemptFailure(
     }
   }
   // Every durable effect is done; the mark now records COMPLETION, and only
-  // then does the attempt's own error propagate.
-  await markSettled();
+  // then does the attempt's own error propagate. A settlement whose failure row
+  // never landed is NOT complete: no mark, so a replay writes what is missing.
+  if (durableOutcome) await markSettled();
   throw err;
 }
 /**

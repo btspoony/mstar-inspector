@@ -11343,7 +11343,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     expect(h.sandbox.calls).toHaveLength(sandboxCalls);
   });
 
-  test("a held comment claim restore failure warns and records a terminal capacity drop", async () => {
+  test("a claim that cannot be handed back refuses to ack, and the retry stays owed", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9202 });
     seedClaim(db, payload, 9202, "queued");
@@ -11358,48 +11358,45 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
       h.overrides,
     );
 
-    await consumer(h.makeBatch(payload));
+    // The ack is the promise that recovery exists: the claim could not be
+    // handed back, so the delivery is NOT acknowledged and is not recorded as
+    // dropped. The obligation itself was persisted, and the claim keeps its
+    // payload for the recovery pass.
+    await expect(consumer(h.makeBatch(payload))).rejects.toThrow(/could not be handed back/);
 
     expect(h.messageRetryCalls).toHaveLength(0);
-    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
-    expect(h.logLines.some((l) => l.level === "warn" && l.msg.includes("comment claim restore failed — dropping through terminal handling") && l.msg.includes("D1 unavailable"))).toBe(true);
-    expect(failureRows(db)).toHaveLength(1);
-    expect(failureRows(db)[0]).toMatchObject({ pr_number: payload.pr_number, stage: "pipeline" });
-    expect(String(failureRows(db)[0]!.error)).toContain("system-cap");
-    expect(String(failureRows(db)[0]!.error)).toContain("comment claim restore failed: D1 unavailable");
-    expect(String(failureRows(db)[0]!.error)).not.toContain("refused retries");
-    expect((await createFailureStore(db).countAdmissionDrops24h())["system-cap"]).toBe(1);
-    expect(claimRows(db)[0]!.state).toBe("consumed");
+    expect(h.messageAckCalls).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(claimRows(db)).toEqual([
+      { state: "consumed", consumed_ms: expect.any(Number), payload_json: JSON.stringify(payload) },
+    ]);
+    const owed = db.raw.query("SELECT payload_json, state FROM review_successors").all() as Array<{
+      payload_json: string;
+      state: string;
+    }>;
+    expect(owed).toHaveLength(1);
+    expect(owed[0]!.state).toBe("owed");
     expect(h.sandbox.calls).toHaveLength(0);
   });
 
-  test("a pr-held comment claim restore failure records a drop without a known head", async () => {
+  test("a pr-held hand-back failure refuses to ack instead of dropping", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9203 });
     seedClaim(db, payload, 9203, "queued");
-    await seedInflight(db, { headSha: null });
+    await seedInflight(db, { headSha: "aaaa" });
     const consumer = createReviewConsumer(
       await h.makeEnv({ DB: dbFailingOn(db, "SET state = 'queued', payload_json") as never }),
       h.testLog,
       h.overrides,
     );
 
-    await consumer(h.makeBatch(payload));
+    await expect(consumer(h.makeBatch(payload))).rejects.toThrow(/could not be handed back/);
 
     expect(h.messageRetryCalls).toHaveLength(0);
-    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
-    expect(failureRows(db)).toHaveLength(1);
-    const failure = failureRows(db)[0]!;
-    expect(failure).toMatchObject({ pr_number: payload.pr_number, stage: "pipeline", head_sha: "" });
-    expect(String(failure.error)).toContain("comment claim restore failed: D1 unavailable");
-    expect(String(failure.error)).toContain("pr-held");
-    expect(String(failure.error)).not.toContain("refused retries");
-    expect((await createFailureStore(db).countAdmissionDrops24h())["pr-held"]).toBe(1);
-    const terminalWarn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("— acking"))!;
-    expect(terminalWarn.msg).toContain("comment claim restore failed: D1 unavailable");
-    expect(terminalWarn.msg).toContain("pr-held");
-    expect(terminalWarn.msg).not.toContain("delayed retries");
+    expect(h.messageAckCalls).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(0);
     expect(claimRows(db)[0]!.state).toBe("consumed");
+    expect(claimRows(db)[0]!.payload_json).not.toBeNull();
     expect(h.sandbox.calls).toHaveLength(0);
   });
 

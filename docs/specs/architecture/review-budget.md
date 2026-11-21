@@ -174,23 +174,21 @@ The runner reports, the Worker publishes:
 The Workflow route (`src/workflow/review.ts`, handed off by the queue consumer) is
 wired as the production queue path, and this page is where an operator reads what
 must hold before it carries real deliveries. **Do not enable the route for real
-traffic until every claim below holds with its test.** The route is proven only
-by interruption tests: each one simulates the interruption or the lying signal
-it names, and each one failed against the code before this gate was written
-(except claim 6, which already held and is pinned so a later change cannot
-regress it).
+traffic until every claim below holds with its test.** Each claim is proven by an
+interruption test that simulates what it names. Where the proof is narrower than
+the claim, the table says so; a narrower proof is never labelled a full one.
 
-| # | Recovery claim | Test |
-|---|---|---|
-| 1 | A comment delivery whose claim was already consumed is still recoverable: a redelivery that finds an `owed`/`ambiguous`/`failed` handoff reaches create, and an interruption between consuming the claim and writing the handoff leaves a row the reconciler hands back. | `tests/pipeline/route-recovery-handoff.test.ts` — all three cases |
-| 2 | The settle-once mark proves **completion**, not entry: a host killed inside the settlement leaves no mark and the resumed run settles; a completed settlement is not repeated; one transient error is retried. | `tests/pipeline/route-recovery-settlement.test.ts` — all four cases |
-| 3 | The successor outbox row exists **before** the moved-head settlement that terminalizes the old Check, so an interruption leaves an owed row rather than nothing. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-3 cases |
-| 4 | The successor dedupe key fences sends and identifies its owner (App/target, observed head, originating delivery); the stored winning payload is what gets sent; a replay of one intent admits once. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-4 cases |
-| 5 | Error classification carries proof: a `TypeError` is not evidence a create did not land, and "already exists" is not evidence the same instance exists — this attempt's own instance id is read back, or the outcome is unknown. | `tests/pipeline/route-recovery-handoff.test.ts` — all three claim-5 cases |
-| 6 | The paid call cannot start or end past the frozen instant when the request queues or the marker proof takes time: the remaining window is re-derived inside the container, kill grace subtracted. | `tests/pipeline/route-recovery-deadline.test.ts` — both claim-6 cases |
-| 7 | The guard window and the attempt's instant come from **one** settled value, including a legacy row anchored concurrently by two callers. | `tests/pipeline/route-recovery-deadline.test.ts` — the claim-7 case |
-| 8 | A widened guard never ack-and-forgets a queued retry (the drop records the retry the reconciler owes), and while a paid exec's state is unknown the PR and its capacity are not reassigned. | `tests/pipeline/route-recovery-guard.test.ts` — all three cases |
-| 9 | A container suspended between reading its clock and starting the bounded command cannot start the paid command after the deadline (`date` blocked past the instant). | `tests/pipeline/route-recovery-deadline.test.ts` — the claim-9 case |
+| # | Recovery claim | Test | What the test demonstrates |
+|---|---|---|---|
+| 1 | A comment delivery whose claim was already consumed is still recoverable: a redelivery that finds an `owed`/`ambiguous`/`failed` handoff reaches create, and an interruption between consuming the claim and writing the handoff leaves a row the reconciler hands back. | `tests/pipeline/route-recovery-handoff.test.ts` — all four cases | The pre-handoff case is **exercised**: a normal queued claim is consumed by the real consumer, its handoff insert is made to hang (the host dies there), the test observes the state the code produced, then recovers through the reconciler and replays admission. Reverting the consumer to clearing the payload at consumption fails it. |
+| 2 | The settle-once mark proves **completion**, not entry: an interruption after the mark but before the failure row / Check terminal leaves the settlement replayable; the step survives one transient error. | `tests/pipeline/route-recovery-settlement.test.ts` — all five cases | The mark is read at each effect boundary: absent while the failure row lands, absent after a killed settlement, skipped after a completed one, and absent when the failure-row write itself rejects (the mark does not certify a row that is missing). The retry is a model of the platform's policy, not the platform. |
+| 3 | The successor outbox row exists **before** the moved-head settlement that terminalizes the old Check. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-3 cases | The outbox is read **inside** the `terminalize` call; moving the record after terminalization fails the test. The second case kills the host before the successor step and recovers the owed row. |
+| 4 | The successor dedupe key fences sends and identifies its owner; the stored winning payload is what gets sent; a replay of one intent admits once. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-4 cases | The first case drives the real workflow `recordSuccessor` against a competing stored winner: sending the locally built payload instead fails the test. The second covers a replay (one admission) and two independent origins on one head (separate keys, serialized by the guard). |
+| 5 | Error classification carries proof: a `TypeError` is not evidence a create did not land, and "already exists" is not evidence the same instance exists — this attempt's own instance id is read back, or the outcome is unknown. | `tests/pipeline/route-recovery-handoff.test.ts` — all three claim-5 cases | Lying errors are injected and the handoff state distinguishes ambiguous from confirmed. The platform's own `status()` semantics remain a gate item below. |
+| 6 | The paid call cannot start or end past the frozen instant **when the request queues, the marker proof takes time, or the container's request is delayed** — the remaining window is re-derived inside the container, kill grace subtracted. | `tests/pipeline/route-recovery-deadline.test.ts` — both claim-6 cases | The exact wrapper is executed with a controlled clock: the duration handed to `timeout` is `deadline − now − 1 − grace` from the CONTAINER's clock, and a window at or below the grace starts nothing. This bounds queueing and hand-off. It does **not** bound a platform suspension of the container between its final clock sample and the process start — that is claim 9, and no shell can bound it. |
+| 7 | The guard window and the attempt's instant come from **one** settled value, including a legacy row anchored concurrently by two callers. | `tests/pipeline/route-recovery-deadline.test.ts` — the claim-7 case | A competing first-writer anchor is injected during this delivery's cap read; the actual admission lease and the attempt's instant are compared afterwards. |
+| 8 | A widened guard never ack-and-forgets a queued retry, and while a paid exec's state is unknown the PR and its capacity are not reassigned. | `tests/pipeline/route-recovery-guard.test.ts` — all six cases | The obligation is written and the comment claim handed back **before** the ack; a failing obligation write produces no ack; a delivered row is re-armed by a later drop; an expired lease over an unaccounted paid exec holds both the PR and its capacity. |
+| 9 | A container suspended between reading its clock and starting the bounded command cannot **start** the paid command after the deadline. | `tests/pipeline/route-recovery-deadline.test.ts` — the claim-9 case | A controlled `date` blocks past the deadline and the paid command is shown never to start. What is **not** proved: a suspension strictly after the final clock sample. See the residual below; enabling the route does not make that window disappear. |
 
 **What these tests cannot prove, and must be observed on the platform before
 enabling.** The tests own the database, the clock and the command line; they do
@@ -210,11 +208,14 @@ not own Cloudflare's behaviour. Before the route carries real deliveries:
 
 **Accepted residual (claim 9).** A suspension strictly between the *final* clock
 sample and `exec timeout` still hands the child a duration computed before the
-freeze. No shell can close that gap — it needs a kernel-side watchdog the
-sandbox SDK does not expose — and it is now a few syscalls wide instead of the
-whole request. The claim-9 test proves the observable half: a stale sample can
-no longer start the paid command after the deadline. If the platform later
-exposes a kernel-side deadline, the wrapper's second sample is what it replaces.
+freeze — if that happens, the paid process can run past the frozen instant by
+that duration. No shell can close it (it needs a kernel-side watchdog the
+sandbox SDK does not expose), and the second sample narrows the window to a few
+syscalls instead of the whole request. The claim-9 test proves only the
+observable half: a **stale sample** cannot start the paid command after the
+deadline. The absolute guarantee therefore depends on the platform's scheduler
+not suspending a container in that narrow window; if the platform later exposes
+a kernel-side deadline, the wrapper's second sample is what it replaces.
 
 ## Where it lives
 

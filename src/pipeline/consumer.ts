@@ -97,7 +97,7 @@ import {
   guardDropDedupeKeyOf,
   markAttemptHandoff,
   readAttemptHandoff,
-  recordSuccessorIntent,
+  recordGuardDropIntent,
   reserveAttemptHandoff,
 } from "../store/review-route-store";
 import {
@@ -443,16 +443,16 @@ async function handleGuardHeld(
   // the App row BEFORE the guard, so this retry path reads no storage at all.
   const delays = guardRetryDelaysSeconds(level);
   const delaySeconds = delays[message.attempts - 1];
-  let retryAllowed = delaySeconds !== undefined;
   let restoreFailure: string | null = null;
   /**
    * Hand the comment claim back so a LATER delivery of this message can run:
    * the scheduled retry below, or the outbox retry the terminal drop records.
    * Other deliveries cannot consume a consumed row; only this delivery can
-   * restore it.
+   * restore it. Returns whether a hand-back was needed and succeeded, so the
+   * terminal path can refuse to ack what it could not make recoverable.
    */
-  const restoreClaimForRetry = async (queuedMs: number): Promise<void> => {
-    if (!commentClaimConsumed || message.body.comment_id === undefined) return;
+  const restoreClaimForRetry = async (queuedMs: number): Promise<"none" | "restored" | "failed"> => {
+    if (!commentClaimConsumed || message.body.comment_id === undefined) return "none";
     const payload = message.body;
     try {
       await deps.env.DB.prepare(
@@ -471,31 +471,34 @@ async function handleGuardHeld(
           payload.comment_id,
         )
         .run();
+      return "restored";
     } catch (err) {
-      retryAllowed = false;
       const detail = err instanceof Error ? err.message : String(err);
-      restoreFailure = `comment claim restore failed: ${detail}`;
-      deps.log.warn(fields, `comment claim restore failed — dropping through terminal handling: ${detail}`);
+      deps.log.warn(fields, `comment claim restore failed: ${detail}`);
+      return "failed";
     }
   };
   if (delaySeconds !== undefined) {
     // Let the scheduled delivery arrive before the outbox recovery window starts.
-    await restoreClaimForRetry(Date.now() + delaySeconds * 1000);
-  }
-  if (retryAllowed) {
-    // Say WHY nothing has started: the attach already put a `queued` run on
-    // this commit, and the relabel adds the holder's context to it. Only a
-    // `pr-held` refusal names a live review to wait for — a cap/storage
-    // refusal has no holder and must not claim one.
-    if (admission.reason === "pr-held") {
-      await markQueuedBehindInflightRow(deps, message.body, heldHeadSha);
+    const claim = await restoreClaimForRetry(Date.now() + delaySeconds * 1000);
+    if (claim !== "failed") {
+      // Say WHY nothing has started: the attach already put a `queued` run on
+      // this commit, and the relabel adds the holder's context to it. Only a
+      // `pr-held` refusal names a live review to wait for — a cap/storage
+      // refusal has no holder and must not claim one.
+      if (admission.reason === "pr-held") {
+        await markQueuedBehindInflightRow(deps, message.body, heldHeadSha);
+      }
+      deps.log.info(
+        fields,
+        `${what} — scheduling delayed retry in ${delaySeconds}s (attempt ${message.attempts}; ${heldBecause})`,
+      );
+      message.retry({ delaySeconds });
+      return;
     }
-    deps.log.info(
-      fields,
-      `${what} — scheduling delayed retry in ${delaySeconds}s (attempt ${message.attempts}; ${heldBecause})`,
-    );
-    message.retry({ delaySeconds });
-    return;
+    // The claim could not be handed back: fall through to the terminal path,
+    // which refuses to ack unless it can make the delivery recoverable.
+    restoreFailure = "comment claim restore failed";
   }
   deps.log.warn(
     fields,
@@ -503,7 +506,8 @@ async function handleGuardHeld(
       ? `review dropped: ${restoreFailure} (attempt ${message.attempts}; ${heldBecause}) — acking, no DLQ`
       : `${what} after ${delays.length} delayed retries (attempt ${message.attempts}; ${heldBecause}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
   );
-  message.ack();
+  // NOT acknowledged yet: the drop's obligation is persisted (and the comment
+  // claim handed back) below, and the ack is the promise that it exists.
   // A cap/storage refusal that survived the whole backoff leaves the review
   // DROPPED with no other D1 trace: no attempt for this PR ever reached the
   // runner, so neither `reviews` nor the failure sweep (which counts
@@ -524,8 +528,42 @@ async function handleGuardHeld(
     admission.reason === "pr-held" &&
     (payloadSha === null || payloadSha === "" || heldSha === "" || payloadSha === heldSha)
   ) {
+    // A benign duplicate: nothing is owed, nothing is dropped. The claim's
+    // payload is cleared so the recovery pass does not read this settled
+    // delivery as a stranded one and re-send it forever.
+    if (commentClaimConsumed) {
+      await clearCommentClaimPayload(deps.env.DB, message.body).catch((err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `benign duplicate: comment claim payload clear failed: ${detail}`);
+      });
+    }
+    message.ack();
     return;
   }
+  // A drop is not the end of the route's obligation: the review this delivery
+  // named is still owed, and the guard can release later than the fixed ladder
+  // (an operator cap may exceed it). The obligation is persisted and the
+  // comment claim handed back BEFORE the ack — an ack promises that recovery
+  // exists, so it is only given once both hold. Either failure throws instead of
+  // acking. A delivery without a claim keeps its payload only if the hand-back
+  // failed, which is exactly what the recovery pass restores.
+  try {
+    await recordGuardDropIntent(deps.env.DB, {
+      dedupeKey: guardDropDedupeKeyOf(message.body),
+      payload: message.body,
+      nowMs: Date.now(),
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `dropped delivery could not be recorded as owed — refusing to ack: ${detail}`);
+    throw err;
+  }
+  if ((await restoreClaimForRetry(Date.now())) === "failed") {
+    throw new Error(
+      `review dropped for ${message.body.owner}/${message.body.repo}#${message.body.pr_number} but its comment claim could not be handed back — refusing to ack, the recovery pass owns the retained payload`,
+    );
+  }
+  message.ack();
   // Convention for a job that never resolved a sha (comment trigger —
   // `head_sha` is null in the payload): the row's `head_sha` is `""` (the
   // 0010 column allows it; only `reviews` forbids it), and the PR identity
@@ -569,26 +607,6 @@ async function handleGuardHeld(
   // This is the real drop: the run attached for this message will never
   // execute, so it is settled `neutral` with the refusal named. Best-effort;
   // the ack and the drop record are unaffected.
-  // A drop is not the end of the route's obligation: the review this delivery
-  // named is still owed, and the guard can release later than the fixed ladder
-  // (an operator cap may exceed it). The comment claim is handed back in the
-  // same breath — the re-delivery this records would otherwise be refused by
-  // the claim this delivery consumed — and the retry is written to the
-  // successor outbox, so ack-and-forget never happens: the reconciler
-  // re-enqueues it after the guard has had time to release. The dedupe key is
-  // the delivery itself: a second drop of the same delivery records nothing, so
-  // the recovery is a single second chance, not a loop.
-  await restoreClaimForRetry(Date.now());
-  try {
-    await recordSuccessorIntent(deps.env.DB, {
-      dedupeKey: guardDropDedupeKeyOf(message.body),
-      payload: message.body,
-      nowMs: Date.now(),
-    });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    deps.log.warn(fields, `dropped delivery could not be recorded as owed (the drop record below is its trace): ${detail}`);
-  }
   await settleSkippedRow(deps, message.body, message.body.head_sha, `review admission refused: ${admission.reason}`);
   return deps.failureStore
     .record({
@@ -1563,6 +1581,10 @@ async function processMessage(
   // payload is cleared at that point; every other outcome clears it in the
   // finally, and an interrupted host leaves it for the recovery pass.
   let handoffRecorded = false;
+  // Set when this delivery is handed to the guard path, which owns the comment
+  // claim's payload from then on (it hands the claim back, or the recovery pass
+  // restores the retained payload). The finally must not clear it first.
+  let guardHeldOutcome = false;
   // §7.10 Check budgets, filled by the ONE per-message runtime read (after the
   // level resolves, before the begin hook). Every terminal path runs after that
   // read; a path that somehow reached one without it is still bounded by the
@@ -1975,6 +1997,10 @@ async function processMessage(
       // Deliberately settled in `handleGuardHeld`'s TERMINAL branch only (§7.9):
       // the first three refusals are retried, and a duplicate delivery shares
       // this attempt_key — settling here could close the live review's own run.
+      // The claim's payload is LEFT in place: the guard path hands the claim
+      // back (or, failing that, the recovery pass restores the retained
+      // payload), so the finally must not drop it first.
+      guardHeldOutcome = true;
       return {
         kind: "guard-held",
         commentClaimConsumed,
@@ -2325,9 +2351,10 @@ async function processMessage(
     // need it recovered: an interrupted host runs no finally, so the row it
     // leaves behind is exactly the window the recovery pass restores. Every
     // outcome that REACHES here has ended — a handoff row owns the attempt, or
-    // the delivery is done — so the payload is dropped (a `queued` row restored
-    // by the guard path is untouched: it owns its own retry).
-    if (commentClaimConsumed && !handoffRecorded) {
+    // the delivery is done — so the payload is dropped. A guard-held delivery is
+    // excluded: handleGuardHeld hands the claim back, and if that fails the
+    // retained payload is what the recovery pass restores.
+    if (commentClaimConsumed && !handoffRecorded && !guardHeldOutcome) {
       await clearCommentClaimPayload(deps.env.DB, payload).catch((err: unknown) => {
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(

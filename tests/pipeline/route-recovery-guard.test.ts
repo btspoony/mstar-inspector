@@ -91,7 +91,9 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     );
     expect(sent).toHaveLength(1);
     expect(sent[0]!.head_sha).toBe(payload.head_sha);
-    // Delivered once: a second drop of the same delivery records nothing new.
+    // A second recovery pass sends nothing: the row is delivered. (A second
+    // DROP re-arms it — see the next cases — but a delivered row itself is not
+    // re-sent.)
     await reconcileReviewRoute(
       {
         DB: db as never,
@@ -178,6 +180,72 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     expect((db.raw.query("SELECT state FROM comment_trigger_claims").get() as { state: string }).state).toBe(
       "consumed",
     );
+  });
+
+  test("a drop whose obligation cannot be written refuses to ack", async () => {
+    const db = await createSeededTestD1();
+    await seedLiveHolder(db, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    h.queueState.attempts = 6;
+    // The outbox write fails: the ack is the promise that recovery exists, so
+    // it must not be given.
+    const failing = {
+      prepare(query: string) {
+        if (!/INSERT INTO\s+review_successors/.test(query)) return db.prepare(query);
+        const reject = Promise.withResolvers<never>();
+        reject.reject(new Error("D1 unavailable"));
+        return {
+          bind() {
+            return this;
+          },
+          first: async () => null,
+          all: async () => ({ results: [] }),
+          run: () => reject.promise,
+        };
+      },
+    };
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: failing as never }),
+      h.testLog,
+      { ...h.overrides, startAttempt: async () => {} },
+    );
+
+    // The write's own failure surfaces (nothing was acknowledged).
+    await expect(
+      consumer(h.makeBatch(makePayload({ head_sha: "1111111111111111111111111111111111111111" }))),
+    ).rejects.toThrow(/D1 unavailable/);
+
+    expect(h.messageAckCalls).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(await listOwedSuccessors(db as never, 10)).toHaveLength(0);
+  });
+
+  test("a later drop of the same delivery re-arms its delivered row", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: "1111111111111111111111111111111111111111" });
+    await seedLiveHolder(db, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    h.queueState.attempts = 6;
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      startAttempt: async () => {},
+    });
+
+    await consumer(h.makeBatch(payload));
+    const sent: ReviewJobPayload[] = [];
+    const env = {
+      DB: db as never,
+      REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never,
+    };
+    await reconcileReviewRoute(env, Date.now());
+    expect(sent).toHaveLength(1);
+    expect(await listOwedSuccessors(db as never, 10)).toHaveLength(0);
+
+    // The guard still holds through the re-delivery's whole ladder, so it is
+    // dropped again: the row becomes owed again, or the guard outliving one
+    // ladder would lose the review for good.
+    await consumer(h.makeBatch(payload));
+    expect(await listOwedSuccessors(db as never, 10)).toHaveLength(1);
+    await reconcileReviewRoute(env, Date.now() + 1_000);
+    expect(sent).toHaveLength(2);
   });
 });
 

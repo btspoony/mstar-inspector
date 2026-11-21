@@ -164,39 +164,76 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
     }
   });
 
-  test("an interruption after consuming the claim leaves a row the reconciler hands back", async () => {
+  test("a host killed after consuming the claim and before the handoff leaves a row the reconciler hands back", async () => {
     const db = await createSeededTestD1();
     const payload = commentPayload(9300);
-    // The host died between consuming the claim and writing the handoff: the
-    // claim row is the only record, and it still carries the payload.
-    seedCommentClaim(db, payload, 9300, "consumed", true);
+    // The delivery starts with a normal queued claim, exactly as the worker
+    // wrote it: nothing about the interruption is seeded.
+    seedCommentClaim(db, payload, 9300, "queued", true);
 
+    // The host dies AT the handoff write: that insert never returns, so the
+    // invocation hangs there (its finally never runs) and is abandoned below.
+    const reached = Promise.withResolvers<void>();
+    const consumer = createReviewConsumer(
+      await h.makeEnv({
+        DB: {
+          prepare(query: string) {
+            const statement = db.prepare(query);
+            if (!/INSERT INTO\s+review_attempt_handoffs/.test(query)) return statement;
+            reached.resolve();
+            const hang = Promise.withResolvers<never>();
+            return {
+              bind() {
+                return this;
+              },
+              first: <T>() => statement.first<T>(),
+              all: <T>() => statement.all<T>(),
+              run: () => hang.promise,
+            };
+          },
+        } as never,
+      }),
+      h.testLog,
+      h.overrides,
+    );
+    const abandoned = consumer(h.makeBatch(payload));
+    abandoned.catch(() => {});
+
+    // Wait for the write to be attempted — no timer, the code signals it.
+    await reached.promise;
+
+    // The state the CODE produced: the claim was consumed through the normal
+    // path, its payload kept, and no handoff row exists.
+    expect(claimRow(db)).toMatchObject({ state: "consumed" });
+    expect(JSON.parse(claimRow(db).payload_json!)).toEqual(payload);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_attempt_handoffs").get()).toEqual({ n: 0 });
+
+    // Recovery: the reconciler hands the claim back and the replay runs.
     const sent: ReviewJobPayload[] = [];
     const env = {
       DB: db as never,
       REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never,
     };
-    // Too fresh: a live delivery may still be writing its handoff.
-    await reconcileReviewRoute(env, 2_000);
+    const killedAt = Date.now();
+    await reconcileReviewRoute(env, killedAt);
     expect(sent).toHaveLength(0);
-
-    await reconcileReviewRoute(env, 1_000 + 5 * 60_000 + 1);
+    await reconcileReviewRoute(env, killedAt + 5 * 60_000 + 1);
     expect(sent).toHaveLength(1);
-    expect(deliveryKeyOf(sent[0]!)).toBe(deliveryKeyOf(payload));
-    // The hand-back is a state transition: a second pass sends nothing.
-    await reconcileReviewRoute(env, 1_000 + 10 * 60_000);
+    await reconcileReviewRoute(env, killedAt + 10 * 60_000);
     expect(sent).toHaveLength(1);
     expect(claimRow(db).state).toBe("queued");
 
-    // The re-delivery runs the review and the claim becomes consumed again,
-    // this time with the payload dropped (the handoff row owns recovery).
+    // The dead invocation's admission lease is still held (its finally never
+    // ran); nothing was created for it, so it expires on its TTL — modelled
+    // here as the expiry, not as a second admission beside a live row.
+    db.raw.prepare("DELETE FROM review_inflight").run();
     const route = recordingStarter();
-    const consumer = createReviewConsumer(
+    const replay = createReviewConsumer(
       await h.makeEnv({ DB: db as never }),
       h.testLog,
       { ...h.overrides, startAttempt: route.startAttempt },
     );
-    await consumer(h.makeBatch(sent[0]!));
+    await replay(h.makeBatch(sent[0]!));
     expect(route.started).toHaveLength(1);
     expect(claimRow(db)).toMatchObject({ state: "consumed", payload_json: null });
   });

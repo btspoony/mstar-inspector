@@ -237,6 +237,38 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     expect(failureRows(db)).toHaveLength(afterFirst);
   });
 
+  test("a rejected failure-row write leaves no completion mark, and the replay writes it", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedHandoff(db, payload);
+    // The settlement's durable outcome never lands (an infra fault on the row),
+    // and no container exists, so the settlement continues to its end.
+    const broken = {
+      ...createFailureStore(db as never),
+      record: async () => {
+        throw new Error("D1 unavailable");
+      },
+    };
+    await expect(
+      runReviewAttemptWorkflow(await makeDeps(db, broken), makeRef(payload), stepHost({ failOn: "prepare" }).step, async () => {}),
+    ).rejects.toThrow();
+
+    // The mark must NOT certify a settlement whose row is missing: the retry
+    // would skip it and the failure would vanish.
+    expect(failureRows(db)).toHaveLength(0);
+    expect(settledMark(db)).toBeNull();
+
+    // A healthy replay finishes the settlement and only then marks it.
+    await runReviewAttemptWorkflow(
+      await makeDeps(db),
+      makeRef(payload),
+      stepHost({ failOn: "prepare" }).step,
+      async () => {},
+    );
+    expect(failureRows(db)).toHaveLength(1);
+    expect(settledMark(db)).toEqual(expect.any(Number));
+  });
+
   test("one transient error inside the settlement is retried and completes", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();

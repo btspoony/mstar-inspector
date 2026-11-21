@@ -237,14 +237,42 @@ describe("claim 3 — the outbox row precedes the moved-head settlement", () => 
 });
 
 describe("claim 4 — the dedupe key fences sends and names its owner", () => {
-  test("a replay of one intent sends the STORED payload and admits once", async () => {
+  test("the workflow sends the STORED winner, never its own rebuilt payload", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    // Another execution of the same intent already recorded a winner — with a
+    // payload this delivery would never build (a different attach identity and
+    // an ordering stamp the moved head does not have).
+    const intent = successorIntentOf(payload, SHA)!;
+    const storedWinner: ReviewJobPayload = {
+      ...intent.payload,
+      attachDeliveryId: "stored-winner",
+      head_at: "2000-01-01T00:00:00.000Z",
+    };
+    await recordSuccessorIntent(db as never, {
+      dedupeKey: intent.dedupeKey,
+      payload: storedWinner,
+      nowMs: 1,
+    });
+
+    // The whole route runs to the moved head, so the real `recordSuccessor`
+    // builds its own payload, hits the conflict and must enqueue the stored one.
+    const { successors } = await runMovedHead(db);
+
+    expect(successors).toHaveLength(1);
+    expect(successors[0]!.attachDeliveryId).toBe("stored-winner");
+    expect(successors[0]!.head_at).toBe("2000-01-01T00:00:00.000Z");
+    expect(outboxRows(db)).toHaveLength(1);
+    expect(outboxRows(db)[0]!.state).toBe("delivered");
+  });
+
+  test("a replay of one intent admits once; independent origins on the head are serialized, not collided", async () => {
     const db = await createSeededTestD1();
     const base = makePayload();
-    const intent = successorIntentOf(base, "feedfacefeedfacefeedfacefeedfacefeedface")!;
+    const head = "feedfacefeedfacefeedfacefeedfacefeedface";
+    const intent = successorIntentOf(base, head)!;
 
-    // Two executions of the same intent (a re-executed step, the immediate send
-    // racing the reconciler). The second builds a different local payload: the
-    // stored one is what must be sent.
+    // The same intent recorded twice is one row and the stored payload wins.
     await recordSuccessorIntent(db as never, { dedupeKey: intent.dedupeKey, payload: intent.payload, nowMs: 1 });
     const stored = await recordSuccessorIntent(db as never, {
       dedupeKey: intent.dedupeKey,
@@ -256,20 +284,24 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
 
     // Admission of that payload twice creates exactly one attempt.
     const started: AttemptRef[] = [];
-    const consumer = createReviewConsumer(
-      await h.makeEnv({ DB: db as never }),
-      h.testLog,
-      {
-        ...h.overrides,
-        startAttempt: async (_deps, ref) => {
-          started.push(ref);
-        },
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      startAttempt: async (_deps, ref) => {
+        started.push(ref);
       },
-    );
+    });
     await consumer(h.makeBatch(stored));
     await consumer(h.makeBatch(stored));
     expect(started).toHaveLength(1);
-    expect(started[0]!.payload.successor_of).toBe(deliveryKeyOf(base));
+
+    // A DIFFERENT origin observing the same head is a legitimate separate
+    // trigger: it is not silently refused by the first origin's key (the guard
+    // serializes it), so neither head is lost to a permanent collision.
+    const otherOrigin = successorIntentOf({ ...base, comment_id: 4242 }, head)!;
+    expect(otherOrigin.dedupeKey).not.toBe(intent.dedupeKey);
+    await consumer(h.makeBatch(otherOrigin.payload));
+    expect(started).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(1);
   });
 
   test("the key names the App/target and the originating delivery", () => {

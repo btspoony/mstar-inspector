@@ -371,13 +371,44 @@ export async function markSuccessorDelivered(db: D1Like, dedupeKey: string, nowM
 }
 
 /**
- * The outbox identity of a delivery the guard gave up on for good. One dropped
- * delivery is owed ONE retry — the dedupe key is the delivery itself, so the
- * retry it produces, if it is dropped too, records nothing new and the loop
- * ends after that single second chance.
+ * The outbox identity of a delivery the guard gave up on for good.
  */
 export function guardDropDedupeKeyOf(payload: ReviewJobPayload): string {
   return JSON.stringify(["guard-drop", deliveryKeyOf(payload)]);
+}
+
+/**
+ * Record — or RE-ARM — the owed retry for a dropped delivery. The upsert is
+ * deliberate: once a delivery's first owed row has been delivered, a LATER
+ * ladder of the same delivery that is dropped again must make that row owed
+ * again. Without it the first re-delivery would consume the only chance and a
+ * guard still held would lose the review for good — ack-and-forget by another
+ * name. Each re-arm costs one full retry ladder, because only a drop reaches
+ * this line.
+ */
+export async function recordGuardDropIntent(
+  db: D1Like,
+  input: { dedupeKey: string; payload: ReviewJobPayload; nowMs: number },
+): Promise<ReviewJobPayload> {
+  await db
+    .prepare(
+      `INSERT INTO review_successors (dedupe_key, payload_json, state, created_ms)
+       VALUES (?, ?, 'owed', ?)
+       ON CONFLICT (dedupe_key) DO UPDATE SET
+         payload_json = excluded.payload_json,
+         state = 'owed',
+         delivered_ms = NULL`,
+    )
+    .bind(input.dedupeKey, JSON.stringify(input.payload), input.nowMs)
+    .run();
+  const row = await db
+    .prepare(`SELECT payload_json FROM review_successors WHERE dedupe_key = ?`)
+    .bind(input.dedupeKey)
+    .first<{ payload_json: string }>();
+  if (row === null) {
+    throw new Error(`guard-drop record for ${input.dedupeKey} disappeared after its write`);
+  }
+  return JSON.parse(row.payload_json) as ReviewJobPayload;
 }
 
 /** One consumed comment claim whose delivery died before it recorded anything. */
