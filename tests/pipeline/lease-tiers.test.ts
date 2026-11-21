@@ -118,6 +118,36 @@ describe("execution lease renewal", () => {
     expect(await renewCheckLease(db, claim.attemptId, renewed!, renewed!.untilMs)).toBeNull();
     expect((await checkRow(db, claim.attemptId)).execution_deadline_ms).toBe(deadline);
   });
+
+  test("a delayed renewal whose epoch has moved is refused, not renewed onto the newer lease", async () => {
+    const db = await seededDb();
+    const deadline = T0 + 1_500_000;
+    const claim = await claimed(db, deadline);
+    const mine = await renewCheckLease(db, claim.attemptId, claim.lease, T0);
+    expect(mine).not.toBeNull();
+
+    // The holder stalls; the attempt is handed to recovery and re-acquired, so
+    // the epoch moves under the SAME attempt id.
+    expect(
+      await deferCheckRecovery(
+        db, claim.attemptId, mine!,
+        { state: "pending", nextAttemptMs: T0 + 60_000, reason: "delay fixture" },
+        T0,
+      ),
+    ).toBe(true);
+    const T1 = T0 + 60_000;
+    const takeover = await claimCheckRecovery(db, claim.attemptId, "recovery:2", T1);
+    expect(takeover).not.toBeNull();
+    expect(takeover!.epoch).toBe(mine!.epoch + 1);
+
+    // The delayed renewal writes nothing: it cannot inherit the newer lease.
+    expect(await renewCheckLease(db, claim.attemptId, mine!, T1)).toBeNull();
+    const row = await checkRow(db, claim.attemptId);
+    expect(row.holder).toBe("recovery:2");
+    expect(row.lease_epoch).toBe(takeover!.epoch);
+    expect(row.lease_until_ms).toBe(takeover!.untilMs);
+    expect(row.execution_deadline_ms).toBe(deadline);
+  });
 });
 
 describe("publication lease is separate from execution", () => {
@@ -231,5 +261,43 @@ describe("publication lease is separate from execution", () => {
       mode: "recover",
       updated_ms: later,
     });
+  });
+
+  test("a delayed claim cannot read a later same-holder acquisition as its own", async () => {
+    const db = await seededDb();
+    const claim = await claimed(db, T0 + 1_500_000);
+    const HOLDER = "pub:send-a";
+
+    const mine = await claimPublicationLease(db, {
+      attemptId: claim.attemptId, actionKey: ACTION, holder: HOLDER, mode: "send", nowMs: T0,
+    });
+    expect(mine).not.toBeNull();
+    expect(mine!.epoch).toBe(1);
+
+    // Past its expiry the SAME holder string can take the action again: the
+    // epoch moves and the expiry is a later instant.
+    const later = T0 + PUBLICATION_LEASE_MS;
+    const takeover = await claimPublicationLease(db, {
+      attemptId: claim.attemptId, actionKey: ACTION, holder: HOLDER, mode: "send", nowMs: later,
+    });
+    expect(takeover).not.toBeNull();
+    expect(takeover!.epoch).toBe(2);
+
+    // The delayed caller's fence is stale, so its release is refused by epoch —
+    // it never acts on the newer acquisition.
+    expect(await releasePublicationLease(db, {
+      attemptId: claim.attemptId, actionKey: ACTION, lease: mine!, nowMs: later,
+    })).toBe(false);
+    const row = await db.raw
+      .query(`SELECT holder, lease_epoch, lease_until_ms FROM publication_leases WHERE attempt_id = ? AND action_key = ?`)
+      .get(claim.attemptId, ACTION) as Record<string, unknown>;
+    expect(row).toMatchObject({
+      holder: HOLDER,
+      lease_epoch: takeover!.epoch,
+      lease_until_ms: later + PUBLICATION_LEASE_MS,
+    });
+    expect(await releasePublicationLease(db, {
+      attemptId: claim.attemptId, actionKey: ACTION, lease: takeover!, nowMs: later,
+    })).toBe(true);
   });
 });

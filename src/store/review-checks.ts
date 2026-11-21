@@ -1197,17 +1197,28 @@ export async function renewCheckLease(
       `UPDATE review_checks
           SET lease_until_ms = MAX(lease_until_ms, MIN(?, execution_deadline_ms)), updated_ms = ?
         WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
-          AND lease_until_ms > ? AND ${NONTERMINAL_WHERE}`,
+          AND lease_until_ms > ? AND ${NONTERMINAL_WHERE}
+        RETURNING holder, lease_epoch, lease_until_ms`,
     )
     .bind(nowMs + CHECK_LEASE_MS, nowMs, id, lease.holder, lease.epoch, lease.untilMs, nowMs)
-    .run();
-  if (renewed.meta.changes !== 1) return null;
-  const row = await db
-    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM review_checks WHERE id = ?`)
-    .bind(id)
-    .first<Pick<ReviewCheckRow, "holder" | "lease_epoch" | "lease_until_ms">>();
-  if (row === null || row.holder !== lease.holder || row.lease_until_ms === null) return null;
-  return { holder: lease.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  // The row THIS statement wrote — no second read can hand back a later
+  // acquisition — and it must still be the fence it was given: the epoch is
+  // unchanged (renewal is not takeover), and the window is either the old one
+  // or one fresh cap, never shorter. Anything else (including zero rows, i.e. a
+  // takeover bumped the epoch or the lease lapsed) is a refusal.
+  const written = renewed.results[0];
+  if (
+    written === undefined ||
+    written.holder !== lease.holder ||
+    written.lease_epoch !== lease.epoch ||
+    written.lease_until_ms === null ||
+    written.lease_until_ms < lease.untilMs ||
+    (written.lease_until_ms !== lease.untilMs && written.lease_until_ms > nowMs + CHECK_LEASE_MS)
+  ) {
+    return null;
+  }
+  return { holder: written.holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
 }
 
 /**

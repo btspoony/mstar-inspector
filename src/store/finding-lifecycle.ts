@@ -424,21 +424,29 @@ export async function claimPublicationLease(
              lease_until_ms = excluded.lease_until_ms,
              mode = excluded.mode,
              updated_ms = excluded.updated_ms
-       WHERE publication_leases.lease_until_ms IS NULL OR publication_leases.lease_until_ms <= ?`,
+       WHERE publication_leases.lease_until_ms IS NULL OR publication_leases.lease_until_ms <= ?
+       RETURNING holder, lease_epoch, lease_until_ms`,
     )
     .bind(
       input.attemptId, input.actionKey, input.holder,
       input.nowMs + PUBLICATION_LEASE_MS, input.mode, input.nowMs,
       input.nowMs,
     )
-    .run();
-  if (claim.meta.changes === 0) return null;
-  const row = await db
-    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM publication_leases WHERE attempt_id = ? AND action_key = ?`)
-    .bind(input.attemptId, input.actionKey)
-    .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
-  if (row === null || row.holder !== input.holder || row.lease_until_ms === null) return null;
-  return { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  // The statement RETURNS the row it wrote, so the claim carries the identity it
+  // established instead of re-reading a row a delayed caller could no longer
+  // own. Zero rows = the guard refused (a live holder). A row that is not the
+  // fence this call wrote — another holder, or an expiry other than the one
+  // bound here — is a refusal, never a live lease.
+  const written = claim.results[0];
+  if (
+    written === undefined ||
+    written.holder !== input.holder ||
+    written.lease_until_ms !== input.nowMs + PUBLICATION_LEASE_MS
+  ) {
+    return null;
+  }
+  return { holder: written.holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
 }
 
 /**
