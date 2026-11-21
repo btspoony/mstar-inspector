@@ -286,7 +286,17 @@ export function RuntimePage({ locale }: { locale: Locale }) {
    * last number — and the request's own echo — are values the row may not hold.
    */
   const [attemptCapConfirming, setAttemptCapConfirming] = useState(false);
-  /** The last accepted save's echo — what a later re-read is compared with. */
+  /**
+   * The save's outcome is unknown (network error, timeout, 5xx): the write may
+   * have landed. The card stays unconfirmed and says so, rather than reporting a
+   * failure the store may not have had.
+   */
+  const [attemptCapSaveUnknown, setAttemptCapSaveUnknown] = useState(false);
+  /**
+   * The last CONFIRMED save's echo — what a later re-read is compared with.
+   * `null` after an uncertain failure: that save's fate is unknown, so the
+   * read may not be described as "someone else changed it".
+   */
   const [attemptCapEcho, setAttemptCapEcho] = useState<number | null>(null);
   /**
    * The store's value when the confirming re-read disagreed with the echo:
@@ -539,26 +549,29 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   }
 
   /**
-   * Read the stored cap back after a save. Answers false when the read did not
-   * answer, leaving the card in its unconfirmed state: the echo is a value the
-   * store may not hold, so it is never rendered as the effective one. A read
-   * that answers degraded data is a successful answer — the row is named
-   * unreadable and no effective value is claimed.
+   * Read the stored cap back. `echo` is the confirmed save's value, or `null`
+   * when the save's outcome is unknown — then a differing read is just the
+   * store's answer, never "another save changed it". Answers false when the
+   * read did not answer, leaving the card in its unconfirmed state: neither
+   * the echo nor a guess is rendered as the effective value.
    */
-  async function confirmAttemptCap(echo: number): Promise<boolean> {
+  async function confirmAttemptCap(echo: number | null): Promise<boolean> {
     const fresh = await readRuntime().catch(() => null);
     if (!fresh?.attemptCap) return false;
     update(() => fresh);
     setAttemptCapConfirming(false);
+    setAttemptCapSaveUnknown(false);
     setAttemptCapEcho(null);
     setAttemptCapChangedElsewhere(
-      fresh.attemptCap.degraded || fresh.attemptCap.capMs === echo ? null : fresh.attemptCap.capMs,
+      echo === null || fresh.attemptCap.degraded || fresh.attemptCap.capMs === echo
+        ? null
+        : fresh.attemptCap.capMs,
     );
     return true;
   }
 
   async function onRetryAttemptCap(): Promise<void> {
-    if (busy || attemptCapEcho === null) return;
+    if (busy || !attemptCapConfirming) return;
     setBusy(true);
     try {
       // A failed retry leaves the unconfirmed state and its button in place.
@@ -585,6 +598,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     // in flight, so the number on screen stops being a claim the moment it
     // leaves. Enter the unconfirmed state BEFORE dispatching, not on the reply.
     setAttemptCapConfirming(true);
+    setAttemptCapSaveUnknown(false);
     try {
       const saved = await setAttemptCap(capMs, stored);
       // The write landed. The VALUE still is not shown: the echo is what this
@@ -602,20 +616,28 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       // its retry are the whole report, so this read never reaches the catch.
       await confirmAttemptCap(saved.capMs);
     } catch (error) {
-      // No save landed: leave the unconfirmed state so the operator can fix the
-      // number and resend, and report this as a failure rather than a confirm.
-      setAttemptCapConfirming(false);
-      setAttemptCapEcho(null);
-      const generic = t(locale, "admin.runtime.attemptCapFailed");
-      setNotice({
-        kind: "error",
-        message:
-          error instanceof AdminWriteError
-            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
-            : generic,
-        source: "attemptCap",
-      });
-      attemptCapSignal.fail();
+      if (error instanceof AdminWriteError && error.status >= 400 && error.status < 500) {
+        // A DEFINITE refusal: the store did not change, so the last confirmed
+        // value returns and editing stays available with the typed number.
+        setAttemptCapConfirming(false);
+        setAttemptCapSaveUnknown(false);
+        setAttemptCapEcho(null);
+        const generic = t(locale, "admin.runtime.attemptCapFailed");
+        setNotice({
+          kind: "error",
+          message: `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`,
+          source: "attemptCap",
+        });
+        attemptCapSignal.fail();
+      } else {
+        // UNCERTAIN (network error, timeout, 5xx): the write may have landed, so
+        // neither outcome is claimed. The card stays unconfirmed with no number,
+        // and the retry reads the store back. No echo to compare against: this
+        // save's fate is unknown, so a differing read is not "changed elsewhere".
+        setAttemptCapSaveUnknown(true);
+        setAttemptCapEcho(null);
+        attemptCapSignal.fail();
+      }
     } finally {
       setBusy(false);
     }
@@ -894,9 +916,17 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   // back: no echo is shown, and nothing is editable until a read
                   // answers.
                   <div className="mt-4" data-attempt-cap="confirming">
-                    <p className="text-sm text-muted-foreground">
-                      {t(locale, "admin.runtime.attemptCapConfirming")}
-                    </p>
+                    {attemptCapSaveUnknown ? (
+                      // The write may or may not have landed: say the outcome is
+                      // unknown, never that it failed.
+                      <p className="text-sm text-(--tone-warn-fg)" data-attempt-cap="unknown">
+                        {t(locale, "admin.runtime.attemptCapUnknown")}
+                      </p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        {t(locale, "admin.runtime.attemptCapConfirming")}
+                      </p>
+                    )}
                     <Button
                       type="button"
                       variant="secondary"

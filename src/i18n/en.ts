@@ -1566,6 +1566,12 @@ export const en = {
       /** A save is in flight or accepted; no value shows until it is read back. */
       attemptCapConfirming:
         "A save was sent and the stored value is being confirmed. No effective value is shown until it can be read back.",
+      /**
+       * The save did not answer (network, timeout, 5xx): it may have landed.
+       * Never say it failed — say the outcome is unknown.
+       */
+      attemptCapUnknown:
+        "The save's outcome is unknown: the request did not answer, so it may or may not have been stored. Retry reads the stored value back; no number is shown until it does.",
       /** No attempt is admitted while the stored cap cannot be read. */
       attemptCapUnreadable:
         "The stored maximum duration could not be read, so no new review is admitted until it is readable again or a new value is saved.",
