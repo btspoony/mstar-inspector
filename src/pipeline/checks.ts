@@ -85,6 +85,7 @@ import {
   markCheckQueuedBehindInflight,
   recordTerminalizeOutcome,
 } from "../store/review-checks";
+import { claimPublicationLease, releasePublicationLease } from "../store/finding-lifecycle";
 import { redactSecrets } from "./redact";
 import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
 import type { BudgetExhaustedOutcome } from "../../packages/shared/src/budget-exhausted-wire";
@@ -668,9 +669,9 @@ async function adoptCheckRunWith(
  * Terminalize an owned run with a frozen conclusion (spec §7.9 "Desired versus
  * observed"): prove persisted ownership of the lease AND of `checkRunId`,
  * require the persisted terminal intent to agree with what is being sent (the
- * store freezes `desired` BEFORE any update), then validate the response's
- * identity and terminal state. Only a validated response lets the caller
- * advance `observed`.
+ * store freezes `desired` BEFORE any update), take the publication lease of
+ * THIS action, then validate the response's identity and terminal state. Only
+ * a validated response lets the caller advance `observed`.
  */
 async function completeCheckWith(
   deps: ChecksDeps,
@@ -697,20 +698,59 @@ async function completeCheckWith(
   // mutates or enlarges the text between freezing the intent and completing the
   // run therefore cannot diverge from what was bounded and stored — and cannot
   // push an oversized/unredacted title into the public Check surface.
-  const frozen = {
-    desired: owned.data.desired as CheckConclusion["desired"],
-    title: owned.data.desiredTitle,
-    summary: owned.data.desiredSummary,
-  };
-  if (frozen.title === null || frozen.summary === null) {
+  const frozenTitle = owned.data.desiredTitle;
+  const frozenSummary = owned.data.desiredSummary;
+  if (frozenTitle === null || frozenSummary === null) {
     return refused("persisted terminal intent carries no frozen title/summary");
   }
+  const frozen = {
+    desired: owned.data.desired as CheckConclusion["desired"],
+    title: frozenTitle,
+    summary: frozenSummary,
+  };
   if (frozen.desired !== input.conclusion.desired) {
     return refused("conclusion does not match the persisted terminal intent");
   }
   if (owned.data.checkRunId !== input.checkRunId) {
     return refused("check run id is not the one this attempt persisted");
   }
+  // §7.9: the PUBLICATION lease of this action, taken before the token mint so
+  // the 120 s window covers the whole bounded send. A live holder — of a send
+  // or of the same action's recovery — refuses this one instead of being
+  // bypassed, and the request below is never issued.
+  const opened = await openPublicationFence(deps, {
+    attemptId: identity.attemptId,
+    actionKey: PUBLICATION_ACTION_CHECK_COMPLETE,
+    holder: input.lease.holder,
+  });
+  if ("reason" in opened) return refused(opened.reason);
+  const fence = opened.fence;
+  try {
+    return await terminalUpdate(deps, fence, identity, input, frozen);
+  } finally {
+    // Settlement or handoff: either way this acquisition is spent, and the
+    // action must be claimable again (recovery reconciles what was sent).
+    await fence.release();
+  }
+}
+
+/**
+ * The terminal update itself, under an acquired publication fence: the request
+ * is issued only after the fence is re-proved on a FRESH clock, because the
+ * client resolution here mints a token and awaits the network.
+ */
+async function terminalUpdate(
+  deps: ChecksDeps,
+  fence: PublicationFence,
+  identity: CheckIdentity,
+  input: {
+    lease: Lease;
+    checkRunId: number;
+    conclusion: CheckConclusion;
+    updateBudgetMs?: number;
+  },
+  frozen: { desired: CheckConclusion["desired"]; title: string; summary: string },
+): Promise<{ kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string; requests: number }> {
   const resolvedClient = await clientFor(deps, identity.scope);
   if ("reason" in resolvedClient) return refused(resolvedClient.reason);
   const client = resolvedClient.client;
@@ -722,6 +762,11 @@ async function completeCheckWith(
   // terminalize a remote run (spec §7.9).
   if (!(await stillLive(deps, identity, input.lease))) {
     return refused("lease expired before the update request");
+  }
+  // …and the same proof for the PUBLICATION lease: a lapsed or superseded one
+  // refuses the send here, on the last line before the request.
+  if (!(await fence.verify())) {
+    return refused(`publication lease ${fence.actionKey} lapsed before the update request`);
   }
   const { scope } = identity;
   // Typed as the TERMINAL pair: status and conclusion are required together, so
@@ -803,35 +848,52 @@ async function markInProgressWith(
   if (runId === null) return { kind: "settled", promoted: false };
   const { scope } = owned.data.identity;
   const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
-  const send = (async (): Promise<boolean> => {
-    const resolvedClient = await clientFor(deps, scope);
-    if ("reason" in resolvedClient) return false;
-    const client = resolvedClient.client;
-    if (!hasChecksMethod(client, "update")) return false;
-    // Same fresh live-lease proof as the terminal send: token minting can cross
-    // `lease.untilMs`, and an expired holder must not speak for the run.
-    if (!(await stillLive(deps, owned.data.identity, input.lease))) return false;
-    await client.rest.checks.update({
-      owner: scope.owner,
-      repo: scope.repo,
-      check_run_id: runId,
-      status: "in_progress",
-      output: { title: CHECK_NAME, summary: input.summary },
-    });
-    return true;
-  })();
-  const attempted = await sendRequestsWithin(send, budgetMs, "check in-progress");
-  if (!attempted.settled) {
-    // The PATCH may still be in flight: report that honestly so the caller
-    // does not write a terminal state it could be overtaken by.
-    input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
-    return { kind: "abandoned" };
+  // §7.9: this PATCH is a GitHub mutation, so it needs the action's publication
+  // lease, not the attempt's execution lease alone. A refusal is silent, like
+  // every other pre-send refusal on this lane: the run simply is not promoted.
+  const opened = await openPublicationFence(deps, {
+    attemptId: owned.data.identity.attemptId,
+    actionKey: PUBLICATION_ACTION_CHECK_IN_PROGRESS,
+    holder: input.lease.holder,
+  });
+  if ("reason" in opened) return { kind: "settled", promoted: false };
+  const fence = opened.fence;
+  try {
+    const send = (async (): Promise<boolean> => {
+      const resolvedClient = await clientFor(deps, scope);
+      if ("reason" in resolvedClient) return false;
+      const client = resolvedClient.client;
+      if (!hasChecksMethod(client, "update")) return false;
+      // Same fresh live-lease proof as the terminal send: token minting can cross
+      // `lease.untilMs`, and an expired holder must not speak for the run.
+      if (!(await stillLive(deps, owned.data.identity, input.lease))) return false;
+      // …and the publication lease, re-proved on the last line before the PATCH.
+      if (!(await fence.verify())) return false;
+      await client.rest.checks.update({
+        owner: scope.owner,
+        repo: scope.repo,
+        check_run_id: runId,
+        status: "in_progress",
+        output: { title: CHECK_NAME, summary: input.summary },
+      });
+      return true;
+    })();
+    const attempted = await sendRequestsWithin(send, budgetMs, "check in-progress");
+    if (!attempted.settled) {
+      // The PATCH may still be in flight: report that honestly so the caller
+      // does not write a terminal state it could be overtaken by.
+      input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
+      return { kind: "abandoned" };
+    }
+    if (typeof attempted.outcome !== "boolean") {
+      input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
+      return { kind: "settled", promoted: false };
+    }
+    return { kind: "settled", promoted: attempted.outcome };
+  } finally {
+    // Settled or handed off — never left held by a caller that has moved on.
+    await fence.release();
   }
-  if (typeof attempted.outcome !== "boolean") {
-    input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
-    return { kind: "settled", promoted: false };
-  }
-  return { kind: "settled", promoted: attempted.outcome };
 }
 
 /**
@@ -1071,6 +1133,102 @@ function httpStatus(error: unknown): number | null {
 function safeDetail(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return redactSecrets(message).replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
+// ---------------------------------------------------------------------------
+// §7.9 publication lease — the right to perform ONE GitHub mutation
+// ---------------------------------------------------------------------------
+
+/** The §7.9 action key of the terminal Check update on one attempt. */
+export const PUBLICATION_ACTION_CHECK_COMPLETE = "check:complete";
+/** The §7.9 action key of the `in_progress` promotion on one attempt. */
+export const PUBLICATION_ACTION_CHECK_IN_PROGRESS = "check:in-progress";
+
+/**
+ * Authority to perform ONE GitHub mutation: the publication-lease row this
+ * sender took for its action (spec §7.9). It is NOT the attempt's execution
+ * lease — that one proves who may drive the attempt, this one proves who may
+ * send right now, and a holder may have either without the other.
+ */
+export type PublicationFence = {
+  actionKey: string;
+  /**
+   * Re-prove the EXACT acquired row on a fresh clock, immediately before the
+   * request. False means this sender no longer has the action: the row lapsed,
+   * or a newer epoch took it — either way nothing may be sent. Never throws:
+   * an unprovable lease is not an authorised send.
+   */
+  verify(): Promise<boolean>;
+  /**
+   * Hand the action back when this acquisition settles (sent, refused or
+   * possibly-sent). Clears holder + expiry under this epoch only, so a late
+   * release cannot clear a newer acquisition. Never throws: an unreleased row
+   * lapses at its own expiry, and the send's own outcome is the truth.
+   */
+  release(): Promise<boolean>;
+};
+
+/**
+ * Take the publication lease of one action for a SEND (spec §7.9): `mode` is
+ * `send`, the key is the mutation (`check:complete`, `comment:<id>`), and a
+ * live holder of the same key — send OR recovery — refuses this acquisition
+ * instead of being bypassed. A store fault is a refusal too: an unreadable
+ * lease is not publication authority.
+ */
+export async function openPublicationFence(
+  deps: { db: D1Like; nowMs: () => number },
+  input: { attemptId: string; actionKey: string; holder: string },
+): Promise<{ fence: PublicationFence } | { reason: string }> {
+  let lease: Lease | null;
+  try {
+    lease = await claimPublicationLease(deps.db, {
+      attemptId: input.attemptId,
+      actionKey: input.actionKey,
+      holder: input.holder,
+      mode: "send",
+      nowMs: deps.nowMs(),
+    });
+  } catch (error) {
+    return { reason: `publication lease for ${input.actionKey} unreadable: ${safeDetail(error)}` };
+  }
+  if (lease === null) {
+    return { reason: `publication lease for ${input.actionKey} is held by another holder` };
+  }
+  const held = lease;
+  return {
+    fence: {
+      actionKey: input.actionKey,
+      async verify() {
+        try {
+          const row = await deps.db
+            .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM publication_leases WHERE attempt_id = ? AND action_key = ?`)
+            .bind(input.attemptId, input.actionKey)
+            .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
+          return (
+            row !== null &&
+            row.holder === input.holder &&
+            row.lease_epoch === held.epoch &&
+            row.lease_until_ms === held.untilMs &&
+            deps.nowMs() < held.untilMs
+          );
+        } catch {
+          return false;
+        }
+      },
+      async release() {
+        try {
+          return await releasePublicationLease(deps.db, {
+            attemptId: input.attemptId,
+            actionKey: input.actionKey,
+            lease: held,
+            nowMs: deps.nowMs(),
+          });
+        } catch {
+          return false;
+        }
+      },
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

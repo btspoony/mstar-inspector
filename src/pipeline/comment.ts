@@ -104,7 +104,7 @@ import {
   type GraphqlOctokit,
   type ResolveOutcome,
 } from "./review-threads";
-import { createChecksAdapter, type ChecksAdapter, type ChecksOctokit } from "./checks";
+import { createChecksAdapter, openPublicationFence, type ChecksAdapter, type ChecksOctokit, type PublicationFence } from "./checks";
 import {
   DEGRADED_MARKER_PREFIX,
   DEGRADED_MARKER_RE,
@@ -1316,6 +1316,15 @@ export type PostPreparedReviewInput = CommenterTargetInput & {
    * performs can spend whatever window the caller checked.
    */
   notAfterMs?: number;
+  /**
+   * The owning Check attempt, when the caller IS that attempt's send lane
+   * (spec §7.9). Present → this send takes the publication lease of its action
+   * (`comment:<publicationId>`) and re-proves it on the last line before the
+   * mutation. Absent → a caller outside an attempt (the recovery lane, a test
+   * double): no publication authority is asserted, exactly the `notAfterMs`
+   * convention.
+   */
+  attemptId?: string;
 };
 
 export type PostPreparedDegradedInput = CommenterTargetInput & {
@@ -1326,6 +1335,8 @@ export type PostPreparedDegradedInput = CommenterTargetInput & {
   publicationId: string;
   /** As `PostPreparedReviewInput.notAfterMs`: the frozen instant, at the mutation. */
   notAfterMs?: number;
+  /** As `PostPreparedReviewInput.attemptId`: take the action's publication lease. */
+  attemptId?: string;
 };
 
 export type ReviewCommenter = {
@@ -1530,11 +1541,12 @@ export async function planDegradedUpsertWithOctokit(octokit: PostOctokit, input:
  * "A known definitive rejection before any successful/unknown send is
  * failed, not published"). Thrown by the prepared-send surfaces when the
  * target no longer shows its expected previous version, a foreign marker
- * appeared after the plan, or the client surface cannot publish at all —
- * cases where the honest durable state is `failed`, NOT the post-attempt
- * `unknown`. Any error that may have reached GitHub (transport throw, a
- * create response without an id) deliberately stays a plain Error so it
- * keeps mapping to `unknown`.
+ * appeared after the plan, the client surface cannot publish at all, or the
+ * action's PUBLICATION lease is held by another holder or lapsed at dispatch
+ * (§7.9) — cases where the honest durable state is `failed`, NOT the
+ * post-attempt `unknown`. Any error that may have reached GitHub (transport
+ * throw, a create response without an id) deliberately stays a plain Error so
+ * it keeps mapping to `unknown`.
  */
 export class PreparedSendRejected extends Error {
   constructor(message: string) {
@@ -1563,32 +1575,77 @@ export class PublicationDeadlineSpent extends Error {
  * runs on the last line before the request — there is no path to
  * `createComment`/`updateComment` that skips it, including the create fallbacks.
  *
+ * The publication lease of the action is re-proved on that SAME last line: the
+ * scan can outlive its 120 s window or lose the row to a newer epoch, and
+ * neither may reach GitHub.
+ *
  * `undefined` = no frozen instant (a caller outside an attempt, e.g. a test
- * double or a recovery action): the send proceeds unguarded.
+ * double or a recovery action): that half of the guard does not apply.
  */
 function guardMutations<T extends { createComment: unknown; updateComment: unknown }>(
   issues: T,
   notAfterMs: number | undefined,
+  fence: PublicationFence | undefined,
 ): T {
-  if (notAfterMs === undefined) return issues;
-  const refuse = (verb: string): void => {
-    const lateMs = Date.now() - notAfterMs;
-    if (lateMs < 0) return;
-    throw new PublicationDeadlineSpent(
-      `${verb}: the attempt's frozen deadline passed ${lateMs}ms ago — nothing was sent`,
-    );
+  if (notAfterMs === undefined && fence === undefined) return issues;
+  const atDispatch = async (verb: string): Promise<void> => {
+    if (notAfterMs !== undefined) {
+      const lateMs = Date.now() - notAfterMs;
+      if (lateMs >= 0) {
+        throw new PublicationDeadlineSpent(
+          `${verb}: the attempt's frozen deadline passed ${lateMs}ms ago — nothing was sent`,
+        );
+      }
+    }
+    if (fence !== undefined && !(await fence.verify())) {
+      throw new PreparedSendRejected(
+        `${verb}: the publication lease ${fence.actionKey} is no longer held by this sender — nothing was sent`,
+      );
+    }
   };
   return {
     ...issues,
-    createComment: (...args: never[]) => {
-      refuse("create comment");
+    createComment: async (...args: never[]) => {
+      await atDispatch("create comment");
       return (issues.createComment as (...inner: never[]) => unknown)(...args);
     },
-    updateComment: (...args: never[]) => {
-      refuse("update comment");
+    updateComment: async (...args: never[]) => {
+      await atDispatch("update comment");
       return (issues.updateComment as (...inner: never[]) => unknown)(...args);
     },
   } as T;
+}
+
+/**
+ * The owning Check attempt of a publication send (spec §7.9), bound to the
+ * store the send fences on. Present only when the caller IS that attempt's
+ * send lane; the recovery lane takes its own acquisition (Task 3's lane).
+ */
+export type PublicationSendGuard = { db: D1Like; nowMs: () => number; attemptId: string };
+
+/**
+ * Run ONE comment mutation under the publication lease of its action: acquire
+ * before the scan, hand the fence to the send (which re-proves it at the
+ * mutation), and release on settlement or handoff. A live holder of the same
+ * key — a send OR a recovery — refuses this one here, before any GitHub call,
+ * as a DEFINITIVE pre-send rejection (nothing left the Worker).
+ */
+async function underPublicationFence<T>(
+  guard: PublicationSendGuard | undefined,
+  actionKey: string,
+  run: (fence: PublicationFence | undefined) => Promise<T>,
+): Promise<T> {
+  if (guard === undefined) return run(undefined);
+  const opened = await openPublicationFence(
+    { db: guard.db, nowMs: guard.nowMs },
+    { attemptId: guard.attemptId, actionKey, holder: `send:${actionKey}` },
+  );
+  if ("reason" in opened) throw new PreparedSendRejected(`${opened.reason} — nothing was sent`);
+  try {
+    return await run(opened.fence);
+  } finally {
+    await opened.fence.release();
+  }
 }
 
 /**
@@ -1608,7 +1665,22 @@ function guardMutations<T extends { createComment: unknown; updateComment: unkno
  * an id is an unprovable publication and throws a plain Error (a request
  * WAS sent — the caller must treat it as unknown, never as not-sent).
  */
-export async function postPreparedReviewWithOctokit(octokit: PostOctokit, input: PostPreparedReviewInput): Promise<{ commentId: number }> {
+export async function postPreparedReviewWithOctokit(
+  octokit: PostOctokit,
+  input: PostPreparedReviewInput,
+  guard?: PublicationSendGuard,
+): Promise<{ commentId: number }> {
+  return underPublicationFence(guard, `comment:${input.publicationId}`, (fence) =>
+    publishPreparedReview(octokit, input, fence),
+  );
+}
+
+/** The review upsert itself, under the action's publication fence. */
+async function publishPreparedReview(
+  octokit: PostOctokit,
+  input: PostPreparedReviewInput,
+  fence: PublicationFence | undefined,
+): Promise<{ commentId: number }> {
   const surface = octokit.rest?.issues;
   if (!surface?.listComments || !surface?.updateComment || !surface?.createComment || typeof octokit.paginate !== "function") {
     throw new PreparedSendRejected(
@@ -1616,9 +1688,10 @@ export async function postPreparedReviewWithOctokit(octokit: PostOctokit, input:
     );
   }
   // The scan below rides the RAW surface; every mutating verb goes through the
-  // guarded one, so the deadline check sits on the last line before the write.
+  // guarded one, so the deadline and publication-lease checks sit on the last
+  // line before the write.
   const comments = await scanCommentsWithOctokit(octokit, input, "review");
-  const issues = guardMutations(surface, input.notAfterMs);
+  const issues = guardMutations(surface, input.notAfterMs, fence);
   const parsedRound = (body: string | null | undefined): number | null =>
     body ? parseReviewRound(body) : null;
 
@@ -1704,6 +1777,18 @@ async function createPreparedComment(
 export async function postPreparedDegradedWithOctokit(
   octokit: PostOctokit,
   input: PostPreparedDegradedInput,
+  guard?: PublicationSendGuard,
+): Promise<{ posted: boolean; commentId: number | null }> {
+  return underPublicationFence(guard, `comment:${input.publicationId}`, (fence) =>
+    publishPreparedDegraded(octokit, input, fence),
+  );
+}
+
+/** The degraded upsert itself, under the action's publication fence. */
+async function publishPreparedDegraded(
+  octokit: PostOctokit,
+  input: PostPreparedDegradedInput,
+  fence: PublicationFence | undefined,
 ): Promise<{ posted: boolean; commentId: number | null }> {
   const surface = octokit.rest?.issues;
   if (!surface?.listComments || !surface?.updateComment || !surface?.createComment || typeof octokit.paginate !== "function") {
@@ -1713,7 +1798,7 @@ export async function postPreparedDegradedWithOctokit(
   }
   const comments = await scanCommentsWithOctokit(octokit, input, "degraded");
   // Mutations ride the guarded surface: the scan above can spend the window.
-  const issues = guardMutations(surface, input.notAfterMs);
+  const issues = guardMutations(surface, input.notAfterMs, fence);
   const degradedRoundOf = (body: string | null | undefined): number | null => {
     if (!body || !body.startsWith(DEGRADED_MARKER_PREFIX)) return null;
     return parseDegradedRound(body);
@@ -2092,6 +2177,13 @@ export type PostPreparedLineCommentsInput = {
   publicationId: string;
   /** Prepared line intents (≥ 1 or NO call), pre-built by the consumer. */
   intents: LineIntent[];
+  /**
+   * The owning Check attempt (spec §7.9) — present when the caller is that
+   * attempt's send lane. The batch then takes the publication lease
+   * `line-comments:<publicationId>` and re-proves it before `createReview`;
+   * absent means a caller outside an attempt (see `PostPreparedReviewInput`).
+   */
+  attemptId?: string;
 };
 
 /**
@@ -2126,14 +2218,33 @@ function publishedRangeStart(intent: LineIntent): number | null {
 export async function postLineCommentsWithOctokit(
   octokit: PostOctokit,
   input: PostPreparedLineCommentsInput,
+  guard?: PublicationSendGuard,
 ): Promise<PostedLineComments> {
   if (input.intents.length === 0) {
     return { posted: [], ambiguous: [], captured: true, reviewId: null };
   }
+  return underPublicationFence(guard, `line-comments:${input.publicationId}`, (fence) =>
+    publishLineComments(octokit, input, fence),
+  );
+}
+
+/** The one `createReview` batch itself, under the action's publication fence. */
+async function publishLineComments(
+  octokit: PostOctokit,
+  input: PostPreparedLineCommentsInput,
+  fence: PublicationFence | undefined,
+): Promise<PostedLineComments> {
   const createReview = octokit.rest?.pulls?.createReview;
   if (!createReview) {
     throw new Error(
       "octokit is missing rest.pulls.createReview — cannot post line comments; check the injected auth surface",
+    );
+  }
+  // The publication lease of THIS action, re-proved on the last line before the
+  // request: the batch may have lost its window while the caller prepared it.
+  if (fence !== undefined && !(await fence.verify())) {
+    throw new PreparedSendRejected(
+      `line-comment batch: the publication lease ${fence.actionKey} is no longer held by this sender — nothing was sent`,
     );
   }
   const response = (await createReview({
@@ -2427,6 +2538,15 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       })
     : null;
 
+  // §7.9 publication authority for comment sends: the caller names the attempt
+  // it is sending for, and the send takes that action's publication lease. No
+  // store or no attempt id (a caller outside an attempt) sends unguarded,
+  // exactly like an omitted `notAfterMs`.
+  const publicationGuard = (attemptId: string | undefined): PublicationSendGuard | undefined =>
+    attemptId === undefined || options?.db === undefined
+      ? undefined
+      : { db: options.db, nowMs: options.nowMs ?? (() => Date.now()), attemptId };
+
   return {
     getAppIdentity,
     ...(threadSurface
@@ -2452,16 +2572,28 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       return planDegradedUpsertWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postPreparedReview(input) {
-      return postPreparedReviewWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
+      return postPreparedReviewWithOctokit(
+        await getOctokit({ installationId: input.installationId, repo: input.repo }),
+        input,
+        publicationGuard(input.attemptId),
+      );
     },
     async postPreparedDegraded(input) {
-      return postPreparedDegradedWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
+      return postPreparedDegradedWithOctokit(
+        await getOctokit({ installationId: input.installationId, repo: input.repo }),
+        input,
+        publicationGuard(input.attemptId),
+      );
     },
     async deleteDegradedComment(input) {
       return deleteDegradedCommentWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postLineComments(input) {
-      return postLineCommentsWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
+      return postLineCommentsWithOctokit(
+        await getOctokit({ installationId: input.installationId, repo: input.repo }),
+        input,
+        publicationGuard(input.attemptId),
+      );
     },
     async listDiscussion(input) {
       const octokit = await getOctokit({ installationId: input.installationId, repo: input.repo });

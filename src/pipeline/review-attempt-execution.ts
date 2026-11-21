@@ -2044,6 +2044,12 @@ async function publishDegradedPublication(input: {
   commenter: ReviewCommenter;
   scope: Scope;
   headSha: string;
+  /**
+   * The owning Check attempt (§7.9): the degraded comment send takes the
+   * publication lease of its action for it. Absent when this host has no
+   * attempt row (a resumed publication) — that lane asserts no authority.
+   */
+  attemptId?: string;
   redactedError: string;
   redactedStdout: string;
   /** The attempt that stages it, so a recovery completing the apply can settle it. */
@@ -2111,6 +2117,7 @@ async function publishDegradedPublication(input: {
         body,
         publicationId: staged.id,
         notAfterMs: input.notAfterMs,
+        ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
       });
     } catch (err) {
       // Refused AT the mutation because the instant had passed: nothing left
@@ -4883,6 +4890,7 @@ async function collectPhase(
       commenter,
       scope: lifecycleScope,
       headSha,
+      ...(check?.handle?.attemptId === undefined ? {} : { attemptId: check.handle.attemptId }),
       redactedError,
       redactedStdout,
       attemptId,
@@ -5354,6 +5362,7 @@ async function publishPhase(
       body: preparedBody,
       publicationId: stagedId,
       notAfterMs: ref.deadlineMs,
+      attemptId,
     });
   } catch (err) {
     // The adapter refused at the mutation because the instant had passed:
@@ -5484,6 +5493,7 @@ async function publishPhase(
         round,
         publicationId: stagedId,
         intents: lineIntents,
+        attemptId,
       });
       if (postedLine.posted.length > 0) {
         try {
