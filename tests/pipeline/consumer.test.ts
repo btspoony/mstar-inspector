@@ -1546,19 +1546,26 @@ describe("createReviewConsumer", () => {
     ]);
   });
 
-  test("a delivery the queue will retry leaves the enqueue claim alone", async () => {
+  test("a terminal workflow failure stamps the claim on the FIRST delivery — there is no retry ladder on this route", async () => {
     h.sandbox.runnerExitCode = 1;
-    h.queueState.attempts = 3; // a retry still follows
+    h.queueState.attempts = 3; // the delivery number no longer gates the stamp
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // The throw IS the retry signal: processMessage rethrows and the handler
-    // never acks, so the queue redelivers this message — and the "1" claim
-    // keeps proving the job is still in flight.
+    // The throw is still the failure signal (a definite execution failure is
+    // settled and surfaced), but the Workflow instance is the attempt's
+    // terminal owner: the commit's claim is stamped `failed` NOW instead of
+    // waiting out a delivery ladder that no longer exists.
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
 
     expect(h.messageAckCalls).toHaveLength(0);
-    expect(h.kvPuts.some((p) => p.value === "failed")).toBe(false);
+    expect(h.kvPuts).toEqual([
+      {
+        key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+        value: "failed",
+        options: { expirationTtl: IDEMPOTENCY_SECONDS },
+      },
+    ]);
   });
 
   test("a failing failed-claim KV write never masks the rethrow", async () => {
@@ -5999,12 +6006,14 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow("d1 down at staging");
 
     // No GitHub MUTATION at all: the pre-staging plan read is read-only and
-    // may have run, but no prepared send, no line comments; no KV done; no
-    // reviews row. The failure rides the AL-6 channel (review_failures +
-    // rethrow).
+    // may have run, but no prepared send, no line comments; no reviews row.
+    // The ONE KV write is the claim's terminal `failed` stamp — the Workflow
+    // instance is the attempt's terminal owner, so the commit stops counting
+    // as queued immediately. The failure rides the AL-6 channel (review_failures
+    // + rethrow).
     expect(h.commenterCalls.some((c) => c.op === "post-prepared")).toBe(false);
     expect(h.commenterCalls.some((c) => c.op === "line-comments")).toBe(false);
-    expect(h.kvPuts).toHaveLength(0);
+    expect(h.kvPuts.map((write) => write.value)).toEqual(["failed"]);
     expect(reviewCount(db)).toBe(0);
     const pubRows = db.raw.query("SELECT COUNT(*) AS n FROM review_publications").get() as { n: number };
     expect(pubRows.n).toBe(0);
@@ -7574,14 +7583,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(h.makeBatch(makePayload()));
     await consumer(h.makeBatch(makePayload())); // the same message delivered twice
 
-    // The second delivery is acked by the idempotency check BEFORE step 4, so
-    // it never reaches the Check lane: one attempt, one run (with its one
-    // promotion), one publication.
+    // The second delivery is acked by the durable HANDOFF record before any
+    // credential, admission or Check work, so it never reaches the Check lane:
+    // one attempt, one run (with its one promotion), one publication.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     expect(checkRows(db)).toHaveLength(1);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(h.kvPuts).toHaveLength(1);
-    expect(h.logLines.some((l) => l.msg.includes("idempotency hit"))).toBe(true);
+    expect(h.logLines.some((l) => l.msg.includes("already handed off"))).toBe(true);
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("success");
     expect(row.observed).toBe("success");
@@ -10731,10 +10740,11 @@ describe("usage ledger (migration 0031)", () => {
     expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(charged);
   });
 
-  test("a duplicate delivery after a completed review with the KV claim absent or faulting still runs no second review", async () => {
-    // §7.7 step 2: the KV done claim is only the FAST dedup — D1 is the durable
-    // backstop. Both states that make the claim unreadable are covered, because
-    // "KV says done" is exactly what neither of these has.
+  test("a duplicate delivery is deduped by the durable handoff, before any KV read", async () => {
+    // The handoff record answers "this message was already handed off" from
+    // D1 alone, so a duplicate never pays for a credential resolution, an
+    // admission row or a KV read — the KV claim and the D1 review row remain
+    // the backstops for OTHER deliveries of the same commit.
     for (const kv of ["absent", "faulting"] as const) {
       h = createConsumerHarness();
       freshChecks();
@@ -10750,25 +10760,23 @@ describe("usage ledger (migration 0031)", () => {
       expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
       expect(h.sandbox.calls.filter((c) => c.cmd.includes("bun run"))).toHaveLength(1);
 
-      // GitHub redelivers the same commit with no readable done claim: the
-      // key is absent, or every read throws.
+      // GitHub redelivers the same message: the handoff record is the dedupe.
       h.kvState.entries.clear();
       h.kvState.getValue = null;
       if (kv === "faulting") h.kvState.getError = new Error("kv down");
 
       await consumer(h.makeBatch(makePayload()));
 
-      // The D1 row for this exact head is what answers "already reviewed":
-      // no second completed review, no second charge, no second post, and no
+      // No second completed review, no second charge, no second post, and no
       // second paid model run.
       expect(reviewCount(db)).toBe(1);
       expect(usageRows(db)).toHaveLength(1);
       expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
       expect(h.sandbox.calls.filter((c) => c.cmd.includes("bun run"))).toHaveLength(1);
-      expect(h.logLines.filter((l) => l.msg === "idempotency hit — ack")).toHaveLength(1);
-      if (kv === "faulting") {
-        expect(h.logLines.filter((l) => l.msg.includes("idempotency KV read failed"))).not.toHaveLength(0);
-      }
+      expect(h.logLines.filter((l) => l.msg.includes("already handed off"))).toHaveLength(1);
+      // The duplicate returned before the KV face entirely: a faulting KV is
+      // never even read.
+      expect(h.logLines.filter((l) => l.msg.includes("idempotency KV read failed"))).toHaveLength(0);
     }
   });
 
@@ -11100,22 +11108,23 @@ describe("usage ledger (migration 0031)", () => {
     expect(failureRows(db)[0]!.error).toContain('"applied":"unknown"');
   });
 
-  test("a genuine re-execution after a runner failure mints seq 2 for the same review", async () => {
+  test("a new delivery of the same commit after a runner failure mints seq 2 for the same review", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     // Attempt 1: the runner fails, so no reviews row, KV done or journal row
-    // exists — both dedup reads and the journal handoff miss on the retry.
+    // exists. Its handoff record is terminal for THAT delivery.
     h.sandbox.runnerExitCode = 1;
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
     expect(usageRows(db).map((row) => row.seq)).toEqual([1]);
 
-    // The consumer stays bound to this instance's doubles; only the failed
-    // runner knob has to be cleared for the retry.
+    // A genuinely NEW delivery of the same commit (its own Check attach
+    // identity, so its own handoff record) runs again: the attempt is new, the
+    // metered review identity is the payload's.
     h.sandbox.runnerExitCode = 0;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    await consumer(h.makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-2" })));
 
     const key = idemKey({
       installation_id: 123,
@@ -11147,7 +11156,7 @@ describe("usage ledger (migration 0031)", () => {
     await consumer(h.makeBatch(makePayload()));
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.resolvedSha = "aaaabbbbccccddddeeeeffff0000111122223333";
-    await consumer(h.makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-2" })));
 
     const key = idemKey({
       installation_id: 123,
@@ -11171,7 +11180,7 @@ describe("usage ledger (migration 0031)", () => {
 
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
-    await consumer(h.makeBatch(makePayload({ head_sha: null })));
+    await consumer(h.makeBatch(makePayload({ head_sha: null, attachDeliveryId: "delivery-2" })));
 
     const key = idemKey({
       installation_id: 123,

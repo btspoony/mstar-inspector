@@ -92,6 +92,12 @@
 import type { Message, MessageBatch, Workflow } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
+  deliveryKeyOf,
+  markAttemptHandoff,
+  readAttemptHandoff,
+  reserveAttemptHandoff,
+} from "../store/review-route-store";
+import {
   classifyGithubRateLimit,
   GITHUB_RATE_LIMIT_PREFIX,
   MAINTENANCE_DEFERRED_STAGE,
@@ -1097,13 +1103,36 @@ type ConsumerOverrides = Partial<
 };
 
 /** How a host hands an admitted attempt to the execution route. */
-export type AttemptStarter = (deps: ProcessDeps, ref: AttemptRef) => Promise<void>;
+export type AttemptStarter = (
+  deps: ProcessDeps,
+  ref: AttemptRef,
+) => Promise<WorkflowCreateVerdict | void>;
+
+/** The create outcome a host can confirm: new, or already present. */
+export type WorkflowCreateVerdict = "created" | "exists";
 
 /**
- * A Workflow `create` whose reply was lost or rejected. The instance may exist,
- * so the delivery is ACKED and never retried: a redelivery mints a fresh
- * attempt id and could pay twice. Any other starter error is NOT ambiguous and
- * propagates.
+ * A DEFINITE `Workflow.create` rejection — a configuration or validation
+ * failure the instance did not survive. This is a failure, not an ambiguous
+ * success: the attempt is settled as failed and the delivery takes the queue's
+ * retry path.
+ */
+export class WorkflowCreateFailedError extends Error {
+  constructor(
+    readonly attemptId: string,
+    readonly cause: unknown,
+  ) {
+    super(
+      `attempt ${attemptId}: the Workflow instance could not be created (${cause instanceof Error ? cause.message : String(cause)})`,
+    );
+    this.name = "WorkflowCreateFailedError";
+  }
+}
+
+/**
+ * A Workflow `create` whose reply was lost. The instance may exist, so the
+ * delivery is ACKED and never retried: a redelivery mints a fresh attempt id
+ * and could pay twice. The handoff row stays for recovery.
  */
 export class WorkflowCreateAmbiguousError extends Error {
   constructor(
@@ -1118,18 +1147,48 @@ export class WorkflowCreateAmbiguousError extends Error {
 }
 
 /**
+ * Read a create rejection's class. Only a genuinely unknown outcome may be
+ * acked as ambiguous:
+ * - "already exists" means the instance IS there (our own redelivery) → exists;
+ * - an RPC status in the 4xx range (except the retryable 408/425/429) and a
+ *   `TypeError` (a binding/class/validation failure, thrown before the call
+ *   left this isolate) are DEFINITE;
+ * - anything else — no status, a transport error, a 5xx — is unknown.
+ */
+function classifyWorkflowCreateFailure(err: unknown): "exists" | "definite" | "unknown" {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/already exists/i.test(message)) return "exists";
+  if (err instanceof TypeError) return "definite";
+  const status = (err as { status?: unknown } | null)?.status;
+  if (
+    typeof status === "number" &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 425 &&
+    status !== 429
+  ) {
+    return "definite";
+  }
+  return "unknown";
+}
+
+/**
  * Create the attempt's Workflow instance. Instance id = attempt id, so a replay
- * of the same admitted attempt addresses the same instance. A rejection is
- * classified as AMBIGUOUS — the create may have landed — which is the one
- * failure the consumer acks instead of propagating.
+ * of the same admitted attempt addresses the same instance and a lost reply
+ * cannot create a second one.
  */
 export async function createWorkflowInstance(
   workflow: Workflow<AttemptRef>,
   ref: AttemptRef,
-): Promise<void> {
+): Promise<WorkflowCreateVerdict> {
   try {
     await workflow.create({ id: ref.attemptId, params: ref });
+    return "created";
   } catch (err) {
+    const verdict = classifyWorkflowCreateFailure(err);
+    if (verdict === "exists") return "exists";
+    if (verdict === "definite") throw new WorkflowCreateFailedError(ref.attemptId, err);
     throw new WorkflowCreateAmbiguousError(ref.attemptId, err);
   }
 }
@@ -1399,13 +1458,14 @@ async function processMessage(
   // `deps.roundBudgetMs`, so it can never eat the window the paid run and its
   // publication need.
   const roundStartedAt = Date.now();
-  // The attempt identity: minted once per delivery, immutable, and the ONE
-  // source the container name derives from (a destroyed sandbox's id is never
-  // reused — attach-after-destroy behavior is unknown, uniqueness wins). Every
-  // later step addresses the container through it, so a recovery run can reach
-  // the one that holds this attempt's checkout.
-  const attemptId = crypto.randomUUID();
-  const sandboxId = attemptSandboxId(attemptId);
+  // The delivery key and the recorded attempt id are learned inside the try, so
+  // a DB fault or a legacy payload still flows through the structured failure
+  // channel. A redelivery of this message finds the row its predecessor wrote
+  // and replays the SAME attempt id, so an interrupted handoff can never mint a
+  // second attempt that could pay twice.
+  let deliveryKey = "";
+  let attemptId: string = crypto.randomUUID();
+  let sandboxId = attemptSandboxId(attemptId);
   // Review admission (WF-002 + review-concurrency §1.2): the live
   // `review_inflight` row this attempt wrote, released in the finally. The
   // key is the PR identity WITHOUT head_sha, so comment-mention jobs
@@ -1440,6 +1500,25 @@ async function processMessage(
   let checkBudgets: CheckBudgets | null = null;
   try {
     baseFields = toBaseFields(payload);
+    // THE HANDOFF RECORD, before anything else: a redelivery of this message
+    // replays the attempt its predecessor recorded, and a confirmed instance
+    // ends the delivery here. A fault is a failure of this invocation, not a
+    // reason to mint a second attempt.
+    deliveryKey = deliveryKeyOf(payload);
+    const previousHandoff = await readAttemptHandoff(deps.env.DB, deliveryKey);
+    if (previousHandoff?.state === "created") {
+      // The instance was confirmed earlier and this redelivery only missed the
+      // ack: the attempt is running, so the delivery is done here.
+      deps.log.info(
+        { ...payloadIdentityFields(payload), attempt_id: previousHandoff.attemptId },
+        "review attempt already handed off to its Workflow instance — ack without a second instance",
+      );
+      return { kind: "routed" };
+    }
+    if (previousHandoff !== null) {
+      attemptId = previousHandoff.attemptId;
+      sandboxId = attemptSandboxId(attemptId);
+    }
     // Durable per-comment claim (migration 0048) — the atomic step that turns
     // at-least-once queue delivery into at-most-once execution. The worker
     // already inserted the row `queued` before it enqueued, so the conditional
@@ -1456,25 +1535,37 @@ async function processMessage(
     // `queued` (the outbox re-send), and the row itself lives on as the
     // tombstone that refuses every later delivery of this comment.
     if (payload.comment_id !== undefined) {
-      const claimed = await deps.env.DB.prepare(
-        `UPDATE comment_trigger_claims SET state = 'consumed', consumed_ms = ?, payload_json = NULL
-          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
-            AND state = 'queued'`,
-      )
-        .bind(
-          Date.now(),
-          payload.installation_id,
-          payload.owner,
-          payload.repo,
-          payload.pr_number,
-          payload.comment_id,
+      if (payload.successor_of !== undefined) {
+        // A successor re-admitted after a moved head. The comment claim that
+        // produced the original job is already `consumed`, and the successor is
+        // not a replay of that comment: its at-most-once guarantee is the
+        // outbox dedupe key (the observed head) plus this delivery's own
+        // handoff row, so the identity is preserved without a second claim.
+        deps.log.info(
+          { ...payloadIdentityFields(payload) },
+          "successor delivery — the comment claim was consumed by the skipped attempt; the outbox key is its at-most-once",
+        );
+      } else {
+        const claimed = await deps.env.DB.prepare(
+          `UPDATE comment_trigger_claims SET state = 'consumed', consumed_ms = ?, payload_json = NULL
+            WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+              AND state = 'queued'`,
         )
-        .run();
-      if (claimed.meta.changes === 0) {
-        deps.log.info(baseFields, "comment trigger already claimed — ack without running");
-        return { kind: "ok" };
+          .bind(
+            Date.now(),
+            payload.installation_id,
+            payload.owner,
+            payload.repo,
+            payload.pr_number,
+            payload.comment_id,
+          )
+          .run();
+        if (claimed.meta.changes === 0) {
+          deps.log.info(baseFields, "comment trigger already claimed — ack without running");
+          return { kind: "ok" };
+        }
+        commentClaimConsumed = true;
       }
-      commentClaimConsumed = true;
     }
     // Credential resolution FIRST (lock L4 — consumer-side),
     // before the guard/sandbox: app → D1 row gated
@@ -1961,27 +2052,74 @@ async function processMessage(
       inflight,
       attempts,
     };
-    // Ownership moves with the attempt: its own cleanup releases the row, even
-    // when the create reply is lost.
-    inflight = null;
-    handedOff = true;
-    try {
-      await startAttempt(deps, attemptRef);
-    } catch (err) {
-      // ONLY an ambiguous create is acked: the instance may exist, so a
-      // redelivery (fresh attempt id, possible second paid run) is worse than
-      // holding the attempt to its TTL. Any other error is a real failure and
-      // propagates.
-      if (!(err instanceof WorkflowCreateAmbiguousError)) throw err;
+    // THE HANDOFF IS A RECORD BEFORE IT IS AN EFFECT: write (or read back) the
+    // delivery's handoff row, with this attempt id and payload, BEFORE the
+    // instance is created. An interruption after this line leaves a row the
+    // recovery pass replays; a concurrent duplicate of the same message uses
+    // the id this row already holds.
+    const handoff = await reserveAttemptHandoff(deps.env.DB, {
+      deliveryKey,
+      attemptId,
+      payload,
+      nowMs: Date.now(),
+    });
+    if (handoff.attemptId !== attemptId) {
+      // Two deliveries of the same message raced; the other one owns this
+      // handoff and will create the instance. Release our admission row and
+      // ack: a second instance would be a second paid attempt.
       deps.log.warn(
         {
           ...(baseFields ?? payloadIdentityFields(payload)),
           sandbox_id: sandboxId,
           attempt_id: attemptId,
-          event: "review_workflow_create_failed",
         },
-        `workflow instance creation was not confirmed — acked without a retry: the instance may exist and own this attempt (${err.message})`,
+        `another delivery owns this handoff (attempt ${handoff.attemptId}) — ack without a second instance`,
       );
+      return { kind: "routed" };
+    }
+    try {
+      const verdict = await startAttempt(deps, attemptRef);
+      await markAttemptHandoff(deps.env.DB, deliveryKey, "created", Date.now());
+      if (verdict !== "exists") {
+        // Ownership moves with a NEW instance: its own cleanup releases the row.
+        inflight = null;
+        handedOff = true;
+      }
+      // "exists" confirms an instance an earlier delivery created; this
+      // delivery's admission row is released in the finally and the instance
+      // keeps the one it owns.
+    } catch (err) {
+      if (err instanceof WorkflowCreateAmbiguousError) {
+        // The instance MAY exist: move ownership and ack. The handoff row stays
+        // `ambiguous` for the recovery pass, which re-enqueues the payload so
+        // admission re-tries create with the SAME attempt id.
+        await markAttemptHandoff(deps.env.DB, deliveryKey, "ambiguous", Date.now());
+        inflight = null;
+        handedOff = true;
+        deps.log.warn(
+          {
+            ...(baseFields ?? payloadIdentityFields(payload)),
+            sandbox_id: sandboxId,
+            attempt_id: attemptId,
+            event: "review_workflow_create_ambiguous",
+          },
+          `workflow instance creation was not confirmed — acked without a retry, the handoff stays for recovery (${err.message})`,
+        );
+        return { kind: "routed" };
+      }
+      if (err instanceof WorkflowCreateFailedError) {
+        // A DEFINITE failure is a failure, never an ambiguous success: the
+        // handoff records it, the admission path below writes the failure row,
+        // stamps the claim and rethrows into the queue's retry/DLQ ladder, and
+        // a redelivery replays this same attempt id.
+        await markAttemptHandoff(deps.env.DB, deliveryKey, "failed", Date.now());
+        throw err;
+      }
+      // Not a create outcome: the starter ran the attempt itself and settled
+      // it. The instance owns the attempt; propagate without a second record.
+      inflight = null;
+      handedOff = true;
+      throw err;
     }
     return { kind: "routed" };
   } catch (err) {

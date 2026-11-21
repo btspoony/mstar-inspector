@@ -501,12 +501,20 @@ describe("the owed Check mark", () => {
     expect(row.attempt_key).toBe("rival-head-key");
     // Nothing was launched on our identity.
     expect(row.state).not.toBe("launched");
-    // The bare ack is gone: admission gets the observed head to start the
-    // successor attempt, and no claim from the skipped delivery rides along.
+    // The successor carries the identity and ordering it actually has: the
+    // marker for the skipped delivery, its own attach identity, and no
+    // fabricated head_at (this delivery's stamp describes the SAME head, and
+    // this payload has none).
     expect(successors).toHaveLength(1);
     expect(successors[0]!.head_sha).toBe(SHA);
-    expect(successors[0]!.comment_id).toBeUndefined();
-    expect(successors[0]!.attachDeliveryId).toBeUndefined();
+    expect(successors[0]!.head_at).toBeUndefined();
+    expect(successors[0]!.successor_of).toBeString();
+    expect(successors[0]!.attachDeliveryId).toMatch(/^successor:/);
+    // The durable outbox was written before the send and is marked delivered
+    // once the queue accepted it.
+    const outbox = db.raw.prepare("SELECT state FROM review_successors").all() as Array<{ state: string }>;
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]!.state).toBe("delivered");
   });
 
   test("a same-identity freeze proceeds rather than skipping", async () => {

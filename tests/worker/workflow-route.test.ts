@@ -22,9 +22,19 @@ import "../helpers/cloudflare-workers-mock";
 
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { createSeededTestD1, TEST_APP_ID, VALID_OUTPUT } from "../helpers/consumer-fixtures";
-import { createConsumerHarness, makePayload } from "../helpers/consumer-harness";
+import { createConsumerHarness, failureRows, makePayload } from "../helpers/consumer-harness";
 import { inlineWorkflowStep } from "../helpers/workflow-route";
 import { acquireInflight } from "../../src/store/inflight-store";
+import {
+  deliveryKeyOf,
+  listOwedSuccessors,
+  readAttemptHandoff,
+  recordSuccessorIntent,
+  reserveAttemptHandoff,
+  successorDedupeKeyOf,
+  type AttemptHandoff,
+} from "../../src/store/review-route-store";
+import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import type { AttemptRef } from "../../src/pipeline/review-attempt-execution";
 import type { WorkflowStepConfig } from "cloudflare:workers";
 
@@ -150,10 +160,13 @@ describe("review route — the queue handler hands off only", () => {
     await consumer(h.makeBatch(makePayload()));
 
     // Ack, never retry: a redelivery mints a fresh attempt id and could pay
-    // twice, so the instance that may exist owns the attempt until TTL.
+    // twice, so the instance that may exist owns the attempt until TTL. The
+    // handoff row stays `ambiguous` for the recovery pass.
     expect(h.messageAckCalls).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.sandbox.calls).toHaveLength(0);
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(makePayload()));
+    expect(handoff?.state).toBe("ambiguous");
   });
 });
 
@@ -178,7 +191,9 @@ describe("review route — the workflow is the only paid route", () => {
     await consumer(h.makeBatch(makePayload() as ReviewJobPayload));
 
     expect(started).toHaveLength(1);
-    expect(steps.map((step) => step.name)).toEqual(["prepare", "review", "collect", "publish"]);
+    // Every post-paid transition is its own durable step; cleanup is one, so an
+    // interrupted host still destroys what the retention table allows.
+    expect(steps.map((step) => step.name)).toEqual(["prepare", "review", "collect", "publish", "cleanup"]);
     // The platform cannot retry the paid step.
     expect(steps.find((step) => step.name === "review")!.config?.retries?.limit).toBe(0);
     // The paid route really ran: one publication, the launch row persisted,
@@ -189,6 +204,174 @@ describe("review route — the workflow is the only paid route", () => {
       .get(started[0]!.attemptId) as { state: string };
     expect(launch.state).toBe("persisted");
     expect(h.sandbox.destroyCalls).toBe(1);
+  });
+});
+
+describe("review route — every handoff is a durable record", () => {
+  test("the handoff row is written before the instance is created", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const seen: { handoff: AttemptHandoff | null } = { handoff: null };
+    let observedKey = "";
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: db as never }),
+      h.testLog,
+      {
+        ...h.overrides,
+        // A create can only run AFTER the record exists: the callback reads it.
+        startAttempt: async (_deps, ref) => {
+          observedKey = deliveryKeyOf(payload);
+          seen.handoff = await readAttemptHandoff(db as never, observedKey);
+          return "created";
+        },
+      },
+    );
+
+    await consumer(h.makeBatch(payload));
+
+    expect(seen.handoff?.state).toBe("owed");
+    expect(seen.handoff?.attemptId).toMatch(/^[0-9a-f-]{36}$/);
+    // The confirmed outcome is recorded on the same row.
+    expect((await readAttemptHandoff(db as never, observedKey))?.state).toBe("created");
+  });
+
+  test("a definite create failure is settled as a failure, and the redelivery replays the same attempt id", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const ids: string[] = [];
+    let calls = 0;
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: db as never }),
+      h.testLog,
+      {
+        ...h.overrides,
+        startAttempt: async (_deps, ref) => {
+          ids.push(ref.attemptId);
+          calls += 1;
+          const workflow =
+            calls === 1
+              ? {
+                  create: async () => {
+                    // A definite configuration rejection: no instance exists.
+                    throw Object.assign(new Error("invalid workflow configuration"), { status: 400 });
+                  },
+                }
+              : { create: async () => ({}) };
+          return createWorkflowInstance(workflow as never, ref);
+        },
+      },
+    );
+
+    await expect(consumer(h.makeBatch(payload))).rejects.toThrow(/could not be created/);
+
+    // A definite failure is a FAILURE: the attempt was settled (failure row
+    // written, claim released) and its handoff records the failure.
+    expect(failureRows(db)).toHaveLength(1);
+    const key = deliveryKeyOf(payload);
+    expect((await readAttemptHandoff(db as never, key))?.state).toBe("failed");
+    expect(ids).toHaveLength(1);
+
+    // The redelivery replays the SAME attempt id — never a second attempt.
+    await consumer(h.makeBatch(payload));
+
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).toBe(ids[1]);
+    expect((await readAttemptHandoff(db as never, key))?.state).toBe("created");
+  });
+
+  test("a redelivery after a confirmed create acks without creating a second instance", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const ids: string[] = [];
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: db as never }),
+      h.testLog,
+      {
+        ...h.overrides,
+        startAttempt: async (_deps, ref) => {
+          ids.push(ref.attemptId);
+          return "created";
+        },
+      },
+    );
+
+    await consumer(h.makeBatch(payload));
+    await consumer(h.makeBatch(payload));
+
+    expect(ids).toHaveLength(1);
+    expect(h.messageAckCalls).toHaveLength(2);
+  });
+
+  test("a successor is an outbox row: one per observed head, delivered once, retried by the recovery pass", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const successorPayload: ReviewJobPayload = {
+      ...payload,
+      head_sha: "feedfacefeedfacefeedfacefeedfacefeedface",
+      successor_of: deliveryKeyOf(payload),
+      attachDeliveryId: "successor:test",
+    };
+    const dedupeKey = successorDedupeKeyOf({
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      headSha: successorPayload.head_sha!,
+    });
+
+    // Two records of the same moved head collapse to one outbox row.
+    await recordSuccessorIntent(db as never, { dedupeKey, payload: successorPayload, nowMs: 1 });
+    await recordSuccessorIntent(db as never, { dedupeKey, payload: successorPayload, nowMs: 2 });
+    expect(await listOwedSuccessors(db as never, 10)).toHaveLength(1);
+
+    const sent: ReviewJobPayload[] = [];
+    const env = {
+      DB: db as never,
+      REVIEW_QUEUE: {
+        send: async (message: ReviewJobPayload) => {
+          sent.push(message);
+        },
+      } as never,
+    };
+    await reconcileReviewRoute(env, 3);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.head_sha).toBe(successorPayload.head_sha);
+    // Delivered rows are not re-sent.
+    expect(await listOwedSuccessors(db as never, 10)).toHaveLength(0);
+    await reconcileReviewRoute(env, 4);
+    expect(sent).toHaveLength(1);
+  });
+
+  test("the recovery pass re-enqueues an unconfirmed handoff for the same attempt", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const key = deliveryKeyOf(payload);
+    // A host died after writing the handoff, before create created anything.
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: key,
+      attemptId: "attempt-stranded",
+      payload,
+      nowMs: 1_000,
+    });
+    const sent: ReviewJobPayload[] = [];
+    const env = {
+      DB: db as never,
+      REVIEW_QUEUE: {
+        send: async (message: ReviewJobPayload) => {
+          sent.push(message);
+        },
+      } as never,
+    };
+
+    // Too fresh: a live delivery may still be trying.
+    await reconcileReviewRoute(env, 2_000);
+    expect(sent).toHaveLength(0);
+
+    // Past the quiet period: the payload is re-enqueued (the queue handler
+    // replays the recorded attempt id), and the row's clock is bumped.
+    await reconcileReviewRoute(env, 1_000 + 5 * 60_000 + 1);
+    expect(sent).toHaveLength(1);
+    expect(deliveryKeyOf(sent[0]!)).toBe(key);
   });
 });
 

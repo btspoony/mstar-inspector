@@ -26,6 +26,7 @@ import { deploymentModeOf, type DeploymentMode, type Env, type ScheduledEnv } fr
 import { defaultSweepLog, runSweep } from "./sweep";
 import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
 import { reconcileReviewChecks } from "./check-reconcile";
+import { reconcileReviewRoute } from "../pipeline/route-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
@@ -1231,15 +1232,19 @@ export default {
       await runCheckReconcileStage(env);
       return;
     }
+    // The database is the composition's prerequisite: captured ONCE after the
+    // guard (a reconciler call may widen `env`, and every stage needs the same
+    // bound handle).
+    const db = env.DB;
+    if (db === undefined) {
+      defaultSweepLog.warn(
+        { event: "ops_sweep_db_unbound", detail: "DB binding missing — sweep skipped" },
+        "ops sweep skipped",
+      );
+      return;
+    }
     try {
-      if (!env.DB) {
-        defaultSweepLog.warn(
-          { event: "ops_sweep_db_unbound", detail: "DB binding missing — sweep skipped" },
-          "ops sweep skipped",
-        );
-        return;
-      }
-      await runSweep(env.DB, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
+      await runSweep(db, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
     } catch (error) {
       // SEC-03: the sweep-failure detail is redacted before the warn line —
       // an infra error can interpolate a secret-shaped value
@@ -1265,6 +1270,21 @@ export default {
           detail: redactSecrets(error instanceof Error ? error.message : String(error)),
         },
         "lifecycle reconcile failed",
+      );
+    }
+    // Durable route handoffs (migration 0083) — OWN try/catch, LAST stage: an
+    // unconfirmed Workflow create and a moved head's undelivered successor are
+    // re-sent to the queue here, so neither can vanish with an interrupted
+    // host.
+    try {
+      await reconcileReviewRoute({ DB: db, REVIEW_QUEUE: env.REVIEW_QUEUE });
+    } catch (error) {
+      defaultSweepLog.warn(
+        {
+          event: "ops_route_reconcile_failed",
+          detail: redactSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        "route handoff reconcile failed",
       );
     }
   },

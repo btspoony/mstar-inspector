@@ -40,7 +40,7 @@ import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../rev
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { type D1ArtifactStore } from "../store/artifact-store";
-import { QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
+import { type FailureStage, type FailureStore } from "../store/failure-store";
 import {
   hasUsageEventForExecutionToken,
   recordUsageEvent,
@@ -346,14 +346,14 @@ export type ConsumerLogFields = {
    * `maintenance_defer` (same channel, additive): the invocation found the
    * platform closed (D20) and deferred the whole batch instead of running it —
    * one line per invocation, not per message.
-   * `review_workflow_create_failed` / `review_moved_head_successor` /
+   * `review_workflow_create_ambiguous` / `review_moved_head_successor` /
    * `review_moved_head_no_successor` / `review_successor_enqueue_failed`
    * (union widened ADDITIVELY, the Workflow route): the queue's hand-off could
-   * not confirm the instance (the instance may exist — acked, never retried),
-   * and the moved-head path re-admitted the observed head for a successor
-   * attempt (or named why it could not).
+   * not confirm the instance (the instance may exist — acked, never retried,
+   * and the handoff row stays for recovery), and the moved-head path recorded
+   * the observed head in the successor outbox (or named why it could not).
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_failed" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -2464,7 +2464,11 @@ export type AttemptRef = {
   checkClaimSha: string | null;
   /** The live admission row this attempt owns — its cleanup releases it. */
   inflight: { key: InflightKey; attemptId: string; ttlSeconds: number };
-  /** The queue delivery number: only the final one stamps the failed claim. */
+  /**
+   * The queue delivery number of the message that admitted this attempt. It no
+   * longer gates the failed-claim stamp (the Workflow instance is the terminal
+   * owner); it identifies the delivery in diagnostics.
+   */
   attempts: number;
 };
 
@@ -5402,7 +5406,7 @@ export async function settleAttemptFailure(
   /** The facts this settlement hands cleanup (a durable proof, or an unknown verdict). */
   cleanup: CleanupInput,
 ): Promise<ProcessOutcome> {
-  const { payload, level, attemptId, githubAppId, attempts } = ref;
+  const { payload, level, attemptId, githubAppId } = ref;
   // The phase's facts arrive as data; the cause keeps its type for the branches
   // below, so a wrapped rejection is settled exactly as the raw one was.
   const failure = thrown instanceof AttemptPhaseError ? thrown : undefined;
@@ -5617,11 +5621,10 @@ export async function settleAttemptFailure(
   );
 
   // AL-6: best-effort review_failures row BEFORE the
-  // rethrow — DLQ-bound infra failures otherwise leave zero D1 trace (the
-  // audit blind spot). `stage` = the coarse phase in flight
-  // (failureStage); rows are per-attempt events (a DLQ'd message leaves up
-  // to QUEUE_MAX_ATTEMPTS of them: 1 initial delivery + the queue's
-  // max_retries, one per guard rung). The insert
+  // rethrow — an unresolved attempt otherwise leaves zero D1 trace (the audit
+  // blind spot). `stage` = the coarse phase in flight (failureStage); rows are
+  // per-attempt events, so a re-executed settlement can append one duplicate
+  // event row, never a second terminal claim. The insert
   // must never mask the rethrow: its own failure is a warn line only.
   // SEC-03: the error detail is redacted (shape + exact-value passes)
   // before the durable row — an infra error can interpolate a
@@ -5690,15 +5693,18 @@ export async function settleAttemptFailure(
     await check?.terminalize(null, "pre-publication-failure");
   }
 
-  // This delivery is the last one the queue will make (the next stop is the
-  // DLQ), so the commit will never be reviewed: overwrite its idempotency
-  // key with "failed" (the worker's claim TTL) so neither the worker's
-  // pre-check nor the supersede skip keeps treating the stale "1" as proof.
-  // Keyed off the PAYLOAD sha — the same sha the worker claimed.
+  // The Workflow instance is the attempt's TERMINAL owner: on this route there
+  // is no further queue delivery ladder to wait out, so a settled failure
+  // stamps the commit's claim `failed` (the worker's claim TTL) immediately —
+  // neither the worker's pre-check nor the supersede skip may keep treating the
+  // stale "1" as proof of a review that is coming. The owner is the claim this
+  // delivery actually took: the payload head's idempotency key. A comment-only
+  // delivery states no commit, so it has no such claim; its consumed comment
+  // claim already refuses replay and the failure row is the trace.
   // `putAbandonClaim` never downgrades a completed review. Best-effort: a KV
   // fault only leaves "1" behind, which the failure row above traces, and it
   // never masks the rethrow.
-  if (attempts >= QUEUE_MAX_ATTEMPTS && payload.head_sha) {
+  if (payload.head_sha) {
     try {
       await putAbandonClaim(
         deps.env.IDEMPOTENCY_KV,
