@@ -1712,12 +1712,12 @@ export async function recordCheckObservation(
   nowMs: CheckClock,
   /**
    * The update this response validates carried a conclusion derived WITHOUT a
-   * publication proof, while a staged publication was already linked. The
-   * Check is still terminal — the send landed — but the record asserts an
-   * UNCONFIRMED outcome, which the linked publication's later confirmation
-   * may contradict (§7.9a). Such a row is closed `remote-unconfirmed` instead
-   * of `done`, which is the durable mark `reopenTerminalCorrection` consumes
-   * exactly once; every other agreeing response closes `done`.
+   * publication proof. The Check is still terminal — the send landed — but the
+   * record asserts an UNCONFIRMED outcome, which the publication it links may
+   * later contradict (§7.9a). Such a row is closed `remote-unconfirmed`
+   * instead of `done`, which is the durable mark `reopenTerminalCorrection`
+   * consumes exactly once; every other agreeing response closes `done`. A row
+   * with no linked publication is never marked: nothing could ever correct it.
    */
   options?: { conclusionUnproven?: boolean },
 ): Promise<boolean> {
@@ -1740,7 +1740,8 @@ export async function recordCheckObservation(
   if (running && owned.observed !== "unknown") return false;
 
   const observed: CheckObserved = agrees ? (owned.desired as Exclude<CheckDesired, "in_progress">) : "in_progress";
-  const unproven = agrees && options?.conclusionUnproven === true;
+  const unproven =
+    agrees && options?.conclusionUnproven === true && owned.publicationId !== null;
   return runFenced(
     db,
     id,
@@ -2122,20 +2123,33 @@ export async function listCheckReconcileBatch(
         )
         -- §7.9a late correction: a Check that already reached its terminal
         -- record as an UNCONFIRMED failure linked to a staged publication owes
-        -- one revision when that publication confirms. The mark is the whole
-        -- selection: whether the proof exists is read by the lane, through the
-        -- row's OWN link, so this batch never has to consult the journal and a
-        -- proof that never arrives costs one indexed read per pass and nothing
-        -- else. No other terminal row is selected. Correction rows sort AFTER
-        -- the due ones so a record that forever awaits its proof cannot hold
-        -- the head of the bounded batch.
+        -- one revision when that publication confirms. No other terminal row is
+        -- selected, and the mark is retained indefinitely: nothing observable
+        -- ever proves a publication will not confirm, so a time bound here
+        -- would silently make a late confirmation unable to correct the record
+        -- (the same platform limit as I-000670). It costs one indexed proof
+        -- read per pass and no writes.
         OR (
           terminal_ms IS NOT NULL
           AND recovery_state = 'remote-unconfirmed'
           AND desired = 'failure' AND observed = 'failure'
           AND publication_id IS NOT NULL
         )
-        ORDER BY (terminal_ms IS NOT NULL), COALESCE(next_attempt_ms,created_ms),id
+        -- PARTITION the batch so an old mark that never confirms can never
+        -- displace work that is ready: marks whose own link already carries a
+        -- proof are actionable NOW and come first, due rows keep their place,
+        -- and marks still awaiting proof fill the remainder of the bound.
+        ORDER BY
+          CASE
+            WHEN terminal_ms IS NOT NULL AND EXISTS (
+              SELECT 1 FROM review_publications pub
+               WHERE pub.id = review_checks.publication_id
+                 AND pub.proof_json IS NOT NULL AND json_valid(pub.proof_json)
+            ) THEN 0
+            WHEN terminal_ms IS NULL THEN 1
+            ELSE 2
+          END,
+          COALESCE(next_attempt_ms,created_ms),id
         LIMIT ?`,
     )
     .bind(maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs, limit)

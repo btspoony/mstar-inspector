@@ -1045,7 +1045,11 @@ async function reconcileCheckAttempt(
   }
 
   // Intent BEFORE any remote update: the persisted row is the only source the
-  // send reads, so the frozen text cannot be swapped after this point.
+  // send reads, so the frozen text cannot be swapped after this point. The wait
+  // attribution is NOT pinned as this attempt's link (an abandoned attempt
+  // keeps its own `publication_id` NULL); a row that already links its own
+  // publication keeps that link, which is what a proof-free conclusion must
+  // stay correctable from (§7.9a).
   await setCheckDesired(db, attemptId, lease, conclusion, proof?.publicationId ?? null, now());
   const intent = await getCheckOwnership(db, attemptId, lease, now());
   if (intent === null) return;
@@ -1245,7 +1249,7 @@ async function reconcileCheckAttempt(
       // frozen intent: an earlier send LANDED and only its reply was lost.
       // Reading it back is reconciliation — re-sending the same text would
       // spend a request to prove what this read already proved.
-      const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary);
+      const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary, proof === null);
       if (recorded === "mismatch") {
         await settleFailedAttempt(
           db, now, attemptsBefore, row, lease,
@@ -1284,7 +1288,7 @@ async function reconcileCheckAttempt(
     await settleFailedAttempt(db, now, attemptsBefore, row, lease, completed.reason, log, summary);
     return;
   }
-  const recorded = await recordTerminal(db, attemptId, lease, completed.remote, frozen, now, summary);
+  const recorded = await recordTerminal(db, attemptId, lease, completed.remote, frozen, now, summary, proof === null);
   if (recorded === "mismatch") {
     await settleFailedAttempt(
       db, now, attemptsBefore, row, lease,
@@ -1300,6 +1304,11 @@ async function reconcileCheckAttempt(
  * row, so an old-epoch response (the row has moved on) writes nothing.
  * Returns `mismatch` when the payload is a different outcome than intended,
  * `lost` when the fence no longer belongs to this invocation.
+ *
+ * `conclusionUnproven` says this send carried a conclusion decided WITHOUT a
+ * publication proof: the record is then published-but-unconfirmed and stays
+ * correctable once by its own publication's confirmation (§7.9a) — the same
+ * mark the consumer's terminalize records.
  */
 async function recordTerminal(
   db: D1Like,
@@ -1309,6 +1318,7 @@ async function recordTerminal(
   frozen: CheckConclusion,
   now: () => number,
   summary: CheckReconcileSummary,
+  conclusionUnproven: boolean,
 ): Promise<"recorded" | "mismatch" | "lost"> {
   // Delivery needs the frozen conclusion AND the frozen text (spec §7.9): a
   // reply whose output is absent or different proves nothing about what the
@@ -1318,7 +1328,7 @@ async function recordTerminal(
     remote.conclusion === frozen.desired &&
     remote.summary === frozen.summary;
   if (!agrees) return "mismatch";
-  const written = await recordCheckObservation(db, attemptId, lease, remote, now());
+  const written = await recordCheckObservation(db, attemptId, lease, remote, now(), { conclusionUnproven });
   if (!written) return "lost";
   // The Check is concluded: clear the attempt row's owed flag so this lane
   // stops selecting it. Bookkeeping only — the conclusion is already durable,
