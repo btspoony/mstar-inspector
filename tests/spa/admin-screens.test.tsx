@@ -819,6 +819,55 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("a save shows the store's value, not its echo, when the row changed elsewhere", async () => {
+    let serverCap = 1_200_000;
+    let patches = 0;
+    const capGroup = () => ({
+      ...RUNTIME,
+      attemptCap: { capMs: serverCap, saved: true, min: 900_000, max: 3_600_000, degraded: false },
+    });
+    const surface = await runtimeScreen((request) => {
+      if (request.method !== "PATCH") return json(capGroup());
+      patches += 1;
+      if (patches === 1) {
+        // Another operator's save lands between this request's echo and the
+        // card's re-read: the echo is stale before it is rendered.
+        serverCap = 3_000_000;
+        return json({ attemptCap: { capMs: 1_800_000 } });
+      }
+      serverCap = 2_400_000;
+      return json({ attemptCap: { capMs: 2_400_000 } });
+    });
+    await surface.type("#attempt-cap-ms", "1800000");
+    const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    // The store wins over the 1 800 000 the request was answered with, and the
+    // disagreement is a persistent line rather than a disappearing notice.
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 3000000 ms (saved value).",
+    );
+    expect(surface.container.querySelector('[data-attempt-cap="changed-elsewhere"]')?.textContent).toBe(
+      "Another save changed the stored value while this page was open; the effective value is now 3000000 ms, which is what the store holds.",
+    );
+    expect((surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement).value).toBe(
+      "3000000",
+    );
+
+    // A second save leaves the card on the second store value, not the first.
+    await surface.type("#attempt-cap-ms", "2400000");
+    await surface.click(form.querySelector('button[type="submit"]'));
+    expect((surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement).value).toBe(
+      "2400000",
+    );
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 2400000 ms (saved value).",
+    );
+    expect(surface.container.querySelector('[data-attempt-cap="changed-elsewhere"]')).toBeNull();
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(2);
+    await surface.close();
+  });
+
   test("an unreadable cap claims no effective value and starts the field empty", async () => {
     const surface = await runtimeScreen(() =>
       json({

@@ -1295,6 +1295,9 @@ export const zhCN: Dictionary = {
       attemptCapCurrentSaved: "下一次审查生效：{value} 毫秒（已保存值）。",
       /** {value} = 行缺失时的默认值——绝不会显示为已保存值。 */
       attemptCapCurrentDefault: "下一次审查生效：{value} 毫秒（平台默认值——尚未保存任何值）。",
+      /** 保存后的重读与回显不一致：以存储中的值为准。 */
+      attemptCapChangedElsewhere:
+        "本页面打开期间，另一处保存改动了已存储的值；生效值现为 {value} 毫秒，这正是存储中的值。",
       /** 已存储的上限无法读取时不会准入任何审查。 */
       attemptCapUnreadable:
         "无法读取已存储的审查最长时长，因此在重新可读或保存新值之前，不会准入任何新审查。",

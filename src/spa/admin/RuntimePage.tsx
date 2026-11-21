@@ -280,6 +280,12 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [sweepDraft, setSweepDraft] = useState<Partial<Record<SweepField, string>>>({});
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
   const [attemptCapDraft, setAttemptCapDraft] = useState<string | null>(null);
+  /**
+   * The store's value when a save's re-read disagreed with the save's own echo:
+   * another operator wrote the row while this page was open. The card keeps
+   * showing the store's number and says so until the next save.
+   */
+  const [attemptCapChangedElsewhere, setAttemptCapChangedElsewhere] = useState<number | null>(null);
   /** The window's pending state: `null` = untouched, so the stored one shows. */
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
   const [reasonDraft, setReasonDraft] = useState<string | null>(null);
@@ -539,8 +545,23 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     attemptCapSignal.start();
     try {
       const saved = await setAttemptCap(capMs, stored);
-      // A 2xx rewrote the row, so the card reads as a saved, trusted value.
-      update((data) => ({ ...data, attemptCap: saved }));
+      // The echo is what THIS request wrote; it is not what the row holds now.
+      // Another operator may have written the cap since this page loaded, so the
+      // card shows the store's answer and keeps a line when it differs.
+      const fresh = await readRuntime().catch(() => null);
+      if (fresh?.attemptCap) {
+        update(() => fresh);
+        setAttemptCapChangedElsewhere(
+          fresh.attemptCap.degraded || fresh.attemptCap.capMs === saved.capMs
+            ? null
+            : fresh.attemptCap.capMs,
+        );
+      } else {
+        // The write landed but the re-read did not: keep the accepted echo and
+        // stop claiming a disagreement the card can no longer verify.
+        setAttemptCapChangedElsewhere(null);
+        update((data) => ({ ...data, attemptCap: saved }));
+      }
       setAttemptCapDraft(null);
       setNotice({
         kind: "success",
@@ -870,15 +891,26 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 {attemptCap.degraded ? null : (
                   // The two copies are the whole point: a stored value says so,
                   // and an absent row says "default — nothing saved".
-                  <p className="mt-2 text-xs text-muted-foreground" data-attempt-cap="effective">
-                    {t(
-                      locale,
-                      attemptCap.saved
-                        ? "admin.runtime.attemptCapCurrentSaved"
-                        : "admin.runtime.attemptCapCurrentDefault",
-                      { value: attemptCap.capMs },
+                  <>
+                    <p className="mt-2 text-xs text-muted-foreground" data-attempt-cap="effective">
+                      {t(
+                        locale,
+                        attemptCap.saved
+                          ? "admin.runtime.attemptCapCurrentSaved"
+                          : "admin.runtime.attemptCapCurrentDefault",
+                        { value: attemptCap.capMs },
+                      )}
+                    </p>
+                    {attemptCapChangedElsewhere === null ? null : (
+                      // Persistent, not a notice that disappears: the operator
+                      // must know the number they just sent is not the one in force.
+                      <p className="mt-1 text-xs text-(--tone-warn-fg)" data-attempt-cap="changed-elsewhere">
+                        {t(locale, "admin.runtime.attemptCapChangedElsewhere", {
+                          value: attemptCapChangedElsewhere,
+                        })}
+                      </p>
                     )}
-                  </p>
+                  </>
                 )}
               </CardContent>
             </SectionCard>
