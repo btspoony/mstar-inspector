@@ -89,19 +89,16 @@
  * never src/worker/**.
  */
 
-import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
+import type { Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   classifyGithubRateLimit,
-  GITHUB_PRIMARY_RATE_LIMIT_PREFIX,
   GITHUB_RATE_LIMIT_PREFIX,
   MAINTENANCE_DEFERRED_STAGE,
 } from "../contracts/failure-stages";
 import {
   idemKey,
   IDEMPOTENCY_SECONDS,
-  IDEM_DEGRADED,
-  IDEM_DONE,
   IDEM_DROPPED,
   IDEM_FAILED,
   IDEM_PAUSED,
@@ -110,117 +107,23 @@ import {
   putAbandonClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
-import { dropAllSuggestionFences, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
-import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import { providerEnvName } from "./provider-catalog";
-import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
-import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
-import { createFailureStore, QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
-import {
-  hasUsageEventForExecutionToken,
-  recordUsageEvent,
-  type UsageSource,
-} from "../store/usage-store";
-// The cost model the ledger charges: `rpFor` from the profile judging this
-// month (D5), so a started review is priced by the same configuration the
-// enqueue's ceiling check read.
-import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
-import { computeFindingFingerprint } from "../store/fingerprint";
+import { redactExactSecrets, redactSecrets } from "./redact";
+import { createArtifactStore } from "../store/artifact-store";
+import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 // The hand-off's two fenced writes live in the Check registry (§7.9/§7.11.2):
 // linking the publication the probe found, and releasing the claim to recovery.
+import { type PublicationRow } from "../store/finding-lifecycle";
+import { type Scope } from "../../packages/shared/src/recheck-wire";
+import { getSandbox } from "./sandbox";
 import {
-  CHECK_BACKOFF_MS,
-  deferCheckRecovery,
-  linkCheckPublication,
-  recordTerminalizeOutcome,
-} from "../store/review-checks";
-import {
-  applyPublishedLifecycle,
-  claimPublication,
-  countRecheckableFindings,
-  findPublicationJournal,
-  hasUnprovenDegradedPublication,
-  PUBLICATION_HANDOFF_PHASES,
-  markPublicationFailed,
-  recordPublicationProof,
-  selectAssessmentTargets,
-  stagePublication,
-  type Lease,
-  type LineIntent,
-  type LifecycleRound,
-  type PublicationPayload,
-  type PublicationRow,
-  type VerifiedResolution,
-} from "../store/finding-lifecycle";
-import {
-  ASSESSMENT_TARGET_CAP,
-  RECHECK_ASSIGNMENT_PROSE_BYTES,
-  RECHECK_STATUS_ERROR_MAX_CHARS,
-  type Assessment,
-  type Coverage,
-  type Discussion,
-  type EvidenceSlice,
-  type RecheckDoc,
-  type RecheckInput,
-  type RecheckStatus,
-  type RecheckTarget,
-  type Scope,
-} from "../../packages/shared/src/recheck-wire";
-import { BODY_TRUNCATED_SUFFIX, boundDiscussion } from "./discussion-context";
-import { buildLineIntent, sha256Hex } from "./review-threads";
-import { getSandbox, type RetentionProof, type ReviewSandbox } from "./sandbox";
-import type { ShellCommand } from "./shell-command";
-import {
-  BudgetExhaustedError,
-  RoundBudgetSpent,
-  STDERR_TAIL_MAX,
-  boundedStepTimeout,
-  chainHeadSelector,
-  effectiveModelChain,
-  parseBoundedRead,
-  prepareReviewAttempt,
-  runReviewAttempt,
   attemptSandboxId,
-  AttemptUnknownError,
-  discardReviewAttempt,
-  type ReviewAttemptProgress,
   type RunnerAppConfig,
 } from "./review-attempt";
 import {
-  CLONE_DIR,
-  compareGateCommand,
-  DIFF_PATH,
-  fetchDepthOneCommand,
-  gitTransportEnv,
-  incrementDiffCommand,
-  isApiSha,
-  isDiffTooLarge,
-  issueViewCommand,
-  localDiffCommand,
-  mergeBaseCommand,
-  parseCompareGate,
-  prBodyCommand,
-  pullRequestBaseRefCommand,
-} from "./gitops";
-import {
-  PR_CONTEXT_MAX_CHARS,
-  PR_CONTEXT_MAX_ISSUES,
-  type PrContext,
-} from "../../packages/shared/src/report-wire";
-import {
-  buildPreparedDegradedBody,
-  buildPreparedReviewBody,
-  buildPublicationMarker,
-  buildRevalidatedSection,
   createReviewCommenter,
-  filterLineCommentFindings,
-  PreparedSendRejected,
-  renderLineCommentText,
-  type ClosureRow,
-  type CommenterEnv,
   type ReviewCommenter,
-  type UpsertPlan,
 } from "./comment";
 // Per-App credential resolution (lock L4): the consumer is a
 // sanctioned reader of the dashboard store leaves (apps-store reads the
@@ -239,7 +142,6 @@ import { createSecretbox } from "../dashboard/secretbox";
 // the admission settings use.
 import {
   getMaintenanceMode,
-  getRecheckAssignmentMaxBytes,
   maintenanceClosed,
   readDefaultReviewLevel,
 } from "../dashboard/runtime-config-store";
@@ -253,14 +155,7 @@ import {
 import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
 // §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
-import {
-  CHECK_SUMMARIES,
-  createCheckBeginLatch,
-  createCheckLifecycle,
-  type CheckBeginLatch,
-  type CheckPromotion,
-  type CheckTerminalOutcome,
-} from "./checks";
+import { createCheckLifecycle } from "./checks";
 // Review admission (review-concurrency §1.2): one `review_inflight` row is the
 // per-PR lock and the capacity reservation; the cap comes from the pipeline's
 // single runtime-config reader (never a dashboard route import).
@@ -269,11 +164,9 @@ import {
   describeInflightError,
   releaseInflight,
   type InflightKey,
-  type InflightRefusal,
 } from "../store/inflight-store";
-import { readReviewConcurrency, type DegradedReason } from "./concurrency-reader";
+import { readReviewConcurrency } from "./concurrency-reader";
 import {
-  CHECK_TERMINALIZE_DEFAULT,
   CHECK_UPDATE_DEFAULT,
   readCheckBudgets,
   type CheckBudgets,
@@ -282,28 +175,15 @@ import {
 // derivation. The Check store imports the same module, so neither side owns a
 // second copy of the arithmetic.
 import {
-  anchorRunnerBudget,
-  CHECK_HOOK_TIMEOUT_MS,
-  CHECK_WINDOW_MS,
-  deriveReviewBudget,
-  EXEC_TIMEOUT_GIT_MS,
-  INLINE_RESOLVE_BUDGET_MS,
-  POST_RUNNER_READ_BUDGET_MS,
   reviewGuardTtlSeconds,
   ROUND_BUDGET_MS,
   runnerTimeoutMs,
-  parseNumstatSize,
-  requestRunnerBudget,
-  type ReviewBudget,
-  type RunnerBudgetAnchor,
 } from "../review-budget";
 // The admitted attempt's execution lives in its own module (layering:
 // consumer → review-attempt-execution → review-attempt). Everything the
 // admission half shares with it is imported from there, never duplicated.
 import {
-  bindUnboundThreads,
   boundedBestEffort,
-  extractIssueRefs,
   findIncrementBase,
   journalHandoffRow,
   kvDoneHit,

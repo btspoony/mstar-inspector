@@ -16,34 +16,28 @@
  * admission half imports them; nothing here imports `consumer.ts`.
  */
 
-import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
+import type { D1Database, KVNamespace } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   classifyGithubRateLimit,
   GITHUB_PRIMARY_RATE_LIMIT_PREFIX,
   GITHUB_RATE_LIMIT_PREFIX,
-  MAINTENANCE_DEFERRED_STAGE,
 } from "../contracts/failure-stages";
 import {
   idemKey,
   IDEMPOTENCY_SECONDS,
   IDEM_DEGRADED,
   IDEM_DONE,
-  IDEM_DROPPED,
   IDEM_FAILED,
-  IDEM_PAUSED,
-  IDEM_SUPERSEDED,
-  isReviewClaim,
   putAbandonClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
 import { dropAllSuggestionFences, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { providerEnvName } from "./provider-catalog";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
-import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
-import { createFailureStore, QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
+import { type D1ArtifactStore } from "../store/artifact-store";
+import { QUEUE_MAX_ATTEMPTS, type FailureStore } from "../store/failure-store";
 import {
   hasUsageEventForExecutionToken,
   recordUsageEvent,
@@ -96,7 +90,7 @@ import {
 } from "../../packages/shared/src/recheck-wire";
 import { BODY_TRUNCATED_SUFFIX, boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
-import { getSandbox, type RetentionProof, type ReviewSandbox } from "./sandbox";
+import { type RetentionProof, type ReviewSandbox } from "./sandbox";
 import type { ShellCommand } from "./shell-command";
 import {
   BudgetExhaustedError,
@@ -108,9 +102,9 @@ import {
   parseBoundedRead,
   prepareReviewAttempt,
   runReviewAttempt,
-  attemptSandboxId,
   AttemptUnknownError,
   discardReviewAttempt,
+  type ReviewAttemptExecution,
   type ReviewAttemptProgress,
   type RunnerAppConfig,
 } from "./review-attempt";
@@ -118,6 +112,7 @@ import {
   CLONE_DIR,
   compareGateCommand,
   DIFF_PATH,
+  type GitOpsCommands,
   fetchDepthOneCommand,
   gitTransportEnv,
   incrementDiffCommand,
@@ -140,7 +135,6 @@ import {
   buildPreparedReviewBody,
   buildPublicationMarker,
   buildRevalidatedSection,
-  createReviewCommenter,
   filterLineCommentFindings,
   PreparedSendRejected,
   renderLineCommentText,
@@ -153,37 +147,20 @@ import {
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // review_bots row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
-import { createReviewBotsStore, type BotScope } from "../dashboard/apps-store";
-import {
-  checkGateOf,
-  createTargetsStore,
-  readEffectiveTargetSettings,
-  type ReviewTargetRow,
-} from "../dashboard/targets-store";
-import { createSecretbox } from "../dashboard/secretbox";
+import { createTargetsStore } from "../dashboard/targets-store";
 // The operator default review depth (migration 0047 pairing): read ONLY when
 // the target row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
-import {
-  getMaintenanceMode,
-  getRecheckAssignmentMaxBytes,
-  maintenanceClosed,
-  readDefaultReviewLevel,
-} from "../dashboard/runtime-config-store";
+import { getRecheckAssignmentMaxBytes } from "../dashboard/runtime-config-store";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads bot_provider_keys / bot_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
-import {
-  createAppConfigStore,
-  type CustomProviderConsumerConfig,
-} from "../dashboard/app-config-store";
-import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
+import { type CustomProviderConsumerConfig } from "../dashboard/app-config-store";
 // §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
 import {
   CHECK_SUMMARIES,
   createCheckBeginLatch,
-  createCheckLifecycle,
   type CheckBeginLatch,
   type CheckPromotion,
   type CheckTerminalOutcome,
@@ -191,18 +168,11 @@ import {
 // Review admission (review-concurrency §1.2): one `review_inflight` row is the
 // per-PR lock and the capacity reservation; the cap comes from the pipeline's
 // single runtime-config reader (never a dashboard route import).
-import {
-  acquireInflight,
-  describeInflightError,
-  releaseInflight,
-  type InflightKey,
-  type InflightRefusal,
-} from "../store/inflight-store";
-import { readReviewConcurrency, type DegradedReason } from "./concurrency-reader";
+import { releaseInflight, type InflightKey, type InflightRefusal } from "../store/inflight-store";
+import { type DegradedReason } from "./concurrency-reader";
 import {
   CHECK_TERMINALIZE_DEFAULT,
   CHECK_UPDATE_DEFAULT,
-  readCheckBudgets,
   type CheckBudgets,
 } from "./check-budgets-reader";
 // The review round clock, its reserve ledger and the single runner-budget
@@ -216,8 +186,6 @@ import {
   EXEC_TIMEOUT_GIT_MS,
   INLINE_RESOLVE_BUDGET_MS,
   POST_RUNNER_READ_BUDGET_MS,
-  reviewGuardTtlSeconds,
-  ROUND_BUDGET_MS,
   runnerTimeoutMs,
   parseNumstatSize,
   requestRunnerBudget,
@@ -2460,135 +2428,140 @@ export type AdmittedReviewAttempt = {
  * provisions a second container or launches a second paid step for the same
  * attempt.
  */
-export async function runAdmittedReviewAttempt(
-  input: AdmittedReviewAttempt,
-): Promise<ProcessOutcome> {
-  const {
-    payload,
-    deps,
-    attemptId,
-    sandboxId,
-    roundStartedAt,
-    level,
-    commenter,
-    githubAppId,
-    workspaceId,
-    usageWorkspaceId,
-    usageSource,
-    appCfg,
-    modelOverrides,
-    customProviders,
-    checkBudgets,
-    inflight,
-    attempts,
-  } = input;
-  // Set once the sha is resolved from the checkout; the failure log carries
-  // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
-  // criteria: 失败路径错误日志含幂等键).
-  let fields: ConsumerLogFields | undefined;
-  let baseFields: ConsumerLogFields | undefined;
-  let sandbox: ReviewSandbox | null = null;
-  // Set when the attempt's container could not be proven — by collection OR by
-  // teardown: the other half is skipped too, and capacity is never released on
-  // unknown evidence (a new attempt could start on a container that still runs).
-  let containerUnproven = false;
-  // A durable outcome for this attempt. It authorises destroying the container
-  // ONLY together with an observed paid return (`runnerReturned`): an error
-  // event, a lost reply or a timeout is never proof a child stopped.
-  let durableOutcome = false;
-  // The attempt's mutable cross-step facts, passed by reference so a throw
-  // inside a step still leaves them visible to the catch.
-  // Failure-stage tracking (AL-6): the catch site's best-effort
-  // review_failures row classifies `stage` from the coarse phase in flight —
-  // "pipeline" (default) = worker-side orchestration; "sandbox" = container
-  // acquisition + the in-sandbox git/diff/numstat/input steps (exec exception
-  // OR non-zero exit); "runner" = the in-image review run itself. "parse"
-  // never goes through this variable — the degrade branch records stage="parse"
-  // directly and acks without reaching the catch.
-  // Runner wall-clock start (d5-budget AC-S10-logs): set just before the
-  // runner exec so the failure log can carry elapsed_ms. VISIBILITY ONLY —
-  // elapsed never aborts; the sandbox exec timeout is the only wall-clock
-  // failure (spec 不 abort).
-  // SEC-01 exact-value defense: the session's ACTUAL secret values (runner
-  // env provider keys + the minted installation token). Seeded with the
-  // minted token right after mint, then replaced with the full session values
-  // once the runner env is assembled. Hoisted so the catch site's best-effort
-  // failure row can exact-redact the error detail too (SEC-03).
-  const progress: ReviewAttemptProgress = {
-    failureStage: "pipeline",
-    secretValues: [],
-    runnerStartedAt: undefined,
-    runnerReturned: false,
-  };
-  // Set the moment the prepared publication send is ATTEMPTED: a throw after
-  // this point is post-send uncertainty (publication-unknown), never a
-  // clean pre-publication failure.
-  let sendAttempt: { publicationId: string } | null = null;
-  // §7.10 Check seam state: the handle from the begin hook (null = no Checks /
-  // hook failed) and the ONCE-guarded terminalize — every terminal path reports
-  // exactly one outcome, hook exceptions are isolated warns, and a hook
-  // timeout resolves without blocking the path.
-  let checkHandle: CheckHandle | null = null;
-  let checkTerminalized = false;
-  // The authoritative checkout SHA once `rev-parse` answered, and the App's
-  // numeric GitHub id once the credential row resolved. Both are the facts a
-  // pre-numstat exhaustion needs to claim the Check it owes: an issue-comment
-  // delivery has no payload SHA and may have no readable head watermark, so
-  // the admission claim never ran, yet the stop happens after both are known.
-  let resolvedHeadSha: string | null = null;
-  let resolvedGithubAppId: number | undefined = githubAppId;
-  // §7.10 Check lane scope — the same App/PR identity the publication journal
-  // and the attempt key use, derivable from the payload alone. Hoisted so a
-  // stop that fires before the fallback claim can still claim the Check it
-  // owes; it is ASSIGNED inside the try so a legacy payload with no `botRef`
-  // throws through the structured channel instead of escaping before the catch.
-  let lifecycleScope: Scope | undefined;
-  // The facts a `budget-exhausted` resolution is built from: the ONE derived
-  // round clock (set at the diff stage), the runner allocation frozen just
-  // before the input write (null = the runner never received one), and the
-  // selected numstat's textual line count (null = unobserved). Hoisted so the
-  // catch can resolve a consumer deadline refusal into the same typed outcome
-  // a runner signal or sandbox kill carries — an unobserved fact stays null,
-  // never inferred.
-  let roundBudget: ReviewBudget | null = null;
-  let runnerAnchor: RunnerBudgetAnchor | null = null;
-  let observedChangedLines: number | null = null;
+/**
+ * The attempt's cross-phase run state: what a boundary must carry and no single
+ * phase owns. The orchestrator builds it once and hands the same object to
+ * every phase, so a failure settlement or a teardown sees exactly what the
+ * phases wrote — never a closure over an invocation's scope.
+ *
+ * The durable carriers stay durable: the paid result is proven through the
+ * launch row and the publication payload is read from the journal, so a
+ * restart resumes at a boundary instead of at this object.
+ */
+export type AttemptRun = {
+  readonly input: AdmittedReviewAttempt;
+  /** AL-6 + SEC-01: the failure stage, the session's secret values, the runner's return. */
+  readonly progress: ReviewAttemptProgress;
+  /** The §7.10 Check settlement this attempt owns. */
+  readonly check: CheckSettlement;
+  baseFields?: ConsumerLogFields;
+  fields?: ConsumerLogFields;
+  sandbox: ReviewSandbox | null;
+  /** The authoritative checkout sha, once `rev-parse` answered. */
+  headSha: string | null;
+  lifecycleScope?: Scope;
+  roundBudget: ReviewBudget | null;
+  runnerAnchor: RunnerBudgetAnchor | null;
+  observedChangedLines: number | null;
+  durableOutcome: boolean;
+  containerUnproven: boolean;
+  sendAttempt: { publicationId: string } | null;
+};
+
+/**
+ * The §7.10 Check seam: the claim that opens this attempt's run and the ONE
+ * terminalize that settles it. Its state lives on this object rather than in
+ * attempt locals, so every phase settles through the same pair of writers.
+ */
+export type CheckSettlement = {
+  handle: CheckHandle | null;
+  claimAttempted: boolean;
   /**
-   * The attempt whose promotion was ABANDONED (its update budget ended the
-   * wait while the PATCH may still be in flight). This attempt must then not
-   * write the terminal state itself: the late promotion could land after it and
-   * reopen a finished run that is no longer due for recovery. Cleared by every
-   * new begin, so it always describes `checkHandle`.
+   * The attempt whose promotion was ABANDONED: its update budget ended the
+   * wait while the PATCH may still be in flight, so this attempt must not write
+   * the terminal state itself. Cleared by every new begin.
    */
-  let checkPromotionAbandoned: string | null = null;
-  // Whether the ADMISSION-time claim ran. The post-`rev-parse` block is the
-  // fallback for a message whose SHA was not knowable then, so it must not
-  // claim a second time (a failed early claim included: the claim INSERT is the
-  // one race-decided gate, and the old code tried exactly once).
-  let checkClaimAttempted = false;
-  /**
-   * §7.10 give-up handoff: this attempt stopped waiting on the terminalize
-   * hook. The lifecycle freezes a terminal intent (only where none is frozen)
-   * and releases the lease to the Check recovery lane with NO remote request,
-   * so the minute reconciler closes the run instead of waiting out the
-   * execution deadline (spec §7.11). The promise is handed to the invocation
-   * context when one exists, so a Check write never adds a wait to the
-   * review's own return.
-   *
-   * Resolves `true` only when the handoff COMPLETED under this lease (intent +
-   * release, two fenced writes) and the release actually changed the row.
-   * `false` means the attempt may still hold this attempt's lease (or the
-   * no-op proved it was not ours to release), so a caller taking a second
-   * Check ownership must not do so — a Check fault never blocks the review,
-   * but it must not double-claim either.
-   *
-   * EVERY hand-off of an attempt whose promotion was ABANDONED gets the longer
-   * first recovery delay, because the property belongs to the attempt, not to
-   * one exit: the abandoned PATCH is bounded only by its update budget plus the
-   * transport's own lifetime, and no cancellation exists — the bound only stops
-   * the wait. Scheduling the recovery write beyond that bound is what makes it
-   * the LAST writer; it is an assumption about network lifetime, not a proof.
-   */
+  promotionAbandoned: string | null;
+  terminalized: boolean;
+  begin(scope: Scope, githubAppId: number, headSha: string): Promise<CheckHandle | null>;
+  abandon(
+    handle: CheckHandle,
+    reason: string,
+    options?: { outcome?: CheckTerminalOutcome; inheritedHeadSha?: string; budgetExhaustion?: BudgetExhaustedOutcome },
+  ): Promise<boolean>;
+  terminalize(
+    publicationId: string | null,
+    outcome: CheckTerminalOutcome,
+    inheritedHeadSha?: string,
+    budgetExhaustion?: BudgetExhaustedOutcome,
+  ): Promise<void>;
+};
+
+export type CheckSettlementInput = {
+  payload: ReviewJobPayload;
+  deps: ProcessDeps;
+  sandboxId: string;
+  checkBudgets: CheckBudgets | null;
+  /** The attempt's CURRENT structured log fields (the run state owns them). */
+  logFields: () => ConsumerLogFields;
+};
+
+/** A phase's early settlement: the attempt owes nothing more. */
+export type SettledAttempt = { kind: "settled"; outcome: ProcessOutcome };
+
+/** What `prepare` hands the paid step: the container, its credential, and the round's inputs. */
+export type PreparedAttempt = {
+  headSha: string;
+  token: string;
+  cmds: GitOpsCommands;
+  sandbox: ReviewSandbox;
+  fields: ConsumerLogFields;
+  lifecycleScope: Scope;
+  key: IdempotencyKey;
+  targets: RecheckTarget[];
+  totalOpen: number;
+  captureFailed: boolean;
+  pendingApplyFailed: boolean;
+  sinceSha: string | null;
+  diffText: string;
+  catalogExcluded: ReadonlySet<string>;
+  catalogBudgetExcluded: ReadonlySet<string>;
+  budgetExcluded: Set<string>;
+  discussion: Discussion;
+  askedDiscussion: Discussion;
+  recheckInput: RecheckInput | undefined;
+  recheckAssignmentMaxBytes: number | undefined;
+  prContext: PrContext | undefined;
+  anchor: RunnerBudgetAnchor;
+  observedChangedLines: number | null;
+  reconFacts: string[];
+};
+
+export type PrepareStep = { kind: "prepared"; prepared: PreparedAttempt } | SettledAttempt;
+
+/** What the paid step returned: a reply, never a completion. */
+export type ReviewedAttempt = {
+  execution: ReviewAttemptExecution;
+  recheckDoc: RecheckDoc | null;
+  rejectedRowIds: ReadonlySet<string>;
+  anonymousRejectedRows: number;
+};
+
+/**
+ * What `collect` hands `publish`: the immutable payload, already staged, and
+ * the facts the GitHub actions are keyed on.
+ */
+export type CollectedAttempt = {
+  stagedId: string;
+  key: IdempotencyKey;
+  plan: UpsertPlan;
+  round: number;
+  preparedBody: string;
+  bodySha256: string;
+  lineIntents: LineIntent[];
+  resolutions: { associationId: string; verified: VerifiedResolution }[];
+};
+
+export type CollectStep = { kind: "collected"; collected: CollectedAttempt } | SettledAttempt;
+
+/**
+ * The §7.10 Check settlement of one attempt. Hook exceptions and timeouts are
+ * isolated warns; the begin is bounded by the 2 s consumer hook bound and the
+ * terminalize by the operator's update budget, and every terminal path reports
+ * exactly one outcome.
+ */
+export function createCheckSettlement(input: CheckSettlementInput): CheckSettlement {
+  const { payload, deps, sandboxId, checkBudgets, logFields } = input;
   const abandonCheck = (
     handle: CheckHandle,
     reason: string,
@@ -2599,7 +2572,7 @@ export async function runAdmittedReviewAttempt(
     // nothing can prove this attempt released, so report the handoff as failed.
     if (abandon === undefined) return Promise.resolve(false);
     const line = {
-      ...(baseFields ?? payloadIdentityFields(payload)),
+      ...logFields(),
       sandbox_id: sandboxId,
       attempt_id: handle.attemptId,
       check_reason: reason,
@@ -2607,7 +2580,7 @@ export async function runAdmittedReviewAttempt(
     // Two budgets of margin past the abandoned send itself (the promotion runs
     // on the operator's update budget), never shorter than the shared rung.
     const firstRecoveryDelayMs =
-      checkPromotionAbandoned === handle.attemptId
+      settlement.promotionAbandoned === handle.attemptId
         ? Math.max(
             CHECK_BACKOFF_MS[0]!,
             2 * (checkBudgets?.updateMs ?? CHECK_UPDATE_DEFAULT) + 60_000,
@@ -2688,7 +2661,7 @@ export async function runAdmittedReviewAttempt(
     const recordDetached = (outcome: "budget-exceeded"): void => {
       void record(outcome);
     };
-    if (checkPromotionAbandoned === handle.attemptId) {
+    if (settlement.promotionAbandoned === handle.attemptId) {
       // The promotion's PATCH may still be on the wire (its bound only stopped
       // the wait). A terminal write from THIS attempt could be overtaken by
       // it and the finished run reopened — and a reopened run is no longer due
@@ -2732,7 +2705,7 @@ export async function runAdmittedReviewAttempt(
           const detail = err instanceof Error ? err.message : String(err);
           deps.log.warn(
             {
-              ...(baseFields ?? payloadIdentityFields(payload)),
+              ...logFields(),
               sandbox_id: sandboxId,
               attempt_id: handle.attemptId,
             },
@@ -2748,7 +2721,7 @@ export async function runAdmittedReviewAttempt(
           abandoned = true;
           deps.log.warn(
             {
-              ...(baseFields ?? payloadIdentityFields(payload)),
+              ...logFields(),
               sandbox_id: sandboxId,
               attempt_id: handle.attemptId,
               event: "check_terminalize_budget_exceeded",
@@ -2779,7 +2752,7 @@ export async function runAdmittedReviewAttempt(
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
         {
-          ...(baseFields ?? payloadIdentityFields(payload)),
+          ...logFields(),
           sandbox_id: sandboxId,
           attempt_id: handle.attemptId,
           event: "check_terminalize_failed",
@@ -2804,9 +2777,9 @@ export async function runAdmittedReviewAttempt(
     inheritedHeadSha?: string,
     budgetExhaustion?: BudgetExhaustedOutcome,
   ): Promise<void> => {
-    if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
-    checkTerminalized = true;
-    await runTerminalize(checkHandle, publicationId, outcome, inheritedHeadSha, budgetExhaustion);
+    if (deps.checks === undefined || settlement.handle === null || settlement.terminalized) return;
+    settlement.terminalized = true;
+    await runTerminalize(settlement.handle, publicationId, outcome, inheritedHeadSha, budgetExhaustion);
   };
 
   /**
@@ -2829,7 +2802,7 @@ export async function runAdmittedReviewAttempt(
     const warn = (detail: string) =>
       deps.log.warn(
         {
-          ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
+          ...logFields(),
           attempt_id: handle.attemptId,
           event: "check_in_progress_failed",
         },
@@ -2871,7 +2844,7 @@ export async function runAdmittedReviewAttempt(
   const beginCheck = async (scope: Scope, githubAppId: number, headSha: string): Promise<CheckHandle | null> => {
     if (deps.checks === undefined) return null;
     // Every begin owns the flag: it must always describe the handle we return.
-    checkPromotionAbandoned = null;
+    settlement.promotionAbandoned = null;
     // One latch per `begin` call, created HERE and never stored anywhere: a
     // later message cannot clear or reuse it, so a detached begin from this
     // message stays abandoned for its whole lifetime (QC1-001 replacement
@@ -2904,7 +2877,7 @@ export async function runAdmittedReviewAttempt(
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
-        fields ?? baseFields ?? payloadIdentityFields(payload),
+        logFields(),
         `check begin hook failed (isolated, no Check): ${detail}`,
       );
       return null;
@@ -2912,1997 +2885,414 @@ export async function runAdmittedReviewAttempt(
     // A handle means THIS review is starting, so the run may say so — and if
     // that send was abandoned rather than settled, this attempt must not
     // terminalize the run itself (the promotion may still land).
+    settlement.handle = handle;
     if (handle !== null && (await promoteCheckInProgress(handle)) === "abandoned") {
-      checkPromotionAbandoned = handle.attemptId;
+      settlement.promotionAbandoned = handle.attemptId;
     }
     return handle;
   };
+  const settlement: CheckSettlement = {
+    handle: null,
+    claimAttempted: false,
+    promotionAbandoned: null,
+    terminalized: false,
+    begin: beginCheck,
+    abandon: abandonCheck,
+    terminalize: terminalizeCheck,
+  };
+  return settlement;
+}
 
+/**
+ * One admitted review attempt's execution: prepare → review → collect →
+ * publish, with its failure settlement and teardown around them. The consumer
+ * hands off after admission, dedupe and skip settlement; every phase below
+ * states its own input and output, so a restart resumes at a boundary instead
+ * of at a live stack.
+ *
+ * The attempt row is the authority for its container and its paid step: this
+ * orchestrator may prove, act on and terminalize what that row owns, and it
+ * never provisions a second container or launches a second paid step for the
+ * same attempt.
+ */
+export async function runAdmittedReviewAttempt(
+  input: AdmittedReviewAttempt,
+): Promise<ProcessOutcome> {
+  const { payload, deps } = input;
+  const progress: ReviewAttemptProgress = {
+    failureStage: "pipeline",
+    secretValues: [],
+    runnerStartedAt: undefined,
+    runnerReturned: false,
+  };
+  // The settlement reads the run's log fields through this getter: the
+  // orchestrator owns the object, the settlement only reads it.
+  const check = createCheckSettlement({
+    payload,
+    deps,
+    sandboxId: input.sandboxId,
+    checkBudgets: input.checkBudgets,
+    logFields: () => run.fields ?? run.baseFields ?? payloadIdentityFields(payload),
+  });
+  const run: AttemptRun = {
+    input,
+    progress,
+    check,
+    baseFields: undefined,
+    fields: undefined,
+    sandbox: null,
+    headSha: null,
+    lifecycleScope: undefined,
+    roundBudget: null,
+    runnerAnchor: null,
+    observedChangedLines: null,
+    durableOutcome: false,
+    containerUnproven: false,
+    sendAttempt: null,
+  };
   try {
-    // F-001 (QC wave-1): toBaseFields derefs payload.botRef.appId, so an
-    // in-flight pre-deploy message (no `botRef` — AL-24-4 accepts the
-    // TypeError) must throw INSIDE the try: it then flows through the
-    // established structured channel (review failed: log + AL-6
-    // review_failures row + rethrow). Pure relocation — no runtime guard
-    // (AL-24-4 forbids one).
-    baseFields = toBaseFields(payload);
-    // §7.10 Check lane scope — the same App/PR identity the publication journal
-    // and the attempt key use, derivable from the payload alone.
-    lifecycleScope = {
-      appId: payload.botRef.appId,
-      installationId: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      prNumber: payload.pr_number,
-    };
-    if (input.checkClaimSha !== null) {
-      // The claim the consumer decided the head of: it runs here, before any
-      // provisioning, so the settlement that terminalizes it lives beside it.
-      checkClaimAttempted = true;
-      checkHandle = await beginCheck(lifecycleScope, githubAppId, input.checkClaimSha);
-    }
-    // 1-3. Container + purpose-scoped credential + authoritative checkout:
-    // the attempt body acquires them and advances `progress.failureStage`.
-    const prepared = await prepareReviewAttempt({
-      payload,
-      deps,
-      commenter,
-      attemptId,
-      sandbox,
-      onSandbox: (acquired) => {
-        sandbox = acquired;
-      },
-      progress,
-    });
-    sandbox = prepared.sandbox;
-    const token = prepared.token;
-    const cmds = prepared.cmds;
-    const headSha = prepared.headSha;
-    resolvedHeadSha = headSha;
-
-    const key: IdempotencyKey = {
-      installation_id: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      pr_number: payload.pr_number,
-      head_sha: headSha,
-    };
-    fields = {
-      ...baseFields,
-      // d5-budget L5: the level's clock rides every structured log from here
-      // on (same ConsumerLogFields channel — no new sink).
-      level,
-      runner_timeout_ms: runnerTimeoutMs(level),
-      // deep = parent session; quick/default = Bun seat fan-out. Never a
-      // fabricated seat_count for deep (spec § Queue visibility).
-      orchestration: level === "deep" ? "parent" : "bun-fanout",
-      head_sha: headSha,
-      idempotency_key: idemKey(key),
-      sandbox_id: sandboxId,
-    };
-
-    // §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
-    // authoritative checkout HERE — before any dedup/journal early exit, so a
-    // delivery whose claimed SHA was disproved can never close the wrong head's
-    // run as `skipped`. (A message that had no knowable SHA at admission is a
-    // different case: its claim stays at the post-capture fallback below, so a
-    // duplicate or journal hand-off of a comment trigger never creates a run.)
-    // The checkout's OWN claim waits for the dedup read below: an already
-    // reviewed head is acked, never claimed.
-    let supersededClaimReleased = false;
-    if (checkHandle !== null && checkHandle.headSha !== headSha) {
-      const supersededHandle = checkHandle;
-      checkHandle = null;
-      deps.log.warn(
-        fields,
-        `check attempt superseded: claimed ${supersededHandle.headSha.slice(0, 7)}, checked out ${headSha.slice(0, 7)}`,
-      );
-      // Freeze the contradicted attempt's `superseded` intent and release it —
-      // TWO fenced D1 writes (intent + release), no remote request. Its remote
-      // send belongs to the minute recovery cron, so the new head's review
-      // never waits on the Check hook.
-      supersededClaimReleased = await abandonCheck(
-        supersededHandle,
-        "the checkout proved a newer commit than the claim",
-        { outcome: "superseded" },
-      );
-      if (!supersededClaimReleased) {
-        // The handoff failed, so the old attempt may still hold this
-        // consumer's lease: claiming the new head anyway would put two live
-        // consumer-owned claims on one invocation. A Check fault never blocks
-        // the review — this message reviews the checked-out commit with NO
-        // Check, and the old attempt's own deadline hands it to recovery.
-        deps.log.warn(
-          fields,
-          `check supersede handoff failed — continuing the review for ${headSha.slice(0, 7)} with no Check`,
-        );
-      }
-    }
-
-    // 4. Dedup (§7.7 step 2, first half): already completed for this
-    // checked-out sha → ack (no post, no insert). KV done-state first (B3),
-    // then D1. Keyed off the checkout, so a force-push between delivery and
-    // processing is never mis-deduped against the stale payload sha.
-    const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
-    if (done) {
-      deps.log.info(fields, "KV idempotency hit — ack");
-      // A handle exists only when the claim's SHA WAS the checkout (a
-      // concurrent duplicate): that run must be closed, carrying THIS head's
-      // existing result (inherited like an empty increment), never a `neutral`
-      // that would mask a failing gate.
-      await terminalizeCheck(null, "skipped", headSha);
-      // §7.9: with no handle (the adoption refused) the attached run would
-      // otherwise wait out the attach window and close red. The settlement is
-      // keyed on the PAYLOAD SHA — what the attach used — not this checkout SHA.
-      await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
-      return { kind: "ok" };
-    }
-    const existing = await deps.store.findByIdempotencyKey(key);
-    if (existing) {
-      deps.log.info(fields, "idempotency hit — ack");
-      await terminalizeCheck(null, "skipped", headSha);
-      await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
-      return { kind: "ok" };
-    }
-    // §7.7 step 2 (second half) — the publication journal: an existing
-    // prepared/sending/unknown/confirmed row for this exact scope/SHA hands
-    // off to recovery and ACKs without another paid review. Pending recovery
-    // is never deleted by a same-SHA mention re-run.
-    const journalRow = await journalHandoffRow(deps.env.DB, lifecycleScope, headSha);
-    if (journalRow !== null) {
-      deps.log.info(
-        fields,
-        `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
-      );
-      // A `prepared` row hands delivery to the recovery lane; it does NOT
-      // claim the review is visible — the publication still owes its send, and
-      // recovery owns it. Nothing here waits for it or asserts it.
-      // Deliberately NOT terminalized: this attempt published nothing, and the
-      // publication on this head belongs to an earlier generation. LINKING that
-      // row is what makes it this attempt's proof, so the conclusion stays with
-      // the publication: an applied proof decides `success`, and only the
-      // execution deadline decides the honest failure. Freezing an intent here
-      // would instead close the run for good — the correction seam needs a
-      // non-null `publication_id` (which is exactly what this link supplies).
-      //
-      // Both writes are fenced on the claim lease, and either can refuse: the
-      // claim runs 900s while the intervening sandbox/token/inflight/journal
-      // steps are network calls with no enforced clock. A refusal writes
-      // nothing, which is the honest outcome — the row keeps its current owner
-      // and stays `in_progress`; once `lease_until_ms` passes, the reconcile
-      // selector picks it up and the deadline path concludes it. A store fault
-      // is a warn too: a Check fault never blocks the review's ack.
-      if (checkHandle !== null) {
-        const nowMs = Date.now();
-        const handoffFields = {
-          ...fields,
-          sandbox_id: sandboxId,
-          attempt_id: checkHandle.attemptId,
-          check_reason: "publication journal handoff",
-        };
-        try {
-          if (
-            !(await linkCheckPublication(
-              deps.env.DB,
-              checkHandle.attemptId,
-              checkHandle.lease,
-              journalRow.id,
-              nowMs,
-            ))
-          ) {
-            deps.log.warn(
-              { ...handoffFields, event: "check_abandon_not_owned" },
-              "publication link refused by the check lease fence — the row keeps its owner and the deadline path concludes it (publication journal handoff)",
-            );
-          }
-          if (
-            !(await deferCheckRecovery(
-              deps.env.DB,
-              checkHandle.attemptId,
-              checkHandle.lease,
-              {
-                state: "remote-unconfirmed",
-                nextAttemptMs: nowMs + CHECK_BACKOFF_MS[0]!,
-                reason: "publication journal handoff",
-              },
-              nowMs,
-            ))
-          ) {
-            deps.log.warn(
-              { ...handoffFields, event: "check_abandon_not_owned" },
-              "claim release refused by the check lease fence — the row keeps its lease and the deadline path concludes it (publication journal handoff)",
-            );
-          }
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          deps.log.warn(
-            { ...handoffFields, event: "check_abandon_failed" },
-            `publication journal handoff faulted (the Check row is left to the recovery lane): ${detail}`,
-          );
-        }
-      } else {
-        // §7.9: no handle was adopted for this hand-off, so the delivery's own
-        // attached run has nobody to close it — settlement carries the head's
-        // own gate result (or `neutral` when it has none).
-        await settleSkippedRow(deps, payload, payload.head_sha, "a publication for this head already exists");
-      }
-      return { kind: "ok" };
-    }
-    // §7.7 step 4: claim the CHECKED-OUT head — only on a dedup AND journal
-    // miss. The admission claim named the payload sha (or the watermark), which
-    // this checkout just disproved; a head already reviewed or already
-    // published never reaches here.
-    if (supersededClaimReleased) {
-      checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
-    }
-
-    // 4b. Usage ledger (migration 0031): one row per STARTED execution. Both
-    // dedup reads and the journal handoff above have missed, so a duplicate
-    // delivery of a completed review never reaches this insert; a genuine
-    // re-execution after a runner failure mints the next `seq` for the same
-    // review. The product rule is "count, never refuse": a write failure is
-    // logged and recorded as a `usage` failure row carrying the metered
-    // identity (`reviewId` + `workspaceId`) so the dropped attempt can be
-    // reconciled. The review continues either way.
-    const reviewId = idemKey({
-      // The metered identity is the PAYLOAD identity (plan § Consumer write
-      // point 3): the authoritative checkout sha refines the review row only,
-      // so a force-push between delivery and retry cannot split one review
-      // into two ledger identities. A comment-mention job has no payload sha
-      // and shares one stable per-PR identity — `idemKey` refuses an empty
-      // sha, so the "no commit" sentinel stands in.
-      ...key,
-      head_sha: payload.head_sha || "no-sha",
-    });
-    // The charge (D2, D5, D7): this execution's own resolved strength against
-    // the source its bot scope selects, priced by the profile judging THIS UTC
-    // month's first day — the same profile the enqueue's ceiling read, so the
-    // rows and the ceiling can never be denominated differently. Recomputed
-    // here instead of carried on the queue message: `level` is already resolved
-    // and `scope` rides the credential read, so the charge costs one profile
-    // read per started review and the message gains no field (a level change
-    // between enqueue and consume is then priced at what actually ran).
-    //
-    // EVERYTHING that computes or writes this row is inside ONE boundary, the
-    // profile read above all: `resolveQuotaProfile` THROWS when the profile
-    // table is empty, and `self-hosted` never runs the enqueue gate that would
-    // have absorbed it, so a charge priced outside this `try` would abort the
-    // review — queue retry ×3, DLQ, no review posted and no ledger row. The
-    // product rule here is "count, never refuse", and the recorded `usage`
-    // failure row below is how a charge that could not be computed is
-    // reconciled instead.
-    const usageNow = new Date();
-    // Named once so the price and its source cannot disagree: `rpFor` reads the
-    // same value in the same expression.
-    // Minted BEFORE the profile read: the failure row and the read-back must
-    // name THIS attempt even when the charge never got computed. The row input
-    // itself is built INSIDE the `try`, so no path can write a placeholder price.
-    const executionToken = crypto.randomUUID();
-    const usageOccurredAt = usageNow.toISOString();
-    try {
-      // No retry: a replay of the SAME token is already idempotent (the unique
-      // index rejects it), and a retry that minted a NEW token would be a
-      // different execution by definition — a second count for one attempt. A
-      // dropped row stays reconcilable through the `usage` failure row below.
-      await recordUsageEvent(deps.env.DB, {
-        reviewId,
-        executionToken,
-        workspaceId: usageWorkspaceId,
-        occurredAt: usageOccurredAt,
-        rp: rpFor(level, usageSource, await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso)),
-        source: usageSource,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      // A pre-commit failure and an ambiguous one (the write landed, the driver
-      // threw) reach this catch identically. The token read-back separates them
-      // and reports THREE states: `true` — this execution's row is present, so
-      // the failure is noise; `false` — the read succeeded and found nothing,
-      // the only state a backfill may act on; `"unknown"` — the read itself
-      // failed, so nothing is known. A backfill must re-check the token before
-      // inserting: the unique index only rejects a replay that REUSES the
-      // recorded token, and a fresh token would mint another `seq`.
-      //
-      // A CHARGE that could not be computed (an empty profile table) reaches
-      // this same catch: no row was attempted, so the read-back answers `false`
-      // and the reconciliation below applies unchanged.
-      const applied: true | false | "unknown" = await hasUsageEventForExecutionToken(
-        deps.env.DB,
-        executionToken,
-      ).catch(() => "unknown" as const);
-      deps.log.warn(
-        { ...fields, review_id: reviewId, workspace_id: usageWorkspaceId, usage_applied: applied },
-        `usage_events row not written (review continues): ${detail}`,
-      );
-      // The failure row is best-effort too — its own guard keeps a recording
-      // failure from reaching the pipeline.
-      try {
-        await deps.failureStore.record({
-          target_id: payload.targetId,
-          installation_id: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          pr_number: payload.pr_number,
-          head_sha: headSha,
-          stage: "usage",
-          // The identity a backfill would write, and the source its price
-          // comes from: `usageWorkspaceId` IS the charged workspace (the
-          // target's), never the bot's.
-          error: `usage_events row not written: ${detail} ${JSON.stringify({
-            reviewId,
-            workspaceId: usageWorkspaceId,
-            executionToken,
-            source: usageSource,
-            applied,
-          })}`,
-        });
-      } catch (recordErr) {
-        const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
-        deps.log.warn(fields, `review_failures insert failed (usage failure, review continues): ${recordDetail}`);
-      }
-    }
-
-    // 5. §7.7 step 3 — lifecycle context: apply this scope's pending
-    // CONFIRMED journals in original publication order (an older assessment
-    // never loses to a newer unapplied recurrence), then capture targets,
-    // trusted diff evidence and discussions. Any capture/apply failure is
-    // honest context-unavailable — the round cannot close stale lifecycle
-    // state, never a false first-round closure.
-    const captureMs = Date.now();
-    let pendingApplyFailed = false;
-    try {
-      pendingApplyFailed = !(await applyPendingLifecycleJournals(deps.env.DB, lifecycleScope, captureMs));
-      if (pendingApplyFailed) {
-        deps.log.warn(fields, "pending lifecycle journal apply failed — proceeding with context-unavailable coverage (no closure this round)");
-      }
-    } catch (err) {
-      pendingApplyFailed = true;
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `pending lifecycle journal read failed — context-unavailable: ${detail}`);
-    }
-
-    let targets: RecheckTarget[] = [];
-    let totalOpen = 0;
-    let captureFailed = false;
-    try {
-      targets = await selectAssessmentTargets(deps.env.DB, lifecycleScope, ASSESSMENT_TARGET_CAP);
-      totalOpen = await countRecheckableFindings(deps.env.DB, lifecycleScope);
-    } catch (err) {
-      captureFailed = true;
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `lifecycle target capture failed — context-unavailable: ${detail}`);
-    }
-
-    // Incremental round selection: when this PR has a previously REVIEWED head,
-    // ask GitHub whether it is an ancestor of this one AND whether the range is
-    // this branch's own work. Only that combination is an honest increment
-    // (base...head is then exactly the work since the last review);
-    // `behind`/`diverged`/`identical`/a 404 after a force-push, any non-zero
-    // exit, a merge commit or a truncated commit list keep the FULL diff. A
-    // failed base read degrades the same way, but it is warned: a silent
-    // fallback would disable incremental rounds forever with no trace.
-    let incrementBase: string | null = null;
-    try {
-      incrementBase = await deps.findIncrementBase(deps.env.DB, lifecycleScope);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(
-        { ...fields, increment_base: "lookup-failed" },
-        `increment base lookup failed — reviewing the full diff: ${detail}`,
-      );
-    }
-    let sinceSha: string | null = null;
-    if (incrementBase !== null && incrementBase !== headSha) {
-      try {
-        const compare = await sandbox.runCommand(
-          compareGateCommand(payload.owner, payload.repo, incrementBase, headSha),
-          { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
-        );
-        if (compare.exitCode !== 0) {
-          deps.log.info(
-            { ...fields, increment_status: `exit ${compare.exitCode}` },
-            "incremental base not an ancestor of this head — reviewing the full diff",
-          );
-        } else {
-          const gate = parseCompareGate(compare.stdout);
-          // shortcut: any merge commit in the increment forces a full-diff round,
-          // upgrade when merge-heavy PR branches make re-reviews common.
-          if (gate === null) {
-            deps.log.info(
-              { ...fields, increment_status: "unusable" },
-              "compare answer unusable — reviewing the full diff",
-            );
-          } else if (gate.branchWork) {
-            sinceSha = incrementBase;
-          } else if (gate.status === "ahead") {
-            deps.log.info(
-              { ...fields, increment_status: "ahead-merge" },
-              "increment cannot be proven to be this branch's own work — reviewing the full PR diff",
-            );
-          } else {
-            deps.log.info(
-              { ...fields, increment_status: gate.status },
-              "incremental base not an ancestor of this head — reviewing the full diff",
-            );
-          }
-        }
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.info({ ...fields, increment_status: "unavailable" }, `compare status unavailable — full diff: ${detail}`);
-      }
-    }
-
-    // Diff (GH_TOKEN via exec env only — never in the command). The command
-    // writes the file for numstat AND streams a BOUNDED copy back: that stdout
-    // is the WORKER-CONTROLLED §7.3 trusted capture the evidence catalog
-    // slices and the line-intent hunk prefilter both derive from. The bounded
-    // read names three outcomes, deliberately distinct:
-    //   fit        → the text IS the capture;
-    //   overflow   → over DIFF_PREFETCH_MAX_BYTES: the diff exists but cannot
-    //                prove any row (no slices; base-filter line comments),
-    //                never truncated slices;
-    //   unreadable → no flag line at all: the transport broke, so the capture
-    //                failed whatever the file holds (a zero-change PR still
-    //                prints its `\n0\n` flag line).
-    // An empty `fit` payload is NOT decided here: `gh pr diff` also writes
-    // nothing for a PR with no changes, and only the numstat of the same round
-    // can tell the two apart (see step 6).
-    // An incremental round captures the FULL diff here as well: the prior
-    // findings live in files the increment may not touch, so their evidence
-    // catalog can only be proven against the whole PR diff. The increment
-    // capture below feeds the numstat partition ONLY.
-    // ONE window for the whole diff stage: the refused `gh pr diff` and the
-    // oversized fallback draw their timeouts from this same deadline, so the
-    // stage can never spend more than the `full-diff` ledger window it bills —
-    // and never more than what the derived runner deadline still leaves.
-    // EVERY post-diff sandbox step below (the increment capture, numstat, the
-    // runner-input write, the PR-context reads) and the paid runner itself draw
-    // from this ONE derived deadline, and a spent deadline declines explicitly
-    // — no step starts on a fresh 120s window once the fallback was admitted.
-    const terminalizeBudgetMs = checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT;
-    // ONE derivation for the whole round: the platform cap, the live
-    // terminalize budget and the tier decide the reserve, the absolute
-    // pre-runner cutoff and every window other owners bill from it.
-    roundBudget = deriveReviewBudget({
-      roundStartMs: roundStartedAt,
-      capMs: deps.roundBudgetMs,
-      terminalizeMs: terminalizeBudgetMs,
-      level,
-    });
-    const runnerDeadlineMs = roundBudget.runnerCutoffMs;
-    const diffStageNow = Date.now();
-    const diffWindowMs = boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "diff capture", "preparation");
-    const diffCaptureDeadlineMs = diffStageNow + diffWindowMs;
-    const diff = await sandbox.runCommand(cmds.diff, {
-      env: { GH_TOKEN: token },
-      timeout: diffWindowMs,
-    });
-    let diffStdout = diff.stdout;
-    if (diff.exitCode !== 0) {
-      // Only GitHub's oversized-diff refusal has a local substitute; an auth or
-      // network failure keeps today's rethrow (a fallback would mask the cause).
-      // The fallback shares this round's clock and the diff stage's window, and
-      // declines when either the derived runner deadline or that window is spent.
-      const captured = isDiffTooLarge(diff.stderr)
-        ? await oversizedDiffCapture(
-            sandbox,
-            token,
-            { owner: payload.owner, repo: payload.repo, prNumber: payload.pr_number },
-            headSha,
-            runnerDeadlineMs,
-            diffCaptureDeadlineMs,
-          )
-        : null;
-      if (captured === null) {
-        throw new Error(gitStageFailureDetail("diff", diff, progress.secretValues));
-      }
-      if ("reason" in captured) {
-        // ONE warn per attempt, and never silence: the step that ended it, that
-        // step's exit code and a redacted stderr tail (redaction BEFORE the tail
-        // cut, exactly as the stage detail does). The durable failure keeps the
-        // ORIGINAL 406 and gains the reason, so "not attempted (budget)",
-        // "failed at fetch" and "hostile ref rejected" stay distinguishable.
-        const tail =
-          captured.run === undefined
-            ? ""
-            : redactExactSecrets(redactSecrets(captured.run.stderr), progress.secretValues).trim().slice(-STDERR_TAIL_MAX);
-        deps.log.warn(
-          { ...fields, diff_fallback: captured.reason, diff_fallback_step: captured.step },
-          `oversized diff fallback declined: ${captured.step} (${captured.reason})` +
-            (captured.run === undefined ? ", no exec ran" : `, exit ${captured.run.exitCode}`) +
-            (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
-        );
-        if (captured.reason === "budget") {
-          // The derived deadline, not a code fault, declined the fallback —
-          // resolve it into the same `budget-exhausted` outcome the runner
-          // window produces (the record keeps the git-stage cause verbatim).
-          throw new RoundBudgetSpent(
-            `${gitStageFailureDetail("diff", diff, progress.secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`,
-            "preparation",
-          );
-        }
-        throw new Error(`${gitStageFailureDetail("diff", diff, progress.secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`);
-      }
-      diffStdout = captured.run.stdout;
-      deps.log.info(
-        { ...fields, diff_source: "oversized-local" },
-        "oversized PR diff (github 406) — captured the merge-base..head diff from the clone",
-      );
-    }
-    const diffRead = parseBoundedRead(diffStdout);
-    const diffText = diffRead.text ?? "";
-    // The diff FILE's state, from the SAME round's bounded read of that file —
-    // the one evidence that separates an EMPTY file (nothing to review) from a
-    // capture that never delivered one. `git apply --numstat` rejects an empty
-    // file as unusable input, so the numstat exit below is classified against
-    // this state, never against the exit code alone.
-    let diffFileState: "empty" | "captured" | "overflow" | "unreadable" =
-      diffRead.failure ?? (diffRead.text === "" ? "empty" : "captured");
-
-    // Increment capture (numstat partition only): base...head replaces the
-    // file AFTER the full diff text is already in memory, so the evidence
-    // catalog above keeps proving prior findings against the whole PR.
-    // A non-zero exit has two documented outcomes: a too-large refusal (the
-    // compare API's own 20,000-line ceiling) downgrades the round to the full
-    // diff it already captured — logged, with the `since` fact dropped — while
-    // any other failure throws with its own cause. An unreadable/empty capture
-    // marks the round context-incomplete. Nothing here falls back silently: the
-    // `since` fact would then be a lie.
-    // An empty bounded read is NOT decided here: as with the full diff, only
-    // the same round's numstat tells a genuinely unchanged increment (empty
-    // file) from a capture that delivered nothing. Until that read, an empty
-    // capture counts as a failure — the conservative side, which also keeps the
-    // recheck input unbuilt exactly as before.
-    if (sinceSha !== null) {
-      const increment = await sandbox.runCommand(
-        incrementDiffCommand(payload.owner, payload.repo, sinceSha, headSha, DIFF_PATH),
-        {
-          env: { GH_TOKEN: token },
-          timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "increment diff", "preparation"),
-        },
-      );
-      if (increment.exitCode !== 0) {
-        // The compare API refuses an oversized base...head diff with the same
-        // 20,000-line ceiling `gh pr diff` answers, and that refusal has a
-        // documented outcome: the round reviews the full diff it already
-        // captured (the refused capture never replaced that file). The `since`
-        // fact is DROPPED for the rest of the round — keeping it would describe
-        // the file as an increment it no longer is — and this one warn is its
-        // whole trace, so the degrade is never silent. A genuine capture
-        // failure keeps its own cause and stays a round failure.
-        if (!isDiffTooLarge(increment.stderr)) {
-          throw new Error(gitStageFailureDetail("increment diff", increment, progress.secretValues));
-        }
-        const tail = redactExactSecrets(redactSecrets(increment.stderr), progress.secretValues).trim().slice(-STDERR_TAIL_MAX);
-        deps.log.warn(
-          { ...fields, increment_capture: "too_large", increment_since: sinceSha },
-          `increment diff capture too large (github 406) — reviewing the full diff instead, exit ${increment.exitCode}` +
-            (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
-        );
-        sinceSha = null;
-      } else {
-        const incrementRead = parseBoundedRead(increment.stdout);
-        diffFileState = incrementRead.failure ?? (incrementRead.text === "" ? "empty" : "captured");
-        if (incrementRead.failure === "unreadable") {
-          captureFailed = true;
-          deps.log.warn(
-            { ...fields, increment_capture: "unreadable", increment_since: sinceSha },
-            `increment diff capture unreadable — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
-          );
-        } else if (diffFileState === "empty") {
-          captureFailed = true;
-        }
-      }
-    }
-
-    // Trusted evidence catalog (§7.3) for the selected targets, pinned to
-    // the authoritative checkout SHA. A target the captured diff cannot prove
-    // is EXCLUDED from the recheck input: without catalog evidence the seat
-    // could only guess, so sending it would invite a misattributed verdict.
-    const catalog =
-      targets.length > 0
-        ? buildEvidenceCatalog(diffText, targets, headSha)
-        : {
-            slices: [] as EvidenceSlice[],
-            excludedTargets: new Set<string>(),
-            catalogBudgetExcluded: new Set<string>(),
-            sliceIdsByRowId: new Map<string, string[]>(),
-          };
-    const catalogExcluded: ReadonlySet<string> = catalog.excludedTargets;
-    const catalogBudgetExcluded: ReadonlySet<string> = catalog.catalogBudgetExcluded;
-
-    // §7.5 discovery BEFORE the §7.8 capture: an association whose remote
-    // thread was never bound cannot enter the discussion, and the recheck's
-    // resolution fences only ever verify a thread the seat actually saw — so
-    // binding it first is what lets this round resolve it at all. Bounded: any
-    // association the budget could not reach stays unbound for a later round.
-    const bound = await bindUnboundThreads({ DB: deps.env.DB, commenter, log: deps.log, fields }, lifecycleScope, targets);
-    if (bound.skipped > 0) {
-      deps.log.warn(fields, `${bound.skipped} association(s) left unbound for a later round`);
-    }
-
-    // Bounded discussion capture (§7.8) for the selected targets' known
-    // threads. API failure is unavailable — never empty/complete.
-    let discussion = emptyDiscussion(captureMs);
-    if (targets.length > 0) {
-      try {
-        const placeholders = targets.map(() => "?").join(",");
-        const threadRows = await deps.env.DB
-          .prepare(
-            `SELECT id, thread_id FROM review_threads
-             WHERE finding_row_id IN (${placeholders}) AND thread_id IS NOT NULL
-               AND superseded_by_publication_id IS NULL`,
-          )
-          .bind(...targets.map((t) => t.rowId))
-          .all<{ id: string; thread_id: string }>();
-        discussion = await commenter.listDiscussion({
-          installationId: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          prNumber: payload.pr_number,
-          threads: threadRows.results.map((row) => ({ associationId: row.id, threadId: row.thread_id })),
-          nowMs: captureMs,
-        });
-        // §7.8: the model-context bounds and untrusted-text neutralization are
-        // NOT cosmetic — this bounded view is what rides the wire, so the seat
-        // never sees a raw captured body, and the pass is what marks the thread
-        // snapshots (and a cap-truncated issue capture) whose items were
-        // dropped or clamped — the resolution fences read exactly those flags.
-        discussion = boundDiscussion(discussion);
-      } catch (err) {
-        captureFailed = true;
-        discussion = {
-          items: [],
-          issueCoverage: "unavailable",
-          issueModelCoverage: "unavailable",
-          issueDigest: "",
-          capturedMs: captureMs,
-          threads: [],
-        };
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(fields, `discussion capture failed — context-unavailable: ${detail}`);
-      }
-    }
-
-    // The typed recheck input (§7.3): omitted ENTIRELY when no open rows
-    // exist — the runner input stays byte-identical on a first round. Only
-    // rows the trusted catalog can prove ride the wire, and only the slices
-    // those rows reference: a never-sent row leaves no orphan evidence, and
-    // no slice it owns consumes the byte budget.
-    let recheckInput: RecheckInput | undefined;
-    const budgetExcluded = new Set<string>();
-    // What the seat is actually handed. Narrowed to the sent rows'
-    // associations once they are known: a thread of a row this round could not
-    // fit was not seen by the seat, so it must never be offered for resolution.
-    let askedDiscussion = discussion;
-    let recheckAssignmentMaxBytes: number | undefined;
-    if (targets.length > 0 && !captureFailed) {
-      // §7.8: the seat's ask budget is an operator setting, read ONCE per
-      // message and only when a recheck round will actually be asked, so a
-      // delivery with no open rows pays nothing. It rides the runner input as
-      // its own top-level field — the `mstar.recheck-input/v1` document stays
-      // frozen — and it FITS this ask instead of refusing it whole: the prose
-      // is fixed, so the document gets what the budget leaves, and the rows the
-      // budget could not reach are accounted `budget` rather than skipped by a
-      // seat that never ran.
-      const budget = await getRecheckAssignmentMaxBytes(deps.env.DB);
-      // A degraded read answers the documented default and owes the operator
-      // one structured warn (the level/concurrency readers' contract). It is
-      // reported even when nothing fits below: the budget decided that.
-      if (budget.degraded) {
-        deps.log.warn(
-          {
-            ...(baseFields ?? payloadIdentityFields(payload)),
-            event: "review_recheck_assignment_degraded",
-            max_bytes: budget.maxBytes,
-          },
-          "recheck assignment budget read degraded — using the documented default",
-        );
-      }
-      // The one byte cap a row must fit: the §7.3 wire cap, or the room the
-      // assignment budget leaves once its own prose is paid.
-      const documentMaxBytes = Math.min(
-        RECHECK_INPUT_MAX_BYTES,
-        budget.maxBytes - RECHECK_ASSIGNMENT_PROSE_BYTES,
-      );
-      const candidates = targets.filter(
-        (target) => !catalogExcluded.has(target.rowId) && !catalogBudgetExcluded.has(target.rowId),
-      );
-      // Each row is measured against the evidence of the rows ALREADY
-      // accepted, never against slices a pending row might still bring: a row
-      // that does not fit is dropped and contributes nothing, so a later row
-      // is measured against the set that will really ride — it cannot lose its
-      // place to a row that was itself excluded, and byte accounting is
-      // monotone (adding a row only grows the serialized input), so a row
-      // dropped here cannot fit the final input either.
-      const included: RecheckTarget[] = [];
-      const referenced = new Set<string>();
-      let evidence: EvidenceSlice[] = [];
-      for (const target of candidates) {
-        const withRow = new Set([...referenced, ...(catalog.sliceIdsByRowId.get(target.rowId) ?? [])]);
-        const nextEvidence = catalog.slices.filter((slice) => withRow.has(slice.id));
-        // The cap is measured on the SERIALIZED input — schema, headSha,
-        // evidence, discussion, array brackets and separators included — so
-        // the accepted document is exactly what the cap counts. The discussion
-        // measured here is the whole capture: narrowing it to the sent rows can
-        // only shrink the document, so this stays an upper bound.
-        const candidate = {
-          schema: RECHECK_INPUT_SCHEMA,
-          headSha,
-          targets: [...included, target],
-          evidence: nextEvidence,
-          discussion,
-        };
-        if (jsonByteLength(candidate) > documentMaxBytes) continue;
-        included.push(target);
-        evidence = nextEvidence;
-        for (const id of withRow) referenced.add(id);
-      }
-      // The rotation HEAD is the one row the fit must never drop for want of
-      // room. A row it omits never advances the clock, so the same row comes
-      // back first on every round and is dropped again — permanently
-      // `budget`, the deadlock this fitting removes. So whenever the head did
-      // not fit whole, its ORIGINAL body is bounded into the room that is left
-      // (beside the rows that did fit, or alone when none did) and its own
-      // catalog rides as far as it fits, so the seat can still cite its proof.
-      // The rowId, title, file path, line anchors and every other field stay
-      // exactly as captured: the same finding row, never a rewritten one.
-      const head = candidates[0];
-      if (head !== undefined && !included.some((target) => target.rowId === head.rowId)) {
-        // Measured against the WHOLE discussion: the head is not included yet,
-        // so the narrowed view would also drop its own threads. Probes are the
-        // serialized document itself, so a multi-byte body is bounded by real
-        // UTF-8 bytes, and the binary search is logarithmic in body length.
-        const bytesOf = (targets: RecheckTarget[], slices: EvidenceSlice[], target: RecheckTarget): number =>
-          jsonByteLength({
-            schema: RECHECK_INPUT_SCHEMA,
-            headSha,
-            targets: [...targets, target],
-            evidence: slices,
-            discussion,
-          });
-        const withBody = (length: number): RecheckTarget => ({
-          ...head,
-          original: { ...head.original, body: truncatedBody(head.original.body, length) },
-        });
-        /** The head bounded into `slices` beside `targets`, or null when not even an empty body fits. */
-        const rescue = (targets: RecheckTarget[], slices: EvidenceSlice[]): RecheckTarget | null => {
-          if (bytesOf(targets, slices, withBody(0)) > documentMaxBytes) return null;
-          let low = 0;
-          let high = head.original.body.length;
-          while (low < high) {
-            const mid = Math.ceil((low + high) / 2);
-            if (bytesOf(targets, slices, withBody(mid)) <= documentMaxBytes) low = mid;
-            else high = mid - 1;
-          }
-          return withBody(low);
-        };
-        const own = new Set(catalog.sliceIdsByRowId.get(head.rowId) ?? []);
-        // The head's own catalog, and the union a shared document needs — never
-        // a slice of a row that ends up unsent (that would be orphan evidence).
-        const headSlices = catalog.slices.filter((slice) => own.has(slice.id));
-        const withOwn = catalog.slices.filter((slice) => own.has(slice.id) || referenced.has(slice.id));
-        // Room for the rows that fit comes first; the head gives up its catalog
-        // before those rows give up their place. A head that cannot share the
-        // budget at all still rides alone — its clock moves, and the rows it
-        // displaced keep their own place for the next round.
-        const attempts: { targets: RecheckTarget[]; slices: EvidenceSlice[] }[] =
-          included.length === 0
-            ? [
-                { targets: [], slices: headSlices },
-                { targets: [], slices: [] },
-              ]
-            : [
-                { targets: included, slices: withOwn },
-                { targets: included, slices: evidence },
-                { targets: [], slices: headSlices },
-                { targets: [], slices: [] },
-              ];
-        for (const attempt of attempts) {
-          const bounded = rescue(attempt.targets, attempt.slices);
-          if (bounded === null) continue;
-          // Array order does not change a serialized document's byte count, so
-          // the head goes back where the rotation had it: first.
-          included.splice(0, included.length, ...attempt.targets);
-          included.unshift(bounded);
-          evidence = attempt.slices;
-          break;
-        }
-      }
-      const sentIds = new Set(included.map((target) => target.rowId));
-      for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);
-      if (included.length === 0) {
-        // Nothing can be asked: even the head's fixed fields plus the discussion
-        // overrun the budget, so no body length and no catalog can rescue it.
-        // Name both figures so the operator can tell a budget that is too small
-        // from an ask that grew, and never report it as a seat skip — no seat was
-        // started.
-        const requiredBytes =
-          RECHECK_ASSIGNMENT_PROSE_BYTES +
-          jsonByteLength({
-            schema: RECHECK_INPUT_SCHEMA,
-            headSha,
-            targets:
-              head === undefined ? [] : [{ ...head, original: { ...head.original, body: "" } }],
-            evidence: [],
-            discussion,
-          });
-        deps.log.warn(
-          {
-            ...(baseFields ?? payloadIdentityFields(payload)),
-            event: "review_recheck_no_fit",
-            assignment_max_bytes: budget.maxBytes,
-            required_bytes: requiredBytes,
-            selected: targets.length,
-          },
-          `recheck ask cannot fit the assignment budget — the smallest document this round can ask (prose + one finding's fixed fields + discussion) needs ${requiredBytes} bytes, the budget is ${budget.maxBytes}; nothing was sent, so every row keeps its budget reason and its rotation clock (raise review.recheck.assignment_max_bytes to let the round run)`,
-        );
-      }
-      // The seat's view of the discussion: issue items and their coverage and
-      // digest are the round's context and stay, while a thread is offered only
-      // for a row that rides — a resolve verifies a thread the seat saw.
-      const sentAssociations = new Set(included.flatMap((target) => target.associationIds));
-      askedDiscussion = {
-        ...discussion,
-        items: discussion.items.filter(
-          (item) =>
-            item.source === "issue" ||
-            (item.associationId !== null && sentAssociations.has(item.associationId)),
-        ),
-        threads: discussion.threads.filter((thread) => sentAssociations.has(thread.associationId)),
-      };
-      if (included.length > 0) {
-        recheckAssignmentMaxBytes = budget.maxBytes;
-        recheckInput = {
-          schema: RECHECK_INPUT_SCHEMA,
-          headSha,
-          targets: included,
-          evidence,
-          discussion: askedDiscussion,
-        };
-      }
-    }
-
-    // 6. §7.7 step 4 — the Check claim was made at ADMISSION. What remains is
-    // the FALLBACK (no SHA was knowable there) and the SUPERSEDE check: the
-    // authoritative checkout is the only SHA the review itself will use.
-
-    // 6. §7.7 step 4 — the fallback claim for a message whose SHA was not
-    // knowable at admission (a comment trigger with no readable head
-    // watermark): it lands here, after dedup/journal handed their duplicates
-    // off, BEFORE model work. Absent `checks` dep = no Checks; hook failure is
-    // isolated and cannot prevent the review (step 5).
-    if (deps.checks !== undefined && !checkClaimAttempted) {
-      checkClaimAttempted = true;
-      checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
-    }
-
-    // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
-    // diff without applying it. The lines ("<add>\t<del>\t<path>") are the
-    // runner's seat-partition universe (reconFacts convention). On an
-    // incremental round the file holds base...head, so the seats partition the
-    // work done since the last review instead of the whole PR. Its window is
-    // what the DERIVED runner deadline still owes (declines once spent).
-    const numstat = await sandbox.runCommand(cmds.numstat, {
-      timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat", "preparation"),
-    });
-    // A non-zero exit is the FILE's answer about itself: an empty file is what
-    // `git apply` rejects as unusable input (exit 128, "unrecognized input"),
-    // so the same round's read of that file classifies the exit. Any other
-    // failure keeps its own detail — git stderr plus the diff-path state — so
-    // "the file is empty" and "the file could not be read" never collapse into
-    // one message.
-    if (numstat.exitCode !== 0 && diffFileState !== "empty") {
-      throw new Error(`${gitStageFailureDetail("numstat", numstat, progress.secretValues)}; diff file: ${diffFileState}`);
-    }
-    const numstatLines = numstat.stdout
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .filter((line) => line !== "");
-
-    // An empty diff FILE is nothing to review — `git apply --numstat` exits
-    // non-zero on it precisely because it holds no patch — so the round acks
-    // instead of failing the sandbox stage: no publication, no review row.
-    // The numstat's own stdout must be empty too: lines there would prove the
-    // read lost a real diff, which is the capture failure below, never an ack.
-    // Both rounds land here: an empty increment (the prior round already covers
-    // this head's content, and the Check inherits that head's result so an
-    // empty commit never launders a failing baseline into a neutral required
-    // check) and a first round whose head adds no diff (nothing to inherit, so
-    // the Check concludes skipped). A first round also needs the failing exit:
-    // an exit-0 numstat keeps the historical normal-round path.
-    const emptyDiffFile =
-      diffFileState === "empty" && numstatLines.length === 0 && (sinceSha !== null || numstat.exitCode !== 0);
-    if (emptyDiffFile) {
-      if (sinceSha !== null) {
-        deps.log.info(
-          { ...fields, event: "review_no_increment", increment_since: sinceSha },
-          `no increment to review — ${sinceSha.slice(0, 7)}..${headSha.slice(0, 7)} is empty and the last reviewed head already covers this content; acking without a new review`,
-        );
-        await terminalizeCheck(null, "skipped", sinceSha);
-      } else {
-        deps.log.info(
-          { ...fields, event: "review_no_diff" },
-          `no diff to review — ${headSha.slice(0, 7)} adds no changes; acking without a new review`,
-        );
-        await terminalizeCheck(null, "skipped");
-      }
-      return { kind: "ok" };
-    }
-    if (sinceSha !== null && diffFileState === "empty") {
-      deps.log.warn(
-        { ...fields, increment_capture: "empty", increment_since: sinceSha },
-        `increment diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
-      );
-    }
-
-    // A non-delivered diff capture is ambiguous, and only THIS round's
-    // numstat — the diff FILE `git apply` read, not the bounded stdout — can
-    // resolve the EMPTY case. Non-empty numstat means the redirect wrote a diff
-    // the read did not deliver: a CAPTURE FAILURE, so the round is
-    // context-incomplete, never every row published as a confident
-    // `no-evidence`. Both empty with an exit-0 numstat keeps the normal-round
-    // path; a genuinely empty FILE answers the failing exit and acks above.
-    // `overflow` and `unreadable` are capture failures by construction — the
-    // diff exists but is over the bound, or the transport broke — so they take
-    // the same accounting with their own `diff_capture` cause: an over-bound
-    // capture is "too large to prove", never "nothing to prove". The recheck
-    // input built above cannot change: any of the three leaves the catalog
-    // with no slices and every target excluded, so no input was built either
-    // way. Line comments keep the over-size behaviour — `diffText` stays "",
-    // so the hunk prefilter degrades to the base filter.
-    const diffCaptureFailure =
-      diffRead.failure ?? (diffRead.text === "" && numstatLines.length > 0 ? "empty" : undefined);
-    if (diffCaptureFailure !== undefined) {
-      captureFailed = true;
-      deps.log.warn(
-        { ...fields, diff_capture: diffCaptureFailure },
-        `diff capture ${diffCaptureFailure} — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
-      );
-    }
-
-    // 7. Runner input JSON (reconFacts): `<owner>/<repo>#<pr>` and
-    // `head <sha>` fold into the envelope target INSIDE the runtime — the
-    // AUTHORITATIVE checkout sha is used so the ArtifactStore.put target
-    // cross-check agrees with the idempotency key — plus the numstat
-    // universe. base64-transported so the JSON never touches shell quoting;
-    // worktreePath = the clone (the seats' read cwd). An incremental round
-    // adds `since <base>` so the seats know their universe is a delta.
-    const reconFacts = [
-      `${payload.owner}/${payload.repo}#${payload.pr_number}`,
-      `head ${headSha}`,
-      ...(sinceSha !== null ? [`since ${sinceSha}`] : []),
-      ...numstatLines,
-    ];
-    // The App's per-role model overrides ride as an OPTIONAL
-    // input field, included ONLY when a role map resolved above — no-map
-    // messages serialize byte-identically to the pre-overrides payload
-    // (the runner-side guard + type extension ride alongside).
-    // The App's custom-provider declarations ride as an OPTIONAL
-    // input field — keyless (toRunnerCustomProvider strips the decrypted
-    // key; keys reach the container ONLY via the exec env) — included ONLY
-    // when declarations resolved above. No-declaration messages serialize
-    // byte-identically to the pre-declarations payload (the runner-side guard +
-    // synthesis ride alongside).
-    // The capability-host base rides ALWAYS as an EMPTY array: the image
-    // declares no provider, so the per-review models.yml is the App's own
-    // declarations (a built-in provider resolves from the SDK catalog).
-    // PR context for the report seat (best-effort): the description plus the
-    // issues it closes/references, read through gh with the same exec env the
-    // diff uses. Bounded by the DERIVED runner deadline (each read gets what
-    // that deadline still owes, capped at PR_CONTEXT_EXEC_TIMEOUT_MS) and gated
-    // so the post-runner bounded reads survive the capture; any failure or a
-    // budget skip resolves undefined (with one named warn) so the published
-    // report sections degrade to `none` — a narrative gap never fails a review.
-    const prContext = await capturePrContext(
-      sandbox,
-      payload,
-      token,
-      deps.log,
-      fields,
-      runnerDeadlineMs,
-    );
-
-    // Anchor the derived budget HERE, just before the input write: the one
-    // tier clamp the whole pipeline applies (`anchorRunnerBudget`), and the
-    // write, the wire value and the exec timeout all spend its absolute end.
-    // Its refusals — an oversized request, a spent cutoff — throw before any
-    // paid work — never a 1ms exec.
-    // The same numstat stdout the seat partition consumed sizes the runner
-    // request — one read, one size value, `null` when the read cannot prove
-    // a complete row set (unavailable, unproven-empty or truncated/malformed
-    // rows). The request is what the allocation asks for inside the tier;
-    // `anchorRunnerBudget` remains the only clamp that decides the outcome.
-    // A malformed size outcome reuses the `invalid` vocabulary: it carries
-    // NaN, which the anchor's entry check rejects the same way an explicit
-    // bad request is — no second refusal path, no silent fallback.
-    const diffSize = parseNumstatSize(numstat.stdout, diffFileState === "empty");
-    // The outcome's own counter: the selected numstat's textual line count —
-    // a null size is the recorded unknown, never invented.
-    observedChangedLines = diffSize?.changedLines ?? null;
-    const sizeRequest = requestRunnerBudget(level, diffSize);
-
-    const anchor = anchorRunnerBudget(roundBudget, Date.now(), sizeRequest.requestedBudgetMs);
-    if (anchor.kind === "invalid") {
-      throw new Error(
-        `runner request declined — an explicit ${anchor.requestedBudgetMs}ms is not a usable duration`,
-      );
-    }
-    if (anchor.kind === "oversized") {
-      throw new Error(
-        `runner request declined — ${anchor.requestedBudgetMs}ms exceeds the tier maximum (${anchor.tierMaxMs}ms)`,
-      );
-    }
-    if (anchor.kind === "exhausted") {
-      throw new RoundBudgetSpent(
-        `round budget spent: runner declined — the pre-runner cutoff is spent (${anchor.remainingMs}ms left for it)`,
-        "preparation",
-      );
-    }
-    // The allocation is immutable from here on: the typed record's runner
-    // budget is this frozen effective duration.
-    runnerAnchor = anchor;
-    const runnerExecDeadlineMs = anchor.execDeadlineMs;
-    fields = {
-      ...fields,
-      runner_requested_ms: anchor.requestedBudgetMs,
-      runner_effective_ms: anchor.effectiveBudgetMs,
-      runner_cutoff_ms: roundBudget.runnerCutoffMs,
-      runner_deadline_ms: anchor.execDeadlineMs,
-      // The estimate the request was sized from — one work unit per changed
-      // line, minimum one per file; `null` records an unknown size, so an
-      // investigation can tell a tier-max request from a sized one.
-      runner_work_units: sizeRequest.kind === "requested" ? sizeRequest.workUnits : null,
-    };
-    const execution = await runReviewAttempt({
-      deps,
-      deadlineMs: runnerExecDeadlineMs,
-      sandbox,
-      headSha,
-      token,
-      level,
-      appCfg,
-      fields,
-      reconFacts,
-      modelOverrides,
-      customProviders,
-      recheckInput,
-      recheckAssignmentMaxBytes,
-      prContext,
-      runnerAnchor: anchor,
-      observedChangedLines,
-      progress,
-      attemptId,
-    });
-    const { run, recheck, report, appliedProvider } = execution;
-    const recheckDoc = recheck?.doc ?? null;
-    const rejectedRowIds = recheck?.rejected ?? new Set<string>();
-    const anonymousRejectedRows = recheck?.anonymousRejectedRows ?? 0;
-
-    // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
-    // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
-    // parseReviewOutput is a pure function of run.stdout —
-    // the same stdout fails identically on a retry (a deterministic
-    // model-output failure), so the message ACKS instead of throwing. Order:
-    // review_failures row (best-effort — an insert failure must never mask
-    // the degrade) → degraded comment (best-effort — a post failure is a
-    // structured log line only) → the `degraded` outcome the queue handler
-    const parsed = parseReviewOutput(run.stdout);
-    if (!parsed.ok) {
-      // SEC-01 exact-value defense: the session's ACTUAL secret values
-      // (runner env provider keys + the minted installation token) are
-      // exact-redacted from the parse error and the raw stdout BEFORE they
-      // reach the durable failure row or the public degraded comment — a
-      // credential that evades every shape pattern is still removed.
-      const redactedError = redactExactSecrets(redactSecrets(parsed.error), progress.secretValues);
-      const redactedStdout = redactExactSecrets(redactSecrets(run.stdout), progress.secretValues);
-      try {
-        await deps.failureStore.record({
-          target_id: payload.targetId,
-          installation_id: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          pr_number: payload.pr_number,
-          head_sha: headSha,
-          stage: "parse",
-          // qc3 F-001 / qc2 F-001: the zod/engine error can echo a
-          // model-emitted secret-shaped value (`verdict "ghp_…" is not one
-          // of …`) — redactSecrets BEFORE the durable D1 row, same face as
-          // buildDegradedBody's public-comment choke point. SEC-01 adds the
-          // exact-value pass on top.
-          error: redactedError,
-        });
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(fields, `review_failures insert failed (degrade continues): ${detail}`);
-      }
-      // §7.7 degraded publication (plan: stage → claim → send the exact
-      // prepared body → proof → applied mark). The same resolved commenter
-      // instance as the token mint above (lock L4). Best-effort with typed
-      // outcomes — the message acks regardless (deterministic model-output
-      // failure; retry is waste), and the Check hook terminalizes with the
-      // publication identity so the lifecycle reads the persisted proof.
-      const degradedOutcome = await publishDegradedPublication({
-        db: deps.env.DB,
-        commenter,
-        scope: lifecycleScope,
-        headSha,
-        redactedError,
-        redactedStdout,
-      });
-      if (degradedOutcome.phase === "failed") {
-        await terminalizeCheck(null, "degraded-not-posted");
-      } else {
-        await terminalizeCheck(degradedOutcome.publicationId, "publication-unknown");
-        // The paid call returned; the durable degraded notice is its terminal
-        // outcome — the container holds nothing this invocation will collect.
-        durableOutcome = true;
-      }
-      deps.log.warn(
-        fields,
-        `review degraded: output failed schema validation (${redactedError}) — degraded publication ${degradedOutcome.phase}` +
-          `${degradedOutcome.phase === "failed" ? ` (${degradedOutcome.reason})` : ""}; acked, no retry/DLQ`,
-      );
-      // A degraded notice is not a review: stamp the payload sha (the same
-      // key the worker claimed) so neither reader keeps accepting the "1".
-      // Best-effort — a KV fault only leaves the stale claim behind.
-      if (payload.head_sha) {
-        try {
-          await putAbandonClaim(
-            deps.env.IDEMPOTENCY_KV,
-            idemKey({
-              installation_id: payload.installation_id,
-              owner: payload.owner,
-              repo: payload.repo,
-              pr_number: payload.pr_number,
-              head_sha: payload.head_sha,
-            }),
-            IDEM_DEGRADED,
-            IDEMPOTENCY_SECONDS,
-          );
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          deps.log.warn(fields, `degraded-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
-        }
-      }
-      return { kind: "degraded" };
-    }
-
-    // 10. SEC-02 + B4 + size-budget choke point: redact secret-shaped spans
-    // (PEM, tokens, keys, long hex — F-001: every model-controlled field),
-    // clamp per-finding title/body to their budgets (qc2 F-003), then cap
-    // findings to the Top-50 by merge class BEFORE anything can reach the
-    // public review body or the D1 envelope. The SAME capped array feeds
-    // both the post and the put (B4: 渲染与落库同一裁剪数组). SEC-01 adds
-    // the exact-value second pass (the session's ACTUAL secret values) on
-    // top of the shape-based redaction — a credential that evades every
-    // pattern is still removed before the post or the put.
-    const capped = capFindings(
-      clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), progress.secretValues)),
-    );
-    const output = capped.output;
-    // 11. §7.7 step 6 — validation + conservative reconciliation + closure
-    // assembly + final body. The recheck document is reconciled against the
-    // SAME round's final capped findings (§7.4 conservative precedence:
-    // same-round recurrence and related unresolved concerns force
-    // unverifiable; rows the seat was never given are accounted but never
-    // "assessed").
-    const staleContext = pendingApplyFailed || captureFailed;
-    const reconciled = reconcileRecheckRound({
-      targets,
-      doc: recheckDoc,
-      status: recheck?.status ?? null,
-      // The seat's own view: a thread of a row this round could not fit was
-      // never handed over, so it cannot authorize a resolve either.
-      discussion: askedDiscussion,
-      output,
-      staleContext,
-      catalogExcluded,
-      catalogBudgetExcluded,
-      budgetExcluded,
-      rejectedRowIds,
-      anonymousRejectedRows,
-    });
-    // §7.8 attribution: ONE line per recheck round carrying the seat's own
-    // status next to this round's accounting. A lost round therefore leaves a
-    // D1 failure row and this line even when the container's stderr is gone.
-    // Emitted whenever rows were selected: a round the §7.3 size budget emptied
-    // sent nothing, and without this line that silence would be invisible.
-    if (targets.length > 0) {
-      const status = recheck?.status ?? null;
-      const recheckOutcome = status?.outcome ?? "absent";
-      // The runner cancels an unfinished seat when the main review settles
-      // (spec §7.8): the round answered nothing because it was STOPPED, not
-      // because it ran and lost. That is neither a failure row nor an
-      // `invalid-output` for a row the seat never answered.
-      const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
-      // The status document belongs to the SEAT; a round whose document was
-      // lost has its real cause on the read side (absent / overflow /
-      // validation failure), so that cause LEADS the detail instead of the
-      // seat's `ok: null: null`, which says nothing about what went wrong.
-      // `failed` already names the seat's own fault, so it keeps its triple.
-      const docFailure = recheck?.docFailure ?? null;
-      const recheckDetail = redactExactSecrets(
-        redactSecrets(
-          recheckDoc === null && docFailure !== null && recheckOutcome === "ok"
-            ? `document ${docFailure}: ${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`
-            : `${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`,
-        ),
-        progress.secretValues,
-      ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
-      deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
-        {
-          ...fields,
-          recheck_outcome: recheckOutcome,
-          // Same wrapper as `error`: a seat-authored `reason` can echo a
-          // credential exactly like `error` can.
-          recheck_reason: status?.reason === null || status?.reason === undefined
-            ? null
-            : redactExactSecrets(redactSecrets(status.reason), progress.secretValues),
-          recheck_error: status?.error === null || status?.error === undefined
-            ? null
-            : redactExactSecrets(redactSecrets(status.error), progress.secretValues),
-          // Named drops + the unnamed ones actually attributed (no usable
-          // rowId, so mapped by position): the count reports what happened,
-          // not only what could be named.
-          rejected: rejectedRowIds.size + reconciled.anonymousRejectedCount,
-          // A seat-authored `rejected_unnamed` is unbounded; any claim beyond
-          // the sent-and-unanswered pool is excess that can claim no row. It is
-          // dropped, and reported here so the silence has a number.
-          rejected_unnamed_ignored: anonymousRejectedRows - reconciled.anonymousRejectedCount,
-          // Real seat answers (the published coverage count), never the
-          // lifecycle clock — a gate-rejected row advances `last_assessed_ms`
-          // without ever having been assessed.
-          assessed: reconciled.assessedCount,
-        },
-        recheckInput !== undefined
-          ? recheckDoc === null
-            ? roundCancelled
-              ? "recheck round cancelled by the runner — no row was answered, no failure recorded"
-              : "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
-            : "recheck round accounted"
-          : captureFailed
-            ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
-            : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
-      );
-      // Shipped failure rule: a round that SENT rows records one row when its
-      // document is absent or the seat reported `failed` — a seat budget skip
-      // records one too, because that round ran and answered nothing. A round
-      // the runner cancelled by design, and a round that sent nothing at all
-      // (capture failed, catalog exclusion, §7.3 size budget), records none:
-      // its rows are already accounted as `budget`/`no-evidence`/`omitted` in
-      // the closure section.
-      if (
-        recheckInput !== undefined &&
-        !roundCancelled &&
-        (recheckDoc === null || recheckOutcome === "failed")
-      ) {
-        // Best-effort: the insert must never mask the round (AL-6 pattern).
-        try {
-          await deps.failureStore.record({
-            target_id: payload.targetId,
-            installation_id: payload.installation_id,
-            owner: payload.owner,
-            repo: payload.repo,
-            pr_number: payload.pr_number,
-            head_sha: headSha,
-            stage: "recheck",
-            error: recheckDetail,
-          });
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          deps.log.warn(fields, `review_failures insert failed (recheck round continues): ${detail}`);
-        }
-      }
-    }
-    // The ROUND's coverage reads the whole capture, never the narrowed wire
-    // view: an unsent row's truncated thread still leaves this round's context
-    // short, and publication must not claim more than capture could read.
-    const contextCoverage: Coverage = staleContext
-      ? "unavailable"
-      : roundContextCoverage(discussion);
-    const coverage = {
-      totalOpen,
-      selected: targets.length,
-      assessed: reconciled.assessedCount,
-      invalidOutput: reconciled.invalidOutputCount,
-      omitted: reconciled.unansweredCount,
-      capped: Math.max(0, totalOpen - targets.length),
-      contextCoverage,
-    };
-    const queuedAssociations = new Set(reconciled.resolutions.map((r) => r.associationId));
-    const closureRows: ClosureRow[] = targets.map((target) => {
-      const outcome = reconciled.outcomeByRowId.get(target.rowId)!;
-      return {
-        title: target.original.title,
-        disposition: outcome.disposition,
-        reason: outcome.reason,
-        evidenceKind: outcome.evidence?.kind ?? null,
-        // A pending resolve renders not-yet-resolved, not a prediction —
-        // remote outcomes appear in the NEXT round's single upsert (§7.10).
-        thread: target.associationIds.some((id) => queuedAssociations.has(id)) ? "not yet resolved" : "-",
-      };
-    });
-    // The §7.10 facts (coverage line, display cap, thread state) render ONCE,
-    // in the body's revalidated section — there is no second rendering.
-    // 12. §7.7 step 7 — calculate round/target from the App's current single
-    // comment (pre-staging read), assemble the FINAL body, and stage the
-    // COMPLETE private payload BEFORE any GitHub mutation. Staging failure
-    // means no publication/line comments/result writes at all.
-    const plan: UpsertPlan = await commenter.planReviewUpsert({
-      installationId: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      prNumber: payload.pr_number,
-    });
-    const round = plan.round;
-    const publicationId = crypto.randomUUID();
-    const publicationMarker = buildPublicationMarker({ publicationId, headSha, kind: "review" });
-    const preparedBody = buildPreparedReviewBody({
-      output,
-      omittedFindings: capped.omitted,
-      round,
-      headSha,
-      publicationMarker,
-      ...(sinceSha !== null ? { sinceSha } : {}),
-      // The revalidated table is rendered mechanically from the closure rows
-      // and carries the round's full prior-findings set; the report may be null
-      // (no prContext / seat failure), in which case every heading still
-      // renders with `none`.
-      reportParts: { report, revalidated: buildRevalidatedSection(coverage, closureRows) },
-    });
-    const bodySha256 = await sha256Hex(preparedBody);
-
-    // Seen records for the current findings: the stable finding identity is
-    // the fingerprint — an existing lifecycle row (open or CLOSED) with the
-    // same finding_id REUSES its row id so the apply's upsert reopens it
-    // (§7.2 recurrence) instead of minting a duplicate.
-    const seenRowIdByFindingId = new Map<string, string>();
-    if (output.findings.length > 0) {
-      const findingIdPlaceholders = output.findings.map(() => "?").join(",");
-      const findingIds = output.findings.map((f) => computeFindingFingerprint(f));
-      const knownRows = await deps.env.DB
-        .prepare(
-          `SELECT id, finding_id FROM review_findings
-           WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             AND finding_id IN (${findingIdPlaceholders})`,
-        )
-        .bind(
-          lifecycleScope.appId,
-          lifecycleScope.installationId,
-          lifecycleScope.owner,
-          lifecycleScope.repo,
-          lifecycleScope.prNumber,
-          ...findingIds,
-        )
-        .all<{ id: string; finding_id: string }>();
-      for (const known of knownRows.results) seenRowIdByFindingId.set(known.finding_id, known.id);
-    }
-    const seen: LifecycleRound["seen"] = output.findings.map((finding) => {
-      const findingId = computeFindingFingerprint(finding);
-      let rowId = seenRowIdByFindingId.get(findingId);
-      if (rowId === undefined) {
-        rowId = crypto.randomUUID();
-        seenRowIdByFindingId.set(findingId, rowId);
-      }
-      return { rowId, findingId, original: projectOriginalFinding(finding) };
-    });
-
-    // Line intents for the line-commentable findings (hunk prefilter over
-    // the SAME worker-captured diff as the evidence catalog): preallocated
-    // opaque UUIDs, trusted marker bodies, digest computed at staging.
-    const qualifying = filterLineCommentFindings(
-      output.findings,
-      diffText !== "" ? diffText : undefined,
-    );
-    const lineIntents: LineIntent[] = [];
-    for (const { finding, lineStart } of qualifying) {
-      const rowId = seenRowIdByFindingId.get(computeFindingFingerprint(finding));
-      if (rowId === undefined) continue; // unreachable — seen covers every finding
-      // A range the wire cannot publish (cross-hunk, or a start that is not a
-      // real range) falls back to the single-line anchor at line_end; the body
-      // must not keep an applyable multi-line replacement for the dropped range.
-      const rangeDemoted =
-        typeof finding.line_start === "number" &&
-        finding.line_start < finding.line_end! &&
-        !(typeof lineStart === "number" && lineStart >= 1 && lineStart < finding.line_end!);
-      lineIntents.push(
-        await buildLineIntent({
-          findingRowId: rowId,
-          publicationId,
-          associationId: crypto.randomUUID(),
-          scope: lifecycleScope,
-          originalSha: headSha,
-          round,
-          path: finding.file_path!,
-          line: finding.line_end!,
-          lineStart,
-          body: renderLineCommentText(
-            rangeDemoted ? { ...finding, body: dropAllSuggestionFences(finding.body) } : finding,
-          ),
-        }),
-      );
-    }
-
-    const lifecycleRound: LifecycleRound = {
-      // The clock moves for every selected row EXCEPT the rows the FIT omitted
-      // for room. A row the catalog could not prove, or one a capture failure
-      // never offered, is re-proved by a later round's diff — parking it at the
-      // rotation head would keep it inside the 25-row cap forever. A fit-omitted
-      // row is different: it was provable and simply did not fit, so it holds its
-      // clock, stays at the head and is rescued when the next round reaches it.
-      selectedRowIds: targets
-        .filter((target) => !budgetExcluded.has(target.rowId))
-        .map((target) => target.rowId),
-      assessments: reconciled.assessments,
-      seen,
-      resolutions: reconciled.resolutions,
-      coverage,
-    };
-    const payloadDoc: PublicationPayload = {
-      version: 1,
-      scope: lifecycleScope,
-      headSha,
-      kind: "review",
-      round,
-      targetCommentId: plan.action === "update" ? plan.commentId : null,
-      body: preparedBody,
-      bodySha256,
-      artifact: {
-        kind: "review",
-        key: idemKey(key),
-        schema: "mstar.review/v1",
-        payload: output,
-        appId: payload.botRef.appId,
-        targetId: payload.targetId,
-        model: chainHeadSelector(effectiveModelChain(appCfg).chain),
-        provider: appliedProvider,
-        // A stale-context round (its pending lifecycle journal failed to
-        // apply OR its capture failed) still publishes, but its row must
-        // never be an incremental base: the flag rides the staged artifact
-        // so the put that writes it (here or on recovery) persists it.
-        contextIncomplete: staleContext,
-        // The round's own wall clock: the same `roundStartedAt` every budget
-        // check reads, so the stored duration is the run's, not a second clock.
-        durationMs: Date.now() - roundStartedAt,
-      },
-      lifecycle: lifecycleRound,
-      lineIntents,
-    };
-    const staged = await stagePublication(deps.env.DB, { id: publicationId, payload: payloadDoc, nowMs: Date.now() });
-    // An insert conflict returns the EXISTING immutable payload — a
-    // prepared/confirmed publication is never overwritten with a second
-    // model result (spec §7.7). The existing row owns this scope+SHA: hand
-    // it to recovery instead of sending OUR newer body over it.
-    if (staged.id !== publicationId) {
-      deps.log.warn(
-        fields,
-        `publication journal conflict (existing row ${staged.id}, phase ${staged.phase}) — the immutable payload wins; not sending a second publication`,
-      );
-      await terminalizeCheck(null, "pre-publication-failure");
-      return { kind: "ok" };
-    }
-    const stagedId = staged.id;
-    // The paid call returned and ITS result is now durably staged.
-    durableOutcome = true;
-
-    // 13. §7.7 step 8 — epoch-fenced claim, phase sending, publish the EXACT
-    // prepared upsert, validate the response id, persist proof BEFORE KV
-    // done. A response/proof loss retains the staged payload for read-only
-    // discovery — never a second paid review, never a blind re-send.
-    const lease = await claimPublication(deps.env.DB, stagedId, `consumer:${sandboxId}`, Date.now());
-    if (lease === null) {
-      throw new Error("publication journal claim failed — refusing to send without the epoch-fenced lease");
-    }
-    sendAttempt = { publicationId: stagedId };
-    let sent: { commentId: number };
-    try {
-      sent = await commenter.postPreparedReview({
-        installationId: payload.installation_id,
-        owner: payload.owner,
-        repo: payload.repo,
-        prNumber: payload.pr_number,
-        headSha,
-        round,
-        targetCommentId: plan.action === "update" ? plan.commentId : null,
-        body: preparedBody,
-        publicationId: stagedId,
-      });
-    } catch (err) {
-      if (err instanceof PreparedSendRejected) {
-        // Definitive pre-send rejection (§7.7): no request left the Worker.
-        // `failed` is the truthful durable phase (never the post-attempt
-        // `unknown`); payload/digest/attempts are retained and recovery
-        // never re-sends. The Check conclusion is the honest
-        // pre-publication failure.
-        try {
-          await markPublicationFailed(deps.env.DB, stagedId, lease, err.message, Date.now());
-        } catch (markErr) {
-          const detail = markErr instanceof Error ? markErr.message : String(markErr);
-          deps.log.warn(fields, `failed-phase mark could not be persisted: ${detail}`);
-        }
-        await terminalizeCheck(null, "pre-publication-failure");
-        deps.log.warn(fields, `prepared review definitively rejected before send — recorded failed: ${err.message}`);
-        return { kind: "ok" };
-      }
-      throw err;
-    }
-    const proof = {
-      publicationId: stagedId,
-      scope: lifecycleScope,
-      headSha,
-      kind: "review" as const,
-      round,
-      commentId: sent.commentId,
-      bodySha256,
-      confirmedMs: Date.now(),
-    };
-    let proofOk = false;
-    try {
-      proofOk = await recordPublicationProof(deps.env.DB, stagedId, lease, proof);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `publication proof write threw: ${detail}`);
-    }
-    if (!proofOk) {
-      // The honest unknown-publication window: the send happened but the
-      // proof is not durable — no KV done, no local rows, no claim of
-      // publication. The staged payload stays for M8 read-only discovery.
-      deps.log.warn(
-        fields,
-        "publication proof could not be persisted after the send — retaining staged/sending for read-only discovery; no local completion is claimed",
-      );
-      await terminalizeCheck(stagedId, "publication-unknown");
-      return { kind: "ok" };
-    }
-
-    // 13a. KV done-state fence (BUG-01): follows durable confirmation (the
-    // persisted proof) — a crash in the steps below redelivers into the
-    // journal handoff ack, never a duplicate paid review.
-    try {
-      await deps.env.IDEMPOTENCY_KV.put(idemKey(key), IDEM_DONE, {
-        expirationTtl: IDEMPOTENCY_SECONDS,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `KV completion write failed: ${detail}`);
-    }
-
-    // 14. §7.7 step 9 — with positive persisted proof only: the artifact
-    // store.put + ONE idempotent lifecycle batch (inside
-    // applyPublishedLifecycle, ending with the applied mark under the
-    // lease). Local write failures do not undo the publication and never
-    // rerun the model — the confirmed row stays due for M8 recovery.
-    let applied = false;
-    try {
-      applied = await applyPublishedLifecycle(deps.env.DB, stagedId, lease, Date.now());
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `lifecycle apply threw after a confirmed publication: ${detail}`);
-    }
-    if (!applied) {
-      deps.log.warn(
-        fields,
-        "review published and confirmed but the lifecycle apply did not complete — publication stays confirmed for M8 recovery; acking to avoid a duplicate comment",
-      );
-      await terminalizeCheck(stagedId, "publication-unknown");
-      return { kind: "ok" };
-    }
-
-    // 15. §7.7 step 10 — post/capture the intent-prepared COMMENT-only line
-    // review AFTER the result/lifecycle apply; persist the exact returned
-    // review/comment ids against the associations. NEVER throwing: a remote
-    // line failure is an explicit fallback log (the intents stay staged and
-    // discoverable), never fabricated mappings.
-    if (lineIntents.length > 0) {
-      try {
-        const postedLine = await commenter.postLineComments({
-          installationId: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          prNumber: payload.pr_number,
-          headSha,
-          round,
-          publicationId: stagedId,
-          intents: lineIntents,
-        });
-        if (postedLine.posted.length > 0) {
-          try {
-            const captureStmts = postedLine.posted.map((p) =>
-              deps.env.DB
-                .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ?`)
-                .bind(postedLine.reviewId, p.commentId, Date.now(), p.associationId),
-            );
-            await deps.env.DB.batch(captureStmts);
-          } catch (err) {
-            const detail = err instanceof Error ? err.message : String(err);
-            deps.log.warn(fields, `line-comment id capture failed (intents stay discoverable): ${detail}`);
-          }
-        }
-        if (!postedLine.captured || postedLine.ambiguous.length > 0) {
-          deps.log.warn(
-            { ...fields, line_comments_fallback: true },
-            `line-comment capture incomplete (ambiguous: ${postedLine.ambiguous.join(", ") || "none"}) — never fabricated`,
-          );
-        }
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(
-          { ...fields, line_comments_fallback: true },
-          `line comments failed — overall comment already published, continuing overall-only: ${detail}`,
-        );
-      }
-    }
-
-    // 16. §7.7 step 11 — resolution LAST: persist the verified snapshot and
-    // enqueue the pending row BEFORE the single inline attempt (a crash
-    // before the first attempt stays discoverable by M8), then discover +
-    // resolve. Never throws out of the message; never reruns the model.
-    // Newly-created threads of THIS round are never resolved inline — their
-    // associations carry no verified snapshot, so only PRIOR associations
-    // with a complete verification are attempted here.
-    //
-    // The inline lane is a fast path, not the recovery engine: M8 owns
-    // unbounded convergence with its own request/deadline discipline
-    // (§7.11.1). Bounding it here keeps one queue message from spending
-    // hundreds of sequential GitHub requests (P67-QC-017) — an entry that
-    // cannot be admitted is simply left `pending`, which is exactly the
-    // durable state M8 picks up, so nothing is lost and no attempt is spent
-    // on skipped work.
-    if (reconciled.resolutions.length > 0) {
-      const assocPlaceholders = reconciled.resolutions.map(() => "?").join(",");
-      const assocRows = await deps.env.DB
-        .prepare(`SELECT id, intent_json FROM review_threads WHERE id IN (${assocPlaceholders})`)
-        .bind(...reconciled.resolutions.map((r) => r.associationId))
-        .all<{ id: string; intent_json: string }>();
-      const intentById = new Map(assocRows.results.map((row) => [row.id, row.intent_json]));
-      let inlineResolveBudgetMs = INLINE_RESOLVE_BUDGET_MS;
-      let inlineResolveAttempts = 0;
-      for (const resolution of reconciled.resolutions) {
-        try {
-          const enqueued = await deps.env.DB
-            .prepare(
-              // A CURRENT round supplies fresh verified_json — that is a
-              // genuinely NEW assessment, so the retry budget and any stale
-              // give-up/backoff state reset with it (§7.11.1: "resets
-              // attempts only for a genuinely new assessment"). Without this
-              // reset a row that had reached the cap could be re-enqueued as
-              // `pending` while still `attempts >= 5`, making it permanently
-              // invisible to `listResolutionRecovery` (a silent stall) and
-              // preserving a stale backoff (P67-QC-005).
-              `UPDATE review_threads
-               SET verified_json = ?, resolution_state = 'pending', attempts = 0,
-                   next_attempt_ms = NULL, last_error = NULL, updated_ms = ?
-               WHERE id = ? AND superseded_by_publication_id IS NULL`,
-            )
-            .bind(JSON.stringify(resolution.verified), Date.now(), resolution.associationId)
-            .run();
-          if (enqueued.meta.changes === 0) continue; // superseded — nothing to resolve
-          // The row is durably queued from here on, so any entry this lane
-          // declines to start is picked up by M8 without spending an attempt.
-          if (inlineResolveAttempts >= INLINE_RESOLVE_MAX_ENTRIES || inlineResolveBudgetMs <= 0) {
-            deps.log.warn(
-              fields,
-              `inline resolution admission exhausted (${inlineResolveAttempts}/${INLINE_RESOLVE_MAX_ENTRIES} entries, ${inlineResolveBudgetMs}ms left) — association ${resolution.associationId} stays pending for scheduled recovery`,
-            );
-            continue;
-          }
-          const intentJson = intentById.get(resolution.associationId);
-          if (intentJson === undefined || commenter.discoverThread === undefined || commenter.resolveFindingThread === undefined) {
-            deps.log.warn(
-              fields,
-              `resolution for association ${resolution.associationId} enqueued but discovery is unavailable — left pending for recovery`,
-            );
-            continue;
-          }
-          // Admission for the entry about to start: it may spend up to the
-          // same per-operation request envelope M8 uses, bounded by the
-          // remaining inline deadline.
-          inlineResolveAttempts += 1;
-          const entryDeadline = Date.now() + Math.min(INLINE_RESOLVE_ENTRY_MS, inlineResolveBudgetMs);
-          const entryStartedMs = Date.now();
-          const discovery = await commenter.discoverThread({
-            scope: lifecycleScope,
-            intent: JSON.parse(intentJson) as LineIntent,
-            reviewId: null,
-          });
-          inlineResolveBudgetMs -= Date.now() - entryStartedMs;
-          if (discovery.kind !== "found") {
-            deps.log.warn(
-              fields,
-              `thread discovery for association ${resolution.associationId} returned ${discovery.kind} — verified resolve stays queued (never claims a foreign or ambiguous thread)`,
-            );
-            continue;
-          }
-          if (Date.now() >= entryDeadline || inlineResolveBudgetMs <= 0) {
-            deps.log.warn(
-              fields,
-              `inline resolve deadline passed before the mutation for association ${resolution.associationId} — left pending for scheduled recovery`,
-            );
-            continue;
-          }
-          const outcome = await commenter.resolveFindingThread({
-            scope: lifecycleScope,
-            associationId: resolution.associationId,
-            verified: resolution.verified,
-          });
-          inlineResolveBudgetMs -= Date.now() - entryStartedMs;
-          if (outcome.kind === "resolved") {
-            deps.log.info(
-              fields,
-              `resolved association ${resolution.associationId} (thread ${outcome.threadId}${outcome.adopted ? ", adopted" : ""}${outcome.lateChange ? ", LATE CHANGE recorded" : ""})`,
-            );
-          } else {
-            const reason = outcome.kind === "needs-recheck" || outcome.kind === "retry" || outcome.kind === "abandoned" ? outcome.reason : "";
-            deps.log.warn(
-              fields,
-              `resolve for association ${resolution.associationId} returned ${outcome.kind} (${reason}) — durable queue state owns the follow-up`,
-            );
-          }
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          deps.log.warn(fields, `resolution attempt for ${resolution.associationId} failed (queued state intact): ${detail}`);
-        }
-      }
-    }
-
-    // 17. Degraded-comment lifecycle (Bugbot finding): the successful
-    // review supersedes any earlier degradation — best-effort cleanup AFTER
-    // the normal publication proof, never deleting unconfirmed evidence.
-    // §7.7 step 11 gate: while ANY degraded journal row for this scope is
-    // still prepared/sending/unknown WITHOUT persisted proof, that comment's
-    // exact body is the sole recovery evidence for a possibly-landed send —
-    // deleting it would make the publication permanently unprovable, so the
-    // cleanup is skipped and the condition is logged for the operator.
-    try {
-      const mustPreserve = await hasUnprovenDegradedPublication(deps.env.DB, lifecycleScope);
-      if (mustPreserve) {
-        deps.log.warn(
-          fields,
-          "stale degraded comment cleanup skipped — an unconfirmed degraded publication still depends on its body as recovery evidence",
-        );
-      } else {
-        const deleteOutcome = await commenter.deleteDegradedComment({
-          installationId: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          prNumber: payload.pr_number,
-          error: "",
-          rawOutput: "",
-        });
-        if (deleteOutcome.deleted > 0 || deleteOutcome.skipped > 0 || deleteOutcome.errors.length > 0) {
-          deps.log.warn(
-            { ...fields, degraded_delete_deleted: deleteOutcome.deleted, degraded_delete_skipped: deleteOutcome.skipped },
-            `stale degraded comment cleanup (review stands): deleted=${deleteOutcome.deleted}, skipped=${deleteOutcome.skipped}${
-              deleteOutcome.errors.length > 0 ? `, errors=[${deleteOutcome.errors.join("; ")}]` : ""
-            }`,
-          );
-        }
-        // A throttled sweep is a CONTINUATION event, not a failure of this
-        // review: ONE row per non-zero kind under the non-failure `rate-limit`
-        // stage (excluded from every failure count) so the throttle is not
-        // silently dropped. Each row carries its own kind's prefix, so a
-        // primary 429 never inflates the secondary-limit count. Its own
-        // try/catch — the insert must never mask the review that stands, and
-        // the round is never retried for it.
-        const rateLimitKinds = [
-          { kind: "primary", prefix: GITHUB_PRIMARY_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.primary },
-          { kind: "secondary", prefix: GITHUB_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.secondary },
-        ] as const;
-        for (const { kind, prefix, count } of rateLimitKinds) {
-          if (count === 0) continue;
-          try {
-            await deps.failureStore.record({
-              target_id: payload.targetId,
-              installation_id: payload.installation_id,
-              owner: payload.owner,
-              repo: payload.repo,
-              pr_number: payload.pr_number,
-              head_sha: headSha,
-              stage: "rate-limit",
-              error: `${prefix}${count} stale degraded comment deletion(s) rejected by the GitHub ${kind} rate limit — the review stands`,
-            });
-          } catch (recordErr) {
-            const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
-            deps.log.warn(fields, `review_failures insert failed (degraded cleanup continues): ${recordDetail}`);
-          }
-        }
-      }
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `stale degraded comment delete failed (review stands): ${detail}`);
-    }
-
-    // 18. §7.7 step 12 — the Check terminal decision reads the persisted
-    // proof for this publication (a degraded publication derives `failure`
-    // from it, never a pass; the inline outcome value is only the honest
-    // fallback when the proof is unreadable).
-    await terminalizeCheck(stagedId, "publication-unknown");
-    return { kind: "ok" };
+    const prepared = await prepareAttempt(run);
+    if (prepared.kind === "settled") return prepared.outcome;
+    const reviewed = await reviewAttempt(run, prepared.prepared);
+    const collected = await collectAttempt(run, prepared.prepared, reviewed);
+    if (collected.kind === "settled") return collected.outcome;
+    return await publishAttempt(run, prepared.prepared, collected.collected);
   } catch (err) {
-    // § Exhaustion (the ONE typed terminal outcome outside the verdict
-    // envelope): every wall-clock stop funnels here — the runner's own
-    // exit-0 signal, the sandbox exec killed at the anchored deadline, and
-    // the consumer's derived-deadline refusals, all already resolved to (or
-    // resolvable from) the attempt's own facts. A confirmed stop is terminal
-    // and is published with its own outcome FIRST — the generic outcome
-    // resolution below must never freeze `pre-publication-failure` over the
-    // Check this stop owes. Check `failure` with the typed record, the
-    // durable `budget-exhausted:` row, then `{kind:"budget-exhausted"}` so
-    // the handler acks — a paid queue retry can only lose the same clock
-    // again, and the spec forbids implying otherwise. Journal staging,
-    // recheck resolve/rotate and comment writes never ran (all post-parse),
-    // so this catch is the only publication step the outcome needs.
-    if (err instanceof BudgetExhaustedError || err instanceof RoundBudgetSpent) {
-      const budgetOutcome: BudgetExhaustedOutcome =
-        err instanceof BudgetExhaustedError
-          ? err.outcome
-          : {
-              kind: "budget-exhausted",
-              cause: "consumer-deadline",
-              // Every derived-deadline refusal sits past level resolution
-              // and budget derivation — the `!`s encode that ordering fact,
-              // never a guess.
-              tier: level!,
-              budgetWindow: err.window,
-              budgetMs:
-                err.window === "runner"
-                  ? runnerAnchor!.effectiveBudgetMs
-                  : roundBudget!.preparationBudgetMs,
-              // A consumer decline fires before the runner exec starts:
-              // provably no seat was dispatched or stopped.
-              seatsDispatched: 0,
-              seatsStopped: 0,
-              changedLines: observedChangedLines,
-            };
-      // A stop that fired BEFORE the fallback claim (the diff stage, its
-      // oversized substitute, or the numstat that follows) can reach here with
-      // no Check at all: an issue-comment delivery carries no payload SHA and
-      // may have no readable head watermark, so the admission-time claim was
-      // skipped and the fallback never ran. The checkout SHA IS known by then,
-      // so claim here — an ACK that publishes nothing would leave the frozen
-      // failure this stop owes with no trace and no recovery intent. A claim
-      // already ATTEMPTED is never retried: the claim insert is the one
-      // race-decided gate, and a second try could mint a second generation.
-      if (
-        deps.checks !== undefined &&
-        checkHandle === null &&
-        !checkClaimAttempted &&
-        lifecycleScope !== undefined &&
-        resolvedHeadSha !== null &&
-        resolvedGithubAppId !== undefined
-      ) {
-        checkClaimAttempted = true;
-        checkHandle = await beginCheck(lifecycleScope, resolvedGithubAppId, resolvedHeadSha);
-      }
-      const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${err instanceof Error ? err.message : String(err)}`;
-      deps.log.error(
-        {
-          ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
-          ...(level === undefined
-            ? {}
-            : {
-                level,
-                runner_timeout_ms: runnerTimeoutMs(level),
-                orchestration: level === "deep" ? "parent" : "bun-fanout",
-              }),
-          ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
-          budget_outcome: budgetOutcome,
-        },
-        `review failed: ${budgetDetail}`,
-      );
-      try {
-        await deps.failureStore.record({
-          target_id: payload.targetId,
-          installation_id: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          pr_number: payload.pr_number,
-          head_sha: fields?.head_sha ?? payload.head_sha ?? "",
-          stage: progress.failureStage,
-          error: redactExactSecrets(redactSecrets(budgetDetail), progress.secretValues),
-        });
-        // Confirmed by the await above: only a write that RESOLVED is durable.
-        durableOutcome = true;
-      } catch (recordErr) {
-        const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
-        deps.log.warn(
-          fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
-          `review_failures insert failed (exhaustion path continues): ${recordDetail}`,
-        );
-      }
-      if (!durableOutcome) {
-        // No durable record of this stop: the Check is left alive for the
-        // recovery lane (a terminal conclusion here could never be undone) and
-        // the attempt ends unknown — no destruction, no capacity release.
-        containerUnproven = true;
-        deps.log.warn(
-          {
-            ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
-            ...(level === undefined
-              ? {}
-              : {
-                  level,
-                  runner_timeout_ms: runnerTimeoutMs(level),
-                  orchestration: level === "deep" ? "parent" : "bun-fanout",
-                }),
-            ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
-            event: "review_unresolved",
-          },
-          `review unresolved: ${budgetDetail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
-        );
-        return { kind: "unknown" };
-      }
-      // The row is durable: now the Check may carry the stop's conclusion.
-      await terminalizeCheck(null, "budget-exhausted", undefined, budgetOutcome);
-      return { kind: "budget-exhausted", outcome: budgetOutcome };
-    }
+    return await settleAttemptFailure(run, err);
+  } finally {
+    await cleanupAttempt(run);
+  }
+}
 
-    // An unproven container is NOT a failure: a missing/different marker (or a
-    // lost read) says nothing about whether the review ran. No Check change, no
-    // failure row, no failed-claim stamp, no destroy, no capacity release, and
-    // no retry — a second delivery would provision a second container and pay
-    // the model again on ambiguous acceptance. The Check stays `in_progress`
-    // for the reconciler, which owns the abandoned-attempt outcome.
-    if (err instanceof AttemptUnknownError) {
-      containerUnproven = true;
-      deps.log.warn(
-        {
-          ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
-          ...(level === undefined
-            ? {}
-            : {
-                level,
-                runner_timeout_ms: runnerTimeoutMs(level),
-                orchestration: level === "deep" ? "parent" : "bun-fanout",
-              }),
-          ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
-          event: "review_unresolved",
-        },
-        `review unresolved: ${err.message} — nothing was collected, destroyed or reclaimed`,
-      );
-      return { kind: "unknown" };
-    }
+/**
+ * Phase 1 — prepare. Container, purpose-scoped credential and the
+ * authoritative checkout, then the dedupe/journal/usage gates, the lifecycle
+ * context, the trusted diff evidence and the ONE derived round budget. Every
+ * early exit here is a settlement: the attempt owes nothing more.
+ */
+export async function prepareAttempt(attempt: AttemptRun): Promise<PrepareStep> {
+  const {
+    payload,
+    deps,
+    attemptId,
+    sandboxId,
+    roundStartedAt,
+    level,
+    commenter,
+    githubAppId,
+    usageWorkspaceId,
+    usageSource,
+  } = attempt.input;
+  const progress = attempt.progress;
+  const check = attempt.check;
+  let baseFields = attempt.baseFields;
+  let fields = attempt.fields;
+  let sandbox = attempt.sandbox;
+  let lifecycleScope = attempt.lifecycleScope;
+  let roundBudget = attempt.roundBudget;
+  let observedChangedLines = attempt.observedChangedLines;
+  // F-001 (QC wave-1): toBaseFields derefs payload.botRef.appId, so an
+  // in-flight pre-deploy message (no `botRef` — AL-24-4 accepts the
+  // TypeError) must throw INSIDE the try: it then flows through the
+  // established structured channel (review failed: log + AL-6
+  // review_failures row + rethrow). Pure relocation — no runtime guard
+  // (AL-24-4 forbids one).
+  baseFields = toBaseFields(payload);
+  attempt.baseFields = baseFields;
+  // §7.10 Check lane scope — the same App/PR identity the publication journal
+  // and the attempt key use, derivable from the payload alone.
+  lifecycleScope = {
+    appId: payload.botRef.appId,
+    installationId: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    prNumber: payload.pr_number,
+  };
+  attempt.lifecycleScope = lifecycleScope;
+  if (attempt.input.checkClaimSha !== null) {
+    // The claim the consumer decided the head of: it runs here, before any
+    // provisioning, so the settlement that terminalizes it lives beside it.
+    check.claimAttempted = true;
+    await check.begin(lifecycleScope, githubAppId, attempt.input.checkClaimSha);
+  }
+  // 1-3. Container + purpose-scoped credential + authoritative checkout:
+  // the attempt body acquires them and advances `progress.failureStage`.
+  const prepared = await prepareReviewAttempt({
+    payload,
+    deps,
+    commenter,
+    attemptId,
+    sandbox,
+    onSandbox: (acquired) => {
+      sandbox = acquired;
+      attempt.sandbox = acquired;
+    },
+    progress,
+  });
+  sandbox = prepared.sandbox;
+  attempt.sandbox = sandbox;
+  const token = prepared.token;
+  const cmds = prepared.cmds;
+  const headSha = prepared.headSha;
+  attempt.headSha = headSha;
 
-    // Structured failure log carrying the idempotency key + sandbox id
-    // (the failure log must carry the idempotency key: 失败路径错误日志含幂等键), then
-    // rethrow so the worker retries and eventually DLQs.
-    const detail = err instanceof Error ? err.message : String(err);
-    deps.log.error(
-      {
-        ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
-        // d5-budget AC-S10-logs: the failure line carries the level's budget
-        // once known (post-step-3 `fields` already has it; this spread covers
-        // the pre-checkout fallback) and the runner's elapsed wall-clock once
-        // it started. elapsed never aborts — the sandbox exec timeout is the
-        // only wall-clock failure (spec 不 abort).
-        ...(level === undefined
-          ? {}
-          : {
-              level,
-              runner_timeout_ms: runnerTimeoutMs(level),
-              orchestration: level === "deep" ? "parent" : "bun-fanout",
-            }),
-        ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
-      },
-      `review failed: ${detail}`,
+  const key: IdempotencyKey = {
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+    head_sha: headSha,
+  };
+  fields = {
+    ...baseFields,
+    // d5-budget L5: the level's clock rides every structured log from here
+    // on (same ConsumerLogFields channel — no new sink).
+    level,
+    runner_timeout_ms: runnerTimeoutMs(level),
+    // deep = parent session; quick/default = Bun seat fan-out. Never a
+    // fabricated seat_count for deep (spec § Queue visibility).
+    orchestration: level === "deep" ? "parent" : "bun-fanout",
+    head_sha: headSha,
+    idempotency_key: idemKey(key),
+    sandbox_id: sandboxId,
+  };
+  attempt.fields = fields;
+
+  // §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
+  // authoritative checkout HERE — before any dedup/journal early exit, so a
+  // delivery whose claimed SHA was disproved can never close the wrong head's
+  // run as `skipped`. (A message that had no knowable SHA at admission is a
+  // different case: its claim stays at the post-capture fallback below, so a
+  // duplicate or journal hand-off of a comment trigger never creates a run.)
+  // The checkout's OWN claim waits for the dedup read below: an already
+  // reviewed head is acked, never claimed.
+  let supersededClaimReleased = false;
+  if (check.handle !== null && check.handle.headSha !== headSha) {
+    const supersededHandle = check.handle;
+    check.handle = null;
+    deps.log.warn(
+      fields,
+      `check attempt superseded: claimed ${supersededHandle.headSha.slice(0, 7)}, checked out ${headSha.slice(0, 7)}`,
     );
+    // Freeze the contradicted attempt's `superseded` intent and release it —
+    // TWO fenced D1 writes (intent + release), no remote request. Its remote
+    // send belongs to the minute recovery cron, so the new head's review
+    // never waits on the Check hook.
+    supersededClaimReleased = await check.abandon(
+      supersededHandle,
+      "the checkout proved a newer commit than the claim",
+      { outcome: "superseded" },
+    );
+    if (!supersededClaimReleased) {
+      // The handoff failed, so the old attempt may still hold this
+      // consumer's lease: claiming the new head anyway would put two live
+      // consumer-owned claims on one invocation. A Check fault never blocks
+      // the review — this message reviews the checked-out commit with NO
+      // Check, and the old attempt's own deadline hands it to recovery.
+      deps.log.warn(
+        fields,
+        `check supersede handoff failed — continuing the review for ${headSha.slice(0, 7)} with no Check`,
+      );
+    }
+  }
 
-    // AL-6: best-effort review_failures row BEFORE the
-    // rethrow — DLQ-bound infra failures otherwise leave zero D1 trace (the
-    // audit blind spot). `stage` = the coarse phase in flight
-    // (failureStage); rows are per-attempt events (a DLQ'd message leaves up
-    // to QUEUE_MAX_ATTEMPTS of them: 1 initial delivery + the queue's
-    // max_retries, one per guard rung). The insert
-    // must never mask the rethrow: its own failure is a warn line only.
-    // SEC-03: the error detail is redacted (shape + exact-value passes)
-    // before the durable row — an infra error can interpolate a
-    // secret-shaped value (defense-in-depth; clean strings pass through).
-    // The GitHub secondary-rate-limit cause is tagged HERE — once, before
-    // redaction — so the row's text and the store's prefix count share one
-    // source of truth (a second detection site would drift).
-    const persistedDetail =
-      classifyGithubRateLimit(err) === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
+  // 4. Dedup (§7.7 step 2, first half): already completed for this
+  // checked-out sha → ack (no post, no insert). KV done-state first (B3),
+  // then D1. Keyed off the checkout, so a force-push between delivery and
+  // processing is never mis-deduped against the stale payload sha.
+  const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
+  if (done) {
+    deps.log.info(fields, "KV idempotency hit — ack");
+    // A handle exists only when the claim's SHA WAS the checkout (a
+    // concurrent duplicate): that run must be closed, carrying THIS head's
+    // existing result (inherited like an empty increment), never a `neutral`
+    // that would mask a failing gate.
+    await check.terminalize(null, "skipped", headSha);
+    // §7.9: with no handle (the adoption refused) the attached run would
+    // otherwise wait out the attach window and close red. The settlement is
+    // keyed on the PAYLOAD SHA — what the attach used — not this checkout SHA.
+    await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
+    return { kind: "settled", outcome: { kind: "ok" } };
+  }
+  const existing = await deps.store.findByIdempotencyKey(key);
+  if (existing) {
+    deps.log.info(fields, "idempotency hit — ack");
+    await check.terminalize(null, "skipped", headSha);
+    await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
+    return { kind: "settled", outcome: { kind: "ok" } };
+  }
+  // §7.7 step 2 (second half) — the publication journal: an existing
+  // prepared/sending/unknown/confirmed row for this exact scope/SHA hands
+  // off to recovery and ACKs without another paid review. Pending recovery
+  // is never deleted by a same-SHA mention re-run.
+  const journalRow = await journalHandoffRow(deps.env.DB, lifecycleScope, headSha);
+  if (journalRow !== null) {
+    deps.log.info(
+      fields,
+      `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
+    );
+    // A `prepared` row hands delivery to the recovery lane; it does NOT
+    // claim the review is visible — the publication still owes its send, and
+    // recovery owns it. Nothing here waits for it or asserts it.
+    // Deliberately NOT terminalized: this attempt published nothing, and the
+    // publication on this head belongs to an earlier generation. LINKING that
+    // row is what makes it this attempt's proof, so the conclusion stays with
+    // the publication: an applied proof decides `success`, and only the
+    // execution deadline decides the honest failure. Freezing an intent here
+    // would instead close the run for good — the correction seam needs a
+    // non-null `publication_id` (which is exactly what this link supplies).
+    //
+    // Both writes are fenced on the claim lease, and either can refuse: the
+    // claim runs 900s while the intervening sandbox/token/inflight/journal
+    // steps are network calls with no enforced clock. A refusal writes
+    // nothing, which is the honest outcome — the row keeps its current owner
+    // and stays `in_progress`; once `lease_until_ms` passes, the reconcile
+    // selector picks it up and the deadline path concludes it. A store fault
+    // is a warn too: a Check fault never blocks the review's ack.
+    if (check.handle !== null) {
+      const nowMs = Date.now();
+      const handoffFields = {
+        ...fields,
+        sandbox_id: sandboxId,
+        attempt_id: check.handle.attemptId,
+        check_reason: "publication journal handoff",
+      };
+      try {
+        if (
+          !(await linkCheckPublication(
+            deps.env.DB,
+            check.handle.attemptId,
+            check.handle.lease,
+            journalRow.id,
+            nowMs,
+          ))
+        ) {
+          deps.log.warn(
+            { ...handoffFields, event: "check_abandon_not_owned" },
+            "publication link refused by the check lease fence — the row keeps its owner and the deadline path concludes it (publication journal handoff)",
+          );
+        }
+        if (
+          !(await deferCheckRecovery(
+            deps.env.DB,
+            check.handle.attemptId,
+            check.handle.lease,
+            {
+              state: "remote-unconfirmed",
+              nextAttemptMs: nowMs + CHECK_BACKOFF_MS[0]!,
+              reason: "publication journal handoff",
+            },
+            nowMs,
+          ))
+        ) {
+          deps.log.warn(
+            { ...handoffFields, event: "check_abandon_not_owned" },
+            "claim release refused by the check lease fence — the row keeps its lease and the deadline path concludes it (publication journal handoff)",
+          );
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          { ...handoffFields, event: "check_abandon_failed" },
+          `publication journal handoff faulted (the Check row is left to the recovery lane): ${detail}`,
+        );
+      }
+    } else {
+      // §7.9: no handle was adopted for this hand-off, so the delivery's own
+      // attached run has nobody to close it — settlement carries the head's
+      // own gate result (or `neutral` when it has none).
+      await settleSkippedRow(deps, payload, payload.head_sha, "a publication for this head already exists");
+    }
+    return { kind: "settled", outcome: { kind: "ok" } };
+  }
+  // §7.7 step 4: claim the CHECKED-OUT head — only on a dedup AND journal
+  // miss. The admission claim named the payload sha (or the watermark), which
+  // this checkout just disproved; a head already reviewed or already
+  // published never reaches here.
+  if (supersededClaimReleased) {
+    await check.begin(lifecycleScope, githubAppId, headSha);
+  }
+
+  // 4b. Usage ledger (migration 0031): one row per STARTED execution. Both
+  // dedup reads and the journal handoff above have missed, so a duplicate
+  // delivery of a completed review never reaches this insert; a genuine
+  // re-execution after a runner failure mints the next `seq` for the same
+  // review. The product rule is "count, never refuse": a write failure is
+  // logged and recorded as a `usage` failure row carrying the metered
+  // identity (`reviewId` + `workspaceId`) so the dropped attempt can be
+  // reconciled. The review continues either way.
+  const reviewId = idemKey({
+    // The metered identity is the PAYLOAD identity (plan § Consumer write
+    // point 3): the authoritative checkout sha refines the review row only,
+    // so a force-push between delivery and retry cannot split one review
+    // into two ledger identities. A comment-mention job has no payload sha
+    // and shares one stable per-PR identity — `idemKey` refuses an empty
+    // sha, so the "no commit" sentinel stands in.
+    ...key,
+    head_sha: payload.head_sha || "no-sha",
+  });
+  // The charge (D2, D5, D7): this execution's own resolved strength against
+  // the source its bot scope selects, priced by the profile judging THIS UTC
+  // month's first day — the same profile the enqueue's ceiling read, so the
+  // rows and the ceiling can never be denominated differently. Recomputed
+  // here instead of carried on the queue message: `level` is already resolved
+  // and `scope` rides the credential read, so the charge costs one profile
+  // read per started review and the message gains no field (a level change
+  // between enqueue and consume is then priced at what actually ran).
+  //
+  // EVERYTHING that computes or writes this row is inside ONE boundary, the
+  // profile read above all: `resolveQuotaProfile` THROWS when the profile
+  // table is empty, and `self-hosted` never runs the enqueue gate that would
+  // have absorbed it, so a charge priced outside this `try` would abort the
+  // review — queue retry ×3, DLQ, no review posted and no ledger row. The
+  // product rule here is "count, never refuse", and the recorded `usage`
+  // failure row below is how a charge that could not be computed is
+  // reconciled instead.
+  const usageNow = new Date();
+  // Named once so the price and its source cannot disagree: `rpFor` reads the
+  // same value in the same expression.
+  // Minted BEFORE the profile read: the failure row and the read-back must
+  // name THIS attempt even when the charge never got computed. The row input
+  // itself is built INSIDE the `try`, so no path can write a placeholder price.
+  const executionToken = crypto.randomUUID();
+  const usageOccurredAt = usageNow.toISOString();
+  try {
+    // No retry: a replay of the SAME token is already idempotent (the unique
+    // index rejects it), and a retry that minted a NEW token would be a
+    // different execution by definition — a second count for one attempt. A
+    // dropped row stays reconcilable through the `usage` failure row below.
+    await recordUsageEvent(deps.env.DB, {
+      reviewId,
+      executionToken,
+      workspaceId: usageWorkspaceId,
+      occurredAt: usageOccurredAt,
+      rp: rpFor(level, usageSource, await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso)),
+      source: usageSource,
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    // A pre-commit failure and an ambiguous one (the write landed, the driver
+    // threw) reach this catch identically. The token read-back separates them
+    // and reports THREE states: `true` — this execution's row is present, so
+    // the failure is noise; `false` — the read succeeded and found nothing,
+    // the only state a backfill may act on; `"unknown"` — the read itself
+    // failed, so nothing is known. A backfill must re-check the token before
+    // inserting: the unique index only rejects a replay that REUSES the
+    // recorded token, and a fresh token would mint another `seq`.
+    //
+    // A CHARGE that could not be computed (an empty profile table) reaches
+    // this same catch: no row was attempted, so the read-back answers `false`
+    // and the reconciliation below applies unchanged.
+    const applied: true | false | "unknown" = await hasUsageEventForExecutionToken(
+      deps.env.DB,
+      executionToken,
+    ).catch(() => "unknown" as const);
+    deps.log.warn(
+      { ...fields, review_id: reviewId, workspace_id: usageWorkspaceId, usage_applied: applied },
+      `usage_events row not written (review continues): ${detail}`,
+    );
+    // The failure row is best-effort too — its own guard keeps a recording
+    // failure from reaching the pipeline.
     try {
       await deps.failureStore.record({
         target_id: payload.targetId,
@@ -4910,68 +3300,917 @@ export async function runAdmittedReviewAttempt(
         owner: payload.owner,
         repo: payload.repo,
         pr_number: payload.pr_number,
-        // The authoritative sha once the checkout resolved it; before that
-        // the payload sha, else "" (= never resolved).
-        head_sha: fields?.head_sha ?? payload.head_sha ?? "",
-        stage: progress.failureStage,
-        error: redactExactSecrets(redactSecrets(persistedDetail), progress.secretValues),
+        head_sha: headSha,
+        stage: "usage",
+        // The identity a backfill would write, and the source its price
+        // comes from: `usageWorkspaceId` IS the charged workspace (the
+        // target's), never the bot's.
+        error: `usage_events row not written: ${detail} ${JSON.stringify({
+          reviewId,
+          workspaceId: usageWorkspaceId,
+          executionToken,
+          source: usageSource,
+          applied,
+        })}`,
       });
-      // Confirmed by the await above: a resolved write is the attempt's durable
-      // terminal no-result outcome. A rejection leaves the latch false.
-      durableOutcome = true;
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
-      deps.log.warn(
-        fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
-        `review_failures insert failed: ${recordDetail}`,
-      );
+      deps.log.warn(fields, `review_failures insert failed (usage failure, review continues): ${recordDetail}`);
     }
-    if (!durableOutcome && sandbox !== null) {
-      // A container exists and nothing durable came of this attempt: no row
-      // landed, so no terminal outcome can be claimed. It ends `unknown` — no
-      // destruction, no capacity release, no Check conclusion — instead of a
-      // failure nobody can read back later. (A failure BEFORE any container —
-      // credential gate, configuration — keeps the retry → DLQ path: there is
-      // nothing unresolved to leave behind.)
-      containerUnproven = true;
+  }
+
+  // 5. §7.7 step 3 — lifecycle context: apply this scope's pending
+  // CONFIRMED journals in original publication order (an older assessment
+  // never loses to a newer unapplied recurrence), then capture targets,
+  // trusted diff evidence and discussions. Any capture/apply failure is
+  // honest context-unavailable — the round cannot close stale lifecycle
+  // state, never a false first-round closure.
+  const captureMs = Date.now();
+  let pendingApplyFailed = false;
+  try {
+    pendingApplyFailed = !(await applyPendingLifecycleJournals(deps.env.DB, lifecycleScope, captureMs));
+    if (pendingApplyFailed) {
+      deps.log.warn(fields, "pending lifecycle journal apply failed — proceeding with context-unavailable coverage (no closure this round)");
+    }
+  } catch (err) {
+    pendingApplyFailed = true;
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `pending lifecycle journal read failed — context-unavailable: ${detail}`);
+  }
+
+  let targets: RecheckTarget[] = [];
+  let totalOpen = 0;
+  let captureFailed = false;
+  try {
+    targets = await selectAssessmentTargets(deps.env.DB, lifecycleScope, ASSESSMENT_TARGET_CAP);
+    totalOpen = await countRecheckableFindings(deps.env.DB, lifecycleScope);
+  } catch (err) {
+    captureFailed = true;
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `lifecycle target capture failed — context-unavailable: ${detail}`);
+  }
+
+  // Incremental round selection: when this PR has a previously REVIEWED head,
+  // ask GitHub whether it is an ancestor of this one AND whether the range is
+  // this branch's own work. Only that combination is an honest increment
+  // (base...head is then exactly the work since the last review);
+  // `behind`/`diverged`/`identical`/a 404 after a force-push, any non-zero
+  // exit, a merge commit or a truncated commit list keep the FULL diff. A
+  // failed base read degrades the same way, but it is warned: a silent
+  // fallback would disable incremental rounds forever with no trace.
+  let incrementBase: string | null = null;
+  try {
+    incrementBase = await deps.findIncrementBase(deps.env.DB, lifecycleScope);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(
+      { ...fields, increment_base: "lookup-failed" },
+      `increment base lookup failed — reviewing the full diff: ${detail}`,
+    );
+  }
+  let sinceSha: string | null = null;
+  if (incrementBase !== null && incrementBase !== headSha) {
+    try {
+      const compare = await sandbox.runCommand(
+        compareGateCommand(payload.owner, payload.repo, incrementBase, headSha),
+        { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
+      );
+      if (compare.exitCode !== 0) {
+        deps.log.info(
+          { ...fields, increment_status: `exit ${compare.exitCode}` },
+          "incremental base not an ancestor of this head — reviewing the full diff",
+        );
+      } else {
+        const gate = parseCompareGate(compare.stdout);
+        // shortcut: any merge commit in the increment forces a full-diff round,
+        // upgrade when merge-heavy PR branches make re-reviews common.
+        if (gate === null) {
+          deps.log.info(
+            { ...fields, increment_status: "unusable" },
+            "compare answer unusable — reviewing the full diff",
+          );
+        } else if (gate.branchWork) {
+          sinceSha = incrementBase;
+        } else if (gate.status === "ahead") {
+          deps.log.info(
+            { ...fields, increment_status: "ahead-merge" },
+            "increment cannot be proven to be this branch's own work — reviewing the full PR diff",
+          );
+        } else {
+          deps.log.info(
+            { ...fields, increment_status: gate.status },
+            "incremental base not an ancestor of this head — reviewing the full diff",
+          );
+        }
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.info({ ...fields, increment_status: "unavailable" }, `compare status unavailable — full diff: ${detail}`);
+    }
+  }
+
+  // Diff (GH_TOKEN via exec env only — never in the command). The command
+  // writes the file for numstat AND streams a BOUNDED copy back: that stdout
+  // is the WORKER-CONTROLLED §7.3 trusted capture the evidence catalog
+  // slices and the line-intent hunk prefilter both derive from. The bounded
+  // read names three outcomes, deliberately distinct:
+  //   fit        → the text IS the capture;
+  //   overflow   → over DIFF_PREFETCH_MAX_BYTES: the diff exists but cannot
+  //                prove any row (no slices; base-filter line comments),
+  //                never truncated slices;
+  //   unreadable → no flag line at all: the transport broke, so the capture
+  //                failed whatever the file holds (a zero-change PR still
+  //                prints its `\n0\n` flag line).
+  // An empty `fit` payload is NOT decided here: `gh pr diff` also writes
+  // nothing for a PR with no changes, and only the numstat of the same round
+  // can tell the two apart (see step 6).
+  // An incremental round captures the FULL diff here as well: the prior
+  // findings live in files the increment may not touch, so their evidence
+  // catalog can only be proven against the whole PR diff. The increment
+  // capture below feeds the numstat partition ONLY.
+  // ONE window for the whole diff stage: the refused `gh pr diff` and the
+  // oversized fallback draw their timeouts from this same deadline, so the
+  // stage can never spend more than the `full-diff` ledger window it bills —
+  // and never more than what the derived runner deadline still leaves.
+  // EVERY post-diff sandbox step below (the increment capture, numstat, the
+  // runner-input write, the PR-context reads) and the paid runner itself draw
+  // from this ONE derived deadline, and a spent deadline declines explicitly
+  // — no step starts on a fresh 120s window once the fallback was admitted.
+  const terminalizeBudgetMs = attempt.input.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT;
+  // ONE derivation for the whole round: the platform cap, the live
+  // terminalize budget and the tier decide the reserve, the absolute
+  // pre-runner cutoff and every window other owners bill from it.
+  roundBudget = deriveReviewBudget({
+    roundStartMs: roundStartedAt,
+    capMs: deps.roundBudgetMs,
+    terminalizeMs: terminalizeBudgetMs,
+    level,
+  });
+  attempt.roundBudget = roundBudget;
+  const runnerDeadlineMs = roundBudget.runnerCutoffMs;
+  const diffStageNow = Date.now();
+  const diffWindowMs = boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "diff capture", "preparation");
+  const diffCaptureDeadlineMs = diffStageNow + diffWindowMs;
+  const diff = await sandbox.runCommand(cmds.diff, {
+    env: { GH_TOKEN: token },
+    timeout: diffWindowMs,
+  });
+  let diffStdout = diff.stdout;
+  if (diff.exitCode !== 0) {
+    // Only GitHub's oversized-diff refusal has a local substitute; an auth or
+    // network failure keeps today's rethrow (a fallback would mask the cause).
+    // The fallback shares this round's clock and the diff stage's window, and
+    // declines when either the derived runner deadline or that window is spent.
+    const captured = isDiffTooLarge(diff.stderr)
+      ? await oversizedDiffCapture(
+          sandbox,
+          token,
+          { owner: payload.owner, repo: payload.repo, prNumber: payload.pr_number },
+          headSha,
+          runnerDeadlineMs,
+          diffCaptureDeadlineMs,
+        )
+      : null;
+    if (captured === null) {
+      throw new Error(gitStageFailureDetail("diff", diff, progress.secretValues));
+    }
+    if ("reason" in captured) {
+      // ONE warn per attempt, and never silence: the step that ended it, that
+      // step's exit code and a redacted stderr tail (redaction BEFORE the tail
+      // cut, exactly as the stage detail does). The durable failure keeps the
+      // ORIGINAL 406 and gains the reason, so "not attempted (budget)",
+      // "failed at fetch" and "hostile ref rejected" stay distinguishable.
+      const tail =
+        captured.run === undefined
+          ? ""
+          : redactExactSecrets(redactSecrets(captured.run.stderr), progress.secretValues).trim().slice(-STDERR_TAIL_MAX);
+      deps.log.warn(
+        { ...fields, diff_fallback: captured.reason, diff_fallback_step: captured.step },
+        `oversized diff fallback declined: ${captured.step} (${captured.reason})` +
+          (captured.run === undefined ? ", no exec ran" : `, exit ${captured.run.exitCode}`) +
+          (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
+      );
+      if (captured.reason === "budget") {
+        // The derived deadline, not a code fault, declined the fallback —
+        // resolve it into the same `budget-exhausted` outcome the runner
+        // window produces (the record keeps the git-stage cause verbatim).
+        throw new RoundBudgetSpent(
+          `${gitStageFailureDetail("diff", diff, progress.secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`,
+          "preparation",
+        );
+      }
+      throw new Error(`${gitStageFailureDetail("diff", diff, progress.secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`);
+    }
+    diffStdout = captured.run.stdout;
+    deps.log.info(
+      { ...fields, diff_source: "oversized-local" },
+      "oversized PR diff (github 406) — captured the merge-base..head diff from the clone",
+    );
+  }
+  const diffRead = parseBoundedRead(diffStdout);
+  const diffText = diffRead.text ?? "";
+  // The diff FILE's state, from the SAME round's bounded read of that file —
+  // the one evidence that separates an EMPTY file (nothing to review) from a
+  // capture that never delivered one. `git apply --numstat` rejects an empty
+  // file as unusable input, so the numstat exit below is classified against
+  // this state, never against the exit code alone.
+  let diffFileState: "empty" | "captured" | "overflow" | "unreadable" =
+    diffRead.failure ?? (diffRead.text === "" ? "empty" : "captured");
+
+  // Increment capture (numstat partition only): base...head replaces the
+  // file AFTER the full diff text is already in memory, so the evidence
+  // catalog above keeps proving prior findings against the whole PR.
+  // A non-zero exit has two documented outcomes: a too-large refusal (the
+  // compare API's own 20,000-line ceiling) downgrades the round to the full
+  // diff it already captured — logged, with the `since` fact dropped — while
+  // any other failure throws with its own cause. An unreadable/empty capture
+  // marks the round context-incomplete. Nothing here falls back silently: the
+  // `since` fact would then be a lie.
+  // An empty bounded read is NOT decided here: as with the full diff, only
+  // the same round's numstat tells a genuinely unchanged increment (empty
+  // file) from a capture that delivered nothing. Until that read, an empty
+  // capture counts as a failure — the conservative side, which also keeps the
+  // recheck input unbuilt exactly as before.
+  if (sinceSha !== null) {
+    const increment = await sandbox.runCommand(
+      incrementDiffCommand(payload.owner, payload.repo, sinceSha, headSha, DIFF_PATH),
+      {
+        env: { GH_TOKEN: token },
+        timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "increment diff", "preparation"),
+      },
+    );
+    if (increment.exitCode !== 0) {
+      // The compare API refuses an oversized base...head diff with the same
+      // 20,000-line ceiling `gh pr diff` answers, and that refusal has a
+      // documented outcome: the round reviews the full diff it already
+      // captured (the refused capture never replaced that file). The `since`
+      // fact is DROPPED for the rest of the round — keeping it would describe
+      // the file as an increment it no longer is — and this one warn is its
+      // whole trace, so the degrade is never silent. A genuine capture
+      // failure keeps its own cause and stays a round failure.
+      if (!isDiffTooLarge(increment.stderr)) {
+        throw new Error(gitStageFailureDetail("increment diff", increment, progress.secretValues));
+      }
+      const tail = redactExactSecrets(redactSecrets(increment.stderr), progress.secretValues).trim().slice(-STDERR_TAIL_MAX);
+      deps.log.warn(
+        { ...fields, increment_capture: "too_large", increment_since: sinceSha },
+        `increment diff capture too large (github 406) — reviewing the full diff instead, exit ${increment.exitCode}` +
+          (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
+      );
+      sinceSha = null;
+    } else {
+      const incrementRead = parseBoundedRead(increment.stdout);
+      diffFileState = incrementRead.failure ?? (incrementRead.text === "" ? "empty" : "captured");
+      if (incrementRead.failure === "unreadable") {
+        captureFailed = true;
+        deps.log.warn(
+          { ...fields, increment_capture: "unreadable", increment_since: sinceSha },
+          `increment diff capture unreadable — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+        );
+      } else if (diffFileState === "empty") {
+        captureFailed = true;
+      }
+    }
+  }
+
+  // Trusted evidence catalog (§7.3) for the selected targets, pinned to
+  // the authoritative checkout SHA. A target the captured diff cannot prove
+  // is EXCLUDED from the recheck input: without catalog evidence the seat
+  // could only guess, so sending it would invite a misattributed verdict.
+  const catalog =
+    targets.length > 0
+      ? buildEvidenceCatalog(diffText, targets, headSha)
+      : {
+          slices: [] as EvidenceSlice[],
+          excludedTargets: new Set<string>(),
+          catalogBudgetExcluded: new Set<string>(),
+          sliceIdsByRowId: new Map<string, string[]>(),
+        };
+  const catalogExcluded: ReadonlySet<string> = catalog.excludedTargets;
+  const catalogBudgetExcluded: ReadonlySet<string> = catalog.catalogBudgetExcluded;
+
+  // §7.5 discovery BEFORE the §7.8 capture: an association whose remote
+  // thread was never bound cannot enter the discussion, and the recheck's
+  // resolution fences only ever verify a thread the seat actually saw — so
+  // binding it first is what lets this round resolve it at all. Bounded: any
+  // association the budget could not reach stays unbound for a later round.
+  const bound = await bindUnboundThreads({ DB: deps.env.DB, commenter, log: deps.log, fields }, lifecycleScope, targets);
+  if (bound.skipped > 0) {
+    deps.log.warn(fields, `${bound.skipped} association(s) left unbound for a later round`);
+  }
+
+  // Bounded discussion capture (§7.8) for the selected targets' known
+  // threads. API failure is unavailable — never empty/complete.
+  let discussion = emptyDiscussion(captureMs);
+  if (targets.length > 0) {
+    try {
+      const placeholders = targets.map(() => "?").join(",");
+      const threadRows = await deps.env.DB
+        .prepare(
+          `SELECT id, thread_id FROM review_threads
+           WHERE finding_row_id IN (${placeholders}) AND thread_id IS NOT NULL
+             AND superseded_by_publication_id IS NULL`,
+        )
+        .bind(...targets.map((t) => t.rowId))
+        .all<{ id: string; thread_id: string }>();
+      discussion = await commenter.listDiscussion({
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+        threads: threadRows.results.map((row) => ({ associationId: row.id, threadId: row.thread_id })),
+        nowMs: captureMs,
+      });
+      // §7.8: the model-context bounds and untrusted-text neutralization are
+      // NOT cosmetic — this bounded view is what rides the wire, so the seat
+      // never sees a raw captured body, and the pass is what marks the thread
+      // snapshots (and a cap-truncated issue capture) whose items were
+      // dropped or clamped — the resolution fences read exactly those flags.
+      discussion = boundDiscussion(discussion);
+    } catch (err) {
+      captureFailed = true;
+      discussion = {
+        items: [],
+        issueCoverage: "unavailable",
+        issueModelCoverage: "unavailable",
+        issueDigest: "",
+        capturedMs: captureMs,
+        threads: [],
+      };
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `discussion capture failed — context-unavailable: ${detail}`);
+    }
+  }
+
+  // The typed recheck input (§7.3): omitted ENTIRELY when no open rows
+  // exist — the runner input stays byte-identical on a first round. Only
+  // rows the trusted catalog can prove ride the wire, and only the slices
+  // those rows reference: a never-sent row leaves no orphan evidence, and
+  // no slice it owns consumes the byte budget.
+  let recheckInput: RecheckInput | undefined;
+  const budgetExcluded = new Set<string>();
+  // What the seat is actually handed. Narrowed to the sent rows'
+  // associations once they are known: a thread of a row this round could not
+  // fit was not seen by the seat, so it must never be offered for resolution.
+  let askedDiscussion = discussion;
+  let recheckAssignmentMaxBytes: number | undefined;
+  if (targets.length > 0 && !captureFailed) {
+    // §7.8: the seat's ask budget is an operator setting, read ONCE per
+    // message and only when a recheck round will actually be asked, so a
+    // delivery with no open rows pays nothing. It rides the runner input as
+    // its own top-level field — the `mstar.recheck-input/v1` document stays
+    // frozen — and it FITS this ask instead of refusing it whole: the prose
+    // is fixed, so the document gets what the budget leaves, and the rows the
+    // budget could not reach are accounted `budget` rather than skipped by a
+    // seat that never ran.
+    const budget = await getRecheckAssignmentMaxBytes(deps.env.DB);
+    // A degraded read answers the documented default and owes the operator
+    // one structured warn (the level/concurrency readers' contract). It is
+    // reported even when nothing fits below: the budget decided that.
+    if (budget.degraded) {
       deps.log.warn(
         {
-          ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
-          ...(level === undefined
-            ? {}
-            : {
-                level,
-                runner_timeout_ms: runnerTimeoutMs(level),
-                orchestration: level === "deep" ? "parent" : "bun-fanout",
-              }),
-          ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
-          event: "review_unresolved",
+          ...(baseFields ?? payloadIdentityFields(payload)),
+          event: "review_recheck_assignment_degraded",
+          max_bytes: budget.maxBytes,
         },
-        `review unresolved: ${detail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
+        "recheck assignment budget read degraded — using the documented default",
       );
-      return { kind: "unknown" };
     }
+    // The one byte cap a row must fit: the §7.3 wire cap, or the room the
+    // assignment budget leaves once its own prose is paid.
+    const documentMaxBytes = Math.min(
+      RECHECK_INPUT_MAX_BYTES,
+      budget.maxBytes - RECHECK_ASSIGNMENT_PROSE_BYTES,
+    );
+    const candidates = targets.filter(
+      (target) => !catalogExcluded.has(target.rowId) && !catalogBudgetExcluded.has(target.rowId),
+    );
+    // Each row is measured against the evidence of the rows ALREADY
+    // accepted, never against slices a pending row might still bring: a row
+    // that does not fit is dropped and contributes nothing, so a later row
+    // is measured against the set that will really ride — it cannot lose its
+    // place to a row that was itself excluded, and byte accounting is
+    // monotone (adding a row only grows the serialized input), so a row
+    // dropped here cannot fit the final input either.
+    const included: RecheckTarget[] = [];
+    const referenced = new Set<string>();
+    let evidence: EvidenceSlice[] = [];
+    for (const target of candidates) {
+      const withRow = new Set([...referenced, ...(catalog.sliceIdsByRowId.get(target.rowId) ?? [])]);
+      const nextEvidence = catalog.slices.filter((slice) => withRow.has(slice.id));
+      // The cap is measured on the SERIALIZED input — schema, headSha,
+      // evidence, discussion, array brackets and separators included — so
+      // the accepted document is exactly what the cap counts. The discussion
+      // measured here is the whole capture: narrowing it to the sent rows can
+      // only shrink the document, so this stays an upper bound.
+      const candidate = {
+        schema: RECHECK_INPUT_SCHEMA,
+        headSha,
+        targets: [...included, target],
+        evidence: nextEvidence,
+        discussion,
+      };
+      if (jsonByteLength(candidate) > documentMaxBytes) continue;
+      included.push(target);
+      evidence = nextEvidence;
+      for (const id of withRow) referenced.add(id);
+    }
+    // The rotation HEAD is the one row the fit must never drop for want of
+    // room. A row it omits never advances the clock, so the same row comes
+    // back first on every round and is dropped again — permanently
+    // `budget`, the deadlock this fitting removes. So whenever the head did
+    // not fit whole, its ORIGINAL body is bounded into the room that is left
+    // (beside the rows that did fit, or alone when none did) and its own
+    // catalog rides as far as it fits, so the seat can still cite its proof.
+    // The rowId, title, file path, line anchors and every other field stay
+    // exactly as captured: the same finding row, never a rewritten one.
+    const head = candidates[0];
+    if (head !== undefined && !included.some((target) => target.rowId === head.rowId)) {
+      // Measured against the WHOLE discussion: the head is not included yet,
+      // so the narrowed view would also drop its own threads. Probes are the
+      // serialized document itself, so a multi-byte body is bounded by real
+      // UTF-8 bytes, and the binary search is logarithmic in body length.
+      const bytesOf = (targets: RecheckTarget[], slices: EvidenceSlice[], target: RecheckTarget): number =>
+        jsonByteLength({
+          schema: RECHECK_INPUT_SCHEMA,
+          headSha,
+          targets: [...targets, target],
+          evidence: slices,
+          discussion,
+        });
+      const withBody = (length: number): RecheckTarget => ({
+        ...head,
+        original: { ...head.original, body: truncatedBody(head.original.body, length) },
+      });
+      /** The head bounded into `slices` beside `targets`, or null when not even an empty body fits. */
+      const rescue = (targets: RecheckTarget[], slices: EvidenceSlice[]): RecheckTarget | null => {
+        if (bytesOf(targets, slices, withBody(0)) > documentMaxBytes) return null;
+        let low = 0;
+        let high = head.original.body.length;
+        while (low < high) {
+          const mid = Math.ceil((low + high) / 2);
+          if (bytesOf(targets, slices, withBody(mid)) <= documentMaxBytes) low = mid;
+          else high = mid - 1;
+        }
+        return withBody(low);
+      };
+      const own = new Set(catalog.sliceIdsByRowId.get(head.rowId) ?? []);
+      // The head's own catalog, and the union a shared document needs — never
+      // a slice of a row that ends up unsent (that would be orphan evidence).
+      const headSlices = catalog.slices.filter((slice) => own.has(slice.id));
+      const withOwn = catalog.slices.filter((slice) => own.has(slice.id) || referenced.has(slice.id));
+      // Room for the rows that fit comes first; the head gives up its catalog
+      // before those rows give up their place. A head that cannot share the
+      // budget at all still rides alone — its clock moves, and the rows it
+      // displaced keep their own place for the next round.
+      const attempts: { targets: RecheckTarget[]; slices: EvidenceSlice[] }[] =
+        included.length === 0
+          ? [
+              { targets: [], slices: headSlices },
+              { targets: [], slices: [] },
+            ]
+          : [
+              { targets: included, slices: withOwn },
+              { targets: included, slices: evidence },
+              { targets: [], slices: headSlices },
+              { targets: [], slices: [] },
+            ];
+      for (const attempt of attempts) {
+        const bounded = rescue(attempt.targets, attempt.slices);
+        if (bounded === null) continue;
+        // Array order does not change a serialized document's byte count, so
+        // the head goes back where the rotation had it: first.
+        included.splice(0, included.length, ...attempt.targets);
+        included.unshift(bounded);
+        evidence = attempt.slices;
+        break;
+      }
+    }
+    const sentIds = new Set(included.map((target) => target.rowId));
+    for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);
+    if (included.length === 0) {
+      // Nothing can be asked: even the head's fixed fields plus the discussion
+      // overrun the budget, so no body length and no catalog can rescue it.
+      // Name both figures so the operator can tell a budget that is too small
+      // from an ask that grew, and never report it as a seat skip — no seat was
+      // started.
+      const requiredBytes =
+        RECHECK_ASSIGNMENT_PROSE_BYTES +
+        jsonByteLength({
+          schema: RECHECK_INPUT_SCHEMA,
+          headSha,
+          targets:
+            head === undefined ? [] : [{ ...head, original: { ...head.original, body: "" } }],
+          evidence: [],
+          discussion,
+        });
+      deps.log.warn(
+        {
+          ...(baseFields ?? payloadIdentityFields(payload)),
+          event: "review_recheck_no_fit",
+          assignment_max_bytes: budget.maxBytes,
+          required_bytes: requiredBytes,
+          selected: targets.length,
+        },
+        `recheck ask cannot fit the assignment budget — the smallest document this round can ask (prose + one finding's fixed fields + discussion) needs ${requiredBytes} bytes, the budget is ${budget.maxBytes}; nothing was sent, so every row keeps its budget reason and its rotation clock (raise review.recheck.assignment_max_bytes to let the round run)`,
+      );
+    }
+    // The seat's view of the discussion: issue items and their coverage and
+    // digest are the round's context and stay, while a thread is offered only
+    // for a row that rides — a resolve verifies a thread the seat saw.
+    const sentAssociations = new Set(included.flatMap((target) => target.associationIds));
+    askedDiscussion = {
+      ...discussion,
+      items: discussion.items.filter(
+        (item) =>
+          item.source === "issue" ||
+          (item.associationId !== null && sentAssociations.has(item.associationId)),
+      ),
+      threads: discussion.threads.filter((thread) => sentAssociations.has(thread.associationId)),
+    };
+    if (included.length > 0) {
+      recheckAssignmentMaxBytes = budget.maxBytes;
+      recheckInput = {
+        schema: RECHECK_INPUT_SCHEMA,
+        headSha,
+        targets: included,
+        evidence,
+        discussion: askedDiscussion,
+      };
+    }
+  }
 
-    // §7.7 step 12 on the failure path: a Check begun at step 4 must
-    // terminalize even when the pipeline throws. After a send ATTEMPT the
-    // publication status is unknown (the request may have landed); before
-    // any send the honest outcome is pre-publication-failure. Isolated —
-    // never masks the throw.
-    if (sendAttempt !== null) {
-      await terminalizeCheck(sendAttempt.publicationId, "publication-unknown");
+  // 6. §7.7 step 4 — the Check claim was made at ADMISSION. What remains is
+  // the FALLBACK (no SHA was knowable there) and the SUPERSEDE check: the
+  // authoritative checkout is the only SHA the review itself will use.
+
+  // 6. §7.7 step 4 — the fallback claim for a message whose SHA was not
+  // knowable at admission (a comment trigger with no readable head
+  // watermark): it lands here, after dedup/journal handed their duplicates
+  // off, BEFORE model work. Absent `checks` dep = no Checks; hook failure is
+  // isolated and cannot prevent the review (step 5).
+  if (deps.checks !== undefined && !check.claimAttempted) {
+    check.claimAttempted = true;
+    await check.begin(lifecycleScope, githubAppId, headSha);
+  }
+
+  // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
+  // diff without applying it. The lines ("<add>\t<del>\t<path>") are the
+  // runner's seat-partition universe (reconFacts convention). On an
+  // incremental round the file holds base...head, so the seats partition the
+  // work done since the last review instead of the whole PR. Its window is
+  // what the DERIVED runner deadline still owes (declines once spent).
+  const numstat = await sandbox.runCommand(cmds.numstat, {
+    timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat", "preparation"),
+  });
+  // A non-zero exit is the FILE's answer about itself: an empty file is what
+  // `git apply` rejects as unusable input (exit 128, "unrecognized input"),
+  // so the same round's read of that file classifies the exit. Any other
+  // failure keeps its own detail — git stderr plus the diff-path state — so
+  // "the file is empty" and "the file could not be read" never collapse into
+  // one message.
+  if (numstat.exitCode !== 0 && diffFileState !== "empty") {
+    throw new Error(`${gitStageFailureDetail("numstat", numstat, progress.secretValues)}; diff file: ${diffFileState}`);
+  }
+  const numstatLines = numstat.stdout
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line !== "");
+
+  // An empty diff FILE is nothing to review — `git apply --numstat` exits
+  // non-zero on it precisely because it holds no patch — so the round acks
+  // instead of failing the sandbox stage: no publication, no review row.
+  // The numstat's own stdout must be empty too: lines there would prove the
+  // read lost a real diff, which is the capture failure below, never an ack.
+  // Both rounds land here: an empty increment (the prior round already covers
+  // this head's content, and the Check inherits that head's result so an
+  // empty commit never launders a failing baseline into a neutral required
+  // check) and a first round whose head adds no diff (nothing to inherit, so
+  // the Check concludes skipped). A first round also needs the failing exit:
+  // an exit-0 numstat keeps the historical normal-round path.
+  const emptyDiffFile =
+    diffFileState === "empty" && numstatLines.length === 0 && (sinceSha !== null || numstat.exitCode !== 0);
+  if (emptyDiffFile) {
+    if (sinceSha !== null) {
+      deps.log.info(
+        { ...fields, event: "review_no_increment", increment_since: sinceSha },
+        `no increment to review — ${sinceSha.slice(0, 7)}..${headSha.slice(0, 7)} is empty and the last reviewed head already covers this content; acking without a new review`,
+      );
+      await check.terminalize(null, "skipped", sinceSha);
     } else {
-      await terminalizeCheck(null, "pre-publication-failure");
+      deps.log.info(
+        { ...fields, event: "review_no_diff" },
+        `no diff to review — ${headSha.slice(0, 7)} adds no changes; acking without a new review`,
+      );
+      await check.terminalize(null, "skipped");
     }
+    return { kind: "settled", outcome: { kind: "ok" } };
+  }
+  if (sinceSha !== null && diffFileState === "empty") {
+    deps.log.warn(
+      { ...fields, increment_capture: "empty", increment_since: sinceSha },
+      `increment diff capture empty — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+    );
+  }
 
-    // This delivery is the last one the queue will make (the next stop is the
-    // DLQ), so the commit will never be reviewed: overwrite its idempotency
-    // key with "failed" (the worker's claim TTL) so neither the worker's
-    // pre-check nor the supersede skip keeps treating the stale "1" as proof.
-    // Keyed off the PAYLOAD sha — the same sha the worker claimed.
-    // `putAbandonClaim` never downgrades a completed review. Best-effort: a KV
-    // fault only leaves "1" behind, which the failure row above traces, and it
-    // never masks the rethrow.
-    if (attempts >= QUEUE_MAX_ATTEMPTS && payload.head_sha) {
+  // A non-delivered diff capture is ambiguous, and only THIS round's
+  // numstat — the diff FILE `git apply` read, not the bounded stdout — can
+  // resolve the EMPTY case. Non-empty numstat means the redirect wrote a diff
+  // the read did not deliver: a CAPTURE FAILURE, so the round is
+  // context-incomplete, never every row published as a confident
+  // `no-evidence`. Both empty with an exit-0 numstat keeps the normal-round
+  // path; a genuinely empty FILE answers the failing exit and acks above.
+  // `overflow` and `unreadable` are capture failures by construction — the
+  // diff exists but is over the bound, or the transport broke — so they take
+  // the same accounting with their own `diff_capture` cause: an over-bound
+  // capture is "too large to prove", never "nothing to prove". The recheck
+  // input built above cannot change: any of the three leaves the catalog
+  // with no slices and every target excluded, so no input was built either
+  // way. Line comments keep the over-size behaviour — `diffText` stays "",
+  // so the hunk prefilter degrades to the base filter.
+  const diffCaptureFailure =
+    diffRead.failure ?? (diffRead.text === "" && numstatLines.length > 0 ? "empty" : undefined);
+  if (diffCaptureFailure !== undefined) {
+    captureFailed = true;
+    deps.log.warn(
+      { ...fields, diff_capture: diffCaptureFailure },
+      `diff capture ${diffCaptureFailure} — context-unavailable (no evidence catalog; rows stay context-incomplete)`,
+    );
+  }
+
+  // 7. Runner input JSON (reconFacts): `<owner>/<repo>#<pr>` and
+  // `head <sha>` fold into the envelope target INSIDE the runtime — the
+  // AUTHORITATIVE checkout sha is used so the ArtifactStore.put target
+  // cross-check agrees with the idempotency key — plus the numstat
+  // universe. base64-transported so the JSON never touches shell quoting;
+  // worktreePath = the clone (the seats' read cwd). An incremental round
+  // adds `since <base>` so the seats know their universe is a delta.
+  const reconFacts = [
+    `${payload.owner}/${payload.repo}#${payload.pr_number}`,
+    `head ${headSha}`,
+    ...(sinceSha !== null ? [`since ${sinceSha}`] : []),
+    ...numstatLines,
+  ];
+  // The App's per-role model overrides ride as an OPTIONAL
+  // input field, included ONLY when a role map resolved above — no-map
+  // messages serialize byte-identically to the pre-overrides payload
+  // (the runner-side guard + type extension ride alongside).
+  // The App's custom-provider declarations ride as an OPTIONAL
+  // input field — keyless (toRunnerCustomProvider strips the decrypted
+  // key; keys reach the container ONLY via the exec env) — included ONLY
+  // when declarations resolved above. No-declaration messages serialize
+  // byte-identically to the pre-declarations payload (the runner-side guard +
+  // synthesis ride alongside).
+  // The capability-host base rides ALWAYS as an EMPTY array: the image
+  // declares no provider, so the per-review models.yml is the App's own
+  // declarations (a built-in provider resolves from the SDK catalog).
+  // PR context for the report seat (best-effort): the description plus the
+  // issues it closes/references, read through gh with the same exec env the
+  // diff uses. Bounded by the DERIVED runner deadline (each read gets what
+  // that deadline still owes, capped at PR_CONTEXT_EXEC_TIMEOUT_MS) and gated
+  // so the post-runner bounded reads survive the capture; any failure or a
+  // budget skip resolves undefined (with one named warn) so the published
+  // report sections degrade to `none` — a narrative gap never fails a review.
+  const prContext = await capturePrContext(
+    sandbox,
+    payload,
+    token,
+    deps.log,
+    fields,
+    runnerDeadlineMs,
+  );
+
+  // Anchor the derived budget HERE, just before the input write: the one
+  // tier clamp the whole pipeline applies (`anchorRunnerBudget`), and the
+  // write, the wire value and the exec timeout all spend its absolute end.
+  // Its refusals — an oversized request, a spent cutoff — throw before any
+  // paid work — never a 1ms exec.
+  // The same numstat stdout the seat partition consumed sizes the runner
+  // request — one read, one size value, `null` when the read cannot prove
+  // a complete row set (unavailable, unproven-empty or truncated/malformed
+  // rows). The request is what the allocation asks for inside the tier;
+  // `anchorRunnerBudget` remains the only clamp that decides the outcome.
+  // A malformed size outcome reuses the `invalid` vocabulary: it carries
+  // NaN, which the anchor's entry check rejects the same way an explicit
+  // bad request is — no second refusal path, no silent fallback.
+  const diffSize = parseNumstatSize(numstat.stdout, diffFileState === "empty");
+  // The outcome's own counter: the selected numstat's textual line count —
+  // a null size is the recorded unknown, never invented.
+  observedChangedLines = diffSize?.changedLines ?? null;
+  attempt.observedChangedLines = observedChangedLines;
+  const sizeRequest = requestRunnerBudget(level, diffSize);
+
+  const anchor = anchorRunnerBudget(roundBudget, Date.now(), sizeRequest.requestedBudgetMs);
+  if (anchor.kind === "invalid") {
+    throw new Error(
+      `runner request declined — an explicit ${anchor.requestedBudgetMs}ms is not a usable duration`,
+    );
+  }
+  if (anchor.kind === "oversized") {
+    throw new Error(
+      `runner request declined — ${anchor.requestedBudgetMs}ms exceeds the tier maximum (${anchor.tierMaxMs}ms)`,
+    );
+  }
+  if (anchor.kind === "exhausted") {
+    throw new RoundBudgetSpent(
+      `round budget spent: runner declined — the pre-runner cutoff is spent (${anchor.remainingMs}ms left for it)`,
+      "preparation",
+    );
+  }
+  // The allocation is immutable from here on: the typed record's runner
+  // budget is this frozen effective duration.
+  attempt.runnerAnchor = anchor;
+  fields = {
+    ...fields,
+    runner_requested_ms: anchor.requestedBudgetMs,
+    runner_effective_ms: anchor.effectiveBudgetMs,
+    runner_cutoff_ms: roundBudget.runnerCutoffMs,
+    runner_deadline_ms: anchor.execDeadlineMs,
+    // The estimate the request was sized from — one work unit per changed
+    // line, minimum one per file; `null` records an unknown size, so an
+    // investigation can tell a tier-max request from a sized one.
+    runner_work_units: sizeRequest.kind === "requested" ? sizeRequest.workUnits : null,
+  };
+  attempt.fields = fields;
+  return {
+    kind: "prepared",
+    prepared: {
+      headSha,
+      token,
+      cmds,
+      sandbox,
+      fields,
+      lifecycleScope,
+      key,
+      targets,
+      totalOpen,
+      captureFailed,
+      pendingApplyFailed,
+      sinceSha,
+      diffText,
+      catalogExcluded,
+      catalogBudgetExcluded,
+      budgetExcluded,
+      discussion,
+      askedDiscussion,
+      recheckInput,
+      recheckAssignmentMaxBytes,
+      prContext,
+      anchor,
+      observedChangedLines,
+      reconFacts,
+    },
+  };
+}
+
+/**
+ * Phase 2 — review. Reproves sameness inside `runReviewAttempt`, takes the
+ * one-way launch fence and makes the blocking paid call. A reply is not a
+ * completion, so this phase returns the reply itself: an ambiguous one leads
+ * to collection or recovery, never to a second launch.
+ */
+export async function reviewAttempt(
+  attempt: AttemptRun,
+  prepared: PreparedAttempt,
+): Promise<ReviewedAttempt> {
+  const { deps, level, appCfg, modelOverrides, customProviders, attemptId } = attempt.input;
+  const { headSha, token, sandbox, fields, reconFacts, recheckInput, recheckAssignmentMaxBytes, prContext, anchor, observedChangedLines } = prepared;
+  const progress = attempt.progress;
+  const execution = await runReviewAttempt({
+    deps,
+    deadlineMs: anchor.execDeadlineMs,
+    sandbox,
+    headSha,
+    token,
+    level,
+    appCfg,
+    fields,
+    reconFacts,
+    modelOverrides,
+    customProviders,
+    recheckInput,
+    recheckAssignmentMaxBytes,
+    prContext,
+    runnerAnchor: anchor,
+    observedChangedLines,
+    progress,
+    attemptId,
+  });
+  const { recheck } = execution;
+  return {
+    execution,
+    recheckDoc: recheck?.doc ?? null,
+    rejectedRowIds: recheck?.rejected ?? new Set<string>(),
+    anonymousRejectedRows: recheck?.anonymousRejectedRows ?? 0,
+  };
+}
+
+/**
+ * Phase 3 — collect. Parses and validates the envelope, takes the degrade
+ * path when the output is not a verdict, reconciles the recheck round, builds
+ * the FINAL body and stages the complete private payload BEFORE any GitHub
+ * mutation. Staging failure means no publication, no line comments and no
+ * local result writes at all.
+ */
+export async function collectAttempt(
+  attempt: AttemptRun,
+  prepared: PreparedAttempt,
+  reviewed: ReviewedAttempt,
+): Promise<CollectStep> {
+  const { payload, deps, commenter, appCfg, roundStartedAt } = attempt.input;
+  const check = attempt.check;
+  const {
+    headSha,
+    fields,
+    lifecycleScope,
+    key,
+    targets,
+    totalOpen,
+    captureFailed,
+    pendingApplyFailed,
+    sinceSha,
+    diffText,
+    catalogExcluded,
+    catalogBudgetExcluded,
+    budgetExcluded,
+    discussion,
+    askedDiscussion,
+    recheckInput,
+  } = prepared;
+  const { run, recheck, report, appliedProvider } = reviewed.execution;
+  const recheckDoc = reviewed.recheckDoc;
+  const rejectedRowIds = reviewed.rejectedRowIds;
+  const anonymousRejectedRows = reviewed.anonymousRejectedRows;
+  const progress = attempt.progress;
+  // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
+  // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
+  // parseReviewOutput is a pure function of run.stdout —
+  // the same stdout fails identically on a retry (a deterministic
+  // model-output failure), so the message ACKS instead of throwing. Order:
+  // review_failures row (best-effort — an insert failure must never mask
+  // the degrade) → degraded comment (best-effort — a post failure is a
+  // structured log line only) → the `degraded` outcome the queue handler
+  const parsed = parseReviewOutput(run.stdout);
+  if (!parsed.ok) {
+    // SEC-01 exact-value defense: the session's ACTUAL secret values
+    // (runner env provider keys + the minted installation token) are
+    // exact-redacted from the parse error and the raw stdout BEFORE they
+    // reach the durable failure row or the public degraded comment — a
+    // credential that evades every shape pattern is still removed.
+    const redactedError = redactExactSecrets(redactSecrets(parsed.error), progress.secretValues);
+    const redactedStdout = redactExactSecrets(redactSecrets(run.stdout), progress.secretValues);
+    try {
+      await deps.failureStore.record({
+        target_id: payload.targetId,
+        installation_id: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        pr_number: payload.pr_number,
+        head_sha: headSha,
+        stage: "parse",
+        // qc3 F-001 / qc2 F-001: the zod/engine error can echo a
+        // model-emitted secret-shaped value (`verdict "ghp_…" is not one
+        // of …`) — redactSecrets BEFORE the durable D1 row, same face as
+        // buildDegradedBody's public-comment choke point. SEC-01 adds the
+        // exact-value pass on top.
+        error: redactedError,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `review_failures insert failed (degrade continues): ${detail}`);
+    }
+    // §7.7 degraded publication (plan: stage → claim → send the exact
+    // prepared body → proof → applied mark). The same resolved commenter
+    // instance as the token mint above (lock L4). Best-effort with typed
+    // outcomes — the message acks regardless (deterministic model-output
+    // failure; retry is waste), and the Check hook terminalizes with the
+    // publication identity so the lifecycle reads the persisted proof.
+    const degradedOutcome = await publishDegradedPublication({
+      db: deps.env.DB,
+      commenter,
+      scope: lifecycleScope,
+      headSha,
+      redactedError,
+      redactedStdout,
+    });
+    if (degradedOutcome.phase === "failed") {
+      await check.terminalize(null, "degraded-not-posted");
+    } else {
+      await check.terminalize(degradedOutcome.publicationId, "publication-unknown");
+      // The paid call returned; the durable degraded notice is its terminal
+      // outcome — the container holds nothing this invocation will collect.
+      attempt.durableOutcome = true;
+    }
+    deps.log.warn(
+      fields,
+      `review degraded: output failed schema validation (${redactedError}) — degraded publication ${degradedOutcome.phase}` +
+        `${degradedOutcome.phase === "failed" ? ` (${degradedOutcome.reason})` : ""}; acked, no retry/DLQ`,
+    );
+    // A degraded notice is not a review: stamp the payload sha (the same
+    // key the worker claimed) so neither reader keeps accepting the "1".
+    // Best-effort — a KV fault only leaves the stale claim behind.
+    if (payload.head_sha) {
       try {
         await putAbandonClaim(
           deps.env.IDEMPOTENCY_KV,
@@ -4982,91 +4221,1078 @@ export async function runAdmittedReviewAttempt(
             pr_number: payload.pr_number,
             head_sha: payload.head_sha,
           }),
-          IDEM_FAILED,
+          IDEM_DEGRADED,
           IDEMPOTENCY_SECONDS,
         );
-      } catch (kvErr) {
-        const kvDetail = kvErr instanceof Error ? kvErr.message : String(kvErr);
-        deps.log.warn(
-          fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
-          `failed-claim KV write failed (the skip may still treat this commit as queued): ${kvDetail}`,
-        );
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `degraded-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
       }
     }
+    return { kind: "settled", outcome: { kind: "degraded" } };
+  }
+
+  // 10. SEC-02 + B4 + size-budget choke point: redact secret-shaped spans
+  // (PEM, tokens, keys, long hex — F-001: every model-controlled field),
+  // clamp per-finding title/body to their budgets (qc2 F-003), then cap
+  // findings to the Top-50 by merge class BEFORE anything can reach the
+  // public review body or the D1 envelope. The SAME capped array feeds
+  // both the post and the put (B4: 渲染与落库同一裁剪数组). SEC-01 adds
+  // the exact-value second pass (the session's ACTUAL secret values) on
+  // top of the shape-based redaction — a credential that evades every
+  // pattern is still removed before the post or the put.
+  const capped = capFindings(
+    clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), progress.secretValues)),
+  );
+  const output = capped.output;
+  // 11. §7.7 step 6 — validation + conservative reconciliation + closure
+  // assembly + final body. The recheck document is reconciled against the
+  // SAME round's final capped findings (§7.4 conservative precedence:
+  // same-round recurrence and related unresolved concerns force
+  // unverifiable; rows the seat was never given are accounted but never
+  // "assessed").
+  const staleContext = pendingApplyFailed || captureFailed;
+  const reconciled = reconcileRecheckRound({
+    targets,
+    doc: recheckDoc,
+    status: recheck?.status ?? null,
+    // The seat's own view: a thread of a row this round could not fit was
+    // never handed over, so it cannot authorize a resolve either.
+    discussion: askedDiscussion,
+    output,
+    staleContext,
+    catalogExcluded,
+    catalogBudgetExcluded,
+    budgetExcluded,
+    rejectedRowIds,
+    anonymousRejectedRows,
+  });
+  // §7.8 attribution: ONE line per recheck round carrying the seat's own
+  // status next to this round's accounting. A lost round therefore leaves a
+  // D1 failure row and this line even when the container's stderr is gone.
+  // Emitted whenever rows were selected: a round the §7.3 size budget emptied
+  // sent nothing, and without this line that silence would be invisible.
+  if (targets.length > 0) {
+    const status = recheck?.status ?? null;
+    const recheckOutcome = status?.outcome ?? "absent";
+    // The runner cancels an unfinished seat when the main review settles
+    // (spec §7.8): the round answered nothing because it was STOPPED, not
+    // because it ran and lost. That is neither a failure row nor an
+    // `invalid-output` for a row the seat never answered.
+    const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
+    // The status document belongs to the SEAT; a round whose document was
+    // lost has its real cause on the read side (absent / overflow /
+    // validation failure), so that cause LEADS the detail instead of the
+    // seat's `ok: null: null`, which says nothing about what went wrong.
+    // `failed` already names the seat's own fault, so it keeps its triple.
+    const docFailure = recheck?.docFailure ?? null;
+    const recheckDetail = redactExactSecrets(
+      redactSecrets(
+        recheckDoc === null && docFailure !== null && recheckOutcome === "ok"
+          ? `document ${docFailure}: ${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`
+          : `${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`,
+      ),
+      progress.secretValues,
+    ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
+    deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
+      {
+        ...fields,
+        recheck_outcome: recheckOutcome,
+        // Same wrapper as `error`: a seat-authored `reason` can echo a
+        // credential exactly like `error` can.
+        recheck_reason: status?.reason === null || status?.reason === undefined
+          ? null
+          : redactExactSecrets(redactSecrets(status.reason), progress.secretValues),
+        recheck_error: status?.error === null || status?.error === undefined
+          ? null
+          : redactExactSecrets(redactSecrets(status.error), progress.secretValues),
+        // Named drops + the unnamed ones actually attributed (no usable
+        // rowId, so mapped by position): the count reports what happened,
+        // not only what could be named.
+        rejected: rejectedRowIds.size + reconciled.anonymousRejectedCount,
+        // A seat-authored `rejected_unnamed` is unbounded; any claim beyond
+        // the sent-and-unanswered pool is excess that can claim no row. It is
+        // dropped, and reported here so the silence has a number.
+        rejected_unnamed_ignored: anonymousRejectedRows - reconciled.anonymousRejectedCount,
+        // Real seat answers (the published coverage count), never the
+        // lifecycle clock — a gate-rejected row advances `last_assessed_ms`
+        // without ever having been assessed.
+        assessed: reconciled.assessedCount,
+      },
+      recheckInput !== undefined
+        ? recheckDoc === null
+          ? roundCancelled
+            ? "recheck round cancelled by the runner — no row was answered, no failure recorded"
+            : "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
+          : "recheck round accounted"
+        : captureFailed
+          ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
+          : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
+    );
+    // Shipped failure rule: a round that SENT rows records one row when its
+    // document is absent or the seat reported `failed` — a seat budget skip
+    // records one too, because that round ran and answered nothing. A round
+    // the runner cancelled by design, and a round that sent nothing at all
+    // (capture failed, catalog exclusion, §7.3 size budget), records none:
+    // its rows are already accounted as `budget`/`no-evidence`/`omitted` in
+    // the closure section.
+    if (
+      recheckInput !== undefined &&
+      !roundCancelled &&
+      (recheckDoc === null || recheckOutcome === "failed")
+    ) {
+      // Best-effort: the insert must never mask the round (AL-6 pattern).
+      try {
+        await deps.failureStore.record({
+          target_id: payload.targetId,
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: headSha,
+          stage: "recheck",
+          error: recheckDetail,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `review_failures insert failed (recheck round continues): ${detail}`);
+      }
+    }
+  }
+  // The ROUND's coverage reads the whole capture, never the narrowed wire
+  // view: an unsent row's truncated thread still leaves this round's context
+  // short, and publication must not claim more than capture could read.
+  const contextCoverage: Coverage = staleContext
+    ? "unavailable"
+    : roundContextCoverage(discussion);
+  const coverage = {
+    totalOpen,
+    selected: targets.length,
+    assessed: reconciled.assessedCount,
+    invalidOutput: reconciled.invalidOutputCount,
+    omitted: reconciled.unansweredCount,
+    capped: Math.max(0, totalOpen - targets.length),
+    contextCoverage,
+  };
+  const queuedAssociations = new Set(reconciled.resolutions.map((r) => r.associationId));
+  const closureRows: ClosureRow[] = targets.map((target) => {
+    const outcome = reconciled.outcomeByRowId.get(target.rowId)!;
+    return {
+      title: target.original.title,
+      disposition: outcome.disposition,
+      reason: outcome.reason,
+      evidenceKind: outcome.evidence?.kind ?? null,
+      // A pending resolve renders not-yet-resolved, not a prediction —
+      // remote outcomes appear in the NEXT round's single upsert (§7.10).
+      thread: target.associationIds.some((id) => queuedAssociations.has(id)) ? "not yet resolved" : "-",
+    };
+  });
+  // The §7.10 facts (coverage line, display cap, thread state) render ONCE,
+  // in the body's revalidated section — there is no second rendering.
+  // 12. §7.7 step 7 — calculate round/target from the App's current single
+  // comment (pre-staging read), assemble the FINAL body, and stage the
+  // COMPLETE private payload BEFORE any GitHub mutation. Staging failure
+  // means no publication/line comments/result writes at all.
+  const plan: UpsertPlan = await commenter.planReviewUpsert({
+    installationId: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    prNumber: payload.pr_number,
+  });
+  const round = plan.round;
+  const publicationId = crypto.randomUUID();
+  const publicationMarker = buildPublicationMarker({ publicationId, headSha, kind: "review" });
+  const preparedBody = buildPreparedReviewBody({
+    output,
+    omittedFindings: capped.omitted,
+    round,
+    headSha,
+    publicationMarker,
+    ...(sinceSha !== null ? { sinceSha } : {}),
+    // The revalidated table is rendered mechanically from the closure rows
+    // and carries the round's full prior-findings set; the report may be null
+    // (no prContext / seat failure), in which case every heading still
+    // renders with `none`.
+    reportParts: { report, revalidated: buildRevalidatedSection(coverage, closureRows) },
+  });
+  const bodySha256 = await sha256Hex(preparedBody);
+
+  // Seen records for the current findings: the stable finding identity is
+  // the fingerprint — an existing lifecycle row (open or CLOSED) with the
+  // same finding_id REUSES its row id so the apply's upsert reopens it
+  // (§7.2 recurrence) instead of minting a duplicate.
+  const seenRowIdByFindingId = new Map<string, string>();
+  if (output.findings.length > 0) {
+    const findingIdPlaceholders = output.findings.map(() => "?").join(",");
+    const findingIds = output.findings.map((f) => computeFindingFingerprint(f));
+    const knownRows = await deps.env.DB
+      .prepare(
+        `SELECT id, finding_id FROM review_findings
+         WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+           AND finding_id IN (${findingIdPlaceholders})`,
+      )
+      .bind(
+        lifecycleScope.appId,
+        lifecycleScope.installationId,
+        lifecycleScope.owner,
+        lifecycleScope.repo,
+        lifecycleScope.prNumber,
+        ...findingIds,
+      )
+      .all<{ id: string; finding_id: string }>();
+    for (const known of knownRows.results) seenRowIdByFindingId.set(known.finding_id, known.id);
+  }
+  const seen: LifecycleRound["seen"] = output.findings.map((finding) => {
+    const findingId = computeFindingFingerprint(finding);
+    let rowId = seenRowIdByFindingId.get(findingId);
+    if (rowId === undefined) {
+      rowId = crypto.randomUUID();
+      seenRowIdByFindingId.set(findingId, rowId);
+    }
+    return { rowId, findingId, original: projectOriginalFinding(finding) };
+  });
+
+  // Line intents for the line-commentable findings (hunk prefilter over
+  // the SAME worker-captured diff as the evidence catalog): preallocated
+  // opaque UUIDs, trusted marker bodies, digest computed at staging.
+  const qualifying = filterLineCommentFindings(
+    output.findings,
+    diffText !== "" ? diffText : undefined,
+  );
+  const lineIntents: LineIntent[] = [];
+  for (const { finding, lineStart } of qualifying) {
+    const rowId = seenRowIdByFindingId.get(computeFindingFingerprint(finding));
+    if (rowId === undefined) continue; // unreachable — seen covers every finding
+    // A range the wire cannot publish (cross-hunk, or a start that is not a
+    // real range) falls back to the single-line anchor at line_end; the body
+    // must not keep an applyable multi-line replacement for the dropped range.
+    const rangeDemoted =
+      typeof finding.line_start === "number" &&
+      finding.line_start < finding.line_end! &&
+      !(typeof lineStart === "number" && lineStart >= 1 && lineStart < finding.line_end!);
+    lineIntents.push(
+      await buildLineIntent({
+        findingRowId: rowId,
+        publicationId,
+        associationId: crypto.randomUUID(),
+        scope: lifecycleScope,
+        originalSha: headSha,
+        round,
+        path: finding.file_path!,
+        line: finding.line_end!,
+        lineStart,
+        body: renderLineCommentText(
+          rangeDemoted ? { ...finding, body: dropAllSuggestionFences(finding.body) } : finding,
+        ),
+      }),
+    );
+  }
+
+  const lifecycleRound: LifecycleRound = {
+    // The clock moves for every selected row EXCEPT the rows the FIT omitted
+    // for room. A row the catalog could not prove, or one a capture failure
+    // never offered, is re-proved by a later round's diff — parking it at the
+    // rotation head would keep it inside the 25-row cap forever. A fit-omitted
+    // row is different: it was provable and simply did not fit, so it holds its
+    // clock, stays at the head and is rescued when the next round reaches it.
+    selectedRowIds: targets
+      .filter((target) => !budgetExcluded.has(target.rowId))
+      .map((target) => target.rowId),
+    assessments: reconciled.assessments,
+    seen,
+    resolutions: reconciled.resolutions,
+    coverage,
+  };
+  const payloadDoc: PublicationPayload = {
+    version: 1,
+    scope: lifecycleScope,
+    headSha,
+    kind: "review",
+    round,
+    targetCommentId: plan.action === "update" ? plan.commentId : null,
+    body: preparedBody,
+    bodySha256,
+    artifact: {
+      kind: "review",
+      key: idemKey(key),
+      schema: "mstar.review/v1",
+      payload: output,
+      appId: payload.botRef.appId,
+      targetId: payload.targetId,
+      model: chainHeadSelector(effectiveModelChain(appCfg).chain),
+      provider: appliedProvider,
+      // A stale-context round (its pending lifecycle journal failed to
+      // apply OR its capture failed) still publishes, but its row must
+      // never be an incremental base: the flag rides the staged artifact
+      // so the put that writes it (here or on recovery) persists it.
+      contextIncomplete: staleContext,
+      // The round's own wall clock: the same `roundStartedAt` every budget
+      // check reads, so the stored duration is the run's, not a second clock.
+      durationMs: Date.now() - roundStartedAt,
+    },
+    lifecycle: lifecycleRound,
+    lineIntents,
+  };
+  const staged = await stagePublication(deps.env.DB, { id: publicationId, payload: payloadDoc, nowMs: Date.now() });
+  // An insert conflict returns the EXISTING immutable payload — a
+  // prepared/confirmed publication is never overwritten with a second
+  // model result (spec §7.7). The existing row owns this scope+SHA: hand
+  // it to recovery instead of sending OUR newer body over it.
+  if (staged.id !== publicationId) {
+    deps.log.warn(
+      fields,
+      `publication journal conflict (existing row ${staged.id}, phase ${staged.phase}) — the immutable payload wins; not sending a second publication`,
+    );
+    await check.terminalize(null, "pre-publication-failure");
+    return { kind: "settled", outcome: { kind: "ok" } };
+  }
+  const stagedId = staged.id;
+  // The paid call returned and ITS result is now durably staged.
+  attempt.durableOutcome = true;
+  return {
+    kind: "collected",
+    collected: {
+      stagedId,
+      key,
+      plan,
+      round,
+      preparedBody,
+      bodySha256,
+      lineIntents,
+      resolutions: reconciled.resolutions,
+    },
+  };
+}
+
+/**
+ * Phase 4 — publish. Epoch-fenced claim, phase `sending`, the EXACT prepared
+ * upsert, validated proof and the applied mark, then the intent-prepared line
+ * comments and the resolution lane. No runner work: the paid result is already
+ * durable before this phase starts.
+ */
+export async function publishAttempt(
+  attempt: AttemptRun,
+  prepared: PreparedAttempt,
+  collected: CollectedAttempt,
+): Promise<ProcessOutcome> {
+  const { payload, deps, commenter, sandboxId } = attempt.input;
+  const { fields, headSha, lifecycleScope } = prepared;
+  const { stagedId, key, plan, round, preparedBody, bodySha256, lineIntents, resolutions } = collected;
+  const check = attempt.check;
+  // 13. §7.7 step 8 — epoch-fenced claim, phase sending, publish the EXACT
+  // prepared upsert, validate the response id, persist proof BEFORE KV
+  // done. A response/proof loss retains the staged payload for read-only
+  // discovery — never a second paid review, never a blind re-send.
+  const lease = await claimPublication(deps.env.DB, stagedId, `consumer:${sandboxId}`, Date.now());
+  if (lease === null) {
+    throw new Error("publication journal claim failed — refusing to send without the epoch-fenced lease");
+  }
+  attempt.sendAttempt = { publicationId: stagedId };
+  let sent: { commentId: number };
+  try {
+    sent = await commenter.postPreparedReview({
+      installationId: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      prNumber: payload.pr_number,
+      headSha,
+      round,
+      targetCommentId: plan.action === "update" ? plan.commentId : null,
+      body: preparedBody,
+      publicationId: stagedId,
+    });
+  } catch (err) {
+    if (err instanceof PreparedSendRejected) {
+      // Definitive pre-send rejection (§7.7): no request left the Worker.
+      // `failed` is the truthful durable phase (never the post-attempt
+      // `unknown`); payload/digest/attempts are retained and recovery
+      // never re-sends. The Check conclusion is the honest
+      // pre-publication failure.
+      try {
+        await markPublicationFailed(deps.env.DB, stagedId, lease, err.message, Date.now());
+      } catch (markErr) {
+        const detail = markErr instanceof Error ? markErr.message : String(markErr);
+        deps.log.warn(fields, `failed-phase mark could not be persisted: ${detail}`);
+      }
+      await check.terminalize(null, "pre-publication-failure");
+      deps.log.warn(fields, `prepared review definitively rejected before send — recorded failed: ${err.message}`);
+      return { kind: "ok" };
+    }
     throw err;
-  } finally {
-    // Destroy FIRST, then release the admission row. Releasing first would let
-    // the next attempt for this PR acquire the slot and start its container
-    // while this one is still alive, so live containers could exceed
-    // min(system, workspace) by the destroy latency. Both blocks warn only.
-    if (sandbox !== null && !containerUnproven) {
-      // Two facts authorise destruction, and only two: the paid call returned
-      // with its result durably persisted, or it never started. An error event,
-      // a lost reply, a timeout or ambiguity destroys nothing — the container is
-      // then left to the platform's inactivity reclamation.
-      const retention: RetentionProof | undefined =
-        progress.runnerStartedAt === undefined
-          ? { kind: "no-paid-work" }
-          : progress.runnerReturned && durableOutcome
-            ? { kind: "retained" }
-            : undefined;
-      if (retention === undefined) {
-        containerUnproven = true;
-        deps.log.warn(
-          {
-            ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
-            sandbox_id: sandboxId,
-            event: "sandbox_teardown_unproven",
-          },
-          "sandbox not destroyed: no durable outcome to justify it — capacity held, nothing released",
-        );
-      } else {
+  }
+  const proof = {
+    publicationId: stagedId,
+    scope: lifecycleScope,
+    headSha,
+    kind: "review" as const,
+    round,
+    commentId: sent.commentId,
+    bodySha256,
+    confirmedMs: Date.now(),
+  };
+  let proofOk = false;
+  try {
+    proofOk = await recordPublicationProof(deps.env.DB, stagedId, lease, proof);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `publication proof write threw: ${detail}`);
+  }
+  if (!proofOk) {
+    // The honest unknown-publication window: the send happened but the
+    // proof is not durable — no KV done, no local rows, no claim of
+    // publication. The staged payload stays for M8 read-only discovery.
+    deps.log.warn(
+      fields,
+      "publication proof could not be persisted after the send — retaining staged/sending for read-only discovery; no local completion is claimed",
+    );
+    await check.terminalize(stagedId, "publication-unknown");
+    return { kind: "ok" };
+  }
+
+  // 13a. KV done-state fence (BUG-01): follows durable confirmation (the
+  // persisted proof) — a crash in the steps below redelivers into the
+  // journal handoff ack, never a duplicate paid review.
+  try {
+    await deps.env.IDEMPOTENCY_KV.put(idemKey(key), IDEM_DONE, {
+      expirationTtl: IDEMPOTENCY_SECONDS,
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `KV completion write failed: ${detail}`);
+  }
+
+  // 14. §7.7 step 9 — with positive persisted proof only: the artifact
+  // store.put + ONE idempotent lifecycle batch (inside
+  // applyPublishedLifecycle, ending with the applied mark under the
+  // lease). Local write failures do not undo the publication and never
+  // rerun the model — the confirmed row stays due for M8 recovery.
+  let applied = false;
+  try {
+    applied = await applyPublishedLifecycle(deps.env.DB, stagedId, lease, Date.now());
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `lifecycle apply threw after a confirmed publication: ${detail}`);
+  }
+  if (!applied) {
+    deps.log.warn(
+      fields,
+      "review published and confirmed but the lifecycle apply did not complete — publication stays confirmed for M8 recovery; acking to avoid a duplicate comment",
+    );
+    await check.terminalize(stagedId, "publication-unknown");
+    return { kind: "ok" };
+  }
+
+  // 15. §7.7 step 10 — post/capture the intent-prepared COMMENT-only line
+  // review AFTER the result/lifecycle apply; persist the exact returned
+  // review/comment ids against the associations. NEVER throwing: a remote
+  // line failure is an explicit fallback log (the intents stay staged and
+  // discoverable), never fabricated mappings.
+  if (lineIntents.length > 0) {
+    try {
+      const postedLine = await commenter.postLineComments({
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+        headSha,
+        round,
+        publicationId: stagedId,
+        intents: lineIntents,
+      });
+      if (postedLine.posted.length > 0) {
         try {
-          // Proven sameness, not a name: a container this attempt cannot prove
-          // it prepared is left alone (its result may be the only copy) and the
-          // teardown is reported as unknown.
-          if ((await discardReviewAttempt(sandbox, attemptId, retention)) !== "destroyed") {
-            containerUnproven = true;
-            deps.log.warn(
-              {
-                ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
-                sandbox_id: sandboxId,
-                event: "sandbox_teardown_unproven",
-              },
-              "sandbox not destroyed: the container is not proven to be this attempt's — capacity held, nothing released",
-            );
-          }
+          const captureStmts = postedLine.posted.map((p) =>
+            deps.env.DB
+              .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ?`)
+              .bind(postedLine.reviewId, p.commentId, Date.now(), p.associationId),
+          );
+          await deps.env.DB.batch(captureStmts);
         } catch (err) {
-          // A LOST proof is the same fact as a refused one: the container's
-          // state is unknown, so capacity must not be handed to a new attempt.
-          containerUnproven = true;
           const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(fields, `line-comment id capture failed (intents stay discoverable): ${detail}`);
+        }
+      }
+      if (!postedLine.captured || postedLine.ambiguous.length > 0) {
+        deps.log.warn(
+          { ...fields, line_comments_fallback: true },
+          `line-comment capture incomplete (ambiguous: ${postedLine.ambiguous.join(", ") || "none"}) — never fabricated`,
+        );
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        { ...fields, line_comments_fallback: true },
+        `line comments failed — overall comment already published, continuing overall-only: ${detail}`,
+      );
+    }
+  }
+
+  // 16. §7.7 step 11 — resolution LAST: persist the verified snapshot and
+  // enqueue the pending row BEFORE the single inline attempt (a crash
+  // before the first attempt stays discoverable by M8), then discover +
+  // resolve. Never throws out of the message; never reruns the model.
+  // Newly-created threads of THIS round are never resolved inline — their
+  // associations carry no verified snapshot, so only PRIOR associations
+  // with a complete verification are attempted here.
+  //
+  // The inline lane is a fast path, not the recovery engine: M8 owns
+  // unbounded convergence with its own request/deadline discipline
+  // (§7.11.1). Bounding it here keeps one queue message from spending
+  // hundreds of sequential GitHub requests (P67-QC-017) — an entry that
+  // cannot be admitted is simply left `pending`, which is exactly the
+  // durable state M8 picks up, so nothing is lost and no attempt is spent
+  // on skipped work.
+  if (resolutions.length > 0) {
+    const assocPlaceholders = resolutions.map(() => "?").join(",");
+    const assocRows = await deps.env.DB
+      .prepare(`SELECT id, intent_json FROM review_threads WHERE id IN (${assocPlaceholders})`)
+      .bind(...resolutions.map((r) => r.associationId))
+      .all<{ id: string; intent_json: string }>();
+    const intentById = new Map(assocRows.results.map((row) => [row.id, row.intent_json]));
+    let inlineResolveBudgetMs = INLINE_RESOLVE_BUDGET_MS;
+    let inlineResolveAttempts = 0;
+    for (const resolution of resolutions) {
+      try {
+        const enqueued = await deps.env.DB
+          .prepare(
+            // A CURRENT round supplies fresh verified_json — that is a
+            // genuinely NEW assessment, so the retry budget and any stale
+            // give-up/backoff state reset with it (§7.11.1: "resets
+            // attempts only for a genuinely new assessment"). Without this
+            // reset a row that had reached the cap could be re-enqueued as
+            // `pending` while still `attempts >= 5`, making it permanently
+            // invisible to `listResolutionRecovery` (a silent stall) and
+            // preserving a stale backoff (P67-QC-005).
+            `UPDATE review_threads
+             SET verified_json = ?, resolution_state = 'pending', attempts = 0,
+                 next_attempt_ms = NULL, last_error = NULL, updated_ms = ?
+             WHERE id = ? AND superseded_by_publication_id IS NULL`,
+          )
+          .bind(JSON.stringify(resolution.verified), Date.now(), resolution.associationId)
+          .run();
+        if (enqueued.meta.changes === 0) continue; // superseded — nothing to resolve
+        // The row is durably queued from here on, so any entry this lane
+        // declines to start is picked up by M8 without spending an attempt.
+        if (inlineResolveAttempts >= INLINE_RESOLVE_MAX_ENTRIES || inlineResolveBudgetMs <= 0) {
+          deps.log.warn(
+            fields,
+            `inline resolution admission exhausted (${inlineResolveAttempts}/${INLINE_RESOLVE_MAX_ENTRIES} entries, ${inlineResolveBudgetMs}ms left) — association ${resolution.associationId} stays pending for scheduled recovery`,
+          );
+          continue;
+        }
+        const intentJson = intentById.get(resolution.associationId);
+        if (intentJson === undefined || commenter.discoverThread === undefined || commenter.resolveFindingThread === undefined) {
+          deps.log.warn(
+            fields,
+            `resolution for association ${resolution.associationId} enqueued but discovery is unavailable — left pending for recovery`,
+          );
+          continue;
+        }
+        // Admission for the entry about to start: it may spend up to the
+        // same per-operation request envelope M8 uses, bounded by the
+        // remaining inline deadline.
+        inlineResolveAttempts += 1;
+        const entryDeadline = Date.now() + Math.min(INLINE_RESOLVE_ENTRY_MS, inlineResolveBudgetMs);
+        const entryStartedMs = Date.now();
+        const discovery = await commenter.discoverThread({
+          scope: lifecycleScope,
+          intent: JSON.parse(intentJson) as LineIntent,
+          reviewId: null,
+        });
+        inlineResolveBudgetMs -= Date.now() - entryStartedMs;
+        if (discovery.kind !== "found") {
+          deps.log.warn(
+            fields,
+            `thread discovery for association ${resolution.associationId} returned ${discovery.kind} — verified resolve stays queued (never claims a foreign or ambiguous thread)`,
+          );
+          continue;
+        }
+        if (Date.now() >= entryDeadline || inlineResolveBudgetMs <= 0) {
+          deps.log.warn(
+            fields,
+            `inline resolve deadline passed before the mutation for association ${resolution.associationId} — left pending for scheduled recovery`,
+          );
+          continue;
+        }
+        const outcome = await commenter.resolveFindingThread({
+          scope: lifecycleScope,
+          associationId: resolution.associationId,
+          verified: resolution.verified,
+        });
+        inlineResolveBudgetMs -= Date.now() - entryStartedMs;
+        if (outcome.kind === "resolved") {
+          deps.log.info(
+            fields,
+            `resolved association ${resolution.associationId} (thread ${outcome.threadId}${outcome.adopted ? ", adopted" : ""}${outcome.lateChange ? ", LATE CHANGE recorded" : ""})`,
+          );
+        } else {
+          const reason = outcome.kind === "needs-recheck" || outcome.kind === "retry" || outcome.kind === "abandoned" ? outcome.reason : "";
+          deps.log.warn(
+            fields,
+            `resolve for association ${resolution.associationId} returned ${outcome.kind} (${reason}) — durable queue state owns the follow-up`,
+          );
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `resolution attempt for ${resolution.associationId} failed (queued state intact): ${detail}`);
+      }
+    }
+  }
+
+  // 17. Degraded-comment lifecycle (Bugbot finding): the successful
+  // review supersedes any earlier degradation — best-effort cleanup AFTER
+  // the normal publication proof, never deleting unconfirmed evidence.
+  // §7.7 step 11 gate: while ANY degraded journal row for this scope is
+  // still prepared/sending/unknown WITHOUT persisted proof, that comment's
+  // exact body is the sole recovery evidence for a possibly-landed send —
+  // deleting it would make the publication permanently unprovable, so the
+  // cleanup is skipped and the condition is logged for the operator.
+  try {
+    const mustPreserve = await hasUnprovenDegradedPublication(deps.env.DB, lifecycleScope);
+    if (mustPreserve) {
+      deps.log.warn(
+        fields,
+        "stale degraded comment cleanup skipped — an unconfirmed degraded publication still depends on its body as recovery evidence",
+      );
+    } else {
+      const deleteOutcome = await commenter.deleteDegradedComment({
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+        error: "",
+        rawOutput: "",
+      });
+      if (deleteOutcome.deleted > 0 || deleteOutcome.skipped > 0 || deleteOutcome.errors.length > 0) {
+        deps.log.warn(
+          { ...fields, degraded_delete_deleted: deleteOutcome.deleted, degraded_delete_skipped: deleteOutcome.skipped },
+          `stale degraded comment cleanup (review stands): deleted=${deleteOutcome.deleted}, skipped=${deleteOutcome.skipped}${
+            deleteOutcome.errors.length > 0 ? `, errors=[${deleteOutcome.errors.join("; ")}]` : ""
+          }`,
+        );
+      }
+      // A throttled sweep is a CONTINUATION event, not a failure of this
+      // review: ONE row per non-zero kind under the non-failure `rate-limit`
+      // stage (excluded from every failure count) so the throttle is not
+      // silently dropped. Each row carries its own kind's prefix, so a
+      // primary 429 never inflates the secondary-limit count. Its own
+      // try/catch — the insert must never mask the review that stands, and
+      // the round is never retried for it.
+      const rateLimitKinds = [
+        { kind: "primary", prefix: GITHUB_PRIMARY_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.primary },
+        { kind: "secondary", prefix: GITHUB_RATE_LIMIT_PREFIX, count: deleteOutcome.rateLimited.secondary },
+      ] as const;
+      for (const { kind, prefix, count } of rateLimitKinds) {
+        if (count === 0) continue;
+        try {
+          await deps.failureStore.record({
+            target_id: payload.targetId,
+            installation_id: payload.installation_id,
+            owner: payload.owner,
+            repo: payload.repo,
+            pr_number: payload.pr_number,
+            head_sha: headSha,
+            stage: "rate-limit",
+            error: `${prefix}${count} stale degraded comment deletion(s) rejected by the GitHub ${kind} rate limit — the review stands`,
+          });
+        } catch (recordErr) {
+          const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+          deps.log.warn(fields, `review_failures insert failed (degraded cleanup continues): ${recordDetail}`);
+        }
+      }
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `stale degraded comment delete failed (review stands): ${detail}`);
+  }
+
+  // 18. §7.7 step 12 — the Check terminal decision reads the persisted
+  // proof for this publication (a degraded publication derives `failure`
+  // from it, never a pass; the inline outcome value is only the honest
+  // fallback when the proof is unreadable).
+  await check.terminalize(stagedId, "publication-unknown");
+  return { kind: "ok" };
+}
+
+/**
+ * The attempt's failure settlement: every throw past admission lands here —
+ * the exhaustion stop, an unprovable container, or an infra failure. It
+ * records the durable outcome, resolves the Check's conclusion from it and
+ * decides whether this delivery may be retried. An unproven container is never
+ * a failure: it changes nothing and is left to the reconciler.
+ */
+export async function settleAttemptFailure(attempt: AttemptRun, err: unknown): Promise<ProcessOutcome> {
+  const { payload, deps, level, sandboxId, githubAppId, attempts } = attempt.input;
+  const progress = attempt.progress;
+  const fields = attempt.fields;
+  const baseFields = attempt.baseFields;
+  const lifecycleScope = attempt.lifecycleScope;
+  const sendAttempt = attempt.sendAttempt;
+  const roundBudget = attempt.roundBudget;
+  const runnerAnchor = attempt.runnerAnchor;
+  const observedChangedLines = attempt.observedChangedLines;
+  const sandbox = attempt.sandbox;
+  const check = attempt.check;
+  // § Exhaustion (the ONE typed terminal outcome outside the verdict
+  // envelope): every wall-clock stop funnels here — the runner's own
+  // exit-0 signal, the sandbox exec killed at the anchored deadline, and
+  // the consumer's derived-deadline refusals, all already resolved to (or
+  // resolvable from) the attempt's own facts. A confirmed stop is terminal
+  // and is published with its own outcome FIRST — the generic outcome
+  // resolution below must never freeze `pre-publication-failure` over the
+  // Check this stop owes. Check `failure` with the typed record, the
+  // durable `budget-exhausted:` row, then `{kind:"budget-exhausted"}` so
+  // the handler acks — a paid queue retry can only lose the same clock
+  // again, and the spec forbids implying otherwise. Journal staging,
+  // recheck resolve/rotate and comment writes never ran (all post-parse),
+  // so this catch is the only publication step the outcome needs.
+  if (err instanceof BudgetExhaustedError || err instanceof RoundBudgetSpent) {
+    const budgetOutcome: BudgetExhaustedOutcome =
+      err instanceof BudgetExhaustedError
+        ? err.outcome
+        : {
+            kind: "budget-exhausted",
+            cause: "consumer-deadline",
+            // Every derived-deadline refusal sits past level resolution
+            // and budget derivation — the `!`s encode that ordering fact,
+            // never a guess.
+            tier: level!,
+            budgetWindow: err.window,
+            budgetMs:
+              err.window === "runner"
+                ? runnerAnchor!.effectiveBudgetMs
+                : roundBudget!.preparationBudgetMs,
+            // A consumer decline fires before the runner exec starts:
+            // provably no seat was dispatched or stopped.
+            seatsDispatched: 0,
+            seatsStopped: 0,
+            changedLines: observedChangedLines,
+          };
+    // A stop that fired BEFORE the fallback claim (the diff stage, its
+    // oversized substitute, or the numstat that follows) can reach here with
+    // no Check at all: an issue-comment delivery carries no payload SHA and
+    // may have no readable head watermark, so the admission-time claim was
+    // skipped and the fallback never ran. The checkout SHA IS known by then,
+    // so claim here — an ACK that publishes nothing would leave the frozen
+    // failure this stop owes with no trace and no recovery intent. A claim
+    // already ATTEMPTED is never retried: the claim insert is the one
+    // race-decided gate, and a second try could mint a second generation.
+    if (
+      deps.checks !== undefined &&
+      check.handle === null &&
+      !check.claimAttempted &&
+      lifecycleScope !== undefined &&
+      attempt.headSha !== null
+    ) {
+      check.claimAttempted = true;
+      await check.begin(lifecycleScope, githubAppId, attempt.headSha);
+    }
+    const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${err instanceof Error ? err.message : String(err)}`;
+    deps.log.error(
+      {
+        ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+        ...(level === undefined
+          ? {}
+          : {
+              level,
+              runner_timeout_ms: runnerTimeoutMs(level),
+              orchestration: level === "deep" ? "parent" : "bun-fanout",
+            }),
+        ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
+        budget_outcome: budgetOutcome,
+      },
+      `review failed: ${budgetDetail}`,
+    );
+    try {
+      await deps.failureStore.record({
+        target_id: payload.targetId,
+        installation_id: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        pr_number: payload.pr_number,
+        head_sha: fields?.head_sha ?? payload.head_sha ?? "",
+        stage: progress.failureStage,
+        error: redactExactSecrets(redactSecrets(budgetDetail), progress.secretValues),
+      });
+      // Confirmed by the await above: only a write that RESOLVED is durable.
+      attempt.durableOutcome = true;
+    } catch (recordErr) {
+      const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+      deps.log.warn(
+        fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+        `review_failures insert failed (exhaustion path continues): ${recordDetail}`,
+      );
+    }
+    if (!attempt.durableOutcome) {
+      // No durable record of this stop: the Check is left alive for the
+      // recovery lane (a terminal conclusion here could never be undone) and
+      // the attempt ends unknown — no destruction, no capacity release.
+      attempt.containerUnproven = true;
+      deps.log.warn(
+        {
+          ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+          ...(level === undefined
+            ? {}
+            : {
+                level,
+                runner_timeout_ms: runnerTimeoutMs(level),
+                orchestration: level === "deep" ? "parent" : "bun-fanout",
+              }),
+          ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
+          event: "review_unresolved",
+        },
+        `review unresolved: ${budgetDetail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
+      );
+      return { kind: "unknown" };
+    }
+    // The row is durable: now the Check may carry the stop's conclusion.
+    await check.terminalize(null, "budget-exhausted", undefined, budgetOutcome);
+    return { kind: "budget-exhausted", outcome: budgetOutcome };
+  }
+
+  // An unproven container is NOT a failure: a missing/different marker (or a
+  // lost read) says nothing about whether the review ran. No Check change, no
+  // failure row, no failed-claim stamp, no destroy, no capacity release, and
+  // no retry — a second delivery would provision a second container and pay
+  // the model again on ambiguous acceptance. The Check stays `in_progress`
+  // for the reconciler, which owns the abandoned-attempt outcome.
+  if (err instanceof AttemptUnknownError) {
+    attempt.containerUnproven = true;
+    deps.log.warn(
+      {
+        ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+        ...(level === undefined
+          ? {}
+          : {
+              level,
+              runner_timeout_ms: runnerTimeoutMs(level),
+              orchestration: level === "deep" ? "parent" : "bun-fanout",
+            }),
+        ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
+        event: "review_unresolved",
+      },
+      `review unresolved: ${err.message} — nothing was collected, destroyed or reclaimed`,
+    );
+    return { kind: "unknown" };
+  }
+
+  // Structured failure log carrying the idempotency key + sandbox id
+  // (the failure log must carry the idempotency key: 失败路径错误日志含幂等键), then
+  // rethrow so the worker retries and eventually DLQs.
+  const detail = err instanceof Error ? err.message : String(err);
+  deps.log.error(
+    {
+      ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+      // d5-budget AC-S10-logs: the failure line carries the level's budget
+      // once known (post-step-3 `fields` already has it; this spread covers
+      // the pre-checkout fallback) and the runner's elapsed wall-clock once
+      // it started. elapsed never aborts — the sandbox exec timeout is the
+      // only wall-clock failure (spec 不 abort).
+      ...(level === undefined
+        ? {}
+        : {
+            level,
+            runner_timeout_ms: runnerTimeoutMs(level),
+            orchestration: level === "deep" ? "parent" : "bun-fanout",
+          }),
+      ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
+    },
+    `review failed: ${detail}`,
+  );
+
+  // AL-6: best-effort review_failures row BEFORE the
+  // rethrow — DLQ-bound infra failures otherwise leave zero D1 trace (the
+  // audit blind spot). `stage` = the coarse phase in flight
+  // (failureStage); rows are per-attempt events (a DLQ'd message leaves up
+  // to QUEUE_MAX_ATTEMPTS of them: 1 initial delivery + the queue's
+  // max_retries, one per guard rung). The insert
+  // must never mask the rethrow: its own failure is a warn line only.
+  // SEC-03: the error detail is redacted (shape + exact-value passes)
+  // before the durable row — an infra error can interpolate a
+  // secret-shaped value (defense-in-depth; clean strings pass through).
+  // The GitHub secondary-rate-limit cause is tagged HERE — once, before
+  // redaction — so the row's text and the store's prefix count share one
+  // source of truth (a second detection site would drift).
+  const persistedDetail =
+    classifyGithubRateLimit(err) === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
+  try {
+    await deps.failureStore.record({
+      target_id: payload.targetId,
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      // The authoritative sha once the checkout resolved it; before that
+      // the payload sha, else "" (= never resolved).
+      head_sha: fields?.head_sha ?? payload.head_sha ?? "",
+      stage: progress.failureStage,
+      error: redactExactSecrets(redactSecrets(persistedDetail), progress.secretValues),
+    });
+    // Confirmed by the await above: a resolved write is the attempt's durable
+    // terminal no-result outcome. A rejection leaves the latch false.
+    attempt.durableOutcome = true;
+  } catch (recordErr) {
+    const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+    deps.log.warn(
+      fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+      `review_failures insert failed: ${recordDetail}`,
+    );
+  }
+  if (!attempt.durableOutcome && sandbox !== null) {
+    // A container exists and nothing durable came of this attempt: no row
+    // landed, so no terminal outcome can be claimed. It ends `unknown` — no
+    // destruction, no capacity release, no Check conclusion — instead of a
+    // failure nobody can read back later. (A failure BEFORE any container —
+    // credential gate, configuration — keeps the retry → DLQ path: there is
+    // nothing unresolved to leave behind.)
+    attempt.containerUnproven = true;
+    deps.log.warn(
+      {
+        ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+        ...(level === undefined
+          ? {}
+          : {
+              level,
+              runner_timeout_ms: runnerTimeoutMs(level),
+              orchestration: level === "deep" ? "parent" : "bun-fanout",
+            }),
+        ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
+        event: "review_unresolved",
+      },
+      `review unresolved: ${detail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
+    );
+    return { kind: "unknown" };
+  }
+
+  // §7.7 step 12 on the failure path: a Check begun at step 4 must
+  // terminalize even when the pipeline throws. After a send ATTEMPT the
+  // publication status is unknown (the request may have landed); before
+  // any send the honest outcome is pre-publication-failure. Isolated —
+  // never masks the throw.
+  if (sendAttempt !== null) {
+    await check.terminalize(sendAttempt.publicationId, "publication-unknown");
+  } else {
+    await check.terminalize(null, "pre-publication-failure");
+  }
+
+  // This delivery is the last one the queue will make (the next stop is the
+  // DLQ), so the commit will never be reviewed: overwrite its idempotency
+  // key with "failed" (the worker's claim TTL) so neither the worker's
+  // pre-check nor the supersede skip keeps treating the stale "1" as proof.
+  // Keyed off the PAYLOAD sha — the same sha the worker claimed.
+  // `putAbandonClaim` never downgrades a completed review. Best-effort: a KV
+  // fault only leaves "1" behind, which the failure row above traces, and it
+  // never masks the rethrow.
+  if (attempts >= QUEUE_MAX_ATTEMPTS && payload.head_sha) {
+    try {
+      await putAbandonClaim(
+        deps.env.IDEMPOTENCY_KV,
+        idemKey({
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: payload.head_sha,
+        }),
+        IDEM_FAILED,
+        IDEMPOTENCY_SECONDS,
+      );
+    } catch (kvErr) {
+      const kvDetail = kvErr instanceof Error ? kvErr.message : String(kvErr);
+      deps.log.warn(
+        fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+        `failed-claim KV write failed (the skip may still treat this commit as queued): ${kvDetail}`,
+      );
+    }
+  }
+  throw err;
+}
+/**
+ * Phase 5 — cleanup. Destroy only the proven container, once its result or a
+ * confirmed no-result outcome is durable, then release the admission row.
+ * Neither ordering nor evidence changed: capacity is never released on
+ * unknown container state, and cleanup never replaces collection.
+ */
+export async function cleanupAttempt(attempt: AttemptRun): Promise<void> {
+  const { payload, deps, attemptId, sandboxId, inflight } = attempt.input;
+  const progress = attempt.progress;
+  const fields = attempt.fields;
+  const baseFields = attempt.baseFields;
+  const sandbox = attempt.sandbox;
+  const durableOutcome = attempt.durableOutcome;
+  let containerUnproven = attempt.containerUnproven;
+  // Destroy FIRST, then release the admission row. Releasing first would let
+  // the next attempt for this PR acquire the slot and start its container
+  // while this one is still alive, so live containers could exceed
+  // min(system, workspace) by the destroy latency. Both blocks warn only.
+  if (sandbox !== null && !containerUnproven) {
+    // Two facts authorise destruction, and only two: the paid call returned
+    // with its result durably persisted, or it never started. An error event,
+    // a lost reply, a timeout or ambiguity destroys nothing — the container is
+    // then left to the platform's inactivity reclamation.
+    const retention: RetentionProof | undefined =
+      progress.runnerStartedAt === undefined
+        ? { kind: "no-paid-work" }
+        : progress.runnerReturned && durableOutcome
+          ? { kind: "retained" }
+          : undefined;
+    if (retention === undefined) {
+      containerUnproven = true;
+      deps.log.warn(
+        {
+          ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
+          sandbox_id: sandboxId,
+          event: "sandbox_teardown_unproven",
+        },
+        "sandbox not destroyed: no durable outcome to justify it — capacity held, nothing released",
+      );
+    } else {
+      try {
+        // Proven sameness, not a name: a container this attempt cannot prove
+        // it prepared is left alone (its result may be the only copy) and the
+        // teardown is reported as unknown.
+        if ((await discardReviewAttempt(sandbox, attemptId, retention)) !== "destroyed") {
+          containerUnproven = true;
           deps.log.warn(
             {
               ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
               sandbox_id: sandboxId,
               event: "sandbox_teardown_unproven",
             },
-            `sandbox teardown unproven: ${detail} — capacity held, nothing released`,
+            "sandbox not destroyed: the container is not proven to be this attempt's — capacity held, nothing released",
           );
         }
-      }
-    }
-    // Release the admission row once the review settled (posted, KV done,
-    // put attempted) OR failed — either way the next attempt may proceed.
-    // Scoped to THIS attempt's id, so an older attempt can never delete a row
-    // a newer one reclaimed after expiry; a release failure only warns (the
-    // row expires by TTL), never masks the review's own outcome.
-    if (inflight !== null && !containerUnproven) {
-      try {
-        await releaseInflight(deps.env.DB, inflight.key, inflight.attemptId);
       } catch (err) {
+        // A LOST proof is the same fact as a refused one: the container's
+        // state is unknown, so capacity must not be handed to a new attempt.
+        containerUnproven = true;
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(
-          { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
-          `review admission release failed — the row expires by TTL (${inflight.ttlSeconds}s): ${detail}`,
+          {
+            ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
+            sandbox_id: sandboxId,
+            event: "sandbox_teardown_unproven",
+          },
+          `sandbox teardown unproven: ${detail} — capacity held, nothing released`,
         );
       }
     }
   }
+  // Release the admission row once the review settled (posted, KV done,
+  // put attempted) OR failed — either way the next attempt may proceed.
+  // Scoped to THIS attempt's id, so an older attempt can never delete a row
+  // a newer one reclaimed after expiry; a release failure only warns (the
+  // row expires by TTL), never masks the review's own outcome.
+  if (inflight !== null && !containerUnproven) {
+    try {
+      await releaseInflight(deps.env.DB, inflight.key, inflight.attemptId);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+        `review admission release failed — the row expires by TTL (${inflight.ttlSeconds}s): ${detail}`,
+      );
+    }
+  }
+  attempt.containerUnproven = containerUnproven;
 }
