@@ -11,9 +11,11 @@
  *   - clone uses the LIVE PR head (`pull/<n>/head`), git transport auth via
  *     scoped extraheader env (GIT_CONFIG_*), GH_TOKEN only for gh steps
  *   - the AUTHORITATIVE sha comes from `git rev-parse HEAD` AFTER the clone;
- *     idem key / D1 row / commit_id / KV all key off it (payload.head_sha is
- *     no longer used for dedup — a force-push mid-flight is self-consistent)
- *   - dedup runs AFTER clone against the checked-out sha
+ *     idem key / D1 row / commit_id / KV all key off it (a force-push
+ *     mid-flight is self-consistent)
+ *   - a delivery whose OWN head was already reviewed acks before the Check
+ *     claim (no attempt row, no container); the checkout-keyed dedup after
+ *     the clone stays the force-push backstop
  *
  * Acceptance points (original brief + later rewiring):
  *   - findByIdempotencyKey hit after clone → ack (no post, no insert)
@@ -498,7 +500,7 @@ function seedCheckBudget(db: TestD1, key: string, value: string): void {
 }
 
 describe("createReviewConsumer", () => {
-  test("findByIdempotencyKey hit after clone → ack: no post, no insert, destroy", async () => {
+  test("findByIdempotencyKey hit → early ack: no post, no insert, no container", async () => {
     const db = await createSeededTestD1();
     const store = createArtifactStore(db);
     await store.put({
@@ -513,15 +515,12 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The authoritative sha comes from the checkout, so the dedup runs after
-    // clone + rev-parse; the D1 hit acks before any post/insert.
-    expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
-      expect.stringContaining("git init '/workspace/repo'"),
-      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
-    ]);
+    // The payload names the head, so the D1 hit acks BEFORE the claim and the
+    // container: a reviewed commit costs no sandbox.
+    expect(h.sandbox.calls).toHaveLength(0);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(h.kvPuts).toHaveLength(0);
-    expect(h.sandbox.destroyCalls).toBe(1);
+    expect(h.sandbox.destroyCalls).toBe(0);
     expect(reviewCount(db)).toBe(1); // untouched
   });
 
@@ -2810,7 +2809,7 @@ describe("createReviewConsumer", () => {
     expect(stored.n).toBe(50);
   });
 
-  test("KV done-state hit → ack without post/insert (B3)", async () => {
+  test("KV done-state hit → early ack without post/insert/container (B3)", async () => {
     h.kvState.getValue = "done";
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -2818,16 +2817,13 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Clone + rev-parse run (the authoritative sha is only known post-clone),
-    // then the KV done hit acks before any post/insert.
-    expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
-      expect.stringContaining("git init '/workspace/repo'"),
-      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
-    ]);
+    // The done claim answers for the payload head before the claim, so even
+    // the container is skipped — the ack precedes every acquisition.
+    expect(h.sandbox.calls).toHaveLength(0);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(h.kvPuts).toHaveLength(0);
-    expect(h.sandbox.destroyCalls).toBe(1);
+    expect(h.sandbox.destroyCalls).toBe(0);
     const infoLine = h.logLines.find((l) => l.level === "info" && l.msg.includes("KV idempotency hit"));
     expect(infoLine).toBeDefined();
   });
@@ -7065,18 +7061,6 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: an abandoned promotion keeps the INHERITED conclusion instead of freezing failure", async () => {
     const db = await createSeededTestD1();
-    // The delivery is a duplicate: a completed, gate-PASSING review already
-    // exists for the checked-out sha, so the admitted run owes THAT result —
-    // the give-up fallback must not overwrite a conclusion this invocation
-    // already had.
-    await createArtifactStore(db).put({
-      kind: "review",
-      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
-      schema: "mstar.review/v1",
-      payload: GATED_OUTPUT,
-      appId: TEST_APP_ID,
-      targetId: `target-${TEST_APP_ID}`,
-    });
     seedCheckBudget(db, "review.check.update_timeout_ms", "1000");
     checkRequestOverrides.update = (params) => {
       if ("status" in params && !("conclusion" in params)) return Promise.withResolvers<CheckRunPayload>().promise;
@@ -7091,6 +7075,27 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      // The duplicate here is the CONCURRENT one: the head's gate-PASSING
+      // review lands after this delivery's pre-claim read (the early ack
+      // misses, so the claim exists) and before its own dedup read. The
+      // admitted run owes that review's result — the give-up fallback must
+      // not overwrite a conclusion this invocation already had.
+      getSandbox: async () => ({
+        runCommand: async (cmd: string, opts?: unknown) => {
+          if (cmd.includes("rev-parse HEAD")) {
+            await createArtifactStore(db).put({
+              kind: "review",
+              key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+              schema: "mstar.review/v1",
+              payload: GATED_OUTPUT,
+              appId: TEST_APP_ID,
+              targetId: `target-${TEST_APP_ID}`,
+            });
+          }
+          return h.fakeSandbox.runCommand(cmd, opts);
+        },
+        destroy: h.fakeSandbox.destroy,
+      }),
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
@@ -8992,35 +8997,167 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
 
       // The contradicted claim is decided BEFORE the dedup read, so it stays
-      // superseded; only the new head's admitted run is closed by the hit, and
-      // it closes with the head's INHERITED result: both variants have an
-      // unreadable baseline here (no review row / no tally), which fails closed.
-      expect(checkRequests.map((r) => r.op), dedup).toEqual([
-        "create",
-        "update",
-        "create",
-        "update",
-        "update",
-      ]);
-      expect((checkRequests[4]!.params as ChecksUpdateParams).conclusion, dedup).toBe("failure");
+      // superseded; the NEW head is never claimed — the hit acks it, so no
+      // attempt is left for the reconciler to close red. Its remote send
+      // belongs to the recovery cron.
+      expect(checkRequests.map((r) => r.op), dedup).toEqual(["create", "update"]);
 
       const early = checkRowFor(db, SHA);
       expect(early.desired, dedup).toBe("failure");
       expect(early.desired_summary, dedup).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
       expect(early.holder, dedup).toBeNull();
 
-      const newHead = checkRowFor(db, SHA2);
-      expect(newHead.desired, dedup).toBe("failure");
-      expect(newHead.terminal_ms, dedup).not.toBeNull();
+      expect(checkRowFor(db, SHA2), dedup).toBeNull();
       expect(h.commenterCalls.filter((c) => c.op === "post-prepared"), dedup).toHaveLength(0);
     }
   });
 
-  test("check lifecycle: an idempotency hit closes the admitted run with the head's INHERITED result", async () => {
+  test("check lifecycle: a reviewed head acks BEFORE the claim — no attempt row, no container, no token", async () => {
+    // Both shapes that know the head before the claim: the payload's own sha
+    // (`pull_request`) and the PR watermark a mention carries instead.
+    for (const route of ["payload", "watermark"] as const) {
+      h = createConsumerHarness();
+      freshChecks();
+      const db = await createSeededTestD1();
+      // The head was already reviewed, gate-PASSING: a second attempt for it
+      // could only be closed red, overwriting this result.
+      await createArtifactStore(db).put({
+        kind: "review",
+        key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+        schema: "mstar.review/v1",
+        payload: GATED_OUTPUT,
+        appId: TEST_APP_ID,
+        targetId: `target-${TEST_APP_ID}`,
+      });
+      if (route === "watermark") await seedPrHead(db, { headSha: SHA, headAt: new Date().toISOString() });
+      let sandboxAcquisitions = 0;
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        getSandbox: async () => {
+          sandboxAcquisitions += 1;
+          return h.fakeSandbox;
+        },
+        createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+      });
+
+      await consumer(
+        h.makeBatch(
+          route === "payload"
+            ? makePayload()
+            : makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" }),
+        ),
+      );
+
+      // Nothing was created or acquired: no Check attempt (remote or local),
+      // no container, no installation token, no comment, no KV write.
+      expect(checkRequests, route).toHaveLength(0);
+      expect(checkRows(db), route).toHaveLength(0);
+      expect(sandboxAcquisitions, route).toBe(0);
+      expect(h.commenterCalls.filter((c) => c.op === "token"), route).toHaveLength(0);
+      expect(h.commenterCalls.filter((c) => c.op === "post-prepared"), route).toHaveLength(0);
+      expect(h.kvPuts, route).toHaveLength(0);
+      // `ok` is the implicit ack: the handler resolved without a retry.
+      expect(h.messageRetryCalls, route).toHaveLength(0);
+      expect(h.messageAckCalls, route).toHaveLength(0);
+      expect(
+        h.logLines.some((line) => line.level === "info" && line.msg.includes("idempotency hit")),
+        route,
+      ).toBe(true);
+    }
+  });
+
+  test("check lifecycle: an unreadable KV answer falls through — the review runs as before", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // A completed, gate-PASSING review for the checked-out sha: the delivery is
-    // a duplicate, so its Check must carry THAT review's result. A `neutral`
-    // would mask a failing gate on GitHub's newest same-name run.
+    h.kvState.getError = new Error("kv down");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // A read that cannot answer is not an answer: the round claims, runs and
+    // posts exactly as it did before the early check existed.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(h.sandbox.calls.filter((c) => c.cmd.includes("bun run"))).toHaveLength(1);
+    expect(h.logLines.filter((l) => l.msg === "idempotency hit — ack")).toHaveLength(0);
+    expect(h.logLines.filter((l) => l.msg === "KV idempotency hit — ack")).toHaveLength(0);
+  });
+
+  test("check lifecycle: an unreadable D1 pre-read falls through — the delivery is not ended by it", async () => {
+    const db = await createSeededTestD1();
+    // The pre-read is the ONE faulted statement: the authoritative
+    // checkout-keyed read that follows answers normally, so a fall-through is
+    // observable as a completed review.
+    let preReadFault = 1;
+    const flakyDb = {
+      prepare: (sql: string) => {
+        if (sql.includes("FROM reviews") && preReadFault-- > 0) throw new Error("D1 unavailable");
+        return db.prepare(sql);
+      },
+      batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    };
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: flakyDb as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // The pre-read fault is announced and nothing else changes: the round
+    // claims, runs and posts exactly as it did before the early check existed.
+    expect(h.logLines.filter((l) => l.level === "warn" && l.msg.includes("early idempotency read failed"))).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(h.logLines.filter((l) => l.msg.includes("idempotency hit"))).toHaveLength(0);
+  });
+
+  test("check lifecycle: a force-push after delivery is still caught by the checkout-keyed dedup", async () => {
+    // The payload names SHA (never reviewed); the clone lands SHA2, which was
+    // reviewed while this delivery waited. The early read keys the PAYLOAD sha,
+    // so it misses — only the post-checkout read, keyed on what the clone
+    // actually holds, may acknowledge.
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    h.kvState.entries.set(
+      idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA2 }),
+      "done",
+    );
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+
+    // The container ran, so the early check did not stop the delivery...
+    expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+    ]);
+    // ...and the checkout hit acks BEFORE the new head is claimed, so no
+    // attempt exists for the commit this delivery never named — nothing is
+    // left for the reconciler to close red. Only the payload claim remains,
+    // frozen `superseded` for the recovery cron.
+    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
+    expect(checkRowFor(db, SHA).desired_summary).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(h.logLines.some((line) => line.level === "info" && line.msg.includes("idempotency hit"))).toBe(true);
+  });
+
+  test("check lifecycle: a reviewed payload head acks even when the checkout moved on", async () => {
+    // The delivery names SHA, which was reviewed; the clone holds SHA2 — a
+    // newer commit nothing has reviewed yet. The duplicate ACKS rather than
+    // reviewing the newer commit under the stale delivery: that newer head is
+    // reviewed only when its own delivery arrives, and nothing here creates
+    // one. Neither head is claimed and no container starts.
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
     await createArtifactStore(db).put({
       kind: "review",
       key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
@@ -9029,40 +9166,63 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       appId: TEST_APP_ID,
       targetId: `target-${TEST_APP_ID}`,
     });
-    const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      createAppCommenter: () => commenterWithChecks(adapter),
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
     });
 
-    await consumer(h.makeBatch(makePayload()));
+    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
 
-    // The claim happens before the dedup read, so the run it created is
-    // terminalized before ack — carrying the reviewed head's own gate result
-    // through the empty-increment inheritance, not a fresh `neutral`.
-    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
-    const update = checkRequests[2]!.params as ChecksUpdateParams;
-    expect(update.conclusion).toBe("success");
-    // The SAME head is the subject and the baseline, so the summary names it
-    // once — `since <head>` would be nonsense.
-    expect(update.output.summary).toBe(
-      `No new changes since the reviewed head ${SHA.slice(0, 7)}; its own gate result is inherited: verdict "ship it", score 85 (floor ${GATE.minScore}; allowed: ship it).`,
-    );
-    const row = checkRowFor(db, SHA);
-    expect(row.desired).toBe("success");
-    expect(row.observed).toBe("success");
-    expect(row.terminal_ms).not.toBeNull();
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(checkRequests).toHaveLength(0);
+    expect(checkRows(db)).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1); // the reviewed head's row, untouched
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+  });
+
+  test("check lifecycle: a confirmed publication for the checkout head acks without a claim", async () => {
+    // The payload names SHA (never reviewed, no journal row); the clone holds
+    // SHA2, whose publication is already confirmed while its `reviews`
+    // projection has not landed. A published head is as final as a reviewed
+    // one, so the checkout-keyed gate hands off to recovery: no claim for
+    // SHA2 and no paid work.
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    seedJournalRow(db, SHA2, "confirmed");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+
+    // The container ran — the early gate keys the payload sha, which has no
+    // journal row...
+    expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+    ]);
+    // ...and SHA2 is never claimed: only the payload's contradicted claim
+    // remains, frozen `superseded` for the recovery cron.
+    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(h.logLines.some((line) => line.msg.includes("publication journal hit"))).toBe(true);
   });
 
   test("check lifecycle: a publication journal handoff links its publication and releases the admitted claim without concluding", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Recovery already owns a publication for the delivered head.
-    seedJournalRow(db, SHA, "prepared");
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      // Recovery already owns a publication for the delivered head. It lands
+      // AFTER the pre-claim gate (which would ack it with no claim), so the
+      // admission claim is the one the hand-off must link and release.
+      getSandbox: async () => {
+        seedJournalRow(db, SHA, "prepared");
+        return h.fakeSandbox;
+      },
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
@@ -9102,10 +9262,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const db = await createSeededTestD1();
     // The journal row the delivery finds already carries the envelope that
     // applies on it (one row per scope/head/kind, reused across generations).
-    seedJournalRow(db, SHA, "prepared", JSON.stringify({ artifact: { payload: GATED_OUTPUT } }));
+    // It lands after the pre-claim gate, so the admission claim exists to link.
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      getSandbox: async () => {
+        seedJournalRow(db, SHA, "prepared", JSON.stringify({ artifact: { payload: GATED_OUTPUT } }));
+        return h.fakeSandbox;
+      },
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
@@ -9160,10 +9324,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: an unproven journal handoff defers, and the deadline closes it as failure", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    seedJournalRow(db, SHA, "prepared");
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      // The row lands after the pre-claim gate, so the claim exists to link.
+      getSandbox: async () => {
+        seedJournalRow(db, SHA, "prepared");
+        return h.fakeSandbox;
+      },
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
@@ -9213,10 +9381,15 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a journal hand-off whose lease is no longer ours refuses both writes and keeps the row's owner", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    seedJournalRow(db, SHA, "prepared");
     const real = lifecycleFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      // The row lands after the pre-claim gate, so the (bumped-lease) claim
+      // exists and both hand-off writes have something to refuse.
+      getSandbox: async () => {
+        seedJournalRow(db, SHA, "prepared");
+        return h.fakeSandbox;
+      },
       checks: {
         // The row is claimed for real, but the handle carries a bumped epoch:
         // the stored fence no longer recognises it, which is exactly the stale
@@ -9257,7 +9430,6 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a refused claim release after a linked publication keeps the row's owner and the link", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    seedJournalRow(db, SHA, "prepared");
     const real = lifecycleFor(db);
     // Write 2 (the release) answers `false` without touching the store; the
     // link is the real write.
@@ -9267,6 +9439,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       logArmingOnJournalHandoff(fault.arm),
       {
         ...h.overrides,
+        // The row lands after the pre-claim gate, so the admission claim is
+        // the one the hand-off links and releases.
+        getSandbox: async () => {
+          seedJournalRow(db, SHA, "prepared");
+          return h.fakeSandbox;
+        },
         checks: {
           begin: (input) => real.begin(input),
           terminalize: (input) => real.terminalize(input),
@@ -9297,7 +9475,6 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a store fault during the journal hand-off is classified as a hand-off failure", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    seedJournalRow(db, SHA, "prepared");
     const real = lifecycleFor(db);
     const fault = journalHandoffFault(db, 1, "throw");
     const consumer = createReviewConsumer(
@@ -9305,6 +9482,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       logArmingOnJournalHandoff(fault.arm),
       {
         ...h.overrides,
+        // The row lands after the pre-claim gate, so the admission claim is
+        // the one whose link faults.
+        getSandbox: async () => {
+          seedJournalRow(db, SHA, "prepared");
+          return h.fakeSandbox;
+        },
         checks: {
           begin: (input) => real.begin(input),
           terminalize: (input) => real.terminalize(input),
@@ -10157,18 +10340,19 @@ describe("usage ledger (migration 0031)", () => {
     expect(reviewCount(db)).toBe(1);
   });
 
-  test("the payload sha is the metered identity — a differing checkout sha keeps one review_id", async () => {
+  test("the payload sha is the metered identity — two checkouts keep one review_id", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload()));
-
-    // Same delivery identity, different authoritative checkout: both dedup
-    // reads and the journal miss (they key off the checkout sha), so this is a
-    // second started execution of the SAME payload review.
-    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Each delivery's clone lands a commit the payload never named, so the
+    // payload head itself stays unreviewed and both executions start: the
+    // review row follows each checkout, the metered identity stays the
+    // payload's.
     h.sandbox.resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
+    await consumer(h.makeBatch(makePayload()));
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.resolvedSha = "aaaabbbbccccddddeeeeffff0000111122223333";
     await consumer(h.makeBatch(makePayload()));
 
     const key = idemKey({
