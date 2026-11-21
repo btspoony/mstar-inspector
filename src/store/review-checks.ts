@@ -1172,6 +1172,45 @@ export async function releaseCheckClaim(
 }
 
 /**
+ * Renew the EXECUTION lease under the same fence the claim established
+ * (spec §7.9). Renewal moves only the lease window — `lease_until_ms` is
+ * re-stamped to a fresh `CHECK_LEASE_MS` window, never shortened, and CAPPED by
+ * the immutable `execution_deadline_ms`, which this statement never writes: a
+ * renewal can never extend the attempt's absolute hard stop. The epoch does not
+ * move either, because renewal is the same holder keeping what it already holds,
+ * not a takeover. The returned lease is the one every later fenced write must
+ * carry (the fence matches the exact triple); `null` means this is no longer
+ * the live lease, and nothing was written.
+ *
+ * Nothing here concerns publication: the publication lease is a different row,
+ * taken and released around one mutation, and neither lease may decide the
+ * other's liveness.
+ */
+export async function renewCheckLease(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<Lease | null> {
+  const renewed = await db
+    .prepare(
+      `UPDATE review_checks
+          SET lease_until_ms = MAX(lease_until_ms, MIN(?, execution_deadline_ms)), updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND lease_until_ms > ? AND ${NONTERMINAL_WHERE}`,
+    )
+    .bind(nowMs + CHECK_LEASE_MS, nowMs, id, lease.holder, lease.epoch, lease.untilMs, nowMs)
+    .run();
+  if (renewed.meta.changes !== 1) return null;
+  const row = await db
+    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM review_checks WHERE id = ?`)
+    .bind(id)
+    .first<Pick<ReviewCheckRow, "holder" | "lease_epoch" | "lease_until_ms">>();
+  if (row === null || row.holder !== lease.holder || row.lease_until_ms === null) return null;
+  return { holder: lease.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+}
+
+/**
  * Release a successfully ATTACHED attempt with a due time (spec §7.9): the
  * admitted message adopts the row immediately (adoption ignores
  * `next_attempt_ms`), while the recovery lane may take it once the grace has

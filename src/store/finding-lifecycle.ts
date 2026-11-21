@@ -384,6 +384,87 @@ export async function claimPublication(db: D1Like, id: string, holder: string, n
   return { holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
 }
 
+// ---------------------------------------------------------------------------
+// §7.9 publication lease — authority over ONE action, not over the attempt
+// ---------------------------------------------------------------------------
+
+/** What a publication acquisition is for. Not part of the key: a `recover`
+ *  contends with a live `send` of the same action instead of bypassing it. */
+export type PublicationLeaseMode = "send" | "recover";
+
+/** The durable identity of one publishable action on one attempt. `actionKey`
+ *  is the mutation (`check:complete`, `comment:<publicationId>`), never a
+ *  caller or a delivery. */
+export type PublicationAction = { attemptId: string; actionKey: string };
+
+/**
+ * Claim the publication lease of ONE action (spec §7.9): its own row, its own
+ * epoch, a fresh `PUBLICATION_LEASE_MS` window — independent of the attempt's
+ * execution lease, which may be live, renewed or expired throughout. One
+ * conditional write takes a free or expired row and increments the epoch;
+ * `null` means another holder owns a live one. Acquiring does not imply (and
+ * does not touch) execution; it says only "this holder may perform THIS
+ * mutation now".
+ */
+export async function claimPublicationLease(
+  db: D1Like,
+  input: PublicationAction & { holder: string; mode: PublicationLeaseMode; nowMs: number },
+): Promise<Lease | null> {
+  if (input.holder.length === 0) {
+    throw new Error("finding-lifecycle: publication lease requires a nonblank holder identity");
+  }
+  const claim = await db
+    .prepare(
+      `INSERT INTO publication_leases
+         (attempt_id, action_key, holder, lease_epoch, lease_until_ms, mode, updated_ms)
+       VALUES (?, ?, ?, 1, ?, ?, ?)
+       ON CONFLICT (attempt_id, action_key) DO UPDATE
+         SET holder = excluded.holder,
+             lease_epoch = publication_leases.lease_epoch + 1,
+             lease_until_ms = excluded.lease_until_ms,
+             mode = excluded.mode,
+             updated_ms = excluded.updated_ms
+       WHERE publication_leases.lease_until_ms IS NULL OR publication_leases.lease_until_ms <= ?`,
+    )
+    .bind(
+      input.attemptId, input.actionKey, input.holder,
+      input.nowMs + PUBLICATION_LEASE_MS, input.mode, input.nowMs,
+      input.nowMs,
+    )
+    .run();
+  if (claim.meta.changes === 0) return null;
+  const row = await db
+    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM publication_leases WHERE attempt_id = ? AND action_key = ?`)
+    .bind(input.attemptId, input.actionKey)
+    .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
+  if (row === null || row.holder !== input.holder || row.lease_until_ms === null) return null;
+  return { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+}
+
+/**
+ * Release the publication lease of ONE action under the epoch it was granted
+ * with: holder and expiry clear, the epoch stays (a late release of an older
+ * acquisition can never clear a newer one). Deliberately not gated on
+ * `lease_until_ms > now` — a holder whose window lapsed still owns its own row
+ * by epoch, and a lapsed publication right is not evidence about the remote
+ * effect. Releases nothing else: execution, the Check row and the journal are
+ * untouched.
+ */
+export async function releasePublicationLease(
+  db: D1Like,
+  input: PublicationAction & { lease: Lease; nowMs: number },
+): Promise<boolean> {
+  const released = await db
+    .prepare(
+      `UPDATE publication_leases
+          SET holder = NULL, lease_until_ms = NULL, updated_ms = ?
+        WHERE attempt_id = ? AND action_key = ? AND holder = ? AND lease_epoch = ?`,
+    )
+    .bind(input.nowMs, input.attemptId, input.actionKey, input.lease.holder, input.lease.epoch)
+    .run();
+  return released.meta.changes === 1;
+}
+
 /**
  * Persist the confirmed publication proof under the live lease (spec §7.7
  * step 8: "Immediately persist proof before KV done"). Fails closed on any
