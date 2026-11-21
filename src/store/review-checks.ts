@@ -123,6 +123,13 @@ export type CheckDesired = "in_progress" | "success" | "neutral" | "failure";
 export type CheckObserved = "unknown" | CheckDesired;
 export type CheckCreateState = "not-sent" | "sending" | "known" | "unknown";
 export type CheckRecoveryState = "pending" | "done" | "remote-unconfirmed" | "local-error" | "suspended";
+/**
+ * The approved category of a terminal review failure (compass D9, migration
+ * 0087). It SELECTS the approved wording; the text itself is never derived from
+ * an error. A review that produced a verdict has no category — a missed gate is
+ * a result, not a failure — and a waiting attempt has none either.
+ */
+export type CheckFailureStatus = "paused" | "unknown-failure" | "budget-stop" | "cap-stop";
 
 /** The immutable identity of one attempt generation (spec §7.9). */
 export type CheckIdentity = {
@@ -148,6 +155,8 @@ export type CheckAttempt = {
   executionDeadlineMs: number;
   attempts: number;
   terminalMs: number | null;
+  /** The approved failure category frozen with the intent; NULL when none applies. */
+  terminalFailureStatus: CheckFailureStatus | null;
   /**
    * When this attempt was ADMITTED. The proof wait uses it to attribute a
    * publication: only a journal row staged at or after this instant can be the
@@ -172,6 +181,13 @@ export type CheckConclusion = {
   desired: Exclude<CheckDesired, "in_progress">;
   title: string;
   summary: string;
+  /**
+   * The approved failure category this intent carries, frozen in the SAME write
+   * as the text. Absent for every non-failure (a verdict, a success, a neutral
+   * skip): `desired` excludes `in_progress` by type, so a category can never be
+   * written for an attempt that is still waiting.
+   */
+  failureStatus?: CheckFailureStatus;
 };
 
 /**
@@ -416,6 +432,7 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
     executionDeadlineMs: row.execution_deadline_ms,
     attempts: row.attempts,
     terminalMs: row.terminal_ms,
+    terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
     createdAtMs: row.created_ms,
   };
 }
@@ -506,6 +523,8 @@ export type CheckOwnership = {
   observed: CheckObserved;
   desiredTitle: string | null;
   desiredSummary: string | null;
+  /** The frozen failure category, so a re-freeze of the same intent keeps it. */
+  terminalFailureStatus: CheckFailureStatus | null;
   publicationId: string | null;
 };
 
@@ -537,6 +556,7 @@ export async function getCheckOwnership(
     observed: attempt.observed,
     desiredTitle: row.desired_title,
     desiredSummary: row.desired_summary,
+    terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
     publicationId: row.publication_id,
   };
 }
@@ -1374,8 +1394,8 @@ export async function rollbackCheckCreateDispatch(
 
 /**
  * Freeze the terminal intent BEFORE any remote update (spec §7.9 "Desired
- * versus observed"): conclusion, bounded title/summary and the publication
- * proof link. The type excludes `in_progress`.
+ * versus observed"): conclusion, bounded title/summary, the approved failure
+ * category and the publication proof link. The type excludes `in_progress`.
  *
  * Monotonic with exactly one documented exception: a `failure` decided while
  * publication was unknown may be corrected to `success`/`neutral` when positive
@@ -1411,10 +1431,10 @@ export async function setCheckDesired(
     db,
     id,
     lease,
-    `desired = ?, desired_title = ?, desired_summary = ?,
+    `desired = ?, desired_title = ?, desired_summary = ?, terminal_failure_status = ?,
             publication_id = COALESCE(?, publication_id),
             recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
-    [conclusion.desired, title, summary, publicationId],
+    [conclusion.desired, title, summary, conclusion.failureStatus ?? null, publicationId],
     nowMs,
   );
 }
@@ -1442,9 +1462,9 @@ export async function setCheckFallbackDesired(
     db,
     id,
     lease,
-    `desired = ?, desired_title = ?, desired_summary = ?,
+    `desired = ?, desired_title = ?, desired_summary = ?, terminal_failure_status = ?,
             recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
-    [conclusion.desired, title, summary],
+    [conclusion.desired, title, summary, conclusion.failureStatus ?? null],
     nowMs,
     "desired = 'in_progress'",
   );

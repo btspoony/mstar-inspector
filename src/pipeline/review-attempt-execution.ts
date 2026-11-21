@@ -746,8 +746,12 @@ export async function settleSkippedRow(
   payload: ReviewJobPayload,
   attachedHeadSha: string | null | undefined,
   reason: string,
-  /** Name a no-op settlement (the moved-head path, whose only other line says why). */
-  announceNoOp = false,
+  /**
+   * `announceNoOp` names a no-op settlement (the moved-head path, whose only
+   * other line says why); `paused` marks a skip the App's pause caused, which
+   * the Check settles under the approved `paused` category.
+   */
+  opts: { announceNoOp?: boolean; paused?: boolean } = {},
 ): Promise<void> {
   if (
     deps.checks?.settleSkipped === undefined ||
@@ -758,7 +762,7 @@ export async function settleSkippedRow(
     // `false` silently.
     payload.attachDeliveryId === undefined
   ) {
-    if (announceNoOp) {
+    if (opts.announceNoOp) {
       deps.log.info(
         payloadIdentityFields(payload),
         `check skip settlement skipped — nothing to settle for this delivery (${reason})`,
@@ -783,6 +787,7 @@ export async function settleSkippedRow(
       // nothing rather than taking another delivery's run (§7.9).
       attachDeliveryId: payload.attachDeliveryId,
       reason,
+      ...(opts.paused === true ? { paused: true } : {}),
       warn: (detail) => deps.log.warn(payloadIdentityFields(payload), detail),
     });
   } catch (err) {
@@ -3215,7 +3220,7 @@ async function settleMovedHead(
   await check.terminalize(null, "skipped", headSha);
   // A skip-settlement fault must not mask the moved head: the attempt is over
   // either way, and the error below is what starts the new one.
-  await settleSkippedRow(deps, ref.payload, headSha, "the head moved between admission and the checkout", true).catch(
+  await settleSkippedRow(deps, ref.payload, headSha, "the head moved between admission and the checkout", { announceNoOp: true }).catch(
     () => {},
   );
   deps.log.warn(

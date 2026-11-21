@@ -204,6 +204,8 @@ export type ReviewCheckRow = {
   desired: string;
   desired_title: string | null;
   desired_summary: string | null;
+  /** Approved terminal-failure category (migration 0087); NULL when none applies. */
+  terminal_failure_status: string | null;
   observed: string;
   recovery_state: string;
   publication_id: string | null;

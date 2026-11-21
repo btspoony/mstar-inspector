@@ -84,7 +84,6 @@ import {
   isRequestNotDispatched,
   type ChecksAdapter,
   type ReviewGate,
-  type UnconfirmedCause,
 } from "../pipeline/checks";
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
@@ -958,13 +957,20 @@ async function reconcileCheckAttempt(
     readRecoveryGate(db, scope),
     readRecoveryReview(db, owned, proof?.publicationId ?? null),
   ]);
-  const conclusion = terminalConclusion(
-    owned,
-    proof,
-    gate,
-    review,
-    beforeDeadline ? undefined : deadlineCause(pending, proofSourceId, proofRead),
-  );
+  const conclusion = terminalConclusion(owned, proof, gate, review);
+  // The approved wording no longer names which evidence the deadline could not
+  // read, so that attribution lands where the operator reads diagnosis: one log
+  // line per unconfirmed conclusion, never a user-visible field.
+  if (proof === null && !beforeDeadline) {
+    log.info(
+      {
+        event: "check_recovery_unconfirmed",
+        attempt_id: attemptId,
+        cause: deadlineCause(pending, proofSourceId, proofRead),
+      },
+      "check recovery concluding unconfirmed — the evidence the deadline could not read",
+    );
+  }
 
   // Intent BEFORE any remote update: the persisted row is the only source the
   // send reads, so the frozen text cannot be swapped after this point.
@@ -985,6 +991,7 @@ async function reconcileCheckAttempt(
     desired: intent.desired,
     title: intent.desiredTitle,
     summary: intent.desiredSummary,
+    ...(intent.terminalFailureStatus === null ? {} : { failureStatus: intent.terminalFailureStatus }),
   };
 
   // 3. Known remote id → GET/validate ownership before any update; otherwise
@@ -1413,7 +1420,7 @@ async function pairUnusableReason(db: D1Like, scope: Scope): Promise<CheckCreden
 /**
  * The proof of the publication THIS attempt owns — the one its own intent write
  * linked into `publication_id` (spec §7.9). The outcome distinguishes WHY it is
- * not a proof, because the deadline conclusion names the missing evidence:
+ * not a proof so the deadline path can LOG which evidence was missing:
  * `unlinked` (no publication row was staged for this attempt), `unproven` (the
  * linked row carries no proof), `unreadable` (the read itself failed).
  *
@@ -1591,16 +1598,16 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
 
 /**
  * Which evidence the deadline was missing, from the wait probe's answer and
- * this attempt's own proof read. Three causes — an attribution, not a
- * taxonomy: nothing was staged for this attempt (`none` plus no link), a staged
- * row whose proof never landed, or a read that failed (the journal's or the
- * proof's). A readable proof never reaches here: it decides.
+ * this attempt's own proof read. Three causes — an attribution for the LOG, not
+ * a taxonomy the user sees: nothing was staged for this attempt (`none` plus no
+ * link), a staged row whose proof never landed, or a read that failed (the
+ * journal's or the proof's). A readable proof never reaches here: it decides.
  */
 function deadlineCause(
   pending: PendingPublication,
   publicationId: string | null,
   read: ProofRead,
-): UnconfirmedCause {
+): "unstaged" | "unproven" | "unreadable" {
   if (pending.kind === "unknown" || read.kind === "unreadable") return "unreadable";
   if (waitIsTerminal(pending, publicationId)) return "unstaged";
   return "unproven";
@@ -1611,11 +1618,11 @@ function deadlineCause(
  * publication proof decides the conclusion against the App gate — a normal
  * publication only succeeds when the applied review meets it — regardless of
  * how the attempt expired. The no-proof branch runs only once the wait above
- * has ended: the execution deadline passed, which makes the honest unconfirmed
- * `failure` the conclusion, and `unconfirmedCause` names the evidence that was
- * missing. An intent the consumer already persisted is preserved verbatim
- * unless a proof-derived correction applies. `gate` is the App's stored gate;
- * `null` means it could not be read, so a proof-derived conclusion fails closed
+ * has ended: the execution deadline passed, which makes the unconfirmed
+ * `failure` the conclusion. An intent the consumer already persisted is
+ * preserved verbatim — including its approved failure category — unless a
+ * proof-derived correction applies. `gate` is the App's stored gate; `null`
+ * means it could not be read, so a proof-derived conclusion fails closed
  * instead of assuming a default.
  */
 function terminalConclusion(
@@ -1623,22 +1630,16 @@ function terminalConclusion(
   proof: PublicationProof | null,
   gate: ReviewGate | null,
   review: PublishedReview | null,
-  unconfirmedCause?: UnconfirmedCause,
 ): CheckConclusion {
   if (proof !== null) return decideConclusion({ proof, outcome: "expired", gate, review });
   if (owned.desired === "in_progress") {
-    return decideConclusion({
-      proof: null,
-      outcome: "expired",
-      gate,
-      review,
-      ...(unconfirmedCause === undefined ? {} : { unconfirmedCause }),
-    });
+    return decideConclusion({ proof: null, outcome: "expired", gate, review });
   }
   return {
     desired: owned.desired,
     title: owned.desiredTitle ?? CHECK_NAME,
     summary: owned.desiredSummary ?? CHECK_SUMMARIES.unconfirmed,
+    ...(owned.terminalFailureStatus === null ? {} : { failureStatus: owned.terminalFailureStatus }),
   };
 }
 

@@ -73,7 +73,7 @@ export async function runReviewAttemptWorkflow(
       // The App was paused after admission: the attempt owes no review, and
       // the run this delivery attached is settled instead of waiting out its
       // deadline.
-      await settleSkippedRow(deps, ref.payload, ref.payload.head_sha, "review paused");
+      await settleSkippedRow(deps, ref.payload, ref.payload.head_sha, "review paused", { paused: true });
       return;
     }
     // The App's paid-provider configuration is resolved by the steps that

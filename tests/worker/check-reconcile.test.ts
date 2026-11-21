@@ -71,7 +71,7 @@ import {
   type CheckReconcileSummary,
   type CheckTransport,
 } from "../../src/worker/check-reconcile";
-import { CHECK_SUMMARIES, CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
+import { CHECK_SUMMARIES, TERMINAL_FAILURE_TEXT, CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
 import { defaultSweepLog } from "../../src/worker/sweep";
@@ -512,7 +512,8 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
-            expect(conclusion.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+            expect(conclusion.failureStatus).toBe("unknown-failure");
+            expect(conclusion.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
             return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
           },
         }),
@@ -526,7 +527,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.observed).toBe("failure");
   });
 
-  test("an expired attempt with NO journal row names an unstaged publication", async () => {
+  test("an expired attempt with NO journal row concludes the approved failure wording", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const fetchStub = stubFetch();
@@ -540,8 +541,10 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
             // No publication row was ever staged for this attempt: the frozen
-            // text names that cause instead of asserting a generic unknown.
-            expect(conclusion.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
+            // text is the approved category wording, and the missing evidence
+            // rides the reconciler's own log line, never a visible field.
+            expect(conclusion.failureStatus).toBe("unknown-failure");
+            expect(conclusion.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
             return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
           },
         }),
@@ -591,7 +594,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     }
     expect(pushed).toHaveLength(1);
     expect(pushed[0]?.desired).toBe("failure");
-    expect(pushed[0]?.summary).toBe("Review gate could not be evaluated for 0123456: the App's gate configuration could not be read.");
+    expect(pushed[0]?.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, attempt.identity.attemptId);
     expect(row.desired).toBe("failure");
     expect(row.observed).toBe("failure");
@@ -3450,7 +3453,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 
     expect(thirdDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBe(own.publicationId);
     expect(row.observed).toBe("failure");
@@ -3523,11 +3526,10 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     }
 
     // No attribution: the unwritten row ended no wait, so the deadline path
-    // names the missing evidence (nothing was staged for this attempt) and
-    // never adopts that proof.
+    // concludes the approved wording and never adopts that proof.
     expect(deferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBeNull();
     expect(row.observed).toBe("failure");
@@ -3592,8 +3594,9 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(deadlineDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
     // A staged row exists (it was claimed after admission) but no proof ever
-    // landed on it: the deadline names that cause, never a proof-less success.
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
+    // landed on it: the deadline concludes the approved wording, never a
+    // proof-less success.
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBeNull();
     expect(row.observed).toBe("failure");
@@ -3657,7 +3660,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     // The proof decides — a degraded publication never passes the gate.
     expect(secondDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
@@ -3741,8 +3744,8 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 // The deadline conclusion names the proof it could not read (spec §7.9)
 // ---------------------------------------------------------------------------
 
-describe("the deadline conclusion names the missing proof", () => {
-  test("(b) a staged journal row without proof names the proof that never landed", async () => {
+describe("the deadline conclusion carries the approved wording", () => {
+  test("(b) a staged journal row without proof concludes the approved wording, never a proof-less success", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     // The hand-off shape: this attempt linked the row it was handed off to,
@@ -3763,10 +3766,10 @@ describe("the deadline conclusion names the missing proof", () => {
     }
 
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("(c) a staged journal row whose proof read fails names the unreadable proof", async () => {
+  test("(c) a staged journal row whose proof read fails still concludes the approved wording", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
@@ -3788,10 +3791,10 @@ describe("the deadline conclusion names the missing proof", () => {
     }
 
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("(d) an unlinked attempt's staged row with malformed proof bytes defers, then names it unreadable", async () => {
+  test("(d) an unlinked attempt's staged row with malformed proof bytes defers, then concludes the approved wording", async () => {
     const db = seededDb();
     const { id } = await abandonedAttempt(db);
     // The attributed shape the probe admits — the row's last write lands after
@@ -3847,7 +3850,7 @@ describe("the deadline conclusion names the missing proof", () => {
 
     expect(deadlineDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBeNull();
     expect(row.observed).toBe("failure");

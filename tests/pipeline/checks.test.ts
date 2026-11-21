@@ -56,6 +56,7 @@ import {
 import { readCheckIdentity } from "../../src/store/review-checks";
 import {
   CHECK_SUMMARIES,
+  TERMINAL_FAILURE_TEXT,
   CheckRequestNotDispatched,
   attachCheckAtAcceptance,
   budgetExhaustedSummary,
@@ -1437,11 +1438,12 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     }
   });
 
-  test("a missing review row or a missing tally is an unreadable-gate failure, never a pass", () => {
+  test("a missing review row or a missing tally is an execution failure, never a pass", () => {
     for (const missing of [null, review("ship it", null)]) {
       const decided = decideConclusion({ proof: normal, outcome: "expired", gate, review: missing });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     }
   });
 
@@ -1482,7 +1484,8 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
 
     const decided = decideConclusion({ proof: unreadable, outcome: "expired", gate, review: read });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
   test("an EMPTY allowed-verdict set misses every review — a saved [] gates every Check to failure", () => {
@@ -1501,28 +1504,28 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     for (const outcome of outcomes) {
       const decided = decideConclusion({ proof: degraded, outcome, gate, review: review("ship it", 100) });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     }
   });
 
-  test("no proof + pre-publication failure is failure with the reason in the summary", () => {
+  test("no proof + pre-publication failure carries the approved wording, never the reason", () => {
     const decided = decideConclusion({
       proof: null,
       outcome: "pre-publication-failure",
       gate,
       review: null,
-      reason: "sandbox clone rejected",
     });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe(
-      "Review execution failed before publication: sandbox clone rejected. No review was published.",
-    );
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("no proof + degraded-not-posted is failure with the degraded-notice wording", () => {
+  test("no proof + degraded-not-posted carries the approved wording", () => {
     const decided = decideConclusion({ proof: null, outcome: "degraded-not-posted", gate, review: null });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe("Review output was invalid and the degraded notice was not published.");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
   test("no proof + skipped (nothing to review and nothing to inherit) is neutral, never a failure", () => {
@@ -1583,85 +1586,50 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     for (const input of unreadable) {
       const decided = decideConclusion({ proof: null, outcome: "skipped", ...input, inherited });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toContain(`No new changes at ${sha7}`);
-      expect(decided.summary).toContain(base7);
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     }
   });
 
-  test("an empty increment whose baseline result is unreadable fails closed and says why", () => {
+  test("an empty increment whose baseline result is unreadable fails closed with the approved wording", () => {
     const decided = decideConclusion({ proof: null, outcome: "skipped", gate, review: null, inherited });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe(CHECK_SUMMARIES.inheritedUnreadable(sha7, base7));
-    expect(decided.summary).toContain(base7);
-    expect(decided.summary).toContain("could not be read");
-    expect(decided.summary).toContain("failing closed");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("no proof + publication-unknown / expired is the unconfirmed failure", () => {
+  test("no proof + publication-unknown / expired is the unconfirmed execution failure", () => {
     for (const outcome of ["publication-unknown", "expired"] as const) {
       const decided = decideConclusion({ proof: null, outcome, gate, review: null });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toBe(
-        "Review attempt could not be confirmed complete; publication status is unknown.",
-      );
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     }
   });
 
-  // The deadline ended the wait without a proof. Each named cause replaces the
-  // generic unknown, so the frozen Check says which evidence it could not read.
-  test("a deadline with no publication row staged names that cause", () => {
-    const decided = decideConclusion({
-      proof: null,
-      outcome: "expired",
-      gate,
-      review: null,
-      unconfirmedCause: "unstaged",
-    });
+  test("the deadline concludes the same approved wording whatever evidence it could not read", () => {
+    // Which proof read was missing stays an internal attribution (the
+    // reconciler logs it); the user-facing text is the category's.
+    const decided = decideConclusion({ proof: null, outcome: "expired", gate, review: null });
     expect(decided.desired).toBe("failure");
     expect(decided.title).toBe(CHECK_NAME);
-    expect(decided.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
-    expect(decided.summary).toContain("no publication row was staged");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("a deadline whose staged publication never landed its proof names that cause", () => {
-    const decided = decideConclusion({
-      proof: null,
-      outcome: "expired",
-      gate,
-      review: null,
-      unconfirmedCause: "unproven",
-    });
-    expect(decided.desired).toBe("failure");
-    expect(decided.title).toBe(CHECK_NAME);
-    expect(decided.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
-    expect(decided.summary).toContain("the proof never landed");
-  });
-
-  test("a deadline whose proof read failed names that cause", () => {
-    const decided = decideConclusion({
-      proof: null,
-      outcome: "expired",
-      gate,
-      review: null,
-      unconfirmedCause: "unreadable",
-    });
-    expect(decided.desired).toBe("failure");
-    expect(decided.title).toBe(CHECK_NAME);
-    expect(decided.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
-    expect(decided.summary).toContain("could not be read");
-  });
-
-  test("no proof + local-error is the exhausted finalization wording", () => {
+  test("no proof + local-error carries the approved wording", () => {
     const decided = decideConclusion({ proof: null, outcome: "local-error", gate, review: null });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe("Finalization could not be confirmed. Manual inspection may be required.");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
   test("an unreadable App gate is failure — no floor, no allowed list, never a default", () => {
     for (const applied of [null, review("ship it", 100)]) {
       const decided = decideConclusion({ proof: normal, outcome: "expired", gate: null, review: applied });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadableConfig(sha7));
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
       // A gate that could not be read must not be described as if it were.
       expect(decided.summary).not.toContain("floor");
       expect(decided.summary).not.toContain("allowed:");
@@ -1682,13 +1650,10 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       decideConclusion({ proof: normal, outcome: "expired", gate, review: null }),
       decideConclusion({ proof: normal, outcome: "expired", gate: null, review: review("ship it", 96) }),
       decideConclusion({ proof: degraded, outcome: "publication-unknown", gate, review: null }),
-      decideConclusion({ proof: null, outcome: "pre-publication-failure", gate, review: null, reason: "x".repeat(9_000) }),
+      decideConclusion({ proof: null, outcome: "pre-publication-failure", gate, review: null }),
       decideConclusion({ proof: null, outcome: "publication-unknown", gate, review: null }),
       decideConclusion({ proof: null, outcome: "degraded-not-posted", gate, review: null }),
       decideConclusion({ proof: null, outcome: "expired", gate, review: null }),
-      decideConclusion({ proof: null, outcome: "expired", gate, review: null, unconfirmedCause: "unstaged" }),
-      decideConclusion({ proof: null, outcome: "expired", gate, review: null, unconfirmedCause: "unproven" }),
-      decideConclusion({ proof: null, outcome: "expired", gate, review: null, unconfirmedCause: "unreadable" }),
       decideConclusion({ proof: null, outcome: "local-error", gate, review: null }),
     ]) {
       expect(decided.summary.length).toBeLessThanOrEqual(2_000);
@@ -1698,19 +1663,6 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       expect(decided.summary).not.toMatch(/approve|approved|request changes|merge gate required|blocking/i);
       expect(decided.summary).not.toMatch(/APPROVE|REQUEST_CHANGES/);
     }
-  });
-
-  test("an untrusted reason cannot smuggle a token or newlines into a public summary", () => {
-    const decided = decideConclusion({
-      proof: null,
-      outcome: "pre-publication-failure",
-      gate,
-      review: null,
-      reason: `ghp_SECRETVALUE123\nsecond line <script>`,
-    });
-    expect(decided.summary).not.toContain("ghp_SECRETVALUE123");
-    expect(decided.summary).not.toContain("\n");
-    expect(decided.summary).toContain("[REDACTED]");
   });
 });
 
@@ -1820,14 +1772,16 @@ describe("empty increment inheritance (spec §7.9)", () => {
         desired: testCase.desired,
         observed: testCase.desired,
       });
-      expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain(`No new changes at ${SHA.slice(0, 7)}`);
-      expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain(BASE7);
-      if (testCase.baseline === null) {
-        // A baseline that cannot be read fails the check closed.
-        expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain("could not be read");
-        expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain("failing closed");
-      } else if (testCase.gate !== null) {
-        expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain(`verdict "${testCase.baseline.verdict}"`);
+      // The wording follows the branch: a readable baseline keeps the precise
+      // inherited verdict, while an unreadable baseline or gate is an execution
+      // fault and carries the approved category text instead.
+      const sentSummary = (fake.updates[0]!.params as ChecksUpdateParams).output.summary;
+      if (testCase.baseline !== null && testCase.gate !== null) {
+        expect(sentSummary).toContain(`No new changes at ${SHA.slice(0, 7)}`);
+        expect(sentSummary).toContain(BASE7);
+        expect(sentSummary).toContain(`verdict "${testCase.baseline.verdict}"`);
+      } else {
+        expect(sentSummary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
       }
     }
   });
@@ -1895,7 +1849,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     expect(fake.updates).toHaveLength(1);
     expect(fake.updates[0]!.raw.conclusion).toBe("failure");
     expect((fake.updates[0]!.raw.output as { summary: string }).summary).toBe(
-      "Review attempt could not be confirmed complete; publication status is unknown.",
+      TERMINAL_FAILURE_TEXT["unknown-failure"],
     );
     const row = await rowOf(db, attempt);
     expect(row.desired).toBe("failure");
@@ -1975,8 +1929,8 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
 
     expect(fake.updates).toHaveLength(1);
     expect(fake.updates[0]!.raw.conclusion).toBe("failure");
-    expect((fake.updates[0]!.raw.output as { summary: string }).summary).toBe(
-      "Review attempt could not be confirmed complete; publication status is unknown.",
+    expect((fake.updates[0]!.params as ChecksUpdateParams).output.summary).toBe(
+      TERMINAL_FAILURE_TEXT["unknown-failure"],
     );
     const row = await rowOf(db, attempt);
     expect(row.desired).toBe("failure");
@@ -3195,7 +3149,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const { row } = await skipHead(db, fake);
 
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
-    expect(fake.updates[0]!.params.output.summary).toBe(CHECK_SUMMARIES.sameHeadInheritedUnreadable(SHA.slice(0, 7)));
+    expect(fake.updates[0]!.params.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(row.desired).toBe("failure");
     expect(row.observed).toBe("failure");
   });
@@ -3249,12 +3203,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const { row } = await skipHead(db, fake);
 
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
-    expect(fake.updates[0]!.params.output.summary).toBe(
-      CHECK_SUMMARIES.sameHeadInheritedGateUnreadable(
-        SHA.slice(0, 7),
-        "the inherited review carries no readable score",
-      ),
-    );
+    expect(fake.updates[0]!.params.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(row.desired).toBe("failure");
   });
 
@@ -3296,7 +3245,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const { row } = await skipHead(db, fake);
 
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
-    expect(fake.updates[0]!.params.output.summary).toBe(CHECK_SUMMARIES.degraded);
+    expect(fake.updates[0]!.params.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(row.desired).toBe("failure");
   });
 
