@@ -98,6 +98,36 @@ export function attemptSandboxId(attemptId: string): string {
 }
 
 /**
+ * THE container handle. It exists only after the attempt's provisioning row
+ * does (migration 0090): `claimReviewAttempt` is the one writer that mints the
+ * id and this is the one reader a caller may use, so a start path cannot reach
+ * `ensureRunning` for an attempt the database has not heard of. A caller that
+ * asks for a handle without that row is told so instead of being handed one
+ * (this is the enforcement behind "no row means no container", not a note).
+ */
+export async function reviewAttemptSandbox(
+  deps: {
+    env: { SANDBOX: unknown; DB: D1Like };
+    getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
+  },
+  attemptId: string,
+): Promise<ReviewSandbox> {
+  const sandboxId = await readAttemptSandboxId(deps.env.DB, attemptId);
+  if (sandboxId === null) {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: no provisioning row, so no container was ever created for it — nothing may be addressed`,
+    );
+  }
+  return deps.getSandbox(deps.env.SANDBOX, sandboxId);
+}
+
+/** The id the provisioning row committed, or null when the attempt never claimed one. */
+export async function readAttemptSandboxId(db: D1Like, attemptId: string): Promise<string | null> {
+  const row = await db.prepare(READ_SANDBOX_ID_SQL).bind(attemptId).first<{ sandbox_id: string | null }>();
+  return row?.sandbox_id ?? null;
+}
+
+/**
  * The attempt's container could not be proven to be the one this attempt
  * prepared: its marker is missing or different (a replacement incarnation, a
  * lost container, an unreadable filesystem). Nothing was read or destroyed on
@@ -154,10 +184,13 @@ export async function discardReviewAttempt(
  * never re-claimed, from the second entry on.
  */
 const CLAIM_ATTEMPT_SQL = `
-INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation)
-VALUES (?, 'provisioned', ?, ?, ?)
+INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation, sandbox_id)
+VALUES (?, 'provisioned', ?, ?, ?, ?)
 ON CONFLICT (attempt_id) DO NOTHING
 `;
+
+/** The attempt's container id, as the provisioning write minted it. */
+const READ_SANDBOX_ID_SQL = `SELECT sandbox_id FROM review_launches WHERE attempt_id = ?`;
 
 /**
  * Fill the frozen IDENTITY once — key AND generation — for a delivery that had
@@ -213,8 +246,8 @@ WHERE attempt_id = ? AND state = 'launched'
  * container may be paying and cleanup must report `unknown` instead.
  */
 const ABANDON_LAUNCH_SQL = `
-INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms)
-VALUES (?, 'abandoned', ?, ?)
+INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms, sandbox_id)
+VALUES (?, 'abandoned', ?, ?, ?)
 ON CONFLICT (attempt_id) DO UPDATE
    SET state = 'abandoned', abandoned_at_ms = excluded.abandoned_at_ms
  WHERE review_launches.state = 'provisioned'
@@ -415,7 +448,7 @@ export async function claimReviewAttempt(
 ): Promise<"claimed" | "already-claimed"> {
   const written = await db
     .prepare(CLAIM_ATTEMPT_SQL)
-    .bind(attemptId, nowMs, identity?.key ?? null, identity?.generation ?? null)
+    .bind(attemptId, nowMs, identity?.key ?? null, identity?.generation ?? null, attemptSandboxId(attemptId))
     .run();
   return written.meta.changes === 1 ? "claimed" : "already-claimed";
 }
@@ -604,7 +637,10 @@ export async function clearConcludedCheckOwed(db: D1Like): Promise<number> {
  * longer insert a paid row after cleanup decided there was none.
  */
 export async function abandonReviewLaunch(db: D1Like, attemptId: string, nowMs: number): Promise<boolean> {
-  const written = await db.prepare(ABANDON_LAUNCH_SQL).bind(attemptId, nowMs, nowMs).run();
+  const written = await db
+    .prepare(ABANDON_LAUNCH_SQL)
+    .bind(attemptId, nowMs, nowMs, attemptSandboxId(attemptId))
+    .run();
   return written.meta.changes === 1;
 }
 
@@ -1821,7 +1857,7 @@ export async function prepareReviewAttempt(input: {
   }
   if (sandbox === null) {
     progress.failureStage = "sandbox";
-    sandbox = await deps.getSandbox(deps.env.SANDBOX, attemptSandboxId(attemptId));
+    sandbox = await reviewAttemptSandbox(deps, attemptId);
     input.onSandbox(sandbox);
   }
   const marker = attemptMarker(attemptId);

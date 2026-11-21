@@ -158,16 +158,17 @@ export type ReviewSandbox = {
    */
   destroy(): Promise<void>;
   /**
-   * Revoke this attempt for good and answer whether a container is still
-   * running. Ids are unique per attempt, so this is about exactly one attempt's
-   * sandbox. The revocation is durable and beats every later start: after it,
-   * no call on this handle may provision a container. `running: false` is
-   * therefore the fact a successor may take the attempt's PR on — the attempt
-   * cannot act now AND cannot start acting again — while `running: true` means
-   * a start won the race and the PR must stay where it is. Absent means the
-   * host cannot revoke, which is not a stop either.
+   * Observe, then revoke: ONE critical section answers whether this attempt's
+   * container is running, and revokes the attempt only when it is NOT.
+   *
+   * `{ revoked: true, running: false }` is the fact a successor may take the
+   * attempt's PR on — nothing can act now, and the durable flag stops every
+   * later start. `{ revoked: false, running: true }` is a live holder: nothing
+   * was revoked and the PR must stay where it is (`revoked: false` is the
+   * promise that no authority was taken away from an attempt that can still
+   * act). Absent means the host cannot observe, which is not a stop either.
    */
-  revoke?(): Promise<{ running: boolean }>;
+  revoke?(): Promise<{ revoked: boolean; running: boolean }>;
 };
 
 /**
@@ -723,19 +724,23 @@ export class SandboxV1 extends DurableObject {
   }
 
   /**
-   * The successor's takeover fact (spec §7.9): revoke durably, then answer
-   * whether anything is still running. Both steps sit inside the ONE critical
-   * section that also serialises starts, so a start either completed before
-   * this call (`running: true`, the successor refuses) or meets the flag on its
-   * way in. The answer never reports a container this DO did not just prove.
+   * The successor's takeover fact (spec §7.9): observe, then revoke — both
+   * inside the ONE critical section that also serialises starts, so a start
+   * either completed before this call (`running: true`, nothing revoked, the
+   * successor refuses) or meets the flag on its way in. The answer never
+   * reports a container this DO did not just prove.
    */
-  async revoke(): Promise<{ running: boolean }> {
+  async revoke(): Promise<{ revoked: boolean; running: boolean }> {
     return this.exclusive(async () => {
+      // Observe FIRST. A live container is reported untouched: revoking it
+      // would take away authority from an attempt that can still act, which is
+      // the one limb the successor rule forbids.
+      if (this.ctx.container?.running === true) return { revoked: false, running: true };
       if (!this.revoked) {
         this.revoked = true;
         await this.ctx.storage.put(REVOKED_KEY, true);
       }
-      return { running: this.ctx.container?.running === true };
+      return { revoked: true, running: false };
     });
   }
 }

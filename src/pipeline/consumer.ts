@@ -125,9 +125,11 @@ import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 // linking the publication the probe found, and releasing the claim to recovery.
 import { type PublicationRow } from "../store/finding-lifecycle";
 import { type Scope } from "../../packages/shared/src/recheck-wire";
+import type { D1Like } from "../store/types";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import {
   attemptSandboxId,
+  readAttemptSandboxId,
   type RunnerAppConfig,
 } from "./review-attempt";
 import {
@@ -1370,6 +1372,9 @@ export function createProcessDeps(
   return deps;
 }
 
+/** What a successor may conclude about an expired attempt's sandbox (spec §7.9). */
+export type SuccessorStopEvidence = "no-container" | "revoked" | "running" | "unavailable";
+
 /**
  * The Queue send stamp as milliseconds, or `null` when the platform supplied
  * none. A `Date` is the platform's form; a numeric stamp is accepted for
@@ -1385,26 +1390,41 @@ function queueStampOf(timestamp: unknown): number | null {
 }
 
 /**
- * The successor's takeover fact (spec §7.9): revoke the PRIOR attempt's own
- * sandbox and require it to answer that nothing is running. Sandbox ids are
- * unique per attempt, so this bears on that attempt and nobody else's — and
- * because the revocation is durable BEFORE the answer, `true` means the
- * attempt cannot act now and cannot start acting again. A live container, an
- * absent capability and a failed call are all NOT a stop: the caller then
- * leaves the PR where it is instead of guessing from the fence.
+ * The successor's two legal facts, in order.
+ *
+ * 1. NO CONTAINER COULD EXIST: the attempt has no provisioning row, and that row
+ *    is the precondition of every container handle (migration 0090) — nothing
+ *    can have started. This is a positive fact about this database, not an
+ *    inference from silence.
+ * 2. THE CONTAINER ANSWERED NOT-RUNNING, and the same critical section revoked
+ *    the attempt so it cannot start again. `running: true` writes nothing: an
+ *    attempt whose container is alive keeps its PR and its authority.
+ *
+ * Anything else — an unreadable row, a host that cannot observe or revoke, a
+ * throw — is `unavailable`, and the caller holds the PR where it is.
  */
-export async function priorSandboxRevoked(
+export async function priorAttemptStopEvidence(
+  db: D1Like,
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>,
   binding: unknown,
   attemptId: string,
-): Promise<boolean> {
+): Promise<SuccessorStopEvidence> {
+  let sandboxId: string | null;
   try {
-    const sandbox = await getSandbox(binding, attemptSandboxId(attemptId));
-    if (sandbox.revoke === undefined) return false;
-    return (await sandbox.revoke()).running === false;
+    sandboxId = await readAttemptSandboxId(db, attemptId);
+  } catch {
+    return "unavailable";
+  }
+  if (sandboxId === null) return "no-container";
+  try {
+    const sandbox = await getSandbox(binding, sandboxId);
+    if (sandbox.revoke === undefined) return "unavailable";
+    const verdict = await sandbox.revoke();
+    if (verdict.running) return "running";
+    return verdict.revoked ? "revoked" : "unavailable";
   } catch {
     // An unreadable sandbox is not a stopped one.
-    return false;
+    return "unavailable";
   }
 }
 
@@ -2066,15 +2086,23 @@ async function processMessage(
     // for one attempt cannot take another's PR.
     if (!admission.ok && admission.reason === "pr-held" && admission.heldExpired) {
       const priorAttemptId = admission.heldAttemptId;
-      if (await priorSandboxRevoked(deps.getSandbox, deps.env.SANDBOX, priorAttemptId)) {
+      const evidence = await priorAttemptStopEvidence(
+        deps.env.DB,
+        deps.getSandbox,
+        deps.env.SANDBOX,
+        priorAttemptId,
+      );
+      if (evidence === "no-container" || evidence === "revoked") {
         admission = await acquireInflight(deps.env.DB, inflightKey, {
           ...admissionOpts,
           priorStopped: { attemptId: priorAttemptId },
         });
       } else {
         deps.log.warn(
-          { ...baseFields, prior_attempt_id: priorAttemptId, event: "review_succession_refused" },
-          "the prior attempt's sandbox is not observed stopped — the PR and its capacity stay with it, never reused on expiry",
+          { ...baseFields, prior_attempt_id: priorAttemptId, succession: evidence, event: "review_succession_refused" },
+          evidence === "running"
+            ? "the prior attempt's container is still running — the PR and its capacity stay with that holder"
+            : "the prior attempt's sandbox could not be observed — no takeover; the PR stays held",
         );
       }
     }

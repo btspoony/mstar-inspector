@@ -125,6 +125,7 @@ import {
   RoundBudgetSpent,
   STDERR_TAIL_MAX,
   attemptSandboxId,
+  reviewAttemptSandbox,
   boundedStepTimeout,
   chainHeadSelector,
   effectiveModelChain,
@@ -411,6 +412,8 @@ export type ConsumerLogFields = {
    * (`review_succession_refused` only): the PR stays held by that attempt.
    */
   prior_attempt_id?: string;
+  /** Which legal fact the successor lacked (`review_succession_refused` only). */
+  succession?: "no-container" | "revoked" | "running" | "unavailable";
   /**
    * Why the consumer stopped waiting on the Check hook (§7.10 give-up) — the
    * free-form detail, distinct from `reason`'s closed admission vocabulary.
@@ -4767,7 +4770,7 @@ export async function reviewAttempt(
   // id (which never starts one) and every PAID action runs through the guarded
   // form inside `runReviewAttempt`: ONE request proves the attempt's marker and
   // executes, so there is no proof-then-act window to race.
-  const sandbox = await deps.getSandbox(deps.env.SANDBOX, attemptSandboxId(attemptId));
+  const sandbox = await reviewAttemptSandbox(deps, attemptId);
   const cached = deps.credentials.get(attemptId);
   const token = cached?.token ?? (await mintSandboxReadToken({ payload, commenter: requireCommenter(deps, payload) }));
   const fields = attemptFields(payload, level, attemptId, prepared.headSha, prepared.budget);
@@ -6408,7 +6411,7 @@ export async function cleanupAttempt(
       // The handle is re-derived by attempt id — a resumed invocation has no
       // previous one — and the marker gate inside `destroyMarked` decides
       // whether this really is the attempt's container.
-      const sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
+      const sandbox = await reviewAttemptSandbox(deps, attemptId);
       // Proven sameness, not a name: a container this attempt cannot prove
       // it prepared is left alone (its result may be the only copy) and the
       // teardown is reported as unknown.

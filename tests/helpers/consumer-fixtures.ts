@@ -207,12 +207,14 @@ export function preclaimedDb(db: TestD1): D1Like {
         all: async () => ({ results: [] }),
         run: async () => {
           // The row the earlier entry left behind: this caller's insert
-          // conflicts, exactly as a replayed prepare sees it.
+          // conflicts, exactly as a replayed prepare sees it. It carries the
+          // sandbox id the CLAIM mints (bound last), because that row is the
+          // precondition of every container handle (migration 0090).
           db.raw
             .prepare(
-              "INSERT OR IGNORE INTO review_launches (attempt_id, state, claimed_at_ms) VALUES (?, 'provisioned', ?)",
+              "INSERT OR IGNORE INTO review_launches (attempt_id, state, claimed_at_ms, sandbox_id) VALUES (?, 'provisioned', ?, ?)",
             )
-            .run(String(bound[0]), Number(bound[1]));
+            .run(String(bound[0]), Number(bound[1]), String(bound[4]));
           return { results: [], meta: { changes: 0, last_row_id: 0 } };
         },
       };

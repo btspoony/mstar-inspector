@@ -139,18 +139,22 @@ const PAID_STATE_UNKNOWN = `EXISTS (SELECT 1 FROM review_launches l
 /**
  * Does this row still consume a cap slot? Live rows do; so do expired rows
  * whose attempt may STILL ACT — an expired lease says the guard lapsed, never
- * that its container stopped. An expired row is free only on evidence: its
- * attempt was revoked by the successor that took its PR, or its launch row
- * proves the paid exec was never sent (`provisioned`/`abandoned`; the
- * provisioning INSERT precedes every container start, so an absent row rules
- * the event out by invariant). Binds, in order: now (unexpired side), now
- * (expired side of the act test).
+ * that its container stopped.
+ *
+ * An expired row is free on exactly TWO facts, matching the takeover rule: the
+ * attempt was REVOKED (its container was observed not running, in the same
+ * transition that moved the PR), or no provisioning row exists at all — that
+ * row is the precondition of every container handle (migration 0090), so its
+ * absence rules the container out. `provisioned` is NOT free: the container is
+ * created before the paid call, so a provisioning row with no `launched` row
+ * may be running right now.
+ *
+ * Binds, in order: now (unexpired side), now (expired side of the act test).
  */
 const HOLDS_CAP_SQL = `(r.expires_at > ? OR ${PAID_STATE_UNKNOWN}
           OR (r.expires_at <= ? AND EXISTS (
                 SELECT 1 FROM review_launches l
                  WHERE l.attempt_id = r.attempt_id
-                   AND l.state NOT IN ('provisioned', 'abandoned')
                    AND l.revoked_ms IS NULL)))`;
 
 /**

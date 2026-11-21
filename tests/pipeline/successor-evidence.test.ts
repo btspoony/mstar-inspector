@@ -38,8 +38,8 @@ import {
   type AdapterScript,
 } from "../worker/helpers/check-reconcile";
 
-const { createReviewConsumer, priorSandboxRevoked } = await import("../../src/pipeline/consumer");
-const { attemptSandboxId } = await import("../../src/pipeline/review-attempt");
+const { createReviewConsumer, priorAttemptStopEvidence } = await import("../../src/pipeline/consumer");
+const { attemptSandboxId, readAttemptSandboxId, reviewAttemptSandbox } = await import("../../src/pipeline/review-attempt");
 const { SandboxV1 } = await import("../../src/pipeline/sandbox");
 const { shellCommand } = await import("../../src/pipeline/shell-command");
 const { recordTerminalDispatch } = await import("../../src/store/review-checks");
@@ -136,63 +136,106 @@ describe("§7.9 the successor transition", () => {
     expect(rowsOf(db)).toEqual(["attempt-1"]);
   });
 
-  test("the stop is a REVOCATION, not a reading: a live container, no capability or a throw is not a stop", async () => {
+  test("the two legal facts: no provisioning row, or a container that answered not-running", async () => {
     const asked: string[] = [];
-    const getSandboxDouble = (answer: (() => Promise<{ running: boolean }>) | undefined) => async (
-      _binding: unknown,
-      id: string,
-    ) => {
-      asked.push(id);
-      const sandbox: Record<string, unknown> = {
-        runCommand: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-        claimMarker: async () => "written",
-        runMarked: async () => ({ kind: "unknown" }),
-        destroyMarked: async () => "unknown",
-        destroy: async () => {},
+    const getSandboxDouble = (answer: (() => Promise<{ revoked: boolean; running: boolean }>) | undefined) =>
+      async (_binding: unknown, id: string) => {
+        asked.push(id);
+        const sandbox: Record<string, unknown> = {
+          runCommand: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+          claimMarker: async () => "written",
+          runMarked: async () => ({ kind: "unknown" }),
+          destroyMarked: async () => "unknown",
+          destroy: async () => {},
+        };
+        if (answer !== undefined) sandbox.revoke = answer;
+        return sandbox as never;
       };
-      if (answer !== undefined) sandbox.revoke = answer;
-      return sandbox as never;
-    };
 
-    expect(await priorSandboxRevoked(getSandboxDouble(async () => ({ running: false })), {}, "attempt-1")).toBe(true);
-    // It revoked THAT attempt's sandbox, never the PR's or the caller's.
-    expect(asked).toEqual([attemptSandboxId("attempt-1")]);
-    // A container that won the start race keeps the PR where it is.
-    expect(await priorSandboxRevoked(getSandboxDouble(async () => ({ running: true })), {}, "attempt-1")).toBe(false);
-    expect(await priorSandboxRevoked(getSandboxDouble(undefined), {}, "attempt-1")).toBe(false);
+    // Fact 2: no provisioning row means no container was ever created, so no
+    // handle is even addressed.
+    const empty = createMigratedTestD1();
+    expect(await priorAttemptStopEvidence(empty, getSandboxDouble(async () => ({ revoked: true, running: false })), {}, "attempt-1")).toBe(
+      "no-container",
+    );
+    expect(asked).toEqual([]);
+
+    // Fact 1: the row exists, so the attempt's OWN sandbox is asked — and the
+    // id addressed is the one the provisioning row committed.
+    const db = createMigratedTestD1();
+    seedProvisionedAttempt(db, "attempt-1", "review-minted-by-the-claim");
+    expect(await readAttemptSandboxId(db, "attempt-1")).toBe("review-minted-by-the-claim");
+    expect(await priorAttemptStopEvidence(db, getSandboxDouble(async () => ({ revoked: true, running: false })), {}, "attempt-1")).toBe("revoked");
+    expect(asked).toEqual(["review-minted-by-the-claim"]);
+
+    // A live container: nothing was revoked and the hold stands.
+    expect(await priorAttemptStopEvidence(db, getSandboxDouble(async () => ({ revoked: false, running: true })), {}, "attempt-1")).toBe(
+      "running",
+    );
+    // No capability, or a throw, is not a stop.
+    expect(await priorAttemptStopEvidence(db, getSandboxDouble(undefined), {}, "attempt-1")).toBe("unavailable");
     expect(
-      await priorSandboxRevoked(
+      await priorAttemptStopEvidence(
+        db,
         getSandboxDouble(async () => {
           throw new Error("the revocation write failed");
         }),
         {},
         "attempt-1",
       ),
-    ).toBe(false);
-    expect(
-      await priorSandboxRevoked(async () => {
-        throw new Error("the sandbox could not be addressed");
-      }, {}, "attempt-1"),
-    ).toBe(false);
+    ).toBe("unavailable");
   });
 
-  test("capacity counts what may still run: an expired, unrevoked attempt holds its slot", async () => {
+  test("no start path can obtain a handle without a provisioning row", async () => {
+    const addressed: string[] = [];
+    const getSandbox = async (_binding: unknown, id: string) => {
+      addressed.push(id);
+      return { revoke: async () => ({ revoked: true, running: false }) } as never;
+    };
     const db = createMigratedTestD1();
-    seedPaidAttempt(db, "attempt-1");
+    const deps = { env: { SANDBOX: {}, DB: db }, getSandbox };
+
+    // No row: the handle is refused, and the sandbox is never even addressed.
+    await expect(reviewAttemptSandbox(deps, "attempt-1")).rejects.toThrow(/no provisioning row/);
+    expect(addressed).toEqual([]);
+
+    // With a row, the id is the one the CLAIM minted — never a local derivation.
+    seedProvisionedAttempt(db, "attempt-1", "review-minted-by-the-claim");
+    await reviewAttemptSandbox(deps, "attempt-1");
+    expect(addressed).toEqual(["review-minted-by-the-claim"]);
+  });
+
+  test("a provisioned, unobserved attempt holds its slot — `provisioned` is not free", async () => {
+    const db = createMigratedTestD1();
+    // A container is created BEFORE the paid call, so a provisioning row with
+    // no `launched` row may be running right now.
+    seedProvisionedAttempt(db, "attempt-1");
     expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
-    // Cap 1, the row expired — but attempt-1's paid run returned and nothing
-    // revoked it, so its container may still run: no slot for another PR.
     expect(
       await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-2", systemCap: 1, now: LATER }),
     ).toEqual({ ok: false, reason: "system-cap" });
-    // With the attempt revoked (a successor took its PR), the slot is free.
+    // Only the observed stop frees it (a successor revoked in the same
+    // transition that moved the PR).
     db.raw.prepare("UPDATE review_launches SET revoked_ms = ? WHERE attempt_id = ?").run(T0, "attempt-1");
     expect(
       await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-2", systemCap: 1, now: LATER }),
     ).toEqual({ ok: true });
   });
 
-  test("a revoked attempt cannot start a container again", async () => {
+  test("capacity counts what may still run: a paid, unrevoked attempt holds its slot", async () => {
+    const db = createMigratedTestD1();
+    seedPaidAttempt(db, "attempt-1");
+    expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
+    expect(
+      await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-2", systemCap: 1, now: LATER }),
+    ).toEqual({ ok: false, reason: "system-cap" });
+    db.raw.prepare("UPDATE review_launches SET revoked_ms = ? WHERE attempt_id = ?").run(T0, "attempt-1");
+    expect(
+      await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-2", systemCap: 1, now: LATER }),
+    ).toEqual({ ok: true });
+  });
+
+  test("a live container is left alone; a stopped one is revoked and can never start again", async () => {
     const contexts: Array<{ started: unknown[] }> = [];
     const container = (running: boolean) => {
       const state = { running };
@@ -227,17 +270,17 @@ describe("§7.9 the successor transition", () => {
         blockConcurrencyWhile: async (fn: () => Promise<void>) => await fn(),
       };
       return new (SandboxV1 as unknown as new (ctx: unknown, env: unknown) => {
-        revoke: () => Promise<{ running: boolean }>;
+        revoke: () => Promise<{ revoked: boolean; running: boolean }>;
         runCommand: (cmd: unknown) => Promise<unknown>;
       })(ctx, {});
     };
 
-    // Still running: the revocation lands, and the answer says so (the
-    // successor must then leave the PR alone).
-    expect(await sandboxFor(true).revoke()).toEqual({ running: true });
+    // Still running: the observation is taken, NOTHING is revoked, and the
+    // successor must leave the PR with that holder.
+    expect(await sandboxFor(true).revoke()).toEqual({ revoked: false, running: true });
 
     const sandbox = sandboxFor(false);
-    expect(await sandbox.revoke()).toEqual({ running: false });
+    expect(await sandbox.revoke()).toEqual({ revoked: true, running: false });
     // The revoked attempt cannot provision a container — every start path goes
     // through the one gate, and a replay cannot resurrect it.
     await expect(sandbox.runCommand(shellCommand("true"))).rejects.toThrow(/revoked/);
@@ -297,15 +340,22 @@ const PRIOR_KEY: InflightKey = {
   workspace_id: "default",
 };
 
+/** A provisioning row: the container may exist, the paid exec was never sent. */
+function seedProvisionedAttempt(db: TestD1, attemptId: string, sandboxId = attemptSandboxId(attemptId)): void {
+  db.raw
+    .prepare(`INSERT INTO review_launches (attempt_id, state, claimed_at_ms, sandbox_id) VALUES (?, 'provisioned', ?, ?)`)
+    .run(attemptId, 1, sandboxId);
+}
+
 /** A `persisted` launch row: the paid exec returned, and its container may still run. */
 function seedPaidAttempt(db: TestD1, attemptId: string): void {
   db.raw
     .prepare(
       `INSERT INTO review_launches
-         (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
-       VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
+         (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome, sandbox_id)
+       VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted', ?)`,
     )
-    .run(attemptId, 1, 2, 3);
+    .run(attemptId, 1, 2, 3, attemptSandboxId(attemptId));
 }
 
 function revokedAtOf(db: TestD1, attemptId: string): number | null {
@@ -317,6 +367,9 @@ function revokedAtOf(db: TestD1, attemptId: string): number | null {
 
 /** The prior attempt's admission row, long expired, with an accounted paid state. */
 async function seedPriorRow(db: TestD1): Promise<void> {
+  // The prior attempt provisioned a container, so its row is the precondition
+  // an observation needs — and the capacity it took is not free.
+  seedProvisionedAttempt(db, "attempt-prior");
   expect(
     await acquireInflight(db, PRIOR_KEY, {
       systemCap: 32,
@@ -395,7 +448,7 @@ describe("§7.9 admission is the successor's one gate", () => {
     await seedPriorRow(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      getSandbox: async () => ({ ...h.fakeSandbox, revoke: async () => ({ running: true }) }),
+      getSandbox: async () => ({ ...h.fakeSandbox, revoke: async () => ({ revoked: false, running: true }) }),
     });
 
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
@@ -408,6 +461,9 @@ describe("§7.9 admission is the successor's one gate", () => {
     expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     const refusal = h.logLines.find((line) => line.fields.event === "review_succession_refused");
     expect(refusal?.fields.prior_attempt_id).toBe("attempt-prior");
+    expect(refusal?.fields.succession).toBe("running");
+    // The observation revoked nothing: the holder keeps its authority.
+    expect(revokedAtOf(db, "attempt-prior")).toBeNull();
   });
 
   test("the prior attempt's stopped sandbox admits the successor and the review runs", async () => {
@@ -417,7 +473,7 @@ describe("§7.9 admission is the successor's one gate", () => {
     await seedPriorRow(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      getSandbox: async () => ({ ...h.fakeSandbox, revoke: async () => ({ running: false }) }),
+      getSandbox: async () => ({ ...h.fakeSandbox, revoke: async () => ({ revoked: true, running: false }) }),
     });
 
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
@@ -428,5 +484,7 @@ describe("§7.9 admission is the successor's one gate", () => {
     expect(h.commenterCalls.length).toBeGreaterThan(0);
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.logLines.some((line) => line.fields.event === "review_succession_refused")).toBe(false);
+    // Observed not-running → revoked and succeeded in ONE transition.
+    expect(revokedAtOf(db, "attempt-prior")).not.toBeNull();
   });
 });
