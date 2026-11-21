@@ -997,12 +997,12 @@ describe("the publication settlement mark", () => {
     expect(handoff?.settledEffects).toContain("publication");
   });
 
-  test("an apply whose settlement never lands leaves the attempt unmeasured", async () => {
+  test("a foreground settlement failure leaves nothing applied-but-unmeasured", async () => {
     const { db, ref, payload, publicationId } = await stagedPublication();
     const publishing = await makeDeps({ db });
     publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
-    // The apply succeeds; the settlement write is the crash window: it never
-    // lands, and nothing later revisits an applied row.
+    // The settlement rides the apply transaction; its failure rolls the apply
+    // back, so the journal stays recoverable instead of applied-and-unmeasured.
     const underlying = db as unknown as { prepare(query: string): unknown };
     publishing.deps.env.DB = new Proxy(db as unknown as object, {
       get(target, prop) {
@@ -1021,9 +1021,43 @@ describe("the publication settlement mark", () => {
 
     expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
 
-    expect((await readPublication(db as never, publicationId))?.phase).toBe("applied");
-    // Not measured: the report says so instead of timing a step's finish.
+    // Confirmed and still due for recovery: never `applied` without its mark.
+    expect((await readPublication(db as never, publicationId))?.phase).toBe("confirmed");
     expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.settledMs).toBeNull();
+  });
+
+  test("a resumed publication whose Check is open and held elsewhere is not settled", async () => {
+    const { db, ref, payload, publicationId } = await stagedPublication();
+    // The attempt froze a Check pair; ANOTHER holder owns the open row, so the
+    // resumed host's `settlementFor` finds nothing to adopt.
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: "someone-else",
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`test setup: claim failed: ${claimed.kind}`);
+    const check = db.raw
+      .prepare("SELECT attempt_key, generation FROM review_checks WHERE id = ?")
+      .get(claimed.attempt.identity.attemptId) as { attempt_key: string; generation: number };
+    db.raw
+      .prepare("UPDATE review_launches SET attempt_key = ?, attempt_generation = ? WHERE attempt_id = ?")
+      .run(check.attempt_key, check.generation, ATTEMPT_ID);
+
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = undefined;
+    expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
+
+    // The rule discovers the frozen pair: the open row is an obligation, so the
+    // publication is recorded but the attempt is not certified as settled.
+    expect((await readPublication(db as never, publicationId))?.phase).toBe("applied");
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.settledMs).toBeNull();
+    expect(handoff?.settledEffects).toContain("publication");
   });
 
   test("a journal that refuses to close leaves the attempt unmeasured", async () => {

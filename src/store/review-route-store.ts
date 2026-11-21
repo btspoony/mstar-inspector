@@ -363,8 +363,6 @@ export async function markAttemptSettled(
 export type AttemptSettlementInput = {
   attemptId: string;
   landed: readonly SettlementEffect[];
-  /** A Check exists for this attempt, so its conclusion is one of the obligations. */
-  checkInvolved: boolean;
 };
 
 /**
@@ -375,8 +373,9 @@ export type AttemptSettlementInput = {
  * The obligations come from the attempt's own durable facts:
  * - the OUTCOME lane — `publication` (the journal reached applied, or a
  *   definitive close) or `failure-row` (the failure settlement);
- * - `check` when the attempt has a Check. Its conclusion is a DURABLE fact: a
- *   row that is still open is not a conclusion, whatever a handle saw;
+ * - `check` when the attempt froze a Check pair on its launch row. The row is
+ *   read through that pair, so a Check another holder owns is still an
+ *   obligation, and an OPEN row is not a conclusion whatever a handle saw;
  * - the failed-claim stamp when the failure lane names a commit — the lane that
  *   can leave a stale "1" claiming a review that will never come. A
  *   publication's success is its claim's discharge.
@@ -393,18 +392,21 @@ async function settlementPlan(
   const handoff = await readAttemptHandoffByAttempt(db, input.attemptId);
   if (handoff === null) return null;
   const landed = new Set<SettlementEffect>([...(handoff.settledEffects ?? []), ...input.landed]);
-  const checkOpen = await attemptCheckIsOpen(db, input.attemptId);
+  // The pair the attempt froze is the ONLY fact that says a Check exists; the
+  // caller's handle says what it could reach, not what the attempt owes.
+  const checkInvolved = (await readAttemptCheckKey(db, input.attemptId)) !== null;
+  const checkOpen = checkInvolved ? await attemptCheckIsOpen(db, input.attemptId) : false;
   if (checkOpen) landed.delete("check");
-  else if (input.checkInvolved) landed.add("check");
+  else if (checkInvolved) landed.add("check");
 
   let required: SettlementEffect[];
   if (landed.has("skip")) {
     required = ["skip"];
   } else if (landed.has("failure-row")) {
-    required = settlementObligationsOf(handoff.payload, input.checkInvolved);
+    required = settlementObligationsOf(handoff.payload, checkInvolved);
   } else if (landed.has("publication")) {
     required = ["publication"];
-    if (input.checkInvolved) required.push("check");
+    if (checkInvolved) required.push("check");
   } else {
     return null;
   }

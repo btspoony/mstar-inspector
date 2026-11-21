@@ -805,10 +805,9 @@ async function settleAttemptPublication(
   attemptId: string,
   fields: ConsumerLogFields,
   landed: readonly SettlementEffect[],
-  checkInvolved: boolean,
 ): Promise<void> {
   try {
-    await settleAttemptIfDischarged(deps.env.DB, { attemptId, landed, checkInvolved }, Date.now());
+    await settleAttemptIfDischarged(deps.env.DB, { attemptId, landed }, Date.now());
   } catch (err) {
     deps.log.warn(
       fields,
@@ -1100,7 +1099,6 @@ async function applyPendingLifecycleJournals(
                 attemptId,
                 publicationId: id,
                 landed: ["publication"],
-                checkInvolved: (await readAttemptCheckKey(db, attemptId)) !== null,
               },
               at,
             );
@@ -2155,7 +2153,17 @@ async function publishDegradedPublication(input: {
     }
     let applied = false;
     try {
-      applied = await applyPublishedLifecycle(input.db, staged.id, lease, Date.now());
+      const at = Date.now();
+      // Same rule as the normal publish: the settlement record rides the apply
+      // transaction, so an applied degraded notice cannot go unrecorded.
+      const settlement = await settlementStatementIfDischarged(
+        input.db,
+        { attemptId: input.attemptId, publicationId: staged.id, landed: ["publication"] },
+        at,
+      );
+      applied = await applyPublishedLifecycle(input.db, staged.id, lease, at, undefined, () =>
+        settlement === null ? [] : [settlement],
+      );
     } catch {
       applied = false;
     }
@@ -4809,7 +4817,6 @@ async function collectPhase(
         attemptId,
         fields,
         degradedOutcome.publicationClosed ? ["publication"] : [],
-        check !== undefined,
       );
     } else {
       await check?.terminalize(degradedOutcome.publicationId, "publication-unknown");
@@ -4818,7 +4825,7 @@ async function collectPhase(
       // whether it is still open.
       if (degradedOutcome.phase === "confirmed") {
         await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
-        await settleAttemptPublication(deps, attemptId, fields, ["publication"], check !== undefined);
+        await settleAttemptPublication(deps, attemptId, fields, ["publication"]);
       }
       // `unknown` stays unsettled: read-only discovery still owes the send.
     }
@@ -5298,7 +5305,6 @@ async function publishPhase(
         attemptId,
         fields,
         publicationClosed ? ["publication"] : [],
-        check !== undefined,
       );
       return { kind: "ok" };
     }
@@ -5354,7 +5360,19 @@ async function publishPhase(
   // rerun the model — the confirmed row stays due for M8 recovery.
   let applied = false;
   try {
-    applied = await applyPublishedLifecycle(deps.env.DB, stagedId, lease, Date.now());
+    const at = Date.now();
+    // The settlement rides the apply's own transaction: the applied mark and
+    // the attempt's settlement record cannot separate. A settlement the plan
+    // cannot even build aborts the apply — the journal stays recoverable
+    // instead of becoming applied-but-unmeasured.
+    const settlement = await settlementStatementIfDischarged(
+      deps.env.DB,
+      { attemptId, publicationId: stagedId, landed: ["publication"] },
+      at,
+    );
+    applied = await applyPublishedLifecycle(deps.env.DB, stagedId, lease, at, undefined, () =>
+      settlement === null ? [] : [settlement],
+    );
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(fields, `lifecycle apply threw after a confirmed publication: ${detail}`);
@@ -5605,7 +5623,7 @@ async function publishPhase(
   await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
   // The rule decides completeness from durable facts: an open Check leaves the
   // attempt unsettled even though the publication is applied.
-  await settleAttemptPublication(deps, attemptId, fields, ["publication"], check !== undefined);
+  await settleAttemptPublication(deps, attemptId, fields, ["publication"]);
   return { kind: "ok" };
 }
 
@@ -5638,9 +5656,9 @@ export async function settleAttemptFailure(
    * certifies the attempt by itself. A delivery with no handoff row (a direct
    * phase caller) matches no row.
    */
-  const markSettled = async (landed: readonly SettlementEffect[], checkInvolved: boolean): Promise<void> => {
+  const markSettled = async (landed: readonly SettlementEffect[]): Promise<void> => {
     try {
-      await settleAttemptIfDischarged(deps.env.DB, { attemptId, landed, checkInvolved }, Date.now());
+      await settleAttemptIfDischarged(deps.env.DB, { attemptId, landed }, Date.now());
     } catch (markErr) {
       deps.log.warn(
         { ...payloadIdentityFields(payload), attempt_id: attemptId },
@@ -5656,7 +5674,7 @@ export async function settleAttemptFailure(
     // The moved head's own settlement (skip row + Check conclusion + outbox
     // row) ran before this settlement was called, so there is nothing left to
     // finish and the mark can say so.
-    await markSettled(["skip"], false);
+    await markSettled(["skip"]);
     return { kind: "ok" };
   }
   const progress: ReviewAttemptProgress = {
@@ -5852,7 +5870,7 @@ export async function settleAttemptFailure(
     // The row is durable here (the !durableOutcome case returned `unknown`
     // above) and the Check conclusion just landed; the rule decides whether
     // that closes the attempt.
-    await markSettled(["failure-row"], check !== undefined);
+    await markSettled(["failure-row"]);
     return { kind: "budget-exhausted", outcome: budgetOutcome };
   }
 
@@ -6025,7 +6043,7 @@ export async function settleAttemptFailure(
   const effects: SettlementEffect[] = [];
   if (durableOutcome) effects.push("failure-row");
   if (claimStampLanded) effects.push("claim-stamp");
-  await markSettled(effects, check !== undefined);
+  await markSettled(effects);
   throw err;
 }
 /**

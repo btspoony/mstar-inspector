@@ -96,7 +96,7 @@ import {
 import { createSecretbox } from "../dashboard/secretbox";
 import { createReviewCommenter, PreparedSendRejected, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 import { sha256Hex } from "../pipeline/review-threads";
-import { readAttemptCheckKey, settlementStatementIfDischarged } from "../store/review-route-store";
+import { settlementStatementIfDischarged } from "../store/review-route-store";
 
 // ---------------------------------------------------------------------------
 // Summary + budget constants (spec §7.11.1 verbatim values)
@@ -753,7 +753,6 @@ async function settlementTailStatements(
       attemptId,
       publicationId: row.id,
       landed: ["publication"],
-      checkInvolved: (await readAttemptCheckKey(db, attemptId)) !== null,
     },
     nowMs,
   );

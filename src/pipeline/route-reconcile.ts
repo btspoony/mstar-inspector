@@ -40,7 +40,6 @@ import {
   listIncompleteSettlements,
   listOwedSuccessors,
   markSuccessorDelivered,
-  readAttemptCheckKey,
   restoreCommentClaimForRecovery,
   settleAttemptIfDischarged,
   successorGeneration,
@@ -116,7 +115,6 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       // written for either; retention owns them.
       const launch = await readReviewLaunch(env.DB, handoff.attemptId);
       if (launch === null || (launch.state !== "failed" && launch.state !== "persisted")) continue;
-      const checkKey = await readAttemptCheckKey(env.DB, handoff.attemptId);
       if (!landed.has("failure-row")) {
         await createFailureStore(env.DB).record({
           target_id: handoff.payload.targetId,
@@ -153,7 +151,7 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       // effects this pass landed are the facts; it never certifies the rest.
       await settleAttemptIfDischarged(
         env.DB,
-        { attemptId: handoff.attemptId, landed: [...landed], checkInvolved: checkKey !== null },
+        { attemptId: handoff.attemptId, landed: [...landed] },
         nowMs,
       );
     } catch {
