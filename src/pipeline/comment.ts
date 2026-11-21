@@ -90,7 +90,7 @@ import { redactSecrets } from "./redact";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
-import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
+import type { Lease, LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
 import {
@@ -1320,11 +1320,18 @@ export type PostPreparedReviewInput = CommenterTargetInput & {
    * The owning Check attempt, when the caller IS that attempt's send lane
    * (spec §7.9). Present → this send takes the publication lease of its action
    * (`comment:<publicationId>`) and re-proves it on the last line before the
-   * mutation. Absent → a caller outside an attempt (the recovery lane, a test
-   * double): no publication authority is asserted, exactly the `notAfterMs`
-   * convention.
+   * mutation.
    */
   attemptId?: string;
+  /**
+   * The §7.7 journal claim (`review_publications` holder/epoch/expiry) this
+   * caller holds for `publicationId`. Used when there is no Check attempt to key
+   * a per-action lease on (an App with no Checks surface): the send then proves
+   * THAT claim on the last line before the mutation, so a late sender cannot
+   * mutate after a recovery lane took the journal row over. One of
+   * `attemptId`/`journalClaim` is required — a send with neither is refused.
+   */
+  journalClaim?: Lease;
 };
 
 export type PostPreparedDegradedInput = CommenterTargetInput & {
@@ -1337,6 +1344,8 @@ export type PostPreparedDegradedInput = CommenterTargetInput & {
   notAfterMs?: number;
   /** As `PostPreparedReviewInput.attemptId`: take the action's publication lease. */
   attemptId?: string;
+  /** As `PostPreparedReviewInput.journalClaim`: prove this claim at dispatch. */
+  journalClaim?: Lease;
 };
 
 export type ReviewCommenter = {
@@ -1620,25 +1629,78 @@ function guardMutations<T extends { createComment: unknown; updateComment: unkno
 }
 
 /**
- * The owning Check attempt of a publication send (spec §7.9), bound to the
- * store the send fences on. Present only when the caller IS that attempt's
- * send lane; the recovery lane takes its own acquisition (Task 3's lane).
+ * The publication authority of one comment send (spec §7.9/§7.7), bound to the
+ * store the send proves it against. Two shapes, because an App with no Checks
+ * surface has no `review_checks` row to key a per-action lease on:
+ *
+ *   - `lease`: the send takes the publication lease of its ACTION for the Check
+ *     attempt, and releases it on settlement;
+ *   - `journal`: the caller's §7.7 journal claim (`review_publications`) is the
+ *     fence — verified at dispatch, never released here (the caller persists
+ *     the proof and releases).
+ *
+ * There is no third shape. A send that cannot present one is refused.
  */
-export type PublicationSendGuard = { db: D1Like; nowMs: () => number; attemptId: string };
+export type PublicationSendGuard =
+  | { kind: "lease"; db: D1Like; nowMs: () => number; attemptId: string }
+  | { kind: "journal"; db: D1Like; nowMs: () => number; publicationId: string; claim: Lease };
 
 /**
- * Run ONE comment mutation under the publication lease of its action: acquire
- * before the scan, hand the fence to the send (which re-proves it at the
- * mutation), and release on settlement or handoff. A live holder of the same
- * key — a send OR a recovery — refuses this one here, before any GitHub call,
- * as a DEFINITIVE pre-send rejection (nothing left the Worker).
+ * The journal claim as a dispatch-time fence: the row must still carry THIS
+ * holder, THIS epoch and the expiry the caller was granted, and that expiry
+ * must still be in the future. A late sender therefore cannot mutate after a
+ * recovery lane took the journal row over.
+ */
+function journalClaimFence(
+  guard: Extract<PublicationSendGuard, { kind: "journal" }>,
+  actionKey: string,
+): PublicationFence {
+  return {
+    actionKey,
+    async verify() {
+      try {
+        const row = await guard.db
+          .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM review_publications WHERE id = ?`)
+          .bind(guard.publicationId)
+          .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
+        return (
+          row !== null &&
+          row.holder === guard.claim.holder &&
+          row.lease_epoch === guard.claim.epoch &&
+          row.lease_until_ms === guard.claim.untilMs &&
+          guard.nowMs() < guard.claim.untilMs
+        );
+      } catch {
+        return false;
+      }
+    },
+    // The caller's claim, not this send's: `underPublicationFence` never
+    // releases it, and a release here would hand the publication to recovery
+    // before the proof is persisted.
+    async release() {
+      return false;
+    },
+  };
+}
+
+/**
+ * Run ONE comment mutation under the authority of its sender: acquire the
+ * action's publication lease before the scan, hand the fence to the send (which
+ * re-proves it at the mutation), and release on settlement or handoff — or, for
+ * the journal lane, hand over the caller's claim as a verify-only fence. A live
+ * holder of the same key — a send OR a recovery — refuses this one here, before
+ * any GitHub call, as a DEFINITIVE pre-send rejection (nothing left the
+ * Worker). A send with no authority at all is refused for the same reason.
  */
 async function underPublicationFence<T>(
   guard: PublicationSendGuard | undefined,
   actionKey: string,
   run: (fence: PublicationFence | undefined) => Promise<T>,
 ): Promise<T> {
+  // Only the raw `*WithOctokit` seam can arrive without a guard (unit tests):
+  // every production entry is `createReviewCommenter`, which refuses first.
   if (guard === undefined) return run(undefined);
+  if (guard.kind === "journal") return run(journalClaimFence(guard, actionKey));
   const opened = await openPublicationFence(
     { db: guard.db, nowMs: guard.nowMs },
     { attemptId: guard.attemptId, actionKey, holder: `send:${actionKey}` },
@@ -1899,6 +1961,32 @@ export type DegradedDeleteOutcome = {
 };
 
 /**
+ * The delete seam: a marker is removed only while it still carries the EXACT
+ * body that was scanned, and the proof runs INSIDE the delete verb — on the
+ * last line before the request — so no path to `issues.deleteComment` can skip
+ * it. A newer degraded publication can rewrite the same comment (round+1)
+ * across the scan, and deleting it would destroy the evidence the recovery lane
+ * reconciles against; that case is a `PreparedSendRejected`, i.e. nothing left
+ * the Worker.
+ */
+function guardDeletes(
+  issues: NonNullable<PostOctokit["rest"]>["issues"],
+  unchanged: () => Promise<boolean>,
+): NonNullable<PostOctokit["rest"]>["issues"] {
+  return {
+    ...issues,
+    deleteComment: async (params) => {
+      if (!(await unchanged())) {
+        throw new PreparedSendRejected(
+          "degraded marker: the comment no longer carries the body that was scanned — nothing was deleted",
+        );
+      }
+      return (issues.deleteComment as (inner: Record<string, unknown>) => Promise<unknown>)(params);
+    },
+  };
+}
+
+/**
  * Delete stale bot-authored `review-degraded:v1` comments (Bugbot finding —
  * degraded-comment lifecycle, round-2 fix): scan the FULL comment list
  * (same WF-001 pagination as the upsert — the marker can sit beyond page 1
@@ -1942,23 +2030,26 @@ export async function deleteDegradedCommentWithOctokit(
   };
   for (const match of matches) {
     try {
-      // The marker's identity is its EXACT body: a newer degraded publication
-      // can rewrite this same comment (round+1) between the scan and this
-      // delete, and removing it would destroy the newer evidence the recovery
-      // lane reconciles against. Re-read at the delete and require the body
-      // that was scanned; anything else is not ours to delete.
-      const atDelete = await scanCommentsWithOctokit(octokit, input, "degraded");
-      if (!atDelete.some((c) => c.id === match.id && c.body === match.body)) {
-        outcome.skipped += 1;
-        continue;
-      }
-      await issues.deleteComment({
+      // The identity proof for THIS delete: re-read the list and require the
+      // same id to still carry the same body. It runs inside the verb wrapper
+      // below, so it is the last thing before the request.
+      const deleting = guardDeletes(issues, async () => {
+        const atDelete = await scanCommentsWithOctokit(octokit, input, "degraded");
+        return atDelete.some((c) => c.id === match.id && c.body === match.body);
+      });
+      await deleting.deleteComment!({
         owner: input.owner,
         repo: input.repo,
         comment_id: match.id,
       });
       outcome.deleted += 1;
     } catch (err) {
+      // A marker whose identity changed across the scan is not an error and not
+      // ours to delete: count it as skipped and leave it standing.
+      if (err instanceof PreparedSendRejected) {
+        outcome.skipped += 1;
+        continue;
+      }
       // A throttled delete says nothing about the marker: count it as the
       // continuation event the consumer persists, never as a skip. The kind
       // decides which prefix that row carries, so a 429 stays out of the
@@ -2193,10 +2284,11 @@ export type PostPreparedLineCommentsInput = {
   /**
    * The owning Check attempt (spec §7.9) — present when the caller is that
    * attempt's send lane. The batch then takes the publication lease
-   * `line-comments:<publicationId>` and re-proves it before `createReview`;
-   * absent means a caller outside an attempt (see `PostPreparedReviewInput`).
+   * `line-comments:<publicationId>` and re-proves it before `createReview`.
    */
   attemptId?: string;
+  /** As `PostPreparedReviewInput.journalClaim`: the §7.7 claim, proved at dispatch. */
+  journalClaim?: Lease;
 };
 
 /**
@@ -2551,21 +2643,31 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       })
     : null;
 
-  // §7.9 publication authority for comment sends: the caller names the Check
-  // attempt it is sending for, and the send takes that action's publication
-  // lease. A caller that NAMES an attempt is fenced or refused — never sent
-  // unfenced because this instance happens to lack the journal store. Only a
-  // caller with NO Check attempt at all (the Check lane never opened for this
-  // App, so there is no attempt row to key a lease on) reaches the send
-  // unguarded; the journal's own claim remains its fence.
-  const publicationGuard = (attemptId: string | undefined): PublicationSendGuard | undefined => {
-    if (attemptId === undefined) return undefined;
+  // §7.9/§7.7 publication authority for comment sends. EVERY prepared send
+  // through this factory presents one of the two authorities the module can
+  // prove at dispatch — the Check attempt's per-action lease, or the caller's
+  // journal claim — and a send that presents neither is refused here rather
+  // than mutating GitHub unfenced.
+  const clock = options?.nowMs ?? (() => Date.now());
+  const publicationAuthority = (input: {
+    publicationId: string;
+    attemptId?: string;
+    journalClaim?: Lease;
+  }): PublicationSendGuard => {
     if (options?.db === undefined) {
       throw new PreparedSendRejected(
-        `the publication lease of attempt ${attemptId} cannot be read — this commenter was built without the journal store; nothing was sent`,
+        `the publication authority of ${input.publicationId} cannot be read — this commenter was built without the journal store; nothing was sent`,
       );
     }
-    return { db: options.db, nowMs: options.nowMs ?? (() => Date.now()), attemptId };
+    if (input.attemptId !== undefined) {
+      return { kind: "lease", db: options.db, nowMs: clock, attemptId: input.attemptId };
+    }
+    if (input.journalClaim !== undefined) {
+      return { kind: "journal", db: options.db, nowMs: clock, publicationId: input.publicationId, claim: input.journalClaim };
+    }
+    throw new PreparedSendRejected(
+      `no publication authority for ${input.publicationId}: neither a Check attempt nor a journal claim was supplied — nothing was sent`,
+    );
   };
 
   return {
@@ -2593,7 +2695,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       return planDegradedUpsertWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postPreparedReview(input) {
-      const guard = publicationGuard(input.attemptId);
+      const guard = publicationAuthority(input);
       return postPreparedReviewWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
@@ -2601,7 +2703,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       );
     },
     async postPreparedDegraded(input) {
-      const guard = publicationGuard(input.attemptId);
+      const guard = publicationAuthority(input);
       return postPreparedDegradedWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
@@ -2612,7 +2714,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       return deleteDegradedCommentWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postLineComments(input) {
-      const guard = publicationGuard(input.attemptId);
+      const guard = publicationAuthority(input);
       return postLineCommentsWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,

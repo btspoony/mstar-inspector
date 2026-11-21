@@ -33,14 +33,18 @@ import {
 } from "../../src/store/review-checks";
 import {
   PUBLICATION_LEASE_MS,
+  claimPublication,
   claimPublicationLease,
   releasePublicationLease,
+  stagePublication,
 } from "../../src/store/finding-lifecycle";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   PUBLICATION_ACTION_CHECK_COMPLETE,
+  PUBLICATION_ACTION_CHECK_CREATE,
   createChecksAdapter,
   type CheckRunPayload,
+  type ChecksCreateParams,
   type ChecksOctokit,
   type ChecksRelabelParams,
 } from "../../src/pipeline/checks";
@@ -120,14 +124,20 @@ function runPayload(identity: CheckIdentity, overrides: Partial<CheckRunPayload>
   };
 }
 
-/** A scripted Checks surface that records every update it was asked to send. */
-function fakeChecks(identity: CheckIdentity): { octokit: ChecksOctokit; updates: ChecksRelabelParams[] } {
+/** A scripted Checks surface that records every request it was asked to send. */
+function fakeChecks(identity: CheckIdentity): {
+  octokit: ChecksOctokit;
+  updates: ChecksRelabelParams[];
+  creates: ChecksCreateParams[];
+} {
   const updates: ChecksRelabelParams[] = [];
+  const creates: ChecksCreateParams[] = [];
   const octokit: ChecksOctokit = {
     rest: {
       checks: {
-        async create() {
-          throw new Error("this lane never creates");
+        async create(params) {
+          creates.push(params);
+          return { data: runPayload(identity, { status: "queued" }) };
         },
         async update(params) {
           updates.push(params);
@@ -142,7 +152,7 @@ function fakeChecks(identity: CheckIdentity): { octokit: ChecksOctokit; updates:
       },
     },
   };
-  return { octokit, updates };
+  return { octokit, updates, creates };
 }
 
 async function publicationRow(
@@ -253,15 +263,15 @@ const commentInput = (publicationId: string) => ({
   publicationId,
 });
 
-/** A scripted Issues surface; `onScan` is where the marker scan's cost is simulated. */
-function fakeIssues(onScan?: () => void): {
+/** An Issues surface; `onScan` is where the marker scan's cost is simulated. */
+function fakeIssues(onScan?: () => void | Promise<void>): {
   octokit: PostOctokit;
   calls: { verb: string; params: Record<string, unknown> }[];
 } {
   const calls: { verb: string; params: Record<string, unknown> }[] = [];
   const octokit: PostOctokit = {
     paginate: async () => {
-      onScan?.();
+      await onScan?.();
       return [];
     },
     rest: {
@@ -282,10 +292,53 @@ function fakeIssues(onScan?: () => void): {
 }
 
 const guardFor = (db: D1Like, attemptId: string): PublicationSendGuard => ({
+  kind: "lease",
   db,
   nowMs: () => CLOCK,
   attemptId,
 });
+
+/** The no-Check-row lane: the caller's §7.7 journal claim, proved at dispatch. */
+const journalGuard = (db: D1Like, publicationId: string, claim: Lease): PublicationSendGuard => ({
+  kind: "journal",
+  db,
+  nowMs: () => CLOCK,
+  publicationId,
+  claim,
+});
+
+/** Stage and claim ONE journal publication, returning the claim this sender holds. */
+async function journalClaim(db: D1Like, publicationId: string): Promise<Lease> {
+  await stagePublication(db, {
+    id: publicationId,
+    nowMs: T0,
+    payload: {
+      version: 1,
+      scope: SCOPE,
+      headSha: SHA,
+      kind: "review",
+      round: 1,
+      targetCommentId: null,
+      body: "prepared body",
+      bodySha256: "0".repeat(64),
+      artifact: null,
+      lifecycle: null,
+      lineIntents: [],
+    },
+  });
+  const lease = await claimPublication(db, publicationId, "consumer:journal", T0);
+  if (lease === null) throw new Error("fixture: journal claim refused");
+  return lease;
+}
+
+async function journalRow(db: D1Like, publicationId: string): Promise<{ holder: string | null; lease_epoch: number }> {
+  const row = await db
+    .prepare(`SELECT holder, lease_epoch FROM review_publications WHERE id = ?`)
+    .bind(publicationId)
+    .first<{ holder: string | null; lease_epoch: number }>();
+  if (row === null) throw new Error("fixture: journal row vanished");
+  return row;
+}
 
 describe("prepared comment send — the publication lease of comment:<publicationId>", () => {
   test("a review-comment send is refused while recovery owns the action", async () => {
@@ -434,7 +487,29 @@ describe("the key's identity is the Check attempt, never the execution one", () 
   });
 });
 
-describe("a named attempt is fenced or refused, never sent unfenced", () => {
+describe("publication authority is required, not optional", () => {
+  test("a send that presents neither a Check attempt nor a journal claim is refused", async () => {
+    const db = await seededDb();
+    let requests = 0;
+    const commenter = createReviewCommenter(
+      { APP_ID: "1", PRIVATE_KEY: TEST_PRIVATE_KEY },
+      {
+        db,
+        nowMs: () => CLOCK,
+        fetchImpl: async () => {
+          requests += 1;
+          return new Response("{}", { status: 200 });
+        },
+      },
+    );
+
+    const failure = await commenter.postPreparedReview(commentInput("pub-7")).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PreparedSendRejected);
+    expect((failure as Error).message).toMatch(/no publication authority for pub-7/);
+    expect(requests).toBe(0);
+  });
+
   test("a send naming an attempt through a store-less commenter is refused before any request", async () => {
     let requests = 0;
     const commenter = createReviewCommenter(
@@ -460,27 +535,47 @@ describe("a named attempt is fenced or refused, never sent unfenced", () => {
 describe("the held-check relabel re-proves its row at dispatch", () => {
   test("a row that stopped qualifying during client resolution is not relabelled", async () => {
     const db = await seededDb();
-    const { identity } = await claimedAttempt(db);
-    const fake = fakeChecks(identity);
-    const adapter = createChecksAdapter({ db, nowMs: () => CLOCK, getOctokit: async () => fake.octokit });
-    let rechecks = 0;
+    // A released delivery row in the shape the predicate relabels.
+    const claim = await claimAttempt(db, {
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      attachDeliveryId: "delivery-relabel",
+      holder: "delivery:delivery-relabel",
+      nowMs: T0,
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+    });
+    if (claim.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${claim.kind}`);
+    expect(await setCheckCreateState(db, claim.attempt.identity.attemptId, claim.lease, "sending", undefined, T0)).toBe(true);
+    expect(await attachCheckRunId(db, claim.attempt.identity.attemptId, claim.lease, RUN_ID, T0)).toBe(true);
+    const fake = fakeChecks(claim.attempt.identity);
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => CLOCK,
+      getOctokit: async () => {
+        // The review reaches its conclusion while the client is being resolved:
+        // freezing the intent makes the conditional write at dispatch select
+        // nothing, so the queued text can never overwrite the settled run.
+        expect(await setCheckDesired(db, claim.attempt.identity.attemptId, claim.lease, SUCCESS, null, T0)).toBe(true);
+        return fake.octokit;
+      },
+    });
 
     const sent = await adapter.markQueuedBehindInflight!({
       scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      attachDeliveryId: "delivery-relabel",
       checkRunId: RUN_ID,
       summary: "Queued behind the live review for this pull request.",
-      // The store predicate, re-asked at the PATCH: another holder froze or
-      // terminalized the row in between, so it no longer selects.
-      recheck: async () => {
-        rechecks += 1;
-        return null;
-      },
       updateBudgetMs: 1_000,
       warn: () => {},
     });
 
     expect(sent).toBe(false);
-    expect(rechecks).toBe(1);
     expect(fake.updates).toHaveLength(0);
   });
 });
@@ -537,11 +632,85 @@ describe("the frozen deadline is read after the lease proof", () => {
     const failure = await postPreparedReviewWithOctokit(
       fake.octokit,
       { ...commentInput("pub-timing"), notAfterMs },
-      { db: slow, nowMs: () => Date.now(), attemptId },
+      { kind: "lease", db: slow, nowMs: () => Date.now(), attemptId },
     ).catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(PublicationDeadlineSpent);
     expect((failure as Error).message).toMatch(/frozen deadline passed/);
     expect(fake.calls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2: the no-Check lane's own authority, and the Check create
+// ---------------------------------------------------------------------------
+
+describe("the no-Check lane proves its journal claim at dispatch", () => {
+  test("a claim taken over during the scan refuses the send", async () => {
+    const db = await seededDb();
+    const claim = await journalClaim(db, "pub-j1");
+    // The recovery lane takes the journal row over while this sender scans.
+    const fake = fakeIssues(async () => {
+      expect(await claimPublication(db, "pub-j1", "recovery:9", T0 + PUBLICATION_LEASE_MS + 1)).not.toBeNull();
+    });
+
+    const failure = await postPreparedReviewWithOctokit(
+      fake.octokit,
+      commentInput("pub-j1"),
+      journalGuard(db, "pub-j1", claim),
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PreparedSendRejected);
+    expect((failure as Error).message).toMatch(/publication lease comment:pub-j1 is no longer held by this sender/);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  test("a send that still holds the claim dispatches, and the caller keeps the claim", async () => {
+    const db = await seededDb();
+    const claim = await journalClaim(db, "pub-j2");
+    const fake = fakeIssues();
+
+    const sent = await postPreparedReviewWithOctokit(
+      fake.octokit,
+      commentInput("pub-j2"),
+      journalGuard(db, "pub-j2", claim),
+    );
+
+    expect(sent.commentId).toBe(9001);
+    expect(fake.calls.map((call) => call.verb)).toEqual(["create"]);
+    // The §7.7 claim belongs to the caller: the send proves it but never hands
+    // it to recovery (the caller releases after the proof is persisted).
+    const row = await journalRow(db, "pub-j2");
+    expect(row.holder).toBe(claim.holder);
+    expect(row.lease_epoch).toBe(claim.epoch);
+  });
+});
+
+describe("the Check create proves its own action lease", () => {
+  test("a create is refused while another holder owns check:create", async () => {
+    const db = await seededDb();
+    const { attemptId, identity, lease } = await claimedAttempt(db);
+    expect(
+      await claimPublicationLease(db, {
+        attemptId, actionKey: PUBLICATION_ACTION_CHECK_CREATE, holder: "recover:2", mode: "recover", nowMs: T0,
+      }),
+    ).not.toBeNull();
+    const fake = fakeChecks(identity);
+    const adapter = createChecksAdapter({ db, nowMs: () => CLOCK, getOctokit: async () => fake.octokit });
+
+    const result = await adapter.beginCheck({ identity, lease });
+
+    expect(result.kind).toBe("unavailable");
+    expect(result.kind === "unavailable" && result.reason).toMatch(
+      /publication lease for check:create is held by another holder/,
+    );
+    expect(result.kind === "unavailable" && result.requests).toBe(0);
+    expect(fake.creates).toHaveLength(0);
+    // Nothing was attempted, so the row keeps its honest pre-send state.
+    const row = await db
+      .prepare(`SELECT create_state FROM review_checks WHERE id = ?`)
+      .bind(attemptId)
+      .first<{ create_state: string }>();
+    expect(row?.create_state).toBe("not-sent");
   });
 });

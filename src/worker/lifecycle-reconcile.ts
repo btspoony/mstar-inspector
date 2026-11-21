@@ -226,6 +226,11 @@ export type ReviewerFactory = (input: {
   appId: string;
   installationId: number;
   transport?: ReconcileTransport;
+  /**
+   * The run's clock. The resolved reviewer's store faces use it too, so a
+   * journal claim taken with this clock is verified against the same one.
+   */
+  now?: () => number;
 }) => Promise<ReviewerResolution>;
 
 type RoutingRow = {
@@ -264,7 +269,7 @@ async function routingRow(db: D1Like, appId: string, installationId: number): Pr
  * malformed probe is `identity-mismatch` too — the lanes must not mutate
  * under an unproven identity.
  */
-export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appId, installationId, transport }) => {
+export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appId, installationId, transport, now }) => {
   const row = await routingRow(db, appId, installationId);
   if (row === null) return { kind: "unavailable", reason: "missing" };
   if (row.deleted_at !== null) return { kind: "unavailable", reason: "deleted" };
@@ -281,6 +286,9 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
     );
     const commenter = createReviewCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem }, {
       db,
+      // ONE clock: the publication authority this lane proves at dispatch is
+      // the journal claim taken with the run's clock, not the wall clock.
+      ...(now === undefined ? {} : { nowMs: now }),
       ...(transport === undefined ? {} : { fetchImpl: transport.fetchImpl }),
     });
     const { resolveFindingThread, getAppIdentity } = commenter;
@@ -548,6 +556,7 @@ export async function reconcileReviewLifecycle(
             appId: pair.appId,
             installationId: pair.installationId,
             transport,
+            now,
           });
           if (proof.kind !== "ok") {
             // Still mismatched / still unusable: re-stamp BOTH lanes with the
@@ -627,7 +636,7 @@ async function reviewerForPair(
   db: D1Like,
   env: ScheduledEnv,
   scope: Scope,
-  nowMs: number,
+  now: () => number,
   budget: RunBudget,
   reviewerFactory: ReviewerFactory,
   transport: ReconcileTransport,
@@ -645,7 +654,7 @@ async function reviewerForPair(
       // transport choke point, so no per-operation reservation is charged
       // here — reserving an estimate AND metering the real requests would
       // double-count and shrink the run's true allowance.
-      return await reviewerFactory({ db, env, appId: scope.appId, installationId: scope.installationId, transport });
+      return await reviewerFactory({ db, env, appId: scope.appId, installationId: scope.installationId, transport, now });
     } catch (error) {
       // A throwing factory is a credential-path failure — fail closed to a
       // durable suspension rather than letting it escape the lane.
@@ -668,8 +677,8 @@ async function reviewerForPair(
         ? {}
         : { credentialFingerprint: settled.credentialFingerprint }),
     };
-    const pubs = await suspendPublicationRecovery(db, pair, suspension, nowMs);
-    const threads = await suspendResolutionRecovery(db, pair, suspension, nowMs);
+    const pubs = await suspendPublicationRecovery(db, pair, suspension, now());
+    const threads = await suspendResolutionRecovery(db, pair, suspension, now());
     summary.suspended += pubs + threads;
     log.warn(
       { event: "ops_lifecycle_pair_suspended", detail: reason },
@@ -722,7 +731,7 @@ async function reconcilePublications(
     // fit the run, so an exhausted run stops the lane before any claim.
     const scope = row.payload.scope;
     if (!canSpend(budget, now(), 1, true)) continue; // stays due, no claim
-    const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
+    const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // pair suspended durably
     if (row.phase === "prepared") {
       await sendPreparedPublication(db, now, budget, resolved, row, log, summary);
@@ -856,6 +865,10 @@ async function sendPreparedPublication(
       targetCommentId: row.payload.targetCommentId,
       body: row.payload.body,
       publicationId: row.id,
+      // This lane's authority is the journal claim it just took: the send
+      // re-proves it at dispatch, so a claim taken over (or expired) mid-send
+      // cannot mutate GitHub on a stale owner's behalf.
+      journalClaim: lease,
     };
     let commentId: number;
     if (row.payload.kind === "degraded") {
@@ -1071,7 +1084,7 @@ async function reconcileResolutions(
     // Pair credentials come FIRST; the §7.5 surface claims and counts its
     // attempt only inside `resolveFindingThread`, which the admission above
     // precedes.
-    const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
+    const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // pair suspended durably
     // A paused App keeps "previously-authorized resolution retry" running
     // (frozen pause policy) — no extra gate here.

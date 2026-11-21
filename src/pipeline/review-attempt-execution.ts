@@ -2117,6 +2117,7 @@ async function publishDegradedPublication(input: {
         body,
         publicationId: staged.id,
         notAfterMs: input.notAfterMs,
+        journalClaim: lease,
         ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
       });
     } catch (err) {
@@ -5364,7 +5365,10 @@ async function publishPhase(
       notAfterMs: ref.deadlineMs,
       // The LEASE key is a `review_checks.id`, never `ref.attemptId` (the
       // container identity): the send must contend with this attempt's own
-      // Check sends and with recovery, which key on the Check row.
+      // Check sends and with recovery, which key on the Check row. With no
+      // Check row at all (an App without a Checks surface) the journal claim
+      // this invocation already holds is proved at dispatch instead.
+      journalClaim: lease,
       ...(check?.handle?.attemptId === undefined ? {} : { attemptId: check.handle.attemptId }),
     });
   } catch (err) {
@@ -5496,7 +5500,9 @@ async function publishPhase(
         round,
         publicationId: stagedId,
         intents: lineIntents,
-        // `review_checks.id`, not the container identity (see the marker send).
+        // `review_checks.id`, not the container identity (see the marker send);
+        // the journal claim covers the no-Check-row lane.
+        journalClaim: lease,
         ...(check?.handle?.attemptId === undefined ? {} : { attemptId: check.handle.attemptId }),
       });
       if (postedLine.posted.length > 0) {
