@@ -158,13 +158,16 @@ export type ReviewSandbox = {
    */
   destroy(): Promise<void>;
   /**
-   * Does this sandbox id still have a running container? Read-only and never
-   * starting one. Ids are unique per attempt, so `false` is an OBSERVATION
-   * about that one attempt — nothing is left that could act — while `true`
-   * means a successor must not reuse the attempt's PR or capacity. Absent
-   * means the host cannot answer, which is not a stop.
+   * Revoke this attempt for good and answer whether a container is still
+   * running. Ids are unique per attempt, so this is about exactly one attempt's
+   * sandbox. The revocation is durable and beats every later start: after it,
+   * no call on this handle may provision a container. `running: false` is
+   * therefore the fact a successor may take the attempt's PR on — the attempt
+   * cannot act now AND cannot start acting again — while `running: true` means
+   * a start won the race and the PR must stay where it is. Absent means the
+   * host cannot revoke, which is not a stop either.
    */
-  containerRunning?(): Promise<boolean>;
+  revoke?(): Promise<{ running: boolean }>;
 };
 
 /**
@@ -280,6 +283,9 @@ const MARKER_CLAIM_COMMAND = shellCommand(
 /** The marker is ~60 bytes; a hung read must not hold an attempt's collection. */
 const MARKER_READ_TIMEOUT_MS = 30_000;
 
+/** The DO's durable revocation flag (see `revoke`); read before any start. */
+const REVOKED_KEY = "attempt-revoked";
+
 /** Container image key in `wrangler.jsonc` → `containers[].images`. */
 const CONTAINER_IMAGE_KEY = "sandbox";
 /**
@@ -358,12 +364,21 @@ export class SandboxV1 extends DurableObject {
    * running. `blockConcurrencyWhile` keeps requests behind the re-arm. The
    * request-path guard re-arms it as well (both are idempotent).
    */
+  /**
+   * A revocation outlives an eviction: a restarted DO that forgot it could
+   * start a container for an attempt a successor already owns.
+   */
+  private revoked = false;
+
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     const container = ctx.container;
     if (container?.running) {
       void ctx.blockConcurrencyWhile(() => container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS));
     }
+    void ctx.blockConcurrencyWhile(async () => {
+      this.revoked = (await ctx.storage.get<boolean>(REVOKED_KEY)) === true;
+    });
   }
 
   /** The container bound to this DO (absent only when the binding is misconfigured). */
@@ -381,6 +396,12 @@ export class SandboxV1 extends DurableObject {
    * `start()` is safe to repeat because a deploy restarts the DO.
    */
   private async ensureRunning(container: Container): Promise<void> {
+    // THE revocation gate: every start-permitted call goes through here, so a
+    // revoked attempt cannot provision a container again — not with a replay,
+    // not after an eviction, not with a command queued before the revocation.
+    if (this.revoked) {
+      throw new Error("this attempt was revoked by the successor that took its PR — nothing may start");
+    }
     if (!container.running) {
       const image = container.images[CONTAINER_IMAGE_KEY];
       if (image === undefined) {
@@ -702,15 +723,20 @@ export class SandboxV1 extends DurableObject {
   }
 
   /**
-   * The attempt's stop observation (spec §7.9). `running` is the platform's own
-   * answer for the container bound to this id and starting one is not on this
-   * path, so `false` means there is no container left that could act for the
-   * attempt — the one fact a successor may reassign the PR on. A missing
-   * container binding is not an answer, so it throws instead of reading as
-   * stopped.
+   * The successor's takeover fact (spec §7.9): revoke durably, then answer
+   * whether anything is still running. Both steps sit inside the ONE critical
+   * section that also serialises starts, so a start either completed before
+   * this call (`running: true`, the successor refuses) or meets the flag on its
+   * way in. The answer never reports a container this DO did not just prove.
    */
-  async containerRunning(): Promise<boolean> {
-    return this.container.running;
+  async revoke(): Promise<{ running: boolean }> {
+    return this.exclusive(async () => {
+      if (!this.revoked) {
+        this.revoked = true;
+        await this.ctx.storage.put(REVOKED_KEY, true);
+      }
+      return { running: this.ctx.container?.running === true };
+    });
   }
 }
 

@@ -1385,21 +1385,23 @@ function queueStampOf(timestamp: unknown): number | null {
 }
 
 /**
- * The successor's stop observation (spec §7.9): did the PRIOR attempt's own
- * sandbox answer that no container is running? Sandbox ids are unique per
- * attempt, so `false` is an observation about that attempt and nobody else's.
- * A live container, an absent capability, or a failed read is NOT a stop — the
- * caller then refuses the takeover instead of guessing from the fence.
+ * The successor's takeover fact (spec §7.9): revoke the PRIOR attempt's own
+ * sandbox and require it to answer that nothing is running. Sandbox ids are
+ * unique per attempt, so this bears on that attempt and nobody else's — and
+ * because the revocation is durable BEFORE the answer, `true` means the
+ * attempt cannot act now and cannot start acting again. A live container, an
+ * absent capability and a failed call are all NOT a stop: the caller then
+ * leaves the PR where it is instead of guessing from the fence.
  */
-export async function priorSandboxStopped(
+export async function priorSandboxRevoked(
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>,
   binding: unknown,
   attemptId: string,
 ): Promise<boolean> {
   try {
     const sandbox = await getSandbox(binding, attemptSandboxId(attemptId));
-    if (sandbox.containerRunning === undefined) return false;
-    return (await sandbox.containerRunning()) === false;
+    if (sandbox.revoke === undefined) return false;
+    return (await sandbox.revoke()).running === false;
   } catch {
     // An unreadable sandbox is not a stopped one.
     return false;
@@ -2057,14 +2059,14 @@ async function processMessage(
     };
     let admission = await acquireInflight(deps.env.DB, inflightKey, admissionOpts);
     // §7.9: an expired row is a FENCE, not a stopped executor. This attempt is
-    // a successor only when the owning attempt's own sandbox answers that no
-    // container is running — never because the lease lapsed, a Workflow went
-    // quiet, or time passed. The acquisition then binds that observed id to the
-    // row it replaces, so an observation taken for one attempt cannot take
-    // another's PR.
+    // a successor only when the owning attempt's own sandbox is REVOKED and
+    // answers that nothing is running — never because the lease lapsed, a
+    // Workflow went quiet, or time passed. The acquisition then binds that
+    // attempt's id in the SAME transaction that revokes it, so a probe taken
+    // for one attempt cannot take another's PR.
     if (!admission.ok && admission.reason === "pr-held" && admission.heldExpired) {
       const priorAttemptId = admission.heldAttemptId;
-      if (await priorSandboxStopped(deps.getSandbox, deps.env.SANDBOX, priorAttemptId)) {
+      if (await priorSandboxRevoked(deps.getSandbox, deps.env.SANDBOX, priorAttemptId)) {
         admission = await acquireInflight(deps.env.DB, inflightKey, {
           ...admissionOpts,
           priorStopped: { attemptId: priorAttemptId },

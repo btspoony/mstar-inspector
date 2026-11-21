@@ -38,8 +38,11 @@ import {
   type AdapterScript,
 } from "../worker/helpers/check-reconcile";
 
-const { createReviewConsumer, priorSandboxStopped } = await import("../../src/pipeline/consumer");
+const { createReviewConsumer, priorSandboxRevoked } = await import("../../src/pipeline/consumer");
 const { attemptSandboxId } = await import("../../src/pipeline/review-attempt");
+const { SandboxV1 } = await import("../../src/pipeline/sandbox");
+const { shellCommand } = await import("../../src/pipeline/shell-command");
+const { recordTerminalDispatch } = await import("../../src/store/review-checks");
 
 const KEY: InflightKey = {
   installation_id: 42,
@@ -51,6 +54,11 @@ const KEY: InflightKey = {
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const LATER = "2026-11-03T00:02:00Z";
+
+/** Another PR of the same tenant — the one a full system cap must refuse. */
+function otherPr(prNumber: number): InflightKey {
+  return { ...KEY, pr_number: prNumber };
+}
 
 const OPTS: AcquireInflightOptions = {
   systemCap: 32,
@@ -88,6 +96,7 @@ describe("§7.9 the successor transition", () => {
 
   test("a confirmed stop plus the expired fence reassigns the PR and the slot", async () => {
     const db = createMigratedTestD1();
+    seedPaidAttempt(db, "attempt-1");
     expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
     const newerSha = "fedcba9876543210fedcba9876543210fedcba98";
     expect(
@@ -106,6 +115,9 @@ describe("§7.9 the successor transition", () => {
       .query("SELECT head_sha FROM review_inflight")
       .all() as Array<{ head_sha: string }>;
     expect(row!.head_sha).toBe(newerSha);
+    // The revocation commits in the SAME transaction: the displaced attempt may
+    // never start anything again.
+    expect(revokedAtOf(db, "attempt-1")).not.toBeNull();
   });
 
   test("an observation taken for another attempt never replaces this one", async () => {
@@ -124,9 +136,12 @@ describe("§7.9 the successor transition", () => {
     expect(rowsOf(db)).toEqual(["attempt-1"]);
   });
 
-  test("the stop observation is false unless the prior attempt's own sandbox says so", async () => {
+  test("the stop is a REVOCATION, not a reading: a live container, no capability or a throw is not a stop", async () => {
     const asked: string[] = [];
-    const getSandboxDouble = (answer: (() => Promise<boolean>) | undefined) => async (_binding: unknown, id: string) => {
+    const getSandboxDouble = (answer: (() => Promise<{ running: boolean }>) | undefined) => async (
+      _binding: unknown,
+      id: string,
+    ) => {
       asked.push(id);
       const sandbox: Record<string, unknown> = {
         runCommand: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
@@ -135,30 +150,98 @@ describe("§7.9 the successor transition", () => {
         destroyMarked: async () => "unknown",
         destroy: async () => {},
       };
-      if (answer !== undefined) sandbox.containerRunning = answer;
+      if (answer !== undefined) sandbox.revoke = answer;
       return sandbox as never;
     };
 
-    expect(await priorSandboxStopped(getSandboxDouble(async () => false), {}, "attempt-1")).toBe(true);
-    // It asked about THAT attempt's sandbox, never the PR or the caller's.
+    expect(await priorSandboxRevoked(getSandboxDouble(async () => ({ running: false })), {}, "attempt-1")).toBe(true);
+    // It revoked THAT attempt's sandbox, never the PR's or the caller's.
     expect(asked).toEqual([attemptSandboxId("attempt-1")]);
-
-    expect(await priorSandboxStopped(getSandboxDouble(async () => true), {}, "attempt-1")).toBe(false);
-    expect(await priorSandboxStopped(getSandboxDouble(undefined), {}, "attempt-1")).toBe(false);
+    // A container that won the start race keeps the PR where it is.
+    expect(await priorSandboxRevoked(getSandboxDouble(async () => ({ running: true })), {}, "attempt-1")).toBe(false);
+    expect(await priorSandboxRevoked(getSandboxDouble(undefined), {}, "attempt-1")).toBe(false);
     expect(
-      await priorSandboxStopped(
+      await priorSandboxRevoked(
         getSandboxDouble(async () => {
-          throw new Error("the sandbox read failed");
+          throw new Error("the revocation write failed");
         }),
         {},
         "attempt-1",
       ),
     ).toBe(false);
     expect(
-      await priorSandboxStopped(async () => {
+      await priorSandboxRevoked(async () => {
         throw new Error("the sandbox could not be addressed");
       }, {}, "attempt-1"),
     ).toBe(false);
+  });
+
+  test("capacity counts what may still run: an expired, unrevoked attempt holds its slot", async () => {
+    const db = createMigratedTestD1();
+    seedPaidAttempt(db, "attempt-1");
+    expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
+    // Cap 1, the row expired — but attempt-1's paid run returned and nothing
+    // revoked it, so its container may still run: no slot for another PR.
+    expect(
+      await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-2", systemCap: 1, now: LATER }),
+    ).toEqual({ ok: false, reason: "system-cap" });
+    // With the attempt revoked (a successor took its PR), the slot is free.
+    db.raw.prepare("UPDATE review_launches SET revoked_ms = ? WHERE attempt_id = ?").run(T0, "attempt-1");
+    expect(
+      await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-2", systemCap: 1, now: LATER }),
+    ).toEqual({ ok: true });
+  });
+
+  test("a revoked attempt cannot start a container again", async () => {
+    const contexts: Array<{ started: unknown[] }> = [];
+    const container = (running: boolean) => {
+      const state = { running };
+      const started: unknown[] = [];
+      contexts.push({ started });
+      return {
+        get running() {
+          return state.running;
+        },
+        images: { sandbox: "img" },
+        start: (opts: unknown) => {
+          started.push(opts);
+          state.running = true;
+        },
+        setInactivityTimeout: async () => {},
+        exec: async () => {
+          throw new Error("no exec in this double");
+        },
+        destroy: async () => {
+          state.running = false;
+        },
+      };
+    };
+    const sandboxFor = (running: boolean) => {
+      const durable = new Map<string, unknown>();
+      const ctx = {
+        container: container(running),
+        storage: {
+          get: async (key: string) => durable.get(key),
+          put: async (key: string, value: unknown) => void durable.set(key, value),
+        },
+        blockConcurrencyWhile: async (fn: () => Promise<void>) => await fn(),
+      };
+      return new (SandboxV1 as unknown as new (ctx: unknown, env: unknown) => {
+        revoke: () => Promise<{ running: boolean }>;
+        runCommand: (cmd: unknown) => Promise<unknown>;
+      })(ctx, {});
+    };
+
+    // Still running: the revocation lands, and the answer says so (the
+    // successor must then leave the PR alone).
+    expect(await sandboxFor(true).revoke()).toEqual({ running: true });
+
+    const sandbox = sandboxFor(false);
+    expect(await sandbox.revoke()).toEqual({ running: false });
+    // The revoked attempt cannot provision a container — every start path goes
+    // through the one gate, and a replay cannot resurrect it.
+    await expect(sandbox.runCommand(shellCommand("true"))).rejects.toThrow(/revoked/);
+    expect(contexts.at(-1)!.started).toHaveLength(0);
   });
 });
 
@@ -214,6 +297,24 @@ const PRIOR_KEY: InflightKey = {
   workspace_id: "default",
 };
 
+/** A `persisted` launch row: the paid exec returned, and its container may still run. */
+function seedPaidAttempt(db: TestD1, attemptId: string): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_launches
+         (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
+       VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
+    )
+    .run(attemptId, 1, 2, 3);
+}
+
+function revokedAtOf(db: TestD1, attemptId: string): number | null {
+  const row = db.raw
+    .prepare("SELECT revoked_ms FROM review_launches WHERE attempt_id = ?")
+    .get(attemptId) as { revoked_ms: number | null } | undefined;
+  return row?.revoked_ms ?? null;
+}
+
 /** The prior attempt's admission row, long expired, with an accounted paid state. */
 async function seedPriorRow(db: TestD1): Promise<void> {
   expect(
@@ -228,6 +329,65 @@ async function seedPriorRow(db: TestD1): Promise<void> {
   ).toEqual({ ok: true });
 }
 
+describe("§7.9 an already-dispatched terminal update is discovery, never a resend", () => {
+  test("a dispatched-but-unlanded update is read back and never sent twice", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const attemptId = attempt.identity.attemptId;
+    await setCheckCreateState(db, attemptId, lease, "sending", undefined, CLAIM_AT);
+    expect(await attachCheckRunId(db, attemptId, lease, 4242, CLAIM_AT)).toBe(true);
+
+    // Phase 1 — the real dispatch sequence: the lane freezes its intent, then
+    // the adapter records the dispatch and the reply is LOST.
+    let firstSends = 0;
+    const losing: AdapterScript = {
+      fetch: async (identity) => ({
+        kind: "found",
+        remote: remoteFor(identity, { id: 4242, status: "in_progress", conclusion: null }),
+      }),
+      complete: async (identity) => {
+        firstSends += 1;
+        const live = await rawRow(db, identity.attemptId);
+        await recordTerminalDispatch(
+          db,
+          identity.attemptId,
+          { holder: String(live.holder), epoch: Number(live.lease_epoch), untilMs: Number(live.lease_until_ms) },
+          T0,
+        );
+        return { kind: "unavailable", reason: "the reply was lost", requests: 1 };
+      },
+    };
+    await run(db, { now: () => T0, credentials: scriptedCredentials(db, losing), fetchImpl: OFFLINE_FETCH });
+    expect(firstSends).toBe(1);
+    expect((await rawRow(db, attemptId)).terminal_dispatch_ms).toBe(T0);
+
+    // Phase 2 — a fresh recovery claim reads the run still `in_progress`. That
+    // read is NOT proof the request failed to land, so the update is never
+    // re-sent: the intent makes the pass discovery-only.
+    let secondSends = 0;
+    const resent: AdapterScript = {
+      fetch: async () => ({ kind: "found", remote: remoteFor(attempt.identity, { id: 4242, status: "in_progress", conclusion: null }) }),
+      complete: async () => {
+        secondSends += 1;
+        return { kind: "unavailable", reason: "a second terminal update was sent", requests: 1 };
+      },
+    };
+    await run(db, {
+      now: () => T0 + 120_000,
+      credentials: scriptedCredentials(db, resent),
+      fetchImpl: OFFLINE_FETCH,
+    });
+
+    expect(secondSends).toBe(0);
+    const row = await rawRow(db, attemptId);
+    expect(row.terminal_dispatch_ms).toBe(T0);
+    expect(row.observed).toBe("unknown");
+    // The unconfirmed dispatch is charged so the ladder can end honestly
+    // instead of re-reading forever.
+    expect(Number(row.attempts)).toBe(2);
+  });
+});
+
 describe("§7.9 admission is the successor's one gate", () => {
   test("a prior sandbox still running keeps the PR: guard-held, nothing provisioned", async () => {
     const h = createConsumerHarness();
@@ -235,7 +395,7 @@ describe("§7.9 admission is the successor's one gate", () => {
     await seedPriorRow(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      getSandbox: async () => ({ ...h.fakeSandbox, containerRunning: async () => true }),
+      getSandbox: async () => ({ ...h.fakeSandbox, revoke: async () => ({ running: true }) }),
     });
 
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
@@ -257,7 +417,7 @@ describe("§7.9 admission is the successor's one gate", () => {
     await seedPriorRow(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      getSandbox: async () => ({ ...h.fakeSandbox, containerRunning: async () => false }),
+      getSandbox: async () => ({ ...h.fakeSandbox, revoke: async () => ({ running: false }) }),
     });
 
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));

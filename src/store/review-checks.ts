@@ -1408,6 +1408,66 @@ export async function setCheckCreateState(
 }
 
 /**
+ * Record that a terminal update is ABOUT to be sent (migration 0089, §7.9a).
+ *
+ * Written in the same fenced statement that holds the attempt, immediately
+ * before the request: from this instant the outcome is UNKNOWN, so no lane may
+ * send this action again — a second send could double a request the first one
+ * already landed. Only readback may resolve it. Cleared by a validated response
+ * (`recordCheckObservation`, the dispatch resolved) or by a refusal PROVEN
+ * pre-send (`clearTerminalDispatch`, nothing left the Worker).
+ *
+ * The intent deliberately outlives `terminal_ms`: the late correction re-sends
+ * on a terminal row once — and only once — because its own dispatch resolved
+ * and cleared the mark.
+ */
+export async function recordTerminalDispatch(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET terminal_dispatch_ms = ?, updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND terminal_dispatch_ms IS NULL`,
+    )
+    .bind(nowMs, nowMs, id, lease.holder, lease.epoch, lease.untilMs)
+    .run();
+  return result.meta.changes === 1;
+}
+
+/** Clear the dispatch intent after a refusal PROVEN not to have left the Worker. */
+export async function clearTerminalDispatch(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET terminal_dispatch_ms = NULL, updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND terminal_dispatch_ms IS NOT NULL`,
+    )
+    .bind(nowMs, id, lease.holder, lease.epoch, lease.untilMs)
+    .run();
+  return result.meta.changes === 1;
+}
+
+/** The attempt's dispatch intent, or null when no terminal update was sent. */
+export async function readTerminalDispatch(db: D1Like, id: string): Promise<number | null> {
+  const row = await db
+    .prepare(`SELECT terminal_dispatch_ms FROM review_checks WHERE id = ?`)
+    .bind(id)
+    .first<{ terminal_dispatch_ms: number | null }>();
+  return row?.terminal_dispatch_ms ?? null;
+}
+
+/**
  * Undo a `sending` mark for a create that provably NEVER dispatched (spec §7.9
  * / RL-12 together with the `requests: 0` contract).
  *
@@ -1518,10 +1578,15 @@ export async function setCheckDesired(
     db,
     id,
     lease,
+    // A CHANGED frozen intent supersedes the previous dispatch: the mark it
+    // left described other text, so the corrected conclusion may be sent once
+    // (spec §7.9a's late correction). An unchanged intent keeps the mark, so
+    // re-running it can never send the same update twice.
     `desired = ?, desired_title = ?, desired_summary = ?, terminal_failure_status = ?,
             publication_id = COALESCE(?, publication_id),
+            terminal_dispatch_ms = CASE WHEN desired = ? AND desired_summary = ? THEN terminal_dispatch_ms ELSE NULL END,
             recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
-    [conclusion.desired, title, summary, conclusion.failureStatus ?? null, publicationId],
+    [conclusion.desired, title, summary, conclusion.failureStatus ?? null, publicationId, conclusion.desired, summary],
     nowMs,
   );
 }
@@ -1751,6 +1816,7 @@ export async function recordCheckObservation(
             create_state = CASE WHEN check_run_id IS NULL THEN 'known' ELSE create_state END,
             recovery_state = CASE WHEN ? THEN 'done' WHEN ? THEN 'remote-unconfirmed' ELSE recovery_state END,
             terminal_ms = CASE WHEN ? THEN ? ELSE terminal_ms END,
+            terminal_dispatch_ms = CASE WHEN ? THEN NULL ELSE terminal_dispatch_ms END,
             next_attempt_ms = CASE WHEN ? THEN NULL ELSE next_attempt_ms END,
             last_error = CASE WHEN ? THEN NULL ELSE last_error END`,
     [
@@ -1760,6 +1826,9 @@ export async function recordCheckObservation(
       unproven ? 1 : 0,
       agrees ? 1 : 0,
       nowMs ?? lease.untilMs,
+      // The dispatch intent clears only when THIS observation is the terminal
+      // it dispatched: a mere `running` read proves nothing about the request.
+      agrees ? 1 : 0,
       agrees ? 1 : 0,
       agrees ? 1 : 0,
     ],

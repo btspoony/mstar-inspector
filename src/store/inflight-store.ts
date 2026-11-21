@@ -137,6 +137,23 @@ const PAID_STATE_UNKNOWN = `EXISTS (SELECT 1 FROM review_launches l
              AND l.state = 'launched' AND l.result_outcome IS NULL)`;
 
 /**
+ * Does this row still consume a cap slot? Live rows do; so do expired rows
+ * whose attempt may STILL ACT — an expired lease says the guard lapsed, never
+ * that its container stopped. An expired row is free only on evidence: its
+ * attempt was revoked by the successor that took its PR, or its launch row
+ * proves the paid exec was never sent (`provisioned`/`abandoned`; the
+ * provisioning INSERT precedes every container start, so an absent row rules
+ * the event out by invariant). Binds, in order: now (unexpired side), now
+ * (expired side of the act test).
+ */
+const HOLDS_CAP_SQL = `(r.expires_at > ? OR ${PAID_STATE_UNKNOWN}
+          OR (r.expires_at <= ? AND EXISTS (
+                SELECT 1 FROM review_launches l
+                 WHERE l.attempt_id = r.attempt_id
+                   AND l.state NOT IN ('provisioned', 'abandoned')
+                   AND l.revoked_ms IS NULL)))`;
+
+/**
  * The PR's lock and a capacity slot in ONE conditional insert.
  *
  * `meta.changes === 1` is the only success signal: it means the anchor row was
@@ -155,9 +172,9 @@ INSERT INTO review_inflight
   (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE (SELECT COUNT(*) FROM review_inflight r
-        WHERE r.expires_at > ? OR ${PAID_STATE_UNKNOWN}) < ?
+        WHERE ${HOLDS_CAP_SQL}) < ?
   AND (SELECT COUNT(*) FROM review_inflight r
-        WHERE r.workspace_id = ? AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) < ?
+        WHERE r.workspace_id = ? AND ${HOLDS_CAP_SQL}) < ?
 ON CONFLICT (installation_id, owner, repo, pr_number) DO UPDATE SET
   workspace_id = excluded.workspace_id,
   attempt_id   = excluded.attempt_id,
@@ -168,7 +185,23 @@ WHERE review_inflight.expires_at <= ?
   AND NOT EXISTS (SELECT 1 FROM review_launches l
                    WHERE l.attempt_id = review_inflight.attempt_id
                      AND l.state = 'launched' AND l.result_outcome IS NULL)
-  AND (review_inflight.attempt_id = ? OR review_inflight.attempt_id = ?)
+  AND (review_inflight.attempt_id = ?
+       OR (review_inflight.attempt_id = ?
+           AND NOT EXISTS (SELECT 1 FROM review_launches l
+                            WHERE l.attempt_id = review_inflight.attempt_id
+                              AND l.revoked_ms IS NULL)))
+`;
+
+/**
+ * The successor's revocation of the attempt it displaces, written in the SAME
+ * transaction as the acquisition. `revoked_ms` is the durable "this attempt may
+ * not start anything again" fact: the sandbox refuses every later start, and
+ * the cap counts stop charging the row. Idempotent (a second revoke keeps the
+ * first instant).
+ */
+const REVOKE_SQL = `
+UPDATE review_launches SET revoked_ms = ?
+ WHERE attempt_id = ? AND revoked_ms IS NULL
 `;
 
 /**
@@ -186,10 +219,9 @@ SELECT
       AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) AS held,
   (SELECT r.head_sha FROM review_inflight r
     WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) AS held_head_sha,
+  (SELECT COUNT(*) FROM review_inflight r WHERE ${HOLDS_CAP_SQL}) AS total,
   (SELECT COUNT(*) FROM review_inflight r
-    WHERE r.expires_at > ? OR ${PAID_STATE_UNKNOWN}) AS total,
-  (SELECT COUNT(*) FROM review_inflight r
-    WHERE r.workspace_id = ? AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) AS workspace_total,
+    WHERE r.workspace_id = ? AND ${HOLDS_CAP_SQL}) AS workspace_total,
   (SELECT r.attempt_id FROM review_inflight r
     WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?) AS held_attempt_id,
   (SELECT r.expires_at FROM review_inflight r
@@ -239,7 +271,7 @@ export async function acquireInflight(
     }
     const now = isoInstant(nowMs);
     const expiresAt = isoInstant(nowMs + ttlMs);
-    const written = await db
+    const acquire = db
       .prepare(ACQUIRE_SQL)
       .bind(
         key.installation_id,
@@ -251,21 +283,36 @@ export async function acquireInflight(
         opts.headSha ?? "",
         now,
         expiresAt,
-        // System cap: live rows overall.
+        // System cap: rows that still hold a slot (see HOLDS_CAP_SQL).
+        now,
         now,
         opts.systemCap,
-        // Workspace cap: live rows of this tenant.
+        // Workspace cap: the same test, scoped to the tenant.
         key.workspace_id,
+        now,
         now,
         opts.workspaceCap,
         // Reclaim guard: only an EXPIRED row may be replaced.
         now,
         // …and only by its own attempt (a replay) or by the successor that
-        // observed THAT attempt's sandbox stopped. `""` never matches a row.
+        // observed THAT attempt's sandbox stopped and revoked it. `""` never
+        // matches a row.
         opts.attemptId,
         opts.priorStopped?.attemptId ?? "",
-      )
-      .run();
+      );
+    let written: { meta: { changes: number } };
+    if (opts.priorStopped === undefined) {
+      written = await acquire.run();
+    } else {
+      // ONE transaction: the revocation and the acquisition commit together, so
+      // capacity can never move to a successor while the attempt it displaces
+      // may still start something.
+      const [, taken] = await db.batch([
+        db.prepare(REVOKE_SQL).bind(nowMs, opts.priorStopped.attemptId),
+        acquire,
+      ]);
+      written = taken!;
+    }
     if (written.meta.changes === 1) return { ok: true };
 
     const row = await db
@@ -276,12 +323,17 @@ export async function acquireInflight(
         key.repo,
         key.pr_number,
         now,
+        // held_head_sha: the PR's row, whatever its state.
         key.installation_id,
         key.owner,
         key.repo,
         key.pr_number,
+        // total: the same slot test the acquire bound.
         now,
+        now,
+        // workspace_total.
         key.workspace_id,
+        now,
         now,
         key.installation_id,
         key.owner,

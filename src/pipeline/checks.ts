@@ -66,6 +66,8 @@ import {
   recordCheckObservation,
   releaseAttachedCheck,
   releaseCheckClaim,
+  clearTerminalDispatch,
+  recordTerminalDispatch,
   rollbackCheckCreateDispatch,
   setCheckCreateState,
   setCheckDesired,
@@ -798,6 +800,13 @@ async function terminalUpdate(
   if (!(await fence.verify())) {
     return refused(`publication lease ${fence.actionKey} lapsed before the update request`);
   }
+  // §7.9a: the DISPATCH INTENT is durable before anything leaves. From here the
+  // outcome is unknown, so this action may only be discovered — a lane that
+  // finds the intent set (a lost reply, a fresh recovery claim) must read the
+  // run back instead of sending the same update twice.
+  if (!(await recordTerminalDispatch(deps.db, identity.attemptId, input.lease, deps.nowMs()))) {
+    return refused("a terminal update for this attempt was already dispatched — reconcile it by readback");
+  }
   const { scope } = identity;
   // Typed as the TERMINAL pair: status and conclusion are required together, so
   // this send can never be built without the frozen conclusion it reports.
@@ -820,6 +829,12 @@ async function terminalUpdate(
     "check update",
   );
   if ("failure" in attempted.outcome) {
+    // A refusal PROVEN zero-dispatched (a typed pre-send marker) means nothing
+    // left the Worker, so the intent above would misstate the row: clear it and
+    // the next pass may send the same frozen intent.
+    if (attempted.sent === 0) {
+      await clearTerminalDispatch(deps.db, identity.attemptId, input.lease, deps.nowMs());
+    }
     return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check update") };
   }
   const remote = toCheckRemote(attempted.outcome.data);
@@ -2779,6 +2794,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // predicate is part of the UPDATE, so a concurrent terminalize's
       // proof-derived conclusion and its exact summary survive this write.
       await setCheckFallbackDesired(deps.db, handle.attemptId, fence.lease, conclusion, fence.nowMs);
+      // The give-up is the ONE place a terminal update's dispatch right is
+      // HANDED OVER, not retried: recovery reads the run back and sends only
+      // what the readback cannot prove already landed (§7.10). Everywhere else
+      // the intent keeps a second lane from issuing the same request.
+      await clearTerminalDispatch(deps.db, handle.attemptId, fence.lease, fence.nowMs);
       // Released on BOTH branches — an already-frozen intent is sent by
       // recovery exactly as it stands. `requestsSpent: true` keeps the row
       // `remote-unconfirmed`, so recovery ADOPTS the run the interrupted

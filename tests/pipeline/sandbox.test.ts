@@ -220,7 +220,13 @@ function makeDo(): { sandbox: ReviewSandbox; container: FakeContainer } {
   const container = makeContainer();
   // ctx double: the real DurableObjectState's blockConcurrencyWhile runs the
   // callback behind the concurrency gate and resolves with its result.
-  const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
+  const ctx = {
+    container,
+    // Migration 0089: the DO loads its durable revocation flag before any
+    // request, so every ctx double carries storage.
+    storage: { get: async () => undefined, put: async () => {} },
+    blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
+  };
   const sandbox = new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
   return { sandbox, container };
 }
@@ -328,7 +334,13 @@ describe("SandboxV1 Durable Object", () => {
   test("a missing container image key fails loud (wrangler/DO drift, not a silent no-op)", async () => {
     reset();
     const container = { ...makeContainer(), images: {} };
-    const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
+    const ctx = {
+    container,
+    // Migration 0089: the DO loads its durable revocation flag before any
+    // request, so every ctx double carries storage.
+    storage: { get: async () => undefined, put: async () => {} },
+    blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
+  };
     const sandbox = new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
 
     await expect(sandbox.runCommand(shellCommand("echo hi"))).rejects.toThrow(
@@ -412,7 +424,13 @@ describe("SandboxV1 Durable Object", () => {
 
   test("a missing container binding fails loud (misconfigured wrangler, not a silent no-op)", async () => {
     reset();
-    const sandbox = new SandboxV1({} as never, {}) as unknown as ReviewSandbox;
+    const sandbox = new SandboxV1(
+      {
+        storage: { get: async () => undefined, put: async () => {} },
+        blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
+      } as never,
+      {},
+    ) as unknown as ReviewSandbox;
 
     await expect(sandbox.runCommand(shellCommand("echo hi"))).rejects.toThrow(
       "container binding is not configured",

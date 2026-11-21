@@ -67,6 +67,7 @@ import {
   markCheckLocalError,
   readPublicationProof,
   readPublishedReview,
+  readTerminalDispatch,
   recordCheckObservation,
   reenableChecksForApps,
   releaseCheckClaim,
@@ -1263,6 +1264,31 @@ async function reconcileCheckAttempt(
     // with the right conclusion but carries no — or different — approved text,
     // so the wording never reached the user. Fall through and send the frozen
     // intent to THAT run; a landed update is never replaced by a new one.
+  }
+
+  // §7.9a: an already-DISPATCHED terminal update is discovery, never permission
+  // to send again. The fetch above is the readback; a run that has not reached
+  // the intended state yet does not prove the earlier request failed to land,
+  // and sending the same update twice is exactly the double it would cause.
+  if ((await readTerminalDispatch(db, attemptId)) !== null) {
+    if (beforeDeadline) {
+      // Its outcome may still arrive: wait without spending an attempt.
+      await releaseCheckClaim(db, attemptId, lease, now());
+      log.info(
+        { event: "ops_check_reconcile_dispatch_pending", detail: `attempt=${attemptId}` },
+        "a terminal update was already dispatched — readback only, no second send",
+      );
+      return;
+    }
+    // Past the deadline nothing more can prove it: charge the attempt so the
+    // ladder ends honestly (local-error with the remote id retained) instead of
+    // re-reading forever.
+    await settleFailedAttempt(
+      db, now, attemptsBefore, row, lease,
+      "a terminal update was dispatched and could not be confirmed by readback — never re-sent",
+      log, summary,
+    );
+    return;
   }
 
   const completed = await resolved.adapter.completeCheck({
