@@ -1319,7 +1319,7 @@ export type CheckLifecycleHooks = {
     /** THIS delivery's attach identity — absent means it created no row. */
     attachDeliveryId?: string;
     reason: string;
-    /** One warn when a publication proof exists but cannot be parsed. */
+    /** One warn when the proof cannot be parsed (fallback) or read (nothing settled). */
     warn?: (detail: string) => void;
     updateBudgetMs?: number;
   }): Promise<boolean>;
@@ -4761,35 +4761,38 @@ async function processMessage(
     // The ledger stamp is a DELIVERY watermark, so a later delivery naming the
     // SAME sha moves it too (migration 0044): expected and harmless here, since
     // the skip also requires the ledger's sha to differ from this payload's.
-    // ONE PR-watermark read per delivery (migration 0044): the supersede skip,
-    // the early dedup key and the hit-time freshness check share it. A FAILED
-    // read is cached with the single warning it earned, so a second site reuses
-    // that outcome instead of re-reading — and re-logging — one root cause. A
-    // readable answer is re-read only by the hit-time check (`fresh`), because
-    // that second read is what catches a push that landed after the key.
+    // The watermark read (migration 0044), memoized for the SKIP decisions
+    // only: the supersede skip and the early dedup key share one answer. The
+    // hit-time live-head check below always issues its OWN read — a memo must
+    // never supply the value that comparison decides on, or a mention whose
+    // head advanced would be acked. A fault is memoized as a warning, never as
+    // an answer: one root cause, one line, however many reads it took.
     let watermark: PrHeadAnswer | null | undefined;
-    let watermarkFaulted = false;
     let watermarkFaultLogged = false;
-    const readWatermark = async (fallback: string, fresh = false): Promise<PrHeadAnswer | null> => {
-      if (watermark === undefined || (fresh && watermark !== null)) {
+    const selectWatermark = (): Promise<PrHeadAnswer | null> =>
+      deps.selectPrHead({
+        targetId: payload.targetId,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+      });
+    /** One warn per delivery for a watermark read that could not answer. */
+    const warnWatermarkFault = (fallback: string, err: unknown): void => {
+      if (watermarkFaultLogged) return;
+      watermarkFaultLogged = true;
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        { ...payloadIdentityFields(payload), app_id: payload.botRef.appId },
+        `PR head watermark read failed (${fallback}): ${detail}`,
+      );
+    };
+    const readWatermark = async (fallback: string): Promise<PrHeadAnswer | null> => {
+      if (watermark === undefined) {
         try {
-          watermark = await deps.selectPrHead({
-            targetId: payload.targetId,
-            owner: payload.owner,
-            repo: payload.repo,
-            prNumber: payload.pr_number,
-          });
+          watermark = await selectWatermark();
         } catch (err) {
           watermark = null;
-          watermarkFaulted = true;
-          if (!watermarkFaultLogged) {
-            watermarkFaultLogged = true;
-            const detail = err instanceof Error ? err.message : String(err);
-            deps.log.warn(
-              { ...payloadIdentityFields(payload), app_id: payload.botRef.appId },
-              `PR head watermark read failed (${fallback}): ${detail}`,
-            );
-          }
+          warnWatermarkFault(fallback, err);
         }
       }
       return watermark;
@@ -5033,17 +5036,24 @@ async function processMessage(
         };
         // One FRESH read per hit — never on a miss — compared with the head the
         // key was made against, never with itself, so a mention keyed on an
-        // older watermark still sees the push that overtook it. A watermark
-        // read that already FAULTED earlier in this delivery is reused as-is:
-        // one root cause, one warning (see `readWatermark`).
+        // older watermark still sees the push that overtook it. This read is
+        // ALWAYS its own: the memo above may deduplicate a repeated fault's
+        // warning, but it can never supply the value this comparison decides.
         let liveHeadSha: string | null | undefined;
         const liveHead = async (): Promise<string | null> => {
           if (liveHeadSha === undefined) {
-            const read = await readWatermark("ack the keyed head now, do not re-review", true);
+            let read: PrHeadAnswer | null = null;
+            let faulted = false;
+            try {
+              read = await selectWatermark();
+            } catch (err) {
+              faulted = true;
+              warnWatermarkFault("ack the keyed head now, do not re-review", err);
+            }
             liveHeadSha = read?.headSha ?? null;
             // An ANSWER without a head (no ledger row) names the fallback here;
-            // a fault already logged its own single line, once per delivery.
-            if (!watermarkFaulted && liveHeadSha === null) {
+            // a thrown read already logged its one line for the delivery.
+            if (!faulted && liveHeadSha === null) {
               deps.log.warn(
                 earlyFields,
                 "PR head watermark unreadable — ack the keyed head now, do not re-review",

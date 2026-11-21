@@ -1604,11 +1604,14 @@ export type CheckLifecycle = {
    * confirmed publication's proof first, its persisted `reviews` row when that
    * projection has not landed. A head whose review met the gate stays
    * `success`, one that missed it stays `failure`. `neutral` — with the skip
-   * reason — is only the skip with nothing to inherit: no proof and no
-   * readable review, an unreadable gate, or a result without a readable score.
-   * A live consumer holder, a frozen intent and a terminal row are never
-   * taken; `false` means there was nothing to settle. A store or transport
-   * fault rejects — the caller logs it and the ACK is unaffected.
+   * reason — is only the skip with nothing to inherit: no proof and no readable
+   * review, an unreadable gate, or a result without a readable score. A proof
+   * whose bytes do not parse falls back to the projection; a proof that cannot
+   * be READ settles nothing at all (the run is left to the reconciler's
+   * deadline path) — evidence this lane cannot read is never turned into a
+   * verdict. A live consumer holder, a frozen intent and a terminal row are
+   * never taken; `false` means there was nothing to settle. A store or
+   * transport fault rejects — the caller logs it and the ACK is unaffected.
    */
   settleSkipped(input: {
     scope: Scope;
@@ -1624,9 +1627,10 @@ export type CheckLifecycle = {
     /** Why the delivery was skipped — the `neutral` summary names it. */
     reason: string;
     /**
-     * One warn when the publication proof exists but cannot be parsed and the
-     * settlement falls back to the persisted review. Never a throw: an omitted
-     * hook just drops the line.
+     * One warn when the settlement had to fall back off the publication proof:
+     * its bytes do not parse (the `reviews` projection is then the fallback),
+     * or the proof could not be READ at all (nothing is settled — the run is
+     * left to the recovery lane). Never a throw; an omitted hook drops the line.
      */
     warn?: (detail: string) => void;
     /** The operator-configured bound on the one terminal `checks.update`. */
@@ -2207,11 +2211,19 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       try {
         proof = await readPublicationProof(deps.db, { scope: input.scope, headSha: input.headSha });
       } catch (err) {
-        // A row whose proof cannot be parsed is UNREADABLE, exactly like a
-        // missing one: the projection below is the fallback and one warn names
-        // the read that failed. A parse fault must never escape a settlement —
-        // the caller's catch would leave the run to the recovery lane.
         const detail = err instanceof Error ? err.message : String(err);
+        if (!(err instanceof SyntaxError)) {
+          // The SELECT itself could not answer — a fault, not an unreadable
+          // payload. Settling now would conclude from evidence this lane cannot
+          // read and could freeze `neutral` over a confirmed failing review, so
+          // NOTHING is frozen: the attempt is left to the reconciler's own
+          // deadline path, which re-reads proof and review with its own
+          // fallbacks. One warn names the fault.
+          input.warn?.(`publication proof read failed (settling nothing; left to the recovery lane): ${detail}`);
+          return false;
+        }
+        // The row exists and its bytes do not parse: UNREADABLE, exactly like a
+        // missing proof — the projection below is the fallback.
         input.warn?.(`publication proof unreadable (falling back to the persisted review): ${detail}`);
       }
       const review =

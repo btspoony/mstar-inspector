@@ -3055,6 +3055,58 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     expect(row.desired).toBe("failure");
   });
 
+  test("a proof read fault settles nothing — no intent frozen, one warning", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The projection is readable, but the proof SELECT itself fails. The lane
+    // must not guess a verdict from a partially readable evidence set: it
+    // settles nothing and leaves the run to the reconciler's deadline path.
+    seedHeadReview(db, "needs fixes", 40);
+    const fake = settlingFake();
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
+    const failingDb = {
+      prepare: (sql: string) => {
+        if (sql.includes("review_publications")) throw new Error("D1 unavailable");
+        return db.prepare(sql);
+      },
+      batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    };
+    const warnings: string[] = [];
+    const lifecycle = createCheckLifecycle({
+      db: failingDb as never,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    expect(
+      await lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        attachDeliveryId: deliveryId,
+        reason: "already reviewed for this head",
+        warn: (detail) => warnings.push(detail),
+      }),
+    ).toBe(false);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("publication proof read failed");
+    // No intent, no remote request: the row keeps its claim and its
+    // `in_progress` conclusion, which the deadline path corrects.
+    expect(fake.updates).toHaveLength(0);
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.desired).toBe("in_progress");
+    expect(row.desired_summary).toBeNull();
+    expect(row.desired_title).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    expect(row.holder).not.toBeNull();
+  });
+
   test("a confirmed publication without a reviews row still settles the gate result", async () => {
     const db = await seededDb();
     CLOCK = T0;

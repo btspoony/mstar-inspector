@@ -9176,12 +9176,50 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: "2026-01-01T00:00:00.000Z" })));
 
-    expect(watermarkReads).toBe(1);
+    expect(watermarkReads).toBe(2);
     expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("PR head watermark read failed"))).toHaveLength(1);
     expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("ack the keyed head now"))).toHaveLength(0);
     // The ack still happens: an unreadable watermark never buys a second review.
     expect(h.sandbox.calls).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
+  });
+
+  test("check lifecycle: the hit-time read still happens after an empty watermark answer", async () => {
+    // The delivery carries a stamp, so the supersede path reads the watermark
+    // and gets a row with NO head. The push lands after that answer: the hit
+    // check must read again — reusing the memo would compare against "no head"
+    // and ack the very commit it should review.
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: GATED_OUTPUT,
+      appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
+    });
+    let watermarkReads = 0;
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      selectPrHead: async () => {
+        watermarkReads += 1;
+        return watermarkReads === 1
+          ? { headSha: null, headAt: null }
+          : { headSha: SHA2, headAt: new Date().toISOString() };
+      },
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: "2026-01-01T00:00:00.000Z" })));
+
+    // The supersede answer plus the hit-time read — the second one decided it.
+    expect(watermarkReads).toBe(2);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(reviewCount(db)).toBe(2);
+    expect(checkRowFor(db, SHA2).head_sha).toBe(SHA2);
+    expect(h.logLines.some((line) => line.level === "info" && line.msg.includes("reviewing the live head"))).toBe(true);
   });
 
   test("check lifecycle: an unreadable live head keeps the ack — one warning, no second paid review", async () => {
