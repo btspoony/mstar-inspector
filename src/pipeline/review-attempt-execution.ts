@@ -55,12 +55,17 @@ import { computeFindingFingerprint } from "../store/fingerprint";
 // linking the publication the probe found, and releasing the claim to recovery.
 import {
   CHECK_BACKOFF_MS,
+  CHECK_LEASE_MS,
   attemptKey,
+  claimCheckRecovery,
   deferCheckRecovery,
+  getCheckAttempt,
   readCheckIdentity,
   readOpenCheckIdentityForKey,
   linkCheckPublication,
   recordTerminalizeOutcome,
+  releaseCheckClaim,
+  setCheckDesired,
 } from "../store/review-checks";
 import {
   deliveryKeyOf,
@@ -189,6 +194,7 @@ import { type CustomProviderConsumerConfig } from "../dashboard/app-config-store
 import {
   CHECK_SUMMARIES,
   createCheckBeginLatch,
+  decideConclusion,
   type CheckBeginLatch,
   type CheckPromotion,
   type CheckTerminalOutcome,
@@ -3022,6 +3028,20 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
     const beginLatch = createCheckBeginLatch();
     let handle: CheckHandle | null;
     try {
+      // The check row's execution deadline IS the attempt's frozen hard stop
+      // (adoption narrows the attach window to this same instant), so the
+      // reconciler and the execution fence agree without a re-read.
+      //
+      // The ONE exception is a MINT after that instant has already passed:
+      // such a claim can only be the SETTLEMENT of a typed stop this attempt
+      // already reached (nothing is still running), and a spent instant cannot
+      // own a lease — `claimAttempt` refuses it. The claim then opens the same
+      // settlement window `settleSkipped` opens, so the stop's category and
+      // wording are frozen and delivered instead of dropped. A resumed
+      // ADOPTION keeps the attempt's own instant: only a mint is widened, so no
+      // existing row's deadline ever moves.
+      const claimDeadlineMs =
+        expect !== undefined ? deadlineMs : Math.max(deadlineMs, Date.now() + CHECK_LEASE_MS);
       handle = await withHookTimeout(
         deps.checks.begin({
           scope,
@@ -3029,10 +3049,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
           headSha,
           triggeredBy: payload.triggered_by,
           action: payload.action,
-          // The check row's execution deadline IS the attempt's frozen hard
-          // stop (adoption narrows the attach window to this same instant), so
-          // the reconciler and the execution fence agree without a re-read.
-          executionDeadlineMs: deadlineMs,
+          executionDeadlineMs: claimDeadlineMs,
           latch: beginLatch,
           ...(expect === undefined ? {} : { expect }),
         }),
@@ -3113,6 +3130,61 @@ function requireRunnerConfig(deps: ProcessDeps, payload: ReviewJobPayload): Runn
 /** The §7.10 settlement this invocation created, when it created one. */
 function maybeSettlement(deps: ProcessDeps, attemptId: string): CheckSettlement | undefined {
   return deps.checkSettlements.get(attemptId);
+}
+
+/**
+ * Fill in a wall-clock stop's category on a Check this invocation can no longer
+ * fence. A spent attempt deadline takes away the right to WRITE (its lease
+ * triple is dead), never the fact: the attempt ended at the cap or spent its
+ * tier window, and the run must say which.
+ *
+ * The recovery lease is the one the minute lane would take; taking it here,
+ * freezing the typed conclusion and giving it straight back leaves the row
+ * immediately due (`desired <> 'in_progress'` needs no due time), so the
+ * reconciler DELIVERS the approved wording instead of closing the run as an
+ * unknown failure. Only a WAITING row is filled: a frozen intent is immutable,
+ * so a row another lane already concluded keeps its own text and category.
+ *
+ * Best-effort by contract — the stop's durable failure record already exists,
+ * and a fault here must never mask the typed stop.
+ */
+async function freezeKnownStop(
+  deps: ProcessDeps,
+  payload: ReviewJobPayload,
+  attemptId: string,
+  budgetExhaustion: BudgetExhaustedOutcome,
+): Promise<void> {
+  const now = Date.now();
+  const line = { ...payloadIdentityFields(payload), attempt_id: attemptId };
+  try {
+    const attempt = await getCheckAttempt(deps.env.DB, attemptId);
+    if (attempt === null || attempt.desired !== "in_progress") return;
+    const lease = await claimCheckRecovery(deps.env.DB, attemptId, `stop:${crypto.randomUUID()}`, now);
+    if (lease === null) return;
+    const frozen = await setCheckDesired(
+      deps.env.DB,
+      attemptId,
+      lease,
+      decideConclusion({ proof: null, outcome: "budget-exhausted", gate: null, review: null, budgetExhaustion }),
+      null,
+      now,
+    );
+    // Given straight back: a frozen intent needs no due time, so the minute
+    // lane is due at once.
+    await releaseCheckClaim(deps.env.DB, attemptId, lease, Date.now());
+    deps.log.info(
+      { ...line, budget_outcome: budgetExhaustion },
+      frozen
+        ? "check attempt frozen with the stop's own category — the reconciler delivers it"
+        : "check attempt not frozen under the recovery lease — the reconciler concludes it",
+    );
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(
+      line,
+      `check stop category not recorded (the stop's durable record stands): ${detail}`,
+    );
+  }
 }
 
 /**
@@ -5699,18 +5771,17 @@ export async function settleAttemptFailure(
     // failure this stop owes with no trace and no recovery intent. A claim
     // already ATTEMPTED is never retried: the claim insert is the one
     // race-decided gate, and a second try could mint a second generation.
-    // A deadline already SPENT cannot own a Check lease (the row's deadline IS
-    // that instant), so the claim is skipped there: the recovery lane closes
-    // the row at its own expiry and the durable failure above is the stop's
-    // record. Claiming would throw and mask the typed stop.
+    // A deadline already SPENT does not change that: this stop is a fact we
+    // hold, and the claim opens a SETTLEMENT window for it (see
+    // `beginCheck`), which is what lets the category be frozen instead of
+    // dropped.
     if (
       deps.checks !== undefined &&
       check !== undefined &&
       check.handle === null &&
       !check.claimAttempted &&
       lifecycleScope !== undefined &&
-      headSha !== null &&
-      ref.deadlineMs > Date.now()
+      headSha !== null
     ) {
       check.claimAttempted = true;
       await check.begin(lifecycleScope, githubAppId, headSha);
@@ -5782,6 +5853,13 @@ export async function settleAttemptFailure(
       if (paidStateObserved) await recordReviewFailure(deps.env.DB, attemptId, Date.now());
       // The row is durable: now the Check may carry the stop's conclusion.
     await check?.terminalize(null, "budget-exhausted", undefined, budgetOutcome);
+    // A spent deadline took away this invocation's right to write (its lease
+    // triple is dead), never the fact: the Check may still be waiting with the
+    // category unknown. Fill it here, under the recovery lease the minute lane
+    // would take, so the reconciler DELIVERS the stop's own wording. The id is
+    // the CHECK attempt's (`handle`), never the Workflow attempt id above.
+    const checkAttemptId = check?.handle?.attemptId;
+    if (checkAttemptId !== undefined) await freezeKnownStop(deps, payload, checkAttemptId, budgetOutcome);
     // The row is durable here (the !durableOutcome case returned `unknown`
     // above) and the Check conclusion just landed. The budget stop writes no
     // failed-claim stamp on this route, so none is owed.

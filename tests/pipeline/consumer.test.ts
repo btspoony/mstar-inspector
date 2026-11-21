@@ -10585,6 +10585,37 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(reviewCount(db)).toBe(0);
   });
 
+  test("check lifecycle: a stop past the attempt deadline still records its category for the recovery lane", async () => {
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+        attemptCapMs: ROUND_BUDGET_MS,
+        // The clock crosses the attempt's own hard stop before the diff stage,
+        // so the Check's execution lease is dead by the time the stop is known:
+        // the category can only be frozen under the recovery lease.
+        ...clockSpendingSandbox("git init", ROUND_BUDGET_MS + 60_000, clock),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    // The stop we already knew is recorded rather than dropped: the row carries
+    // the category and the approved wording, and is handed back so the minute
+    // reconciler delivers it.
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("failure");
+    expect(row.terminal_failure_status).toBe("cap-stop");
+    expect(row.desired_summary).toBe(TERMINAL_FAILURE_TEXT["cap-stop"]);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.next_attempt_ms).toBeNull();
+  });
+
   test("check lifecycle: an abandoned terminal send hands the exhaustion intent to recovery, which sends it", async () => {
     h.sandbox.runnerExitCode = 124;
     h.sandbox.runnerStdout = "";

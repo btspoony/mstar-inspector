@@ -1168,6 +1168,26 @@ function terminalFailure(status: CheckFailureStatus, budgetExhaustion?: BudgetEx
   };
 }
 
+/**
+ * The approved category of a typed wall-clock stop, keyed by the WINDOW the stop
+ * drew on — the one fact that says which clock ended the attempt, whoever
+ * noticed it. `cause` is an attribution of the observer, not a category: the
+ * runner input write's kill at the anchored instant reports `sandbox-kill`
+ * while the refusal right after it reports `consumer-deadline`, and both are the
+ * same spent window.
+ *
+ *   - `preparation` — the derived pre-runner cutoff exists so the runner still
+ *     gets a window before the end-to-end cap; a stop there IS that cap.
+ *   - `runner` — the window frozen for the paid runner; spending it is the
+ *     tier's time budget, not the platform's duration.
+ *
+ * Total by type, so no window can fall through to a default.
+ */
+const STOP_CATEGORY: Record<BudgetExhaustedOutcome["budgetWindow"], CheckFailureStatus> = {
+  preparation: "cap-stop",
+  runner: "budget-stop",
+};
+
 /** The cause phrase the public summary carries for each typed stop. */
 const BUDGET_EXHAUSTED_CAUSE_TEXT: Record<BudgetExhaustedOutcome["cause"], string> = {
   "runner-deadline": "runner deadline reached",
@@ -1316,19 +1336,15 @@ export function decideConclusion(input: {
   // this attempt's Check (RL-12 reuses the head SHA). `budgetExhaustion` is
   // required by contract — the two seams that supply this outcome always carry
   // the record they resolved, so a missing one is a caller defect, named on the
-  // throw. The category keeps the operator's end-to-end cap distinct from a
-  // spent tier window: the Worker's derived cutoff refusing a step IS the cap
-  // (`capStop` raises exactly that cause), while a stop the GRANTED runner
-  // window produced is the tier's budget.
+  // throw. The category reads the record's WINDOW, never the `cause`: the same
+  // spent instant is reported by two paths with different causes.
   if (outcome === "budget-exhausted") {
     if (input.budgetExhaustion === undefined) {
       throw new Error(
         'decideConclusion: outcome "budget-exhausted" requires the resolved budgetExhaustion record',
       );
     }
-    return input.budgetExhaustion.cause === "consumer-deadline"
-      ? terminalFailure("cap-stop", input.budgetExhaustion)
-      : terminalFailure("budget-stop", input.budgetExhaustion);
+    return terminalFailure(STOP_CATEGORY[input.budgetExhaustion.budgetWindow], input.budgetExhaustion);
   }
   if (proof !== null) {
     if (proof.kind === "degraded") return terminalFailure("unknown-failure");

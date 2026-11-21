@@ -773,10 +773,12 @@ describe("setCheckFallbackDesired (give-up fallback, spec §7.9/§7.10)", () => 
     summary: `Review gate missed for ${SHA.slice(0, 7)}: verdict "needs fixes", score 40 (floor 80; allowed: ship it).`,
   };
 
-  test("the frozen intent wins in either write order", async () => {
-    // (1) The fallback lands while the row still wants `in_progress`, then the
-    // terminalize freezes its precise gate failure — same `desired`, so the
-    // real decision replaces the fallback text.
+  test("the first frozen intent is immutable in either write order", async () => {
+    // (1) The fallback lands while the row still wants `in_progress`; a later
+    // write with the SAME `desired` is a no-op on the frozen fields — the text
+    // and the category are what a user may already have seen. In production the
+    // real terminalize freezes BEFORE its send, so it is the first writer; the
+    // only later change that can still land is a DIFFERENT desired with proof.
     {
       const db = seededDb();
       const { attempt, lease } = await claim(db);
@@ -785,7 +787,7 @@ describe("setCheckFallbackDesired (give-up fallback, spec §7.9/§7.10)", () => 
       expect(await setCheckDesired(db, id, lease, GATE_FAILURE, null, T0)).toBe(true);
       const row = await rawRow(db, id);
       expect(row.desired).toBe("failure");
-      expect(row.desired_summary).toBe(GATE_FAILURE.summary);
+      expect(row.desired_summary).toBe(FAILURE.summary);
     }
     // (2) The terminalize freezes first: the fallback's own predicate refuses,
     // so the exact text and the recovery state stay untouched.

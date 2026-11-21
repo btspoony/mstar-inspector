@@ -1402,10 +1402,15 @@ export async function rollbackCheckCreateDispatch(
  * proof turns up, and the correction is honored ONLY when the caller supplies
  * that proof link (spec §7.9: "newly discovered positive publication proof may
  * correct a previously unknown failure into success/neutral on the same owned
- * run; record that correction, do not create another run"). Re-writing the SAME
- * intent is the idempotent replay case and still links the proof. Any other
- * change — a downgrade, a lateral swap, or a correction with no proof — returns
- * false and writes nothing.
+ * run; record that correction, do not create another run"). Any other change —
+ * a downgrade, a lateral swap, or a correction with no proof — returns false.
+ *
+ * A re-write of the SAME desired is the idempotent replay case, and it is a
+ * NO-OP on the frozen fields: the title, the text and the category that selects
+ * it are what the user may already have seen, so a second writer (a recovery
+ * pass, a duplicate settlement, an interrupted caller) can only link the proof
+ * and refresh the recovery bookkeeping. Changing the wording is the correction
+ * above — a different `desired` with proof — or nothing.
  */
 export async function setCheckDesired(
   db: D1Like,
@@ -1418,9 +1423,21 @@ export async function setCheckDesired(
   const current = await getCheckOwnership(db, id, lease, nowMs);
   if (current === null) return false;
   const was = current.desired;
-  if (was !== "in_progress" && was !== conclusion.desired) {
+  const replay = was === conclusion.desired;
+  if (was !== "in_progress" && !replay) {
     const correction = was === "failure" && (conclusion.desired === "success" || conclusion.desired === "neutral");
     if (!correction || publicationId === null) return false;
+  }
+  if (replay) {
+    return runFenced(
+      db,
+      id,
+      lease,
+      `publication_id = COALESCE(?, publication_id),
+              recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
+      [publicationId],
+      nowMs,
+    );
   }
   // Freeze BOUNDED text: the persisted row is the only source the send reads,
   // so an oversized or newline-injected title/summary cannot reach the public

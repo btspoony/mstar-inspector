@@ -43,6 +43,7 @@ import {
   getReviewAttemptCap,
 } from "../../src/dashboard/runtime-config-store";
 import { postRunnerReserveMs, readReviewAttemptCapMs } from "../../src/review-budget";
+import { CHECK_LEASE_MS } from "../../src/store/review-checks";
 import { BudgetExhaustedError, AttemptUnknownError } from "../../src/pipeline/review-attempt";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
@@ -298,15 +299,45 @@ describe("the frozen deadline survives a resume", () => {
       },
       terminalize: async () => {},
     };
+    const live = Date.now() + 4_242_000;
     const settlement = createCheckSettlement({
       deps,
       payload: makePayload(),
       attemptId: ATTEMPT_ID,
       checkBudgets: null,
-      deadlineMs: 4_242_000,
+      deadlineMs: live,
     });
     await settlement.begin(SCOPE, 424242, SHA);
-    expect(captured).toEqual([4_242_000]);
+    // A LIVE attempt's claim carries its hard stop verbatim.
+    expect(captured).toEqual([live]);
+  });
+
+  test("a claim after the attempt's hard stop opens a settlement window instead", async () => {
+    const { deps } = await makeDeps();
+    const captured: number[] = [];
+    deps.checks = {
+      begin: async (input) => {
+        captured.push(input.executionDeadlineMs);
+        return null;
+      },
+      terminalize: async () => {},
+    };
+    // The stop is already known and the attempt's instant has passed: a spent
+    // instant can own no lease, so the claim opens the settlement window
+    // `settleSkipped` opens — that is what lets the stop's category be frozen
+    // instead of dropped (and it never moves an existing row's deadline).
+    const spent = Date.now() - 60_000;
+    const settlement = createCheckSettlement({
+      deps,
+      payload: makePayload(),
+      attemptId: ATTEMPT_ID,
+      checkBudgets: null,
+      deadlineMs: spent,
+    });
+    await settlement.begin(SCOPE, 424242, SHA);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!).toBeGreaterThan(Date.now());
+    expect(captured[0]!).toBeLessThanOrEqual(Date.now() + CHECK_LEASE_MS);
   });
 });
 

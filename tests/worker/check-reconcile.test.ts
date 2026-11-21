@@ -3738,6 +3738,53 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
   });
+
+  test("a category frozen under the recovery lease is DELIVERED, never re-decided as unknown", async () => {
+    const db = seededDb();
+    // The consumer's own lease died with the attempt deadline, so the stop it
+    // knew could only be frozen under the recovery lease — the same one this
+    // test takes, the way `freezeKnownStop` does at the stop site.
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const frozen = await claimCheckRecovery(db, id, "recovery:fixture", T0);
+    expect(frozen).not.toBeNull();
+    expect(
+      await setCheckDesired(
+        db,
+        id,
+        frozen!,
+        {
+          desired: "failure",
+          title: CHECK_NAME,
+          summary: TERMINAL_FAILURE_TEXT["cap-stop"],
+          failureStatus: "cap-stop",
+        },
+        null,
+        T0,
+      ),
+    ).toBe(true);
+    expect(await releaseCheckClaim(db, id, frozen!, T0)).toBe(true);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    // The approved wording of the category the stop recorded — not the generic
+    // unknown failure an expired lease would otherwise produce.
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["cap-stop"]);
+    const row = await rawRow(db, id);
+    expect(row.terminal_failure_status).toBe("cap-stop");
+    expect(row.terminal_ms).not.toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

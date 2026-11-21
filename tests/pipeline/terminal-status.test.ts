@@ -34,7 +34,10 @@ import {
   CHECK_LEASE_MS,
   CHECK_NAME,
   claimAttempt,
+  claimCheckRecovery,
   getCheckAttempt,
+  listCheckReconcileBatch,
+  releaseCheckClaim,
   setCheckCreateState,
   setCheckDesired,
   type CheckConclusion,
@@ -179,20 +182,33 @@ describe("every terminal path persists a category (or deliberately none)", () =>
       }),
       status: "unknown-failure",
     },
-    // The two wall-clock categories, kept distinct.
+    // The wall-clock categories, keyed by the WINDOW the stop drew on and never
+    // by the observer's `cause`: the same spent instant is reported as
+    // `sandbox-kill` by the runner input write's kill and as `consumer-deadline`
+    // by the refusal right after it.
     {
-      path: "budget-stop (tier window spent)",
-      decided: decideConclusion({ proof: null, outcome: "budget-exhausted", gate: null, review: null, budgetExhaustion: BUDGET_RECORD }),
+      path: "budget-stop: runner window, runner-deadline",
+      decided: decideConclusion({ proof: null, outcome: "budget-exhausted", gate: null, review: null, budgetExhaustion: { ...BUDGET_RECORD, cause: "runner-deadline" } }),
       status: "budget-stop",
     },
     {
-      path: "cap-stop (operator cap reached)",
+      path: "budget-stop: runner window, sandbox-kill",
+      decided: decideConclusion({ proof: null, outcome: "budget-exhausted", gate: null, review: null, budgetExhaustion: { ...BUDGET_RECORD, cause: "sandbox-kill" } }),
+      status: "budget-stop",
+    },
+    {
+      path: "budget-stop: runner window, consumer-deadline",
+      decided: decideConclusion({ proof: null, outcome: "budget-exhausted", gate: null, review: null, budgetExhaustion: { ...BUDGET_RECORD, cause: "consumer-deadline" } }),
+      status: "budget-stop",
+    },
+    {
+      path: "cap-stop: preparation window",
       decided: decideConclusion({
         proof: null,
         outcome: "budget-exhausted",
         gate: null,
         review: null,
-        budgetExhaustion: { ...BUDGET_RECORD, cause: "consumer-deadline" },
+        budgetExhaustion: { ...BUDGET_RECORD, cause: "consumer-deadline", budgetWindow: "preparation" },
       }),
       status: "cap-stop",
     },
@@ -231,6 +247,38 @@ describe("every terminal path persists a category (or deliberately none)", () =>
     const tier = paths.find((entry) => entry.path.startsWith("budget-stop"))!;
     expect(cap.status).not.toBe(tier.status);
     expect(cap.decided.summary).not.toBe(tier.decided.summary);
+  });
+
+  test("one spent instant maps to one category, whoever observed it", () => {
+    // The runner input write is killed at the anchored deadline (`sandbox-kill`)
+    // while the refusal right after it reports the Worker's cutoff
+    // (`consumer-deadline`); both spent the SAME frozen runner window, so both
+    // are one category.
+    const sameInstant = (["runner-deadline", "sandbox-kill", "consumer-deadline"] as const).map((cause) =>
+      decideConclusion({
+        proof: null,
+        outcome: "budget-exhausted",
+        gate: null,
+        review: null,
+        budgetExhaustion: { ...BUDGET_RECORD, cause, budgetWindow: "runner" },
+      }),
+    );
+    for (const decided of sameInstant) {
+      expect(decided.failureStatus).toBe("budget-stop");
+      expect(decided.summary).toBe(terminalFailureSummary("budget-stop", BUDGET_RECORD));
+    }
+    // The preparation window is a different fact, whatever its cause reads.
+    for (const cause of ["consumer-deadline", "sandbox-kill"] as const) {
+      const decided = decideConclusion({
+        proof: null,
+        outcome: "budget-exhausted",
+        gate: null,
+        review: null,
+        budgetExhaustion: { ...BUDGET_RECORD, cause, budgetWindow: "preparation" },
+      });
+      expect(decided.failureStatus).toBe("cap-stop");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["cap-stop"]);
+    }
   });
 });
 
@@ -337,5 +385,91 @@ describe("the category is frozen with the intent (migration 0087)", () => {
     expect(() =>
       db.raw.prepare("UPDATE review_checks SET terminal_failure_status = 'runner-timeout' WHERE id = ?").run(attemptId),
     ).toThrow(/CHECK constraint failed/i);
+  });
+
+  test("a same-failure replay leaves the frozen wording and category byte-identical", async () => {
+    const db = seededDb();
+    const { attemptId, lease } = await claimed(db);
+    expect(
+      await setCheckDesired(
+        db,
+        attemptId,
+        lease,
+        {
+          desired: "failure",
+          title: CHECK_NAME,
+          summary: TERMINAL_FAILURE_TEXT["unknown-failure"],
+          failureStatus: "unknown-failure",
+        },
+        null,
+        T0,
+      ),
+    ).toBe(true);
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, created_ms, updated_ms)
+         VALUES ('replay-proof', ?, ?, ?, ?, ?, ?, 'review', 'prepared', '{}', ?, ?)`,
+      )
+      .run(APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, T0, T0);
+
+    // A second writer with the SAME desired but its own text and category: the
+    // frozen intent is what the user may already have seen, so only the proof
+    // link moves.
+    expect(
+      await setCheckDesired(
+        db,
+        attemptId,
+        lease,
+        { desired: "failure", title: "another title", summary: TERMINAL_FAILURE_TEXT["cap-stop"], failureStatus: "cap-stop" },
+        "replay-proof",
+        T0,
+      ),
+    ).toBe(true);
+
+    const row = (await getCheckAttempt(db, attemptId))!;
+    expect(row.terminalFailureStatus).toBe("unknown-failure");
+    expect(row.publicationId).toBe("replay-proof");
+    const stored = (await db
+      .prepare("SELECT desired_title, desired_summary FROM review_checks WHERE id = ?")
+      .bind(attemptId)
+      .first()) as { desired_title: string; desired_summary: string };
+    expect(stored.desired_title).toBe(CHECK_NAME);
+    expect(stored.desired_summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
+  });
+
+  test("an expired lease leaves the known category recoverable under the recovery claim", async () => {
+    const db = seededDb();
+    const { attemptId } = await claimed(db);
+    // The attempt's own deadline ran out with nothing frozen, so its execution
+    // lease is dead: the recovery lease is the only way to record what we know.
+    const later = DEADLINE + 1;
+    const recovery = await claimCheckRecovery(db, attemptId, "recovery:fixture", later);
+    expect(recovery).not.toBeNull();
+    expect(
+      await setCheckDesired(
+        db,
+        attemptId,
+        recovery!,
+        {
+          desired: "failure",
+          title: CHECK_NAME,
+          summary: terminalFailureSummary("cap-stop", BUDGET_RECORD),
+          failureStatus: "cap-stop",
+        },
+        null,
+        later,
+      ),
+    ).toBe(true);
+    expect(await releaseCheckClaim(db, attemptId, recovery!, later)).toBe(true);
+
+    const row = (await getCheckAttempt(db, attemptId))!;
+    expect(row.desired).toBe("failure");
+    expect(row.terminalFailureStatus).toBe("cap-stop");
+    // Immediately due: a frozen intent needs no due time, so the minute lane
+    // can deliver the approved wording instead of concluding an unknown failure.
+    const due = await listCheckReconcileBatch(db, later);
+    expect(due.map((attempt) => attempt.identity.attemptId)).toContain(attemptId);
   });
 });
