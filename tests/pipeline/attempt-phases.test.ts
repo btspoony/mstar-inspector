@@ -40,7 +40,7 @@ import {
   claimReviewLaunch,
   readReviewLaunch,
 } from "../../src/pipeline/review-attempt";
-import { PUBLICATION_LEASE_MS, claimAppliedLineBatch, readLineBatchState, recordLineDispatchIntent, readPublication } from "../../src/store/finding-lifecycle";
+import { PUBLICATION_LEASE_MS, claimDegradedTarget, readLineBatchState, recordLineDispatchIntent, readPublication } from "../../src/store/finding-lifecycle";
 import {
   deliveryKeyOf,
   readAttemptHandoff,
@@ -924,6 +924,37 @@ describe("a first publication past the frozen instant", () => {
 
     const send = h.commenterCalls.find((call) => call.op === "post-prepared-degraded");
     expect((send?.args as { notAfterMs?: number } | undefined)?.notAfterMs).toBe(ref.deadlineMs);
+  });
+
+  test("a degraded UPDATE is not staged while its target is held by a cleanup", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = "not a verdict";
+    h.fakeCommenter.planDegradedUpsert = async () => ({ action: "update", commentId: 7001, round: 2 });
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+
+    // The cleanup owns the exact target: the staging path must take the same
+    // exclusion before it stages (and before its UPDATE).
+    const held = await claimDegradedTarget(db as never, {
+      scope: SCOPE,
+      commentId: 7001,
+      holder: "cleanup:123:7001",
+      nowMs: Date.now(),
+    });
+    expect(held).not.toBeNull();
+
+    const { deps: collecting } = await makeDeps({ db });
+    expect(await collectAttempt(collecting, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "degraded" } });
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
+    const staged = db.raw.prepare(`SELECT COUNT(*) AS n FROM review_publications WHERE kind = 'degraded'`).get() as { n: number };
+    expect(staged.n).toBe(0);
   });
 
   test("a degraded send refused at the mutation settles as a wall-clock stop, never as a swallowed failure", async () => {

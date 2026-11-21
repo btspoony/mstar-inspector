@@ -130,6 +130,10 @@ export type PublicationRow = {
 
 /** Publication lease duration (spec §7.7 step 8: "120s, epoch-fenced"). */
 export const PUBLICATION_LEASE_MS = 120_000;
+
+/** `line_dispatch_ms` value for a row that predates the column: its intent is
+ *  UNKNOWN (the batch may have been sent), so it is discovery-only forever. */
+export const LINE_DISPATCH_UNKNOWN = -1;
 /** Recovery attempt cap — rows at/after this count leave the selectors. */
 export const LIFECYCLE_MAX_ATTEMPTS = 5;
 /** Staged payload cap (spec §7.7: size ≤1 MiB UTF-8; reject, never truncate). */
@@ -1367,7 +1371,9 @@ export type LineBatchState = { pending: boolean; dispatched: boolean };
 /**
  * Read the batch's durable state. `dispatched` is the §7.9a evidence question:
  * an intent means some lane took the send right for this exact batch, so the
- * only remaining work is read-only discovery — never a second send.
+ * only remaining work is read-only discovery — never a second send. A row that
+ * predates the column carries `LINE_DISPATCH_UNKNOWN` and is treated the same
+ * way: its intent is unknown, not absent.
  */
 export async function readLineBatchState(db: D1Like, id: string): Promise<LineBatchState> {
   const row = await db
@@ -1498,44 +1504,52 @@ export async function listLineBatchRecovery(db: D1Like, nowMs: number, limit: nu
 /** The exact degraded comment a cleanup and its publishers contend on. */
 export type DegradedTargetRef = { scope: Scope; commentId: number };
 
-/** Stable key: the authenticated App/installation/repo/PR plus the comment id. */
-export function degradedTargetKey({ scope, commentId }: DegradedTargetRef): string {
-  return `${scope.appId}:${scope.installationId}:${scope.owner}/${scope.repo}#${scope.prNumber}:${commentId}`;
+const DEGRADED_TARGET_COLUMNS = "bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?";
+
+function degradedTargetBinds({ scope, commentId }: DegradedTargetRef): [string, number, string, string, number, number] {
+  return [scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, commentId];
 }
 
 /**
  * Claim writer exclusion for ONE degraded target comment (spec §7.9a condition
- * 3). Both sides take this before touching the comment remotely: the cleanup
- * before DELETE, a degraded publisher before an update of that target. One
- * conditional row, one epoch: a live holder refuses the other side, and the
- * cleanup keeps it for the whole delete (an unresolved delete leaves it held
- * until its expiry, so no writer can reuse the target meanwhile). Uses the same
- * 120 s window as every other send right.
+ * 3). The cleanup takes it before DELETE; a degraded publisher (its staging AND
+ * its recovery send) takes it before an UPDATE of that comment. One conditional
+ * row, one epoch: a live holder refuses the other side, and a target whose last
+ * DELETE is UNRESOLVED (`unresolved_ms` set) refuses every writer until a fresh
+ * complete observation proves the outcome — there is no time bound that quietly
+ * re-opens it.
  */
 export async function claimDegradedTarget(
   db: D1Like,
   input: DegradedTargetRef & { holder: string; nowMs: number },
 ): Promise<Lease | null> {
   if (input.holder.length === 0) throw new Error("finding-lifecycle: degraded target claim requires a nonblank holder identity");
-  const key = degradedTargetKey(input);
   const claim = await db
     .prepare(
-      `INSERT INTO degraded_target_leases (target_key, holder, lease_epoch, lease_until_ms, updated_ms)
-       VALUES (?, ?, 1, ?, ?)
-       ON CONFLICT (target_key) DO UPDATE
+      `INSERT INTO degraded_target_leases
+         (bot_id, installation_id, owner, repo, pr_number, comment_id, holder, lease_epoch, lease_until_ms, updated_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+       ON CONFLICT (bot_id, installation_id, owner, repo, pr_number, comment_id) DO UPDATE
          SET holder = excluded.holder,
              lease_epoch = degraded_target_leases.lease_epoch + 1,
              lease_until_ms = excluded.lease_until_ms,
              updated_ms = excluded.updated_ms
-         WHERE degraded_target_leases.lease_until_ms IS NULL
-            OR degraded_target_leases.lease_until_ms <= ?`,
+         WHERE (degraded_target_leases.lease_until_ms IS NULL
+                OR degraded_target_leases.lease_until_ms <= ?)
+           AND degraded_target_leases.unresolved_ms IS NULL`,
     )
-    .bind(key, input.holder, input.nowMs + PUBLICATION_LEASE_MS, input.nowMs, input.nowMs)
+    .bind(
+      ...degradedTargetBinds(input),
+      input.holder,
+      input.nowMs + PUBLICATION_LEASE_MS,
+      input.nowMs,
+      input.nowMs,
+    )
     .run();
   if (claim.meta.changes === 0) return null;
   const row = await db
-    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM degraded_target_leases WHERE target_key = ?`)
-    .bind(key)
+    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM degraded_target_leases WHERE ${DEGRADED_TARGET_COLUMNS}`)
+    .bind(...degradedTargetBinds(input))
     .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
   if (row === null || row.holder !== input.holder || row.lease_until_ms !== input.nowMs + PUBLICATION_LEASE_MS) {
     return null;
@@ -1543,20 +1557,64 @@ export async function claimDegradedTarget(
   return { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
 }
 
-/** Release the target exclusion under the exact epoch it was granted with. */
+/**
+ * Hand the target exclusion back under the exact epoch it was granted with.
+ * `keep: true` means the DELETE may have landed and its outcome is UNKNOWN: the
+ * target becomes unresolved, so no writer (and no new delete) may use it until
+ * resolution is proven. `keep: false` is a known outcome — the target is free.
+ */
 export async function releaseDegradedTarget(
   db: D1Like,
-  input: DegradedTargetRef & { lease: Lease; nowMs: number },
+  input: DegradedTargetRef & { lease: Lease; nowMs: number; keep: boolean },
 ): Promise<boolean> {
   const released = await db
     .prepare(
       `UPDATE degraded_target_leases
-          SET holder = NULL, lease_until_ms = NULL, updated_ms = ?
-        WHERE target_key = ? AND holder = ? AND lease_epoch = ?`,
+          SET holder = NULL, lease_until_ms = NULL,
+              unresolved_ms = CASE WHEN ? THEN ? ELSE unresolved_ms END,
+              updated_ms = ?
+        WHERE ${DEGRADED_TARGET_COLUMNS} AND holder = ? AND lease_epoch = ?`,
     )
-    .bind(input.nowMs, degradedTargetKey(input), input.lease.holder, input.lease.epoch)
+    .bind(
+      input.keep ? 1 : 0,
+      input.nowMs,
+      input.nowMs,
+      ...degradedTargetBinds(input),
+      input.lease.holder,
+      input.lease.epoch,
+    )
     .run();
   return released.meta.changes === 1;
+}
+
+/**
+ * Record that a fresh COMPLETE observation proved this target's last unresolved
+ * DELETE: the comment was still present (the delete did not land) or is gone
+ * (it did). Only then may a writer use the target again.
+ */
+export async function resolveDegradedTarget(db: D1Like, ref: DegradedTargetRef, nowMs: number): Promise<boolean> {
+  const resolved = await db
+    .prepare(
+      `UPDATE degraded_target_leases
+          SET unresolved_ms = NULL, updated_ms = ?
+        WHERE ${DEGRADED_TARGET_COLUMNS} AND unresolved_ms IS NOT NULL`,
+    )
+    .bind(nowMs, ...degradedTargetBinds(ref))
+    .run();
+  return resolved.meta.changes === 1;
+}
+
+/** Every target in this exact scope whose last DELETE is still unresolved. */
+export async function listUnresolvedDegradedTargets(db: D1Like, scope: Scope): Promise<number[]> {
+  const rows = await db
+    .prepare(
+      `SELECT comment_id FROM degraded_target_leases
+        WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+          AND unresolved_ms IS NOT NULL`,
+    )
+    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .all<{ comment_id: number }>();
+  return rows.results.map((row) => row.comment_id);
 }
 
 /**

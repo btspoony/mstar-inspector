@@ -69,6 +69,7 @@ import type { D1Like, D1StatementLike } from "../store/types";
 import {
   applyPublishedLifecycle,
   captureLineComments,
+  claimDegradedTarget,
   claimPublication,
   deferPublicationRecovery,
   deferResolutionRecovery,
@@ -90,6 +91,7 @@ import {
   recordPublicationProof,
   recordLineDispatchIntent,
   reenableLifecycleForApps,
+  releaseDegradedTarget,
   releaseLineDispatch,
   releaseUnspentPublicationClaim,
   supersedePublication,
@@ -1002,8 +1004,35 @@ async function sendPreparedPublication(
     }
     return;
   }
+  // §7.9a condition 3: a degraded UPDATE reuses the comment a cleanup may be
+  // deleting. The same target exclusion the staging path holds covers this
+  // recovery send (and a target whose delete is unresolved refuses it).
+  const degradedTarget =
+    row.payload.kind === "degraded" && row.payload.targetCommentId !== null
+      ? { scope, commentId: row.payload.targetCommentId }
+      : null;
+  let degradedTargetLease: Lease | null = null;
+  if (degradedTarget !== null) {
+    degradedTargetLease = await claimDegradedTarget(db, {
+      ...degradedTarget,
+      holder: `recovery-degraded:${row.id}`,
+      nowMs: now(),
+    });
+    if (degradedTargetLease === null) {
+      log.warn(
+        { event: "ops_lifecycle_degraded_target_busy", detail: `publication=${row.id} comment=${degradedTarget.commentId}` },
+        "degraded target is held by its cleanup or unresolved — no send",
+      );
+      return;
+    }
+  }
   const lease = await claimPublication(db, row.id, HOLDER, now());
-  if (lease === null) return; // claimed elsewhere between pre-check and claim
+  if (lease === null) {
+    if (degradedTarget !== null && degradedTargetLease !== null) {
+      await releaseDegradedTarget(db, { ...degradedTarget, lease: degradedTargetLease, nowMs: now(), keep: false });
+    }
+    return; // claimed elsewhere between pre-check and claim
+  }
   try {
     // §7.9a condition 1: a Check-backed publication's recovery send must meet
     // the foreground send on the SAME per-action lease. That key is the attempt
@@ -1132,6 +1161,10 @@ async function sendPreparedPublication(
     // The send MAY have landed (§7.7): the honest phase is unknown —
     // read-only discovery only, never a blind second create.
     await settleFailedPublicationAttempt(db, now, row, lease, error instanceof Error ? error.message : String(error), summary, true);
+  } finally {
+    if (degradedTarget !== null && degradedTargetLease !== null) {
+      await releaseDegradedTarget(db, { ...degradedTarget, lease: degradedTargetLease, nowMs: now(), keep: false });
+    }
   }
 }
 

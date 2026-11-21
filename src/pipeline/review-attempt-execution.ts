@@ -79,6 +79,7 @@ import {
 import {
   applyPublishedLifecycle,
   captureLineComments,
+  claimDegradedTarget,
   claimPublication,
   countRecheckableFindings,
   findPublicationJournal,
@@ -88,6 +89,7 @@ import {
   readLineBatchState,
   recordPublicationProof,
   recordLineDispatchIntent,
+  releaseDegradedTarget,
   releaseLineDispatch,
   releaseUnspentPublicationClaim,
   readPublication,
@@ -2073,6 +2075,11 @@ async function publishDegradedPublication(input: {
     repo: input.scope.repo,
     prNumber: input.scope.prNumber,
   };
+  // §7.9a condition 3: an UPDATE reuses the comment a cleanup may be deleting.
+  // The target exclusion is taken BEFORE staging and held through the send, so
+  // a newer staged body and an in-flight delete cannot win separately.
+  let targetRef: { commentId: number } | null = null;
+  let targetLease: Lease | null = null;
   try {
     const plan = await commenter.planDegradedUpsert(target);
     const publicationId = crypto.randomUUID();
@@ -2098,6 +2105,21 @@ async function publishDegradedPublication(input: {
       attemptId: input.attemptId,
       admittedAttemptId: input.admittedAttemptId,
     };
+    targetRef = plan.action === "update" ? { commentId: plan.commentId } : null;
+    if (targetRef !== null) {
+      targetLease = await claimDegradedTarget(input.db, {
+        scope: input.scope,
+        commentId: targetRef.commentId,
+        holder: `degraded-stage:${publicationId}`,
+        nowMs: Date.now(),
+      });
+      if (targetLease === null) {
+        return {
+          phase: "failed",
+          reason: `the degraded target ${targetRef.commentId} is held by its cleanup (or its delete is unresolved) — the notice was not staged`,
+        };
+      }
+    }
     const staged = await stagePublication(input.db, { id: publicationId, payload, nowMs: Date.now() });
     // §7.7: an insert conflict returns the EXISTING immutable payload — never
     // overwrite a prepared/confirmed publication with a second model result.
@@ -2219,6 +2241,16 @@ async function publishDegradedPublication(input: {
     if (err instanceof RoundBudgetSpent) throw err;
     // A staging/unknown fault may have left a row behind: the lane stays open.
     return { phase: "failed", reason: err instanceof Error ? err.message : String(err), publicationClosed: false };
+  } finally {
+    if (targetRef !== null && targetLease !== null) {
+      await releaseDegradedTarget(input.db, {
+        scope: input.scope,
+        commentId: targetRef.commentId,
+        lease: targetLease,
+        nowMs: Date.now(),
+        keep: false,
+      });
+    }
   }
 }
 

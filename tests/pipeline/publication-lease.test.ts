@@ -36,7 +36,10 @@ import {
   claimDegradedTarget,
   claimPublication,
   claimPublicationLease,
+  listUnresolvedDegradedTargets,
+  releaseDegradedTarget,
   releasePublicationLease,
+  resolveDegradedTarget,
   stagePublication,
 } from "../../src/store/finding-lifecycle";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
@@ -55,9 +58,11 @@ import {
   createReviewCommenter,
   deleteDegradedCommentWithOctokit,
   postPreparedReviewWithOctokit,
+  recoverLineCommentsWithOctokit,
   type PostOctokit,
   type PublicationSendGuard,
 } from "../../src/pipeline/comment";
+import { buildLineBatchMarker, lineMarker } from "../../src/pipeline/review-threads";
 import { createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../store/helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
@@ -665,10 +670,11 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
               lineIntents: [],
             },
           });
+          // A staging (or sending) writer must lose the same target.
           const writer = await claimDegradedTarget(db, {
             scope: SCOPE,
             commentId: 7001,
-            holder: "degraded:writer",
+            holder: "degraded-stage:pub-newer-degraded",
             nowMs: T0,
           });
           writerClaimWon = writer !== null;
@@ -798,5 +804,175 @@ describe("the Check create proves its own action lease", () => {
       .bind(attemptId)
       .first<{ create_state: string }>();
     expect(row?.create_state).toBe("not-sent");
+  });
+});
+
+describe("the line-batch readback verifies authorship, uniqueness and publication", () => {
+  const PUB = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const OTHER = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+  const ASSOC = "cccccccc-dddd-4eee-8fff-000000000001";
+  const LOGIN = "acme-inspector[bot]";
+  const marker = buildLineBatchMarker(PUB);
+  const input = {
+    installationId: 123,
+    owner: "acme",
+    repo: "widgets",
+    prNumber: 42,
+    headSha: SHA,
+    round: 1,
+    publicationId: PUB,
+    intents: [
+      {
+        associationId: ASSOC,
+        findingRowId: "finding-1",
+        publicationId: PUB,
+        scope: SCOPE,
+        originalSha: SHA,
+        round: 1,
+        path: "src/a.ts",
+        line: 10,
+        body: "fix",
+        bodySha256: "a".repeat(64),
+      },
+    ],
+  };
+  type ReadbackReview = { id: number; body: string; user: { login: string; type: string } };
+  type ReadbackComment = { id: number; path: string; line: number; body: string; user: { login: string } };
+  const review = (id: number, login: string, body: string): ReadbackReview => ({
+    id,
+    body,
+    user: { login, type: "Bot" },
+  });
+  const comment = (
+    id: number,
+    login: string,
+    publicationId: string,
+    associationId: string,
+  ): ReadbackComment => ({
+    id,
+    path: "src/a.ts",
+    line: 10,
+    body: `a fix\n${lineMarker({ publicationId, associationId })}`,
+    user: { login },
+  });
+  function readback(reviews: ReadbackReview[], comments: ReadbackComment[]): PostOctokit {
+    return {
+      paginate: async () => reviews,
+      rest: {
+        issues: {
+          listComments: async () => ({ data: [] }),
+          updateComment: async () => ({}),
+          createComment: async () => ({}),
+        },
+        pulls: {
+          listReviews: async () => ({ data: reviews }),
+          listCommentsForReview: async () => ({ data: comments }),
+        },
+      },
+    };
+  }
+
+  test("exactly one review by our identity carrying this publication's marker is captured", async () => {
+    const recovered = await recoverLineCommentsWithOctokit(
+      readback([review(7, LOGIN, `${marker}`)], [comment(2001, LOGIN, PUB, ASSOC)]),
+      input,
+      LOGIN,
+    );
+    expect(recovered.captured).toBe(true);
+    expect(recovered.posted).toEqual([{ associationId: ASSOC, commentId: 2001, path: "src/a.ts", line: 10 }]);
+  });
+
+  test("two candidate reviews are ambiguous — nothing is captured", async () => {
+    const recovered = await recoverLineCommentsWithOctokit(
+      readback([review(7, LOGIN, marker), review(8, LOGIN, marker)], [comment(2001, LOGIN, PUB, ASSOC)]),
+      input,
+      LOGIN,
+    );
+    expect(recovered.captured).toBe(false);
+    expect(recovered.posted).toEqual([]);
+  });
+
+  test("a review by another author carrying the marker is unverified", async () => {
+    const recovered = await recoverLineCommentsWithOctokit(
+      readback([review(7, "someone-else[bot]", marker)], [comment(2001, LOGIN, PUB, ASSOC)]),
+      input,
+      LOGIN,
+    );
+    expect(recovered.captured).toBe(false);
+    expect(recovered.posted).toEqual([]);
+  });
+
+  test("a review whose last marker names another publication is unverified", async () => {
+    const recovered = await recoverLineCommentsWithOctokit(
+      readback(
+        [review(7, LOGIN, `${marker} ${buildLineBatchMarker(OTHER)}`)],
+        [comment(2001, LOGIN, PUB, ASSOC)],
+      ),
+      input,
+      LOGIN,
+    );
+    expect(recovered.captured).toBe(false);
+    expect(recovered.posted).toEqual([]);
+  });
+
+  test("a comment authored elsewhere or carrying another publication's marker is not captured", async () => {
+    const foreignComment = await recoverLineCommentsWithOctokit(
+      readback([review(7, LOGIN, marker)], [comment(2001, "someone-else[bot]", PUB, ASSOC)]),
+      input,
+      LOGIN,
+    );
+    expect(foreignComment.captured).toBe(false);
+    expect(foreignComment.posted).toEqual([]);
+
+    const otherPublication = await recoverLineCommentsWithOctokit(
+      readback([review(7, LOGIN, marker)], [comment(2001, LOGIN, OTHER, ASSOC)]),
+      input,
+      LOGIN,
+    );
+    expect(otherPublication.captured).toBe(false);
+    expect(otherPublication.posted).toEqual([]);
+  });
+
+  test("an unavailable App identity captures nothing", async () => {
+    const recovered = await recoverLineCommentsWithOctokit(
+      readback([review(7, LOGIN, marker)], [comment(2001, LOGIN, PUB, ASSOC)]),
+      input,
+      null,
+    );
+    expect(recovered.captured).toBe(false);
+    expect(recovered.posted).toEqual([]);
+  });
+});
+
+describe("a degraded target whose delete is unresolved blocks every writer", () => {
+  test("an unresolved delete stays closed until a fresh observation proves the outcome", async () => {
+    const db = await seededDb();
+    const ref = { scope: SCOPE, commentId: 7001 };
+    const cleanup = await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0 });
+    if (cleanup === null) throw new Error("fixture: the cleanup claim was refused");
+    // The DELETE may have landed: its outcome is unknown.
+    expect(await releaseDegradedTarget(db, { ...ref, lease: cleanup, nowMs: T0, keep: true })).toBe(true);
+    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([7001]);
+
+    // No lapse re-opens it: a writer long after the lease would have expired is
+    // still refused until resolution is PROVEN.
+    expect(
+      await claimDegradedTarget(db, {
+        ...ref,
+        holder: "degraded:writer",
+        nowMs: T0 + PUBLICATION_LEASE_MS * 10,
+      }),
+    ).toBeNull();
+
+    // A fresh complete observation (the comment is still present) resolves it.
+    expect(await resolveDegradedTarget(db, ref, T0 + PUBLICATION_LEASE_MS * 10 + 1)).toBe(true);
+    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([]);
+    expect(
+      await claimDegradedTarget(db, {
+        ...ref,
+        holder: "degraded:writer",
+        nowMs: T0 + PUBLICATION_LEASE_MS * 10 + 2,
+      }),
+    ).not.toBeNull();
   });
 });

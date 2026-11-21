@@ -90,13 +90,14 @@ import { redactSecrets } from "./redact";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
-import { claimDegradedTarget, hasUnprovenDegradedPublication, releaseDegradedTarget, type Lease, type LineIntent, type VerifiedResolution } from "../store/finding-lifecycle";
+import { claimDegradedTarget, hasUnprovenDegradedPublication, listUnresolvedDegradedTargets, releaseDegradedTarget, resolveDegradedTarget, type Lease, type LineIntent, type VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
 import {
   buildLineBatchMarker,
   buildLineCommentBody,
   createReviewThreads,
+  parseLineBatchMarker,
   parseLineMarker,
   sha256Hex,
   stripInspectorMarkerSyntax,
@@ -2007,6 +2008,12 @@ export type DegradedCleanupGuard = {
   preserve: (match: { id: number; body: string }) => Promise<boolean>;
   /** null = a competing writer owns the exact target: skip, do not delete. */
   claimTarget?: (commentId: number) => Promise<DegradedTargetLock | null>;
+  /**
+   * A complete scan is a fresh observation of every target in this scope: an
+   * unresolved DELETE whose comment is ABSENT is thereby resolved. Called once
+   * with the ids the scan found.
+   */
+  resolveAbsent?: (presentIds: readonly number[]) => Promise<void>;
 };
 
 /** The target exclusion a cleanup holds across one DELETE. */
@@ -2108,6 +2115,11 @@ export async function deleteDegradedCommentWithOctokit(
   }
   const comments = await scanCommentsWithOctokit(octokit, input, "degraded");
   const matches = findDegradedComments(comments);
+  // A target whose last DELETE is unresolved is re-observed here: absent from
+  // this complete scan proves the delete landed, so it stops blocking writers.
+  if (guard?.resolveAbsent !== undefined) {
+    await guard.resolveAbsent(comments.map((comment) => comment.id));
+  }
   const outcome: DegradedDeleteOutcome = {
     deleted: 0,
     skipped: 0,
@@ -2534,26 +2546,44 @@ async function publishLineComments(
  */
 function captureLineCommentsOf(
   intents: readonly LineIntent[],
-  returned: Array<{ id?: unknown; path?: unknown; line?: unknown; original_line?: unknown; body?: unknown }>,
+  returned: Array<{
+    id?: unknown;
+    path?: unknown;
+    line?: unknown;
+    original_line?: unknown;
+    body?: unknown;
+    user?: { login?: unknown } | null;
+  }>,
   reviewId: number | null,
+  /** Set on the recovery readback: only comments carrying THIS publication's
+   *  trusted marker, authored by THIS App, may be captured — a row anchor
+   *  cannot prove either. */
+  verify?: { publicationId: string; login: string },
 ): PostedLineComments {
   const posted: PostedLineComments["posted"] = [];
   const ambiguous: string[] = [];
-  const associations = returned.map((c) =>
-    typeof c.body === "string" ? (parseLineMarker(c.body)?.associationId ?? null) : null,
-  );
+  const markers = returned.map((c) => (typeof c.body === "string" ? parseLineMarker(c.body) : null));
+  const associations = markers.map((marker) => marker?.associationId ?? null);
   for (const intent of intents) {
-    const byMarker = returned.filter((c, i) => typeof c.id === "number" && associations[i] === intent.associationId);
+    const byMarker = returned.filter(
+      (c, i) =>
+        typeof c.id === "number" &&
+        associations[i] === intent.associationId &&
+        (verify === undefined ||
+          (markers[i]?.publicationId === verify.publicationId && c.user?.login === verify.login)),
+    );
     const matches =
       byMarker.length > 0
         ? byMarker
-        : returned.filter(
-            (c, i) =>
-              typeof c.id === "number" &&
-              associations[i] === null &&
-              c.path === intent.path &&
-              (c.line ?? c.original_line) === intent.line,
-          );
+        : verify !== undefined
+          ? []
+          : returned.filter(
+              (c, i) =>
+                typeof c.id === "number" &&
+                associations[i] === null &&
+                c.path === intent.path &&
+                (c.line ?? c.original_line) === intent.line,
+            );
     if (matches.length === 1) {
       posted.push({
         associationId: intent.associationId,
@@ -2569,18 +2599,21 @@ function captureLineCommentsOf(
 }
 
 /**
- * A PR review that carries this publication's batch marker. `listReviews`
- * returns an untyped boundary payload, so the two fields the readback needs
- * are narrowed explicitly.
+ * A PR review that is OUR batch for THIS exact publication: the last trusted
+ * line-batch marker names the publication, and the author is this App. A quoted
+ * marker inside someone else's text never satisfies it.
  */
-function isBatchReviewOf(candidate: unknown, marker: string): candidate is { id: number; body: string } {
+function isBatchReviewOf(
+  candidate: unknown,
+  publicationId: string,
+  login: string,
+): candidate is { id: number; body: string } {
   if (typeof candidate !== "object" || candidate === null) return false;
-  if (!("id" in candidate) || !("body" in candidate)) return false;
-  return (
-    typeof candidate.id === "number" &&
-    typeof candidate.body === "string" &&
-    candidate.body.includes(marker)
-  );
+  if (!("id" in candidate) || !("body" in candidate) || !("user" in candidate)) return false;
+  if (typeof candidate.id !== "number" || typeof candidate.body !== "string") return false;
+  const user = candidate.user;
+  if (typeof user !== "object" || user === null || !("login" in user) || user.login !== login) return false;
+  return parseLineBatchMarker(candidate.body)?.publicationId === publicationId;
 }
 
 /**
@@ -2594,14 +2627,17 @@ function isBatchReviewOf(candidate: unknown, marker: string): candidate is { id:
 export async function recoverLineCommentsWithOctokit(
   octokit: PostOctokit,
   input: PostPreparedLineCommentsInput,
+  expectedLogin: string | null,
 ): Promise<PostedLineComments> {
+  // Unverified: no identity to prove authorship, or a read failed. Nothing is
+  // captured, so nothing is persisted.
   const nothing: PostedLineComments = { posted: [], ambiguous: [], captured: false, reviewId: null };
   if (input.intents.length === 0) return { posted: [], ambiguous: [], captured: true, reviewId: null };
+  if (expectedLogin === null) return nothing;
   const pulls = octokit.rest?.pulls;
   if (pulls?.listReviews === undefined || pulls.listCommentsForReview === undefined || typeof octokit.paginate !== "function") {
     return nothing;
   }
-  const marker = buildLineBatchMarker(input.publicationId);
   let reviews: unknown;
   try {
     reviews = await octokit.paginate(pulls.listReviews, {
@@ -2613,11 +2649,21 @@ export async function recoverLineCommentsWithOctokit(
   } catch {
     return nothing;
   }
-  const review = (Array.isArray(reviews) ? reviews : []).find((candidate: unknown) =>
-    isBatchReviewOf(candidate, marker),
+  // EXACTLY ONE review may claim this publication: two candidates are
+  // ambiguous, and an ambiguous readback captures nothing.
+  const candidates = (Array.isArray(reviews) ? reviews : []).filter((candidate: unknown) =>
+    isBatchReviewOf(candidate, input.publicationId, expectedLogin),
   );
-  if (review === undefined) return nothing;
-  let returned: Array<{ id?: unknown; path?: unknown; line?: unknown; original_line?: unknown; body?: unknown }> | null;
+  if (candidates.length !== 1) return nothing;
+  const review = candidates[0]!;
+  let returned: Array<{
+    id?: unknown;
+    path?: unknown;
+    line?: unknown;
+    original_line?: unknown;
+    body?: unknown;
+    user?: { login?: unknown } | null;
+  }> | null;
   try {
     const listed = await pulls.listCommentsForReview({
       owner: input.owner,
@@ -2630,8 +2676,11 @@ export async function recoverLineCommentsWithOctokit(
   } catch {
     returned = null;
   }
-  if (returned === null) return { posted: [], ambiguous: [], captured: false, reviewId: review.id };
-  return captureLineCommentsOf(input.intents, returned, review.id);
+  if (returned === null) return nothing;
+  return captureLineCommentsOf(input.intents, returned, review.id, {
+    publicationId: input.publicationId,
+    login: expectedLogin,
+  });
 }
 
 /**
@@ -2865,39 +2914,11 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
     },
     async postPreparedDegraded(input) {
       const guard = publicationSendGuard(options?.db, clock, input);
-      const octokit = await getOctokit({ installationId: input.installationId, repo: input.repo });
-      const db = options?.db;
-      // §7.9a condition 3: an UPDATE reuses the very comment a cleanup may be
-      // deleting. Both sides take the target's exclusion before touching it, so
-      // a delete in flight and a publisher cannot win separately.
-      if (db === undefined || input.targetCommentId === null) {
-        return postPreparedDegradedWithOctokit(octokit, input, guard);
-      }
-      const ref = {
-        scope: {
-          appId: input.appId,
-          installationId: input.installationId,
-          owner: input.owner,
-          repo: input.repo,
-          prNumber: input.prNumber,
-        },
-        commentId: input.targetCommentId,
-      };
-      const target = await claimDegradedTarget(db, {
-        ...ref,
-        holder: `degraded:${input.publicationId}`,
-        nowMs: clock(),
-      });
-      if (target === null) {
-        throw new PublicationAuthorityUnavailable(
-          `degraded target ${input.targetCommentId} is held by its cleanup — nothing was sent`,
-        );
-      }
-      try {
-        return await postPreparedDegradedWithOctokit(octokit, input, guard);
-      } finally {
-        await releaseDegradedTarget(db, { ...ref, lease: target, nowMs: clock() });
-      }
+      return postPreparedDegradedWithOctokit(
+        await getOctokit({ installationId: input.installationId, repo: input.repo }),
+        input,
+        guard,
+      );
     },
     async deleteDegradedComment(input) {
       // §7.9a condition 3: without the journal store neither the preservation
@@ -2920,6 +2941,9 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
             ? {}
             : {
                 claimTarget: async (commentId: number) => {
+                  // The match itself is a fresh observation: the comment exists,
+                  // so an unresolved DELETE did not land.
+                  await resolveDegradedTarget(db, { scope, commentId }, clock());
                   const lease = await claimDegradedTarget(db, {
                     scope,
                     commentId,
@@ -2929,11 +2953,16 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
                   if (lease === null) return null;
                   return {
                     release: async (keep: boolean) => {
-                      if (!keep) {
-                        await releaseDegradedTarget(db, { scope, commentId, lease, nowMs: clock() });
-                      }
+                      await releaseDegradedTarget(db, { scope, commentId, lease, nowMs: clock(), keep });
                     },
                   };
+                },
+                resolveAbsent: async (presentIds: readonly number[]) => {
+                  for (const commentId of await listUnresolvedDegradedTargets(db, scope)) {
+                    if (!presentIds.includes(commentId)) {
+                      await resolveDegradedTarget(db, { scope, commentId }, clock());
+                    }
+                  }
                 },
               }),
         },
@@ -2948,9 +2977,11 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       );
     },
     async recoverLineComments(input) {
+      const identity = await getAppIdentity();
       return recoverLineCommentsWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
+        identity === null ? null : `${identity.slug}[bot]`,
       );
     },
     async listDiscussion(input) {

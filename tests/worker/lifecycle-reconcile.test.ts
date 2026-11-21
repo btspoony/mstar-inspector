@@ -907,6 +907,189 @@ describe("§7.9a condition 1 — a Check-backed send and its recovery share one 
       await running;
     }
   });
+
+  test("the no-Check lane: foreground and recovery contend on the SAME journal claim — one mutation", async () => {
+    const db = createMigratedTestD1();
+    await seedRealApp(db, APP, 1001);
+    // The payload's admitted attempt is the launch row with NO frozen Check
+    // identity: this is the lane whose authority is the journal claim.
+    await seedPrepared(db, "pub-journal", reviewPayload(SCOPE, { round: 2 }), 120_000);
+    const clock = { now: T0 };
+    const fg = { posts: 0 };
+    const bg = { posts: 0 };
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const token = (name: string) =>
+      json(200, {
+        token: name,
+        expires_at: new Date(T0 + 3_600_000).toISOString(),
+        repositories: [{ id: 1, name: "widgets" }],
+        permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+        repository_selection: "selected",
+      });
+
+    const planGate = Promise.withResolvers<void>();
+    const planReached = Promise.withResolvers<void>();
+    let planSuspensionUsed = false;
+    const backgroundFetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/app")) return json(200, { id: 1001, slug: "acme-inspector" });
+      if (url.endsWith("/access_tokens")) return token("ghs_bg");
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          bg.posts += 1;
+          return json(201, { id: 9100, body: "second" });
+        }
+        if (!planSuspensionUsed) {
+          planSuspensionUsed = true;
+          planReached.resolve();
+          await planGate.promise;
+        }
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = backgroundFetch;
+    const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE };
+    const running = reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => clock.now });
+
+    // The recovery has selected the row as `prepared` and is suspended in its
+    // plan. The foreground now takes THE claim for this publication.
+    await planReached.promise;
+    const journalLease = await claimPublication(db as never, "pub-journal", "consumer:fg", T0);
+    if (journalLease === null) throw new Error("fixture: the foreground journal claim was refused");
+    clock.now = T0;
+
+    const foregroundFetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/access_tokens")) return token("ghs_fg");
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          fg.posts += 1;
+          return json(201, { id: 9001, body: "posted" });
+        }
+        planGate.resolve();
+        await running;
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    try {
+      const commenter = createReviewCommenter(
+        { APP_ID: "1001", PRIVATE_KEY: await testAppPem() },
+        { db, nowMs: () => clock.now, fetchImpl: foregroundFetch },
+      );
+      const sent = await commenter.postPreparedReview({
+        installationId: 123,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        headSha: SHA,
+        round: 2,
+        targetCommentId: null,
+        body: "review body",
+        publicationId: "pub-journal",
+        journalClaim: journalLease,
+      });
+
+      expect(sent.commentId).toBe(9001);
+      // The recovery's claim on the same row was refused: one mutation, and the
+      // row still carries the foreground's claim (holder + epoch), untouched.
+      expect(fg.posts).toBe(1);
+      expect(bg.posts).toBe(0);
+      const row = db.raw
+        .prepare(`SELECT holder, lease_epoch, phase FROM review_publications WHERE id = ?`)
+        .get("pub-journal") as { holder: string | null; lease_epoch: number; phase: string };
+      expect(row.holder).toBe(journalLease.holder);
+      expect(row.lease_epoch).toBe(journalLease.epoch);
+      expect(row.phase).toBe("sending");
+    } finally {
+      globalThis.fetch = realFetch;
+      await running;
+    }
+  });
+});
+
+describe("§7.9a condition 2 — a pre-intent line batch is discovery-only", () => {
+  test("a row staged before dispatch intents existed is never sent by the recovery lane", async () => {
+    const db = createMigratedTestD1();
+    await seedRealApp(db, APP, 1001);
+    const intent: LineIntent = {
+      associationId: "assoc-old",
+      findingRowId: "finding-old",
+      publicationId: "pub-old",
+      scope: SCOPE,
+      originalSha: SHA,
+      round: 1,
+      path: "src/a.ts",
+      line: 10,
+      body: "fix",
+      bodySha256: "a".repeat(64),
+    };
+    await seedPrepared(db, "pub-old", reviewPayload(SCOPE, { lineIntents: [intent] }), 120_000);
+    // The shape a pre-migration applied row has: work pending, intent UNKNOWN.
+    db.raw
+      .prepare(`UPDATE review_publications SET phase = 'applied', applied_ms = ?, recovery_state = 'done', line_dispatch_ms = -1 WHERE id = ?`)
+      .run(T0, "pub-old");
+    seedFindingRow(db, "finding-old", "pub-old", SCOPE);
+    db.raw
+      .prepare(
+        `INSERT INTO review_threads
+           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+            original_sha, round, intent_json, resolution_state, verified_json, attempts, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '{}', 'pending', NULL, 0, ?, ?)`,
+      )
+      .run("assoc-old", "finding-old", "pub-old", SCOPE.appId, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, T0, T0);
+
+    const seen = { creates: 0, reviews: 0 };
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/app")) return json(200, { id: 1001, slug: "acme-inspector" });
+      if (url.endsWith("/access_tokens")) {
+        return json(200, {
+          token: "ghs_old",
+          expires_at: new Date(T0 + 3_600_000).toISOString(),
+          repositories: [{ id: 1, name: "widgets" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+          repository_selection: "selected",
+        });
+      }
+      if (url.includes("/pulls/") && url.includes("/reviews")) {
+        if (init?.method === "POST") {
+          seen.creates += 1;
+          return json(201, { id: 9200 });
+        }
+        seen.reviews += 1;
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    try {
+      await reconcileReviewLifecycle(
+        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE },
+        { log: SILENT_LOG, now: () => T0 },
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    // The sentinel is intent-UNKNOWN: the batch may already be sent, so the
+    // lane may only read it back (and capture nothing here).
+    expect(seen.creates).toBe(0);
+    expect(seen.reviews).toBeGreaterThanOrEqual(1);
+    const row = db.raw
+      .prepare(`SELECT phase, line_dispatch_ms FROM review_publications WHERE id = ?`)
+      .get("pub-old") as { phase: string; line_dispatch_ms: number | null };
+    expect(row.phase).toBe("applied");
+    expect(row.line_dispatch_ms).toBe(-1);
+  });
 });
 
 describe("thread lane — retry, backoff, give-up (real §7.5 surface)", () => {
