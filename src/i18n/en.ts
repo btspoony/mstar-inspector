@@ -1563,6 +1563,9 @@ export const en = {
       /** A save's re-read disagreed with its echo: the store's value wins. */
       attemptCapChangedElsewhere:
         "Another save changed the stored value while this page was open; the effective value is now {value} ms, which is what the store holds.",
+      /** A save landed; its value is not shown until the row is read back. */
+      attemptCapConfirming:
+        "A save was accepted; the stored value is being confirmed. No effective value is shown until it can be read back.",
       /** No attempt is admitted while the stored cap cannot be read. */
       attemptCapUnreadable:
         "The stored maximum duration could not be read, so no new review is admitted until it is readable again or a new value is saved.",

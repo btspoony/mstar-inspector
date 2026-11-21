@@ -281,7 +281,15 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
   const [attemptCapDraft, setAttemptCapDraft] = useState<string | null>(null);
   /**
-   * The store's value when a save's re-read disagreed with the save's own echo:
+   * A save was accepted and its re-read has not confirmed the stored value yet.
+   * While true the card renders no number and blocks editing: this request's
+   * echo is a value the row may no longer hold.
+   */
+  const [attemptCapConfirming, setAttemptCapConfirming] = useState(false);
+  /** The last accepted save's echo — what a later re-read is compared with. */
+  const [attemptCapEcho, setAttemptCapEcho] = useState<number | null>(null);
+  /**
+   * The store's value when the confirming re-read disagreed with the echo:
    * another operator wrote the row while this page was open. The card keeps
    * showing the store's number and says so until the next save.
    */
@@ -530,6 +538,36 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
+  /**
+   * Read the stored cap back after a save. Answers false when the read did not
+   * answer, leaving the card in its unconfirmed state: the echo is a value the
+   * store may not hold, so it is never rendered as the effective one. A read
+   * that answers degraded data is a successful answer — the row is named
+   * unreadable and no effective value is claimed.
+   */
+  async function confirmAttemptCap(echo: number): Promise<boolean> {
+    const fresh = await readRuntime().catch(() => null);
+    if (!fresh?.attemptCap) return false;
+    update(() => fresh);
+    setAttemptCapConfirming(false);
+    setAttemptCapEcho(null);
+    setAttemptCapChangedElsewhere(
+      fresh.attemptCap.degraded || fresh.attemptCap.capMs === echo ? null : fresh.attemptCap.capMs,
+    );
+    return true;
+  }
+
+  async function onRetryAttemptCap(): Promise<void> {
+    if (busy || attemptCapEcho === null) return;
+    setBusy(true);
+    try {
+      // A failed retry leaves the unconfirmed state and its button in place.
+      await confirmAttemptCap(attemptCapEcho);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onSaveAttemptCap(
     event: FormEvent<HTMLFormElement>,
     stored: AttemptCapConfig,
@@ -545,30 +583,21 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     attemptCapSignal.start();
     try {
       const saved = await setAttemptCap(capMs, stored);
-      // The echo is what THIS request wrote; it is not what the row holds now.
-      // Another operator may have written the cap since this page loaded, so the
-      // card shows the store's answer and keeps a line when it differs.
-      const fresh = await readRuntime().catch(() => null);
-      if (fresh?.attemptCap) {
-        update(() => fresh);
-        setAttemptCapChangedElsewhere(
-          fresh.attemptCap.degraded || fresh.attemptCap.capMs === saved.capMs
-            ? null
-            : fresh.attemptCap.capMs,
-        );
-      } else {
-        // The write landed but the re-read did not: keep the accepted echo and
-        // stop claiming a disagreement the card can no longer verify.
-        setAttemptCapChangedElsewhere(null);
-        update((data) => ({ ...data, attemptCap: saved }));
-      }
+      // The write landed, so it is reported. The VALUE is not: the echo is what
+      // this request wrote, not what the row holds now, so the card shows no
+      // number and blocks editing until the re-read answers.
       setAttemptCapDraft(null);
+      setAttemptCapEcho(saved.capMs);
+      setAttemptCapConfirming(true);
       setNotice({
         kind: "success",
         message: t(locale, "admin.runtime.attemptCapSaved"),
         source: "attemptCap",
       });
       attemptCapSignal.succeed();
+      // A failed confirmation is not a failed save: the unconfirmed state and
+      // its retry are the whole report, so this read never reaches the catch.
+      await confirmAttemptCap(saved.capMs);
     } catch (error) {
       const generic = t(locale, "admin.runtime.attemptCapFailed");
       setNotice({
@@ -853,6 +882,24 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.attemptCapUnreadable")} />
                   </div>
+                ) : attemptCapConfirming ? (
+                  // A save landed but the row has not been read back: the echo
+                  // is not shown, and nothing is editable until a read answers.
+                  <div className="mt-4" data-attempt-cap="confirming">
+                    <p className="text-sm text-muted-foreground">
+                      {t(locale, "admin.runtime.attemptCapConfirming")}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="mt-2"
+                      data-attempt-cap="retry"
+                      disabled={busy}
+                      onClick={() => void onRetryAttemptCap()}
+                    >
+                      {t(locale, "common.retry")}
+                    </Button>
+                  </div>
                 ) : null}
                 <form
                   className="mt-4 flex flex-wrap items-end gap-2"
@@ -870,13 +917,18 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       className="w-40"
                       autoComplete="off"
                       required
-                      value={attemptCapDraft ?? (attemptCap.degraded ? "" : String(attemptCap.capMs))}
+                      disabled={busy || attemptCapConfirming}
+                      value={
+                        attemptCapConfirming
+                          ? ""
+                          : (attemptCapDraft ?? (attemptCap.degraded ? "" : String(attemptCap.capMs)))
+                      }
                       onChange={(event) => setAttemptCapDraft(event.target.value)}
                     />
                   </div>
                   <Button
                     type="submit"
-                    disabled={busy}
+                    disabled={busy || attemptCapConfirming}
                     status={attemptCapSignal.status === "idle" ? undefined : attemptCapSignal.status}
                   >
                     {t(locale, "admin.runtime.attemptCapSave")}
@@ -888,7 +940,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     </Button>
                   ) : null}
                 </form>
-                {attemptCap.degraded ? null : (
+                {attemptCap.degraded || attemptCapConfirming ? null : (
                   // The two copies are the whole point: a stored value says so,
                   // and an absent row says "default — nothing saved".
                   <>

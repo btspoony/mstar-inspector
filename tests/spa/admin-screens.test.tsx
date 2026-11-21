@@ -868,6 +868,48 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("a save whose re-read fails shows no number, and a retry returns to one", async () => {
+    let reads = 0;
+    let readsFail = true;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") return json({ attemptCap: { capMs: 1_800_000 } });
+      reads += 1;
+      // The page's own load succeeds; every read after the save fails until
+      // the retry, so the card may not claim a number it could not confirm.
+      if (reads > 1 && readsFail) return new Response("unavailable", { status: 503 });
+      return json({
+        ...RUNTIME,
+        attemptCap: { capMs: 1_800_000, saved: true, min: 900_000, max: 3_600_000, degraded: false },
+      });
+    });
+    await surface.type("#attempt-cap-ms", "1800000");
+    const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    // The write is acknowledged; the value is not shown and nothing is editable.
+    expect(surface.container.querySelector('[data-attempt-cap="confirming"]')?.textContent).toContain(
+      "A save was accepted; the stored value is being confirmed.",
+    );
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')).toBeNull();
+    const field = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
+    expect(field.value).toBe("");
+    expect(field.disabled).toBe(true);
+    expect((form.querySelector('button[type="submit"]') as unknown as HTMLButtonElement).disabled).toBe(true);
+    expect(surface.text()).toContain("Saved.");
+
+    // A retry that answers returns the card to the store's number.
+    readsFail = false;
+    await surface.click(surface.container.querySelector('[data-attempt-cap="retry"]'));
+    expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).toBeNull();
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 1800000 ms (saved value).",
+    );
+    const confirmed = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
+    expect(confirmed.value).toBe("1800000");
+    expect(confirmed.disabled).toBe(false);
+    await surface.close();
+  });
+
   test("an unreadable cap claims no effective value and starts the field empty", async () => {
     const surface = await runtimeScreen(() =>
       json({
