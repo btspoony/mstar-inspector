@@ -35,6 +35,8 @@ import {
 } from "../../src/store/review-route-store";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import type { AttemptRef } from "../../src/pipeline/review-attempt-execution";
+/** The KV the recovery pass writes failed-claim stamps to (a minimal double). */
+const routeKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
 const { createReviewConsumer, createWorkflowInstance } = await import("../../src/pipeline/consumer");
 
@@ -113,6 +115,7 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
     await reconcileReviewRoute(
       {
         DB: db as never,
+        IDEMPOTENCY_KV: routeKv as never,
         REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never,
       },
       1_000 + 5 * 60_000 + 1,
@@ -212,6 +215,7 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
     const sent: ReviewJobPayload[] = [];
     const env = {
       DB: db as never,
+      IDEMPOTENCY_KV: routeKv as never,
       REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never,
     };
     const killedAt = Date.now();

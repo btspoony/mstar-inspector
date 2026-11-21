@@ -26,7 +26,8 @@ import { createConsumerHarness, failureRows, makePayload } from "../helpers/cons
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore, type FailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
-import { deliveryKeyOf, reserveAttemptHandoff } from "../../src/store/review-route-store";
+import { deliveryKeyOf, markAttemptSettled, reserveAttemptHandoff } from "../../src/store/review-route-store";
+import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import type { AttemptRef, CheckSettlement, ProcessDeps } from "../../src/pipeline/review-attempt-execution";
 import type { TestD1 } from "../store/helpers";
 
@@ -292,6 +293,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     expect(failureRows(db).length).toBeGreaterThanOrEqual(1);
     // This failure is pre-checkout, so no Check conclusion was owed: the mark
     // must record exactly the effects this settlement had, and not the stamp.
+    // The array is a SET (the mark's union sorts it), not an ordered log.
     expect(settledEffects(db)).toEqual(["failure-row"]);
     // Not complete: a replay must finish the missing stamp, so the mark must
     // not skip the settlement.
@@ -304,8 +306,62 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       stepHost({ failOn: "prepare" }).step,
       async () => {},
     );
-    expect(settledEffects(db)).toEqual(["failure-row", "claim-stamp"]);
+    expect(settledEffects(db)).toEqual(["claim-stamp", "failure-row"]);
     expect(settledMark(db)).toEqual(expect.any(Number));
+  });
+
+  test("the recovery pass finishes a settlement that outlived the step and the instance", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const key = deliveryKeyOf(payload);
+    await seedHandoff(db, payload);
+    // The settlement started (the Workflow step wrote its in-progress marker)
+    // and only the Check effect landed before the execution vanished.
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ?, settled_effects = ? WHERE delivery_key = ?")
+      .run(1_000, JSON.stringify(["check"]), key);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // Too fresh: a live step may still be finishing.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 60_000);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(settledMark(db)).toBeNull();
+
+    // Past the quiet window the pass lands what needs no dead host's memory.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 5 * 60_000 + 1);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("settlement replay");
+    expect(h.kvPuts.some((put) => put.value === "failed")).toBe(true);
+    expect(settledMark(db)).toEqual(expect.any(Number));
+    expect(settledEffects(db)).toEqual(["check", "claim-stamp", "failure-row"]);
+
+    // Completed: a second pass does nothing.
+    const rowsAfter = failureRows(db).length;
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 10 * 60_000);
+    expect(failureRows(db)).toHaveLength(rowsAfter);
+  });
+
+  test("two settlement executions accumulate their effects instead of overwriting each other", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const key = deliveryKeyOf(payload);
+    await seedHandoff(db, payload);
+
+    // Execution A landed the failure row; execution B landed the stamp. Neither
+    // alone is the obligation, and B must not erase A's progress.
+    await markAttemptSettled(db as never, key, ["failure-row"], ["failure-row", "claim-stamp"], 2_000);
+    expect(settledEffects(db)).toEqual(["failure-row"]);
+    expect(settledMark(db)).toBeNull();
+
+    await markAttemptSettled(db as never, key, ["claim-stamp"], ["failure-row", "claim-stamp"], 3_000);
+    expect(settledEffects(db)).toEqual(["claim-stamp", "failure-row"]);
+    expect(settledMark(db)).toEqual(3_000);
+
+    // A later empty write keeps the union and the completion.
+    await markAttemptSettled(db as never, key, [], ["failure-row", "claim-stamp"], 4_000);
+    expect(settledEffects(db)).toEqual(["claim-stamp", "failure-row"]);
+    expect(settledMark(db)).toEqual(3_000);
   });
 
   test("one transient error inside the settlement is retried and completes", async () => {

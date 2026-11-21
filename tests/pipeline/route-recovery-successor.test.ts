@@ -48,6 +48,8 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { Lease } from "../../src/store/finding-lifecycle";
 import type { AttemptRef, CheckHandle, ProcessDeps } from "../../src/pipeline/review-attempt-execution";
 import type { TestD1 } from "../store/helpers";
+/** The KV the recovery pass writes failed-claim stamps to (a minimal double). */
+const routeKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
@@ -226,6 +228,7 @@ describe("claim 3 — the outbox row precedes the moved-head settlement", () => 
     await reconcileReviewRoute(
       {
         DB: db as never,
+        IDEMPOTENCY_KV: routeKv as never,
         REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never,
       },
       Date.now(),

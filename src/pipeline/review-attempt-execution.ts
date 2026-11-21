@@ -66,6 +66,7 @@ import {
   deliveryKeyOf,
   markAttemptSettled,
   recordSuccessorIntent,
+  settlementObligationsOf,
   successorIntentOf,
   type SettlementEffect,
 } from "../store/review-route-store";
@@ -5470,9 +5471,15 @@ export async function settleAttemptFailure(
    *   and requiring a KV write would let a KV fault block settlement forever.
    * A delivery with no handoff row (a direct phase caller) matches no row.
    */
-  const markSettled = async (effects: readonly SettlementEffect[], complete: boolean): Promise<void> => {
+  const markSettled = async (landed: readonly SettlementEffect[]): Promise<void> => {
     try {
-      await markAttemptSettled(deps.env.DB, deliveryKeyOf(payload), effects, complete, Date.now());
+      await markAttemptSettled(
+        deps.env.DB,
+        deliveryKeyOf(payload),
+        landed,
+        settlementObligationsOf(payload),
+        Date.now(),
+      );
     } catch (markErr) {
       deps.log.warn(
         { ...payloadIdentityFields(payload), attempt_id: attemptId },
@@ -5488,7 +5495,7 @@ export async function settleAttemptFailure(
     // The moved head's own settlement (skip row + Check conclusion + outbox
     // row) ran before this settlement was called, so there is nothing left to
     // finish and the mark can say so.
-    await markSettled(["skip"], true);
+    await markSettled(["skip"]);
     return { kind: "ok" };
   }
   const progress: ReviewAttemptProgress = {
@@ -5650,7 +5657,7 @@ export async function settleAttemptFailure(
     // The row is durable here (the !durableOutcome case returned `unknown`
     // above) and the Check conclusion just landed. The budget stop writes no
     // failed-claim stamp on this route, so none is owed.
-    await markSettled(check === undefined ? ["failure-row"] : ["failure-row", "check"], true);
+    await markSettled(check === undefined ? ["failure-row"] : ["failure-row", "check"]);
     return { kind: "budget-exhausted", outcome: budgetOutcome };
   }
 
@@ -5823,7 +5830,11 @@ export async function settleAttemptFailure(
   if (durableOutcome) effects.push("failure-row");
   if (check !== undefined) effects.push("check");
   if (claimStampLanded) effects.push("claim-stamp");
-  await markSettled(effects, durableOutcome && claimStampLanded);
+  // The required set is the settlement's own obligation (`settlementObligationsOf`):
+  // the mark completes only when the UNION of every settlement execution for
+  // this delivery covers it, so two racing settlements cannot erase each
+  // other's progress and neither can certify a missing effect.
+  await markSettled(effects);
   throw err;
 }
 /**

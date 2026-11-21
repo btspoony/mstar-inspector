@@ -35,6 +35,7 @@ import {
 import { MovedHeadError } from "../pipeline/review-attempt";
 import { POST_RUNNER_READ_BUDGET_MS } from "../review-budget";
 import {
+  beginAttemptSettlement,
   deliveryKeyOf,
   markSuccessorDelivered,
   readAttemptHandoff,
@@ -114,6 +115,9 @@ export async function runReviewAttemptWorkflow(
         const deliveryKey = deliveryKeyOf(ref.payload);
         const handoff = await readAttemptHandoff(deps.env.DB, deliveryKey);
         if (handoff !== null && handoff.settledMs !== null) return { settled: true };
+        // The in-progress marker: this row is now the route's recovery pass's
+        // obligation if this execution never reaches its completion mark.
+        if (handoff !== null) await beginAttemptSettlement(deps.env.DB, deliveryKey, Date.now());
         await settleAttemptFailure(deps, ref, err, cleanup);
         return { settled: true };
       },

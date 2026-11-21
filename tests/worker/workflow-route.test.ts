@@ -37,6 +37,8 @@ import {
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import type { AttemptRef } from "../../src/pipeline/review-attempt-execution";
 import type { WorkflowStepConfig } from "cloudflare:workers";
+/** The KV the recovery pass writes failed-claim stamps to (a minimal double). */
+const routeKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
 // Dynamic: the module graph under test must load after the workerd shim.
 const { createReviewConsumer, createWorkflowInstance } = await import("../../src/pipeline/consumer");
@@ -322,6 +324,7 @@ describe("review route — every handoff is a durable record", () => {
     const sent: ReviewJobPayload[] = [];
     const env = {
       DB: db as never,
+      IDEMPOTENCY_KV: routeKv as never,
       REVIEW_QUEUE: {
         send: async (message: ReviewJobPayload) => {
           sent.push(message);
@@ -352,6 +355,7 @@ describe("review route — every handoff is a durable record", () => {
     const sent: ReviewJobPayload[] = [];
     const env = {
       DB: db as never,
+      IDEMPOTENCY_KV: routeKv as never,
       REVIEW_QUEUE: {
         send: async (message: ReviewJobPayload) => {
           sent.push(message);

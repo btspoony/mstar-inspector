@@ -9,6 +9,9 @@
  *   attempt id and re-tries create. A replay is idempotent: an instance that
  *   exists answers "already exists" (and is probed for this attempt's id) and
  *   is recorded as created, never a second attempt.
+ * - a SETTLEMENT that started and never completed: the Workflow's step retry
+ *   and a resumed instance cover the transient cases; this pass covers the one
+ *   that outlived both, landing the effects that need no dead host's memory.
  * - a CONSUMED COMMENT CLAIM still carrying its payload: the host died between
  *   consuming the claim and writing the handoff, so the claim row is the only
  *   record left. The pass hands it back to the queue (once — the state
@@ -21,16 +24,27 @@
  * `updated_ms` is bumped after a re-enqueue so one sweep cannot hot-loop on the
  * same row; a failed send leaves the clock untouched, so the next pass retries.
  */
-import type { D1Database, Queue } from "@cloudflare/workers-types";
+import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import {
+  IDEMPOTENCY_SECONDS,
+  IDEM_FAILED,
+  idemKey,
+  putAbandonClaim,
+} from "../contracts/idem";
+import { createFailureStore } from "../store/failure-store";
 import {
   listCommentClaimsForRecovery,
   listHandoffsForRecovery,
+  listIncompleteSettlements,
   listOwedSuccessors,
+  markAttemptSettled,
   markSuccessorDelivered,
   restoreCommentClaimForRecovery,
+  settlementObligationsOf,
   successorGeneration,
   touchAttemptHandoff,
+  type SettlementEffect,
 } from "../store/review-route-store";
 
 /** A handoff is retried only after this quiet period (a live delivery is still trying). */
@@ -38,7 +52,12 @@ export const HANDOFF_RECOVERY_AFTER_MS = 5 * 60_000;
 /** Rows per pass per family — the reconciler's own bound. */
 export const ROUTE_RECOVERY_LIMIT = 25;
 
-export type ReviewRouteEnv = { DB: D1Database; REVIEW_QUEUE: Queue<ReviewJobPayload> };
+export type ReviewRouteEnv = {
+  DB: D1Database;
+  REVIEW_QUEUE: Queue<ReviewJobPayload>;
+  /** The commit claim the failed-claim stamp is written to. */
+  IDEMPOTENCY_KV: KVNamespace;
+};
 
 /**
  * Deliver what the route owes. Per-row faults are isolated: one bad row never
@@ -70,6 +89,62 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       await touchAttemptHandoff(env.DB, handoff.deliveryKey, nowMs);
     } catch {
       // Stays owed (the clock is untouched); the next pass retries it.
+    }
+  }
+  // A settlement that STARTED and never completed. The Workflow's own retry
+  // covers a transient fault inside the step, and a resumed instance re-runs a
+  // step whose result was lost — but neither covers a settlement that outlived
+  // both (a persistent fault, or an instance the platform failed). This pass is
+  // the durable owner: it lands the effects that need no dead host's memory —
+  // the failure row and the commit's claim stamp — and completes the mark. The
+  // Check conclusion is NOT redone here: a settlement writes its mark only after
+  // `terminalize` returned, so a Check that never concluded has no mark and is
+  // closed by the check reconciler at its own lease.
+  for (const handoff of await listIncompleteSettlements(env.DB, {
+    settlingBeforeMs: nowMs - HANDOFF_RECOVERY_AFTER_MS,
+    limit: ROUTE_RECOVERY_LIMIT,
+  })) {
+    try {
+      const landed = new Set<SettlementEffect>(handoff.settledEffects ?? []);
+      if (!landed.has("failure-row")) {
+        await createFailureStore(env.DB).record({
+          target_id: handoff.payload.targetId,
+          installation_id: handoff.payload.installation_id,
+          owner: handoff.payload.owner,
+          repo: handoff.payload.repo,
+          pr_number: handoff.payload.pr_number,
+          head_sha: handoff.payload.head_sha ?? "",
+          stage: "pipeline",
+          error: `settlement replay: the attempt's settlement did not finish (landed: ${
+            landed.size === 0 ? "nothing" : [...landed].join(", ")
+          }); the route's recovery pass recorded this failure and finished the settlement`,
+        });
+        landed.add("failure-row");
+      }
+      if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
+        await putAbandonClaim(
+          env.IDEMPOTENCY_KV,
+          idemKey({
+            installation_id: handoff.payload.installation_id,
+            owner: handoff.payload.owner,
+            repo: handoff.payload.repo,
+            pr_number: handoff.payload.pr_number,
+            head_sha: handoff.payload.head_sha,
+          }),
+          IDEM_FAILED,
+          IDEMPOTENCY_SECONDS,
+        );
+        landed.add("claim-stamp");
+      }
+      await markAttemptSettled(
+        env.DB,
+        handoff.deliveryKey,
+        [...landed],
+        settlementObligationsOf(handoff.payload),
+        nowMs,
+      );
+    } catch {
+      // Stays incomplete; the next pass retries it.
     }
   }
   // A claim whose delivery died before recording anything. The state transition

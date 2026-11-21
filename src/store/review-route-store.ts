@@ -49,6 +49,12 @@ export type AttemptHandoff = {
    * operator) sees what is still owed.
    */
   settledEffects: SettlementEffect[] | null;
+  /**
+   * When the settlement step STARTED. A settlement that started and never
+   * completed is the recovery pass's obligation; `settledMs` alone cannot tell
+   * it apart from an attempt that has not failed yet.
+   */
+  settlingMs: number | null;
 };
 
 /**
@@ -171,6 +177,7 @@ type HandoffRow = {
   created_ms: number;
   settled_ms: number | null;
   settled_effects: string | null;
+  settling_ms: number | null;
 };
 
 function toHandoff(row: HandoffRow): AttemptHandoff {
@@ -183,6 +190,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
     createdMs: row.created_ms,
     settledMs: row.settled_ms,
     settledEffects: row.settled_effects === null ? null : (JSON.parse(row.settled_effects) as SettlementEffect[]),
+    settlingMs: row.settling_ms,
   };
 }
 
@@ -190,7 +198,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
 export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promise<AttemptHandoff | null> {
   const row = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects, settling_ms
          FROM review_attempt_handoffs WHERE delivery_key = ?`,
     )
     .bind(deliveryKey)
@@ -293,20 +301,93 @@ export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip";
 export async function markAttemptSettled(
   db: D1Like,
   deliveryKey: string,
-  effects: readonly SettlementEffect[],
-  complete: boolean,
+  landed: readonly SettlementEffect[],
+  required: readonly SettlementEffect[],
   nowMs: number,
 ): Promise<boolean> {
+  // ONE statement, because two settlements can run for one row (a step retry
+  // racing a resumed host): the effects ACCUMULATE (the union keeps what the
+  // other execution landed) and completeness is decided against the union, so
+  // neither write can erase the other's progress and neither can certify an
+  // effect that is missing. `json_each` is SQLite's own JSON1 surface.
   const written = await db
     .prepare(
       `UPDATE review_attempt_handoffs
-          SET settled_effects = ?,
-              settled_ms = CASE WHEN ? = 1 THEN COALESCE(settled_ms, ?) ELSE settled_ms END
+          SET settled_effects = (
+                SELECT json_group_array(value) FROM (
+                  SELECT value FROM json_each(COALESCE(settled_effects, '[]'))
+                  UNION
+                  SELECT value FROM json_each(?)
+                )
+              ),
+              settled_ms = CASE
+                WHEN settled_ms IS NOT NULL THEN settled_ms
+                WHEN NOT EXISTS (
+                  SELECT 1 FROM json_each(?) req
+                   WHERE req.value NOT IN (
+                     SELECT value FROM json_each(COALESCE(settled_effects, '[]'))
+                     UNION
+                     SELECT value FROM json_each(?)
+                   )
+                ) THEN ?
+                ELSE NULL
+              END
         WHERE delivery_key = ?`,
     )
-    .bind(JSON.stringify(effects), complete ? 1 : 0, nowMs, deliveryKey)
+    .bind(
+      JSON.stringify(landed),
+      JSON.stringify(required),
+      JSON.stringify(landed),
+      nowMs,
+      deliveryKey,
+    )
     .run();
-  return written.meta.changes === 1 && complete;
+  return written.meta.changes === 1;
+}
+
+/**
+ * Mark that a settlement STARTED. Written before the settlement's effects, so
+ * a settlement that never completes is distinguishable from an attempt that has
+ * not failed yet — and therefore recoverable by the route's pass.
+ */
+export async function beginAttemptSettlement(db: D1Like, deliveryKey: string, nowMs: number): Promise<void> {
+  await db
+    .prepare(`UPDATE review_attempt_handoffs SET settling_ms = COALESCE(settling_ms, ?) WHERE delivery_key = ?`)
+    .bind(nowMs, deliveryKey)
+    .run();
+}
+
+/**
+ * The effects a settlement OWES for this delivery: its own durable failure row,
+ * and the commit's failed-claim stamp when the delivery names a commit. The
+ * Check conclusion is not listed: a settlement only writes the mark after its
+ * `terminalize` returned, so a Check that never concluded leaves no mark at all
+ * (and the Check row's own lease hands it to the check reconciler), while a
+ * concluded one is already recorded in the effects.
+ */
+export function settlementObligationsOf(payload: ReviewJobPayload): SettlementEffect[] {
+  return payload.head_sha ? ["failure-row", "claim-stamp"] : ["failure-row"];
+}
+
+/**
+ * Settlements that STARTED and never completed, quiet long enough that a live
+ * step is not racing this pass.
+ */
+export async function listIncompleteSettlements(
+  db: D1Like,
+  input: { settlingBeforeMs: number; limit: number },
+): Promise<AttemptHandoff[]> {
+  const rows = await db
+    .prepare(
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects, settling_ms
+         FROM review_attempt_handoffs
+        WHERE settled_ms IS NULL AND settling_ms IS NOT NULL AND settling_ms <= ?
+        ORDER BY settling_ms
+        LIMIT ?`,
+    )
+    .bind(input.settlingBeforeMs, input.limit)
+    .all<HandoffRow>();
+  return rows.results.map(toHandoff);
 }
 
 /**
@@ -320,7 +401,7 @@ export async function listHandoffsForRecovery(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects, settling_ms
          FROM review_attempt_handoffs
         WHERE state IN ('owed', 'ambiguous') AND updated_ms <= ?
         ORDER BY updated_ms

@@ -1277,7 +1277,15 @@ export default {
     // re-sent to the queue here, so neither can vanish with an interrupted
     // host.
     try {
-      await reconcileReviewRoute({ DB: db, REVIEW_QUEUE: env.REVIEW_QUEUE });
+      // The scheduled lane's env type narrows the bindings it reads; the
+      // route's recovery pass also writes the commit claim, which this worker
+      // has bound at runtime (the scheduled handler receives the full Env).
+      const routeKv = (env as Env).IDEMPOTENCY_KV;
+      await reconcileReviewRoute({
+        DB: db,
+        REVIEW_QUEUE: env.REVIEW_QUEUE,
+        IDEMPOTENCY_KV: routeKv,
+      });
     } catch (error) {
       defaultSweepLog.warn(
         {

@@ -30,6 +30,8 @@ import {
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import type { AttemptRef } from "../../src/pipeline/review-attempt-execution";
 import type { TestD1 } from "../store/helpers";
+/** The KV the recovery pass writes failed-claim stamps to (a minimal double). */
+const routeKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
 
@@ -91,6 +93,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     await reconcileReviewRoute(
       {
         DB: db as never,
+        IDEMPOTENCY_KV: routeKv as never,
         REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never,
       },
       Date.now(),
@@ -103,6 +106,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     await reconcileReviewRoute(
       {
         DB: db as never,
+        IDEMPOTENCY_KV: routeKv as never,
         REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never,
       },
       Date.now() + 1_000,
@@ -168,6 +172,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     await reconcileReviewRoute(
       {
         DB: db as never,
+        IDEMPOTENCY_KV: routeKv as never,
         REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never,
       },
       Date.now(),
@@ -239,6 +244,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     const sent: ReviewJobPayload[] = [];
     const env = {
       DB: db as never,
+      IDEMPOTENCY_KV: routeKv as never,
       REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never,
     };
     await reconcileReviewRoute(env, Date.now());
@@ -266,6 +272,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     const sent: ReviewJobPayload[] = [];
     const env = {
       DB: db as never,
+      IDEMPOTENCY_KV: routeKv as never,
       REVIEW_QUEUE: {
         send: async (message: ReviewJobPayload) => {
           sent.push(message);
