@@ -961,6 +961,47 @@ describe("createReviewConsumer", () => {
     expect(h.sandbox.destroyCalls).toBe(1);
   });
 
+  test("an unproven collection leaves the container, capacity and Check state alone and acks", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The container stops proving itself after prepare: a replacement
+    // incarnation cannot answer with this attempt's marker.
+    h.sandbox.markedUnknown = true;
+    const db = await createSeededTestD1();
+    let terminalized = 0;
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => ({
+          attemptId: "attempt-unproven",
+          scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        }),
+        terminalize: async () => {
+          terminalized += 1;
+        },
+      },
+    });
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // Unknown is not a failure: the Check keeps whatever state it had, no
+    // failure row is written, and the container is left alone — it may hold
+    // the only copy of the result.
+    expect(terminalized).toBe(0);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(h.sandbox.destroyCalls).toBe(0);
+    // Capacity is not reassigned on unknown evidence: the admission row holds
+    // until its own TTL.
+    expect(inflightRows(db)).toHaveLength(1);
+    // Acked, never retried: a second delivery would provision a second
+    // container and pay the model again on an ambiguous attempt.
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.logLines.filter((line) => line.fields.event === "review_unresolved")).toHaveLength(1);
+  });
+
   test("propagated GitHub secondary rate limit → the persisted error starts with the stable prefix, after redaction", async () => {
     // The octokit request-error shape a rejected GitHub call throws: a 403
     // that carries `retry-after` is GitHub's secondary limit, not a

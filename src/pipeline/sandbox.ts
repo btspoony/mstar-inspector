@@ -248,12 +248,11 @@ export class SandboxV1 extends DurableObject {
   /**
    * Start the container when needed and (re)set the inactivity timeout —
    * idempotent by construction: `running` is true as soon as `start()`
-   * returns, the check→start sequence has no await in between (concurrent
-   * calls cannot double-start), and every step after `start()` is safe to
-   * repeat because a deploy restarts the DO.
+   * returns, the check→start sequence has no await in between (the
+   * incarnation lock makes concurrent calls impossible), and every step after
+   * `start()` is safe to repeat because a deploy restarts the DO.
    */
-  private async ensureRunning(): Promise<void> {
-    const container = this.container;
+  private async ensureRunning(container: Container): Promise<void> {
     if (!container.running) {
       const image = container.images[CONTAINER_IMAGE_KEY];
       if (image === undefined) {
@@ -262,6 +261,25 @@ export class SandboxV1 extends DurableObject {
       container.start({ image, instance: CONTAINER_INSTANCE, enableInternet: true });
     }
     await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
+  }
+
+  /**
+   * One container operation at a time on this DO. The guarded operations prove
+   * the marker on the SAME handle they then act on, and a start-permitted path
+   * must not provision between that proof and that use — this lock is what
+   * makes the pair one incarnation-bound step against another request. A
+   * platform eviction or an out-of-band container restart stays outside any
+   * in-DO guarantee: it shows up as a missing marker, i.e. `unknown`.
+   */
+  private gate: Promise<unknown> = Promise.resolve();
+
+  private exclusive<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.gate.then(run, run);
+    this.gate = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   }
 
   /**
@@ -282,58 +300,70 @@ export class SandboxV1 extends DurableObject {
     command: ShellCommand,
     opts?: CommandOpts,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    return this.execCommand(command, opts, true);
+    return this.exclusive(() => this.execCommand(this.container, command, opts, true));
   }
 
   /**
-   * Write the attempt marker once. `ensureRunning` is deliberate: prepare owns
+   * Write the attempt marker once. `start` is deliberate: prepare owns
    * provisioning, so this is the ONE marker path allowed to start a container.
-   * A lost reply is resolved by reading the marker back — a replay sees the
-   * same bytes and reports `matched` instead of failing.
+   * A lost reply is resolved by reading the marker back from the same handle —
+   * a replay sees the same bytes and reports `matched` instead of failing.
    */
   async claimMarker(marker: string): Promise<"written" | "matched" | "unknown"> {
-    let exitCode: number;
-    try {
-      exitCode = (
-        await this.execCommand(MARKER_CLAIM_COMMAND, { env: { MSTAR_ATTEMPT_MARKER: marker } }, true)
-      ).exitCode;
-    } catch {
-      // The write failed (noclobber refusal, container loss). Only a matching
-      // marker can turn that into a replay; anything else is not provable.
-      exitCode = 1;
-    }
-    if (exitCode === 0) return "written";
-    return (await this.readMarker()) === marker ? "matched" : "unknown";
+    return this.exclusive(async () => {
+      const container = this.container;
+      let exitCode: number;
+      try {
+        exitCode = (
+          await this.execCommand(container, MARKER_CLAIM_COMMAND, { env: { MSTAR_ATTEMPT_MARKER: marker } }, true)
+        ).exitCode;
+      } catch {
+        // The write failed (noclobber refusal, container loss). Only a matching
+        // marker can turn that into a replay; anything else is not provable.
+        exitCode = 1;
+      }
+      if (exitCode === 0) return "written";
+      return (await this.readMarker(container)) === marker ? "matched" : "unknown";
+    });
   }
 
   /**
-   * The sameness gate: the marker bytes are read from the SAME container handle
-   * the command then runs on, in ONE request, so a probe can never describe a
-   * container that a later call no longer reaches. `running` is checked first —
-   * an absent container is `unknown`, and this path never starts one.
+   * The sameness gate. The handle is captured ONCE, the marker is read from
+   * it, and the command runs on that same handle — never a fresh
+   * `this.container` read after the awaited probe, and no start-permitted path
+   * can run in between (`exclusive`). `running` is checked first, so a probe
+   * never starts a container.
    */
   async runMarked(marker: string, command: ShellCommand, opts?: CommandOpts): Promise<MarkedRun> {
-    if (!this.container.running) return { kind: "unknown" };
-    if ((await this.readMarker()) !== marker) return { kind: "unknown" };
-    return { kind: "ran", ...(await this.execCommand(command, opts, false)) };
+    return this.exclusive(async () => {
+      const container = this.container;
+      if (!container.running) return { kind: "unknown" };
+      if ((await this.readMarker(container)) !== marker) return { kind: "unknown" };
+      try {
+        return { kind: "ran", ...(await this.execCommand(container, command, opts, false)) };
+      } catch {
+        // The exec reply was lost: whether the command ran is unprovable, so
+        // the outcome is `unknown` — never a document read as unreadable.
+        return { kind: "unknown" };
+      }
+    });
   }
 
-  /**
-   * Prove sameness, then destroy — the same one-request gate as `runMarked`.
-   * An attempt's collect and cleanup are serial workflow steps, so nothing on
-   * the DO can swap the container between the proof and the destroy.
-   */
+  /** Prove sameness on the captured handle, then destroy that same container. */
   async destroyMarked(marker: string): Promise<"destroyed" | "unknown"> {
-    if (!this.container.running) return "unknown";
-    if ((await this.readMarker()) !== marker) return "unknown";
-    await this.container.destroy();
-    return "destroyed";
+    return this.exclusive(async () => {
+      const container = this.container;
+      if (!container.running) return "unknown";
+      if ((await this.readMarker(container)) !== marker) return "unknown";
+      await container.destroy();
+      return "destroyed";
+    });
   }
 
   /** The marker's exact bytes, or null when it is absent/unreadable. Never starts a container. */
-  private async readMarker(): Promise<string | null> {
+  private async readMarker(container: Container): Promise<string | null> {
     try {
-      const read = await this.execCommand(MARKER_READ_COMMAND, { timeout: MARKER_READ_TIMEOUT_MS }, false);
+      const read = await this.execCommand(container, MARKER_READ_COMMAND, { timeout: MARKER_READ_TIMEOUT_MS }, false);
       return read.exitCode === 0 ? read.stdout : null;
     } catch {
       return null;
@@ -341,10 +371,12 @@ export class SandboxV1 extends DurableObject {
   }
 
   /**
-   * The bounded exec itself. `start` is the caller's decision — prepare (and a
-   * plain run) may provision, a marker-guarded operation must not.
+   * The bounded exec itself, on the caller's handle. `start` is the caller's
+   * decision — prepare (and a plain run) may provision, a marker-guarded
+   * operation must not.
    */
   private async execCommand(
+    container: Container,
     command: ShellCommand,
     opts: CommandOpts | undefined,
     start: boolean,
@@ -370,14 +402,14 @@ export class SandboxV1 extends DurableObject {
         `the exec stdin payload is ${stdinPayload.byteLength} bytes, above the ${MAX_EXEC_STDIN_BYTES}-byte bound`,
       );
     }
-    if (start) await this.ensureRunning();
+    if (start) await this.ensureRunning(container);
     // Clamp before converting: a zero/negative value must never reach the argv
     // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
     // non-finite override (NaN/Infinity) is not a duration at all — default.
     const requestedMs = opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS;
     const timeoutMs = Number.isFinite(requestedMs) ? Math.max(1, requestedMs) : DEFAULT_EXEC_TIMEOUT_MS;
     const timeoutSeconds = timeoutMs / 1000;
-    const process = await this.container.exec(
+    const process = await container.exec(
       ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
       {
         cwd: opts?.cwd,
@@ -426,7 +458,7 @@ export class SandboxV1 extends DurableObject {
 
   /** Terminate the container. Ids are never reused (see getSandbox). */
   async destroy(): Promise<void> {
-    await this.container.destroy();
+    return this.exclusive(() => this.container.destroy());
   }
 }
 

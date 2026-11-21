@@ -51,6 +51,14 @@ type MarkerContainer = {
   startCalls: number;
   /** Shell commands the DO actually ran through the gate (not the marker traffic). */
   ran: string[];
+  /** Marker reads served (the proof half of a guarded operation). */
+  markerReads: number;
+  /** A guarded exec answers by rejecting (the reply was lost). */
+  execRejects: boolean;
+  /** When set, a command naming "slow" waits on it (a long in-flight run). */
+  slow: Promise<void> | undefined;
+  /** Runs as the marker read is served (a handoff to a new handle). */
+  onMarkerRead: (() => void) | undefined;
   destroyed: boolean;
   start(opts: unknown): void;
   setInactivityTimeout(ms: number): Promise<void>;
@@ -65,6 +73,10 @@ function makeContainer(running = false): MarkerContainer {
     images: { sandbox: "registry.example/review-sandbox@sha256:abc" },
     startCalls: 0,
     ran: [],
+    markerReads: 0,
+    execRejects: false,
+    slow: undefined,
+    onMarkerRead: undefined,
     destroyed: false,
     start() {
       container.startCalls += 1;
@@ -86,8 +98,13 @@ function makeContainer(running = false): MarkerContainer {
           container.marker = env["MSTAR_ATTEMPT_MARKER"] ?? "";
           return answer("", 0);
         }
-        return container.marker === null ? answer("", 3) : answer(container.marker, 0);
+        container.markerReads += 1;
+        const served = container.marker === null ? answer("", 3) : answer(container.marker, 0);
+        container.onMarkerRead?.();
+        return served;
       }
+      if (container.slow !== undefined && command.includes("slow")) await container.slow;
+      if (container.execRejects) throw new Error("container exec reply lost");
       container.ran.push(command);
       return answer("ran", 0);
     },
@@ -102,6 +119,19 @@ function makeContainer(running = false): MarkerContainer {
 function makeDo(container: MarkerContainer) {
   const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
   return new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
+}
+
+/** The same DO with a swappable ctx container (a handoff between incarnations). */
+function makeSwappableDo(container: MarkerContainer) {
+  const ctx: { container: MarkerContainer; blockConcurrencyWhile: (fn: () => Promise<unknown>) => Promise<unknown> } = {
+    container,
+    blockConcurrencyWhile: (fn) => fn(),
+  };
+  const sandbox = new SandboxV1(
+    { get container() { return ctx.container; }, blockConcurrencyWhile: ctx.blockConcurrencyWhile } as never,
+    {},
+  ) as unknown as ReviewSandbox;
+  return { sandbox, ctx };
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +154,8 @@ type SandboxDouble = {
 function attemptSandboxDouble(decision: {
   claim?: "written" | "matched" | "unknown";
   marked?: "ran" | "unknown";
+  /** The guarded call itself rejects (the reply was lost). */
+  markedRejected?: boolean;
 }): SandboxDouble {
   const events: string[] = [];
   const sandbox = {
@@ -134,6 +166,7 @@ function attemptSandboxDouble(decision: {
     }),
     runMarked: mock(async (_marker: string, command: string) => {
       events.push(`marked:${command}`);
+      if (decision.markedRejected === true) throw new Error("rpc lost");
       return decision.marked === "unknown"
         ? ({ kind: "unknown" as const } as const)
         : { kind: "ran" as const, stdout: "", stderr: "", exitCode: 0 };
@@ -268,6 +301,11 @@ describe("collection refuses an unproven container", () => {
     expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(1);
   });
 
+  test("a rejected guarded read is unknown, not an unreadable document", async () => {
+    const sandbox = attemptSandboxDouble({ markedRejected: true });
+    await expect(runReviewAttempt(executionInput(sandbox))).rejects.toBeInstanceOf(AttemptUnknownError);
+  });
+
   test("a matching live incarnation collects the result documents", async () => {
     const sandbox = attemptSandboxDouble({ marked: "ran" });
     const execution = await runReviewAttempt(executionInput(sandbox));
@@ -350,6 +388,69 @@ describe("SandboxV1 marker gate", () => {
     expect(await sandbox.destroyMarked(marker)).toBe("unknown");
     expect(container.ran).toEqual([]);
     expect(container.destroyed).toBe(false);
+  });
+
+  test("a guarded command whose reply is lost reports unknown", async () => {
+    const container = makeContainer(true);
+    const sandbox = makeDo(container);
+    const marker = attemptMarker(ATTEMPT_A);
+    container.marker = marker;
+    container.execRejects = true;
+
+    expect(await sandbox.runMarked(marker, shellCommand("cat result.json"))).toEqual({ kind: "unknown" });
+    // The proof itself succeeded; only the command's reply is unprovable.
+    expect(container.markerReads).toBe(1);
+  });
+
+  test("the proof and the action stay on the handle the probe read", async () => {
+    const original = makeContainer(true);
+    const replacement = makeContainer(true);
+    original.marker = attemptMarker(ATTEMPT_A);
+    const { sandbox, ctx } = makeSwappableDo(original);
+    // The DO's own ctx container is handed off mid-probe: a guard that re-read
+    // `this.container` after the awaited marker read would act on the
+    // replacement instead.
+    original.onMarkerRead = () => {
+      ctx.container = replacement;
+    };
+
+    expect(await sandbox.runMarked(attemptMarker(ATTEMPT_A), shellCommand("cat result.json"))).toEqual({
+      kind: "ran",
+      stdout: "ran",
+      stderr: "",
+      exitCode: 0,
+    });
+    expect(original.ran).toEqual(["cat result.json"]);
+    expect(replacement.ran).toEqual([]);
+
+    ctx.container = original;
+    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A))).toBe("destroyed");
+    expect(original.destroyed).toBe(true);
+    expect(replacement.destroyed).toBe(false);
+  });
+
+  test("a start-permitted run cannot slip between the proof and the action", async () => {
+    const container = makeContainer(true);
+    const sandbox = makeDo(container);
+    const marker = attemptMarker(ATTEMPT_A);
+    container.marker = marker;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    container.slow = promise;
+
+    const slowRun = sandbox.runCommand(shellCommand("slow"));
+    const teardown = sandbox.destroyMarked(marker);
+    await Bun.sleep(0);
+
+    // The teardown is queued behind the in-flight run: it has read no marker
+    // and destroyed nothing while another operation owns the container.
+    expect(container.markerReads).toBe(0);
+    expect(container.destroyed).toBe(false);
+
+    resolve();
+    expect(await slowRun).toEqual({ stdout: "ran", stderr: "", exitCode: 0 });
+    expect(await teardown).toBe("destroyed");
+    expect(container.markerReads).toBe(1);
+    expect(container.destroyed).toBe(true);
   });
 
   test("the prepared incarnation allows collect-then-destroy", async () => {

@@ -43,6 +43,7 @@ import type { GitOpsCommands } from "../../src/pipeline/gitops";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import { REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
+import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -341,6 +342,8 @@ const DIFF_READ = boundedFileReadCommand(DIFF_PATH, DIFF_PREFETCH_MAX_BYTES);
 const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
 const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
 const REPORT_READ = readReportCommand();
+/** The runner's applied-model document read (same transport, its own fixed path). */
+const APPLIED_MODEL_READ = readReportCommand(APPLIED_MODEL_PATH);
 const PR_BODY_READ = prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER);
 /**
  * The two increment commands carry per-round shas, so the double matches them
@@ -670,6 +673,11 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
     const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
     return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: 0 };
+  }
+  if (cmd === APPLIED_MODEL_READ) {
+    // The default round has no applied-model document (no model served): the
+    // read's proven-absence flag, the same shape the real command emits.
+    return { stdout: "\n2\n", stderr: "", exitCode: 0 };
   }
   if (cmd === REPORT_READ) {
     if (state.reportFileExitCode !== 0) {

@@ -62,6 +62,12 @@ import type { ShellCommand } from "./shell-command";
  * LF. It identifies the attempt and nothing else — no credential, no host, no
  * checkout fact — so it can be read back from the container and compared
  * verbatim.
+ *
+ * It proves "this container is the one this attempt wrote" and nothing more: it
+ * cannot stop a REPLAYED prepare from stamping a replacement container, because
+ * an exclusive create protects an existing file, not an absent one. That half
+ * is the durable first-provisioning claim in the attempt's own row; until that
+ * row exists, no recovery path may be enabled, and none is wired here.
  */
 export function attemptMarker(attemptId: string): string {
   return `mstar.review-attempt/v1:${attemptId.toLowerCase()}\n`;
@@ -257,12 +263,16 @@ async function boundedRead(
 ): Promise<ReportBoundedRead> {
   // The marker is re-proved on EVERY read, from the same container the command
   // then runs on: a replacement between collection steps yields unknown, never
-  // a document from a container this attempt did not prepare.
+  // a document from a container this attempt did not prepare. A rejected call
+  // is unprovable too — the reply never said whether the proof or the command
+  // failed — so it is `unknown`, not an unreadable document.
   let read: MarkedRun;
   try {
     read = await sandbox.runMarked(marker, command, { timeout: timeoutMs });
   } catch {
-    return { text: null, failure: "unreadable" };
+    throw new AttemptUnknownError(
+      "the attempt container could not be proven to be this attempt's (the read itself was lost) — its result is not collected",
+    );
   }
   if (read.kind === "unknown") {
     throw new AttemptUnknownError(

@@ -182,6 +182,7 @@ import {
   prepareReviewAttempt,
   runReviewAttempt,
   attemptSandboxId,
+  AttemptUnknownError,
   discardReviewAttempt,
   type ReviewAttemptProgress,
   type RunnerAppConfig,
@@ -452,7 +453,7 @@ export type ConsumerLogFields = {
    * platform closed (D20) and deferred the whole batch instead of running it —
    * one line per invocation, not per message.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
   action: string;
   installation_id: number;
   owner: string;
@@ -779,7 +780,7 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
 
 /**
  * Outcome of one message pass (bugbot BB-3 + architect lock L4 + AL-1).
- * FIVE DISTINCT typed outcomes never throw: a guard-held message
+ * SIX DISTINCT typed outcomes never throw: a guard-held message
  * is scheduled for a per-message delayed retry and finally acked with a
  * warning — it is never rethrown into the immediate-retry ×3 → DLQ path; a
  * PAUSED message (the App's review_enabled=0) is acked directly after its
@@ -793,9 +794,11 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
  * BUDGET-EXHAUSTED message (the wall clock ended the review) is acked
  * directly after its Check `failure` and `budget-exhausted:` failure row —
  * a confirmed stop is terminal, so another paid delivery can only lose the
- * same clock again. Infra failures keep the
- * existing throw → retry → DLQ behavior (plus the AL-6 best-effort failure
- * row before the rethrow).
+ * same clock again; an UNKNOWN message (the attempt's container could not be
+ * proven) is acked directly with nothing changed — no result claimed, no
+ * failure recorded, no container destroyed, no capacity released. Infra
+ * failures keep the existing throw → retry → DLQ behavior (plus the AL-6
+ * best-effort failure row before the rethrow).
  */
 export type ProcessOutcome =
   | { kind: "ok" }
@@ -832,7 +835,17 @@ export type ProcessOutcome =
    * acked directly — terminal, so no paid queue retry and no DLQ entry. The
    * typed record rides for the report.
    */
-  | { kind: "budget-exhausted"; outcome: BudgetExhaustedOutcome };
+  | { kind: "budget-exhausted"; outcome: BudgetExhaustedOutcome }
+  /**
+   * The attempt's container could not be proven to be the one it prepared, so
+   * its result was not collected. No result was claimed from it, nothing was
+   * failed, destroyed or reclaimed: the Check stays `in_progress`, the admission
+   * row holds until its TTL and the container is left alone (it may carry the
+   * only result). The message is acked — a paid retry could only launch a second
+   * attempt on ambiguous acceptance, which is exactly what an unknown outcome
+   * forbids.
+   */
+  | { kind: "unknown" };
 
 /**
  * Why the guard held a message plus the caps it was measured against
@@ -3415,6 +3428,13 @@ export function createReviewConsumer(
         // is a leftover, acked directly before any container. No retry (the
         // newer delivery is the one that reviews) and no DLQ.
         message.ack();
+      } else if (outcome.kind === "unknown") {
+        // The attempt's container could not be proven, so its result is
+        // uncollected and nothing was claimed about it. Ack: a retry would
+        // provision another container and pay the model again on an ambiguous
+        // attempt. The live Check and the admission row keep their own state —
+        // the reconciler owns what an abandoned attempt concludes.
+        message.ack();
       } else if (outcome.kind === "budget-exhausted") {
         // The round's wall clock ended the review and its Check `failure` +
         // `budget-exhausted:` row already landed inside processMessage. A
@@ -3540,6 +3560,9 @@ async function processMessage(
   const attemptId = crypto.randomUUID();
   const sandboxId = attemptSandboxId(attemptId);
   let sandbox: ReviewSandbox | null = null;
+  // Set when the attempt's container could not be proven: teardown and capacity
+  // release are skipped (both would act on unknown evidence).
+  let attemptUnknown = false;
   // Set once the sha is resolved from the checkout; the failure log carries
   // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
   // criteria: 失败路径错误日志含幂等键).
@@ -6358,6 +6381,32 @@ async function processMessage(
       return { kind: "budget-exhausted", outcome: budgetOutcome };
     }
 
+    // An unproven container is NOT a failure: a missing/different marker (or a
+    // lost read) says nothing about whether the review ran. No Check change, no
+    // failure row, no failed-claim stamp, no destroy, no capacity release, and
+    // no retry — a second delivery would provision a second container and pay
+    // the model again on ambiguous acceptance. The Check stays `in_progress`
+    // for the reconciler, which owns the abandoned-attempt outcome.
+    if (err instanceof AttemptUnknownError) {
+      attemptUnknown = true;
+      deps.log.warn(
+        {
+          ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+          ...(level === undefined
+            ? {}
+            : {
+                level,
+                runner_timeout_ms: runnerTimeoutMs(level),
+                orchestration: level === "deep" ? "parent" : "bun-fanout",
+              }),
+          ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
+          event: "review_unresolved",
+        },
+        `review unresolved: ${err.message} — nothing was collected, destroyed or reclaimed`,
+      );
+      return { kind: "unknown" };
+    }
+
     // §7.7 step 12 on the failure path: a Check begun at step 4 must
     // terminalize even when the pipeline throws. After a send ATTEMPT the
     // publication status is unknown (the request may have landed); before
@@ -6464,7 +6513,7 @@ async function processMessage(
     // the next attempt for this PR acquire the slot and start its container
     // while this one is still alive, so live containers could exceed
     // min(system, workspace) by the destroy latency. Both blocks warn only.
-    if (sandbox !== null) {
+    if (sandbox !== null && !attemptUnknown) {
       try {
         // Proven sameness, not a name: a container this attempt cannot prove it
         // prepared is left alone (its result may be the only copy) and the
@@ -6488,7 +6537,7 @@ async function processMessage(
     // Scoped to THIS attempt's id, so an older attempt can never delete a row
     // a newer one reclaimed after expiry; a release failure only warns (the
     // row expires by TTL), never masks the review's own outcome.
-    if (inflight !== null) {
+    if (inflight !== null && !attemptUnknown) {
       try {
         await releaseInflight(deps.env.DB, inflight.key, inflight.attemptId);
       } catch (err) {
