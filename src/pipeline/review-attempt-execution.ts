@@ -3030,18 +3030,21 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
     try {
       // The check row's execution deadline IS the attempt's frozen hard stop
       // (adoption narrows the attach window to this same instant), so the
-      // reconciler and the execution fence agree without a re-read.
+      // reconciler and the execution fence agree without a re-read. A LIVE
+      // attempt's instant is passed VERBATIM — even one that has less than a
+      // whole lease left: moving it would extend a running review's hard stop.
       //
       // The ONE exception is a MINT after that instant has already passed:
       // such a claim can only be the SETTLEMENT of a typed stop this attempt
       // already reached (nothing is still running), and a spent instant cannot
       // own a lease — `claimAttempt` refuses it. The claim then opens the same
       // settlement window `settleSkipped` opens, so the stop's category and
-      // wording are frozen and delivered instead of dropped. A resumed
-      // ADOPTION keeps the attempt's own instant: only a mint is widened, so no
-      // existing row's deadline ever moves.
+      // wording are frozen and delivered instead of dropped. `expect` (a
+      // resumed ADOPTION) keeps the attempt's own instant: only a mint is
+      // widened, so no existing row's deadline ever moves.
+      const claimNowMs = Date.now();
       const claimDeadlineMs =
-        expect !== undefined ? deadlineMs : Math.max(deadlineMs, Date.now() + CHECK_LEASE_MS);
+        expect === undefined && deadlineMs <= claimNowMs ? claimNowMs + CHECK_LEASE_MS : deadlineMs;
       handle = await withHookTimeout(
         deps.checks.begin({
           scope,

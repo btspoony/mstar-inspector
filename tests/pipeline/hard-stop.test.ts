@@ -43,7 +43,7 @@ import {
   getReviewAttemptCap,
 } from "../../src/dashboard/runtime-config-store";
 import { postRunnerReserveMs, readReviewAttemptCapMs } from "../../src/review-budget";
-import { CHECK_LEASE_MS } from "../../src/store/review-checks";
+import { CHECK_LEASE_MS, CHECK_NAME } from "../../src/store/review-checks";
 import { BudgetExhaustedError, AttemptUnknownError } from "../../src/pipeline/review-attempt";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
@@ -63,6 +63,7 @@ const {
   cleanupAttempt,
 } = await import("../../src/pipeline/review-attempt-execution");
 const { createReviewConsumer, WorkflowCreateFailedError } = await import("../../src/pipeline/consumer");
+const { createCheckLifecycle, createChecksAdapter } = await import("../../src/pipeline/checks");
 
 const ATTEMPT_ID = "attempt-hard-stop-01";
 const CAP_MS = 900_000;
@@ -310,6 +311,67 @@ describe("the frozen deadline survives a resume", () => {
     await settlement.begin(SCOPE, 424242, SHA);
     // A LIVE attempt's claim carries its hard stop verbatim.
     expect(captured).toEqual([live]);
+  });
+
+  test("a live attempt's instant is byte-identical even with less than one lease left", async () => {
+    const { deps, db } = await makeDeps();
+    // Live, and SHORTER than the settlement window a spent deadline would open:
+    // an attempt whose hard stop is one minute away must keep exactly that
+    // minute. Extending it would let a running review outlive its own cap.
+    const live = Date.now() + 60_000;
+    // A scripted create that proves the attempt's identity, exactly what the
+    // real adapter needs to persist `sending` and attach the run.
+    const octokit = {
+      rest: {
+        checks: {
+          create: async (params: { head_sha: string; external_id: string }) => ({
+            data: {
+              id: 4242,
+              name: CHECK_NAME,
+              head_sha: params.head_sha,
+              external_id: params.external_id,
+              app: { id: 424242 },
+              status: "queued",
+              conclusion: null,
+            },
+          }),
+          update: async () => {
+            throw new Error("not used here");
+          },
+          get: async () => {
+            throw new Error("not used here");
+          },
+          listForRef: async () => {
+            throw new Error("not used here");
+          },
+        },
+      },
+    };
+    deps.checks = createCheckLifecycle({
+      db,
+      nowMs: () => Date.now(),
+      getAdapter: () =>
+        createChecksAdapter({ db, nowMs: () => Date.now(), getOctokit: async () => octokit }),
+      getCheckGate: async () => null,
+    });
+    const settlement = createCheckSettlement({
+      deps,
+      payload: makePayload(),
+      attemptId: ATTEMPT_ID,
+      checkBudgets: null,
+      deadlineMs: live,
+    });
+    const handle = await settlement.begin(SCOPE, 424242, SHA);
+    expect(handle).not.toBeNull();
+
+    const row = await db
+      .prepare("SELECT execution_deadline_ms, lease_until_ms FROM review_checks WHERE id = ?")
+      .bind(handle!.attemptId)
+      .first<{ execution_deadline_ms: number; lease_until_ms: number }>();
+    // The minted row's deadline and its lease are the attempt's own instant —
+    // unchanged by the claim.
+    expect(row!.execution_deadline_ms).toBe(live);
+    expect(row!.lease_until_ms).toBe(live);
   });
 
   test("a claim after the attempt's hard stop opens a settlement window instead", async () => {
