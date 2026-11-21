@@ -28,6 +28,8 @@ import { createFailureStore, type FailureStore } from "../../src/store/failure-s
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { deliveryKeyOf, markAttemptSettled, reserveAttemptHandoff } from "../../src/store/review-route-store";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
+import { claimAttempt } from "../../src/store/review-checks";
+import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { AttemptRef, CheckSettlement, ProcessDeps } from "../../src/pipeline/review-attempt-execution";
 import type { TestD1 } from "../store/helpers";
 
@@ -112,6 +114,13 @@ function settledEffects(db: TestD1): string[] | null {
     .prepare("SELECT settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
     .get(ATTEMPT_ID) as { settled_effects: string | null } | null;
   return row?.settled_effects === null || row === null ? null : (JSON.parse(row.settled_effects) as string[]);
+}
+
+/** The settlement record of one DELIVERY (the replayer cases use another attempt id). */
+function settlementOf(db: TestD1, deliveryKey: string): { settled_ms: number | null; settled_effects: string | null } {
+  return db.raw
+    .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE delivery_key = ?")
+    .get(deliveryKey) as { settled_ms: number | null; settled_effects: string | null };
 }
 
 function settledMark(db: TestD1): number | null {
@@ -319,7 +328,15 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     // and only the Check effect landed before the execution vanished.
     db.raw
       .prepare("UPDATE review_attempt_handoffs SET settling_ms = ?, settled_effects = ? WHERE delivery_key = ?")
-      .run(1_000, JSON.stringify(["check"]), key);
+      .run(1_000, null, key);
+    // The attempt's outcome is durable on its launch row — the only condition
+    // under which the pass may write.
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms, failed_at_ms, result_outcome)
+         VALUES (?, 'failed', ?, ?, ?, 'failed')`,
+      )
+      .run(ATTEMPT_ID, 900, 950, 990);
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
 
@@ -334,7 +351,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     expect(String(failureRows(db)[0]!.error)).toContain("settlement replay");
     expect(h.kvPuts.some((put) => put.value === "failed")).toBe(true);
     expect(settledMark(db)).toEqual(expect.any(Number));
-    expect(settledEffects(db)).toEqual(["check", "claim-stamp", "failure-row"]);
+    expect(settledEffects(db)).toEqual(["claim-stamp", "failure-row"]);
 
     // Completed: a second pass does nothing.
     const rowsAfter = failureRows(db).length;
@@ -362,6 +379,130 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     await markAttemptSettled(db as never, key, [], ["failure-row", "claim-stamp"], 4_000);
     expect(settledEffects(db)).toEqual(["claim-stamp", "failure-row"]);
     expect(settledMark(db)).toEqual(3_000);
+  });
+
+  test("the pass refuses an unknown paid state and a skipped delivery before writing anything", async () => {
+    const db = await createSeededTestD1();
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // (a) launched, no outcome: the container may still be running.
+    const unknownPayload = makePayload();
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(unknownPayload),
+      attemptId: "attempt-unknown",
+      payload: unknownPayload,
+      nowMs: 1_000,
+      deadlineMs: Date.now() + 600_000,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE delivery_key = ?")
+      .run(1_000, deliveryKeyOf(unknownPayload));
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms)
+         VALUES (?, 'launched', ?, ?)`,
+      )
+      .run("attempt-unknown", 900, 950);
+
+    // (b) a moved-head skip: no paid outcome, and it is not a failure.
+    const skipPayload = makePayload({ head_sha: "9999999999999999999999999999999999999999" });
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(skipPayload),
+      attemptId: "attempt-skip",
+      payload: skipPayload,
+      nowMs: 1_000,
+      deadlineMs: Date.now() + 600_000,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE delivery_key = ?")
+      .run(1_000, deliveryKeyOf(skipPayload));
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms)
+         VALUES (?, 'provisioned', ?)`,
+      )
+      .run("attempt-skip", 900);
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 5 * 60_000 + 1);
+
+    // Nothing was written for either: no failure row, no claim stamp, no mark.
+    expect(failureRows(db)).toHaveLength(0);
+    expect(h.kvPuts).toHaveLength(0);
+    const rows = db.raw
+      .query("SELECT settled_ms FROM review_attempt_handoffs ORDER BY created_ms")
+      .all() as Array<{ settled_ms: number | null }>;
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.settled_ms === null)).toBe(true);
+  });
+
+  test("no mark completes over an open Check; the pass finishes it once the Check is terminal", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const key = deliveryKeyOf(payload);
+    const scope: Scope = {
+      appId: TEST_APP_ID,
+      installationId: 123,
+      owner: TEST_OWNER,
+      repo: TEST_REPO,
+      prNumber: TEST_PR_NUMBER,
+    };
+    // A real Check row for this attempt, still open (no terminal_ms).
+    const claimed = await claimAttempt(db as never, {
+      scope,
+      githubAppId: 424242,
+      headSha: payload.head_sha!,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: "consumer:attempt-open-check",
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`the test could not create the Check: ${claimed.kind}`);
+    const identity = claimed.attempt.identity;
+    // The Check row's own attempt key — the identity the launch row freezes.
+    const checkKey = (
+      db.raw.query("SELECT attempt_key FROM review_checks WHERE id = ?").get(identity.attemptId) as {
+        attempt_key: string;
+      }
+    ).attempt_key;
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: key,
+      attemptId: identity.attemptId,
+      payload,
+      nowMs: 1_000,
+      deadlineMs: Date.now() + 600_000,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE delivery_key = ?")
+      .run(1_000, key);
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, attempt_key, attempt_generation, state, claimed_at_ms, launched_at_ms, failed_at_ms, result_outcome)
+         VALUES (?, ?, ?, 'failed', ?, ?, ?, 'failed')`,
+      )
+      .run(identity.attemptId, checkKey, identity.generation, 900, 950, 990);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // The Check is open: the row and stamp land, but the mark must NOT complete.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 5 * 60_000 + 1);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(JSON.parse(settlementOf(db, key).settled_effects!)).toEqual(["claim-stamp", "failure-row"]);
+    expect(settlementOf(db, key).settled_ms).toBeNull();
+
+    // The check reconciler closes the Check at its lease; the next pass records
+    // that conclusion and only then completes.
+    db.raw.prepare("UPDATE review_checks SET terminal_ms = ? WHERE id = ?").run(Date.now(), claimed.attempt.identity.attemptId);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 10 * 60_000);
+    expect(JSON.parse(settlementOf(db, key).settled_effects!)).toEqual(["check", "claim-stamp", "failure-row"]);
+    expect(settlementOf(db, key).settled_ms).toEqual(expect.any(Number));
+
+    // Completed: no further writes.
+    const rows = failureRows(db).length;
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 15 * 60_000);
+    expect(failureRows(db)).toHaveLength(rows);
   });
 
   test("one transient error inside the settlement is retried and completes", async () => {

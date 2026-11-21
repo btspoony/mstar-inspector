@@ -365,8 +365,25 @@ export async function beginAttemptSettlement(db: D1Like, deliveryKey: string, no
  * (and the Check row's own lease hands it to the check reconciler), while a
  * concluded one is already recorded in the effects.
  */
-export function settlementObligationsOf(payload: ReviewJobPayload): SettlementEffect[] {
-  return payload.head_sha ? ["failure-row", "claim-stamp"] : ["failure-row"];
+export function settlementObligationsOf(payload: ReviewJobPayload, checkInvolved: boolean): SettlementEffect[] {
+  return [
+    "failure-row",
+    ...(checkInvolved ? (["check"] as const) : []),
+    ...(payload.head_sha ? (["claim-stamp"] as const) : []),
+  ];
+}
+
+/** The Check identity the attempt froze on its launch row (`null` = no Check). */
+export async function readAttemptCheckKey(
+  db: D1Like,
+  attemptId: string,
+): Promise<{ key: string; generation: number } | null> {
+  const row = await db
+    .prepare(`SELECT attempt_key, attempt_generation FROM review_launches WHERE attempt_id = ?`)
+    .bind(attemptId)
+    .first<{ attempt_key: string | null; attempt_generation: number | null }>();
+  if (row === null || row.attempt_key === null) return null;
+  return { key: row.attempt_key, generation: row.attempt_generation ?? 0 };
 }
 
 /**

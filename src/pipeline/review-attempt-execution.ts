@@ -5471,13 +5471,13 @@ export async function settleAttemptFailure(
    *   and requiring a KV write would let a KV fault block settlement forever.
    * A delivery with no handoff row (a direct phase caller) matches no row.
    */
-  const markSettled = async (landed: readonly SettlementEffect[]): Promise<void> => {
+  const markSettled = async (landed: readonly SettlementEffect[], required: readonly SettlementEffect[]): Promise<void> => {
     try {
       await markAttemptSettled(
         deps.env.DB,
         deliveryKeyOf(payload),
         landed,
-        settlementObligationsOf(payload),
+        required,
         Date.now(),
       );
     } catch (markErr) {
@@ -5495,7 +5495,7 @@ export async function settleAttemptFailure(
     // The moved head's own settlement (skip row + Check conclusion + outbox
     // row) ran before this settlement was called, so there is nothing left to
     // finish and the mark can say so.
-    await markSettled(["skip"]);
+    await markSettled(["skip"], ["skip"]);
     return { kind: "ok" };
   }
   const progress: ReviewAttemptProgress = {
@@ -5657,7 +5657,10 @@ export async function settleAttemptFailure(
     // The row is durable here (the !durableOutcome case returned `unknown`
     // above) and the Check conclusion just landed. The budget stop writes no
     // failed-claim stamp on this route, so none is owed.
-    await markSettled(check === undefined ? ["failure-row"] : ["failure-row", "check"]);
+    await markSettled(
+      check === undefined ? ["failure-row"] : ["failure-row", "check"],
+      settlementObligationsOf(payload, check !== undefined),
+    );
     return { kind: "budget-exhausted", outcome: budgetOutcome };
   }
 
@@ -5834,7 +5837,7 @@ export async function settleAttemptFailure(
   // the mark completes only when the UNION of every settlement execution for
   // this delivery covers it, so two racing settlements cannot erase each
   // other's progress and neither can certify a missing effect.
-  await markSettled(effects);
+  await markSettled(effects, settlementObligationsOf(payload, check !== undefined));
   throw err;
 }
 /**

@@ -33,6 +33,8 @@ import {
   putAbandonClaim,
 } from "../contracts/idem";
 import { createFailureStore } from "../store/failure-store";
+import { readOpenCheckIdentityForKey } from "../store/review-checks";
+import { readReviewLaunch } from "./review-attempt";
 import {
   listCommentClaimsForRecovery,
   listHandoffsForRecovery,
@@ -40,6 +42,7 @@ import {
   listOwedSuccessors,
   markAttemptSettled,
   markSuccessorDelivered,
+  readAttemptCheckKey,
   restoreCommentClaimForRecovery,
   settlementObligationsOf,
   successorGeneration,
@@ -106,6 +109,22 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
   })) {
     try {
       const landed = new Set<SettlementEffect>(handoff.settledEffects ?? []);
+      // A skip is not a failure: the moved-head settlement owns that outcome,
+      // and the successor outbox already carries the head it displaced.
+      if (landed.has("skip")) continue;
+      // ACT ONLY ON A DURABLE OUTCOME. `launched` without an outcome is the
+      // unknown paid state — the container may still be running — and a
+      // delivery that never provisioned has no outcome to replay. Nothing is
+      // written for either; retention owns them.
+      const launch = await readReviewLaunch(env.DB, handoff.attemptId);
+      if (launch === null || (launch.state !== "failed" && launch.state !== "persisted")) continue;
+      const checkKey = await readAttemptCheckKey(env.DB, handoff.attemptId);
+      // The one effect this pass cannot produce: an open Check is not
+      // concluded here, so the mark must not complete until the Check row is
+      // terminal — the check reconciler closes it at its own lease, and the
+      // next pass records it. A mark never claims completeness over an open
+      // Check.
+      const checkOpen = checkKey === null ? null : await readOpenCheckIdentityForKey(env.DB, checkKey.key);
       if (!landed.has("failure-row")) {
         await createFailureStore(env.DB).record({
           target_id: handoff.payload.targetId,
@@ -136,11 +155,12 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
         );
         landed.add("claim-stamp");
       }
+      if (checkKey !== null && checkOpen === null) landed.add("check");
       await markAttemptSettled(
         env.DB,
         handoff.deliveryKey,
         [...landed],
-        settlementObligationsOf(handoff.payload),
+        settlementObligationsOf(handoff.payload, checkKey !== null),
         nowMs,
       );
     } catch {

@@ -181,7 +181,7 @@ the claim, the table says so; a narrower proof is never labelled a full one.
 | # | Recovery claim | Test | What the test demonstrates |
 |---|---|---|---|
 | 1 | A comment delivery whose claim was already consumed is still recoverable: a redelivery that finds an `owed`/`ambiguous`/`failed` handoff reaches create, and an interruption between consuming the claim and writing the handoff leaves a row the reconciler hands back. | `tests/pipeline/route-recovery-handoff.test.ts` — all four cases | The pre-handoff case is **exercised**: a normal queued claim is consumed by the real consumer, its handoff insert is made to hang (the host dies there), the test observes the state the code produced, then recovers through the reconciler and replays admission. Reverting the consumer to clearing the payload at consumption fails it. |
-| 2 | The settle-once mark proves **completion**, not entry: an interruption after the mark but before the failure row / Check terminal leaves the settlement replayable; the step survives one transient error. | `tests/pipeline/route-recovery-settlement.test.ts` — all eight cases | The mark records **which effects landed** (`settled_effects`) and completes only when the union of every execution's effects covers the settlement's obligation; two racing executions accumulate instead of overwriting. A lost claim stamp is recorded, not swallowed, and a **recovery pass finishes it** (see below). The retry is a model of the platform's policy, not the platform. |
+| 2 | The settle-once mark proves **completion**, not entry: an interruption after the mark but before the failure row / Check terminal leaves the settlement replayable; the step survives one transient error. | `tests/pipeline/route-recovery-settlement.test.ts` — all ten cases | The mark records **which effects landed** (`settled_effects`) and completes only when the union of every execution's effects covers the settlement's obligation; two racing executions accumulate instead of overwriting. A lost claim stamp is recorded, not swallowed, and a **recovery pass finishes it** (see below). Two cases prove the pass's refusals — an unknown paid state and a skipped delivery are never written — and one proves the ordering directly: an open Check keeps the mark incomplete until the Check row is terminal. The retry is a model of the platform's policy, not the platform. |
 | 3 | The successor outbox row exists **before** the moved-head settlement that terminalizes the old Check. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-3 cases | The outbox is read **inside** the `terminalize` call; moving the record after terminalization fails the test. The second case kills the host before the successor step and recovers the owed row. |
 | 4 | The successor dedupe key fences sends and identifies its owner; the stored winning payload is what gets sent; a replay of one intent admits once. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-4 cases | The first case drives the real workflow `recordSuccessor` against a competing stored winner: sending the locally built payload instead fails the test. The second covers a replay (one admission) and two independent origins on one head (separate keys, serialized by the guard). |
 | 5 | Error classification carries proof: a `TypeError` is not evidence a create did not land, and "already exists" is not evidence the same instance exists — this attempt's own instance id is read back, or the outcome is unknown. | `tests/pipeline/route-recovery-handoff.test.ts` — all three claim-5 cases | Lying errors are injected and the handoff state distinguishes ambiguous from confirmed. The platform's own `status()` semantics remain a gate item below. |
@@ -201,16 +201,28 @@ assumed away, and three owners cover it in order — each named, none implied:
    sweep) owns the settlement that outlived both — a persistent fault, or an
    instance the platform failed. It selects handoffs whose `settling_ms` is set
    and `settled_ms` is still NULL (quiet for `HANDOFF_RECOVERY_AFTER_MS` = 5
-   minutes, at most `ROUTE_RECOVERY_LIMIT` = 25 rows per pass), lands the two
-   effects that need no dead host's memory — the failure row, marked
+   minutes, at most `ROUTE_RECOVERY_LIMIT` = 25 rows per pass), and it acts only
+   on evidence it can see:
+   - **a durable outcome on the launch row** — `failed` or `persisted`. A
+     `launched` row with no outcome is the unknown paid state (the container may
+     still be running) and nothing is written for it; a delivery that never
+     provisioned is not a failure either, and a settlement marked `skip` (a moved
+     head) is left to the successor outbox. All three are refused before any
+     write.
+   - **a concluded Check**. The one effect this pass cannot produce is the Check
+     conclusion, so it records `check` only when the attempt's Check row is
+     terminal (`terminal_ms` set) and otherwise leaves the mark incomplete. The
+     check reconciler (`reconcileReviewChecks`) closes that row at its lease, and
+     the next pass records the conclusion — **no mark completes over an open
+     Check**.
+   It lands the effects that need no dead host's memory — the failure row, marked
    `settlement replay: …`, and the commit's failed-claim stamp — and completes
-   the mark, which is written only when the UNION of every execution's effects
-   covers the settlement's obligation. The **Check conclusion is not redone
-   there**: a settlement writes its mark only after `terminalize` returned, so an
-   unconcluded Check carries no mark and is closed by the check reconciler at
-   its own lease (`reconcileReviewChecks`).
+   the mark only when the UNION of every execution's effects covers the
+   settlement's obligation (row, the Check when the attempt had one, the stamp
+   when the delivery names a commit).
    The cadence is the sweep's, so an abandoned settlement is finished within one
-   sweep interval plus the 5-minute quiet window — not instantly, and not never.
+   sweep interval plus the 5-minute quiet window, and one Check lease for the
+   conclusion — not instantly, and not never.
 
 **What these tests cannot prove, and must be observed on the platform before
 enabling.** The tests own the database, the clock and the command line; they do
