@@ -3867,14 +3867,22 @@ describe("an owed Check settlement has a reader and a clearer", () => {
     expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(0);
 
     // The resumed publication could not adopt the Check and recorded the
-    // obligation on the ATTEMPT row (never on the Check row).
+    // obligation on the ATTEMPT row (never on the Check row). The two sides are
+    // generated INDEPENDENTLY — the attempt row's id is its own random value,
+    // the Check's id is another — and only the shared `attempt_key` pairs them.
+    const checkKey = (
+      db.raw.prepare("SELECT attempt_key FROM review_checks WHERE id = ?").get(attemptId) as {
+        attempt_key: string;
+      }
+    ).attempt_key;
+    const launchId = `attempt-row-${crypto.randomUUID()}`;
+    expect(launchId).not.toBe(attemptId);
     db.raw
-      .prepare(
-        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms)
-         VALUES (?, 'launched', ?, ?)`,
-      )
-      .run(attemptId, T0, T0);
-    db.raw.prepare(`UPDATE review_launches SET check_owed_ms = ? WHERE attempt_id = ?`).run(T0 + 60_000, attemptId);
+      .prepare(`INSERT INTO review_launches (attempt_id, state, claimed_at_ms) VALUES (?, 'provisioned', ?)`)
+      .run(launchId, T0);
+    db.raw
+      .prepare(`UPDATE review_launches SET check_owed_ms = ?, check_key = ? WHERE attempt_id = ?`)
+      .run(T0 + 60_000, checkKey, launchId);
 
     expect((await listCheckReconcileBatch(db, T0 + 60_000)).map((row) => row.identity.attemptId)).toEqual([attemptId]);
 
@@ -3916,9 +3924,10 @@ describe("an owed Check settlement has a reader and a clearer", () => {
     expect(row.observed).toBe("success");
     expect(row.terminal_ms).toBe(T0 + 60_000);
     const launch = db.raw
-      .prepare("SELECT check_owed_ms FROM review_launches WHERE attempt_id = ?")
-      .get(attemptId) as { check_owed_ms: number | null };
+      .prepare("SELECT check_owed_ms, check_key FROM review_launches WHERE attempt_id = ?")
+      .get(launchId) as { check_owed_ms: number | null; check_key: string | null };
     expect(launch.check_owed_ms).toBeNull();
+    expect(launch.check_key).toBeNull();
     // And the cleared attempt no longer occupies the due batch.
     expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(0);
   });

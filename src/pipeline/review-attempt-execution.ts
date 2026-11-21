@@ -55,6 +55,7 @@ import { computeFindingFingerprint } from "../store/fingerprint";
 // linking the publication the probe found, and releasing the claim to recovery.
 import {
   CHECK_BACKOFF_MS,
+  attemptKey,
   deferCheckRecovery,
   linkCheckPublication,
   recordTerminalizeOutcome,
@@ -336,7 +337,7 @@ export type ConsumerLogFields = {
    * platform closed (D20) and deferred the whole batch instead of running it —
    * one line per invocation, not per message.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
   action: string;
   installation_id: number;
   owner: string;
@@ -3039,17 +3040,47 @@ async function settlementFor(
     // fields belong to its own owner. One conditional write on the row that
     // outlives this invocation, and the recovery lane is due once the holder
     // releases.
-    const owed = await noteCheckOwed(deps.env.DB, ref.attemptId, Date.now());
     deps.log.warn(
-      { ...settlement.fields, event: "check_settlement_not_adopted", check_recovery_owed: owed },
-      owed
-        ? "check settlement not adopted on a resumed step — the attempt row now carries the obligation"
-        : "check settlement not adopted on a resumed step — no attempt row to hand over",
+      { ...settlement.fields, event: "check_settlement_not_adopted" },
+      "check settlement not adopted on a resumed step — the obligation is recorded once its publication is durable",
     );
     return undefined;
   }
   deps.checkSettlements.set(ref.attemptId, settlement);
   return settlement;
+}
+
+/**
+ * Record that this attempt's Check settlement is still owed — ONLY once a
+ * publication for it is durable and the Check has not concluded. The key is the
+ * Check row's own `attempt_key` (the association is that derived identity, not
+ * two random UUIDs) and the due instant is the recovery lane's first backoff
+ * rung, so the select honours it instead of bypassing `next_attempt_ms`.
+ */
+async function noteOwedCheck(deps: ProcessDeps, ref: AttemptRef, headSha: string): Promise<void> {
+  const scope = scopeOf(ref.payload);
+  if (scope === undefined || deps.checks === undefined) return;
+  const checkKey = attemptKey({
+    appId: scope.appId,
+    installationId: scope.installationId,
+    owner: scope.owner,
+    repo: scope.repo,
+    prNumber: scope.prNumber,
+    headSha,
+    triggeredBy: ref.payload.triggered_by,
+    action: ref.payload.action,
+  });
+  const owed = await noteCheckOwed(deps.env.DB, {
+    attemptId: ref.attemptId,
+    checkKey,
+    dueMs: Date.now() + CHECK_BACKOFF_MS[0]!,
+  });
+  deps.log.warn(
+    { ...attemptFields(ref.payload, ref.level, ref.attemptId, headSha), event: "check_settlement_owed", check_recovery_owed: owed },
+    owed
+      ? "check settlement owed — the attempt row carries the obligation for the recovery lane"
+      : "check settlement owed — no open check row to hand over",
+  );
 }
 
 /** The round's structured log fields, derived from data alone. */
@@ -4488,6 +4519,11 @@ async function collectPhase(
       await check?.terminalize(null, "degraded-not-posted");
     } else {
       await check?.terminalize(degradedOutcome.publicationId, "publication-unknown");
+      // A durable degraded publication is the proof the Check concludes from;
+      // with no settlement in this host the obligation is recorded once.
+      if (check === undefined && degradedOutcome.phase === "confirmed") {
+        await noteOwedCheck(deps, ref, headSha);
+      }
     }
     deps.log.warn(
       fields,
@@ -4976,6 +5012,10 @@ async function publishPhase(
     await check?.terminalize(stagedId, "publication-unknown");
     return { kind: "ok" };
   }
+  // The publication is durable and this host adopted no Check: record the owed
+  // settlement on the attempt row (its own backoff instant, the Check's own
+  // key) so the recovery lane concludes it after the holder releases.
+  if (check === undefined) await noteOwedCheck(deps, ref, headSha);
 
   // 13a. KV done-state fence (BUG-01): follows durable confirmation (the
   // persisted proof) — a crash in the steps below redelivers into the
@@ -5596,21 +5636,25 @@ export async function cleanupAttempt(
   const sandboxId = attemptSandboxId(attemptId);
   const fields = attemptFields(payload, ref.level, attemptId, input.headSha ?? null);
   const baseFields: ConsumerLogFields | undefined = undefined;
-  // Retention reads the ATTEMPT ROW and nothing else: its `result_outcome` is
-  // the only record that can be attributed to this attempt (a failure row
-  // matched by PR and time can belong to another attempt, or be a usage /
-  // recheck / rate-limit row).
-  //   no row / pending          → the paid call never started
-  //   outcome persisted|failed   → terminal: the result is durable, or the
-  //                                no-result outcome is
-  //   launched, no outcome       → unknown: hold container and capacity
+  // THE RETENTION CONTRACT, read from the attempt row and nothing else (plan
+  // Task 4b's table, one row per state):
+  //   absent                    → no-paid-work (never claimed)
+  //   provisioned               → no-paid-work (container may exist, the paid
+  //                               exec was never sent, nothing was charged)
+  //   launched + no outcome     → unknown: hold container and capacity
+  //   launched + an outcome     → retained (the terminal fact is on the row)
+  //   persisted | failed        → retained
+  // No phase-local value participates: the row's state was written by whatever
+  // observed the fact, and cleanup only reads it.
   const launch = await readReviewLaunch(deps.env.DB, attemptId);
   const retention: RetentionProof | undefined =
-    launch === null || launch.state === "pending"
+    launch === null || launch.state === "provisioned"
       ? { kind: "no-paid-work" }
-      : launch.outcome === "persisted" || launch.outcome === "failed"
+      : launch.state === "persisted" || launch.state === "failed"
         ? { kind: "retained" }
-        : undefined;
+        : // `launched` with no outcome is the ONLY unknown; the schema refuses an
+          // outcome on a `launched` row, so this arm is the table's last cell.
+          undefined;
   let containerUnproven = retention === undefined || input.unproven === true;
   // Destroy FIRST, then release the admission row. Releasing first would let
   // the next attempt for this PR acquire the slot and start its container

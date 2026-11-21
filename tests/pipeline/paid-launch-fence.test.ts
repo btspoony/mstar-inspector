@@ -288,8 +288,11 @@ describe("the paid step is taken at most once per attempt", () => {
       }),
     ).rejects.toBeInstanceOf(AttemptUnknownError);
 
-    expect(sandbox.events).toEqual([]);
-    expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("pending");
+    // The claim now sits in the statement that is about to SEND: everything
+    // before it (here the runner-input write) already ran, and the paid exec
+    // never did. The row stays `provisioned`, which cleanup may still release.
+    expect(sandbox.events.filter((event) => event.includes(RUNNER_PATH))).toEqual([]);
+    expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("provisioned");
   });
 
   test("a rejected completion write after a returned paid call is unknown, and the row stays launched", async () => {
@@ -355,7 +358,7 @@ describe("a replayed prepare never provisions a second container", () => {
     const first = sandboxDouble();
     await prepareReviewAttempt(prepareInput(db, first));
     expect(first.events.filter((event) => event.startsWith("claim:"))).toHaveLength(1);
-    expect(await readReviewLaunch(db, ATTEMPT)).toMatchObject({ state: "pending" });
+    expect(await readReviewLaunch(db, ATTEMPT)).toMatchObject({ state: "provisioned" });
 
     // A replaced container (empty filesystem) is refused WITHOUT writing a
     // marker on it: the row already says this attempt provisioned.
@@ -444,7 +447,7 @@ describe("a replayed prepare never provisions a second container", () => {
 });
 
 describe("a lost marker reply is unknown", () => {
-  test("the first entry's marker claim rejects: nothing runs and the row stays pending", async () => {
+  test("the first entry's marker claim rejects: nothing runs and the row stays provisioned", async () => {
     const db = createMigratedTestD1();
     const sandbox = sandboxDouble({ markerClaimThrows: true });
 
@@ -458,6 +461,6 @@ describe("a lost marker reply is unknown", () => {
     expect(sandbox.events.some((event) => event.startsWith("run:"))).toBe(false);
     // The provisioning claim itself succeeded: this entry owns the attempt, and
     // the attempt's outcome — not its claim — is what is unknown.
-    expect(await readReviewLaunch(db, ATTEMPT)).toMatchObject({ state: "pending" });
+    expect(await readReviewLaunch(db, ATTEMPT)).toMatchObject({ state: "provisioned" });
   });
 });

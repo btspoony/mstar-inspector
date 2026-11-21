@@ -438,7 +438,7 @@ describe("a refused Check adoption", () => {
     const published = await readPublication(db as never, collected.collected.publicationId);
     expect(published?.proof).not.toBeNull();
     // And the handoff named itself on the log line.
-    const warn = h.logLines.find((line) => line.fields.event === "check_settlement_not_adopted");
+    const warn = h.logLines.find((line) => line.fields.event === "check_settlement_owed");
     expect(warn?.fields.check_recovery_owed).toBe(true);
   });
 });

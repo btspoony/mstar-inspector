@@ -210,7 +210,7 @@ export function preclaimedDb(db: TestD1): D1Like {
           // conflicts, exactly as a replayed prepare sees it.
           db.raw
             .prepare(
-              "INSERT OR IGNORE INTO review_launches (attempt_id, state, claimed_at_ms) VALUES (?, 'pending', ?)",
+              "INSERT OR IGNORE INTO review_launches (attempt_id, state, claimed_at_ms) VALUES (?, 'provisioned', ?)",
             )
             .run(String(bound[0]), Number(bound[1]));
           return { results: [], meta: { changes: 0, last_row_id: 0 } };

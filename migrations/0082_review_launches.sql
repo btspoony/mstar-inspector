@@ -7,37 +7,47 @@
 -- claim: only the caller whose INSERT created it may start a container for this
 -- attempt, so a replayed prepare cannot stamp a replacement as the original.
 --
--- `state` walks forward only. The claim statements are conditional on the state
--- they leave (`pending` → `launched`, `launched` → `persisted`), so a statement
--- that would take the paid step or record completion twice matches zero rows.
--- The CHECKs couple each state to the facts that make it true: a row claiming a
--- launch carries its instant, and a `persisted` row carries the instant AND the
--- result itself — completion and result durability are one statement, so no
--- completion can be recorded without the result.
+-- `state` walks forward only, and its MEANING is the whole retention contract
+-- (plan Task 4b): `provisioned` = a container may be allocated but the paid
+-- exec was NEVER sent; `launched` = the paid exec was sent and may have been
+-- charged; `persisted` = a result is on the row; `failed` = the paid call
+-- returned a nonzero status. The claim statements are conditional on the state
+-- they leave, so a statement that would take the paid step twice matches zero
+-- rows. `launched` is written in the same statement that is about to send the
+-- exec — never earlier — so a failure while minting or writing input leaves the
+-- row `provisioned`, which cleanup may still release.
 --
--- `result_outcome` is the attempt's TERMINAL outcome as THIS row records it
--- (`persisted` when the paid result is durable, `failed` when a failure row for
--- this attempt actually wrote after a returned paid call). Retention reads it
--- and nothing else: a failure row is not attributable to an attempt by PR and
--- time (another attempt's row, or a usage/recheck/rate-limit row, can share the
--- window), so the fence's own row carries the fact instead.
+-- The CHECKs couple each state to the facts that make it true: a `launched`
+-- row carries its instant, `persisted` carries the instant AND the result,
+-- `failed` carries its instant and the failed outcome.
 --
--- `check_owed_ms` records that this attempt's Check settlement is still owed.
--- It is written HERE, never on the Check row: that row's `holder`,
--- `lease_until_ms`, `next_attempt_ms` and `last_error` belong to its lease and
--- suspension state, and an opportunistic note must not disturb them.
+-- `result_outcome` records the terminal outcome where the state machine permits
+-- it: `persisted` on a persisted row, `failed` on a failed row. A `launched`
+-- row with an outcome is the plan's "may destroy" case; a `launched` row
+-- WITHOUT one is the only `unknown`, and only it holds container and capacity.
+--
+-- `check_key` + `check_owed_ms` record an OWED Check settlement: the key is the
+-- Check row's own `attempt_key` (the association is that derived identity, not
+-- two random UUIDs), and the instant is the obligation's own due time, so the
+-- recovery select honours the backoff instead of bypassing it. Both are written
+-- together, only after a publication is durable and the Check has not
+-- concluded, and cleared only by the conclusion.
 CREATE TABLE review_launches (
   attempt_id TEXT PRIMARY KEY,
-  state TEXT NOT NULL CHECK (state IN ('pending', 'launched', 'persisted')),
+  state TEXT NOT NULL CHECK (state IN ('provisioned', 'launched', 'persisted', 'failed')),
   claimed_at_ms INTEGER NOT NULL,
   launched_at_ms INTEGER,
   persisted_at_ms INTEGER,
+  failed_at_ms INTEGER,
   result_json TEXT,
   result_outcome TEXT CHECK (result_outcome IS NULL OR result_outcome IN ('persisted', 'failed')),
+  check_key TEXT,
   check_owed_ms INTEGER,
-  CHECK ((launched_at_ms IS NOT NULL) = (state <> 'pending')),
+  CHECK ((launched_at_ms IS NOT NULL) = (state <> 'provisioned')),
   CHECK ((persisted_at_ms IS NOT NULL) = (state = 'persisted')),
+  CHECK ((failed_at_ms IS NOT NULL) = (state = 'failed')),
   CHECK ((result_json IS NOT NULL) = (state = 'persisted')),
   CHECK ((result_outcome = 'persisted') = (state = 'persisted')),
-  CHECK (result_outcome <> 'failed' OR state <> 'pending')
+  CHECK ((result_outcome = 'failed') = (state = 'failed')),
+  CHECK ((check_key IS NOT NULL) = (check_owed_ms IS NOT NULL))
 );

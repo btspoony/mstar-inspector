@@ -301,9 +301,14 @@ const CHECK_DUE_PREDICATE = `recovery_state IN ('pending','remote-unconfirmed')
                    OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))
             )
             OR (
+              -- An OWED settlement, associated by the Check's OWN attempt key
+              -- (never by two generated ids), and honouring the obligation's
+              -- own due instant so the backoff is not bypassed.
               EXISTS (
                 SELECT 1 FROM review_launches l
-                 WHERE l.attempt_id = review_checks.id AND l.check_owed_ms IS NOT NULL
+                 WHERE l.check_key = review_checks.attempt_key
+                   AND l.check_owed_ms IS NOT NULL
+                   AND l.check_owed_ms <= ?
               )
               AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
             )
@@ -829,7 +834,7 @@ export async function claimCheckRecovery(
         WHERE id = ? AND ${NONTERMINAL_WHERE}
           AND ${CHECK_DUE_PREDICATE}`,
     )
-    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs)
+    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs)
     .run();
   if (claim.meta.changes !== 1) return null;
   const row = await db
@@ -1863,7 +1868,7 @@ export async function listCheckReconcileBatch(
         ORDER BY COALESCE(next_attempt_ms,created_ms),id
         LIMIT ?`,
     )
-    .bind(maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, limit)
+    .bind(maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs, limit)
     .all<ReviewCheckRow>();
   return results.map(attemptOf);
 }
