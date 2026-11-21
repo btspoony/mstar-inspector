@@ -8996,26 +8996,17 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
 
       // The contradicted claim is decided BEFORE the dedup read, so it stays
-      // superseded; only the new head's admitted run is closed by the hit, and
-      // it closes with the head's INHERITED result: both variants have an
-      // unreadable baseline here (no review row / no tally), which fails closed.
-      expect(checkRequests.map((r) => r.op), dedup).toEqual([
-        "create",
-        "update",
-        "create",
-        "update",
-        "update",
-      ]);
-      expect((checkRequests[4]!.params as ChecksUpdateParams).conclusion, dedup).toBe("failure");
+      // superseded; the NEW head is never claimed — the hit acks it, so no
+      // attempt is left for the reconciler to close red. Its remote send
+      // belongs to the recovery cron.
+      expect(checkRequests.map((r) => r.op), dedup).toEqual(["create", "update"]);
 
       const early = checkRowFor(db, SHA);
       expect(early.desired, dedup).toBe("failure");
       expect(early.desired_summary, dedup).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
       expect(early.holder, dedup).toBeNull();
 
-      const newHead = checkRowFor(db, SHA2);
-      expect(newHead.desired, dedup).toBe("failure");
-      expect(newHead.terminal_ms, dedup).not.toBeNull();
+      expect(checkRowFor(db, SHA2), dedup).toBeNull();
       expect(h.commenterCalls.filter((c) => c.op === "post-prepared"), dedup).toHaveLength(0);
     }
   });
@@ -9095,22 +9086,33 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(h.logLines.filter((l) => l.msg === "KV idempotency hit — ack")).toHaveLength(0);
   });
 
-  test("check lifecycle: an unreadable D1 answer never acks — the delivery fails instead", async () => {
+  test("check lifecycle: an unreadable D1 pre-read falls through — the delivery is not ended by it", async () => {
     const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(
-      await h.makeEnv({ DB: dbFailingOn(db, "FROM reviews") as never }),
-      h.testLog,
-      { ...h.overrides, createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)) },
-    );
+    // The pre-read is the ONE faulted statement: the authoritative
+    // checkout-keyed read that follows answers normally, so a fall-through is
+    // observable as a completed review.
+    let preReadFault = 1;
+    const flakyDb = {
+      prepare: (sql: string) => {
+        if (sql.includes("FROM reviews") && preReadFault-- > 0) throw new Error("D1 unavailable");
+        return db.prepare(sql);
+      },
+      batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    };
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: flakyDb as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
 
-    await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow("D1 unavailable");
+    await consumer(h.makeBatch(makePayload()));
 
-    // Nothing was created and nothing was acknowledged: the commit keeps
-    // owing a review, which only an honest failure (retry) preserves.
-    expect(checkRequests).toHaveLength(0);
-    expect(checkRows(db)).toHaveLength(0);
-    expect(h.messageAckCalls).toHaveLength(0);
-    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    // The pre-read fault is announced and nothing else changes: the round
+    // claims, runs and posts exactly as it did before the early check existed.
+    expect(h.logLines.filter((l) => l.level === "warn" && l.msg.includes("early idempotency read failed"))).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(h.logLines.filter((l) => l.msg.includes("idempotency hit"))).toHaveLength(0);
   });
 
   test("check lifecycle: a force-push after delivery is still caught by the checkout-keyed dedup", async () => {
@@ -9136,12 +9138,45 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
     ]);
-    // ...and the NEW head's claim is the one the checkout hit closed, with no
-    // review, comment or stored row for the commit this delivery never named.
-    expect(checkRowFor(db, SHA2).terminal_ms).not.toBeNull();
+    // ...and the checkout hit acks BEFORE the new head is claimed, so no
+    // attempt exists for the commit this delivery never named — nothing is
+    // left for the reconciler to close red. Only the payload claim remains,
+    // frozen `superseded` for the recovery cron.
+    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
+    expect(checkRowFor(db, SHA).desired_summary).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(h.logLines.some((line) => line.level === "info" && line.msg.includes("idempotency hit"))).toBe(true);
+  });
+
+  test("check lifecycle: a reviewed payload head acks even when the checkout moved on", async () => {
+    // The delivery names SHA, which was reviewed; the clone holds SHA2 — a
+    // newer commit nothing has reviewed yet. The duplicate ACKS rather than
+    // reviewing the newer commit under the stale delivery: the commit that
+    // advanced the PR has its own delivery (the supersede skip's own rule), so
+    // neither head is claimed and no container starts.
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: GATED_OUTPUT,
+      appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
+    });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(checkRequests).toHaveLength(0);
+    expect(checkRows(db)).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1); // the reviewed head's row, untouched
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
   });
 
   test("check lifecycle: a publication journal handoff links its publication and releases the admitted claim without concluding", async () => {
@@ -10246,15 +10281,19 @@ describe("usage ledger (migration 0031)", () => {
     expect(reviewCount(db)).toBe(1);
   });
 
-  test("the payload sha is the metered identity — a differing checkout sha keeps one review_id", async () => {
+  test("the payload sha is the metered identity — two checkouts keep one review_id", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // The clone lands a commit the delivery never named (a force-push between
-    // delivery and processing): the review row follows the checkout, the
-    // metered identity stays the payload's.
-    h.sandbox.resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
+    // Each delivery's clone lands a commit the payload never named, so the
+    // payload head itself stays unreviewed and both executions start: the
+    // review row follows each checkout, the metered identity stays the
+    // payload's.
+    h.sandbox.resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
+    await consumer(h.makeBatch(makePayload()));
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.resolvedSha = "aaaabbbbccccddddeeeeffff0000111122223333";
     await consumer(h.makeBatch(makePayload()));
 
     const key = idemKey({
@@ -10264,7 +10303,10 @@ describe("usage ledger (migration 0031)", () => {
       pr_number: 42,
       head_sha: SHA,
     });
-    expect(usageRows(db).map((row) => [row.review_id, row.seq])).toEqual([[key, 1]]);
+    expect(usageRows(db).map((row) => [row.review_id, row.seq])).toEqual([
+      [key, 1],
+      [key, 2],
+    ]);
   });
 
   test("a job without a payload sha keeps one review identity across checkout shas", async () => {

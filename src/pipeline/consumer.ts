@@ -67,9 +67,10 @@
  * mention carries — and only short-circuits a head this lane already
  * reviewed: that duplicate creates no Check attempt and no container. It is
  * a fast path, not the dedup authority: the checkout-keyed read below still
- * decides what the live clone holds, so a force-push after delivery is
- * caught there. A duplicate whose own head was reviewed while the PR has
- * since advanced acks here — the newer commit owns its own delivery.
+ * decides what the live clone holds — and the clone's head is claimed only
+ * after that read — so a force-push after delivery is caught there. A
+ * duplicate whose own head was reviewed while the PR has since advanced acks
+ * here — the newer commit owns its own delivery.
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
@@ -5001,7 +5002,21 @@ async function processMessage(
           idempotency_key: idemKey(earlyKey),
         };
         const earlyDone = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(earlyKey), earlyFields, deps.log);
-        if (earlyDone || (await deps.store.findByIdempotencyKey(earlyKey)) !== null) {
+        let earlyReviewed = earlyDone;
+        if (!earlyReviewed) {
+          try {
+            earlyReviewed = (await deps.store.findByIdempotencyKey(earlyKey)) !== null;
+          } catch (err) {
+            // A pre-read fault is not an answer: fall through to the existing
+            // path, whose checkout-keyed read is the authoritative one and
+            // keeps its own retry semantics on failure.
+            deps.log.warn(
+              earlyFields,
+              `early idempotency read failed — continuing to the checkout-keyed path: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+        if (earlyReviewed) {
           deps.log.info(earlyFields, earlyDone ? "KV idempotency hit — ack" : "idempotency hit — ack");
           await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
           return { kind: "ok" };
@@ -5077,43 +5092,6 @@ async function processMessage(
     const headSha = rev.stdout.trim();
     resolvedHeadSha = headSha;
 
-    // §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
-    // authoritative checkout HERE — before any dedup/journal early exit, so a
-    // delivery whose claimed SHA was disproved can never close the wrong head's
-    // run as `skipped`. (A message that had no knowable SHA at admission is a
-    // different case: its claim stays at the post-capture fallback below, so a
-    // duplicate or journal hand-off of a comment trigger never creates a run.)
-    if (checkHandle !== null && checkHandle.headSha !== headSha) {
-      const supersededHandle = checkHandle;
-      checkHandle = null;
-      deps.log.warn(
-        fields ?? baseFields ?? payloadIdentityFields(payload),
-        `check attempt superseded: claimed ${supersededHandle.headSha.slice(0, 7)}, checked out ${headSha.slice(0, 7)}`,
-      );
-      // Freeze the contradicted attempt's `superseded` intent and release it —
-      // TWO fenced D1 writes (intent + release), no remote request. Its remote
-      // send belongs to the minute recovery cron, so the new head's review
-      // never waits on the Check hook.
-      const handedOff = await abandonCheck(
-        supersededHandle,
-        "the checkout proved a newer commit than the claim",
-        { outcome: "superseded" },
-      );
-      if (handedOff) {
-        checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
-      } else {
-        // The handoff failed, so the old attempt may still hold this
-        // consumer's lease: claiming the new head anyway would put two live
-        // consumer-owned claims on one invocation. A Check fault never blocks
-        // the review — this message reviews the checked-out commit with NO
-        // Check, and the old attempt's own deadline hands it to recovery.
-        deps.log.warn(
-          fields ?? baseFields ?? payloadIdentityFields(payload),
-          `check supersede handoff failed — continuing the review for ${headSha.slice(0, 7)} with no Check`,
-        );
-      }
-    }
-
     const key: IdempotencyKey = {
       installation_id: payload.installation_id,
       owner: payload.owner,
@@ -5135,6 +5113,44 @@ async function processMessage(
       sandbox_id: sandboxId,
     };
 
+    // §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
+    // authoritative checkout HERE — before any dedup/journal early exit, so a
+    // delivery whose claimed SHA was disproved can never close the wrong head's
+    // run as `skipped`. (A message that had no knowable SHA at admission is a
+    // different case: its claim stays at the post-capture fallback below, so a
+    // duplicate or journal hand-off of a comment trigger never creates a run.)
+    // The checkout's OWN claim waits for the dedup read below: an already
+    // reviewed head is acked, never claimed.
+    let supersededClaimReleased = false;
+    if (checkHandle !== null && checkHandle.headSha !== headSha) {
+      const supersededHandle = checkHandle;
+      checkHandle = null;
+      deps.log.warn(
+        fields,
+        `check attempt superseded: claimed ${supersededHandle.headSha.slice(0, 7)}, checked out ${headSha.slice(0, 7)}`,
+      );
+      // Freeze the contradicted attempt's `superseded` intent and release it —
+      // TWO fenced D1 writes (intent + release), no remote request. Its remote
+      // send belongs to the minute recovery cron, so the new head's review
+      // never waits on the Check hook.
+      supersededClaimReleased = await abandonCheck(
+        supersededHandle,
+        "the checkout proved a newer commit than the claim",
+        { outcome: "superseded" },
+      );
+      if (!supersededClaimReleased) {
+        // The handoff failed, so the old attempt may still hold this
+        // consumer's lease: claiming the new head anyway would put two live
+        // consumer-owned claims on one invocation. A Check fault never blocks
+        // the review — this message reviews the checked-out commit with NO
+        // Check, and the old attempt's own deadline hands it to recovery.
+        deps.log.warn(
+          fields,
+          `check supersede handoff failed — continuing the review for ${headSha.slice(0, 7)} with no Check`,
+        );
+      }
+    }
+
     // 4. Dedup (§7.7 step 2, first half): already completed for this
     // checked-out sha → ack (no post, no insert). KV done-state first (B3),
     // then D1. Keyed off the checkout, so a force-push between delivery and
@@ -5142,9 +5158,10 @@ async function processMessage(
     const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
     if (done) {
       deps.log.info(fields, "KV idempotency hit — ack");
-      // The claim now precedes this read, so the run it created must be closed
-      // — and it must carry THIS head's existing result (inherited like an
-      // empty increment), never a `neutral` that would mask a failing gate.
+      // A handle exists only when the claim's SHA WAS the checkout (a
+      // concurrent duplicate): that run must be closed, carrying THIS head's
+      // existing result (inherited like an empty increment), never a `neutral`
+      // that would mask a failing gate.
       await terminalizeCheck(null, "skipped", headSha);
       // §7.9: with no handle (the adoption refused) the attached run would
       // otherwise wait out the attach window and close red. The settlement is
@@ -5158,6 +5175,12 @@ async function processMessage(
       await terminalizeCheck(null, "skipped", headSha);
       await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
       return { kind: "ok" };
+    }
+    // §7.7 step 4: claim the CHECKED-OUT head — only now, on a dedup miss. The
+    // admission claim named the payload sha (or the watermark), which this
+    // checkout just disproved; a head already reviewed never reaches here.
+    if (supersededClaimReleased) {
+      checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
     }
     // §7.7 step 2 (second half) — the publication journal: an existing
     // prepared/sending/unknown/confirmed row for this exact scope/SHA hands
