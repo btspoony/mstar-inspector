@@ -102,6 +102,13 @@ export type CheckRunPayload = {
   status: string;
   conclusion: string | null;
   app: { id: number | bigint } | null;
+  /**
+   * The human-facing text GitHub stores on the run. It is the only remote
+   * evidence that the approved wording LANDED: a conclusion alone is what an
+   * earlier writer left behind (spec §7.9, plan "Persistence and
+   * reconciliation contract").
+   */
+  output?: { title?: string | null; summary?: string | null } | null;
 };
 
 export type ChecksCreateParams = {
@@ -218,6 +225,10 @@ export function toCheckRemote(payload: CheckRunPayload | null | undefined): Chec
   if (typeof payload.status !== "string") return null;
   if (payload.external_id !== null && typeof payload.external_id !== "string") return null;
   if (payload.conclusion !== null && typeof payload.conclusion !== "string") return null;
+  // A payload with no readable text is NOT malformed: it is a run whose
+  // wording cannot be proven, which `null` says without failing the read.
+  const rawSummary = payload.output?.summary;
+  const summary = typeof rawSummary === "string" ? rawSummary : null;
   if (payload.app === null || payload.app === undefined) {
     return {
       id,
@@ -226,6 +237,7 @@ export function toCheckRemote(payload: CheckRunPayload | null | undefined): Chec
       external_id: payload.external_id,
       status: payload.status,
       conclusion: payload.conclusion,
+      summary,
       app: null,
     };
   }
@@ -238,6 +250,7 @@ export function toCheckRemote(payload: CheckRunPayload | null | undefined): Chec
     external_id: payload.external_id,
     status: payload.status,
     conclusion: payload.conclusion,
+    summary,
     app: { id: appId },
   };
 }

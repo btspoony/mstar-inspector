@@ -195,6 +195,7 @@ function remoteFor(
     app?: { id: number } | null;
     status?: string;
     conclusion?: string | null;
+    summary?: string | null;
   } = {},
   intent: CheckConclusion["desired"] = "success",
 ): CheckRemote {
@@ -209,6 +210,7 @@ function remoteFor(
     app: overrides.app === undefined ? { id: identity.githubAppId } : overrides.app,
     status: overrides.status ?? "completed",
     conclusion: overrides.conclusion === undefined ? intent : overrides.conclusion,
+    summary: overrides.summary === undefined ? null : overrides.summary,
   };
 }
 
@@ -1110,6 +1112,7 @@ describe("a settled neutral row does not retire the head (spec §7.9)", () => {
           app: { id: APP_NUMERIC_ID },
           status: "completed",
           conclusion: "neutral",
+          summary: null,
         },
         T0,
       ),

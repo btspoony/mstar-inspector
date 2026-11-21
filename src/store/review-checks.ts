@@ -174,6 +174,12 @@ export type CheckRemote = {
   app: { id: number } | null;
   status: string;
   conclusion: string | null;
+  /**
+   * The run's human-facing summary, or `null` when the payload carried no
+   * readable text. A conclusion alone does not prove the approved wording
+   * landed, so delivery is judged on this field (spec §7.9).
+   */
+  summary: string | null;
 };
 
 /** A terminal intent: `in_progress` is structurally excluded (spec §7.11.2). */

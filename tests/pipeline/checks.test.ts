@@ -310,6 +310,8 @@ describe("beginCheck — the create contract", () => {
         app: { id: GITHUB_APP_ID },
         status: "in_progress",
         conclusion: null,
+        // A create carries no text yet: the promotion relabel writes it.
+        summary: null,
       },
     });
   });
@@ -2033,7 +2035,14 @@ describe("identity helpers", () => {
       app: { id: GITHUB_APP_ID },
       status: "in_progress",
       conclusion: null,
+      summary: null,
     });
+    // The run's own text is evidence: it is what tells "the approved wording
+    // landed" apart from "something set the same conclusion".
+    expect(toCheckRemote({ ...runPayload(identity), output: { title: "t", summary: "approved text" } })?.summary).toBe(
+      "approved text",
+    );
+    expect(toCheckRemote({ ...runPayload(identity), output: null })?.summary).toBeNull();
     expect(toCheckRemote(null)).toBeNull();
     expect(toCheckRemote(undefined)).toBeNull();
     expect(toCheckRemote({ ...runPayload(identity), id: "not-a-number" as unknown as number })).toBeNull();

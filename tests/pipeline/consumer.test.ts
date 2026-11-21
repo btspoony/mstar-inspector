@@ -8508,7 +8508,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           await attachCheckRunId(db, identity.attemptId, lease, 777, checkState.clockMs);
           return {
             kind: "ready",
-            remote: { id: 4242, name: CHECK_NAME, head_sha: SHA, external_id: null, status: "in_progress", conclusion: null, app: { id: TEST_GITHUB_APP_ID } },
+            remote: {
+              id: 4242,
+              name: CHECK_NAME,
+              head_sha: SHA,
+              external_id: null,
+              status: "in_progress",
+              conclusion: null,
+              summary: null,
+              app: { id: TEST_GITHUB_APP_ID },
+            },
           };
         },
         adoptCheckRun: async () => ({ kind: "absent" }),
@@ -8554,7 +8563,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           checkState.clockMs = lease.untilMs + 1;
           return {
             kind: "ready",
-            remote: { id: 4242, name: CHECK_NAME, head_sha: SHA, external_id: null, status: "in_progress", conclusion: null, app: { id: TEST_GITHUB_APP_ID } },
+            remote: {
+              id: 4242,
+              name: CHECK_NAME,
+              head_sha: SHA,
+              external_id: null,
+              status: "in_progress",
+              conclusion: null,
+              summary: null,
+              app: { id: TEST_GITHUB_APP_ID },
+            },
           };
         },
         adoptCheckRun: async () => ({ kind: "absent" }),

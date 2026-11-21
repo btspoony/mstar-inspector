@@ -1157,15 +1157,36 @@ async function reconcileCheckAttempt(
     return;
   }
   if (fetched.remote.status === "completed") {
-    const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary);
-    if (recorded === "mismatch") {
+    if (fetched.remote.conclusion !== frozen.desired) {
+      // A different CONCLUSION is not a wording gap: overwriting it here would
+      // replace an outcome this lane never recorded. Reported honestly and
+      // left to the attempt ladder, exactly as before.
       await settleFailedAttempt(
         db, now, attemptsBefore, row, lease,
         `remote run concluded ${fetched.remote.conclusion ?? "null"}, persisted intent is ${frozen.desired}`,
         log, summary,
       );
+      return;
     }
-    return;
+    if (fetched.remote.summary === frozen.summary) {
+      // The conclusion AND the approved text already match this attempt's
+      // frozen intent: an earlier send LANDED and only its reply was lost.
+      // Reading it back is reconciliation — re-sending the same text would
+      // spend a request to prove what this read already proved.
+      const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary);
+      if (recorded === "mismatch") {
+        await settleFailedAttempt(
+          db, now, attemptsBefore, row, lease,
+          "the reread run is not the persisted terminal intent",
+          log, summary,
+        );
+      }
+      return;
+    }
+    // A conclusion-only match is not delivery (spec §7.9): the run is finished
+    // with the right conclusion but carries no — or different — approved text,
+    // so the wording never reached the user. Fall through and send the frozen
+    // intent to THAT run; a landed update is never replaced by a new one.
   }
 
   const completed = await resolved.adapter.completeCheck({

@@ -98,6 +98,7 @@ import {
   NOOP_QUEUE,
   UNCONFIRMED,
   agreeingScript,
+  frozenSummaryOf,
   asEnv,
   claim,
   linkPublication,
@@ -177,12 +178,12 @@ describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
     try {
       // Before the grace the lane does not even select it: the one-hour window
       // is no longer what decides when recovery may look.
-      const early = await run(db, { now: () => grace - 1, credentials: scriptedCredentials(db, agreeingScript()) });
+      const early = await run(db, { now: () => grace - 1, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(early.examined).toBe(0);
 
       // AT the grace it is due: the pass claims it and gives the claim back to
       // wait for the publication proof. No create, no second run, no request.
-      const summary = await run(db, { now: () => grace, credentials: scriptedCredentials(db, agreeingScript()) });
+      const summary = await run(db, { now: () => grace, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(summary.examined).toBe(1);
       expect(summary.deferred).toBe(1);
       expect(summary.errors).toBe(0);
@@ -226,7 +227,7 @@ describe("a store-only skip settlement (spec §7.9 / RL-10)", () => {
     expect(await releaseCheckClaim(db, id, lease, T0)).toBe(true);
 
     const script: AdapterScript = {
-      ...agreeingScript("neutral", 4242),
+      ...agreeingScript(db, "neutral", 4242),
       complete: async (identity, checkRunId, conclusion) => ({
         kind: "completed",
         remote: remoteFor(identity, { id: checkRunId, status: "completed", conclusion: conclusion.desired }),
@@ -366,7 +367,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
       .run(CHECK_MAX_ATTEMPTS, capped.attempt.identity.attemptId);
     const fetchStub = stubFetch();
     try {
-      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript()) });
+      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(summary.examined).toBe(1);
       expect(summary.completed).toBe(1);
     } finally {
@@ -1151,7 +1152,7 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
           clock = T0 + CHECK_RECONCILE_RUN_BUDGET_MS;
           return value;
         },
-        credentials: scriptedCredentials(db, agreeingScript()),
+        credentials: scriptedCredentials(db, agreeingScript(db)),
       });
       expect(summary.examined).toBe(1);
       expect(summary.completed).toBe(0);
@@ -1182,7 +1183,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
       .run(bad.attempt.identity.attemptId);
     const fetchStub = stubFetch();
     try {
-      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript()) });
+      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(summary.completed).toBe(1);
       expect(summary.suspended).toBe(1);
     } finally {
@@ -1294,7 +1295,12 @@ describe("throw-proofing (spec §7.11 composition)", () => {
           },
           fetch: async (identity, checkRunId) => ({
             kind: "found",
-            remote: remoteFor(identity, { id: checkRunId, status: "completed", conclusion: "failure" }),
+            remote: remoteFor(identity, {
+              id: checkRunId,
+              status: "completed",
+              conclusion: "failure",
+              summary: frozenSummaryOf(db, identity.attemptId),
+            }),
           }),
         }),
       });
@@ -1714,7 +1720,11 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
           },
           fetch: async (identity) => ({
             kind: "found",
-            remote: remoteFor(identity, { status: "completed", conclusion: "failure" }),
+            remote: remoteFor(identity, {
+              status: "completed",
+              conclusion: "failure",
+              summary: frozenSummaryOf(db, identity.attemptId),
+            }),
           }),
         }, undefined, SCOPE, false),
       });
@@ -2359,7 +2369,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
         now: () => T0,
         credentials: async (input) => {
           probes += 1;
-          return scriptedCredentials(db, agreeingScript())(input);
+          return scriptedCredentials(db, agreeingScript(db))(input);
         },
       });
       // The changed digest earned exactly ONE proof, and the pair resumed.
@@ -2416,7 +2426,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
           now: () => T0,
           credentials: async (input) => {
             probed.push(input.scope.appId);
-            return scriptedCredentials(db, agreeingScript(), undefined, repairedScope)(input);
+            return scriptedCredentials(db, agreeingScript(db), undefined, repairedScope)(input);
           },
         });
       }
@@ -2512,7 +2522,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
         now: () => T0,
         credentials: async (input) => {
           probes += 1;
-          return scriptedCredentials(db, agreeingScript())(input);
+          return scriptedCredentials(db, agreeingScript(db))(input);
         },
       });
       expect(summary.completed).toBe(1);
@@ -2580,7 +2590,11 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
           },
           fetch: async (identity) => ({
             kind: "found",
-            remote: remoteFor(identity, { status: "completed", conclusion: "failure" }),
+            remote: remoteFor(identity, {
+              status: "completed",
+              conclusion: "failure",
+              summary: frozenSummaryOf(db, identity.attemptId),
+            }),
           }),
         }),
       });
@@ -2890,7 +2904,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
         now: () => T0,
         credentials: async ({ scope, transport }) => {
           if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
-          return { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(), transport) };
+          return { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(db), transport) };
         },
       });
       expect(summary.completed).toBe(1);
@@ -2914,7 +2928,7 @@ describe("configured Check update budget (spec §7.10)", () => {
     return async (input) => {
       seen.push(input.updateBudgetMs);
       return input.scope.appId === SCOPE.appId
-        ? { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(), input.transport) }
+        ? { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(db), input.transport) }
         : { kind: "unavailable", reason: "missing" };
     };
   }
