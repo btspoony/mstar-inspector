@@ -1074,7 +1074,18 @@ async function runPreparedCommand(
   opts?: { env?: Record<string, string>; timeout?: number },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   if (provisioning === "claimed") return sandbox.runCommand(command, opts);
-  const read = await sandbox.runMarked(marker, command, opts);
+  let read: MarkedRun;
+  try {
+    read = await sandbox.runMarked(marker, command, opts);
+  } catch {
+    // A lost reply is not an answer: the guarded command may have run on some
+    // incarnation, and none is proven here. Unknown — never an ordinary
+    // failure, which a caller could settle and then destroy the marked
+    // container on.
+    throw new AttemptUnknownError(
+      "the attempt container could not be proven while preparing (the guarded command's reply was lost) — nothing ran on a replacement",
+    );
+  }
   if (read.kind === "unknown") {
     throw new AttemptUnknownError(
       "the attempt container could not be proven while preparing — nothing ran on a replacement",
@@ -1124,7 +1135,26 @@ export async function prepareReviewAttempt(input: {
   //
   // The durable first-provisioning claim comes FIRST, before a container is
   // even resolved: only the entry whose row INSERT created it may start one.
-  const provisioning = await claimReviewAttempt(deps.env.DB, attemptId, Date.now());
+  //
+  // A rejected claim is not an answer: the write may have landed, so this
+  // attempt may already own a provisioned container — and paid work — from an
+  // earlier entry. The outcome is `unknown`, never a retryable failure: a
+  // retried delivery mints a FRESH attempt id and could pay twice, because the
+  // fence only binds within one attempt. An unknown attempt holds its admission
+  // row to TTL instead; that is the intended trade, not a gap to "fix" back
+  // into a retry.
+  let provisioning: "claimed" | "already-claimed";
+  try {
+    provisioning = await claimReviewAttempt(deps.env.DB, attemptId, Date.now());
+  } catch (err) {
+    const detail = redactExactSecrets(
+      redactSecrets(err instanceof Error ? err.message : String(err)),
+      progress.secretValues,
+    );
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: the provisioning claim could not be read back (${detail}) — nothing is provisioned for it`,
+    );
+  }
   if (sandbox === null) {
     progress.failureStage = "sandbox";
     sandbox = await deps.getSandbox(deps.env.SANDBOX, attemptSandboxId(attemptId));
@@ -1142,15 +1172,15 @@ export async function prepareReviewAttempt(input: {
         `attempt ${attemptId}: the container is not this attempt's (its marker is missing or different)`,
       );
     }
-  } else if ((await sandbox.runMarked(marker, MARKER_PROOF_COMMAND)).kind !== "ran") {
+  } else {
     // A replayed prepare may NOT provision: an earlier entry claimed that
-    // right, so the only accepted outcome is the incarnation it started. A
-    // fresh container (no marker, not running) is never stamped as the
-    // original — including after a crash before the marker write, which leaves
-    // the attempt unknown rather than a second container wearing its name.
-    throw new AttemptUnknownError(
-      `attempt ${attemptId}: its container was provisioned by an earlier entry and cannot be proven now — no replacement is provisioned`,
-    );
+    // right, so the only accepted outcome is the incarnation it started — and
+    // every later command runs guarded on that same handle (a refused or lost
+    // guarded reply is `unknown`, never an ordinary failure). A fresh container
+    // (no marker, not running) is never stamped as the original, including
+    // after a crash before the marker write: the attempt stays unknown rather
+    // than a second container wearing its name.
+    await runPreparedCommand(sandbox, marker, provisioning, MARKER_PROOF_COMMAND);
   }
   progress.failureStage = "pipeline";
   // Purpose-scoped sandbox read grant (§7.6 / RL-6): the mint is

@@ -129,6 +129,7 @@ import {
   TEST_SECOND_APP_ID,
   createSeededTestD1,
   failingDb,
+  preclaimedDb,
   seedAppConfig,
   seedReviewingApp,
   setAppReviewLevel,
@@ -336,6 +337,41 @@ const GUARD_FINAL_ATTEMPT = guardRetryDelaysSeconds("default").length + 1;
 /** Live admission rows — the per-PR lock plus the capacity reservation. */
 function inflightRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_inflight ORDER BY rowid").all() as Array<Record<string, unknown>>;
+}
+
+/**
+ * The `unknown` outcome's one contract: nothing was settled, nothing was
+ * concluded, nothing was destroyed, and the admission row still holds the
+ * capacity for the reconciler.
+ */
+function expectUnknownOutcome(db: TestD1, terminalized: number): void {
+  expect(terminalized).toBe(0);
+  expect(failureRows(db)).toHaveLength(0);
+  expect(h.sandbox.destroyCalls).toBe(0);
+  expect(inflightRows(db)).toHaveLength(1);
+  expect(h.messageAckCalls).toHaveLength(1);
+  expect(h.messageRetryCalls).toHaveLength(0);
+  expect(h.logLines.filter((line) => line.fields.event === "review_unresolved")).toHaveLength(1);
+}
+
+/** An attached Check whose terminal decisions are counted, so "no conclusion" is observable. */
+function attachedCheck(attemptId: string) {
+  const state = { terminalized: 0 };
+  return {
+    state,
+    hooks: {
+      begin: async () => ({
+        attemptId,
+        scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+        githubAppId: 424242,
+        headSha: SHA,
+        lease: { holder: "h", epoch: 1, untilMs: 1 },
+      }),
+      terminalize: async () => {
+        state.terminalized += 1;
+      },
+    },
+  };
 }
 
 /** Seed one live admission row through the REAL store: the state a running review leaves behind. */
@@ -1094,6 +1130,59 @@ describe("createReviewConsumer", () => {
     expect(h.messageAckCalls).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.logLines.filter((line) => line.fields.event === "review_unresolved")).toHaveLength(1);
+  });
+
+  test("a rejected provisioning claim is unknown: nothing settled, nothing destroyed, capacity held", async () => {
+    const db = await createSeededTestD1();
+    const check = attachedCheck("attempt-provisioning-claim-unreadable");
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: failingDb(db, "INSERT INTO review_launches") as never }),
+      h.testLog,
+      { ...h.overrides, checks: check.hooks },
+    );
+
+    await consumer(h.makeBatch(makePayload())); // unknown acks
+
+    // The claim may have landed, so an earlier container — and paid work — may
+    // exist for this attempt. A retry would mint a fresh attempt id and could
+    // pay twice, so the delivery acks and holds its capacity to TTL instead.
+    expectUnknownOutcome(db, check.state.terminalized);
+    expect(h.sandbox.calls).toHaveLength(0);
+  });
+
+  test("a rejected replay proof is unknown: nothing settled, nothing destroyed, capacity held", async () => {
+    const db = await createSeededTestD1();
+    const check = attachedCheck("attempt-replay-proof-lost");
+    // The row already exists (an earlier entry claimed it); the guarded proof's
+    // reply is lost, so no incarnation is proven.
+    h.sandbox.markedError = new Error("marker proof reply lost");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: preclaimedDb(db) as never }), h.testLog, {
+      ...h.overrides,
+      checks: check.hooks,
+    });
+
+    await consumer(h.makeBatch(makePayload())); // unknown acks
+
+    expectUnknownOutcome(db, check.state.terminalized);
+    expect(h.sandbox.markedCalls).toHaveLength(1);
+    expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
+  });
+
+  test("a rejected guarded command after the proof is unknown: nothing settled, nothing destroyed", async () => {
+    const db = await createSeededTestD1();
+    const check = attachedCheck("attempt-replay-command-lost");
+    h.sandbox.markedError = new Error("guarded clone reply lost");
+    h.sandbox.markedErrorFromCall = 2; // the proof answers; the clone's reply is lost
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: preclaimedDb(db) as never }), h.testLog, {
+      ...h.overrides,
+      checks: check.hooks,
+    });
+
+    await consumer(h.makeBatch(makePayload())); // unknown acks
+
+    expectUnknownOutcome(db, check.state.terminalized);
+    expect(h.sandbox.markedCalls).toHaveLength(2);
+    expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
   });
 
   test("a refused destroy proof after a matching collection keeps capacity and retries nothing", async () => {

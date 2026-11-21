@@ -187,6 +187,42 @@ export function failingDb(db: TestD1, fragment: string, message = "D1 write repl
 }
 
 /**
+ * A D1 double where an EARLIER entry already claimed this attempt: the
+ * provisioning INSERT lands a `pending` row for the attempt id it is given and
+ * answers zero changes, so the caller's prepare takes the replay path against a
+ * container it may not provision. Every other statement — the launch claim, the
+ * result write, the stores — delegates to the real double.
+ */
+export function preclaimedDb(db: TestD1): D1Like {
+  return {
+    prepare: (sql: string) => {
+      if (!sql.includes("INSERT INTO review_launches")) return db.prepare(sql);
+      let bound: unknown[] = [];
+      const claim: D1StatementLike = {
+        bind: (...values: unknown[]) => {
+          bound = values;
+          return claim;
+        },
+        first: async () => null,
+        all: async () => ({ results: [] }),
+        run: async () => {
+          // The row the earlier entry left behind: this caller's insert
+          // conflicts, exactly as a replayed prepare sees it.
+          db.raw
+            .prepare(
+              "INSERT OR IGNORE INTO review_launches (attempt_id, state, claimed_at_ms) VALUES (?, 'pending', ?)",
+            )
+            .run(String(bound[0]), Number(bound[1]));
+          return { results: [], meta: { changes: 0, last_row_id: 0 } };
+        },
+      };
+      return claim;
+    },
+    batch: (statements: D1StatementLike[]) => db.batch(statements),
+  };
+}
+
+/**
  * Seed one App's per-App AI config through the REAL store (composite-PK AAD
  * path): model chain + provider keys. Default = the ark base chain with
  * the `ark` BYOK key; `extraKeys` adds per-App keys for chains that need
@@ -481,6 +517,12 @@ export type FakeSandboxState = {
   markerClaim: "written" | "matched" | "unknown";
   /** A marked read refuses (`unknown`) instead of running its command. */
   markedUnknown: boolean;
+  /** Every guarded read's command, in order. */
+  markedCalls: string[];
+  /** Thrown by the guarded read itself (its reply was lost). */
+  markedError: Error | undefined;
+  /** 1-based guarded call the error starts at: `1` loses the proof, `2` the command after it. */
+  markedErrorFromCall: number;
   /** The guarded destroy refuses (`unknown`) instead of destroying. */
   destroyMarkedUnknown: boolean;
   /** Runs at the FIRST sandbox command of a test (ordering probes). */
@@ -549,6 +591,9 @@ export function initialFakeSandboxState(): FakeSandboxState {
     destroyError: undefined,
     markerClaim: "written",
     markedUnknown: false,
+    markedCalls: [],
+    markedError: undefined,
+    markedErrorFromCall: 1,
     destroyMarkedUnknown: false,
     probe: undefined,
     gate: undefined,
@@ -564,6 +609,9 @@ type ExecResult = { stdout: string; stderr: string; exitCode: number };
 
 /** The declared command set; an unlisted command is a test failure, not a pass. */
 function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): ExecResult {
+  // The attempt module's marker proof: a no-op that only has to succeed on the
+  // incarnation the guarded read proved, so it carries no declared gitops shape.
+  if (cmd === "true") return { stdout: "", stderr: "", exitCode: 0 };
   switch (state.gitOps.get(cmd)) {
     case "clone":
       return { stdout: "", stderr: "", exitCode: state.cloneExitCode };
@@ -757,11 +805,15 @@ export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxSt
       return answerCommand(cmd, opts, state);
     }),
     claimMarker: mock(async (_marker: string) => state.markerClaim),
-    runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) =>
-      state.markedUnknown
+    runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => {
+      state.markedCalls.push(cmd);
+      if (state.markedError !== undefined && state.markedCalls.length >= state.markedErrorFromCall) {
+        throw state.markedError;
+      }
+      return state.markedUnknown
         ? { kind: "unknown" as const }
-        : { kind: "ran" as const, ...(await sandbox.runCommand(cmd, opts)) },
-    ),
+        : { kind: "ran" as const, ...(await sandbox.runCommand(cmd, opts)) };
+    }),
     destroyMarked: mock(async (_marker: string) => {
       if (state.destroyMarkedUnknown) return "unknown" as const;
       await sandbox.destroy();

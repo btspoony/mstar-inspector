@@ -13,6 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { MarkedRun } from "../../src/pipeline/sandbox";
+import type { D1Like } from "../../src/store/types";
 import { failingDb } from "../helpers/consumer-fixtures";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
@@ -81,13 +82,19 @@ type SandboxDouble = {
 };
 
 function sandboxDouble(
-  decision: { lostReply?: boolean; marker?: "present" | "absent" | "foreign"; vanishAfterProof?: boolean } = {},
+  decision: {
+    lostReply?: boolean;
+    marker?: "present" | "absent" | "foreign";
+    vanishAfterProof?: boolean;
+    /** A guarded read's reply is lost: the proof (`proof`) or the command after it. */
+    guardedThrows?: "proof" | "command";
+  } = {},
 ): SandboxDouble {
   const events: string[] = [];
   const counts = { paidCalls: 0 };
   // The container's own filesystem: the claim writes these bytes, so a later
   // guarded read answers `ran` only on the incarnation the claim stamped.
-  const container = { marked: decision.marker === "present", proofServed: false };
+  const container = { marked: decision.marker === "present", proofServed: false, guardedCalls: 0 };
   return {
     events,
     counts,
@@ -99,6 +106,13 @@ function sandboxDouble(
     },
     async runMarked(_marker: string, command: string) {
       events.push(`marked:${command}`);
+      container.guardedCalls += 1;
+      if (
+        decision.guardedThrows === "proof" ||
+        (decision.guardedThrows === "command" && container.guardedCalls > 1)
+      ) {
+        throw new Error("guarded read reply lost");
+      }
       if (!container.marked) return { kind: "unknown" as const };
       // The proof lands on the incarnation that exists; a container replaced
       // immediately afterwards answers `unknown` to every later guarded
@@ -168,11 +182,11 @@ async function claimedAttempt(db: TestD1): Promise<void> {
   expect(await claimReviewAttempt(db, ATTEMPT, Date.now())).toBe("claimed");
 }
 
-function prepareInput(db: TestD1, sandbox: SandboxDouble | null) {
+function prepareInput(db: TestD1, sandbox: SandboxDouble | null, envDb: D1Like = db) {
   return {
     payload: PAYLOAD,
     deps: {
-      env: { SANDBOX: {}, DB: db },
+      env: { SANDBOX: {}, DB: envDb },
       getSandbox: async () => (sandbox ?? sandboxDouble()) as never,
     },
     commenter: { getInstallationToken: async () => GRANT as never },
@@ -376,5 +390,45 @@ describe("a replayed prepare never provisions a second container", () => {
     // would have started (and used) a replacement the proof never covered.
     expect(replaced.events.some((event) => event.startsWith("run:"))).toBe(false);
     expect(replaced.events.filter((event) => event.startsWith("marked:"))).toHaveLength(2);
+  });
+
+  test("a rejected replay proof is unknown and nothing runs", async () => {
+    const db = createMigratedTestD1();
+    await prepareReviewAttempt(prepareInput(db, sandboxDouble()));
+
+    // The proof's reply is lost. That is not an answer: no incarnation is
+    // proven, so no command may run on any of them.
+    const rejected = sandboxDouble({ marker: "present", guardedThrows: "proof" });
+    await expect(prepareReviewAttempt(prepareInput(db, rejected))).rejects.toBeInstanceOf(
+      AttemptUnknownError,
+    );
+    expect(rejected.events.some((event) => event.startsWith("run:"))).toBe(false);
+    expect(rejected.events.filter((event) => event.startsWith("marked:"))).toHaveLength(1);
+  });
+
+  test("a rejected guarded command after the proof is unknown and nothing runs", async () => {
+    const db = createMigratedTestD1();
+    await prepareReviewAttempt(prepareInput(db, sandboxDouble()));
+
+    const rejected = sandboxDouble({ marker: "present", guardedThrows: "command" });
+    await expect(prepareReviewAttempt(prepareInput(db, rejected))).rejects.toBeInstanceOf(
+      AttemptUnknownError,
+    );
+    expect(rejected.events.some((event) => event.startsWith("run:"))).toBe(false);
+    expect(rejected.events.filter((event) => event.startsWith("marked:"))).toHaveLength(2);
+  });
+
+  test("a rejected provisioning claim is unknown and provisions nothing", async () => {
+    const db = createMigratedTestD1();
+    const sandbox = sandboxDouble();
+
+    // A rejected claim does not establish that no earlier entry provisioned —
+    // so nothing is resolved, claimed or run on that evidence.
+    await expect(
+      prepareReviewAttempt(prepareInput(db, sandbox, failingDb(db, "INSERT INTO review_launches"))),
+    ).rejects.toBeInstanceOf(AttemptUnknownError);
+
+    expect(sandbox.events).toEqual([]);
+    expect(await readReviewLaunch(db, ATTEMPT)).toBeNull();
   });
 });
