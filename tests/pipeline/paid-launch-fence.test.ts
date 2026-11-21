@@ -33,6 +33,7 @@ const {
   runReviewAttempt,
 } = await import("../../src/pipeline/review-attempt");
 const { RUNNER_PATH } = await import("../../src/pipeline/gitops");
+const { REPORT_OUTPUT_PATH } = await import("../../packages/shared/src/report-wire");
 
 const ATTEMPT = "2b0c4f8e-7a11-4a4e-9b1f-2a5f4f2f1c01";
 const SHA = "a".repeat(40);
@@ -93,6 +94,8 @@ function sandboxDouble(
     /** The paid exec's own stdout and status (defaults: empty, 0). */
     paidStdout?: string;
     paidExitCode?: number;
+    /** The report document (`mstar.report/v1`) the post-runner read answers with. */
+    reportDoc?: string;
   } = {},
 ): SandboxDouble {
   const events: string[] = [];
@@ -139,7 +142,10 @@ function sandboxDouble(
           ? `${SHA}\n`
           : command.includes(RUNNER_PATH)
             ? (decision.paidStdout ?? "")
-            : "",
+            : // A bounded read answers "<content>\n<overflow flag>\n".
+              command.includes(REPORT_OUTPUT_PATH)
+              ? `${decision.reportDoc ?? ""}\n0\n`
+              : "",
         stderr: "",
         exitCode: command.includes(RUNNER_PATH) ? (decision.paidExitCode ?? 0) : 0,
       };
@@ -421,26 +427,48 @@ describe("a terminal row cannot authorise anything without its coupled outcome",
 });
 
 describe("no runner output reaches durable storage before redaction", () => {
-  test("stdout echoed by the paid exec is exact-redacted on the host that holds the key", async () => {
+  test("every string the paid run produced is exact-redacted on the host that holds the key", async () => {
     const db = createMigratedTestD1();
     await claimedAttempt(db);
     const secret = "sk-live-9f2a44c1d3";
-    const sandbox = sandboxDouble({ marker: "present", paidStdout: `{"note":"${secret}"}` });
+    const sandbox = sandboxDouble({
+      marker: "present",
+      paidStdout: `{"note":"${secret}"}`,
+      // The runner writes a SECOND document after the exec; its free text is
+      // model-authored too, and it lands on the same row.
+      reportDoc: JSON.stringify({
+        schema: "mstar.report/v1",
+        headSha: SHA,
+        overview: `overview mentioning ${secret}`,
+        linkedIssueAc: "none",
+        verified: "none",
+        rejected: "none",
+        planToFix: "none",
+      }),
+    });
 
     const execution = await runReviewAttempt({
       ...executionInput(sandbox, db),
       appCfg: { keys: { ark: [secret] }, modelChain: "ark/deepseek-v4-flash" },
+      prContext: { prBody: "", issues: [] },
     });
 
     expect(execution.run.stdout).not.toContain(secret);
     expect(execution.run.stdout).toContain("[REDACTED]");
+    expect(execution.report?.overview).not.toContain(secret);
+    expect(execution.report?.overview).toContain("[REDACTED]");
     // The durable copy — what a later collect and a later host can read — is
-    // the SAME sanitized stream; the raw one never crosses the boundary.
+    // the SAME sanitized value; the raw material never crosses the boundary.
     const stored = db.raw
       .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT) as { result_json: string };
     expect(stored.result_json).not.toContain(secret);
-    expect(JSON.parse(stored.result_json).run.stdout).toBe(execution.run.stdout);
+    const row = JSON.parse(stored.result_json) as {
+      run: { stdout: string };
+      report: { overview: string } | null;
+    };
+    expect(row.run.stdout).toBe(execution.run.stdout);
+    expect(row.report?.overview).toBe(execution.report?.overview);
   });
 });
 

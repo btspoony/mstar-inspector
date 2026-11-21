@@ -779,6 +779,32 @@ function encodeExecution(execution: ReviewAttemptExecution): string {
   });
 }
 
+/**
+ * The paid result with every string it carries made safe to store: the exact
+ * values this session's exec was given are removed from the stdout envelope,
+ * the recheck document and status, and the report. The walk is over the WHOLE
+ * value rather than a field list, so a field added later is covered without an
+ * edit here; it runs ONCE, before both the durable write and the return, so a
+ * caller cannot publish the raw stream either.
+ *
+ * Exact-only, deliberately: `redactSecrets` would also rewrite the envelope's
+ * long hex `head_sha` and turn valid output into a parse failure (R3-1 in the
+ * plan-QC fix report). `[REDACTED]` carries no quote, backslash or control
+ * character, so a replaced value can never invalidate the document.
+ */
+function redactExecution<T>(value: T, secrets: readonly string[]): T {
+  if (secrets.length === 0) return value;
+  if (typeof value === "string") return redactExactSecrets(value, secrets) as T;
+  if (value instanceof Set) return new Set([...value].map((item) => redactExecution(item, secrets))) as T;
+  if (Array.isArray(value)) return value.map((item) => redactExecution(item, secrets)) as T;
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactExecution(item, secrets)]),
+    ) as T;
+  }
+  return value;
+}
+
 function decodeExecution(attemptId: string, json: string): ReviewAttemptExecution {
   let parsed: unknown = null;
   try {
@@ -2312,22 +2338,17 @@ export async function runReviewAttempt(input: {
   //
   // NO runner output crosses the persistence boundary unredacted. The exact
   // values this session's own exec received are removed HERE, on the host that
-  // holds them (a resumed host can only redact by shape — the recorded R-1
-  // limit). The exact pass only: `redactSecrets` also rewrites long hex runs,
-  // and this stream is a JSON envelope whose `head_sha` is exactly that — a
-  // shape pass here would corrupt valid output into a parse failure. The stored
-  // and the returned copy are this one sanitized stream, so nothing downstream
-  // can publish the raw one.
-  const execution = {
-    run: {
-      stdout: redactExactSecrets(run.stdout, progress.secretValues),
-      stderr: "",
-      exitCode: run.exitCode,
+  // holds them; the stored and the returned value are this one sanitized
+  // object, so nothing downstream can publish the raw stream either.
+  const execution = redactExecution(
+    {
+      run: { stdout: run.stdout, stderr: "", exitCode: run.exitCode },
+      recheck,
+      report,
+      appliedProvider,
     },
-    recheck,
-    report,
-    appliedProvider,
-  };
+    progress.secretValues,
+  );
   let recorded = false;
   try {
     recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now());

@@ -365,19 +365,20 @@ function reset(): void {
 }
 
 /**
- * The runner input's declared instant is a RUN FACT, not configuration: the
- * instant the exec is killed at = its own start + the timeout it runs under.
- * The start is read off the SAME call record, never a last-written scalar, so
- * round N's input can never borrow another round's start.
+ * The runner input's declared instant is a RUN FACT, not configuration, and it
+ * is the exec's OWN bound: the paid request carries that absolute instant (the
+ * container reads it and reserves its kill grace out of it), so the input and
+ * the request cannot disagree. The instant is read off the SAME call record,
+ * never a last-written scalar, so round N's input can never borrow round N-1's.
  */
 function expectOuterDeadline(input: Record<string, unknown>): void {
   const runner = sandboxCalls.find((c) => c.cmd.includes("--input"));
   if (runner === undefined) throw new Error("no runner exec was issued");
   const opts = runner.opts;
-  const execTimeout =
-    opts !== null && typeof opts === "object" && "timeout" in opts ? opts.timeout : undefined;
-  if (typeof execTimeout !== "number") throw new Error("runner exec carried no numeric timeout");
-  expect(input.outerDeadlineEpochMs).toBe(runner.startedAt + execTimeout);
+  const execDeadline =
+    opts !== null && typeof opts === "object" && "deadlineEpochMs" in opts ? opts.deadlineEpochMs : undefined;
+  if (typeof execDeadline !== "number") throw new Error("runner exec carried no numeric deadlineEpochMs");
+  expect(input.outerDeadlineEpochMs).toBe(execDeadline);
 }
 
 /** The fields every runner input declares, whatever the run adds. */
