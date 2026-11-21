@@ -41,7 +41,9 @@ import type { WorkflowStepConfig } from "cloudflare:workers";
 const routeKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
 // Dynamic: the module graph under test must load after the workerd shim.
-const { createReviewConsumer, createWorkflowInstance } = await import("../../src/pipeline/consumer");
+const { WorkflowCreateAmbiguousError, createReviewConsumer, createWorkflowInstance } = await import(
+  "../../src/pipeline/consumer"
+);
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 
 let h = createConsumerHarness();
@@ -392,3 +394,83 @@ function recordingStep(steps: Array<{ name: string; config: WorkflowStepConfig |
     },
   } as unknown as WorkflowStep;
 }
+
+describe("review route — a confirmed stop releases what it held", () => {
+  test("the runner's exhaustion signal is recorded on the launch row, and cleanup frees the container and capacity", async () => {
+    // A supported terminal response: the runner returned exit 0 with the typed
+    // signal. The paid phase OBSERVED the return, so the attempt owes both
+    // terminal facts — a durable failure row and the row's own outcome.
+    h.sandbox.runnerStdout = JSON.stringify({
+      schema: "mstar.review-budget-exhausted/v1",
+      seatsDispatched: 1,
+      seatsStopped: 1,
+    });
+    const db = await createSeededTestD1();
+    const started: AttemptRef[] = [];
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: db as never }),
+      h.testLog,
+      {
+        ...h.overrides,
+        startAttempt: async (deps, ref) => {
+          started.push(ref);
+          await runReviewAttemptWorkflow(deps, ref, recordingStep([]), async () => {});
+        },
+      },
+    );
+
+    await consumer(h.makeBatch(makePayload()));
+
+    const attemptId = started[0]!.attemptId;
+    const launch = db.raw
+      .prepare("SELECT state, result_outcome FROM review_launches WHERE attempt_id = ?")
+      .get(attemptId) as { state: string; result_outcome: string | null };
+    expect(launch).toEqual({ state: "failed", result_outcome: "failed" });
+    // A confirmed stop is releasable: the container is destroyed and the
+    // admission row is not held to TTL (which would block later reviews).
+    expect(h.sandbox.destroyCalls).toBe(1);
+    const held = db.raw.prepare("SELECT COUNT(*) AS n FROM review_inflight").get() as { n: number };
+    expect(held.n).toBe(0);
+  });
+});
+
+describe("review route — a conflict is resolved by the exact instance", () => {
+  function ref(): AttemptRef {
+    return { attemptId: "attempt-create-fence", payload: makePayload() } as unknown as AttemptRef;
+  }
+
+  test("a definite 4xx whose instance exists is a confirmation, not a failure", async () => {
+    // The status alone is not proof the create did not land: the readback of
+    // THIS attempt's instance decides, for every rejection class.
+    const verdict = await createWorkflowInstance(
+      {
+        create: async () => {
+          throw Object.assign(new Error("invalid params"), { status: 422 });
+        },
+        get: async () => ({ status: async () => ({ status: "running" }) }),
+      } as never,
+      ref(),
+    );
+
+    expect(verdict).toBe("exists");
+  });
+
+  test("a 409 with no instance for this id stays unknown — acked, never settled as failed", async () => {
+    // No 4xx status may skip the exact-instance readback: a conflict is a
+    // statement about existence, and the attempt id is the only fact that
+    // answers it.
+    await expect(
+      createWorkflowInstance(
+        {
+          create: async () => {
+            throw Object.assign(new Error("instance already exists"), { status: 409 });
+          },
+          get: async () => {
+            throw new Error("no such instance");
+          },
+        } as never,
+        ref(),
+      ),
+    ).rejects.toBeInstanceOf(WorkflowCreateAmbiguousError);
+  });
+});

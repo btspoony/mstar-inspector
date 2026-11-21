@@ -28,6 +28,7 @@ const {
   claimReviewLaunch,
   completeReviewLaunch,
   prepareReviewAttempt,
+  launchVerdict,
   readReviewLaunch,
   runReviewAttempt,
 } = await import("../../src/pipeline/review-attempt");
@@ -89,6 +90,9 @@ function sandboxDouble(
     markerClaimThrows?: boolean;
     /** A guarded read's reply is lost: the proof (`proof`) or the command after it. */
     guardedThrows?: "proof" | "command";
+    /** The paid exec's own stdout and status (defaults: empty, 0). */
+    paidStdout?: string;
+    paidExitCode?: number;
   } = {},
 ): SandboxDouble {
   const events: string[] = [];
@@ -131,9 +135,13 @@ function sandboxDouble(
       }
       return {
         kind: "ran" as const,
-        stdout: command.includes("rev-parse") ? `${SHA}\n` : "",
+        stdout: command.includes("rev-parse")
+          ? `${SHA}\n`
+          : command.includes(RUNNER_PATH)
+            ? (decision.paidStdout ?? "")
+            : "",
         stderr: "",
-        exitCode: 0,
+        exitCode: command.includes(RUNNER_PATH) ? (decision.paidExitCode ?? 0) : 0,
       };
     },
     async runCommand(command: string) {
@@ -351,6 +359,88 @@ describe("the state machine cannot be walked twice", () => {
         .run(),
     ).toThrow();
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
+  });
+});
+
+describe("a terminal row cannot authorise anything without its coupled outcome", () => {
+  test("the schema refuses a failed row with no result_outcome", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({ ok: true });
+
+    // Bypassing the module: SQLite's three-valued CHECK used to accept this
+    // (`(NULL = 'failed') = (state = 'failed')` is NULL, which a CHECK allows),
+    // so a terminal row could exist with nothing saying which outcome it
+    // records — and cleanup treats "terminal" as authorisation.
+    expect(() =>
+      db
+        .prepare("UPDATE review_launches SET state = 'failed', failed_at_ms = ? WHERE attempt_id = ?")
+        .bind(Date.now(), ATTEMPT)
+        .run(),
+    ).toThrow();
+    expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
+  });
+
+  test("a stored terminal row whose outcome cannot be read decodes as unreadable, not as permission", async () => {
+    // A row written by another build: timestamps present, outcome missing.
+    const row = {
+      state: "failed",
+      claimed_at_ms: 1,
+      launched_at_ms: 2,
+      persisted_at_ms: null,
+      failed_at_ms: 3,
+      abandoned_at_ms: null,
+      result_json: null,
+      result_outcome: null,
+      check_owed_ms: null,
+    };
+    const stub = {
+      prepare: () => ({ bind: () => ({ first: async () => row }) }),
+    } as unknown as D1Like;
+
+    const decoded = await readReviewLaunch(stub, ATTEMPT);
+    expect(decoded?.state).toBe("unknown");
+    // `unknown` is never `null`: it means a row exists that nothing may reason
+    // about, and cleanup holds the container on it.
+    expect(launchVerdict(decoded)).toEqual({ kind: "unrecognised" });
+  });
+
+  test("a returned status leaves the row launched: the transition waits for the durable failure row", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+
+    await expect(
+      runReviewAttempt(executionInput(sandboxDouble({ marker: "present", paidExitCode: 1 }), db)),
+    ).rejects.toThrow();
+
+    // Destruction permission is NOT recorded before the failure row exists, so
+    // a lost settlement or a racing cleanup cannot destroy a paid container on
+    // a state whose other half never landed.
+    expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
+  });
+});
+
+describe("no runner output reaches durable storage before redaction", () => {
+  test("stdout echoed by the paid exec is exact-redacted on the host that holds the key", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    const secret = "sk-live-9f2a44c1d3";
+    const sandbox = sandboxDouble({ marker: "present", paidStdout: `{"note":"${secret}"}` });
+
+    const execution = await runReviewAttempt({
+      ...executionInput(sandbox, db),
+      appCfg: { keys: { ark: [secret] }, modelChain: "ark/deepseek-v4-flash" },
+    });
+
+    expect(execution.run.stdout).not.toContain(secret);
+    expect(execution.run.stdout).toContain("[REDACTED]");
+    // The durable copy — what a later collect and a later host can read — is
+    // the SAME sanitized stream; the raw one never crosses the boundary.
+    const stored = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT) as { result_json: string };
+    expect(stored.result_json).not.toContain(secret);
+    expect(JSON.parse(stored.result_json).run.stdout).toBe(execution.run.stdout);
   });
 });
 

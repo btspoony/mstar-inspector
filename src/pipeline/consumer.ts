@@ -208,6 +208,7 @@ import {
   type PipelineEnv,
   type ProcessDeps,
   type ProcessOutcome,
+  type RunnerConfig,
 } from "./review-attempt-execution";
 
 export {
@@ -1198,19 +1199,23 @@ export class WorkflowCreateAmbiguousError extends Error {
 }
 
 /**
- * Read a create rejection's class. Only a genuinely unknown outcome may be
- * acked as ambiguous:
- * - an RPC status in the 4xx range (except the retryable 408/425/429) is the
- *   binding answering for THIS request → DEFINITE;
+ * Read a create rejection's class, consulted ONLY after this attempt's own
+ * instance has been read back and found absent (see `createWorkflowInstance`).
+ * That readback is the exact-instance proof, so absence is what lets a status
+ * speak at all:
+ * - a 4xx the binding issued for THIS request (except the retryable 408/425/429
+ *   and except 409) → DEFINITE: the request was refused with no instance
+ *   recorded for this attempt id;
+ * - 409 is NEVER definite even with no instance yet: a conflict is a statement
+ *   about existence, so it is resolved by the instance read as well, and its
+ *   absence only says the readback has not caught up. Treating it as a
+ *   pre-dispatch refusal is how a landed create gets settled as failed and its
+ *   capacity handed to a second attempt.
  * - anything else — no status, a transport error, a 5xx, a `TypeError` — is
  *   UNKNOWN: the catch surrounds an async call, so a TypeError can be raised
- *   while processing a reply the platform already accepted, and the error type
- *   carries no acceptance boundary.
+ *   while processing a reply the platform already accepted.
  *
- * "already exists" is NOT a class here: the message names no instance, so it
- * proves nothing about THIS attempt's id. Both the unknown class and that
- * message are resolved by one fact only — reading this attempt's own instance
- * back from the platform (see `attemptInstanceExists`).
+ * An "already exists" MESSAGE is never a class: it names no instance.
  */
 function classifyWorkflowCreateFailure(err: unknown): "definite" | "unknown" {
   const status = (err as { status?: unknown } | null)?.status;
@@ -1220,7 +1225,8 @@ function classifyWorkflowCreateFailure(err: unknown): "definite" | "unknown" {
     status < 500 &&
     status !== 408 &&
     status !== 425 &&
-    status !== 429
+    status !== 429 &&
+    status !== 409
   ) {
     return "definite";
   }
@@ -1254,14 +1260,18 @@ export async function createWorkflowInstance(
     await workflow.create({ id: ref.attemptId, params: ref });
     return "created";
   } catch (err) {
+    // THE READBACK COMES FIRST, for every rejection class alike: this
+    // attempt's own instance is the only fact that says the create landed.
+    // A structured conflict or validation status must not skip it — a replay
+    // that receives one while its same-id instance exists was never a
+    // definite failure.
+    if (await attemptInstanceExists(workflow, ref.attemptId)) return "exists";
     if (classifyWorkflowCreateFailure(err) === "definite") {
       throw new WorkflowCreateFailedError(ref.attemptId, err);
     }
-    // An unclassified rejection (a lost reply, a transport fault, "already
-    // exists", a TypeError) is resolved by finding the instance itself: if this
-    // attempt's id is already there, the create landed; otherwise the outcome
+    // No instance for this id and no definite status (a lost reply, a
+    // transport fault, "already exists", a TypeError, a conflict): the outcome
     // stays unknown and is acked without a retry.
-    if (await attemptInstanceExists(workflow, ref.attemptId)) return "exists";
     throw new WorkflowCreateAmbiguousError(ref.attemptId, err);
   }
 }
@@ -1494,12 +1504,17 @@ export function createReviewConsumer(
 
 
 /**
- * Rebuild the per-App host channel for a Workflow step host. A separate
- * invocation has none of the admission invocation's resolved state, so the
- * phases' live objects (the App adapter and the keys-bearing runner config)
- * are resolved again from `payload` + `deps`; nothing secret crosses the
+ * Rebuild the per-App GITHUB channel for a Workflow step host. A separate
+ * invocation has none of the admission invocation's resolved state, so the App
+ * adapter is resolved again from `payload` + `deps`; nothing secret crosses the
  * boundary. The paused gate and the sandbox-image gate already ran before the
- * instance was created — this only supplies what execution needs.
+ * instance was created.
+ *
+ * The paid-provider configuration is deliberately NOT resolved here. A resumed
+ * host may have to finish `collect`/`publish` for work that is already paid
+ * for, and those phases need no model chain or provider key: hydrating it here
+ * would turn a rotated provider key into a failure settlement over a durable
+ * result. `ensureRunnerConfig` resolves it at the steps that actually spend it.
  *
  * Returns `"paused"` when the App was paused after admission: the attempt owes
  * no review, and the caller settles its attached run as skipped.
@@ -1510,12 +1525,29 @@ export async function hydrateAttemptHost(
 ): Promise<"ready" | "paused"> {
   const resolution = await resolveCommenter(payload, deps);
   if (resolution.kind === "paused") return "paused";
+  return "ready";
+}
+
+/**
+ * The App's paid-runner configuration, resolved by the STEP that spends it and
+ * cached on the host channel so one host resolves it once. Fail-closed exactly
+ * as admission is (`assertAppConfigComplete`): a chain-less App cannot start a
+ * paid run, so the step that would start one fails there, with the attempt's
+ * own records intact.
+ */
+export async function ensureRunnerConfig(
+  payload: ReviewJobPayload,
+  deps: ProcessDeps,
+): Promise<RunnerConfig> {
+  const cached = deps.runnerConfigs.get(payload.botRef.appId);
+  if (cached !== undefined) return cached;
   const appCfg = await resolveAppConfig(payload, deps);
   const modelOverrides = await resolveModelOverrides(payload, deps);
   const customProviders = await resolveCustomProviders(payload, deps);
   assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.botRef.appId);
-  deps.runnerConfigs.set(payload.botRef.appId, { appCfg, modelOverrides, customProviders });
-  return "ready";
+  const config: RunnerConfig = { appCfg, modelOverrides, customProviders };
+  deps.runnerConfigs.set(payload.botRef.appId, config);
+  return config;
 }
 
 /**

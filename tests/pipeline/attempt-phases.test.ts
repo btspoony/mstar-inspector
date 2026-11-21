@@ -60,6 +60,7 @@ const {
   reviewAttempt,
 } = await import("../../src/pipeline/review-attempt-execution");
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
+const { hydrateAttemptHost, ensureRunnerConfig } = await import("../../src/pipeline/consumer");
 
 const ATTEMPT_ID = "attempt-4b-0001";
 const SCOPE: Scope = {
@@ -687,5 +688,79 @@ describe("the owed Check mark", () => {
     expect(launch.check_generation).toBe(row.generation);
     expect(launch.check_owed_ms).toBeGreaterThan(Date.now());
     expect(h.logLines.some((line) => line.fields.event === "check_settlement_owed")).toBe(true);
+  });
+});
+
+describe("a first publication past the frozen instant", () => {
+  test("publish refuses at/after the deadline, before the journal is claimed or anything is sent", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+
+    // The paid result is durable, but the attempt's instant has passed: the
+    // plan's cap "prevents starting ... a first result publication at or after
+    // expiry", and a delayed or resumed host must honour it.
+    const { deps: publishing } = await makeDeps({ db });
+    const late = { ...ref, deadlineMs: Date.now() - 1 };
+    await expect(publishAttempt(publishing, late, collected.collected.publicationId)).rejects.toThrow(
+      /no first publication/,
+    );
+
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+    // Nothing was claimed, so no `sending` row pretends a send was attempted.
+    expect((await readPublication(db as never, collected.collected.publicationId))?.phase).toBe("prepared");
+  });
+
+  test("the degraded notice takes the same refusal", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    // Invalid output: this collect would stage and send a DEGRADED notice.
+    h.sandbox.runnerStdout = "not a verdict";
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+
+    const { deps: collecting } = await makeDeps({ db });
+    await expect(collectAttempt(collecting, { ...ref, deadlineMs: Date.now() - 1 }, prepared)).rejects.toThrow(
+      /no first publication/,
+    );
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
+  });
+});
+
+describe("the workflow host entry", () => {
+  test("resolves the GitHub adapter without resolving the App's paid configuration", async () => {
+    const { deps } = await makeDeps();
+    deps.appCommenters.clear();
+    deps.runnerConfigs.clear();
+    const payload = makePayload();
+
+    // A restart that only has `collect`/`publish` left must not need the paid
+    // provider: a removed or rotated key would otherwise settle a durable,
+    // already-paid result as a failure.
+    expect(await hydrateAttemptHost(payload, deps)).toBe("ready");
+    expect(deps.appCommenters.has(TEST_APP_ID)).toBe(true);
+    expect(deps.runnerConfigs.size).toBe(0);
+
+    // The step that SPENDS the key resolves it, once, and caches it.
+    const config = await ensureRunnerConfig(payload, deps);
+    expect(config.appCfg.modelChain).toBe("ark/deepseek-v4-flash");
+    expect(deps.runnerConfigs.get(TEST_APP_ID)).toBe(config);
   });
 });

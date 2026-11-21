@@ -59,6 +59,7 @@ import {
   claimAttachedCheckForSettlement,
   claimAttempt,
   deferCheckRecovery,
+  readCheckIdentity,
   readInheritedReview,
   readPublicationProof,
   readPublishedReview,
@@ -1541,6 +1542,16 @@ export type CheckLifecycle = {
     action: string;
     executionDeadlineMs: number;
     /**
+     * The Check identity a RESUMED phase must act on, frozen on the attempt's
+     * own row: `attempt_key` + `generation`. Supplied by adoption/settlement
+     * callers only. A claim that lands on any other generation of the key is
+     * refused (see `begin`) — an older attempt must never promote, conclude or
+     * drive a newer attempt's run, and the latest open generation is not a
+     * substitute for the frozen pair. Omitted → the caller IS the claim (a
+     * fresh review).
+     */
+    expect?: { key: string; generation: number };
+    /**
      * OPTIONAL per-invocation abandonment latch owned by the caller. When the
      * caller's §7.10 budget elapses it trips `abandon()`, and this `begin` then
      * stops attaching a created run on behalf of a caller that is gone —
@@ -2039,6 +2050,28 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         nowMs: deps.nowMs(),
         executionDeadlineMs: input.executionDeadlineMs,
       });
+      // A RESUMED phase acts only on the generation ITS ROW froze. This must
+      // be decided after the claim (that is where the generation becomes
+      // known) and before anything is adopted, attached, promoted or
+      // terminalized: a mismatch is not this attempt's Check at all.
+      if (input.expect !== undefined) {
+        const ownsFrozenPair =
+          claim.attempt.identity.generation === input.expect.generation &&
+          (await readCheckIdentity(deps.db, claim.attempt.identity.attemptId))?.key === input.expect.key;
+        if (!ownsFrozenPair) {
+          if (claim.kind === "claimed") {
+            // This call minted the row it may not use: hand it back instead of
+            // holding a lease on another generation's attempt.
+            await releaseForRecovery(
+              claim.attempt.identity.attemptId,
+              claim.lease,
+              "the claim landed on a generation the attempt's frozen identity does not own",
+              false,
+            );
+          }
+          return null;
+        }
+      }
       // busy = a nonterminal attempt already owns this key: either the
       // delivery path already attached this head's run (spec §7.7 step 4) or a
       // duplicate delivery's second pass is looking at the first one's row. A

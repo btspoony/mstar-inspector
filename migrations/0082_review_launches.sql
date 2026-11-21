@@ -22,9 +22,12 @@
 -- `failed` carries its instant and the failed outcome.
 --
 -- `result_outcome` records the terminal outcome where the state machine permits
--- it: `persisted` on a persisted row, `failed` on a failed row. A `launched`
--- row with an outcome is the plan's "may destroy" case; a `launched` row
--- WITHOUT one is the only `unknown`, and only it holds container and capacity.
+-- it: `persisted` on a persisted row, `failed` on a failed row, and NULL on
+-- every other state. A `launched` row therefore never carries an outcome by
+-- construction, which is why it is the only `unknown` and the only state that
+-- holds container and capacity. The CHECK below is written with `IS` and a
+-- CASE, never with `(result_outcome = 'failed') = (state = 'failed')`: the
+-- latter is three-valued and SQLite ACCEPTS a NULL outcome on a terminal row.
 --
 -- `abandoned` is a CLAIM, not an observation: cleanup CASes
 -- `provisioned → abandoned` and destroys only when the CAS won. A losing CAS
@@ -65,8 +68,14 @@ CREATE TABLE review_launches (
   CHECK ((persisted_at_ms IS NOT NULL) = (state = 'persisted')),
   CHECK ((failed_at_ms IS NOT NULL) = (state = 'failed')),
   CHECK ((result_json IS NOT NULL) = (state = 'persisted')),
-  CHECK ((result_outcome = 'persisted') = (state = 'persisted')),
-  CHECK ((result_outcome = 'failed') = (state = 'failed')),
+  -- TOTAL: every state names the exact outcome it carries. `IS` is null-safe,
+  -- so a terminal row without its outcome (or a non-terminal row WITH one)
+  -- fails the insert instead of passing as NULL.
+  CHECK (result_outcome IS (CASE state
+    WHEN 'persisted' THEN 'persisted'
+    WHEN 'failed' THEN 'failed'
+    ELSE NULL
+  END)),
   CHECK ((attempt_generation IS NOT NULL) = (attempt_key IS NOT NULL)),
   CHECK ((check_key IS NOT NULL) = (check_owed_ms IS NOT NULL)),
   CHECK ((check_generation IS NOT NULL) = (check_owed_ms IS NOT NULL))

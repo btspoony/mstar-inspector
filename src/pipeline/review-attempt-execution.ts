@@ -119,6 +119,7 @@ import {
   parseBoundedRead,
   prepareReviewAttempt,
   readReviewLaunch,
+  recordReviewFailure,
   abandonReviewLaunch,
   launchVerdict,
   readAttemptIdentity,
@@ -1950,13 +1951,36 @@ type DegradedPublicationOutcome =
   | { phase: "failed"; reason: string };
 
 /**
+ * The frozen instant fences a FIRST publication: at or past the attempt's
+ * deadline no first result may be sent (plan: the cap "prevents starting new
+ * review work or a first result publication at or after expiry"). Both
+ * first-send call sites use it — the normal `publish` phase and the degraded
+ * notice `collect` stages — because a delayed or resumed host must not publish
+ * what the instant already refused. It fences nothing else: reconciliation of
+ * an earlier send, the Check settlement and cleanup each have their own rule.
+ *
+ * A refusal is a typed wall-clock stop, so it settles exactly like every other
+ * confirmed stop (failure row, Check conclusion, safe cleanup) instead of
+ * becoming a generic pre-publication failure.
+ */
+function refusePublicationPastDeadline(deadlineMs: number): void {
+  const lateMs = Date.now() - deadlineMs;
+  if (lateMs < 0) return;
+  throw new RoundBudgetSpent(
+    `round budget spent: no first publication ${lateMs}ms past the attempt's frozen deadline`,
+    "runner",
+  );
+}
+
+/**
  * Publish the parse-degrade notice through the §7.7 journal (plan: stage →
  * claim → send the EXACT prepared body → proof → applied mark). The
  * degraded payload has `artifact: null`, `lifecycle: null`, empty line
  * intents and the bounded final degraded body — no normal review or
- * lifecycle rows are ever created from it. NEVER throws: every failure is a
- * typed outcome (the caller acks regardless — a parse fail is a
- * deterministic model-output failure where retry is waste).
+ * lifecycle rows are ever created from it. Every failure is a typed outcome
+ * (the caller acks regardless — a parse fail is a deterministic model-output
+ * failure where retry is waste); the only throw is the deadline refusal above,
+ * taken before anything is staged.
  */
 async function publishDegradedPublication(input: {
   db: PipelineEnv["DB"];
@@ -2553,7 +2577,17 @@ export type CheckSettlement = {
    */
   promotionAbandoned: string | null;
   terminalized: boolean;
-  begin(scope: Scope, githubAppId: number, headSha: string): Promise<CheckHandle | null>;
+  /**
+   * `expect` is the frozen Check identity (key + generation) a RESUMED phase
+   * must act on; the claim refuses any other generation. A fresh review omits
+   * it — its own claim IS the identity.
+   */
+  begin(
+    scope: Scope,
+    githubAppId: number,
+    headSha: string,
+    expect?: AttemptIdentity,
+  ): Promise<CheckHandle | null>;
   abandon(
     handle: CheckHandle,
     reason: string,
@@ -2950,7 +2984,12 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
    * latch (never shared or reset), the 2 s consumer bound, and a throw that
    * only warns — a Check never prevents the review.
    */
-  const beginCheck = async (scope: Scope, githubAppId: number, headSha: string): Promise<CheckHandle | null> => {
+  const beginCheck = async (
+    scope: Scope,
+    githubAppId: number,
+    headSha: string,
+    expect?: AttemptIdentity,
+  ): Promise<CheckHandle | null> => {
     if (deps.checks === undefined) return null;
     // Every begin owns the flag: it must always describe the handle we return.
     settlement.promotionAbandoned = null;
@@ -2973,6 +3012,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
           // the reconciler and the execution fence agree without a re-read.
           executionDeadlineMs: deadlineMs,
           latch: beginLatch,
+          ...(expect === undefined ? {} : { expect }),
         }),
         null,
         // The begin hook keeps §7.10's 2 s: it runs before model work.
@@ -3081,7 +3121,16 @@ async function settlementFor(
   settlement.fields = attemptFields(ref.payload, ref.level, ref.attemptId, headSha);
   // Adoption IS a claim attempt: the fallback path must not claim twice.
   settlement.claimAttempted = true;
-  const handle = await settlement.begin(scope, ref.githubAppId, headSha);
+  // ADOPTION USES THE FROZEN PAIR, never "the latest open generation of this
+  // key": the launch row recorded which generation this attempt owns when it
+  // was created, and a newer one belongs to another attempt. Without the frozen
+  // pair an older attempt could promote or conclude somebody else's run.
+  const handle = await settlement.begin(
+    scope,
+    ref.githubAppId,
+    headSha,
+    (await readAttemptIdentity(deps.env.DB, ref.attemptId)) ?? undefined,
+  );
   if (handle === null) {
     // No adoption: a live holder owns the row (the real lifecycle refuses to
     // take it) or nothing was adoptable. Cache NOTHING — a settlement without
@@ -4662,6 +4711,9 @@ async function collectPhase(
     // outcomes — the message acks regardless (deterministic model-output
     // failure; retry is waste), and the Check hook terminalizes with the
     // publication identity so the lifecycle reads the persisted proof.
+    // The cap fences the FIRST degraded send exactly as it fences the normal
+    // one: a resumed collect whose instant already passed stages nothing.
+    refusePublicationPastDeadline(ref.deadlineMs);
     const degradedOutcome = await publishDegradedPublication({
       db: deps.env.DB,
       commenter,
@@ -5099,6 +5151,10 @@ async function publishPhase(
   // settlement is adopted from the D1 attempt row when this host has none.
   const check = await settlementFor(deps, ref, headSha);
   const stagedId = publicationId;
+  // The frozen instant fences the FIRST send BEFORE the journal is claimed, so
+  // a refused publication leaves no `sending` row behind for a reconciler to
+  // read as an attempted send.
+  refusePublicationPastDeadline(ref.deadlineMs);
   // 13. §7.7 step 8 — epoch-fenced claim, phase sending, publish the EXACT
   // prepared upsert, validate the response id, persist proof BEFORE KV
   // done. A response/proof loss retains the staged payload for read-only
@@ -5457,6 +5513,7 @@ export async function settleAttemptFailure(
   const failure = thrown instanceof AttemptPhaseError ? thrown : undefined;
   const facts = failure?.facts;
   const err = failure?.cause ?? thrown;
+  const detail = err instanceof Error ? err.message : String(err);
   /**
    * The settle-once mark is written HERE, at the settlement's own completion,
    * never at its entry: a host interrupted mid-settlement leaves the mark
@@ -5533,6 +5590,25 @@ export async function settleAttemptFailure(
   // row is the durable fact the "nothing to reclaim" decision reads.
   const launch = await readReviewLaunch(deps.env.DB, attemptId);
   const sandboxMayExist = launch !== null;
+  // THE DURABLE ROW OUTRANKS THIS HOST'S BELIEF (plan Task 4b): `launched` with
+  // no stored outcome means the paid call's fate is unknown, whatever the
+  // failing phase seems to have seen. A step-level rejection — a Workflow
+  // timeout waiting for the paid reply or for a post-run read — carries no
+  // `runnerReturned` fact at all, so it may not conclude the Check, stamp the
+  // commit or release capacity. Only a settlement whose phase facts OBSERVED
+  // the return continues to the terminal path below.
+  const paidStateObserved = progress.runnerReturned;
+  if (launchVerdict(launch).kind === "paid-unknown" && !paidStateObserved) {
+    deps.log.warn(
+      {
+        ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+        event: "review_unresolved",
+      },
+      `review unresolved: ${detail} — the launch row records no paid outcome, so nothing was concluded, destroyed or reclaimed`,
+    );
+    cleanup.unproven = true;
+    return { kind: "unknown" };
+  }
   let durableOutcome = false;
   // § Exhaustion (the ONE typed terminal outcome outside the verdict
   // envelope): every wall-clock stop funnels here — the runner's own
@@ -5652,6 +5728,13 @@ export async function settleAttemptFailure(
         cleanup.unproven = true;
         return { kind: "unknown" };
       }
+      // The row is durable — and it was durable BEFORE this transition, which
+      // is the whole point: a phase that observed the paid call return (a
+      // nonzero status, the exec killed at the deadline, the runner's own
+      // exhaustion signal) makes the attempt's OTHER terminal fact durable
+      // here, after the failure row, never before it. A stop whose exec never
+      // started already moved the row itself (it alone could prove that).
+      if (paidStateObserved) await recordReviewFailure(deps.env.DB, attemptId, Date.now());
       // The row is durable: now the Check may carry the stop's conclusion.
     await check?.terminalize(null, "budget-exhausted", undefined, budgetOutcome);
     // The row is durable here (the !durableOutcome case returned `unknown`
@@ -5692,7 +5775,6 @@ export async function settleAttemptFailure(
     // Structured failure log carrying the idempotency key + sandbox id
   // (the failure log must carry the idempotency key: 失败路径错误日志含幂等键), then
   // rethrow so the worker retries and eventually DLQs.
-  const detail = err instanceof Error ? err.message : String(err);
   deps.log.error(
     {
       ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
@@ -5775,7 +5857,13 @@ export async function settleAttemptFailure(
       cleanup.unproven = true;
       return { kind: "unknown" };
     }
-    // §7.7 step 12 on the failure path: a Check begun at step 4 must
+    // A returned status is a terminal fact only together with the failure row
+    // written above: the row moves to `failed` AFTER that write, so cleanup
+    // can never read "terminal" without something durable to read it against.
+    if (paidStateObserved && durableOutcome) {
+      await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+    }
+  // §7.7 step 12 on the failure path: a Check begun at step 4 must
   // terminalize even when the pipeline throws. After a send ATTEMPT the
   // publication status is unknown (the request may have landed); before
   // any send the honest outcome is pre-publication-failure. Isolated —
@@ -5870,9 +5958,10 @@ export async function cleanupAttempt(
   //   absent                    → no-paid-work (never claimed)
   //   provisioned               → no-paid-work (container may exist, the paid
   //                               exec was never sent, nothing was charged)
-  //   launched + no outcome     → unknown: hold container and capacity
-  //   launched + an outcome     → retained (the terminal fact is on the row)
-  //   persisted | failed        → retained
+  //   launched                  → unknown: hold container and capacity. The
+  //                               schema couples `launched` to NULL outcome, so
+  //                               there is no "launched with an outcome" row.
+  //   persisted | failed        → retained (each carries its own outcome)
   // No phase-local value participates: the row's state was written by whatever
   // observed the fact, and cleanup only reads it.
   // DESTRUCTION CLAIMS THE ROW FIRST: reading `provisioned` is not permission,

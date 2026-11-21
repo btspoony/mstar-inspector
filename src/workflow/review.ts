@@ -16,6 +16,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   createProcessDeps,
+  ensureRunnerConfig,
   hydrateAttemptHost,
 } from "../pipeline/consumer";
 import {
@@ -75,7 +76,14 @@ export async function runReviewAttemptWorkflow(
       await settleSkippedRow(deps, ref.payload, ref.payload.head_sha, "review paused");
       return;
     }
-    const prepared = await step.do("prepare", () => prepareAttempt(deps, ref));
+    // The App's paid-provider configuration is resolved by the steps that
+    // SPEND it, never by the host entry: a restart that only has to finish
+    // `collect`/`publish` for already-paid work must not fail because a
+    // provider key rotated after the paid call.
+    const prepared = await step.do("prepare", async () => {
+      await ensureRunnerConfig(ref.payload, deps);
+      return prepareAttempt(deps, ref);
+    });
     if (prepared.kind === "settled") return;
     cleanup.headSha = prepared.prepared.headSha;
     // The step must outlive the container's own deadline — the container
@@ -88,7 +96,12 @@ export async function runReviewAttemptWorkflow(
         retries: { limit: 0, delay: 0 },
         timeout: remainingMs + POST_RUNNER_READ_BUDGET_MS,
       },
-      () => reviewAttempt(deps, ref, prepared.prepared),
+      // The prepare step may be checkpointed on a host that never ran it, so
+      // the step that pays resolves (or reuses) the config itself.
+      async () => {
+        await ensureRunnerConfig(ref.payload, deps);
+        return reviewAttempt(deps, ref, prepared.prepared);
+      },
     );
     const collected = await step.do("collect", () => collectAttempt(deps, ref, prepared.prepared));
     if (collected.kind === "settled") return;
@@ -161,8 +174,7 @@ export class ReviewWorkflow extends WorkflowEntrypoint<ReviewWorkflowEnv, Attemp
  * starts empty and re-resolves.
  */
 async function ensureHostChannel(deps: ProcessDeps, ref: AttemptRef): Promise<"ready" | "paused"> {
-  const appId = ref.payload.botRef.appId;
-  if (deps.appCommenters.has(appId) && deps.runnerConfigs.has(appId)) return "ready";
+  if (deps.appCommenters.has(ref.payload.botRef.appId)) return "ready";
   return hydrateAttemptHost(ref.payload, deps);
 }
 

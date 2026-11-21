@@ -34,6 +34,12 @@ import type { AttemptRef, CheckSettlement, ProcessDeps } from "../../src/pipelin
 import type { TestD1 } from "../store/helpers";
 
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
+const { AttemptPhaseError, cleanupAttempt, settleAttemptFailure } = await import(
+  "../../src/pipeline/review-attempt-execution"
+);
+const { BudgetExhaustedError, claimReviewAttempt, claimReviewLaunch } = await import(
+  "../../src/pipeline/review-attempt"
+);
 
 const ATTEMPT_ID = "attempt-4d-settlement";
 let h = createConsumerHarness();
@@ -541,5 +547,85 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     expect(terminalizeCalls).toBeGreaterThanOrEqual(2);
     expect(settlement.terminalized).toBe(true);
     expect(settledMark(db)).toEqual(expect.any(Number));
+  });
+});
+
+describe("a rejection is not an observation", () => {
+  /** The attempt's row after a paid exec that was SENT and never answered. */
+  async function launchedAttempt(db: TestD1): Promise<void> {
+    const now = Date.now();
+    expect(await claimReviewAttempt(db as never, ATTEMPT_ID, now, null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, now)).toEqual({ ok: true });
+  }
+
+  function launchState(db: TestD1): string {
+    const row = db.raw.prepare("SELECT state FROM review_launches WHERE attempt_id = ?").get(ATTEMPT_ID) as {
+      state: string;
+    } | null;
+    return row?.state ?? "absent";
+  }
+
+  test("a step-level rejection concludes nothing over an unknown paid state", async () => {
+    const db = await createSeededTestD1();
+    const ref = makeRef(makePayload());
+    await launchedAttempt(db);
+
+    // A Workflow step rejected — a timeout while the platform waited for the
+    // paid reply, a post-run read — so the error is NOT an AttemptPhaseError
+    // and carries no `runnerReturned` fact at all.
+    const outcome = await settleAttemptFailure(
+      await makeDeps(db),
+      ref,
+      new Error("the review step timed out waiting for the reply"),
+      {},
+    );
+
+    expect(outcome).toEqual({ kind: "unknown" });
+    // No failure row, no Check conclusion, no stamp: the row that fences the
+    // launch says the outcome is unknown, and that outranks the step's story.
+    expect(failureRows(db)).toHaveLength(0);
+    expect(launchState(db)).toBe("launched");
+  });
+
+  test("a returned status IS settled: the row records its outcome after the durable failure row", async () => {
+    const db = await createSeededTestD1();
+    const ref = makeRef(makePayload());
+    await launchedAttempt(db);
+    // The phase saw the paid call RETURN and chose the exhaustion signal.
+    const err = new BudgetExhaustedError(
+      {
+        kind: "budget-exhausted",
+        cause: "runner-deadline",
+        tier: "default",
+        budgetWindow: "runner",
+        budgetMs: 600_000,
+        seatsDispatched: 1,
+        seatsStopped: 1,
+        changedLines: null,
+      },
+      "runner signalled budget exhaustion",
+    );
+    const phase = new AttemptPhaseError(
+      {
+        phase: "review",
+        stage: "runner",
+        headSha: null,
+        secretValues: [],
+        runnerStartedAt: 1,
+        runnerReturned: true,
+        runnerEffectiveBudgetMs: 600_000,
+        changedLines: null,
+        sendAttemptPublicationId: null,
+      },
+      err,
+    );
+
+    const outcome = await settleAttemptFailure(await makeDeps(db), ref, phase, {});
+
+    expect(outcome.kind).toBe("budget-exhausted");
+    // Both terminal facts exist, and the ROW is what cleanup reads: a confirmed
+    // stop may not strand the attempt in `launched` and hold its capacity.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(launchState(db)).toBe("failed");
   });
 });

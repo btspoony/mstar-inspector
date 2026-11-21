@@ -197,8 +197,8 @@ WHERE attempt_id = ? AND state = 'launched'
 /**
  * The attempt's terminal NO-RESULT outcome, as one conditional statement: only
  * a `launched` row moves to `failed`, so a replay or duplicate settle changes
- * nothing. Written by the phase that observed the returned status, before any
- * throw leaves it.
+ * nothing. It carries `result_outcome` in the same statement (the schema
+ * refuses the timestamp without it).
  */
 const RECORD_LAUNCH_FAILURE_SQL = `
 UPDATE review_launches
@@ -513,9 +513,13 @@ export async function completeReviewLaunch(
 
 /**
  * Record the attempt's terminal NO-RESULT outcome on its own row, as ONE
- * conditional statement. Called only after a failure row for THIS attempt
- * actually wrote AND the paid call returned a status — an ambiguous exec records
- * nothing, so a resumed cleanup still holds the container.
+ * conditional statement, AFTER the durable failure row exists — the settlement
+ * calls this once its `review_failures` insert resolved, so the row never
+ * authorises destruction ahead of the fact it stands for. An ambiguous exec
+ * records nothing, so a resumed cleanup still holds the container.
+ *
+ * The two pre-exec stop paths in `runReviewAttempt` call it directly: there the
+ * exec never started, so the row is the only place that fact can be written.
  */
 export async function recordReviewFailure(
   db: D1Like,
@@ -693,11 +697,17 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
   if (row === null) return null;
   const unreadable = (): ReviewLaunchState => ({ state: "unknown", claimedAtMs: row.claimed_at_ms });
   if (!isLaunchState(row.state)) return unreadable();
+  // The coupled fact, checked in EVERY arm: a state is only readable with the
+  // outcome it stores (NULL for the non-terminal ones). The schema enforces the
+  // same coupling, so a mismatch means a row this build must not reason about
+  // — never a terminal state whose authorisation is inferred from timestamps.
   switch (row.state) {
     case "provisioned":
-      return { state: "provisioned", claimedAtMs: row.claimed_at_ms, checkOwedMs: row.check_owed_ms };
+      return row.result_outcome !== null
+        ? unreadable()
+        : { state: "provisioned", claimedAtMs: row.claimed_at_ms, checkOwedMs: row.check_owed_ms };
     case "abandoned":
-      return row.abandoned_at_ms === null
+      return row.abandoned_at_ms === null || row.result_outcome !== null
         ? unreadable()
         : {
             state: "abandoned",
@@ -706,7 +716,9 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
             checkOwedMs: row.check_owed_ms,
           };
     case "launched":
-      return row.launched_at_ms === null
+      // No outcome on a launched row: an outcome IS the transition, so this
+      // arm is the only `unknown` and only it holds container and capacity.
+      return row.launched_at_ms === null || row.result_outcome !== null
         ? unreadable()
         : {
             state: "launched",
@@ -715,7 +727,7 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
             checkOwedMs: row.check_owed_ms,
           };
     case "failed":
-      return row.launched_at_ms === null || row.failed_at_ms === null
+      return row.launched_at_ms === null || row.failed_at_ms === null || row.result_outcome !== "failed"
         ? unreadable()
         : {
             state: "failed",
@@ -725,7 +737,12 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
             checkOwedMs: row.check_owed_ms,
           };
     case "persisted":
-      if (row.launched_at_ms === null || row.persisted_at_ms === null || row.result_json === null) {
+      if (
+        row.launched_at_ms === null ||
+        row.persisted_at_ms === null ||
+        row.result_json === null ||
+        row.result_outcome !== "persisted"
+      ) {
         return unreadable();
       }
       return {
@@ -2195,10 +2212,11 @@ export async function runReviewAttempt(input: {
       },
       "runner exec killed at the anchored deadline (provider stderr on this line only)",
     );
-    // THIS phase saw the reply, so THIS phase records the terminal outcome:
-    // one conditional statement on the row that fences the launch, before the
-    // throw leaves. No other writer may set `result_outcome`.
-    await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+    // The returned status is the fact; the ROW's terminal transition belongs
+    // to the settlement that also writes the durable failure row, so the row
+    // never authorises destruction before that row exists (plan Task 4b's
+    // coupled-facts rule). The settlement reads `runnerReturned` from the
+    // phase facts to know this return was observed.
     throw new BudgetExhaustedError(
       {
         kind: "budget-exhausted",
@@ -2214,9 +2232,9 @@ export async function runReviewAttempt(input: {
     );
   }
   if (run.exitCode !== 0) {
-    // A RETURNED nonzero status is this phase's own observation — recorded here,
-    // in one conditional statement, before the throw leaves the phase.
-    await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+    // A RETURNED nonzero status is an observation, but the row's transition is
+    // the settlement's: it happens once the durable failure row exists, never
+    // before (the phase facts carry `runnerReturned: true`).
     throw new Error(runnerFailureDetail(run, progress.secretValues));
   }
   // d5-budget AC-S10-logs: one runner attempt → at least one budget line
@@ -2291,7 +2309,25 @@ export async function runReviewAttempt(input: {
   // and refuses to confirm: the paid outcome is not proven durable, so it is
   // `unknown`, never a failure the caller may settle, destroy on, or retry. A
   // rejected write is explicitly unknown: it may have landed.
-  const execution = { run, recheck, report, appliedProvider };
+  //
+  // NO runner output crosses the persistence boundary unredacted. The exact
+  // values this session's own exec received are removed HERE, on the host that
+  // holds them (a resumed host can only redact by shape — the recorded R-1
+  // limit). The exact pass only: `redactSecrets` also rewrites long hex runs,
+  // and this stream is a JSON envelope whose `head_sha` is exactly that — a
+  // shape pass here would corrupt valid output into a parse failure. The stored
+  // and the returned copy are this one sanitized stream, so nothing downstream
+  // can publish the raw one.
+  const execution = {
+    run: {
+      stdout: redactExactSecrets(run.stdout, progress.secretValues),
+      stderr: "",
+      exitCode: run.exitCode,
+    },
+    recheck,
+    report,
+    appliedProvider,
+  };
   let recorded = false;
   try {
     recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now());

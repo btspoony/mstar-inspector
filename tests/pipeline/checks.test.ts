@@ -53,6 +53,7 @@ import {
   type PublicationProof,
   type Scope,
 } from "../../src/store/review-checks";
+import { readCheckIdentity } from "../../src/store/review-checks";
 import {
   CHECK_SUMMARIES,
   CheckRequestNotDispatched,
@@ -4148,4 +4149,61 @@ describe("budget-exhausted Check vocabulary", () => {
     ).toThrow(/requires the resolved budgetExhaustion record/);
   });
 
+});
+
+describe("a resumed settlement acts only on the frozen generation", () => {
+  /** The lifecycle seam a resumed phase reaches `begin` through. */
+  function lifecycleFor(db: TestD1, onRemoteCall: () => void) {
+    return createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      // Any adapter use means the fence let the call through to a send.
+      getAdapter: () =>
+        ({
+          beginCheck: async () => {
+            onRemoteCall();
+            return { kind: "unavailable", reason: "must not be reached", requests: 0 };
+          },
+        }) as never,
+      getCheckGate: async () => GATE,
+    });
+  }
+
+  test("a claim that would mint a new generation is handed back instead of used", async () => {
+    const db = await seededDb();
+    const first = await claimedAttempt(db);
+    const frozen = await readCheckIdentity(db, first.attempt.identity.attemptId);
+    if (frozen === null) throw new Error("fixture: the claim wrote no identity");
+    await db
+      .prepare("UPDATE review_checks SET terminal_ms = ?, holder = NULL, lease_until_ms = NULL WHERE id = ?")
+      .bind(T0, first.attempt.identity.attemptId)
+      .run();
+
+    let remoteCalls = 0;
+    const lifecycle = lifecycleFor(db, () => {
+      remoteCalls += 1;
+    });
+    const adopted = await lifecycle.begin({
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      executionDeadlineMs: CLOCK + CHECK_LEASE_MS,
+      expect: frozen,
+    });
+
+    expect(adopted).toBeNull();
+    expect(remoteCalls).toBe(0);
+    // The row this call minted is handed to recovery: no lease held, no run.
+    const minted = db.raw
+      .prepare(
+        "SELECT holder, recovery_state, last_error FROM review_checks WHERE attempt_key = ? ORDER BY generation DESC LIMIT 1",
+      )
+      .get(frozen.key) as { holder: string | null; recovery_state: string; last_error: string | null };
+    expect(minted.holder).toBeNull();
+    expect(minted.recovery_state).toBe("pending");
+    // The refusal is named, so the handoff says why this generation exists.
+    expect(minted.last_error).toMatch(/frozen identity/);
+  });
 });
