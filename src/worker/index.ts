@@ -21,15 +21,17 @@
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
-import type { D1Database, ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
+import type { D1Database, ExecutionContext, MessageBatch, ScheduledController, Workflow } from "@cloudflare/workers-types";
 import { deploymentModeOf, type DeploymentMode, type Env, type ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
 import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
 import { reconcileReviewChecks } from "./check-reconcile";
+import { reconcileReviewRoute } from "../pipeline/route-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
+import type { AttemptRef } from "../pipeline/review-attempt-execution";
 import {
   classifyWebhook,
   MENTION_MISS_REASON,
@@ -1152,6 +1154,13 @@ async function runCheckReconcileStage(env: ScheduledEnv): Promise<void> {
   }
 }
 
+/**
+ * The queue face's env: the shared Worker env plus the review execution route's
+ * platform binding. Kept out of `Env` so the fetch path (and the SPA program
+ * that loads src/worker/env.ts) never pulls in the execution module's types.
+ */
+type ReviewQueueEnv = Env & PipelineEnv & { REVIEW_WORKFLOW?: Workflow<AttemptRef> };
+
 export default {
   fetch: (request: Request, env: Env, ctx?: ExecutionContext): Response | Promise<Response> =>
     (env.DEPLOYMENT_MODE === "saas" ? saasApp : app).fetch(request, env, ctx),
@@ -1161,12 +1170,28 @@ export default {
   // cannot resolve it, so a
   // static import would break the fetch-path tests (platform-specific
   // module exception to the static-import rule).
-  async queue(batch: MessageBatch<ReviewJobPayload>, env: Env & PipelineEnv, ctx: ExecutionContext): Promise<void> {
-    const { createReviewConsumer } = await import("../pipeline/consumer");
+  async queue(batch: MessageBatch<ReviewJobPayload>, env: ReviewQueueEnv, ctx: ExecutionContext): Promise<void> {
+    // ONE execution route: the consumer admits, dedupes and settles skips, and
+    // its hand-off calls THIS starter, which creates exactly one Workflow
+    // instance per admitted attempt — instance id = attempt id. The handler
+    // itself never touches a container, a sandbox credential or the model.
+    const workflow = env.REVIEW_WORKFLOW;
+    if (workflow === undefined) {
+      // A deploy without the binding could only drop every review it admits:
+      // fail loud into the queue's retry/DLQ path instead.
+      throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
+    }
+    const { createReviewConsumer, createWorkflowInstance } = await import("../pipeline/consumer");
     // The invocation context owns the detached Check terminalization: the
     // consumer hands it the promise, so an overrun still finishes after the
     // handler returns instead of being reclaimed with the isolate.
-    await createReviewConsumer(env, undefined, {}, { waitUntil: (promise) => ctx.waitUntil(promise) })(batch);
+    await createReviewConsumer(
+      env,
+      undefined,
+      {},
+      { waitUntil: (promise) => ctx.waitUntil(promise) },
+      (_deps, ref) => createWorkflowInstance(workflow, ref),
+    )(batch);
   },
   // Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
   //
@@ -1207,15 +1232,19 @@ export default {
       await runCheckReconcileStage(env);
       return;
     }
+    // The database is the composition's prerequisite: captured ONCE after the
+    // guard (a reconciler call may widen `env`, and every stage needs the same
+    // bound handle).
+    const db = env.DB;
+    if (db === undefined) {
+      defaultSweepLog.warn(
+        { event: "ops_sweep_db_unbound", detail: "DB binding missing — sweep skipped" },
+        "ops sweep skipped",
+      );
+      return;
+    }
     try {
-      if (!env.DB) {
-        defaultSweepLog.warn(
-          { event: "ops_sweep_db_unbound", detail: "DB binding missing — sweep skipped" },
-          "ops sweep skipped",
-        );
-        return;
-      }
-      await runSweep(env.DB, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
+      await runSweep(db, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
     } catch (error) {
       // SEC-03: the sweep-failure detail is redacted before the warn line —
       // an infra error can interpolate a secret-shaped value
@@ -1241,6 +1270,29 @@ export default {
           detail: redactSecrets(error instanceof Error ? error.message : String(error)),
         },
         "lifecycle reconcile failed",
+      );
+    }
+    // Durable route handoffs (migration 0083) — OWN try/catch, LAST stage: an
+    // unconfirmed Workflow create and a moved head's undelivered successor are
+    // re-sent to the queue here, so neither can vanish with an interrupted
+    // host.
+    try {
+      // The scheduled lane's env type narrows the bindings it reads; the
+      // route's recovery pass also writes the commit claim, which this worker
+      // has bound at runtime (the scheduled handler receives the full Env).
+      const routeKv = (env as Env).IDEMPOTENCY_KV;
+      await reconcileReviewRoute({
+        DB: db,
+        REVIEW_QUEUE: env.REVIEW_QUEUE,
+        IDEMPOTENCY_KV: routeKv,
+      });
+    } catch (error) {
+      defaultSweepLog.warn(
+        {
+          event: "ops_route_reconcile_failed",
+          detail: redactSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        "route handoff reconcile failed",
       );
     }
   },

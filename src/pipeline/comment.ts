@@ -1309,6 +1309,13 @@ export type PostPreparedReviewInput = CommenterTargetInput & {
   targetCommentId: number | null;
   body: string;
   publicationId: string;
+  /**
+   * The attempt's frozen deadline: this send may not START a GitHub mutation at
+   * or after it. Enforced on the last line before `createComment`/
+   * `updateComment` (see `guardMutations`), because the marker scan this send
+   * performs can spend whatever window the caller checked.
+   */
+  notAfterMs?: number;
 };
 
 export type PostPreparedDegradedInput = CommenterTargetInput & {
@@ -1317,6 +1324,8 @@ export type PostPreparedDegradedInput = CommenterTargetInput & {
   targetCommentId: number | null;
   body: string;
   publicationId: string;
+  /** As `PostPreparedReviewInput.notAfterMs`: the frozen instant, at the mutation. */
+  notAfterMs?: number;
 };
 
 export type ReviewCommenter = {
@@ -1535,6 +1544,54 @@ export class PreparedSendRejected extends Error {
 }
 
 /**
+ * The attempt's frozen deadline passed BEFORE a GitHub mutation started. No
+ * request left the Worker, so this is a typed wall-clock stop — never the
+ * post-attempt `unknown` of a lost reply (the caller maps it accordingly).
+ */
+export class PublicationDeadlineSpent extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PublicationDeadlineSpent";
+  }
+}
+
+/**
+ * THE FROZEN INSTANT IS AUTHORITATIVE AT THE WRITE. A caller-side check cannot
+ * hold: the pre-staging scan and the mapping before a mutation are unbounded
+ * awaits, so the window the caller saw can be spent by the time a request would
+ * start. Both mutation verbs are therefore wrapped once, here, and the check
+ * runs on the last line before the request — there is no path to
+ * `createComment`/`updateComment` that skips it, including the create fallbacks.
+ *
+ * `undefined` = no frozen instant (a caller outside an attempt, e.g. a test
+ * double or a recovery action): the send proceeds unguarded.
+ */
+function guardMutations<T extends { createComment: unknown; updateComment: unknown }>(
+  issues: T,
+  notAfterMs: number | undefined,
+): T {
+  if (notAfterMs === undefined) return issues;
+  const refuse = (verb: string): void => {
+    const lateMs = Date.now() - notAfterMs;
+    if (lateMs < 0) return;
+    throw new PublicationDeadlineSpent(
+      `${verb}: the attempt's frozen deadline passed ${lateMs}ms ago — nothing was sent`,
+    );
+  };
+  return {
+    ...issues,
+    createComment: (...args: never[]) => {
+      refuse("create comment");
+      return (issues.createComment as (...inner: never[]) => unknown)(...args);
+    },
+    updateComment: (...args: never[]) => {
+      refuse("update comment");
+      return (issues.updateComment as (...inner: never[]) => unknown)(...args);
+    },
+  } as T;
+}
+
+/**
  * Publish the EXACT prepared review body against a caller-provided octokit
  * (§7.7 step 8). Before sending, the target is RE-READ and must
  * show its expected previous version — or an already-matching exact
@@ -1552,13 +1609,16 @@ export class PreparedSendRejected extends Error {
  * WAS sent — the caller must treat it as unknown, never as not-sent).
  */
 export async function postPreparedReviewWithOctokit(octokit: PostOctokit, input: PostPreparedReviewInput): Promise<{ commentId: number }> {
-  const issues = octokit.rest?.issues;
-  if (!issues?.listComments || !issues?.updateComment || !issues?.createComment || typeof octokit.paginate !== "function") {
+  const surface = octokit.rest?.issues;
+  if (!surface?.listComments || !surface?.updateComment || !surface?.createComment || typeof octokit.paginate !== "function") {
     throw new PreparedSendRejected(
       "octokit is missing rest.issues comment methods / paginate — cannot publish the prepared review; check the injected auth surface",
     );
   }
+  // The scan below rides the RAW surface; every mutating verb goes through the
+  // guarded one, so the deadline check sits on the last line before the write.
   const comments = await scanCommentsWithOctokit(octokit, input, "review");
+  const issues = guardMutations(surface, input.notAfterMs);
   const parsedRound = (body: string | null | undefined): number | null =>
     body ? parseReviewRound(body) : null;
 
@@ -1645,13 +1705,15 @@ export async function postPreparedDegradedWithOctokit(
   octokit: PostOctokit,
   input: PostPreparedDegradedInput,
 ): Promise<{ posted: boolean; commentId: number | null }> {
-  const issues = octokit.rest?.issues;
-  if (!issues?.listComments || !issues?.updateComment || !issues?.createComment || typeof octokit.paginate !== "function") {
+  const surface = octokit.rest?.issues;
+  if (!surface?.listComments || !surface?.updateComment || !surface?.createComment || typeof octokit.paginate !== "function") {
     throw new PreparedSendRejected(
       "octokit is missing rest.issues comment methods / paginate — cannot publish the prepared degraded comment; check the injected auth surface",
     );
   }
   const comments = await scanCommentsWithOctokit(octokit, input, "degraded");
+  // Mutations ride the guarded surface: the scan above can spend the window.
+  const issues = guardMutations(surface, input.notAfterMs);
   const degradedRoundOf = (body: string | null | undefined): number | null => {
     if (!body || !body.startsWith(DEGRADED_MARKER_PREFIX)) return null;
     return parseDegradedRound(body);

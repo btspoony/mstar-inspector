@@ -59,6 +59,7 @@ import {
   claimAttachedCheckForSettlement,
   claimAttempt,
   deferCheckRecovery,
+  readCheckIdentity,
   readInheritedReview,
   readPublicationProof,
   readPublishedReview,
@@ -1541,6 +1542,16 @@ export type CheckLifecycle = {
     action: string;
     executionDeadlineMs: number;
     /**
+     * The Check identity a RESUMED phase must act on, frozen on the attempt's
+     * own row: `attempt_key` + `generation`. Supplied by adoption/settlement
+     * callers only. A claim that lands on any other generation of the key is
+     * refused (see `begin`) — an older attempt must never promote, conclude or
+     * drive a newer attempt's run, and the latest open generation is not a
+     * substitute for the frozen pair. Omitted → the caller IS the claim (a
+     * fresh review).
+     */
+    expect?: { key: string; generation: number };
+    /**
      * OPTIONAL per-invocation abandonment latch owned by the caller. When the
      * caller's §7.10 budget elapses it trips `abandon()`, and this `begin` then
      * stops attaching a created run on behalf of a caller that is gone —
@@ -1768,6 +1779,8 @@ export type CheckAttachResult =
  * message. The row keeps `create_state = 'known'` and the run id — the durable
  * facts the consumer's `begin` adopts — and the long
  * `CHECK_ATTACH_WINDOW_MS` deadline keeps it adoptable across the queue delay.
+ * That deadline is PROVISIONAL: the first execution admission narrows it, once,
+ * to the attempt's frozen absolute deadline (`queue send + operator cap`).
  *
  * One run per head: the claim goes through `claimAttempt`, so a duplicate
  * delivery, a queue redelivery or a synchronize event that finds the key
@@ -1808,6 +1821,12 @@ export async function attachCheckAtAcceptance(
   // `busy` (another delivery, or an earlier attach, owns a nonterminal row for
   // this key) and `terminal` (the head is already published) both mean the one
   // run this head may have already exists: nothing to attach, nothing to mint.
+  if (claimed.kind === "absent") {
+    // Unreachable by contract: only a FROZEN-pair claim may answer `absent`,
+    // and a delivery attach never passes one. Naming it beats folding it into
+    // "the head is already published".
+    throw new Error("review-checks: a delivery attach claim answered absent — the store must mint without an expectation");
+  }
   if (claimed.kind !== "claimed") return { kind: "skipped", reason: claimed.kind };
   const { identity } = claimed.attempt;
   const begun = await deps.adapter.beginCheck({ identity, lease: claimed.lease });
@@ -2026,7 +2045,9 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       const adapter = deps.getAdapter(input.scope);
       if (adapter === null) return null;
       // The claim INSERT establishes ownership, so no lease exists to fence on
-      // yet; the clock is sampled for this write.
+      // yet; the clock is sampled for this write. With a frozen pair the store
+      // call itself never mints (it answers from the frozen key's row), so
+      // verification and claim are one step.
       const claim = await claimAttempt(deps.db, {
         scope: input.scope,
         githubAppId: input.githubAppId,
@@ -2036,7 +2057,19 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         holder: `consumer:${crypto.randomUUID()}`,
         nowMs: deps.nowMs(),
         executionDeadlineMs: input.executionDeadlineMs,
+        ...(input.expect === undefined ? {} : { expect: input.expect }),
       });
+      // A pair is still verified before anything is adopted, attached,
+      // promoted or terminalized: the open row for the key can be a NEWER
+      // generation than the frozen one (another attempt's), and taking that
+      // would drive somebody else's run. Nothing was minted here, so there is
+      // nothing to compensate.
+      if (input.expect !== undefined && claim.kind !== "absent") {
+        const ownsFrozenPair =
+          claim.attempt.identity.generation === input.expect.generation &&
+          (await readCheckIdentity(deps.db, claim.attempt.identity.attemptId))?.key === input.expect.key;
+        if (!ownsFrozenPair) return null;
+      }
       // busy = a nonterminal attempt already owns this key: either the
       // delivery path already attached this head's run (spec §7.7 step 4) or a
       // duplicate delivery's second pass is looking at the first one's row. A

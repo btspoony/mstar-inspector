@@ -4,7 +4,7 @@ Spec: docs/specs/architecture/review-budget.md § Known limits
 
 ## Problem
 
-The [Queue invocation clock](../../../../docs/specs/architecture/review-budget.md#one-round-clock) describes the non-configurable platform cap the current review derives its budget from. A [handoff beyond that ceiling](../../../../docs/specs/architecture/review-budget.md#known-limits) removes the Queue invocation bound ([Cloudflare wall-time limits by invocation type](https://developers.cloudflare.com/workflows/reference/limits/#wall-time-limits-by-invocation-type)); this decision makes the replacement cap configurable and operator-owned.
+The retired [Queue invocation clock](../../../../docs/specs/architecture/review-budget.md#one-absolute-deadline) described the non-configurable platform cap the review used to derive its budget from. A [handoff beyond that ceiling](../../../../docs/specs/architecture/review-budget.md#known-limits) removes the Queue invocation bound ([Cloudflare wall-time limits by invocation type](https://developers.cloudflare.com/workflows/reference/limits/#wall-time-limits-by-invocation-type)); this decision makes the replacement cap configurable and operator-owned.
 
 ## Proposal
 

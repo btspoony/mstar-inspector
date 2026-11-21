@@ -46,6 +46,7 @@
 
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
+import { clearCheckOwed, clearConcludedCheckOwed, deferCheckWithOwed } from "../pipeline/review-attempt";
 import type { D1Like } from "../store/types";
 import {
   attachCheckRunId,
@@ -59,8 +60,6 @@ import {
   type CheckAttempt,
   type CheckConclusion,
   type CheckRemote,
-  deferCheckForPendingPublication,
-  deferCheckRecovery,
   getCheckAttempt,
   getCheckOwnership,
   listCheckReconcileBatch,
@@ -505,6 +504,10 @@ export async function reconcileReviewChecks(
     await reenableHealthyAppChecks(env, db, now, budget, credentials, transport, log, checkBudgets.updateMs);
 
     // 1. Due attempts, ONE bound nowMs at every predicate position.
+    // Retry path for the owed-Check marks: a clear that faulted, or a holder
+    // that concluded the Check itself, leaves a mark whose Check is terminal.
+    // One idempotent statement per pass, so the obligation cannot stay set.
+    await clearConcludedCheckOwed(db).catch(() => {});
     const rows = await listCheckReconcileBatch(db, now(), CHECK_MAX_ATTEMPTS, CHECK_RECONCILE_LIMIT);
     for (const row of rows) {
       summary.examined += 1;
@@ -883,7 +886,16 @@ async function reconcileCheckAttempt(
       // would only delay a proof that already exists. The deadline clamps it:
       // the wait never outlives the attempt's own hard stop.
       const nextAttemptMs = Math.min(now() + CHECK_BACKOFF_MS[0]!, row.executionDeadlineMs);
-      if (!(await deferCheckForPendingPublication(db, attemptId, waitingLease, nextAttemptMs, now()))) return;
+      // One call owns BOTH writes: the Check's next_attempt_ms and the owed
+      // obligation's due instant move together or not at all.
+      const rearmed = await deferCheckWithOwed(db, {
+        checkAttemptId: attemptId,
+        lease: waitingLease,
+        nextAttemptMs,
+        nowMs: now(),
+        kind: "proof-wait",
+      });
+      if (!rearmed) return;
       summary.deferred += 1;
       log.info(
         {
@@ -1202,6 +1214,10 @@ async function recordTerminal(
   if (!agrees) return "mismatch";
   const written = await recordCheckObservation(db, attemptId, lease, remote, now());
   if (!written) return "lost";
+  // The Check is concluded: clear the attempt row's owed flag so this lane
+  // stops selecting it. Bookkeeping only — the conclusion is already durable,
+  // so a fault here is a warn, never a failed pass.
+  await clearCheckOwed(db, attemptId).catch(() => {});
   summary.completed += 1;
   return "recorded";
 }
@@ -1264,6 +1280,8 @@ async function settleFailedAttempt(
     const line = giveUpLine(row.identity.scope, attemptId, attemptsAfter, reason);
     const marked = await markCheckLocalError(db, attemptId, lease, line, now());
     if (marked) {
+      // Settled as `local-error`: the attempt no longer owes a settlement.
+      await clearCheckOwed(db, attemptId).catch(() => {});
       summary.gaveUp += 1;
       log.warn({ event: "ops_check_reconcile_gave_up", detail: line }, "check recovery gave up at the attempt cap");
     } else {
@@ -1273,13 +1291,19 @@ async function settleFailedAttempt(
     }
     return;
   }
-  const deferred = await deferCheckRecovery(
-    db,
-    attemptId,
+  const nextAttemptMs = now() + backoffFor(attemptsAfter);
+  // One call owns BOTH writes: the Check's backoff and the obligation's due
+  // instant move together, so a repeatedly failing row backs off instead of
+  // cycling.
+  const deferred = await deferCheckWithOwed(db, {
+    checkAttemptId: attemptId,
     lease,
-    { state: "remote-unconfirmed", nextAttemptMs: now() + backoffFor(attemptsAfter), reason },
-    now(),
-  );
+    nextAttemptMs,
+    nowMs: now(),
+    kind: "recovery",
+    state: "remote-unconfirmed",
+    reason,
+  });
   if (deferred) summary.unconfirmed += 1;
   summary.errors += 1;
 }

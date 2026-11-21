@@ -23,18 +23,22 @@ import {
   postRunnerReserveMs,
   reviewGuardTtlSeconds,
 } from "../../src/review-budget";
-import { CHECK_TERMINALIZE_MAX, CHECK_TERMINALIZE_MIN } from "../../src/dashboard/runtime-config-store";
+import {
+  CHECK_TERMINALIZE_MAX,
+  CHECK_TERMINALIZE_MIN,
+  REVIEW_ATTEMPT_CAP_DEFAULT_MS,
+} from "../../src/dashboard/runtime-config-store";
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../packages/shared/src/runtime";
 
 const LEVELS: readonly ReviewLevel[] = ["quick", "default", "deep"];
 const ROUND_START = 1_700_000_000_000;
 
-/** A round started at `ROUND_START` with the live terminalize budget. */
+/** An attempt admitted at `ROUND_START` under the absent-row operator cap. */
 function budgetFor(level: ReviewLevel, terminalizeMs: number) {
   return deriveReviewBudget({
     roundStartMs: ROUND_START,
-    capMs: ROUND_BUDGET_MS,
+    deadlineMs: ROUND_START + REVIEW_ATTEMPT_CAP_DEFAULT_MS,
     terminalizeMs,
     level,
   });
@@ -45,8 +49,8 @@ describe("tier table inside the derived ceiling", () => {
   // the SMALLEST supported reserve leaves; testing the endpoints as a table is
   // the whole point of the contract.
   for (const terminalizeMs of [CHECK_TERMINALIZE_MIN, 10_000, CHECK_TERMINALIZE_MAX]) {
-    test(`terminalize ${terminalizeMs}ms: quick < default < deep <= cap - reserve`, () => {
-      const cutoff = ROUND_BUDGET_MS - postRunnerReserveMs(terminalizeMs);
+    test(`terminalize ${terminalizeMs}ms: quick < default < deep <= deadline - reserve`, () => {
+      const cutoff = REVIEW_ATTEMPT_CAP_DEFAULT_MS - postRunnerReserveMs(terminalizeMs);
       expect(RUNNER_MAX_BUDGET_MS.quick).toBeLessThan(RUNNER_MAX_BUDGET_MS.default);
       expect(RUNNER_MAX_BUDGET_MS.default).toBeLessThan(RUNNER_MAX_BUDGET_MS.deep);
       expect(RUNNER_MAX_BUDGET_MS.deep).toBeLessThanOrEqual(cutoff);
@@ -56,10 +60,10 @@ describe("tier table inside the derived ceiling", () => {
     });
   }
 
-  test("the cutoff is the platform cap less the live reserve at each endpoint", () => {
-    expect(budgetFor("deep", CHECK_TERMINALIZE_MIN).runnerCutoffMs - ROUND_START).toBe(675_000);
-    expect(budgetFor("deep", 10_000).runnerCutoffMs - ROUND_START).toBe(666_000);
-    expect(budgetFor("deep", CHECK_TERMINALIZE_MAX).runnerCutoffMs - ROUND_START).toBe(646_000);
+  test("the cutoff is the frozen deadline less the live reserve at each endpoint", () => {
+    expect(budgetFor("deep", CHECK_TERMINALIZE_MIN).runnerCutoffMs - ROUND_START).toBe(975_000);
+    expect(budgetFor("deep", 10_000).runnerCutoffMs - ROUND_START).toBe(966_000);
+    expect(budgetFor("deep", CHECK_TERMINALIZE_MAX).runnerCutoffMs - ROUND_START).toBe(946_000);
     // The reserve is charged 1:1, never rounded: the cutoff moves by exactly
     // the terminalize delta.
     expect(
@@ -73,14 +77,14 @@ describe("tier table inside the derived ceiling", () => {
     // copy: one millisecond of drift in CHECK_TERMINALIZE_MAX shrinks the
     // cutoff below the shipped deep maximum and this assertion catches it.
     expect(RUNNER_MAX_BUDGET_MS.deep).toBeLessThanOrEqual(
-      ROUND_BUDGET_MS - postRunnerReserveMs(CHECK_TERMINALIZE_MAX),
+      REVIEW_ATTEMPT_CAP_DEFAULT_MS - postRunnerReserveMs(CHECK_TERMINALIZE_MAX),
     );
   });
 
   test("preparation budget is what the round may spend before the cutoff", () => {
     const budget = budgetFor("deep", 10_000);
     expect(budget.preparationBudgetMs).toBe(budget.runnerCutoffMs - ROUND_START);
-    expect(budget.roundEndMs).toBe(ROUND_START + ROUND_BUDGET_MS);
+    expect(budget.roundEndMs).toBe(ROUND_START + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
   });
 
   test("the guard TTL and Check windows share the level's tier maximum", () => {
@@ -110,14 +114,14 @@ describe("allocation: one min(), one absolute deadline", () => {
     }
   });
 
-  test("a delayed start spends the cutoff, not the table (45s of setup at the default reserve)", () => {
+  test("a delayed start spends the cutoff, not the table (350s of setup at the default reserve)", () => {
     const budget = budgetFor("deep", 10_000);
-    const anchor = anchorRunnerBudget(budget, ROUND_START + 45_000);
+    const anchor = anchorRunnerBudget(budget, ROUND_START + 350_000);
     expect(anchor.kind).toBe("allocated");
     if (anchor.kind !== "allocated") return;
-    // min(646_000, 666_000 - 45_000) = 621_000 — the example the contract names.
-    expect(anchor.effectiveBudgetMs).toBe(621_000);
-    expect(anchor.execDeadlineMs).toBe(ROUND_START + 45_000 + 621_000);
+    // min(646_000, 966_000 - 350_000) = 616_000 — the cutoff binds.
+    expect(anchor.effectiveBudgetMs).toBe(616_000);
+    expect(anchor.execDeadlineMs).toBe(ROUND_START + 350_000 + 616_000);
     expect(anchor.execDeadlineMs + budget.reserveMs).toBe(budget.roundEndMs);
   });
 
@@ -210,10 +214,10 @@ describe("allocation: one min(), one absolute deadline", () => {
     expect("effectiveBudgetMs" in refused).toBe(false);
   });
 
-  test("a smaller test cap moves the whole round, not the table", () => {
+  test("a smaller test cap moves the whole attempt, not the table", () => {
     const budget = deriveReviewBudget({
       roundStartMs: ROUND_START,
-      capMs: 400_000,
+      deadlineMs: ROUND_START + 400_000,
       terminalizeMs: 10_000,
       level: "default",
     });
@@ -373,13 +377,12 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
 });
 
 describe("admission windows cover the whole allocation range", () => {
-  // The invariant `execDeadline + reserve <= roundEnd <= min(guardExpiry,
-  // checkLeaseExpiry)` must hold for EVERY allocation the tier can produce —
-  // not only the tier maximum — so the two allocation extremes run under the
-  // tightest reserve (the supported 30s terminalize ceiling). The windows are
-  // ceiling-derived, so the earliest an acquisition may stamp them is the
-  // round's own start: `roundStart + guardTtl` / `roundStart + checkLease` is
-  // the lowest each expiry can ever be, and any later origin only widens it.
+  // The invariant `execDeadline + reserve <= roundEnd <= guardExpiry` must hold
+  // for EVERY allocation the tier can produce — not only the tier maximum — so
+  // the two allocation extremes run under the tightest reserve (the supported
+  // 30s terminalize ceiling). The guard is ceiling-derived, so the earliest an
+  // acquisition may stamp it is the attempt's own start; the Check row instead
+  // carries `roundEnd` itself as its lease, so no second window is re-derived.
   const size = (changedLines: number, workUnits: number) => ({ changedLines, workUnits });
 
   test("floor request: the smallest allocation still ends inside the earliest-acquired windows", () => {
@@ -397,7 +400,6 @@ describe("admission windows cover the whole allocation range", () => {
       expect(anchor.effectiveBudgetMs).toBe(request.requestedBudgetMs);
       expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
       expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.guardTtlSeconds * 1000);
-      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.checkLeaseMs);
     }
   });
 
@@ -415,7 +417,6 @@ describe("admission windows cover the whole allocation range", () => {
       // the invariant runs; quick/default end earlier by the same windows.
       expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
       expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.guardTtlSeconds * 1000);
-      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.checkLeaseMs);
     }
   });
 
@@ -435,7 +436,6 @@ describe("admission windows cover the whole allocation range", () => {
       if (anchor.kind !== "allocated") return;
       expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
       expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.guardTtlSeconds * 1000);
-      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.checkLeaseMs);
     }
   });
 

@@ -11,7 +11,8 @@
 import { expect, mock } from "bun:test";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import type { ConsumerLog, PipelineEnv } from "../../src/pipeline/consumer";
+import type { AttemptStarter, ConsumerLog, PipelineEnv } from "../../src/pipeline/consumer";
+import { inlineWorkflowStarter } from "./workflow-route";
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 import type { TestD1 } from "../store/helpers";
@@ -79,6 +80,13 @@ export type ConsumerHarness = {
   fakeSandbox: {
     state: FakeSandboxState;
     runCommand: (cmd: string, opts?: unknown) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+    claimMarker: (marker: string) => Promise<"written" | "matched" | "unknown">;
+    runMarked: (
+      marker: string,
+      cmd: string,
+      opts?: unknown,
+    ) => Promise<{ kind: "ran"; stdout: string; stderr: string; exitCode: number } | { kind: "unknown" }>;
+    destroyMarked: (marker: string) => Promise<"destroyed" | "unknown">;
     destroy: () => Promise<void>;
   };
   sandbox: FakeSandboxState;
@@ -92,7 +100,10 @@ export type ConsumerHarness = {
   overrides: {
     createAppCommenter: () => ReviewCommenter;
     getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
+    startAttempt: AttemptStarter;
   };
+  /** Every head a moved-head skip re-admitted through the queue (the successor). */
+  successorEnqueues: ReviewJobPayload[];
   /** Every structured log line the round emitted, in order. */
   logLines: TestLogLine[];
   testLog: ConsumerLog;
@@ -137,10 +148,15 @@ export function createConsumerHarness(): ConsumerHarness {
   const commenterState = initialFakeCommenterState();
   const fakeCommenter = createFakeCommenter(commenterState, commenterCalls);
 
-  // Injected into every consumer under test (DI replaces mock.module).
+  // --- the execution route ------------------------------------------------
+  // The harness runs the PRODUCTION step composition with an in-place step:
+  // the phases, handoffs, settlement and successor hand-off are the real ones,
+  // only the platform's durable step store is replaced.
+  const successorEnqueues: ReviewJobPayload[] = [];
   const overrides = {
     createAppCommenter: () => fakeCommenter,
     getSandbox: async () => fakeSandbox,
+    startAttempt: inlineWorkflowStarter(successorEnqueues),
   };
 
   // --- test log sink (injected via the consumer's optional log param) ------
@@ -243,6 +259,7 @@ export function createConsumerHarness(): ConsumerHarness {
     commenterState,
     fakeCommenter,
     overrides,
+    successorEnqueues,
     logLines,
     testLog,
     kvState,

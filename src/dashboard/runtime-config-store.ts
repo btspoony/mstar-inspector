@@ -699,6 +699,58 @@ export async function setCheckBudgets(
   return value;
 }
 
+/** PK of the end-to-end review attempt cap (the Workflow route's hard stop). */
+export const REVIEW_ATTEMPT_CAP_KEY = "review.attempt.duration_cap_ms";
+/**
+ * Absent row: 20 minutes. The 30-day successful-review sample (n = 1 361) had
+ * p50 304 584 ms, p90 508 800 ms and max 647 553 ms; 20 minutes leaves those
+ * tails room for queue wait, execution and publication while still bounding
+ * capacity. Absent must mean neither "no cap" nor "cap of zero".
+ */
+export const REVIEW_ATTEMPT_CAP_DEFAULT_MS = 1_200_000;
+/**
+ * Range of a stored cap. Below the retired 900 000 ms Queue wall clock a cap
+ * would cut reviews the platform was already completing; one hour is the most
+ * capacity one attempt may hold.
+ */
+export const REVIEW_ATTEMPT_CAP_MIN_MS = 900_000;
+export const REVIEW_ATTEMPT_CAP_MAX_MS = 3_600_000;
+
+/** One cap read: the effective value, plus whether the stored row could be trusted. */
+export type ReviewAttemptCap = {
+  capMs: number;
+  degraded: boolean;
+  /** The degradation's cause; absent from a trustworthy read. */
+  reason?: DegradedReason;
+};
+
+/**
+ * The end-to-end attempt cap in ONE read. Only an absent row is the default; a
+ * present value the parse cannot trust or a read failure answers the default
+ * with `degraded: true` and never throws — the caller (admission) decides that
+ * a degraded answer leaves the delivery retryable rather than inventing a cap.
+ */
+export async function getReviewAttemptCap(db: DashboardD1): Promise<ReviewAttemptCap> {
+  try {
+    const row = await db
+      .prepare(`SELECT value FROM review_runtime_settings WHERE key = ?1`)
+      .bind(REVIEW_ATTEMPT_CAP_KEY)
+      .first<RuntimeSettingRow>();
+    if (row === null) return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: false };
+    // A result row without its (NOT NULL) value column is malformed, not absent.
+    if (row.value === undefined) {
+      return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: true, reason: "malformed" };
+    }
+    const capMs = parseInRange(row.value, REVIEW_ATTEMPT_CAP_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS);
+    if (Number.isNaN(capMs)) {
+      return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: true, reason: "untrusted" };
+    }
+    return { capMs: capMs ?? REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: false };
+  } catch {
+    return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: true, reason: "read-failed" };
+  }
+}
+
 /**
  * The comment-claim outbox settings (migration 0048) and whether the stored
  * rows could be trusted. Global like the check budgets — one outbox per

@@ -43,7 +43,9 @@ import type { GitOpsCommands } from "../../src/pipeline/gitops";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import { REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
+import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import type { D1Like, D1StatementLike } from "../../src/store/types";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { fakePem } from "./fake-secrets";
@@ -161,6 +163,63 @@ export async function createSeededTestD1(): Promise<TestD1> {
   // later awaited re-seeds — last-writer-wins could flake success paths).
   await seedAppConfig(db, TEST_APP_ID);
   return db;
+}
+
+/**
+ * The seeded double with ONE statement class rejecting: every `run()` whose SQL
+ * contains `fragment` rejects with `message`, while reads and `batch` delegate
+ * to the real double. It models a D1 reply lost AFTER the write may have
+ * landed, so a caller must report the attempt as unknown instead of settling,
+ * retrying or destroying on it.
+ */
+export function failingDb(db: TestD1, fragment: string, message = "D1 write reply lost"): D1Like {
+  const wrap = (sql: string, statement: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(sql, statement.bind(...values)),
+    first: <T = Record<string, unknown>>() => statement.first<T>(),
+    all: <T = Record<string, unknown>>() => statement.all<T>(),
+    run: <T = Record<string, unknown>>() =>
+      sql.includes(fragment) ? Promise.reject(new Error(message)) : statement.run<T>(),
+  });
+  return {
+    prepare: (sql: string) => wrap(sql, db.prepare(sql)),
+    batch: (statements: D1StatementLike[]) => db.batch(statements),
+  };
+}
+
+/**
+ * A D1 double where an EARLIER entry already claimed this attempt: the
+ * provisioning INSERT lands a `pending` row for the attempt id it is given and
+ * answers zero changes, so the caller's prepare takes the replay path against a
+ * container it may not provision. Every other statement — the launch claim, the
+ * result write, the stores — delegates to the real double.
+ */
+export function preclaimedDb(db: TestD1): D1Like {
+  return {
+    prepare: (sql: string) => {
+      if (!sql.includes("INSERT INTO review_launches")) return db.prepare(sql);
+      let bound: unknown[] = [];
+      const claim: D1StatementLike = {
+        bind: (...values: unknown[]) => {
+          bound = values;
+          return claim;
+        },
+        first: async () => null,
+        all: async () => ({ results: [] }),
+        run: async () => {
+          // The row the earlier entry left behind: this caller's insert
+          // conflicts, exactly as a replayed prepare sees it.
+          db.raw
+            .prepare(
+              "INSERT OR IGNORE INTO review_launches (attempt_id, state, claimed_at_ms) VALUES (?, 'provisioned', ?)",
+            )
+            .run(String(bound[0]), Number(bound[1]));
+          return { results: [], meta: { changes: 0, last_row_id: 0 } };
+        },
+      };
+      return claim;
+    },
+    batch: (statements: D1StatementLike[]) => db.batch(statements),
+  };
 }
 
 /**
@@ -341,6 +400,8 @@ const DIFF_READ = boundedFileReadCommand(DIFF_PATH, DIFF_PREFETCH_MAX_BYTES);
 const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
 const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
 const REPORT_READ = readReportCommand();
+/** The runner's applied-model document read (same transport, its own fixed path). */
+const APPLIED_MODEL_READ = readReportCommand(APPLIED_MODEL_PATH);
 const PR_BODY_READ = prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER);
 /**
  * The two increment commands carry per-round shas, so the double matches them
@@ -448,8 +509,24 @@ export type FakeSandboxState = {
   runnerExitCode: number;
   /** Thrown from every exec instead of answering (sandbox transport failure). */
   error: Error | undefined;
+  /** Thrown by the paid runner exec alone: the container accepted it, the reply was lost. */
+  runnerError: Error | undefined;
   destroyCalls: number;
   destroyError: Error | undefined;
+  /** What the marker claim answers ("written" = a fresh container). */
+  markerClaim: "written" | "matched" | "unknown";
+  /** Thrown by the marker claim: its reply was lost, so the marker may be written. */
+  markerError: Error | undefined;
+  /** A marked read refuses (`unknown`) instead of running its command. */
+  markedUnknown: boolean;
+  /** Every guarded read's command, in order. */
+  markedCalls: string[];
+  /** Thrown by the guarded read itself (its reply was lost). */
+  markedError: Error | undefined;
+  /** 1-based guarded call the error starts at: `1` loses the proof, `2` the command after it. */
+  markedErrorFromCall: number;
+  /** The guarded destroy refuses (`unknown`) instead of destroying. */
+  destroyMarkedUnknown: boolean;
   /** Runs at the FIRST sandbox command of a test (ordering probes). */
   probe: (() => void) | undefined;
   /** Holds the FIRST runner exec; `reached` resolves once it is parked. */
@@ -511,8 +588,16 @@ export function initialFakeSandboxState(): FakeSandboxState {
     runnerStderr: "",
     runnerExitCode: 0,
     error: undefined,
+    runnerError: undefined,
     destroyCalls: 0,
     destroyError: undefined,
+    markerClaim: "written",
+    markerError: undefined,
+    markedUnknown: false,
+    markedCalls: [],
+    markedError: undefined,
+    markedErrorFromCall: 1,
+    destroyMarkedUnknown: false,
     probe: undefined,
     gate: undefined,
   };
@@ -527,6 +612,9 @@ type ExecResult = { stdout: string; stderr: string; exitCode: number };
 
 /** The declared command set; an unlisted command is a test failure, not a pass. */
 function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): ExecResult {
+  // The attempt module's marker proof: a no-op that only has to succeed on the
+  // incarnation the guarded read proved, so it carries no declared gitops shape.
+  if (cmd === "true") return { stdout: "", stderr: "", exitCode: 0 };
   switch (state.gitOps.get(cmd)) {
     case "clone":
       return { stdout: "", stderr: "", exitCode: state.cloneExitCode };
@@ -662,6 +750,11 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
     return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: 0 };
   }
+  if (cmd === APPLIED_MODEL_READ) {
+    // The default round has no applied-model document (no model served): the
+    // read's proven-absence flag, the same shape the real command emits.
+    return { stdout: "\n2\n", stderr: "", exitCode: 0 };
+  }
   if (cmd === REPORT_READ) {
     if (state.reportFileExitCode !== 0) {
       return { stdout: "", stderr: "read failed", exitCode: state.reportFileExitCode };
@@ -674,15 +767,38 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
   throw new Error(`fake sandbox: unrecognized command — declare it in tests/helpers/consumer-fixtures.ts: ${cmd}`);
 }
 
+/**
+ * The marker RPCs over a sandbox's own `runCommand`/`destroy` — the shape an
+ * attempt-owned sandbox must answer. A case that needs a refusal sets the
+ * state knobs instead of replacing these.
+ */
+export function markerGate(sandbox: {
+  runCommand: (cmd: string, opts?: unknown) => Promise<ExecResult>;
+  destroy: () => Promise<void>;
+}) {
+  return {
+    claimMarker: async () => "written" as const,
+    runMarked: async (_marker: string, cmd: string, opts?: unknown) => ({
+      kind: "ran" as const,
+      ...(await sandbox.runCommand(cmd, opts)),
+    }),
+    destroyMarked: async () => {
+      await sandbox.destroy();
+      return "destroyed" as const;
+    },
+  };
+}
+
 /** The injected sandbox double: `state` carries every per-test knob. */
 export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxState()) {
-  return {
+  const sandbox = {
     state,
     runCommand: mock(async (cmd: string, opts?: unknown) => {
       const first = state.calls.length === 0;
       state.calls.push({ cmd, opts });
       if (first && state.probe !== undefined) state.probe();
       if (state.error !== undefined) throw state.error;
+      if (state.runnerError !== undefined && RUNNER_CMDS.has(cmd)) throw state.runnerError;
       if (cmd.includes("--input") && state.gate !== undefined) {
         const gate = state.gate;
         state.gate = undefined; // only the first runner exec is held
@@ -691,11 +807,30 @@ export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxSt
       }
       return answerCommand(cmd, opts, state);
     }),
+    claimMarker: mock(async (_marker: string) => {
+      if (state.markerError !== undefined) throw state.markerError;
+      return state.markerClaim;
+    }),
+    runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => {
+      state.markedCalls.push(cmd);
+      if (state.markedError !== undefined && state.markedCalls.length >= state.markedErrorFromCall) {
+        throw state.markedError;
+      }
+      return state.markedUnknown
+        ? { kind: "unknown" as const }
+        : { kind: "ran" as const, ...(await sandbox.runCommand(cmd, opts)) };
+    }),
+    destroyMarked: mock(async (_marker: string) => {
+      if (state.destroyMarkedUnknown) return "unknown" as const;
+      await sandbox.destroy();
+      return "destroyed" as const;
+    }),
     destroy: mock(async () => {
       state.destroyCalls += 1;
       if (state.destroyError !== undefined) throw state.destroyError;
     }),
   };
+  return sandbox;
 }
 
 // ---------------------------------------------------------------------------

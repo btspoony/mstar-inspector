@@ -75,6 +75,7 @@ import {
   releaseExpiredCheckClaim,
   rollbackCheckCreateDispatch,
   retryCheckRecovery,
+  type ClaimAttemptResult,
   type Scope,
   setCheckCreateState,
   setCheckDesired,
@@ -142,6 +143,12 @@ function claimInput(overrides: Partial<ClaimInput> = {}): ClaimInput {
   };
 }
 
+/** A claim answer that must name a row (every kind but `absent` does). */
+function attemptOfClaim(result: ClaimAttemptResult): CheckAttempt {
+  if (result.kind === "absent") throw new Error("fixture: the claim found no row for the key");
+  return result.attempt;
+}
+
 /** Claim, failing loudly if the result is anything but `claimed`. */
 async function claim(
   db: TestD1,
@@ -149,7 +156,7 @@ async function claim(
 ): Promise<{ attempt: CheckAttempt; lease: Lease }> {
   const result = await claimAttempt(db, claimInput(overrides));
   if (result.kind !== "claimed") {
-    throw new Error(`expected a claimed attempt, got ${result.kind} (generation ${result.attempt.identity.generation})`);
+    throw new Error(`expected a claimed attempt, got ${result.kind}`);
   }
   return result;
 }
@@ -412,10 +419,10 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
 
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
     expect(again.kind).toBe("terminal");
-    expect(again.attempt.identity.attemptId).toBe(id);
-    expect(again.attempt.identity.externalId).toBe(attempt.identity.externalId);
-    expect(again.attempt.checkRunId).toBe(4242);
-    expect(again.attempt.terminalMs).toBe(T0);
+    expect(attemptOfClaim(again).identity.attemptId).toBe(id);
+    expect(attemptOfClaim(again).identity.externalId).toBe(attempt.identity.externalId);
+    expect(attemptOfClaim(again).checkRunId).toBe(4242);
+    expect(attemptOfClaim(again).terminalMs).toBe(T0);
     expect(await rowCount(db)).toBe(1);
   });
 
@@ -436,7 +443,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     // return terminal and must NOT mint generation N+1 for a published head.
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
     expect(again.kind).toBe("terminal");
-    expect(again.attempt.identity.generation).toBe(1);
+    expect(attemptOfClaim(again).identity.generation).toBe(1);
     expect(await rowCount(db)).toBe(1);
   });
 
@@ -1634,7 +1641,8 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
     const { id } = await localErrorAttempt(db);
     linkPublication(db, id, crypto.randomUUID(), { owner: "someone-else", headSha: `f${SHA.slice(1)}` });
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
-    expect(again.kind).toBe("claimed"); // unproven for THIS scope/SHA → retryable
+    // Unproven for THIS scope/SHA → retryable.
+    if (again.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${again.kind}`);
     expect(again.attempt.identity.generation).toBe(2);
   });
 
@@ -1755,10 +1763,52 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
         }),
       });
       const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
+      if (again.kind !== "terminal") throw new Error(`fixture: expected terminal, got ${again.kind}`);
       expect(again.kind, `kind=${kind} should dedup`).toBe("terminal");
       expect(again.attempt.identity.generation).toBe(1);
       expect(await rowCount(db)).toBe(1);
     }
+  });
+});
+
+describe("a frozen-pair claim never mints", () => {
+  /** The generation this key froze, read off the row that owns it. */
+  async function frozenPair(db: TestD1, id: string) {
+    const row = await rawRow(db, id);
+    return { key: row.attempt_key as string, generation: row.generation as number };
+  }
+
+  test("an OPEN frozen generation answers busy with that row, never a fresh claim", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const frozen = await frozenPair(db, attempt.identity.attemptId);
+
+    const again = await claimAttempt(db, claimInput({ holder: "run-b", expect: frozen }));
+
+    // Never `claimed`: the only row this caller may take is the frozen one, and
+    // taking it is the fenced adoption UPDATE that follows, not a mint.
+    expect(again.kind).toBe("busy");
+    expect(attemptOfClaim(again).identity.generation).toBe(frozen.generation);
+    expect(await rowCount(db)).toBe(1);
+  });
+
+  test("a frozen generation that ENDED answers absent and inserts nothing", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const frozen = await frozenPair(db, id);
+    await attachRun(db, id, lease);
+    expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
+    // Ends without a proven publication: the unrestricted path would happily
+    // mint generation 2 for this key, which is exactly what must not happen.
+    expect(await markCheckLocalError(db, id, lease, "gave up", T0)).toBe(true);
+    expect((await rawRow(db, id)).terminal_ms).toBe(T0);
+
+    const before = await rowCount(db);
+    const again = await claimAttempt(db, claimInput({ holder: "run-b", expect: frozen }));
+
+    expect(again.kind).toBe("absent");
+    expect(await rowCount(db)).toBe(before);
   });
 });
 

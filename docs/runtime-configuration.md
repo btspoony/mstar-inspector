@@ -32,6 +32,7 @@ writes one parameter, and every accepted write lands with its
 | `review.check.terminalize_timeout_ms` | `10000` | integer `1000..30000` | `getCheckBudgets` (`src/pipeline/consumer.ts` terminalize wait) | Bound on the inline terminalize hook |
 | `review.check.update_timeout_ms` | `5000` | integer `500..15000` | `getCheckBudgets` (`src/pipeline/checks.ts`, `src/pipeline/comment.ts`, `src/worker/check-reconcile.ts`) | Bound on the one terminal `checks.update` |
 | `review.recheck.assignment_max_bytes` | `65536` | integer `8192..262144` | `getRecheckAssignmentMaxBytes` (`src/pipeline/consumer.ts`, one read per recheck round; passed to the seat as the runner input's `recheckAssignmentMaxBytes`) | UTF-8 bytes of assignment the prior-findings seat may be asked with — every prior finding and the discussion always ride, evidence slices ride until the budget is spent |
+| `review.attempt.duration_cap_ms` | `1200000` (20 minutes) | integer `900000..3600000` | `getReviewAttemptCap` (`src/dashboard/runtime-config-store.ts`) through `readReviewAttemptCapMs` (`src/review-budget.ts`, once per attempt at admission) | The attempt's one end-to-end cap: the original Queue send stamp plus this value freezes the attempt's absolute deadline, which every execution step and the Check row carry |
 
 Degraded reads: an untrusted concurrency value answers `1` (serial) with
 `degraded: true`; an untrusted level answers `default` with `degraded: true`; an
@@ -40,6 +41,12 @@ recheck assignment budget answers the seat's documented default (`65536`) with
 `degraded: true`. The Check
 budgets are saved as a pair (`checkBudgets: {terminalizeMs, updateMs}`) because
 one operator action defines both.
+
+The attempt cap is the one exception to "degrade and carry on": the store answers
+the default with `degraded: true`, but the admission reader REFUSES that answer
+(one `review_attempt_cap_degraded` warn) and lets the queue redeliver, because an
+invented cap would silently shorten or extend every attempt that delivery owns.
+An ABSENT row is not a fault — it reads the 20-minute default.
 
 ## System layer — `server_flags` (migration `0033`)
 

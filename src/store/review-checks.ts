@@ -185,7 +185,12 @@ export type PublishedReview = { verdict: string; scorePct: number | null };
 /** The §7.9 claim outcome union. */
 export type ClaimAttemptResult =
   | { kind: "claimed"; attempt: CheckAttempt; lease: Lease }
-  | { kind: "busy" | "terminal"; attempt: CheckAttempt };
+  | { kind: "busy" | "terminal"; attempt: CheckAttempt }
+  /**
+   * No row for the key at all. Only reachable for a FROZEN-generation claim
+   * (`expect`), which never inserts: the caller has nothing to settle.
+   */
+  | { kind: "absent" };
 
 /**
  * The transaction clock (spec §7.0). Every §7.9/§7.11.2 signature the contract
@@ -277,6 +282,43 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** A nonterminal attempt is one that has not locally completed or given up. */
 const NONTERMINAL_WHERE = "terminal_ms IS NULL";
+
+/**
+ * The §7.11.2 due predicate, SHARED by the selector and the recovery claim so
+ * the two can never drift (`claimCheckRecovery` repeats the selector's full
+ * eligibility by contract). Bound values, in order: `maxAttempts`, `nowMs`,
+ * `nowMs`, `nowMs - CHECK_STALE_HOLDER_MS`, `nowMs`, `nowMs`, `nowMs`.
+ *
+ * The second disjunct is the OWED shape: a resumed publication that could not
+ * adopt its Check recorded the obligation on the attempt row (`check_owed_ms`),
+ * and that attempt is due as soon as no live lease holds it — the publication
+ * proof it concludes from is already durable, so it must not wait out the
+ * execution deadline.
+ */
+const CHECK_DUE_PREDICATE = `recovery_state IN ('pending','remote-unconfirmed')
+          AND attempts < ?
+          AND (
+            (
+              (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
+              AND (lease_until_ms IS NULL OR lease_until_ms <= ?
+                   OR (desired <> 'in_progress' AND holder IS NOT NULL AND updated_ms <= ?))
+              AND (desired <> 'in_progress' OR execution_deadline_ms <= ?
+                   OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))
+            )
+            OR (
+              -- An OWED settlement, associated by the Check's OWN attempt key
+              -- (never by two generated ids), and honouring the obligation's
+              -- own due instant so the backoff is not bypassed.
+              EXISTS (
+                SELECT 1 FROM review_launches l
+                 WHERE l.check_key = review_checks.attempt_key
+                   AND l.check_generation = review_checks.generation
+                   AND l.check_owed_ms IS NOT NULL
+                   AND l.check_owed_ms <= ?
+              )
+              AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+            )
+          )`;
 
 // ---------------------------------------------------------------------------
 // Identity helpers (spec §7.9)
@@ -547,6 +589,15 @@ export async function claimAttempt(
      * claim, recovery) — such a row is only ever closed by the recovery lane.
      */
     attachDeliveryId?: string;
+    /**
+     * The FROZEN generation this caller must act on. Supplied by resumed
+     * phases: the call then answers from that key's own row and NEVER runs the
+     * minting INSERT, so a generation that ends between the caller's decision
+     * and this call inserts nothing — there is no insert to lose the race
+     * against. Taking the frozen row is the fenced adoption UPDATE that
+     * follows, not this claim.
+     */
+    expect?: { key: string; generation: number };
   },
 ): Promise<ClaimAttemptResult> {
   if (input.holder.length === 0) {
@@ -566,6 +617,19 @@ export async function claimAttempt(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
+  // A caller acting on a FROZEN generation may never mint. Verification and
+  // claim are one step here because the only claim such a caller can make is
+  // that row ITSELF: this call reads it (open → `busy`, ended or never written
+  // → `absent`) and does not execute the insert below, so the mint cannot fire
+  // for a generation that is not the open one — not even by a race, because
+  // there is no insert in flight.
+  if (input.expect !== undefined) {
+    const active = await db
+      .prepare(`SELECT * FROM review_checks WHERE attempt_key = ? AND ${NONTERMINAL_WHERE} ORDER BY generation DESC LIMIT 1`)
+      .bind(input.expect.key)
+      .first<ReviewCheckRow>();
+    return active === null ? { kind: "absent" } : { kind: "busy", attempt: attemptOf(active) };
+  }
   const attemptId = crypto.randomUUID();
 
   // The claim is the whole race. `INSERT … SELECT` is gated on TWO facts about
@@ -740,6 +804,43 @@ export async function claimAttempt(
 }
 
 /** Read one attempt by row id (null = no such row). */
+/**
+ * The identity frozen on a Check row: its `attempt_key` and the generation that
+ * key belongs to. This is what an attempt's launch row records at creation, so
+ * no later phase has to look a generation up (a later one is another attempt's).
+ */
+export async function readCheckIdentity(
+  db: D1Like,
+  id: string,
+): Promise<{ key: string; generation: number } | null> {
+  const row = await db
+    .prepare(`SELECT attempt_key, generation FROM review_checks WHERE id = ?`)
+    .bind(id)
+    .first<{ attempt_key: string; generation: number }>();
+  return row === null ? null : { key: row.attempt_key, generation: row.generation };
+}
+
+/**
+ * The open Check identity for an attempt KEY: its generation, read once at
+ * freeze time when the settlement holds no handle (a refused claim). The key is
+ * the attempt's own, so this names the attempt's row — it is not the "newest
+ * open generation" guess the owed mark must never make.
+ */
+export async function readOpenCheckIdentityForKey(
+  db: D1Like,
+  key: string,
+): Promise<{ key: string; generation: number } | null> {
+  const row = await db
+    .prepare(
+      `SELECT generation FROM review_checks
+        WHERE attempt_key = ? AND terminal_ms IS NULL
+        ORDER BY generation DESC LIMIT 1`,
+    )
+    .bind(key)
+    .first<{ generation: number }>();
+  return row === null ? null : { key, generation: row.generation };
+}
+
 export async function getCheckAttempt(db: D1Like, id: string): Promise<CheckAttempt | null> {
   const row = await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(id).first<ReviewCheckRow>();
   return row === null ? null : attemptOf(row);
@@ -796,15 +897,9 @@ export async function claimCheckRecovery(
       `UPDATE review_checks
           SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?, updated_ms = ?
         WHERE id = ? AND ${NONTERMINAL_WHERE}
-          AND recovery_state IN ('pending','remote-unconfirmed')
-          AND attempts < ?
-          AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
-          AND (lease_until_ms IS NULL OR lease_until_ms <= ?
-               OR (desired <> 'in_progress' AND holder IS NOT NULL AND updated_ms <= ?))
-          AND (desired <> 'in_progress' OR execution_deadline_ms <= ?
-               OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))`,
+          AND ${CHECK_DUE_PREDICATE}`,
     )
-    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs)
+    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs)
     .run();
   if (claim.meta.changes !== 1) return null;
   const row = await db
@@ -841,8 +936,9 @@ export async function claimCheckRecovery(
  *
  * `execution_deadline_ms` is NARROWED here to the adopted lease: the attach
  * window is long only so a queued message can still find its run, while the
- * execution window is whatever the caller passes as `executionDeadlineMs`
- * (the consumer's `now + CHECK_WINDOW_MS`).
+ * execution window is whatever the caller passes as `executionDeadlineMs` —
+ * the attempt's frozen absolute deadline, so the reconciler reads the same
+ * instant the execution fence does.
  */
 export async function adoptReleasedCheckAttempt(
   db: D1Like,
@@ -851,7 +947,7 @@ export async function adoptReleasedCheckAttempt(
     /** The App these credentials authenticate as — never a foreign App's row. */
     githubAppId: number;
     holder: string;
-    /** The execution deadline the adopting invocation owns (`now + CHECK_WINDOW_MS`). */
+    /** The attempt's frozen absolute deadline (`queue send + operator cap`). */
     executionDeadlineMs: number;
     nowMs: number;
   },
@@ -1834,17 +1930,11 @@ export async function listCheckReconcileBatch(
     .prepare(
       `SELECT * FROM review_checks
         WHERE ${NONTERMINAL_WHERE}
-          AND recovery_state IN ('pending','remote-unconfirmed')
-          AND attempts < ?
-          AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
-          AND (lease_until_ms IS NULL OR lease_until_ms <= ?
-               OR (desired <> 'in_progress' AND holder IS NOT NULL AND updated_ms <= ?))
-          AND (desired <> 'in_progress' OR execution_deadline_ms <= ?
-               OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))
+          AND ${CHECK_DUE_PREDICATE}
         ORDER BY COALESCE(next_attempt_ms,created_ms),id
         LIMIT ?`,
     )
-    .bind(maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, limit)
+    .bind(maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs, limit)
     .all<ReviewCheckRow>();
   return results.map(attemptOf);
 }
