@@ -169,7 +169,7 @@ import {
 } from "../../packages/shared/src/recheck-wire";
 import { BODY_TRUNCATED_SUFFIX, boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
-import { getSandbox, type ReviewSandbox } from "./sandbox";
+import { getSandbox, type RetentionProof, type ReviewSandbox } from "./sandbox";
 import type { ShellCommand } from "./shell-command";
 import {
   BudgetExhaustedError,
@@ -3564,6 +3564,10 @@ async function processMessage(
   // teardown: the other half is skipped too, and capacity is never released on
   // unknown evidence (a new attempt could start on a container that still runs).
   let containerUnproven = false;
+  // The durable record that makes destroying the container safe. Set ONLY where
+  // this invocation awaited a write that survives it; a paid run with this
+  // still unset must not be torn down.
+  let retainedOutcome: string | undefined;
   // Set once the sha is resolved from the checkout; the failure log carries
   // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
   // criteria: 失败路径错误日志含幂等键).
@@ -5608,6 +5612,7 @@ async function processMessage(
         await terminalizeCheck(null, "degraded-not-posted");
       } else {
         await terminalizeCheck(degradedOutcome.publicationId, "publication-unknown");
+        retainedOutcome = `degraded:${degradedOutcome.publicationId}`;
       }
       deps.log.warn(
         fields,
@@ -5954,6 +5959,9 @@ async function processMessage(
       return { kind: "ok" };
     }
     const stagedId = staged.id;
+    // The result is durable from here on: a later failure in this invocation
+    // cannot make destroying the container lose it.
+    retainedOutcome = `publication:${stagedId}`;
 
     // 13. §7.7 step 8 — epoch-fenced claim, phase sending, publish the EXACT
     // prepared upsert, validate the response id, persist proof BEFORE KV
@@ -6345,6 +6353,7 @@ async function processMessage(
         checkHandle = await beginCheck(lifecycleScope, resolvedGithubAppId, resolvedHeadSha);
       }
       await terminalizeCheck(null, "budget-exhausted", undefined, budgetOutcome);
+      retainedOutcome = `budget:${attemptId}`;
       const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${err instanceof Error ? err.message : String(err)}`;
       deps.log.error(
         {
@@ -6470,6 +6479,10 @@ async function processMessage(
         stage: progress.failureStage,
         error: redactExactSecrets(redactSecrets(persistedDetail), progress.secretValues),
       });
+      // The durable row is this attempt's terminal no-result outcome: the
+      // container holds nothing this invocation will ever collect. A failed
+      // insert leaves no durable fact, so nothing is claimed for teardown.
+      retainedOutcome = `failure:${attemptId}`;
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
       deps.log.warn(
@@ -6515,34 +6528,56 @@ async function processMessage(
     // while this one is still alive, so live containers could exceed
     // min(system, workspace) by the destroy latency. Both blocks warn only.
     if (sandbox !== null && !containerUnproven) {
-      try {
-        // Proven sameness, not a name: a container this attempt cannot prove it
-        // prepared is left alone (its result may be the only copy) and the
-        // teardown is reported as unknown.
-        if ((await discardReviewAttempt(sandbox, attemptId)) !== "destroyed") {
-          containerUnproven = true;
-          deps.log.warn(
-            {
-              ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
-              sandbox_id: sandboxId,
-              event: "sandbox_teardown_unproven",
-            },
-            "sandbox not destroyed: the container is not proven to be this attempt's — capacity held, nothing released",
-          );
-        }
-      } catch (err) {
-        // A LOST proof is the same fact as a refused one: the container's state
-        // is unknown, so capacity must not be handed to a new attempt.
+      // Destruction authority is a durable fact, not the order this code ran
+      // in: a published/degraded/budget/failure outcome, or a run that never
+      // started a paid call. Anything else (a lost reply, a paid run whose
+      // only result is still in the container) destroys nothing.
+      const retention: RetentionProof | undefined =
+        retainedOutcome !== undefined
+          ? { kind: "retained", evidence: retainedOutcome }
+          : progress.runnerStartedAt === undefined
+            ? { kind: "no-paid-work" }
+            : undefined;
+      if (retention === undefined) {
         containerUnproven = true;
-        const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(
           {
             ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
             sandbox_id: sandboxId,
             event: "sandbox_teardown_unproven",
           },
-          `sandbox teardown unproven: ${detail} — capacity held, nothing released`,
+          "sandbox not destroyed: no durable outcome to justify it — capacity held, nothing released",
         );
+      } else {
+        try {
+          // Proven sameness, not a name: a container this attempt cannot prove
+          // it prepared is left alone (its result may be the only copy) and the
+          // teardown is reported as unknown.
+          if ((await discardReviewAttempt(sandbox, attemptId, retention)) !== "destroyed") {
+            containerUnproven = true;
+            deps.log.warn(
+              {
+                ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
+                sandbox_id: sandboxId,
+                event: "sandbox_teardown_unproven",
+              },
+              "sandbox not destroyed: the container is not proven to be this attempt's — capacity held, nothing released",
+            );
+          }
+        } catch (err) {
+          // A LOST proof is the same fact as a refused one: the container's
+          // state is unknown, so capacity must not be handed to a new attempt.
+          containerUnproven = true;
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(
+            {
+              ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
+              sandbox_id: sandboxId,
+              event: "sandbox_teardown_unproven",
+            },
+            `sandbox teardown unproven: ${detail} — capacity held, nothing released`,
+          );
+        }
       }
     }
     // Release the admission row once the review settled (posted, KV done,

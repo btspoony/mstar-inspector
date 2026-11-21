@@ -54,7 +54,7 @@ import {
   runnerCommand,
   writeJsonCommand,
 } from "./gitops";
-import type { MarkedRun, ReviewSandbox } from "./sandbox";
+import type { MarkedRun, RetentionProof, ReviewSandbox } from "./sandbox";
 import type { ShellCommand } from "./shell-command";
 
 /**
@@ -97,14 +97,17 @@ export class AttemptUnknownError extends Error {
 
 /**
  * Destroy the attempt's container ONLY after proving it is still the one this
- * attempt prepared. No marker match performs neither action and reports
- * `unknown`, so a replacement incarnation is never torn down.
+ * attempt prepared AND that the caller may destroy it (the result is durable,
+ * or no paid work started). No marker match and no retention proof destroy
+ * nothing and report `unknown`, so a replacement incarnation is never torn
+ * down and a running paid command never loses its only copy.
  */
 export async function discardReviewAttempt(
   sandbox: ReviewSandbox,
   attemptId: string,
+  retention: RetentionProof,
 ): Promise<"destroyed" | "unknown"> {
-  return sandbox.destroyMarked(attemptMarker(attemptId));
+  return sandbox.destroyMarked(attemptMarker(attemptId), retention);
 }
 
 /**

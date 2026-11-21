@@ -122,17 +122,69 @@ export type ReviewSandbox = {
    */
   runMarked(marker: string, command: ShellCommand, opts?: CommandOpts): Promise<MarkedRun>;
   /**
-   * Destroy ONLY an already-running container whose marker is exactly `marker`.
-   * A missing/different marker destroys nothing and reports `unknown`, so a
-   * replacement incarnation is never torn down on another attempt's behalf.
+   * Destroy ONLY an already-running container whose marker is exactly `marker`
+   * AND whose result the caller has shown to be retained. A missing/different
+   * marker, a missing retention proof, or a paid run still in flight destroys
+   * nothing and reports `unknown`, so a replacement incarnation is never torn
+   * down on another attempt's behalf and a running paid command never loses its
+   * only result to a premature cleanup.
    */
-  destroyMarked(marker: string): Promise<"destroyed" | "unknown">;
+  destroyMarked(marker: string, retention: RetentionProof): Promise<"destroyed" | "unknown">;
   /**
    * Unproven teardown, for a container that is not an attempt's (the smoke's
    * own health-check sandbox). Attempt-owned containers use `destroyMarked`.
    */
   destroy(): Promise<void>;
 };
+
+/**
+ * Why destroying this container cannot lose a result. A matching marker proves
+ * WHICH container it is, never that anything in it is safe to discard, so the
+ * caller must name the durable fact:
+ *
+ * - `retained`: this attempt's result, or its confirmed terminal no-result
+ *   outcome, is persisted; `evidence` names the durable record.
+ * - `no-paid-work`: the attempt never reached the paid call, so nothing in the
+ *   container is the only copy.
+ *
+ * A caller that cannot produce either (a timeout, a lost reply, a run still in
+ * flight) must not destroy.
+ */
+export type RetentionProof =
+  | { readonly kind: "retained"; readonly evidence: string }
+  | { readonly kind: "no-paid-work" };
+
+function isRetentionProof(proof: RetentionProof | undefined): proof is RetentionProof {
+  if (proof === undefined) return false;
+  if (proof.kind === "no-paid-work") return true;
+  return proof.kind === "retained" && proof.evidence.length > 0;
+}
+
+/**
+ * Headroom a host-side bound gives a locked operation beyond the child's own
+ * GNU-timeout bound. The shell bound only covers a process after it starts; the
+ * platform calls around it (setInactivityTimeout, exec admission, the output
+ * stream) have no deadline of their own, and one that never settles would hold
+ * the DO's critical section forever.
+ */
+const LOCKED_AWAIT_MARGIN_MS = 15_000;
+
+const LOCKED_AWAIT_TIMEOUT = Symbol("locked-await-timeout");
+
+/** Bound one await inside the critical section; the work is abandoned, not cancelled. */
+async function boundedAwait<T>(work: Promise<T>, ms: number): Promise<T | typeof LOCKED_AWAIT_TIMEOUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<typeof LOCKED_AWAIT_TIMEOUT>((resolve) => {
+        timer = setTimeout(() => resolve(LOCKED_AWAIT_TIMEOUT), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** The attempt marker's fixed in-container path: ephemeral `/tmp`, outside the checkout and any mount. */
 const MARKER_PATH = "/tmp/mstar-review-attempt";
@@ -281,6 +333,9 @@ export class SandboxV1 extends DurableObject {
    */
   private gate: Promise<unknown> = Promise.resolve();
 
+  /** Paid/plain runs issued and not yet settled: a teardown must not race one. */
+  private inFlightRuns = 0;
+
   private exclusive<T>(run: () => Promise<T>): Promise<T> {
     const next = this.gate.then(run, run);
     this.gate = next.then(
@@ -312,12 +367,22 @@ export class SandboxV1 extends DurableObject {
     // container. The start is serialized with the guarded pair; the exec that
     // follows is not — a long run must not hold the queue.
     const prepared = { stdin: this.assertBounds(command, opts) };
-    const container = await this.exclusive(async () => {
-      const handle = this.container;
-      await this.ensureRunning(handle);
-      return handle;
-    });
-    return this.execCommand(container, command, opts, prepared);
+    // Registered BEFORE the start so a teardown that finds this run in flight
+    // refuses: its result may be the only copy.
+    this.inFlightRuns += 1;
+    try {
+      const container = await this.exclusive(async () => {
+        const handle = this.container;
+        const started = await boundedAwait(this.ensureRunning(handle), LOCKED_AWAIT_MARGIN_MS);
+        if (started === LOCKED_AWAIT_TIMEOUT) {
+          throw new Error(`container did not become ready within ${LOCKED_AWAIT_MARGIN_MS}ms`);
+        }
+        return handle;
+      });
+      return await this.execCommand(container, command, opts, prepared);
+    } finally {
+      this.inFlightRuns -= 1;
+    }
   }
 
   /**
@@ -331,17 +396,26 @@ export class SandboxV1 extends DurableObject {
     this.assertBounds(MARKER_CLAIM_COMMAND, opts);
     return this.exclusive(async () => {
       const container = this.container;
+      const started = await boundedAwait(this.ensureRunning(container), LOCKED_AWAIT_MARGIN_MS);
+      if (started === LOCKED_AWAIT_TIMEOUT) return "unknown";
       let exitCode: number;
       try {
-        await this.ensureRunning(container);
-        exitCode = (await this.execCommand(container, MARKER_CLAIM_COMMAND, opts)).exitCode;
+        const claimed = await boundedAwait(
+          this.execCommand(container, MARKER_CLAIM_COMMAND, opts),
+          MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS,
+        );
+        // A timed-out write is not retried and not read back: the marker's
+        // presence is unprovable, so the outcome is unknown.
+        if (claimed === LOCKED_AWAIT_TIMEOUT) return "unknown";
+        exitCode = claimed.exitCode;
       } catch {
         // The write failed (noclobber refusal, container loss). Only a matching
         // marker can turn that into a replay; anything else is not provable.
         exitCode = 1;
       }
       if (exitCode === 0) return "written";
-      return (await this.readMarker(container)) === marker ? "matched" : "unknown";
+      const current = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
+      return current === marker ? "matched" : "unknown";
     });
   }
 
@@ -356,9 +430,19 @@ export class SandboxV1 extends DurableObject {
     return this.exclusive(async () => {
       const container = this.container;
       if (!container.running) return { kind: "unknown" };
-      if ((await this.readMarker(container)) !== marker) return { kind: "unknown" };
+      const proof = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
+      // A timed-out proof never reaches the action: the container is unknown,
+      // and a proof that settled later must not race the replacement it may
+      // have described.
+      if (proof === LOCKED_AWAIT_TIMEOUT || proof !== marker) return { kind: "unknown" };
       try {
-        return { kind: "ran", ...(await this.execCommand(container, command, opts)) };
+        const ran = await boundedAwait(
+          this.execCommand(container, command, opts),
+          (opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS) + LOCKED_AWAIT_MARGIN_MS,
+        );
+        return ran === LOCKED_AWAIT_TIMEOUT
+          ? ({ kind: "unknown" } as const)
+          : ({ kind: "ran", ...ran } as const);
       } catch {
         // The exec reply was lost: whether the command ran is unprovable, so
         // the outcome is `unknown` — never a document read as unreadable.
@@ -367,14 +451,33 @@ export class SandboxV1 extends DurableObject {
     });
   }
 
-  /** Prove sameness on the captured handle, then destroy that same container. */
-  async destroyMarked(marker: string): Promise<"destroyed" | "unknown"> {
+  /**
+   * Prove sameness on the captured handle, then destroy that same container —
+   * but only when the caller shows nothing can be lost.
+   *
+   * Refused (`unknown`, nothing destroyed) when:
+   * - no usable `retention` proof is passed — identity is not retention;
+   * - a run issued through `runCommand` is still in flight, so a timed-out or
+   *   lost reply may be leaving a paid command running;
+   * - the container is not live, carries other bytes, or any await stalls.
+   *
+   * Destroying for an attempt this caller did not run (a Workflow recovery
+   * deciding for someone else) is the durable attempt row's job: it must own
+   * the first-provisioning claim before that authority exists. No such caller
+   * exists yet, and this proof cannot be borrowed for it.
+   */
+  async destroyMarked(marker: string, retention: RetentionProof): Promise<"destroyed" | "unknown"> {
+    if (!isRetentionProof(retention)) return "unknown";
     return this.exclusive(async () => {
+      // Inside the lock: a run that registered before us is visible here, and
+      // one that registers after cannot have started a process yet.
+      if (this.inFlightRuns > 0) return "unknown";
       const container = this.container;
       if (!container.running) return "unknown";
-      if ((await this.readMarker(container)) !== marker) return "unknown";
-      await container.destroy();
-      return "destroyed";
+      const proof = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
+      if (proof === LOCKED_AWAIT_TIMEOUT || proof !== marker) return "unknown";
+      const destroyed = await boundedAwait(container.destroy(), LOCKED_AWAIT_MARGIN_MS);
+      return destroyed === LOCKED_AWAIT_TIMEOUT ? "unknown" : "destroyed";
     });
   }
 

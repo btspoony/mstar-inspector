@@ -32,6 +32,8 @@ const {
 const ATTEMPT_A = "2b0c4f8e-7a11-4a4e-9b1f-2a5f4f2f1c01";
 const ATTEMPT_B = "9d7e1a20-33c4-4f0b-8a6d-51c9d2e7b902";
 const SHA = "a".repeat(40);
+/** A retention proof a caller can produce only after its result is durable. */
+const RETAINED = { kind: "retained", evidence: "publication:test" } as const;
 
 const encoder = new TextEncoder();
 
@@ -320,13 +322,13 @@ describe("collection refuses an unproven container", () => {
 describe("destroy refuses an unproven container", () => {
   test("no marker match: nothing is destroyed and the outcome is unknown", async () => {
     const sandbox = attemptSandboxDouble({ marked: "unknown" });
-    expect(await discardReviewAttempt(sandbox as never, ATTEMPT_A)).toBe("unknown");
+    expect(await discardReviewAttempt(sandbox as never, ATTEMPT_A, RETAINED)).toBe("unknown");
     expect(sandbox.events).not.toContain("destroy");
   });
 
   test("a matching live incarnation is destroyed", async () => {
     const sandbox = attemptSandboxDouble({});
-    expect(await discardReviewAttempt(sandbox as never, ATTEMPT_A)).toBe("destroyed");
+    expect(await discardReviewAttempt(sandbox as never, ATTEMPT_A, RETAINED)).toBe("destroyed");
     expect(sandbox.events).toContain("destroyMarked");
   });
 });
@@ -353,7 +355,7 @@ describe("SandboxV1 marker gate", () => {
     expect(await sandbox.runMarked(attemptMarker(ATTEMPT_A), shellCommand("cat result.json"))).toEqual({
       kind: "unknown",
     });
-    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A))).toBe("unknown");
+    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A), RETAINED)).toBe("unknown");
 
     expect(container.startCalls).toBe(0);
     expect(container.ran).toEqual([]);
@@ -368,7 +370,7 @@ describe("SandboxV1 marker gate", () => {
     expect(await sandbox.runMarked(attemptMarker(ATTEMPT_A), shellCommand("cat result.json"))).toEqual({
       kind: "unknown",
     });
-    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A))).toBe("unknown");
+    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A), RETAINED)).toBe("unknown");
 
     expect(container.ran).toEqual([]);
     expect(container.destroyed).toBe(false);
@@ -385,7 +387,7 @@ describe("SandboxV1 marker gate", () => {
     container.marker = null;
 
     expect(await sandbox.runMarked(marker, shellCommand("cat result.json"))).toEqual({ kind: "unknown" });
-    expect(await sandbox.destroyMarked(marker)).toBe("unknown");
+    expect(await sandbox.destroyMarked(marker, RETAINED)).toBe("unknown");
     expect(container.ran).toEqual([]);
     expect(container.destroyed).toBe(false);
   });
@@ -424,7 +426,7 @@ describe("SandboxV1 marker gate", () => {
     expect(replacement.ran).toEqual([]);
 
     ctx.container = original;
-    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A))).toBe("destroyed");
+    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A), RETAINED)).toBe("destroyed");
     expect(original.destroyed).toBe(true);
     expect(replacement.destroyed).toBe(false);
   });
@@ -452,7 +454,7 @@ describe("SandboxV1 marker gate", () => {
     expect(container.ran).toEqual(["slow-read", "later"]);
   });
 
-  test("a long paid run does not prevent a teardown from acquiring the lock", async () => {
+  test("a pending paid run refuses destruction, even with a retention proof", async () => {
     const container = makeContainer(true);
     const sandbox = makeDo(container);
     const marker = attemptMarker(ATTEMPT_A);
@@ -462,14 +464,33 @@ describe("SandboxV1 marker gate", () => {
 
     const paidRun = sandbox.runCommand(shellCommand("slow"));
     await Bun.sleep(0);
-    // The run is in flight and holds no lock: the teardown proves and destroys
-    // now instead of waiting for the execution to settle.
-    const teardown = sandbox.destroyMarked(marker);
-    expect(await teardown).toBe("destroyed");
-    expect(container.destroyed).toBe(true);
+
+    // The paid command is in flight: a caller that timed out or lost the reply
+    // must not take the container (and its only result) down.
+    expect(await sandbox.destroyMarked(marker, RETAINED)).toBe("unknown");
+    expect(container.destroyed).toBe(false);
 
     resolve();
     expect(await paidRun).toEqual({ stdout: "ran", stderr: "", exitCode: 0 });
+    // Once the run settled, retention is the caller's call again.
+    expect(await sandbox.destroyMarked(marker, RETAINED)).toBe("destroyed");
+    expect(container.destroyed).toBe(true);
+  });
+
+  test("without a retention proof nothing is destroyed", async () => {
+    const container = makeContainer(true);
+    const sandbox = makeDo(container);
+    const marker = attemptMarker(ATTEMPT_A);
+    container.marker = marker;
+
+    expect(await sandbox.destroyMarked(marker, undefined as never)).toBe("unknown");
+    expect(await sandbox.destroyMarked(marker, { kind: "retained", evidence: "" })).toBe("unknown");
+    expect(container.destroyed).toBe(false);
+    expect(container.markerReads).toBe(0);
+
+    // A run that never reached the paid call is destroyable with its own proof.
+    expect(await sandbox.destroyMarked(marker, { kind: "no-paid-work" })).toBe("destroyed");
+    expect(container.destroyed).toBe(true);
   });
 
   test("the prepared incarnation allows collect-then-destroy", async () => {
@@ -486,7 +507,7 @@ describe("SandboxV1 marker gate", () => {
     });
     expect(container.ran).toEqual(["cat result.json"]);
 
-    expect(await sandbox.destroyMarked(marker)).toBe("destroyed");
+    expect(await sandbox.destroyMarked(marker, RETAINED)).toBe("destroyed");
     expect(container.destroyed).toBe(true);
   });
 });
