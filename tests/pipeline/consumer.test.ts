@@ -9152,9 +9152,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a reviewed payload head acks even when the checkout moved on", async () => {
     // The delivery names SHA, which was reviewed; the clone holds SHA2 — a
     // newer commit nothing has reviewed yet. The duplicate ACKS rather than
-    // reviewing the newer commit under the stale delivery: the commit that
-    // advanced the PR has its own delivery (the supersede skip's own rule), so
-    // neither head is claimed and no container starts.
+    // reviewing the newer commit under the stale delivery: that newer head is
+    // reviewed only when its own delivery arrives, and nothing here creates
+    // one. Neither head is claimed and no container starts.
     const db = await createSeededTestD1();
     h.sandbox.resolvedSha = SHA2;
     await createArtifactStore(db).put({
@@ -9179,14 +9179,49 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
   });
 
+  test("check lifecycle: a confirmed publication for the checkout head acks without a claim", async () => {
+    // The payload names SHA (never reviewed, no journal row); the clone holds
+    // SHA2, whose publication is already confirmed while its `reviews`
+    // projection has not landed. A published head is as final as a reviewed
+    // one, so the checkout-keyed gate hands off to recovery: no claim for
+    // SHA2 and no paid work.
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    seedJournalRow(db, SHA2, "confirmed");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+
+    // The container ran — the early gate keys the payload sha, which has no
+    // journal row...
+    expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+    ]);
+    // ...and SHA2 is never claimed: only the payload's contradicted claim
+    // remains, frozen `superseded` for the recovery cron.
+    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(h.logLines.some((line) => line.msg.includes("publication journal hit"))).toBe(true);
+  });
+
   test("check lifecycle: a publication journal handoff links its publication and releases the admitted claim without concluding", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Recovery already owns a publication for the delivered head.
-    seedJournalRow(db, SHA, "prepared");
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      // Recovery already owns a publication for the delivered head. It lands
+      // AFTER the pre-claim gate (which would ack it with no claim), so the
+      // admission claim is the one the hand-off must link and release.
+      getSandbox: async () => {
+        seedJournalRow(db, SHA, "prepared");
+        return h.fakeSandbox;
+      },
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
@@ -9226,10 +9261,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const db = await createSeededTestD1();
     // The journal row the delivery finds already carries the envelope that
     // applies on it (one row per scope/head/kind, reused across generations).
-    seedJournalRow(db, SHA, "prepared", JSON.stringify({ artifact: { payload: GATED_OUTPUT } }));
+    // It lands after the pre-claim gate, so the admission claim exists to link.
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      getSandbox: async () => {
+        seedJournalRow(db, SHA, "prepared", JSON.stringify({ artifact: { payload: GATED_OUTPUT } }));
+        return h.fakeSandbox;
+      },
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
@@ -9284,10 +9323,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: an unproven journal handoff defers, and the deadline closes it as failure", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    seedJournalRow(db, SHA, "prepared");
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      // The row lands after the pre-claim gate, so the claim exists to link.
+      getSandbox: async () => {
+        seedJournalRow(db, SHA, "prepared");
+        return h.fakeSandbox;
+      },
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
@@ -9337,10 +9380,15 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a journal hand-off whose lease is no longer ours refuses both writes and keeps the row's owner", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    seedJournalRow(db, SHA, "prepared");
     const real = lifecycleFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      // The row lands after the pre-claim gate, so the (bumped-lease) claim
+      // exists and both hand-off writes have something to refuse.
+      getSandbox: async () => {
+        seedJournalRow(db, SHA, "prepared");
+        return h.fakeSandbox;
+      },
       checks: {
         // The row is claimed for real, but the handle carries a bumped epoch:
         // the stored fence no longer recognises it, which is exactly the stale
@@ -9381,7 +9429,6 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a refused claim release after a linked publication keeps the row's owner and the link", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    seedJournalRow(db, SHA, "prepared");
     const real = lifecycleFor(db);
     // Write 2 (the release) answers `false` without touching the store; the
     // link is the real write.
@@ -9391,6 +9438,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       logArmingOnJournalHandoff(fault.arm),
       {
         ...h.overrides,
+        // The row lands after the pre-claim gate, so the admission claim is
+        // the one the hand-off links and releases.
+        getSandbox: async () => {
+          seedJournalRow(db, SHA, "prepared");
+          return h.fakeSandbox;
+        },
         checks: {
           begin: (input) => real.begin(input),
           terminalize: (input) => real.terminalize(input),
@@ -9421,7 +9474,6 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a store fault during the journal hand-off is classified as a hand-off failure", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    seedJournalRow(db, SHA, "prepared");
     const real = lifecycleFor(db);
     const fault = journalHandoffFault(db, 1, "throw");
     const consumer = createReviewConsumer(
@@ -9429,6 +9481,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       logArmingOnJournalHandoff(fault.arm),
       {
         ...h.overrides,
+        // The row lands after the pre-claim gate, so the admission claim is
+        // the one whose link faults.
+        getSandbox: async () => {
+          seedJournalRow(db, SHA, "prepared");
+          return h.fakeSandbox;
+        },
         checks: {
           begin: (input) => real.begin(input),
           terminalize: (input) => real.terminalize(input),

@@ -4,8 +4,9 @@
  * Flow (compass S7): message → resolve the App's sandbox
  * image (the stored review_bots.sandbox_image_id through the closed
  * registry — unknown/disabled ids fail closed BEFORE the guard/sandbox) →
- * dedup the delivery's OWN head (payload sha or PR watermark; hit → ack with
- * no Check claim and no container) → getSandbox (unique id per attempt) →
+ * dedup the delivery's OWN head (payload sha or PR watermark; reviewed or
+ * already published → ack with no Check claim and no container) → getSandbox
+ * (unique id per attempt) →
  * clone the PR head branch (git
  * transport auth via scoped extraheader env) → `git rev-parse HEAD` for the
  * AUTHORITATIVE sha →
@@ -67,10 +68,13 @@
  * mention carries — and only short-circuits a head this lane already
  * reviewed: that duplicate creates no Check attempt and no container. It is
  * a fast path, not the dedup authority: the checkout-keyed read below still
- * decides what the live clone holds — and the clone's head is claimed only
- * after that read — so a force-push after delivery is caught there. A
- * duplicate whose own head was reviewed while the PR has since advanced acks
- * here — the newer commit owns its own delivery.
+ * decides what the live clone holds — so a force-push after delivery is
+ * caught there, and the clone's head is claimed only on a dedup AND journal
+ * miss. A duplicate whose own head was reviewed while the PR has since
+ * advanced acks here: that newer head is reviewed only when its own delivery
+ * arrives, and nothing here creates one. An already-published head is as
+ * final as an already-reviewed one — a live journal row hands off to recovery
+ * with no claim and no paid work.
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
@@ -5021,6 +5025,27 @@ async function processMessage(
           await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
           return { kind: "ok" };
         }
+        // An already-PUBLISHED head is as final as an already-REVIEWED one: a
+        // live journal row hands off to recovery here exactly as the
+        // checkout-keyed gate below does — no claim, no paid work. An
+        // unreadable read is a miss (that gate is the authoritative one).
+        let earlyJournal: { id: string; phase: PublicationRow["phase"] } | null = null;
+        try {
+          earlyJournal = await journalHandoffRow(deps.env.DB, lifecycleScope, earlyHeadSha);
+        } catch (err) {
+          deps.log.warn(
+            earlyFields,
+            `early publication journal read failed — continuing to the checkout-keyed path: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        if (earlyJournal !== null) {
+          deps.log.info(
+            earlyFields,
+            `publication journal hit (phase ${earlyJournal.phase}, id ${earlyJournal.id}) — handing off to recovery, ack without a second paid review`,
+          );
+          await settleSkippedRow(deps, payload, payload.head_sha, "a publication for this head already exists");
+          return { kind: "ok" };
+        }
         checkClaimAttempted = true;
         checkHandle = await beginCheck(lifecycleScope, githubAppId, earlyHeadSha);
       }
@@ -5176,12 +5201,6 @@ async function processMessage(
       await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
       return { kind: "ok" };
     }
-    // §7.7 step 4: claim the CHECKED-OUT head — only now, on a dedup miss. The
-    // admission claim named the payload sha (or the watermark), which this
-    // checkout just disproved; a head already reviewed never reaches here.
-    if (supersededClaimReleased) {
-      checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
-    }
     // §7.7 step 2 (second half) — the publication journal: an existing
     // prepared/sending/unknown/confirmed row for this exact scope/SHA hands
     // off to recovery and ACKs without another paid review. Pending recovery
@@ -5261,6 +5280,13 @@ async function processMessage(
         await settleSkippedRow(deps, payload, payload.head_sha, "a publication for this head already exists");
       }
       return { kind: "ok" };
+    }
+    // §7.7 step 4: claim the CHECKED-OUT head — only on a dedup AND journal
+    // miss. The admission claim named the payload sha (or the watermark), which
+    // this checkout just disproved; a head already reviewed or already
+    // published never reaches here.
+    if (supersededClaimReleased) {
+      checkHandle = await beginCheck(lifecycleScope, githubAppId, headSha);
     }
 
     // 4b. Usage ledger (migration 0031): one row per STARTED execution. Both
