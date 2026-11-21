@@ -415,21 +415,25 @@ describe("a refused Check adoption", () => {
 
     expect(await publishAttempt(publishing.deps, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
 
-    // Nothing was cached, nothing was stolen, and the obligation is on the row.
+    // Nothing was cached, nothing was touched on the Check row, and the
+    // obligation is recorded on the ATTEMPT row instead.
     expect(begun).toBe(1);
     expect(publishing.deps.checkSettlements.size).toBe(0);
-    const row = db.raw
-      .prepare("SELECT holder, terminal_ms, next_attempt_ms, last_error FROM review_checks WHERE holder = ?")
+    const check = db.raw
+      .prepare("SELECT holder, terminal_ms, next_attempt_ms FROM review_checks WHERE holder = ?")
       .get("consumer:original") as {
       holder: string | null;
       terminal_ms: number | null;
       next_attempt_ms: number | null;
-      last_error: string | null;
     };
-    expect(row.holder).toBe("consumer:original");
-    expect(row.terminal_ms).toBeNull();
-    expect(row.last_error).toContain("not adopted");
-    expect(row.next_attempt_ms).toBeGreaterThan(0);
+    expect(check.holder).toBe("consumer:original");
+    expect(check.terminal_ms).toBeNull();
+    expect(check.next_attempt_ms).toBeNull();
+    const launch = db.raw
+      .prepare("SELECT check_owed_ms, result_outcome FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { check_owed_ms: number | null; result_outcome: string | null };
+    expect(launch.check_owed_ms).toBeGreaterThan(0);
+    expect(launch.result_outcome).toBe("persisted");
     // The publication is the proof the recovery lane concludes from.
     const published = await readPublication(db as never, collected.collected.publicationId);
     expect(published?.proof).not.toBeNull();

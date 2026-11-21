@@ -40,7 +40,7 @@ import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../rev
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { type D1ArtifactStore } from "../store/artifact-store";
-import { QUEUE_MAX_ATTEMPTS, hasFailureRowSince, type FailureStage, type FailureStore } from "../store/failure-store";
+import { QUEUE_MAX_ATTEMPTS, type FailureStage, type FailureStore } from "../store/failure-store";
 import {
   hasUsageEventForExecutionToken,
   recordUsageEvent,
@@ -57,7 +57,6 @@ import {
   CHECK_BACKOFF_MS,
   deferCheckRecovery,
   linkCheckPublication,
-  noteCheckRecoveryOwed,
   recordTerminalizeOutcome,
 } from "../store/review-checks";
 import {
@@ -109,6 +108,8 @@ import {
   parseBoundedRead,
   prepareReviewAttempt,
   readReviewLaunch,
+  recordReviewFailure,
+  noteCheckOwed,
   runReviewAttempt,
   AttemptUnknownError,
   discardReviewAttempt,
@@ -3034,24 +3035,17 @@ async function settlementFor(
   if (handle === null) {
     // No adoption: a live holder owns the row (the real lifecycle refuses to
     // take it) or nothing was adoptable. Cache NOTHING — a settlement without
-    // a handle is worse than none — and put the obligation on the row that
-    // outlives this invocation: the note is non-stealing (no holder, lease,
-    // desired or intent), so the owner's own conclusion still wins, and the
-    // recovery lane is due as soon as it is released. The publication's own
-    // confirmed proof is what that lane reads.
-    const owed = await noteCheckRecoveryOwed(deps.env.DB, {
-      scope,
-      headSha,
-      triggeredBy: ref.payload.triggered_by,
-      action: ref.payload.action,
-      reason: "settlement not adopted on a resumed step",
-      nextAttemptMs: Date.now(),
-    });
+    // a handle is worse than none — and record the obligation on the ATTEMPT
+    // row, never on the Check row: that row's lease, suspension and error
+    // fields belong to its own owner. One conditional write on the row that
+    // outlives this invocation, and the recovery lane is due once the holder
+    // releases.
+    const owed = await noteCheckOwed(deps.env.DB, ref.attemptId, Date.now());
     deps.log.warn(
       { ...settlement.fields, event: "check_settlement_not_adopted", check_recovery_owed: owed },
       owed
-        ? "check settlement not adopted on a resumed step — the recovery lane now owns the conclusion"
-        : "check settlement not adopted on a resumed step — no live check row to hand over",
+        ? "check settlement not adopted on a resumed step — the attempt row now carries the obligation"
+        : "check settlement not adopted on a resumed step — no attempt row to hand over",
     );
     return undefined;
   }
@@ -3095,6 +3089,16 @@ function attemptFields(
           }),
         }),
   };
+}
+
+/**
+ * Whether the paid step's outcome is KNOWN, as the failing phase observed it:
+ * the call never started, or it returned a status. A started call whose return
+ * was never observed is not a known outcome — the row then records nothing and
+ * cleanup holds the container, because the child may still be running.
+ */
+function paidOutcomeKnown(facts: FailureFacts | undefined): boolean {
+  return facts !== undefined && (facts.runnerStartedAt === undefined || facts.runnerReturned);
 }
 
 /** A phase failure carrying the facts as data, with the cause intact. */
@@ -5389,6 +5393,13 @@ export async function settleAttemptFailure(
       });
       // Confirmed by the await above: only a write that RESOLVED is durable.
       durableOutcome = true;
+      // The row records ITS OWN terminal outcome — one conditional statement on
+      // the row that fences the launch. Only a RETURNED paid call qualifies (a
+      // rejected exec is not evidence the child stopped), so an ambiguous
+      // attempt records nothing and a resumed cleanup still holds the container.
+      if (paidOutcomeKnown(facts)) {
+        await recordReviewFailure(deps.env.DB, attemptId);
+      }
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
       deps.log.warn(
@@ -5500,9 +5511,12 @@ export async function settleAttemptFailure(
       stage: progress.failureStage,
       error: redactExactSecrets(redactSecrets(persistedDetail), progress.secretValues),
     });
-    // Confirmed by the await above: a resolved write is the attempt.s durable
+    // Confirmed by the await above: a resolved write is the attempt's durable
     // terminal no-result outcome. A rejection leaves the latch false.
     durableOutcome = true;
+    if (paidOutcomeKnown(facts)) {
+      await recordReviewFailure(deps.env.DB, attemptId);
+    }
   } catch (recordErr) {
     const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
     deps.log.warn(
@@ -5603,31 +5617,21 @@ export async function cleanupAttempt(
   const sandboxId = attemptSandboxId(attemptId);
   const fields = attemptFields(payload, ref.level, attemptId, input.headSha ?? null);
   const baseFields: ConsumerLogFields | undefined = undefined;
-  // The retention proof is DERIVED FROM DURABLE RECORDS, never from a
-  // phase-local value and never from the launch row alone:
-  //   no row / pending              → the paid call never started
-  //   persisted                     → it returned WITH its result retained
-  //   launched + a failure row that wrote → a terminal no-result outcome
-  //   launched + nothing            → unknown: hold the container and the row
-  // Holding a *confirmed* failure to the TTL would burn the guard's retry
-  // budget (2,400 s of backoff against a 2,412 s TTL), so the last delivery
-  // would be acked as a duplicate and the review would never run.
+  // Retention reads the ATTEMPT ROW and nothing else: its `result_outcome` is
+  // the only record that can be attributed to this attempt (a failure row
+  // matched by PR and time can belong to another attempt, or be a usage /
+  // recheck / rate-limit row).
+  //   no row / pending          → the paid call never started
+  //   outcome persisted|failed   → terminal: the result is durable, or the
+  //                                no-result outcome is
+  //   launched, no outcome       → unknown: hold container and capacity
   const launch = await readReviewLaunch(deps.env.DB, attemptId);
-  let retention: RetentionProof | undefined;
-  if (launch === null || launch.state === "pending") {
-    retention = { kind: "no-paid-work" };
-  } else if (launch.state === "persisted") {
-    retention = { kind: "retained" };
-  } else {
-    const wrote = await hasFailureRowSince(deps.env.DB, {
-      installation_id: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      pr_number: payload.pr_number,
-      sinceMs: launch.launchedAtMs,
-    });
-    retention = wrote ? { kind: "retained" } : undefined;
-  }
+  const retention: RetentionProof | undefined =
+    launch === null || launch.state === "pending"
+      ? { kind: "no-paid-work" }
+      : launch.outcome === "persisted" || launch.outcome === "failed"
+        ? { kind: "retained" }
+        : undefined;
   let containerUnproven = retention === undefined || input.unproven === true;
   // Destroy FIRST, then release the admission row. Releasing first would let
   // the next attempt for this PR acquire the slot and start its container

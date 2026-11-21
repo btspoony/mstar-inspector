@@ -251,45 +251,6 @@ FROM review_failures
 WHERE created_at > datetime('now', '-24 hours')
   AND error LIKE ?`;
 
-/**
- * Did a failure row for this PR WRITE at or after `sinceMs`? The caller passes
- * the attempt's own launch instant, so the row it finds is one this attempt's
- * paid phase wrote — deliveries for one PR are serialized by the admission row,
- * so no other attempt can be inside that window. Read-only and standalone: the
- * `FailureStore` contract stays append+read, and its fakes are untouched.
- *
- * A failure row that actually wrote IS a terminal outcome (the plan's "the paid
- * call returned a status and that outcome is durably retained"), which is what
- * lets cleanup release a container instead of holding it to the TTL.
- */
-export async function hasFailureRowSince(
-  db: D1Like,
-  input: {
-    installation_id: number;
-    owner: string;
-    repo: string;
-    pr_number: number;
-    sinceMs: number;
-  },
-): Promise<boolean> {
-  const row = await db
-    .prepare(
-      `SELECT 1 AS written FROM review_failures
-       WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-         AND datetime(created_at) >= datetime(?)
-       LIMIT 1`,
-    )
-    .bind(
-      input.installation_id,
-      input.owner,
-      input.repo,
-      input.pr_number,
-      new Date(input.sinceMs).toISOString(),
-    )
-    .first<{ written: number }>();
-  return row !== null;
-}
-
 /** Create the failure store over one D1 handle. */
 export function createFailureStore(db: D1Like): FailureStoreWithCounts {
   return {

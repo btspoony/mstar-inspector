@@ -148,12 +148,36 @@ WHERE attempt_id = ? AND state = 'pending'
 
 const COMPLETE_LAUNCH_SQL = `
 UPDATE review_launches
-SET state = 'persisted', persisted_at_ms = ?, result_json = ?
+SET state = 'persisted', persisted_at_ms = ?, result_json = ?, result_outcome = 'persisted'
 WHERE attempt_id = ? AND state = 'launched'
 `;
 
+/**
+ * The attempt's terminal NO-RESULT outcome, as one conditional statement on the
+ * row that fences the launch: only a `launched` row without an outcome moves to
+ * `failed`, so a replay, a duplicate settle or a pre-launch failure changes
+ * nothing. `meta.changes` is the success signal — retention reads the column.
+ */
+const RECORD_LAUNCH_FAILURE_SQL = `
+UPDATE review_launches
+SET result_outcome = 'failed'
+WHERE attempt_id = ? AND state = 'launched' AND result_outcome IS NULL
+`;
+
+/**
+ * The attempt's owed Check settlement, recorded on the ATTEMPT row and nowhere
+ * else: the Check row's lease, suspension and error fields belong to its own
+ * owner, and an opportunistic note must not disturb them. One conditional
+ * statement, idempotent (the first stamp wins).
+ */
+const NOTE_CHECK_OWED_SQL = `
+UPDATE review_launches
+SET check_owed_ms = ?
+WHERE attempt_id = ? AND check_owed_ms IS NULL
+`;
+
 const READ_LAUNCH_SQL = `
-SELECT state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json
+SELECT state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome, check_owed_ms
 FROM review_launches
 WHERE attempt_id = ?
 `;
@@ -164,18 +188,34 @@ type LaunchRow = {
   launched_at_ms: number | null;
   persisted_at_ms: number | null;
   result_json: string | null;
+  result_outcome: string | null;
+  check_owed_ms: number | null;
 };
+
+/**
+ * The attempt's TERMINAL outcome as its own row records it — the only authority
+ * retention reads. `null` means no outcome is durable yet, whatever the state.
+ */
+export type ReviewLaunchOutcome = "persisted" | "failed";
 
 /** Where one attempt is in the paid-step machine, as the row records it. */
 export type ReviewLaunchState =
-  | { state: "pending"; claimedAtMs: number }
-  | { state: "launched"; claimedAtMs: number; launchedAtMs: number }
+  | { state: "pending"; claimedAtMs: number; outcome: null; checkOwedMs: number | null }
+  | {
+      state: "launched";
+      claimedAtMs: number;
+      launchedAtMs: number;
+      outcome: ReviewLaunchOutcome | null;
+      checkOwedMs: number | null;
+    }
   | {
       state: "persisted";
       claimedAtMs: number;
       launchedAtMs: number;
       persistedAtMs: number;
       execution: ReviewAttemptExecution;
+      outcome: "persisted";
+      checkOwedMs: number | null;
     };
 
 /**
@@ -247,13 +287,64 @@ export async function completeReviewLaunch(
   return written.meta.changes === 1;
 }
 
+/**
+ * Record the attempt's terminal NO-RESULT outcome on its own row, as ONE
+ * conditional statement. Called only after a failure row for THIS attempt
+ * actually wrote AND the paid call returned a status — an ambiguous exec records
+ * nothing, so a resumed cleanup still holds the container.
+ */
+export async function recordReviewFailure(db: D1Like, attemptId: string): Promise<boolean> {
+  const written = await db.prepare(RECORD_LAUNCH_FAILURE_SQL).bind(attemptId).run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * Record that this attempt's Check settlement is still owed, on the attempt row
+ * (see NOTE_CHECK_OWED_SQL). Idempotent; `false` means the row is gone or the
+ * obligation was already stamped.
+ */
+export async function noteCheckOwed(db: D1Like, attemptId: string, nowMs: number): Promise<boolean> {
+  const written = await db.prepare(NOTE_CHECK_OWED_SQL).bind(nowMs, attemptId).run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * The attempts whose Check settlement is still owed, oldest first — the durable
+ * handoff the recovery lane reads. It grants nothing on the Check row: the
+ * obligation lives on the attempt row, and the lane decides from that row plus
+ * the Check's own lease state.
+ */
+export async function listCheckOwed(
+  db: D1Like,
+  limit: number,
+): Promise<Array<{ attemptId: string; owedMs: number }>> {
+  const { results } = await db
+    .prepare(
+      `SELECT attempt_id, check_owed_ms FROM review_launches
+       WHERE check_owed_ms IS NOT NULL
+       ORDER BY check_owed_ms, attempt_id LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{ attempt_id: string; check_owed_ms: number }>();
+  return results.map((row) => ({ attemptId: row.attempt_id, owedMs: row.check_owed_ms }));
+}
+
 /** The attempt's launch row, or null when it never prepared. */
 export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<ReviewLaunchState | null> {
   const row = await db.prepare(READ_LAUNCH_SQL).bind(attemptId).first<LaunchRow>();
   if (row === null) return null;
-  if (row.state === "pending") return { state: "pending", claimedAtMs: row.claimed_at_ms };
+  const outcome = row.result_outcome === "persisted" || row.result_outcome === "failed" ? row.result_outcome : null;
+  if (row.state === "pending") {
+    return { state: "pending", claimedAtMs: row.claimed_at_ms, outcome: null, checkOwedMs: row.check_owed_ms };
+  }
   if (row.state === "launched" && row.launched_at_ms !== null) {
-    return { state: "launched", claimedAtMs: row.claimed_at_ms, launchedAtMs: row.launched_at_ms };
+    return {
+      state: "launched",
+      claimedAtMs: row.claimed_at_ms,
+      launchedAtMs: row.launched_at_ms,
+      outcome,
+      checkOwedMs: row.check_owed_ms,
+    };
   }
   if (
     row.state === "persisted" &&
@@ -267,6 +358,8 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
       launchedAtMs: row.launched_at_ms,
       persistedAtMs: row.persisted_at_ms,
       execution: decodeExecution(attemptId, row.result_json),
+      outcome: "persisted",
+      checkOwedMs: row.check_owed_ms,
     };
   }
   // The schema's CHECKs make an inconsistent row unreachable; reading it as "no
