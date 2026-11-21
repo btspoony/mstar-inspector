@@ -793,6 +793,27 @@ export async function readCheckIdentity(
   return row === null ? null : { key: row.attempt_key, generation: row.generation };
 }
 
+/**
+ * The open Check identity for an attempt KEY: its generation, read once at
+ * freeze time when the settlement holds no handle (a refused claim). The key is
+ * the attempt's own, so this names the attempt's row — it is not the "newest
+ * open generation" guess the owed mark must never make.
+ */
+export async function readOpenCheckIdentityForKey(
+  db: D1Like,
+  key: string,
+): Promise<{ key: string; generation: number } | null> {
+  const row = await db
+    .prepare(
+      `SELECT generation FROM review_checks
+        WHERE attempt_key = ? AND terminal_ms IS NULL
+        ORDER BY generation DESC LIMIT 1`,
+    )
+    .bind(key)
+    .first<{ generation: number }>();
+  return row === null ? null : { key, generation: row.generation };
+}
+
 export async function getCheckAttempt(db: D1Like, id: string): Promise<CheckAttempt | null> {
   const row = await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(id).first<ReviewCheckRow>();
   return row === null ? null : attemptOf(row);

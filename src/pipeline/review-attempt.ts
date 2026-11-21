@@ -1738,7 +1738,12 @@ export async function prepareReviewAttempt(input: {
             input.identity.key,
           );
         }
-      } else if (existing.key !== input.identity.key) {
+      } else if (
+        existing.key !== input.identity.key ||
+        existing.generation !== input.identity.generation
+      ) {
+        // WHOLE identity: the same pair is our own and proceeds; anything else
+        // is a foreign freeze.
         throw new MovedHeadError(attemptId, existing.key, input.identity.key);
       }
     }

@@ -475,6 +475,109 @@ describe("the owed Check mark", () => {
     expect(row.attempt_key).toBe("rival-head-key");
   });
 
+  test("a moved head records NO failure row and settles as skipped", async () => {
+    const { db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    const ref = makeRef(payload);
+    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), { key: "rival-head-key", generation: 1 });
+    const { deps } = await makeDeps({ db });
+    const { handle } = await seedOwnedCheck(db);
+    deps.checks = { begin: async () => handle, terminalize: async () => {} };
+
+    // The whole route runs: a moved head ACKS (skip) — no failure row, no
+    // pre-publication settlement, no retry.
+    const outcome = await runAdmittedReviewAttempt({ deps, ref });
+    expect(outcome).toEqual({ kind: "ok" });
+    const failures = db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get() as { n: number };
+    expect(failures.n).toBe(0);
+    const row = db.raw
+      .prepare("SELECT attempt_key, state FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { attempt_key: string; state: string };
+    expect(row.attempt_key).toBe("rival-head-key");
+    // Nothing was launched on our identity.
+    expect(row.state).not.toBe("launched");
+  });
+
+  test("a same-identity freeze proceeds rather than skipping", async () => {
+    const { db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    const ref = makeRef(payload);
+    // The identity this attempt will freeze is ALREADY there, identical.
+    const { row, handle } = await seedOwnedCheck(db);
+    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), {
+      key: row.attempt_key,
+      generation: row.generation,
+    });
+    const { deps } = await makeDeps({ db });
+    deps.checks = { begin: async () => handle, terminalize: async () => {} };
+
+    const step = await prepareAttempt(deps, ref);
+    expect(step.kind).toBe("prepared");
+    const frozen = db.raw
+      .prepare("SELECT attempt_key, attempt_generation FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { attempt_key: string; attempt_generation: number };
+    expect(frozen).toEqual({ attempt_key: row.attempt_key, attempt_generation: row.generation });
+  });
+
+  test("a refused initial claim still freezes the identity the publication owes against", async () => {
+    const { db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The admitted claim is refused (another holder owns the row), so no handle
+    // exists — the identity is still the admitted claim's own row.
+    const ref = { ...makeRef(payload), checkClaimSha: SHA };
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: "consumer:original",
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error("seed failed");
+    const held = db.raw
+      .prepare("SELECT id, generation, attempt_key FROM review_checks WHERE id = ?")
+      .get(claimed.attempt.identity.attemptId) as { id: string; generation: number; attempt_key: string };
+
+    const preparing = await makeDeps({ db });
+    preparing.deps.checks = { begin: async () => null, terminalize: async () => {} };
+    const step = await prepareAttempt(preparing.deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const frozen = db.raw
+      .prepare("SELECT attempt_key, attempt_generation FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { attempt_key: string; attempt_generation: number };
+    expect(frozen).toEqual({ attempt_key: held.attempt_key, attempt_generation: held.generation });
+
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
+    expect(await publishAttempt(publishing.deps, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+
+    const launch = db.raw
+      .prepare("SELECT check_owed_ms, check_key, check_generation FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as {
+      check_owed_ms: number | null;
+      check_key: string | null;
+      check_generation: number | null;
+    };
+    expect(launch.check_key).toBe(held.attempt_key);
+    expect(launch.check_generation).toBe(held.generation);
+    expect(launch.check_owed_ms).not.toBeNull();
+  });
+
   test("a handle-less publisher still records the obligation, from the frozen identity", async () => {
     const { db } = await makeDeps();
     const payload = makePayload();

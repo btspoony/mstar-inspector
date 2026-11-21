@@ -58,6 +58,7 @@ import {
   attemptKey,
   deferCheckRecovery,
   readCheckIdentity,
+  readOpenCheckIdentityForKey,
   linkCheckPublication,
   recordTerminalizeOutcome,
 } from "../store/review-checks";
@@ -4196,25 +4197,33 @@ async function preparePhase(
   // admitted one, or the authoritative re-claim the checkout forced). Every
   // later phase reads it from the row; a concurrent freeze of a DIFFERENT head
   // wins the CAS and this attempt settles as skipped instead of continuing.
-  if (check.handle !== null) {
-    const liveIdentity = await readCheckIdentity(deps.env.DB, check.handle.attemptId);
-    if (liveIdentity !== null) {
-      const frozenNow = await readAttemptIdentity(deps.env.DB, attemptId);
-      if (frozenNow === null) {
-        if (!(await freezeAttemptIdentity(deps.env.DB, attemptId, liveIdentity))) {
-          const winner = await readAttemptIdentity(deps.env.DB, attemptId);
-          await settleMovedHead(
-            deps,
-            ref,
-            check,
-            headSha,
-            winner?.key ?? "another caller's head",
-            liveIdentity.key,
-          );
-        }
-      } else if (frozenNow.key !== liveIdentity.key) {
-        await settleMovedHead(deps, ref, check, headSha, frozenNow.key, liveIdentity.key);
+  const admittedKey = ref.checkClaimSha === null ? null : checkKeyOf(payload, ref.checkClaimSha);
+  const liveIdentity =
+    check.handle !== null
+      ? await readCheckIdentity(deps.env.DB, check.handle.attemptId)
+      : // No handle (a refused claim): the identity is still the admitted claim's
+        // open row for that key — a property of the ATTEMPT, not of the handle.
+        admittedKey === null
+        ? null
+        : await readOpenCheckIdentityForKey(deps.env.DB, admittedKey);
+  if (liveIdentity !== null) {
+    const frozenNow = await readAttemptIdentity(deps.env.DB, attemptId);
+    if (frozenNow === null) {
+      if (!(await freezeAttemptIdentity(deps.env.DB, attemptId, liveIdentity))) {
+        const winner = await readAttemptIdentity(deps.env.DB, attemptId);
+        await settleMovedHead(
+          deps,
+          ref,
+          check,
+          headSha,
+          winner?.key ?? "another caller's head",
+          liveIdentity.key,
+        );
       }
+    } else if (frozenNow.key !== liveIdentity.key || frozenNow.generation !== liveIdentity.generation) {
+      // WHOLE identity: an identical (key, generation) pair is our own and
+      // proceeds; anything else is a foreign freeze and skips.
+      await settleMovedHead(deps, ref, check, headSha, frozenNow.key, liveIdentity.key);
     }
   }
 
@@ -5419,10 +5428,11 @@ export async function settleAttemptFailure(
   const failure = thrown instanceof AttemptPhaseError ? thrown : undefined;
   const facts = failure?.facts;
   const err = failure?.cause ?? thrown;
-  // A moved head is a SKIP that starts a new attempt, not a failure: the
-  // attempt already settled its Check as skipped and wrote its skip row, so no
-  // failure row is recorded — the throw only carries the delivery back around.
-  const movedHead = err instanceof MovedHeadError;
+  // A moved head is a SKIP, not a failure: the attempt already concluded its
+  // Check as skipped and wrote its skip row, so it acks here — no failure row,
+  // no pre-publication settlement, no retry. (Quiet instead of rethrowing: the
+  // queue's next delivery would mint a fresh attempt id and could pay twice.)
+  if (err instanceof MovedHeadError) return { kind: "ok" };
   const progress: ReviewAttemptProgress = {
     failureStage: facts?.stage ?? "pipeline",
     secretValues: facts?.secretValues ?? [],
