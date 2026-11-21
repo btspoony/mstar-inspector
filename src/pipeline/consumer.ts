@@ -1568,7 +1568,9 @@ export async function ensureRunnerConfig(
  *   idempotency key `failed` so a DLQ-bound commit stops counting as reviewed-
  *   or-pending proof.
  * @param queueSentAtMs the original Queue send stamp: the attempt deadline's
- *   origin. A redelivery of an already-frozen attempt ignores it in favour of
+ *   origin and the measured queue wait. An absent/non-finite value is NOT
+ *   replaced: the cap falls back to admission, while the report's origin stays
+ *   missing. A redelivery of an already-frozen attempt ignores it in favour of
  *   the recorded deadline.
  */
 async function processMessage(
@@ -1583,9 +1585,13 @@ async function processMessage(
   // an attempt whose Queue send stamp is unavailable.
   const roundStartedAt = Date.now();
   // The attempt's clock starts at the ORIGINAL Queue send, not here: the queue
-  // wait is charged against the cap. A send stamp after "now" (clock skew) or
-  // an absent one is the admission instant instead.
-  const enqueuedMs = Number.isFinite(queueSentAtMs) ? Math.min(queueSentAtMs, roundStartedAt) : roundStartedAt;
+  // wait is charged against the cap. The REPORT's origin stays absent when the
+  // platform supplied no stamp — an invented origin would make the measured
+  // queue wait a lie. The CAP still needs an instant, so its origin is the send
+  // stamp clamped to this instant (a future stamp is clock skew), or admission
+  // when there is none — the timing contract's documented fallback.
+  const queueSentMs = Number.isFinite(queueSentAtMs) ? queueSentAtMs : null;
+  const capOriginMs = queueSentMs === null ? roundStartedAt : Math.min(queueSentMs, roundStartedAt);
   // The delivery key and the recorded attempt id are learned inside the try, so
   // a DB fault or a legacy payload still flows through the structured failure
   // channel. A redelivery of this message finds the row its predecessor wrote
@@ -1991,7 +1997,7 @@ async function processMessage(
           warn: (readerFields, msg) =>
             deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
         }));
-      deadlineMs = (previousHandoff?.createdMs ?? enqueuedMs) + capMs;
+      deadlineMs = (previousHandoff?.createdMs ?? capOriginMs) + capMs;
     }
     // The guard row must outlive the attempt's own hard stop: an operator cap
     // can exceed the level's ceiling-derived TTL, and a guard that expired
@@ -2215,7 +2221,7 @@ async function processMessage(
       payload,
       nowMs: Date.now(),
       deadlineMs,
-      enqueuedMs,
+      enqueuedMs: queueSentMs,
     });
     if (handoff.attemptId !== attemptId) {
       // Two deliveries of the same message raced; the other one owns this

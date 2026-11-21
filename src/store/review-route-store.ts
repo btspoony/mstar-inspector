@@ -238,11 +238,12 @@ export async function reserveAttemptHandoff(
     nowMs: number;
     deadlineMs: number;
     /**
-     * The original Queue send stamp. Copied here because the queue's own
-     * timestamp is not durable: after this delivery the only record of when
-     * the attempt started waiting is this column.
+     * The original Queue send stamp, or `null` when the platform supplied none.
+     * Copied here because the queue's own timestamp is not durable: after this
+     * delivery the only record of when the attempt started waiting is this
+     * column, and an absent stamp must stay absent rather than be invented.
      */
-    enqueuedMs: number;
+    enqueuedMs: number | null;
   },
 ): Promise<AttemptHandoff> {
   await db

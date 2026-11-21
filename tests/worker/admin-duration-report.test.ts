@@ -377,7 +377,7 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
 });
 
 describe("admission records the Queue send stamp once", () => {
-  test("the first writer's enqueued_ms is kept for a redelivery", async () => {
+  test("the first writer's enqueued_ms is kept for a redelivery, and an absent stamp stays absent", async () => {
     const db = createMigratedTestD1();
     const key = "delivery-duration";
     await reserveAttemptHandoff(db as never, {
@@ -401,5 +401,17 @@ describe("admission records the Queue send stamp once", () => {
     });
     expect(replay.attemptId).toBe("attempt-1");
     expect(replay.enqueuedMs).toBe(1_234);
+
+    // No platform stamp: the row carries no origin, and the report counts it as
+    // a missing boundary instead of measuring a fabricated zero-length wait.
+    const unstamped = await reserveAttemptHandoff(db as never, {
+      deliveryKey: "delivery-duration-unstamped",
+      attemptId: "attempt-3",
+      payload: PAYLOAD,
+      nowMs: 7_000,
+      deadlineMs: 907_000,
+      enqueuedMs: null,
+    });
+    expect(unstamped.enqueuedMs).toBeNull();
   });
 });

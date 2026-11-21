@@ -132,6 +132,13 @@ function DurationReportCard({ locale }: { locale: Locale }) {
               { key: "publication", label: "admin.runtime.durationPublication", value: report.phases.publication },
             ];
             const cutoff = report.cutoff;
+            const excluded = report.excluded;
+            const excludedTotal =
+              excluded.unsettled +
+              excluded.skipped +
+              excluded.missingQueueStamp +
+              excluded.missingPhaseBoundary +
+              excluded.invalid;
             return (
               <>
                 <p className="text-sm text-muted-foreground">
@@ -139,7 +146,16 @@ function DurationReportCard({ locale }: { locale: Locale }) {
                 </p>
                 {report.sampleSize === 0 ? (
                   <p className="mt-4 text-sm font-medium" data-duration="empty">
-                    {t(locale, "admin.runtime.durationEmpty")}
+                    {excludedTotal === 0
+                      ? t(locale, "admin.runtime.durationEmpty")
+                      : t(locale, "admin.runtime.durationEmptyExcluded", {
+                          n: excludedTotal,
+                          unsettled: excluded.unsettled,
+                          skipped: excluded.skipped,
+                          missingQueue: excluded.missingQueueStamp,
+                          missingBoundary: excluded.missingPhaseBoundary,
+                          invalid: excluded.invalid,
+                        })}
                   </p>
                 ) : (
                   <>
@@ -175,17 +191,17 @@ function DurationReportCard({ locale }: { locale: Locale }) {
                     <p className="mt-1 text-xs text-muted-foreground">
                       {t(locale, "admin.runtime.durationBuckets")}
                     </p>
+                    <p className="mt-3 text-xs text-muted-foreground" data-duration="excluded">
+                      {t(locale, "admin.runtime.durationExcluded", {
+                        unsettled: excluded.unsettled,
+                        skipped: excluded.skipped,
+                        missingQueue: excluded.missingQueueStamp,
+                        missingBoundary: excluded.missingPhaseBoundary,
+                        invalid: excluded.invalid,
+                      })}
+                    </p>
                   </>
                 )}
-                <p className="mt-3 text-xs text-muted-foreground" data-duration="excluded">
-                  {t(locale, "admin.runtime.durationExcluded", {
-                    unsettled: report.excluded.unsettled,
-                    skipped: report.excluded.skipped,
-                    missingQueue: report.excluded.missingQueueStamp,
-                    missingBoundary: report.excluded.missingPhaseBoundary,
-                    invalid: report.excluded.invalid,
-                  })}
-                </p>
                 <form
                   className="mt-4 flex flex-wrap items-end gap-2"
                   onSubmit={(event) => {

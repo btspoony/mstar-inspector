@@ -349,4 +349,27 @@ describe("claim 5 — error classification carries proof", () => {
     expect(handoff?.state).toBe("created");
     expect(h.messageAckCalls).toHaveLength(1);
   });
+
+  test("an absent Queue send stamp is recorded as absent, never invented", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const batch = h.makeBatch(payload);
+    // A hand-built message carries no send stamp; the platform always does.
+    const message = batch.messages[0]!;
+    const unstamped = message as unknown as { timestamp?: Date };
+    unstamped.timestamp = undefined;
+
+    const route = recordingStarter();
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: db as never }),
+      h.testLog,
+      { ...h.overrides, startAttempt: route.startAttempt },
+    );
+    await consumer(batch);
+
+    expect(route.started).toHaveLength(1);
+    // The cap still anchors at admission; the measured queue wait does not
+    // exist, so it stays NULL and the report excludes the attempt.
+    expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.enqueuedMs).toBeNull();
+  });
 });

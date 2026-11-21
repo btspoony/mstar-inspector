@@ -1317,7 +1317,9 @@ export const zhCN: Dictionary = {
       durationTitle: "审查时长分布",
       durationDescription:
         "最近 {days} 天内被准入的尝试。百分位只统计端到端边界完整的区间，空窗口就显示为空，绝不当作 0。",
-      durationEmpty: "此窗口内没有完成任何尝试。",
+      durationEmpty: "此窗口内没有准入任何尝试。",
+      durationEmptyExcluded:
+        "此窗口内没有完成的尝试：{n} 个已准入尝试全部被排除——{unsettled} 个未结算、{skipped} 个已跳过、{missingQueue} 个缺少队列时间戳、{missingBoundary} 个缺少阶段边界、{invalid} 个边界乱序。",
       durationSample: "{n} 个完整尝试",
       durationTotal: "端到端",
       durationQueueWait: "队列等待",

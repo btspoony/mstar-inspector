@@ -128,12 +128,16 @@ const DURATION_REPORT = {
   cutoff: null,
 };
 
-async function runtimeScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+async function runtimeScreen(
+  respond: Respond,
+  locale: "en" | "zh_CN" = "en",
+  report: unknown = DURATION_REPORT,
+): Promise<Surface> {
   // The screen reads the duration report beside the runtime config; a fixture
   // answering every URL with the config would fail that one read.
   return mount(createElement(RuntimePage, { locale }), (request) =>
     request.url.startsWith("/_internal_admin/api/runtime/duration-report")
-      ? json(DURATION_REPORT)
+      ? json(report)
       : respond(request),
   );
 }
@@ -831,6 +835,40 @@ describe("Runtime screen", () => {
     // An empty queue names its own state instead of rendering an absence.
     expect(queueCells(surface).oldest).toBe("Empty");
     await surface.close();
+  });
+
+  test("a populated window renders the sample, the phase rows and the tail", async () => {
+    const report = {
+      ...DURATION_REPORT,
+      sampleSize: 4,
+      total: { p50Ms: 30_000, p90Ms: 40_000, maxMs: 50_000 },
+      phases: {
+        queueWait: { p50Ms: 1_000, p90Ms: 2_000, maxMs: 3_000 },
+        execution: { p50Ms: 20_000, p90Ms: 30_000, maxMs: 40_000 },
+        publication: { p50Ms: 8_000, p90Ms: 9_000, maxMs: 10_000 },
+      },
+    };
+    const surface = await runtimeScreen(() => json(RUNTIME), "en", report);
+    expect(surface.text()).toContain("4 complete attempts");
+    expect(surface.container.querySelector('[data-duration="queue-wait-p50"]')?.textContent).toBe("1000 ms");
+    expect(surface.container.querySelector('[data-duration="total-max"]')?.textContent).toBe("50000 ms");
+    expect(surface.text()).toContain("Every attempt's interval splits into these three phases.");
+    await surface.close();
+  });
+
+  test("an empty window says whether nothing was admitted or everything was excluded", async () => {
+    const none = await runtimeScreen(() => json(RUNTIME));
+    expect(none.text()).toContain("No attempt was admitted in this window.");
+    await none.close();
+
+    const excluded = await runtimeScreen(() => json(RUNTIME), "en", {
+      ...DURATION_REPORT,
+      excluded: { unsettled: 2, skipped: 1, missingQueueStamp: 1, missingPhaseBoundary: 0, invalid: 0 },
+    });
+    expect(excluded.text()).toContain("No attempt completed: all 4 admitted attempts were excluded");
+    expect(excluded.text()).toContain("2 unsettled");
+    expect(excluded.text()).not.toContain("No attempt was admitted in this window.");
+    await excluded.close();
   });
 
   /** The maintenance card's read cells, keyed by their `data-maintenance` field. */
