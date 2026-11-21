@@ -67,6 +67,7 @@ import {
   markAttemptSettled,
   recordSuccessorIntent,
   successorIntentOf,
+  type SettlementEffect,
 } from "../store/review-route-store";
 import {
   applyPublishedLifecycle,
@@ -5469,9 +5470,9 @@ export async function settleAttemptFailure(
    *   and requiring a KV write would let a KV fault block settlement forever.
    * A delivery with no handoff row (a direct phase caller) matches no row.
    */
-  const markSettled = async (): Promise<void> => {
+  const markSettled = async (effects: readonly SettlementEffect[], complete: boolean): Promise<void> => {
     try {
-      await markAttemptSettled(deps.env.DB, deliveryKeyOf(payload), Date.now());
+      await markAttemptSettled(deps.env.DB, deliveryKeyOf(payload), effects, complete, Date.now());
     } catch (markErr) {
       deps.log.warn(
         { ...payloadIdentityFields(payload), attempt_id: attemptId },
@@ -5484,7 +5485,10 @@ export async function settleAttemptFailure(
   // no pre-publication settlement, no retry. (Quiet instead of rethrowing: the
   // queue's next delivery would mint a fresh attempt id and could pay twice.)
   if (err instanceof MovedHeadError) {
-    await markSettled();
+    // The moved head's own settlement (skip row + Check conclusion + outbox
+    // row) ran before this settlement was called, so there is nothing left to
+    // finish and the mark can say so.
+    await markSettled(["skip"], true);
     return { kind: "ok" };
   }
   const progress: ReviewAttemptProgress = {
@@ -5643,7 +5647,10 @@ export async function settleAttemptFailure(
       }
       // The row is durable: now the Check may carry the stop's conclusion.
     await check?.terminalize(null, "budget-exhausted", undefined, budgetOutcome);
-    await markSettled();
+    // The row is durable here (the !durableOutcome case returned `unknown`
+    // above) and the Check conclusion just landed. The budget stop writes no
+    // failed-claim stamp on this route, so none is owed.
+    await markSettled(check === undefined ? ["failure-row"] : ["failure-row", "check"], true);
     return { kind: "budget-exhausted", outcome: budgetOutcome };
   }
 
@@ -5780,6 +5787,7 @@ export async function settleAttemptFailure(
   // `putAbandonClaim` never downgrades a completed review. Best-effort: a KV
   // fault only leaves "1" behind, which the failure row above traces, and it
   // never masks the rethrow.
+  let claimStampLanded = payload.head_sha === null || payload.head_sha === undefined || payload.head_sha === "";
   if (payload.head_sha) {
     try {
       await putAbandonClaim(
@@ -5794,18 +5802,28 @@ export async function settleAttemptFailure(
         IDEM_FAILED,
         IDEMPOTENCY_SECONDS,
       );
+      claimStampLanded = true;
     } catch (kvErr) {
       const kvDetail = kvErr instanceof Error ? kvErr.message : String(kvErr);
       deps.log.warn(
         fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
-        `failed-claim KV write failed (the skip may still treat this commit as queued): ${kvDetail}`,
+        `failed-claim KV write failed — the mark records the missing stamp and a replay finishes it (the skip may still treat this commit as queued): ${kvDetail}`,
       );
     }
   }
-  // Every durable effect is done; the mark now records COMPLETION, and only
-  // then does the attempt's own error propagate. A settlement whose failure row
-  // never landed is NOT complete: no mark, so a replay writes what is missing.
-  if (durableOutcome) await markSettled();
+  // The mark records the effects that ACTUALLY landed, and completes only when
+  // the set this settlement owed is closed: the failure row (when a container
+  // may exist, a settlement with no durable outcome returned `unknown` above;
+  // otherwise a replay retries the write), the Check conclusion when this
+  // attempt had a Check, and the failed-claim stamp when the delivery names a
+  // commit. A missing effect is not swallowed: it is recorded, so an operator
+  // reads it and a replay finishes it — a KV blip never leaves the review
+  // unsettled, and a lost row is never certified.
+  const effects: SettlementEffect[] = [];
+  if (durableOutcome) effects.push("failure-row");
+  if (check !== undefined) effects.push("check");
+  if (claimStampLanded) effects.push("claim-stamp");
+  await markSettled(effects, durableOutcome && claimStampLanded);
   throw err;
 }
 /**

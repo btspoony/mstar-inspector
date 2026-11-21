@@ -207,8 +207,10 @@ async function recordSuccessor(
     nowMs: Date.now(),
   });
   try {
-    await enqueueSuccessor(stored);
-    await markSuccessorDelivered(deps.env.DB, intent.dedupeKey, Date.now());
+    await enqueueSuccessor(stored.payload);
+    // Generation-scoped: if the row was re-armed while this send was in flight,
+    // it stays owed and the recovery pass delivers the fresher one.
+    await markSuccessorDelivered(deps.env.DB, intent.dedupeKey, stored.generation, Date.now());
     deps.log.warn(
       { ...fields, event: "review_moved_head_successor", head_sha: moved.headSha },
       "moved head settled as skipped — the observed head was re-admitted so a new attempt owns it",

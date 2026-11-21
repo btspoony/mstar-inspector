@@ -106,6 +106,13 @@ async function seedHandoff(db: TestD1, payload: ReturnType<typeof makePayload>):
   });
 }
 
+function settledEffects(db: TestD1): string[] | null {
+  const row = db.raw
+    .prepare("SELECT settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+    .get(ATTEMPT_ID) as { settled_effects: string | null } | null;
+  return row?.settled_effects === null || row === null ? null : (JSON.parse(row.settled_effects) as string[]);
+}
+
 function settledMark(db: TestD1): number | null {
   const row = db.raw
     .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
@@ -266,6 +273,38 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       async () => {},
     );
     expect(failureRows(db)).toHaveLength(1);
+    expect(settledMark(db)).toEqual(expect.any(Number));
+  });
+
+  test("a lost claim stamp is recorded on the mark, not swallowed, and a replay finishes it", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedHandoff(db, payload);
+    // The commit's failed-claim stamp cannot be written: the settlement's other
+    // effects land, so this is a PARTIAL settlement and must say so.
+    h.kvState.putError = new Error("KV unavailable");
+    await expect(
+      runReviewAttemptWorkflow(await makeDeps(db), makeRef(payload), stepHost({ failOn: "prepare" }).step, async () => {}),
+    ).rejects.toThrow();
+
+    // The step retried the settlement once (the mark was not complete), so the
+    // tolerated duplicate event row may be present — never a second claim.
+    expect(failureRows(db).length).toBeGreaterThanOrEqual(1);
+    // This failure is pre-checkout, so no Check conclusion was owed: the mark
+    // must record exactly the effects this settlement had, and not the stamp.
+    expect(settledEffects(db)).toEqual(["failure-row"]);
+    // Not complete: a replay must finish the missing stamp, so the mark must
+    // not skip the settlement.
+    expect(settledMark(db)).toBeNull();
+
+    h.kvState.putError = undefined;
+    await runReviewAttemptWorkflow(
+      await makeDeps(db),
+      makeRef(payload),
+      stepHost({ failOn: "prepare" }).step,
+      async () => {},
+    );
+    expect(settledEffects(db)).toEqual(["failure-row", "claim-stamp"]);
     expect(settledMark(db)).toEqual(expect.any(Number));
   });
 

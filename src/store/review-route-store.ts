@@ -43,6 +43,12 @@ export type AttemptHandoff = {
   createdMs: number;
   /** The settle-once mark the Workflow's settlement step takes after completing. */
   settledMs: number | null;
+  /**
+   * The effects that settlement actually landed. `settledMs` is set only when
+   * the required set is complete, so this array is how a replay (or an
+   * operator) sees what is still owed.
+   */
+  settledEffects: SettlementEffect[] | null;
 };
 
 /**
@@ -164,6 +170,7 @@ type HandoffRow = {
   deadline_ms: number | null;
   created_ms: number;
   settled_ms: number | null;
+  settled_effects: string | null;
 };
 
 function toHandoff(row: HandoffRow): AttemptHandoff {
@@ -175,6 +182,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
     deadlineMs: row.deadline_ms,
     createdMs: row.created_ms,
     settledMs: row.settled_ms,
+    settledEffects: row.settled_effects === null ? null : (JSON.parse(row.settled_effects) as SettlementEffect[]),
   };
 }
 
@@ -182,7 +190,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
 export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promise<AttemptHandoff | null> {
   const row = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects
          FROM review_attempt_handoffs WHERE delivery_key = ?`,
     )
     .bind(deliveryKey)
@@ -271,23 +279,34 @@ export async function touchAttemptHandoff(db: D1Like, deliveryKey: string, nowMs
     .run();
 }
 
+/** The effects a settlement can make durable (see `settleAttemptFailure`). */
+export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip";
+
 /**
- * Complete the settle-once mark. It is written only AFTER the settlement's
- * effects (failure row, Check conclusion, claim stamp) are done, so the mark
- * proves COMPLETION: an interruption before this line leaves the settlement
- * replayable instead of skipped. `true` means this caller wrote it; `false`
- * means another execution got there first — the effects it already made are
- * the settlement, and there is nothing to undo.
+ * Complete the settle-once mark. It is written by the settlement itself, and it
+ * records **which effects landed**: `settled_ms` is set only when the required
+ * set is complete, so the mark can never certify an effect that is missing,
+ * while `settled_effects` tells a replay (and an operator) what is still owed.
+ * `true` means this caller completed it; `false` means a previous execution got
+ * there first or the set is not complete (the replay finishes it).
  */
-export async function markAttemptSettled(db: D1Like, deliveryKey: string, nowMs: number): Promise<boolean> {
+export async function markAttemptSettled(
+  db: D1Like,
+  deliveryKey: string,
+  effects: readonly SettlementEffect[],
+  complete: boolean,
+  nowMs: number,
+): Promise<boolean> {
   const written = await db
     .prepare(
-      `UPDATE review_attempt_handoffs SET settled_ms = ?
-        WHERE delivery_key = ? AND settled_ms IS NULL`,
+      `UPDATE review_attempt_handoffs
+          SET settled_effects = ?,
+              settled_ms = CASE WHEN ? = 1 THEN COALESCE(settled_ms, ?) ELSE settled_ms END
+        WHERE delivery_key = ?`,
     )
-    .bind(nowMs, deliveryKey)
+    .bind(JSON.stringify(effects), complete ? 1 : 0, nowMs, deliveryKey)
     .run();
-  return written.meta.changes === 1;
+  return written.meta.changes === 1 && complete;
 }
 
 /**
@@ -301,7 +320,7 @@ export async function listHandoffsForRecovery(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects
          FROM review_attempt_handoffs
         WHERE state IN ('owed', 'ambiguous') AND updated_ms <= ?
         ORDER BY updated_ms
@@ -322,52 +341,73 @@ export async function listHandoffsForRecovery(
 export async function recordSuccessorIntent(
   db: D1Like,
   input: { dedupeKey: string; payload: ReviewJobPayload; nowMs: number },
-): Promise<ReviewJobPayload> {
+): Promise<{ payload: ReviewJobPayload; generation: number }> {
   await db
     .prepare(
-      `INSERT INTO review_successors (dedupe_key, payload_json, state, created_ms)
-       VALUES (?, ?, 'owed', ?)
+      `INSERT INTO review_successors (dedupe_key, payload_json, state, created_ms, generation)
+       VALUES (?, ?, 'owed', ?, 0)
        ON CONFLICT (dedupe_key) DO NOTHING`,
     )
     .bind(input.dedupeKey, JSON.stringify(input.payload), input.nowMs)
     .run();
   const row = await db
-    .prepare(`SELECT payload_json FROM review_successors WHERE dedupe_key = ?`)
+    .prepare(`SELECT payload_json, generation FROM review_successors WHERE dedupe_key = ?`)
     .bind(input.dedupeKey)
-    .first<{ payload_json: string }>();
+    .first<{ payload_json: string; generation: number }>();
   if (row === null) {
     throw new Error(`review successor intent for ${input.dedupeKey} disappeared after its insert`);
   }
-  return JSON.parse(row.payload_json) as ReviewJobPayload;
+  return { payload: JSON.parse(row.payload_json) as ReviewJobPayload, generation: row.generation };
 }
 
 /** Successor intents still owed a queue send. */
 export async function listOwedSuccessors(
   db: D1Like,
   limit: number,
-): Promise<Array<{ dedupeKey: string; payload: ReviewJobPayload }>> {
+): Promise<Array<{ dedupeKey: string; payload: ReviewJobPayload; generation: number }>> {
   const rows = await db
     .prepare(
-      `SELECT dedupe_key, payload_json FROM review_successors
+      `SELECT dedupe_key, payload_json, generation FROM review_successors
         WHERE state = 'owed' ORDER BY created_ms LIMIT ?`,
     )
     .bind(limit)
-    .all<{ dedupe_key: string; payload_json: string }>();
+    .all<{ dedupe_key: string; payload_json: string; generation: number }>();
   return rows.results.map((row) => ({
     dedupeKey: row.dedupe_key,
     payload: JSON.parse(row.payload_json) as ReviewJobPayload,
+    generation: row.generation,
   }));
 }
 
+/**
+ * The row's CURRENT generation. A sender that read the row earlier carries the
+ * old number and must not deliver over a re-arm: this is the pre-send check.
+ */
+export async function successorGeneration(db: D1Like, dedupeKey: string): Promise<number | null> {
+  const row = await db
+    .prepare(`SELECT generation FROM review_successors WHERE dedupe_key = ?`)
+    .bind(dedupeKey)
+    .first<{ generation: number }>();
+  return row?.generation ?? null;
+}
+
 /** Mark a successor delivered AFTER the queue accepted it. */
-export async function markSuccessorDelivered(db: D1Like, dedupeKey: string, nowMs: number): Promise<void> {
-  await db
+export async function markSuccessorDelivered(
+  db: D1Like,
+  dedupeKey: string,
+  generation: number,
+  nowMs: number,
+): Promise<boolean> {
+  // Generation-scoped: a re-arm that landed while this send was in flight must
+  // stay owed, so the next pass delivers it. `false` means exactly that.
+  const written = await db
     .prepare(
       `UPDATE review_successors SET state = 'delivered', delivered_ms = ?
-        WHERE dedupe_key = ? AND state = 'owed'`,
+        WHERE dedupe_key = ? AND generation = ? AND state = 'owed'`,
     )
-    .bind(nowMs, dedupeKey)
+    .bind(nowMs, dedupeKey, generation)
     .run();
+  return written.meta.changes === 1;
 }
 
 /**
@@ -389,26 +429,27 @@ export function guardDropDedupeKeyOf(payload: ReviewJobPayload): string {
 export async function recordGuardDropIntent(
   db: D1Like,
   input: { dedupeKey: string; payload: ReviewJobPayload; nowMs: number },
-): Promise<ReviewJobPayload> {
+): Promise<{ payload: ReviewJobPayload; generation: number }> {
   await db
     .prepare(
-      `INSERT INTO review_successors (dedupe_key, payload_json, state, created_ms)
-       VALUES (?, ?, 'owed', ?)
+      `INSERT INTO review_successors (dedupe_key, payload_json, state, created_ms, generation)
+       VALUES (?, ?, 'owed', ?, 1)
        ON CONFLICT (dedupe_key) DO UPDATE SET
          payload_json = excluded.payload_json,
          state = 'owed',
-         delivered_ms = NULL`,
+         delivered_ms = NULL,
+         generation = review_successors.generation + 1`,
     )
     .bind(input.dedupeKey, JSON.stringify(input.payload), input.nowMs)
     .run();
   const row = await db
-    .prepare(`SELECT payload_json FROM review_successors WHERE dedupe_key = ?`)
+    .prepare(`SELECT payload_json, generation FROM review_successors WHERE dedupe_key = ?`)
     .bind(input.dedupeKey)
-    .first<{ payload_json: string }>();
+    .first<{ payload_json: string; generation: number }>();
   if (row === null) {
     throw new Error(`guard-drop record for ${input.dedupeKey} disappeared after its write`);
   }
-  return JSON.parse(row.payload_json) as ReviewJobPayload;
+  return { payload: JSON.parse(row.payload_json) as ReviewJobPayload, generation: row.generation };
 }
 
 /** One consumed comment claim whose delivery died before it recorded anything. */

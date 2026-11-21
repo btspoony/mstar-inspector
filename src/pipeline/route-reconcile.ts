@@ -29,6 +29,7 @@ import {
   listOwedSuccessors,
   markSuccessorDelivered,
   restoreCommentClaimForRecovery,
+  successorGeneration,
   touchAttemptHandoff,
 } from "../store/review-route-store";
 
@@ -49,8 +50,13 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
   // all. Send first, mark only after the queue accepted it.
   for (const successor of await listOwedSuccessors(env.DB, ROUTE_RECOVERY_LIMIT)) {
     try {
+      // Pre-send check: this pass read the row earlier, and a re-arm since then
+      // makes the copy in hand stale. Sending it would deliver an obligation the
+      // drop has already superseded; the next pass reads the fresher one.
+      if ((await successorGeneration(env.DB, successor.dedupeKey)) !== successor.generation) continue;
       await queue.send(successor.payload);
-      await markSuccessorDelivered(env.DB, successor.dedupeKey, nowMs);
+      // Generation-scoped: a re-arm during the send keeps the row owed.
+      await markSuccessorDelivered(env.DB, successor.dedupeKey, successor.generation, nowMs);
     } catch {
       // Stays owed; the next pass retries it.
     }

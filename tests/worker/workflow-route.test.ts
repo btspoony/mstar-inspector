@@ -316,7 +316,7 @@ describe("review route — every handoff is a durable record", () => {
       payload: { ...intent.payload, attachDeliveryId: "a different local build" },
       nowMs: 2,
     });
-    expect(stored.attachDeliveryId).toBe(intent.payload.attachDeliveryId);
+    expect(stored.payload.attachDeliveryId).toBe(intent.payload.attachDeliveryId);
     expect(await listOwedSuccessors(db as never, 10)).toHaveLength(1);
 
     const sent: ReviewJobPayload[] = [];

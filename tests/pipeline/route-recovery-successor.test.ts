@@ -279,7 +279,7 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
       payload: { ...intent.payload, attachDeliveryId: "another local build" },
       nowMs: 2,
     });
-    expect(stored).toEqual(intent.payload);
+    expect(stored.payload).toEqual(intent.payload);
     expect(await listOwedSuccessors(db as never, 10)).toHaveLength(1);
 
     // Admission of that payload twice creates exactly one attempt.
@@ -290,8 +290,8 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
         started.push(ref);
       },
     });
-    await consumer(h.makeBatch(stored));
-    await consumer(h.makeBatch(stored));
+    await consumer(h.makeBatch(stored.payload));
+    await consumer(h.makeBatch(stored.payload));
     expect(started).toHaveLength(1);
 
     // A DIFFERENT origin observing the same head is a legitimate separate

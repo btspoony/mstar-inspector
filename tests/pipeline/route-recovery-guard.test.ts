@@ -20,7 +20,13 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { createSeededTestD1, TEST_OWNER, TEST_REPO } from "../helpers/consumer-fixtures";
 import { createConsumerHarness, failureRows, makePayload } from "../helpers/consumer-harness";
 import { acquireInflight } from "../../src/store/inflight-store";
-import { listOwedSuccessors } from "../../src/store/review-route-store";
+import {
+  guardDropDedupeKeyOf,
+  listOwedSuccessors,
+  markSuccessorDelivered,
+  recordGuardDropIntent,
+  successorGeneration,
+} from "../../src/store/review-route-store";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import type { AttemptRef } from "../../src/pipeline/review-attempt-execution";
 import type { TestD1 } from "../store/helpers";
@@ -246,6 +252,42 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     expect(await listOwedSuccessors(db as never, 10)).toHaveLength(1);
     await reconcileReviewRoute(env, Date.now() + 1_000);
     expect(sent).toHaveLength(2);
+  });
+
+  test("a re-arm during a send is not buried by that send's delivered mark", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: "1111111111111111111111111111111111111111" });
+    const dedupeKey = guardDropDedupeKeyOf(payload);
+    const first = await recordGuardDropIntent(db as never, { dedupeKey, payload, nowMs: 1 });
+    expect(first.generation).toBe(1);
+
+    // The pass read generation 1. While its send is in flight, the next ladder
+    // drops the delivery again and re-arms the row (generation 2).
+    const sent: ReviewJobPayload[] = [];
+    const env = {
+      DB: db as never,
+      REVIEW_QUEUE: {
+        send: async (message: ReviewJobPayload) => {
+          sent.push(message);
+          await recordGuardDropIntent(db as never, { dedupeKey, payload: message, nowMs: 2 });
+        },
+      } as never,
+    };
+    await reconcileReviewRoute(env, Date.now());
+
+    // The delivered mark of the STALE generation must not bury the re-arm.
+    expect(await successorGeneration(db as never, dedupeKey)).toBe(2);
+    const owed = await listOwedSuccessors(db as never, 10);
+    expect(owed).toHaveLength(1);
+    expect(owed[0]!.generation).toBe(2);
+    expect(await markSuccessorDelivered(db as never, dedupeKey, 1, Date.now())).toBe(false);
+
+    // The next pass sends the fresh generation — which this test's send hook
+    // re-arms again, so the row keeps its obligation instead of being buried.
+    await reconcileReviewRoute(env, Date.now() + 1_000);
+    expect(sent).toHaveLength(2);
+    expect(await successorGeneration(db as never, dedupeKey)).toBe(3);
+    expect(await listOwedSuccessors(db as never, 10)).toHaveLength(1);
   });
 });
 
