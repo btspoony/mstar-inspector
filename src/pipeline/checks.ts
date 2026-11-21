@@ -2727,9 +2727,19 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       });
       if (completed.kind === "completed") {
         // `observed` advances ONLY from this validated response (spec §7.9),
-        // under a fence re-read for this mutation.
+        // under a fence re-read for this mutation. A conclusion derived WITHOUT
+        // a proof — the unconfirmed fallback for `publication-unknown`/`expired`
+        // — closes the record `remote-unconfirmed` when a staged publication is
+        // linked: the send landed but the record asserts an outcome its own
+        // publication may still contradict, so it stays revisable exactly once
+        // (`reopenTerminalCorrection`). Every proof-derived conclusion is final.
         const observedFence = fenceFor(handle.lease);
-        await recordCheckObservation(deps.db, attemptId, observedFence.lease, completed.remote, observedFence.nowMs);
+        await recordCheckObservation(deps.db, attemptId, observedFence.lease, completed.remote, observedFence.nowMs, {
+          conclusionUnproven:
+            proof === null &&
+            input.publicationId !== null &&
+            (input.outcome === "publication-unknown" || input.outcome === "expired"),
+        });
         return;
       }
       // Unavailable/unconfirmed: recovery status, error and backoff only —

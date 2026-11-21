@@ -71,6 +71,7 @@ import {
   reenableChecksForApps,
   releaseCheckClaim,
   releaseExpiredCheckClaim,
+  reopenTerminalCorrection,
   setCheckDesired,
   suspendCheckForPause,
   suspendCheckRecovery,
@@ -779,9 +780,68 @@ async function reenableProbe(
 }
 
 /**
+ * §7.9a late correction: a Check that was already published as an unconfirmed
+ * failure is revised once when ITS OWN publication later confirms.
+ *
+ * The ordinary publish path freezes the unconfirmed fallback and links the
+ * staged publication, so the Check reaches GitHub saying the outcome is
+ * unknown. When that publication confirms moments later, the record asserts an
+ * outcome the evidence now contradicts — so the record is not proof and must be
+ * correctable. `reopenTerminalCorrection` is the guarded transition: it only
+ * matches a terminal row still marked as an unconfirmed failure and linked to
+ * THIS publication, and it clears that mark in the same statement, so the
+ * revision happens exactly once.
+ *
+ * The proof is read through the row's OWN link first — a confirmation of any
+ * other publication is not evidence about this row — and a pair that D1 cannot
+ * use never reopens a terminal record (the record waits, unmutated, until the
+ * App is healthy again). The reopened row then takes the ordinary path, which
+ * re-decides the conclusion from the proof and sends it on the same owned run.
+ */
+async function reopenTerminalCheck(
+  env: ScheduledEnv,
+  db: D1Like,
+  now: () => number,
+  budget: RunBudget,
+  transport: CheckTransport,
+  credentials: CheckCredentialFactory,
+  credentialCache: Map<string, Promise<CheckCredentialResolution>>,
+  row: CheckAttempt,
+  log: CheckReconcileLog,
+  summary: CheckReconcileSummary,
+  updateBudgetMs: number | undefined,
+): Promise<void> {
+  const attemptId = row.identity.attemptId;
+  const scope = row.identity.scope;
+  // A marked row always carries its link; without one no publication could ever
+  // confirm what this record asserts.
+  const publicationId = row.publicationId;
+  if (publicationId === null) return;
+  const proofRead = await readProof(db, row.identity, publicationId);
+  // Not confirmed yet: the terminal record stands exactly as published, and
+  // this pass writes nothing at all.
+  if (proofRead.kind !== "read") return;
+  if ((await pairUnusableReason(db, scope)) !== null) return;
+  if (!(await reopenTerminalCorrection(db, attemptId, publicationId, now()))) return;
+  log.info(
+    { event: "ops_check_terminal_correction_reopened", attempt_id: attemptId, publication_id: publicationId },
+    "terminal Check reopened for its own publication's confirmed outcome — one revision",
+  );
+  const reopened = await getCheckAttempt(db, attemptId);
+  if (reopened === null) return;
+  await reconcileCheckAttempt(
+    env, db, now, budget, transport, credentials, credentialCache, reopened, log, summary, updateBudgetMs,
+    true,
+  );
+}
+
+/**
  * One due attempt, §7.11.2 steps 1–5 in order. Ownership is only ever granted
  * by `claimCheckRecovery`; everything after it is fenced on that lease, and
  * every exit leaves the row in a state its next run can continue from.
+ *
+ * A TERMINAL row takes the §7.9a late-correction path instead (see
+ * `reopenTerminalCheck`); every other row is nonterminal by construction.
  *
  * Two exits deliberately give the claim BACK (`releaseCheckClaim`) instead of
  * settling the row as a failed attempt, because in neither case did a recovery
@@ -804,9 +864,21 @@ async function reconcileCheckAttempt(
   log: CheckReconcileLog,
   summary: CheckReconcileSummary,
   updateBudgetMs: number | undefined,
+  /**
+   * This call is the second half of a §7.9a late correction: the terminal row
+   * was just reopened from its OWN confirmed publication, so the proof wait is
+   * skipped. The proof exists, and a newer same-head publication's pending
+   * proof must not defer the revision of this row.
+   */
+  correction = false,
 ): Promise<void> {
   const attemptId = row.identity.attemptId;
   const scope = row.identity.scope;
+
+  if (row.terminalMs !== null) {
+    await reopenTerminalCheck(env, db, now, budget, transport, credentials, credentialCache, row, log, summary, updateBudgetMs);
+    return;
+  }
 
   // §7.11.2 step 2a — the publication-proof WAIT, decided BEFORE any credential
   // work: a row that is only waiting must not mint GitHub requests, and it must
@@ -854,7 +926,7 @@ async function reconcileCheckAttempt(
   // settlement's `neutral` (§7.9): that conclusion is final, nothing can
   // correct it and it owes no publication, so waiting for a proof that will
   // never exist would leave the run open for the whole window.
-  if (beforeDeadline && row.desired !== "neutral") {
+  if (!correction && beforeDeadline && row.desired !== "neutral") {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6, §7.11.2
     // step 2): a row whose App is disabled/deleted or whose installation
     // mapping vanished must take the durable suspension path, never loop with

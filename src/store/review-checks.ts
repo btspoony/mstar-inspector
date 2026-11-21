@@ -1710,6 +1710,16 @@ export async function recordCheckObservation(
   lease: Lease,
   remote: CheckRemote,
   nowMs: CheckClock,
+  /**
+   * The update this response validates carried a conclusion derived WITHOUT a
+   * publication proof, while a staged publication was already linked. The
+   * Check is still terminal — the send landed — but the record asserts an
+   * UNCONFIRMED outcome, which the linked publication's later confirmation
+   * may contradict (§7.9a). Such a row is closed `remote-unconfirmed` instead
+   * of `done`, which is the durable mark `reopenTerminalCorrection` consumes
+   * exactly once; every other agreeing response closes `done`.
+   */
+  options?: { conclusionUnproven?: boolean },
 ): Promise<boolean> {
   const owned = await getCheckOwnership(db, id, lease, nowMs);
   if (owned === null) return false;
@@ -1730,6 +1740,7 @@ export async function recordCheckObservation(
   if (running && owned.observed !== "unknown") return false;
 
   const observed: CheckObserved = agrees ? (owned.desired as Exclude<CheckDesired, "in_progress">) : "in_progress";
+  const unproven = agrees && options?.conclusionUnproven === true;
   return runFenced(
     db,
     id,
@@ -1737,14 +1748,15 @@ export async function recordCheckObservation(
     `observed = ?,
             check_run_id = COALESCE(check_run_id, ?),
             create_state = CASE WHEN check_run_id IS NULL THEN 'known' ELSE create_state END,
-            recovery_state = CASE WHEN ? THEN 'done' ELSE recovery_state END,
+            recovery_state = CASE WHEN ? THEN 'done' WHEN ? THEN 'remote-unconfirmed' ELSE recovery_state END,
             terminal_ms = CASE WHEN ? THEN ? ELSE terminal_ms END,
             next_attempt_ms = CASE WHEN ? THEN NULL ELSE next_attempt_ms END,
             last_error = CASE WHEN ? THEN NULL ELSE last_error END`,
     [
       observed,
       remote.id,
-      agrees ? 1 : 0,
+      agrees && !unproven ? 1 : 0,
+      unproven ? 1 : 0,
       agrees ? 1 : 0,
       nowMs ?? lease.untilMs,
       agrees ? 1 : 0,
@@ -1752,6 +1764,69 @@ export async function recordCheckObservation(
     ],
     nowMs,
   );
+}
+
+/**
+ * Reopen a TERMINAL unconfirmed failure for its own publication's confirmed
+ * outcome — the one revision a terminal Check record permits (spec §7.9a: the
+ * record asserts an outcome; evidence that contradicts it means the record is
+ * not proof).
+ *
+ * The row is only reachable through the shape `recordCheckObservation` writes
+ * for a proof-free update (`recovery_state = 'remote-unconfirmed'` while
+ * terminal). Reopening CLEARS that mark in the same statement, so the
+ * revision is available exactly once: the guard is the write's own predicate,
+ * never a read-then-write in the caller. It also clears the finished lease,
+ * because the consumer that terminalized the row is gone and the correction
+ * must be immediately claimable.
+ *
+ * `publicationId` must be the row's OWN link, and that linked row must CARRY a
+ * proof (the same test the store's proof reader applies). The caller reads it
+ * through the link first, so this guard binds the revision to that exact
+ * publication's confirmed outcome (spec §7.9a conditions 1-3): a different
+ * publication's confirmation, an unlinked unconfirmed row, or a link still
+ * without proof all match nothing. `attempts` resets because the revision is a
+ * new obligation carrying new evidence, not another try of the failed one; its
+ * own sends are then bounded by the ordinary recovery cap.
+ *
+ * `false` means the row is no longer that shape — already reopened (a second
+ * caller, or a second confirmation), already corrected, or never marked.
+ */
+export async function reopenTerminalCorrection(
+  db: D1Like,
+  id: string,
+  publicationId: string,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET terminal_ms = NULL, recovery_state = 'pending', attempts = 0,
+              next_attempt_ms = NULL, last_error = NULL, holder = NULL,
+              lease_until_ms = NULL, updated_ms = ?
+        WHERE id = ? AND terminal_ms IS NOT NULL
+          AND recovery_state = 'remote-unconfirmed'
+          AND desired = 'failure' AND observed = 'failure'
+          AND publication_id = ?
+          AND EXISTS (
+            SELECT 1 FROM review_publications pub
+             WHERE pub.id = review_checks.publication_id
+               AND pub.proof_json IS NOT NULL
+          )
+          -- A newer unfinished generation of the same key owns the live Check
+          -- for that head: revising this superseded record would either re-send
+          -- an older run or collide with the one-open-row index. It stays as
+          -- published.
+          AND NOT EXISTS (
+            SELECT 1 FROM review_checks n
+             WHERE n.attempt_key = review_checks.attempt_key
+               AND n.${NONTERMINAL_WHERE}
+               AND n.generation > review_checks.generation
+          )`,
+    )
+    .bind(nowMs, id, publicationId)
+    .run();
+  return result.meta.changes === 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -2041,9 +2116,26 @@ export async function listCheckReconcileBatch(
   const { results } = await db
     .prepare(
       `SELECT * FROM review_checks
-        WHERE ${NONTERMINAL_WHERE}
+        WHERE (
+          ${NONTERMINAL_WHERE}
           AND ${CHECK_DUE_PREDICATE}
-        ORDER BY COALESCE(next_attempt_ms,created_ms),id
+        )
+        -- §7.9a late correction: a Check that already reached its terminal
+        -- record as an UNCONFIRMED failure linked to a staged publication owes
+        -- one revision when that publication confirms. The mark is the whole
+        -- selection: whether the proof exists is read by the lane, through the
+        -- row's OWN link, so this batch never has to consult the journal and a
+        -- proof that never arrives costs one indexed read per pass and nothing
+        -- else. No other terminal row is selected. Correction rows sort AFTER
+        -- the due ones so a record that forever awaits its proof cannot hold
+        -- the head of the bounded batch.
+        OR (
+          terminal_ms IS NOT NULL
+          AND recovery_state = 'remote-unconfirmed'
+          AND desired = 'failure' AND observed = 'failure'
+          AND publication_id IS NOT NULL
+        )
+        ORDER BY (terminal_ms IS NOT NULL), COALESCE(next_attempt_ms,created_ms),id
         LIMIT ?`,
     )
     .bind(maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs, limit)
