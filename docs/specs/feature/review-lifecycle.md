@@ -544,6 +544,20 @@ All local updates require `(id,holder,lease_epoch,lease_until_ms > now)`; remote
 
 Titles/summaries are redacted and bounded; summary ≤2000 chars, error ≤300. The success/failure summary names the verdict, score, floor and allowed verdicts, so a red Check says what bar was missed. The gate and the applied review are read cold at decision time (App store + `reviews` by **exact App/scope/SHA**); the Check lane reads the proof of the publication THIS attempt linked in `publication_id` — another generation's proof for the same exact App/scope/SHA proves nothing about this attempt — while the store's exact scope/SHA read keeps preferring a normal proof over a degraded one. Prepared payload is never publication proof.
 
+### 7.9a Evidence-coupled transitions
+
+A durable record may prove an outcome, close an obligation, or authorize a side effect only if it passes all three checks below. State the exact fact the reader relies on, then trace every path that writes or preserves the claim, including retries, recovery, and backfill.
+
+1. **Binding.** Bind the claim and its evidence to the same subject, generation, and operation. Use the identity fixed when the work was admitted or staged; a newer record or a matching head alone is not a substitute.
+2. **Evidence.** Name the source and the condition that establishes the claim. A local transition can prove its own effect; a remote outcome requires a validated response or readback for the exact target and outcome. Intent, dispatch, timeout, and lease expiry do not prove completion. A missing observation proves absence only if an enforced invariant rules the event out.
+3. **Guarded commit and use.** Every writer must enforce the binding and evidence at the transition that sets the claim and commits the evidence or its durable reference with it. For claims of authority, competing paths must contend on the same conditional transition and use its committed result, not the result of a later lookup. Recheck mutable conditions at the point of use, including immediately before a remote send. If the evidence is missing, ambiguous, or stale for this claim, retain the uncertainty or refuse the action; do not advance the claim.
+
+**Falsification test:** Reject the claim if any path can commit the same claim-bearing record while the asserted fact is false or has not been established.
+
+In the [publication journal](#77-publication-journal-complete-payload-and-crash-recovery), the staged body is intent; only a response or readback matching the App, publication marker, and exact body supports confirmation and local apply. In [Check intent versus observation](#79-app-owned-check-attempt-fencing-and-conclusions), frozen intent does not confirm completion; only matching evidence for the owned run and intended conclusion advances the observed state.
+
+**Limits.** This rule decides whether evidence supports a claim, not which obligations or precedence policy to choose, whether missing evidence will ever arrive, or how the remote service orders requests already sent. Transformed-output confidentiality (`I-000666`) is out of scope: proof of which attempt produced an output does not prove that the output is safe to disclose.
+
 ### 7.10 Closure and consumer Check handoff
 
 `buildReviewBody` accepts optional closure; final assembled body passes the existing size limit. The closure block is a COLLAPSED `<details>` section placed AFTER `### Findings` (its summary carries the "Revalidated findings" title), so an expanded table never pushes the current findings down; a zero-finding envelope adds the empty `### Findings` heading first, keeping the same order. Show ≤25 selected prior rows plus coverage/overflow count; columns are finding, disposition, evidence and thread. A pending resolve renders not-yet-resolved, not a prediction. Remote outcomes discovered after primary publication appear in the next round's single upsert; no second closure-only upsert. Superseded old thread state never stands in for the new occurrence.
