@@ -9150,12 +9150,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(h.logLines.some((line) => line.level === "info" && line.msg.includes("idempotency hit"))).toBe(true);
   });
 
-  test("check lifecycle: a reviewed payload head acks even when the checkout moved on", async () => {
-    // The delivery names SHA, which was reviewed; the clone holds SHA2 — a
-    // newer commit nothing has reviewed yet. The duplicate ACKS rather than
-    // reviewing the newer commit under the stale delivery: that newer head is
-    // reviewed only when its own delivery arrives, and nothing here creates
-    // one. Neither head is claimed and no container starts.
+  test("check lifecycle: an unreadable live head keeps the ack — one warning, no second paid review", async () => {
+    // The delivery names SHA, which was reviewed; the clone holds SHA2. The PR
+    // watermark cannot answer (no row), so the hit is UNPROVEN rather than
+    // stale: the duplicate ACKS as before — an unreadable answer must never
+    // become a second paid review — and says so exactly once. Neither head is
+    // claimed and no container starts.
     const db = await createSeededTestD1();
     h.sandbox.resolvedSha = SHA2;
     await createArtifactStore(db).put({
@@ -9178,6 +9178,91 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(1); // the reviewed head's row, untouched
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
+    expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("unreadable — keeping the ack"))).toHaveLength(1);
+  });
+
+  test("check lifecycle: a stale reviewed head falls through and reviews the live head", async () => {
+    // The delivery names SHA (reviewed); the PR's live head is SHA2. In
+    // `manual` mode a push queues no review, so acking here would leave SHA2
+    // unreviewed for good: the hit falls through and the round reviews it.
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: GATED_OUTPUT,
+      appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
+    });
+    await seedPrHead(db, { headSha: SHA2, headAt: new Date().toISOString() });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+
+    // The live head was reviewed and posted...
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(reviewCount(db)).toBe(2);
+    // ...and the Check belongs to SHA2 alone: the stale key claims nothing.
+    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA2]);
+    expect(h.logLines.some((line) => line.level === "info" && line.msg.includes("reviewing the live head"))).toBe(true);
+    expect(h.messageRetryCalls).toHaveLength(0);
+  });
+
+  test("check lifecycle: a reviewed head that is still live acks — no warning, no review", async () => {
+    const db = await createSeededTestD1();
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: GATED_OUTPUT,
+      appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
+    });
+    // The watermark agrees with the keyed head: the hit is the live head.
+    await seedPrHead(db, { headSha: SHA, headAt: new Date().toISOString() });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(checkRequests).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.logLines.some((line) => line.msg === "idempotency hit — ack")).toBe(true);
+    expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("unreadable — keeping the ack"))).toHaveLength(0);
+    expect(h.logLines.some((line) => line.msg.includes("reviewing the live head"))).toBe(false);
+  });
+
+  test("check lifecycle: an unreviewed head reviews as before — the live head is never read", async () => {
+    // The PR watermark has already advanced, but this delivery's own head was
+    // never reviewed: the early gate is a MISS, and a miss must not pay for a
+    // live-head read. The round reviews the payload's head exactly as before.
+    const db = await createSeededTestD1();
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    await seedPrHead(db, { headSha: SHA2, headAt: new Date().toISOString() });
+    let liveHeadReads = 0;
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      selectPrHead: async () => {
+        liveHeadReads += 1;
+        return { headSha: SHA2, headAt: new Date().toISOString() };
+      },
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+
+    expect(liveHeadReads).toBe(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
   });
 
   test("check lifecycle: a confirmed publication for the checkout head acks without a claim", async () => {

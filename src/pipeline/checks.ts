@@ -1599,14 +1599,15 @@ export type CheckLifecycle = {
    * rejection, a paused App), so its attached run has no review to report and
    * nobody holds a handle to terminalize it. The attached row — released, or
    * still under a stalled delivery holder — is taken with the same fenced
-   * claim and concluded `neutral` with the skip reason.
-   *
-   * Deliberately NOT routed through `decideConclusion`: that function's
-   * contract is "no proof ⇒ failure", which is right for an EXECUTED attempt
-   * and wrong for a delivery that was never going to run (RL-10). A live
-   * consumer holder, a frozen intent and a terminal row are never taken;
-   * `false` means there was nothing to settle. A store or transport fault
-   * rejects — the caller logs it and the ACK is unaffected.
+   * claim and concluded from THIS head's own persisted review against the
+   * App's CURRENT gate (the `inherited` branch, same head both sides): a head
+   * whose review met the gate stays `success`, one that missed it stays
+   * `failure`. `neutral` — with the skip reason — is only the skip with
+   * nothing to inherit: no published review, an unreadable gate, or a review
+   * without a readable score. A live consumer holder, a frozen intent and a
+   * terminal row are never taken; `false` means there was nothing to settle. A
+   * store or transport fault rejects — the caller logs it and the ACK is
+   * unaffected.
    */
   settleSkipped(input: {
     scope: Scope;
@@ -1619,7 +1620,7 @@ export type CheckLifecycle = {
      * taking a row would mean taking another delivery's.
      */
     attachDeliveryId?: string;
-    /** Why the delivery was skipped — the Check summary names it. */
+    /** Why the delivery was skipped — the `neutral` summary names it. */
     reason: string;
     /** The operator-configured bound on the one terminal `checks.update`. */
     updateBudgetMs?: number;
@@ -2187,14 +2188,28 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // live consumer's, already frozen, or terminal.
       if (claimed === null) return false;
       const { identity } = claimed.attempt;
-      // The conclusion is written DIRECTLY (RL-10): a skip is not a verdict on
-      // the commit, so it must never reach `decideConclusion`'s
-      // "no proof ⇒ failure" rule.
-      const conclusion: CheckConclusion = {
-        desired: "neutral",
-        title: CHECK_NAME,
-        summary: CHECK_SUMMARIES.skippedByDelivery(input.reason),
-      };
+      // A skip must never overwrite the head's own gate result with `neutral`:
+      // when THIS head has a published review, the run carries that review's
+      // result against the App's CURRENT gate (the inherited branch — success
+      // when it meets the gate, failure when it does not). `neutral` is only
+      // the skip with nothing to inherit: no published review, an unreadable
+      // gate, or a score the envelope never carried.
+      const review = await readInheritedReview(deps.db, { scope: input.scope, headSha: input.headSha });
+      const gate = review === null ? null : await deps.getCheckGate(input.scope);
+      const conclusion: CheckConclusion =
+        review === null || gate === null || review.scorePct === null
+          ? {
+              desired: "neutral",
+              title: CHECK_NAME,
+              summary: CHECK_SUMMARIES.skippedByDelivery(input.reason),
+            }
+          : decideConclusion({
+              proof: null,
+              outcome: "skipped",
+              gate,
+              review,
+              inherited: { headSha: input.headSha, reviewedHeadSha: input.headSha },
+            });
       const intentFence = fenceFor(claimed.lease);
       if (!(await setCheckDesired(deps.db, identity.attemptId, intentFence.lease, conclusion, null, intentFence.nowMs))) {
         return false;

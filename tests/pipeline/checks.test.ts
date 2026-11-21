@@ -2900,7 +2900,120 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     });
   }
 
-  test("a skipped delivery settles the attached run neutral with the reason", async () => {
+  /**
+   * The attached head's OWN persisted review — the row a skip inherits. `null`
+   * score writes an envelope without a tally (readable verdict, unreadable
+   * gate input).
+   */
+  function seedHeadReview(db: TestD1, verdict: string, scorePct: number | null): void {
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, envelope)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        SCOPE.installationId,
+        SCOPE.owner,
+        SCOPE.repo,
+        SCOPE.prNumber,
+        SHA,
+        verdict,
+        SCOPE.appId,
+        JSON.stringify(scorePct === null ? { verdict } : { verdict, tally: { scorePct } }),
+      );
+  }
+
+  /** One skip of an attached run; returns the row the settlement left. */
+  async function skipHead(
+    db: TestD1,
+    fake: ReturnType<typeof fakeChecks>,
+    gate: ReviewGate | null = GATE,
+  ): Promise<{ attemptId: string; row: Record<string, string | number | null> }> {
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => gate,
+    });
+    expect(
+      await lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        attachDeliveryId: deliveryId,
+        reason: "already reviewed for this head",
+      }),
+    ).toBe(true);
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    return { attemptId, row };
+  }
+
+  test("a skip inherits a passing head review — success, never a neutral that masks it", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    seedHeadReview(db, "ship it", 92);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("success");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMet(SHA.slice(0, 7), "ship it", 92, GATE),
+    );
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+  });
+
+  test("a skip inherits a FAILING head review — failure, never neutral", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    seedHeadReview(db, "needs fixes", 40);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    // The bypass this test exists for: a repeat delivery of this head must not
+    // turn its missed gate into a neutral required check.
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE),
+    );
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+  });
+
+  test("an unreadable gate keeps the skip's own neutral, not a verdict", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    seedHeadReview(db, "ship it", 92);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake, null);
+
+    // A gate that cannot be read proves nothing: the skip falls back to its own
+    // neutral instead of inheriting a verdict from an unknown floor.
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("neutral");
+    expect(fake.updates[0]!.params.output.summary).toContain("already reviewed for this head");
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+  });
+
+  test("a head review without a readable score keeps the skip's own neutral", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    seedHeadReview(db, "ship it", null);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("neutral");
+    expect(fake.updates[0]!.params.output.summary).toContain("already reviewed for this head");
+    expect(row.desired).toBe("neutral");
+  });
+
+  test("a skip with no published review settles the attached run neutral with the reason", async () => {
     const db = await seededDb();
     CLOCK = T0;
     const fake = settlingFake();
