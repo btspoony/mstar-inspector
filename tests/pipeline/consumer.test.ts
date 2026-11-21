@@ -608,10 +608,10 @@ describe("createReviewConsumer", () => {
     });
     // The exec gets what the declared instant still owes, read after the input
     // write: the frozen clock makes that the whole request. The fixture's
-    // numstat is 17 work units, so the size-derived request — 360_000 +
-    // (600_000 − 360_000) × 17/5_000 = 360_816ms, not the tier maximum — is
+    // numstat is 17 work units, so the size-derived request — 500_000 +
+    // (600_000 − 500_000) × 17/5_000 = 500_340ms, not the tier maximum — is
     // what the anchor allocates.
-    expect(runnerExecTimeout()).toBe(360_816);
+    expect(runnerExecTimeout()).toBe(500_340);
     // inside VALID_DIFF's right hunk [18,23]). §7.7 order: the
     // intent-prepared line comments run after the apply; the degraded-comment
     // delete runs last, only after the normal publication proof.
@@ -2204,7 +2204,7 @@ describe("createReviewConsumer", () => {
     });
 
     // The default fixture is 17 work units, so the request is the floor plus
-    // the ramp: 360_000 + (600_000 − 360_000) × 17/5_000 = 360_816ms.
+    // the ramp: 500_000 + (600_000 − 500_000) × 17/5_000 = 500_340ms.
     const requestedMs =
       RUNNER_BUDGET_FLOOR_MS.default +
       ((600_000 - RUNNER_BUDGET_FLOOR_MS.default) * 17) / SIZE_SATURATION_WORK_UNITS;
@@ -2250,7 +2250,7 @@ describe("createReviewConsumer", () => {
     let roundStart = 0;
     await withFrozenClock(async (clock) => {
       roundStart = clock.now;
-      // 600s of clone leaves 66s of the 666s cutoff — under the 360_816ms
+      // 600s of clone leaves 66s of the 666s cutoff — under the 500_340ms
       // request, so the cutoff (not the request) decides the allocation.
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
@@ -2260,7 +2260,7 @@ describe("createReviewConsumer", () => {
     });
 
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
-    expect(line.fields.runner_requested_ms).toBe(360_816);
+    expect(line.fields.runner_requested_ms).toBe(500_340);
     expect(line.fields.runner_effective_ms).toBe(66_000);
     expect(line.fields.runner_deadline_ms).toBe(roundStart + 666_000);
     // Cutoff-bound: the derived pre-runner cutoff — not the request — is
@@ -2883,7 +2883,7 @@ describe("createReviewConsumer", () => {
 
     // The round runs under a FROZEN clock: the fake spends no wall time, so the
     // runner exec gets exactly what the derived deadline still owes — the
-    // size-derived 360_816ms request from the fixture's 17 work units.
+    // size-derived 500_340ms request from the fixture's 17 work units.
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
 
     const runnerCall = h.sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
@@ -2895,7 +2895,7 @@ describe("createReviewConsumer", () => {
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
         OMP_REVIEW_MODEL: "ark/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
       },
-      timeout: 360_816,
+      timeout: 500_340,
     });
     expect(JSON.parse(stdin!)).toEqual({
       version: 1,
@@ -4510,7 +4510,7 @@ describe("createReviewConsumer", () => {
   // each pins its own logged `runner_effective_ms` and asserts it is not the
   // sibling's, so the pair cannot pass by both runs taking the same path.
   const LATE_SATURATED_EFFECTIVE_MS = 446_000;
-  const LATE_FLOOR_EFFECTIVE_MS = 360_048;
+  const LATE_FLOOR_EFFECTIVE_MS = 500_020;
 
   test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (saturated request)", async () => {
     // terminalizeMs = 30_000 is the supported ceiling the reserve charges,
@@ -4568,9 +4568,10 @@ describe("createReviewConsumer", () => {
   });
 
   test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (floor request)", async () => {
-    // The other allocation extreme, under the same late start and the same
-    // 30s terminalize ceiling: a binary-only numstat requests the floor
-    // (360_048ms at 1 work unit), and 200s spent leaves far more than that
+    // The other allocation extreme under the same 30s terminalize ceiling —
+    // this fixture spends 100s before the clone where its sibling spends
+    // 200s: a binary-only numstat requests the floor
+    // (500_020ms at 1 work unit), and 100s spent leaves more than that
     // — so the REQUEST, not the cutoff, binds the exec deadline. The
     // invariant `execDeadline + reserve <= roundEnd <= min(guardExpiry,
     // checkLease)` must still hold, and both expiries keep the CEILING's
@@ -4591,9 +4592,9 @@ describe("createReviewConsumer", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
-        // 200s gone before the clone: the anchor lands at roundStart + 200s
-        // and still has 446s of cutoff left — well above the floor request.
-        ...clockSpendingSandbox("git init", 200_000, clock),
+        // 100s gone before the clone: the anchor lands at roundStart + 100s
+        // and still has 546s of cutoff left — above the 500s floor request.
+        ...clockSpendingSandbox("git init", 100_000, clock),
       });
       await consumer(h.makeBatch(makePayload()));
     });
