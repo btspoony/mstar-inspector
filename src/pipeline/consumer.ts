@@ -4,7 +4,9 @@
  * Flow (compass S7): message → resolve the App's sandbox
  * image (the stored review_bots.sandbox_image_id through the closed
  * registry — unknown/disabled ids fail closed BEFORE the guard/sandbox) →
- * getSandbox (unique id per attempt) → clone the PR head branch (git
+ * dedup the delivery's OWN head (payload sha or PR watermark; hit → ack with
+ * no Check claim and no container) → getSandbox (unique id per attempt) →
+ * clone the PR head branch (git
  * transport auth via scoped extraheader env) → `git rev-parse HEAD` for the
  * AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
@@ -60,9 +62,14 @@
  * feeds the pre-enqueue KV fast path in the worker). The diff, the clone
  * files and the commit_id therefore always describe the same commit; a
  * force-push between webhook delivery and processing is captured by the
- * rev-parse instead of drifting silently. The pre-clone payload-sha dedup
- * is gone for the same reason: it could skip a review that the live clone
- * would have picked up (force-push between delivery and processing).
+ * rev-parse instead of drifting silently. The ONE pre-sandbox read (step 4)
+ * consults the delivery's OWN head — the payload sha, or the PR watermark a
+ * mention carries — and only short-circuits a head this lane already
+ * reviewed: that duplicate creates no Check attempt and no container. It is
+ * a fast path, not the dedup authority: the checkout-keyed read below still
+ * decides what the live clone holds, so a force-push after delivery is
+ * caught there. A duplicate whose own head was reviewed while the PR has
+ * since advanced acks here — the newer commit owns its own delivery.
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
@@ -4976,6 +4983,29 @@ async function processMessage(
       });
       const earlyHeadSha = payload.head_sha || (await readPrHead(deps, payload))?.headSha || null;
       if (earlyHeadSha !== null) {
+        // §7.7 step 2, moved ahead of the claim: a head this lane already
+        // reviewed has nothing to review, so a repeat trigger (the same commit,
+        // typically a comment) must ACK here — a claim it can only close red
+        // would overwrite the head's own result. Same key family as the
+        // checkout-keyed dedup below; an unreadable answer falls through to it.
+        const earlyKey: IdempotencyKey = {
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: earlyHeadSha,
+        };
+        const earlyFields: ConsumerLogFields = {
+          ...(baseFields ?? payloadIdentityFields(payload)),
+          head_sha: earlyHeadSha,
+          idempotency_key: idemKey(earlyKey),
+        };
+        const earlyDone = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(earlyKey), earlyFields, deps.log);
+        if (earlyDone || (await deps.store.findByIdempotencyKey(earlyKey)) !== null) {
+          deps.log.info(earlyFields, earlyDone ? "KV idempotency hit — ack" : "idempotency hit — ack");
+          await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
+          return { kind: "ok" };
+        }
         checkClaimAttempted = true;
         checkHandle = await beginCheck(lifecycleScope, githubAppId, earlyHeadSha);
       }
