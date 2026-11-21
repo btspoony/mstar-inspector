@@ -1147,23 +1147,27 @@ export async function mintSandboxReadToken(input: {
 }
 
 /**
- * The attempt's session secret values (SEC-01), re-derived by a phase that must
- * exact-redact model output without having run the paid step itself: the token
- * it mints here, the App's own provider keys and the runner env's passthrough
- * values — the SAME source the exec used, so the redaction set cannot drift
- * from what the session actually held. It logs nothing (the exec's own line is
- * the one record of the credential payload).
+ * Prove this attempt's container before a LATER step acts on it. Resolves the
+ * Durable Object by attempt id (which never starts a container) and then runs
+ * the marker proof under the guarded, non-starting form: a missing or different
+ * marker, or a lost guarded reply, is `unknown` — never an ordinary failure a
+ * caller could settle and then act on. The handle is returned so the caller
+ * acts on the SAME incarnation it proved.
+ *
+ * The paid step calls this before it writes the runner input or executes: the
+ * launch row stops a second paid launch, and this proves the container the call
+ * would run in is still the one this attempt prepared.
  */
-export async function deriveSessionSecrets(input: {
-  payload: ReviewJobPayload;
-  commenter: Pick<ReviewCommenter, "getInstallationToken">;
-  appCfg: RunnerAppConfig;
-  customProviders: readonly CustomProviderConsumerConfig[] | undefined;
-}): Promise<string[]> {
-  const token = await mintSandboxReadToken({ payload: input.payload, commenter: input.commenter });
-  const runnerEnv = buildRunnerEnv(input.appCfg);
-  const credentials = buildRunnerCredentials(input.appCfg, undefined, undefined, input.customProviders);
-  return sessionSecretValues(runnerEnv, credentials.keyValues, token);
+export async function proveReviewAttemptMarker(input: {
+  deps: {
+    env: { SANDBOX: unknown };
+    getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
+  };
+  attemptId: string;
+}): Promise<ReviewSandbox> {
+  const sandbox = await input.deps.getSandbox(input.deps.env.SANDBOX, attemptSandboxId(input.attemptId));
+  await runPreparedCommand(sandbox, attemptMarker(input.attemptId), "already-claimed", MARKER_PROOF_COMMAND);
+  return sandbox;
 }
 
 /**

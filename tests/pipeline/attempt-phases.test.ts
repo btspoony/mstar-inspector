@@ -271,6 +271,52 @@ describe("the restart round trip", () => {
     expect(await cleanupAttempt(cleaning, ref)).toEqual({ retention: "retained" });
     expect(h.sandbox.destroyCalls).toBe(1);
   });
+
+  test("a restarted publication re-adopts the Check it did not create", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+    // The §7.10 seam, with its own record of what was adopted and concluded.
+    const checks = {
+      begun: 0,
+      terminalized: [] as Array<{ publicationId: string | null; outcome: string }>,
+      begin: async () => {
+        checks.begun += 1;
+        return HANDLE;
+      },
+      markInProgress: async () => ({ kind: "settled" as const, promoted: true }),
+      terminalize: async (input: { publicationId: string | null; outcome: string }) => {
+        checks.terminalized.push({ publicationId: input.publicationId, outcome: input.outcome });
+      },
+    };
+    deps.checks = checks;
+
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: resumed } = await makeDeps({ db });
+    resumed.checks = checks;
+    await reviewAttempt(resumed, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    collecting.checks = checks;
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const begunBeforePublish = checks.begun;
+
+    // The publishing host created no settlement: it must ADOPT the attempt's
+    // Check from D1 rather than leave the run `in_progress` after a success.
+    const { deps: publishing } = await makeDeps({ db });
+    publishing.checks = checks;
+    expect(await publishAttempt(publishing, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+
+    expect(checks.begun).toBe(begunBeforePublish + 1);
+    expect(checks.terminalized).toEqual([
+      { publicationId: collected.collected.publicationId, outcome: "publication-unknown" },
+    ]);
+  });
 });
 
 describe("cleanupAttempt", () => {

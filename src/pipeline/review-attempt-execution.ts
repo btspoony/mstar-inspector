@@ -103,11 +103,11 @@ import {
   attemptSandboxId,
   boundedStepTimeout,
   chainHeadSelector,
-  deriveSessionSecrets,
   effectiveModelChain,
   mintSandboxReadToken,
   parseBoundedRead,
   prepareReviewAttempt,
+  proveReviewAttemptMarker,
   readReviewLaunch,
   runReviewAttempt,
   AttemptUnknownError,
@@ -336,7 +336,7 @@ export type ConsumerLogFields = {
    * platform closed (D20) and deferred the whole batch instead of running it —
    * one line per invocation, not per message.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
   action: string;
   installation_id: number;
   owner: string;
@@ -3001,6 +3001,45 @@ function maybeSettlement(deps: ProcessDeps, attemptId: string): CheckSettlement 
   return deps.checkSettlements.get(attemptId);
 }
 
+/**
+ * The settlement a LATER phase terminalizes through, re-adopted when this host
+ * did not prepare. An empty cache must not mean "leave the Check in progress
+ * forever after a successful publication": the settlement is re-created and
+ * adopted through the same claim path `prepare` used (the lifecycle attaches to
+ * the existing attempt for this scope+head). When adoption is impossible — no
+ * Checks surface, or nothing adoptable — the run is handed to the reconciler
+ * explicitly, which is the documented outcome for an abandoned attempt.
+ */
+async function settlementFor(
+  deps: ProcessDeps,
+  ref: AttemptRef,
+  headSha: string,
+): Promise<CheckSettlement | undefined> {
+  const cached = deps.checkSettlements.get(ref.attemptId);
+  if (cached !== undefined) return cached;
+  const scope = scopeOf(ref.payload);
+  if (deps.checks === undefined || scope === undefined) return undefined;
+  const settlement = createCheckSettlement({
+    deps,
+    payload: ref.payload,
+    attemptId: ref.attemptId,
+    checkBudgets: ref.checkBudgets,
+  });
+  settlement.fields = attemptFields(ref.payload, ref.level, ref.attemptId, headSha);
+  deps.checkSettlements.set(ref.attemptId, settlement);
+  // Adoption IS a claim attempt: the fallback path must not claim twice.
+  settlement.claimAttempted = true;
+  const handle = await settlement.begin(scope, ref.githubAppId, headSha);
+  if (handle === null) {
+    deps.log.warn(
+      { ...settlement.fields, event: "check_settlement_not_adopted" },
+      "check settlement could not be re-adopted on a resumed step — the run (if any) is left to the reconciler",
+    );
+    return undefined;
+  }
+  return settlement;
+}
+
 /** The round's structured log fields, derived from data alone. */
 function attemptFields(
   payload: ReviewJobPayload,
@@ -3037,21 +3076,6 @@ function attemptFields(
           }),
         }),
   };
-}
-
-/**
- * The retention proof a failing phase's own facts establish, once its failure
- * row has durably written. Two facts authorise destruction and only two: the
- * paid call RETURNED a status (its outcome is now durable), or it never started
- * (the phase observed no exec begin). Anything else — a rejected exec, a lost
- * reply, a timeout — proves nothing and destroys nothing. A caller that has no
- * facts (a pure cleanup resume) falls back to the launch row instead.
- */
-function retentionProofOf(facts: FailureFacts | undefined): RetentionProof | undefined {
-  if (facts === undefined) return undefined;
-  if (facts.runnerReturned) return { kind: "retained" };
-  if (facts.runnerStartedAt === undefined) return { kind: "no-paid-work" };
-  return undefined;
 }
 
 /** A phase failure carrying the facts as data, with the cause intact. */
@@ -4261,10 +4285,12 @@ export async function reviewAttempt(
   const { payload, attemptId, level } = ref;
   const runner = requireRunnerConfig(deps, payload);
   const progress = beginProgress();
-  // The live objects are this phase's own: the container by attempt id (never
-  // a handle from a previous invocation) and a freshly minted, purpose-scoped
-  // token. The paid step's authority is the launch row, not either of them.
-  const sandbox = await deps.getSandbox(deps.env.SANDBOX, attemptSandboxId(attemptId));
+  // The live objects are this phase's own, and the container is PROVEN before
+  // anything acts on it: the launch row stops a second paid call, and the
+  // marker proves the incarnation that call would run in is still the one this
+  // attempt prepared (a replacement is `unknown`, never a review of a foreign
+  // checkout).
+  const sandbox = await proveReviewAttemptMarker({ deps, attemptId });
   const cached = deps.credentials.get(attemptId);
   const token = cached?.token ?? (await mintSandboxReadToken({ payload, commenter: requireCommenter(deps, payload) }));
   const fields = attemptFields(payload, level, attemptId, prepared.headSha, prepared.budget);
@@ -4350,9 +4376,7 @@ async function collectPhase(
 ): Promise<CollectStep> {
   const { payload, attemptId, level, roundStartedAt } = ref;
   const commenter = requireCommenter(deps, payload);
-  const runner = requireRunnerConfig(deps, payload);
-  const appCfg = runner.appCfg;
-  const check = maybeSettlement(deps, attemptId);
+  const check = await settlementFor(deps, ref, prepared.headSha);
   const {
     headSha,
     targets,
@@ -4384,17 +4408,14 @@ async function collectPhase(
   const catalogExcluded: ReadonlySet<string> = new Set(prepared.catalogExcluded);
   const catalogBudgetExcluded: ReadonlySet<string> = new Set(prepared.catalogBudgetExcluded);
   const budgetExcluded = new Set(prepared.budgetExcluded);
-  // SEC-01: the redaction set comes from the host's own credential cache when
-  // this invocation ran the paid step, and is re-derived from the same source
-  // when collection resumes without it.
-  progress.secretValues =
-    deps.credentials.get(attemptId)?.secretValues ??
-    (await deriveSessionSecrets({
-      payload,
-      commenter,
-      appCfg,
-      customProviders: runner.customProviders,
-    }));
+  // SEC-01, bounded by the plan: exact-value redaction is a SAME-HOST guarantee.
+  // This host holds the session's ACTUAL values only when it ran the paid step;
+  // a resumed host has none, and it must not substitute values it mints now (a
+  // different token, rotated provider keys) and present them as exact. It
+  // redacts by SHAPE instead — the recorded residual, never a silent claim of
+  // exact coverage. Persisting the secrets to make the resumed set exact would
+  // put credentials in D1, which is worse than the gap.
+  progress.secretValues = deps.credentials.get(attemptId)?.secretValues ?? [];
   // The paid result is the LAUNCH ROW's, never a predecessor's return value.
   const execution = await readPaidExecution(deps, attemptId);
   const { run, recheck, report, appliedProvider } = execution;
@@ -4774,7 +4795,7 @@ async function collectPhase(
       payload: output,
       appId: payload.botRef.appId,
       targetId: payload.targetId,
-      model: chainHeadSelector(effectiveModelChain(appCfg).chain),
+      model: chainHeadSelector(prepared.modelChain),
       provider: appliedProvider,
       // A stale-context round (its pending lifecycle journal failed to
       // apply OR its capture failed) still publishes, but its row must
@@ -4846,7 +4867,6 @@ async function publishPhase(
 ): Promise<ProcessOutcome> {
   const { payload, attemptId, level } = ref;
   const commenter = requireCommenter(deps, payload);
-  const check = maybeSettlement(deps, attemptId);
   const sandboxId = attemptSandboxId(attemptId);
   // The JOURNAL ROW is the authority: a restart after staging publishes
   // exactly what was staged — its body, digest, target comment, round, line
@@ -4872,6 +4892,9 @@ async function publishPhase(
     head_sha: headSha,
   };
   const fields = attemptFields(payload, level, attemptId, headSha);
+  // A resumed publication must still conclude the attempt's Check: the
+  // settlement is adopted from the D1 attempt row when this host has none.
+  const check = await settlementFor(deps, ref, headSha);
   const stagedId = publicationId;
   // 13. §7.7 step 8 — epoch-fenced claim, phase sending, publish the EXACT
   // prepared upsert, validate the response id, persist proof BEFORE KV
@@ -5342,7 +5365,6 @@ export async function settleAttemptFailure(
       });
       // Confirmed by the await above: only a write that RESOLVED is durable.
       durableOutcome = true;
-      cleanup.proof = retentionProofOf(facts);
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
       deps.log.warn(
@@ -5457,7 +5479,6 @@ export async function settleAttemptFailure(
     // Confirmed by the await above: a resolved write is the attempt.s durable
     // terminal no-result outcome. A rejection leaves the latch false.
     durableOutcome = true;
-    cleanup.proof = retentionProofOf(facts);
   } catch (recordErr) {
     const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
     deps.log.warn(
@@ -5540,9 +5561,10 @@ export async function settleAttemptFailure(
  * unknown container state, and cleanup never replaces collection.
  */
 export type CleanupInput = {
-  /** A durable no-result outcome the failure path proved (a row that wrote after a returned status). */
-  proof?: RetentionProof;
-  /** The failure path established the container's state is unknown: nothing is destroyed or released. */
+  /**
+   * The failure path established the container's state is unknown: it can only
+   * REMOVE authorisation, never add it.
+   */
   unproven?: boolean;
   /** The checkout sha, when this invocation knew it, so the teardown line keeps the round's identity. */
   headSha?: string | null;
@@ -5557,21 +5579,21 @@ export async function cleanupAttempt(
   const sandboxId = attemptSandboxId(attemptId);
   const fields = attemptFields(payload, ref.level, attemptId, input.headSha ?? null);
   const baseFields: ConsumerLogFields | undefined = undefined;
-  // The retention proof is DURABLE, never an in-memory timestamp: the launch
-  // row is the one record of how far the paid step got. `no row` / `pending`
-  // proves the paid call never started, `persisted` proves it returned WITH its
-  // result durable, and `launched` alone proves nothing — that last one
-  // destroys nothing, so a restart cannot classify a paid run as unpaid. The
-  // failure path may add its own durable fact (its row resolved after a
-  // RETURNED status), which is the plan's second admissible proof.
+  // ORDERING RULE, not a preference: the durable launch row is consulted first
+  // and is DECISIVE. It is the one record of how far the paid step got —
+  // `no row` / `pending` proves the paid call never started, `persisted` proves
+  // it returned WITH its result durable, and `launched` authorises nothing at
+  // all. A phase-local fact may only ever NARROW that answer (an `unknown`
+  // verdict removes authorisation); it can never widen it, so no freshly
+  // initialised progress can turn a `launched` row into destruction
+  // authorisation.
   const launch = await readReviewLaunch(deps.env.DB, attemptId);
   const retention: RetentionProof | undefined =
-    input.proof ??
-    (launch === null || launch.state === "pending"
+    launch === null || launch.state === "pending"
       ? { kind: "no-paid-work" }
       : launch.state === "persisted"
         ? { kind: "retained" }
-        : undefined);
+        : undefined;
   let containerUnproven = retention === undefined || input.unproven === true;
   // Destroy FIRST, then release the admission row. Releasing first would let
   // the next attempt for this PR acquire the slot and start its container
