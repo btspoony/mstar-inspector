@@ -193,6 +193,7 @@ import {
   toBaseFields,
   type AdmissionRefusalFields,
   type AdmittedReviewAttempt,
+  type AttemptRef,
   type CheckBackgroundSink,
   type ConsumerLog,
   type ConsumerLogFields,
@@ -1123,6 +1124,12 @@ export function createReviewConsumer(
     targets: targetsStore,
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
     appCommenters,
+    // The attempt's live objects and credentials, registered by the host that
+    // resolved them: a phase re-derives what it needs from these instead of
+    // receiving them (or a token) across a boundary.
+    runnerConfigs: new Map(),
+    checkSettlements: new Map(),
+    credentials: new Map(),
     // Production factory (§7.5/§7.7 step 11): the commenter is bound
     // to the thread store (`createReviewCommenter(env, { db })`) so
     // `discoverThread` / `resolveFindingThread` are live for the resolution
@@ -1430,7 +1437,7 @@ async function processMessage(
     // `workspaceId` is the bot's owner (concurrency/inflight); the ledger is
     // charged to the target's workspace — the tenant that asked (see
     // `CommenterResolution.usageWorkspaceId`).
-    const { commenter, githubAppId, workspaceId, usageWorkspaceId } = resolution;
+    const { githubAppId, workspaceId, usageWorkspaceId } = resolution;
     // Supersede skip (migration 0044): a queued delivery whose PR head has
     // already advanced must cost nothing that can fail it, hold the guard, or
     // start work — no admission row, no sandbox, no Check, no publication.
@@ -1832,26 +1839,27 @@ async function processMessage(
     }
     // Handoff: everything from here on belongs to the admitted attempt's own
     // body. This invocation keeps admission, dedupe and skip settlement; the
-    // attempt takes the container, the credential and the paid step.
+    // attempt takes the container, the credential and the paid step, and what
+    // crosses the boundary is DATA — the durable ids plus the delivery's facts.
+    // The App adapter and the keys stay on `deps`, which is how the host
+    // supplies them (and how a resumed step re-derives them).
+    const usageSource: AttemptRef["usageSource"] = resolution.scope === "shared" ? "shared" : "byok";
+    deps.runnerConfigs.set(payload.botRef.appId, { appCfg, modelOverrides, customProviders });
     const admitted: AdmittedReviewAttempt = {
-      payload,
       deps,
-      attemptId,
-      sandboxId,
-      roundStartedAt,
-      level,
-      commenter,
-      githubAppId,
-      workspaceId,
-      usageWorkspaceId,
-      usageSource: resolution.scope === "shared" ? "shared" : "byok",
-      appCfg,
-      modelOverrides,
-      customProviders,
-      checkBudgets,
-      checkClaimSha,
-      inflight,
-      attempts,
+      ref: {
+        attemptId,
+        payload,
+        level,
+        roundStartedAt,
+        githubAppId,
+        usageWorkspaceId,
+        usageSource,
+        checkBudgets,
+        checkClaimSha,
+        inflight,
+        attempts,
+      },
     };
     // Ownership moves with the attempt: its own cleanup releases the row.
     inflight = null;

@@ -340,6 +340,17 @@ export async function stagePublication(
 }
 
 /**
+ * The STAGED journal row by id — the authority `publish` reads rather than any
+ * in-memory copy of the payload: a restart after staging must publish exactly
+ * what was staged, including the body, the target comment, the line intents and
+ * the lifecycle it carries. `null` means the id has no row (nothing to send).
+ */
+export async function readPublication(db: D1Like, id: string): Promise<PublicationRow | null> {
+  const row = await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(id).first<ReviewPublicationRow>();
+  return row === null ? null : publicationRowOf(row);
+}
+
+/**
  * Conditional epoch-fenced claim (spec §7.0 claims / §7.7 step 8): only a
  * non-terminal publication (`prepared`/`sending`/`unknown`/`confirmed` —
  * `applied`/`failed`/`superseded` are terminal) with a free or expired

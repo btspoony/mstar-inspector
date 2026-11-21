@@ -1,11 +1,13 @@
 /**
- * The five attempt phases, each driven ALONE from a hand-built input.
+ * The five attempt phases, each driven ALONE from a hand-built input — and one
+ * case that simulates a RESTART: after `prepare`, only the returned data and the
+ * attempt's sandbox id survive; `review`, `collect`, `publish` and `cleanup`
+ * then run from the persisted records alone.
  *
- * The point of the split is that a phase boundary carries serialisable values,
- * so a Workflow restart can resume at one instead of at a live stack. These
- * cases therefore never enter through `processMessage`: they construct the
- * attempt's run state, the phase's own input and the durable carrier, call the
- * phase, and assert on its explicit output.
+ * The rule these cases enforce is the module's own: a phase may hold live
+ * objects internally, but its input and output are DATA. `JSON.parse(JSON.
+ * stringify(handoff))` is therefore a faithful restart input, and every phase
+ * re-derives the container, the adapter and the token from `deps`.
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 
@@ -27,16 +29,14 @@ import { createConsumerHarness, makePayload } from "../helpers/consumer-harness"
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
-import { claimReviewAttempt, readReviewLaunch } from "../../src/pipeline/review-attempt";
+import { claimReviewAttempt, claimReviewLaunch, readReviewLaunch } from "../../src/pipeline/review-attempt";
+import { readPublication } from "../../src/store/finding-lifecycle";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { Lease } from "../../src/store/finding-lifecycle";
-import type { ReviewSandbox } from "../../src/pipeline/sandbox";
-import { buildGitOpsCommands } from "../../src/pipeline/gitops";
 // Type-only (erased at compile time, so it cannot run before the shim above).
 import type {
-  AdmittedReviewAttempt,
-  AttemptRun,
+  AttemptRef,
   CheckHandle,
   PreparedAttempt,
   ProcessDeps,
@@ -47,15 +47,13 @@ const {
   cleanupAttempt,
   collectAttempt,
   createCheckSettlement,
-  journalHandoffRow,
-  payloadIdentityFields,
   prepareAttempt,
   publishAttempt,
   reviewAttempt,
+  runAdmittedReviewAttempt,
 } = await import("../../src/pipeline/review-attempt-execution");
 
 const ATTEMPT_ID = "attempt-4b-0001";
-const SANDBOX_ID = `review-${ATTEMPT_ID}`;
 const SCOPE: Scope = {
   appId: TEST_APP_ID,
   installationId: 123,
@@ -63,7 +61,7 @@ const SCOPE: Scope = {
   repo: TEST_REPO,
   prNumber: TEST_PR_NUMBER,
 };
-const LEASE: Lease = { holder: `consumer:${SANDBOX_ID}`, epoch: 1, untilMs: Date.now() + 60_000 };
+const LEASE: Lease = { holder: `consumer:${ATTEMPT_ID}`, epoch: 1, untilMs: Date.now() + 60_000 };
 const HANDLE: CheckHandle = { attemptId: ATTEMPT_ID, scope: SCOPE, githubAppId: 424242, headSha: SHA, lease: LEASE };
 
 let h = createConsumerHarness();
@@ -71,9 +69,15 @@ beforeEach(() => {
   h = createConsumerHarness();
 });
 
-/** The seeded D1 + this case's doubles, assembled by hand: nothing here is a live stack. */
-async function makeDeps(): Promise<{ deps: ProcessDeps; db: Awaited<ReturnType<typeof createSeededTestD1>> }> {
-  const db = await createSeededTestD1();
+/**
+ * The seeded D1 + this case's doubles, assembled by hand. `share` carries the
+ * pieces a RESTART keeps: the same database and the same container, but fresh
+ * maps — the host resolves the App again, and nothing in-memory survives.
+ */
+async function makeDeps(
+  share?: { db: Awaited<ReturnType<typeof createSeededTestD1>> },
+): Promise<{ deps: ProcessDeps; db: Awaited<ReturnType<typeof createSeededTestD1>> }> {
+  const db = share?.db ?? (await createSeededTestD1());
   const deps: ProcessDeps = {
     env: await h.makeEnv({ DB: db as never }),
     store: createArtifactStore(db as never),
@@ -86,27 +90,35 @@ async function makeDeps(): Promise<{ deps: ProcessDeps; db: Awaited<ReturnType<t
     selectPrHead: async () => null,
     findIncrementBase: async () => null,
     roundBudgetMs: 900_000,
+    runnerConfigs: new Map(),
+    checkSettlements: new Map(),
+    credentials: new Map(),
   };
-  return { deps, db };
-}
-
-/** One admitted attempt's run state, built by hand — no `processMessage`. */
-function makeRun(deps: ProcessDeps, payload: ReviewJobPayload, sandbox: ReviewSandbox | null = null): AttemptRun {
-  const input: AdmittedReviewAttempt = {
-    payload,
-    deps,
-    attemptId: ATTEMPT_ID,
-    sandboxId: SANDBOX_ID,
-    roundStartedAt: Date.now(),
-    level: "default",
+  // The host channel: the adapter and the keys the host resolved for this
+  // delivery. A phase never receives either across a boundary.
+  deps.appCommenters.set(TEST_APP_ID, {
     commenter: h.fakeCommenter,
+    fingerprint: "test-fingerprint",
     githubAppId: 424242,
-    workspaceId: "default",
-    usageWorkspaceId: "default",
-    usageSource: "byok",
+  });
+  deps.runnerConfigs.set(TEST_APP_ID, {
     appCfg: { keys: { ark: ["sk-test"] }, modelChain: "ark/deepseek-v4-flash" },
     modelOverrides: undefined,
     customProviders: undefined,
+  });
+  return { deps, db };
+}
+
+/** The attempt's data input — what a step host rebuilds from the queue message. */
+function makeRef(payload: ReviewJobPayload): AttemptRef {
+  return {
+    attemptId: ATTEMPT_ID,
+    payload,
+    level: "default",
+    roundStartedAt: Date.now(),
+    githubAppId: 424242,
+    usageWorkspaceId: "default",
+    usageSource: "byok",
     checkBudgets: null,
     checkClaimSha: null,
     inflight: {
@@ -121,86 +133,6 @@ function makeRun(deps: ProcessDeps, payload: ReviewJobPayload, sandbox: ReviewSa
       ttlSeconds: 900,
     },
     attempts: 1,
-  };
-  const progress = {
-    failureStage: "pipeline" as const,
-    secretValues: [] as string[],
-    runnerStartedAt: undefined,
-    runnerReturned: false,
-  };
-  let run!: AttemptRun;
-  const check = createCheckSettlement({
-    payload,
-    deps,
-    sandboxId: SANDBOX_ID,
-    checkBudgets: null,
-    logFields: () => run.fields ?? run.baseFields ?? payloadIdentityFields(payload),
-  });
-  run = {
-    input,
-    progress,
-    check,
-    baseFields: undefined,
-    fields: undefined,
-    sandbox,
-    headSha: null,
-    lifecycleScope: undefined,
-    roundBudget: null,
-    runnerAnchor: null,
-    observedChangedLines: null,
-    durableOutcome: false,
-    containerUnproven: false,
-    sendAttempt: null,
-  };
-  return run;
-}
-
-/** The checkout a handed-off `prepare` leaves: the durable read a restart would make. */
-function makePrepared(payload: ReviewJobPayload): PreparedAttempt {
-  return {
-    headSha: SHA,
-    token: "ghs_test",
-    cmds: buildGitOpsCommands({
-      owner: TEST_OWNER,
-      repo: TEST_REPO,
-      prNumber: TEST_PR_NUMBER,
-      cloneDir: "/home/user/clone",
-      diffPath: "/home/user/diff.patch",
-    }),
-    sandbox: h.fakeSandbox as unknown as ReviewSandbox,
-    fields: payloadIdentityFields(payload),
-    lifecycleScope: SCOPE,
-    key: {
-      installation_id: 123,
-      owner: TEST_OWNER,
-      repo: TEST_REPO,
-      pr_number: TEST_PR_NUMBER,
-      head_sha: SHA,
-    },
-    targets: [],
-    totalOpen: 0,
-    captureFailed: false,
-    pendingApplyFailed: false,
-    sinceSha: null,
-    diffText: "",
-    catalogExcluded: new Set<string>(),
-    catalogBudgetExcluded: new Set<string>(),
-    budgetExcluded: new Set<string>(),
-    discussion: { items: [], issueCoverage: "complete", issueModelCoverage: "complete", issueDigest: "", capturedMs: Date.now(), threads: [] },
-    askedDiscussion: {
-      items: [],
-      issueCoverage: "complete",
-      issueModelCoverage: "complete",
-      issueDigest: "",
-      capturedMs: Date.now(),
-      threads: [],
-    },
-    recheckInput: undefined,
-    recheckAssignmentMaxBytes: undefined,
-    prContext: undefined,
-    anchor: { kind: "allocated", requestedBudgetMs: 500_340, effectiveBudgetMs: 500_340, execDeadlineMs: Date.now() + 500_000 },
-    observedChangedLines: 17,
-    reconFacts: [],
   };
 }
 
@@ -226,11 +158,10 @@ describe("createCheckSettlement", () => {
       },
     };
     const settlement = createCheckSettlement({
-      payload: makePayload(),
       deps,
-      sandboxId: SANDBOX_ID,
+      payload: makePayload(),
+      attemptId: ATTEMPT_ID,
       checkBudgets: null,
-      logFields: () => payloadIdentityFields(makePayload()),
     });
 
     expect(await settlement.begin(SCOPE, 424242, SHA)).toEqual(HANDLE);
@@ -253,11 +184,10 @@ describe("createCheckSettlement", () => {
       },
     };
     const settlement = createCheckSettlement({
-      payload: makePayload(),
       deps,
-      sandboxId: SANDBOX_ID,
+      payload: makePayload(),
+      attemptId: ATTEMPT_ID,
       checkBudgets: null,
-      logFields: () => payloadIdentityFields(makePayload()),
     });
     settlement.handle = HANDLE;
 
@@ -274,168 +204,124 @@ describe("prepareAttempt", () => {
     h.sandbox.resolvedSha = SHA;
     // The durable done-state: the delivery is a duplicate of this head.
     h.kvState.getValue = "done";
-    const run = makeRun(deps, payload);
 
-    const step = await prepareAttempt(run);
+    const step = await prepareAttempt(deps, makeRef(payload));
 
     expect(step).toEqual({ kind: "settled", outcome: { kind: "ok" } });
-    // The phase carried the authoritative checkout sha out on the run state,
-    // which is what a restart's failure path and cleanup read.
-    expect(run.headSha).toBe(SHA);
-    expect(run.sandbox).not.toBeNull();
     expect(h.sandbox.calls.filter((call) => h.sandbox.gitOps.get(call.cmd) === "clone")).toHaveLength(1);
   });
-});
 
-describe("reviewAttempt", () => {
-  test("the paid step receives the anchored exec deadline and leaves a persisted launch row", async () => {
+  test("the handoff is data: no sandbox, no token, no Set survives a JSON round-trip", async () => {
     const { deps } = await makeDeps();
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    // A fresh head: prepare runs to the end of its phase.
+    const step = await prepareAttempt(deps, makeRef(payload));
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+
+    const handoff = step.prepared;
+    expect(handoff.headSha).toBe(SHA);
+    // The ONLY thing a restart may carry: this JSON document plus the attempt
+    // id. A live handle, a token or a Set would fail this equality.
+    expect(JSON.parse(JSON.stringify(handoff))).toEqual(handoff);
+    expect(handoff).not.toHaveProperty("sandbox");
+    expect(handoff).not.toHaveProperty("token");
+    expect(Array.isArray(handoff.catalogExcluded)).toBe(true);
+  });
+});
+
+describe("the restart round trip", () => {
+  test("prepare → review → collect → publish → cleanup runs from persisted records alone", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const run = makeRun(deps, payload);
-    const prepared = makePrepared(payload);
-    // The one durable fact the paid step reads: prepare's provisioning claim.
-    await claimReviewAttempt(deps.env.DB, ATTEMPT_ID, Date.now());
+    const ref = makeRef(payload);
 
-    const reviewed = await reviewAttempt(run, prepared);
+    // --- invocation 1: prepare -------------------------------------------
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
 
-    expect(reviewed.execution.run.stdout).toBe(JSON.stringify(VALID_OUTPUT));
-    // The launch row is the durable carrier: `persisted` after the reply, so
-    // collection can be replayed without paying again.
-    const launch = await readReviewLaunch(deps.env.DB, ATTEMPT_ID);
-    expect(launch?.state).toBe("persisted");
-  });
-});
+    // --- invocation 2: a NEW host (fresh maps), same database + container --
+    const { deps: resumed } = await makeDeps({ db });
+    const reviewed = await reviewAttempt(resumed, ref, prepared);
+    expect(reviewed.state).toBe("persisted");
+    expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("persisted");
 
-describe("collectAttempt", () => {
-  test("a valid envelope is staged BEFORE any GitHub mutation and handed to publish", async () => {
-    const { deps } = await makeDeps();
-    const payload = makePayload();
-    registerGitOpsCommands(h.sandbox, payload);
-    const run = makeRun(deps, payload);
-    const prepared = makePrepared(payload);
-    const reviewed = {
-      execution: {
-        run: { stdout: JSON.stringify(VALID_OUTPUT), stderr: "", exitCode: 0 },
-        recheck: null,
-        report: null,
-        appliedProvider: null,
-      },
-      recheckDoc: null,
-      rejectedRowIds: new Set<string>(),
-      anonymousRejectedRows: 0,
-    };
-
-    const step = await collectAttempt(run, prepared, reviewed);
-
-    expect(step.kind).toBe("collected");
-    if (step.kind !== "collected") return;
-    expect(step.collected.preparedBody).toContain("Two issues found in the diff.");
-    expect(step.collected.round).toBe(1);
-    // Staged, not sent: the publication is on the journal and the commenter
-    // has not been asked to post yet.
-    const journal = await journalHandoffRow(deps.env.DB, SCOPE, SHA);
-    expect(journal?.id).toBe(step.collected.stagedId);
-    expect(journal?.phase).toBe("prepared");
+    // --- invocation 3: collect, reading the paid result from the row ------
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    // The publication id is the whole handoff, and it is on the journal.
+    const staged = await readPublication(db as never, collected.collected.publicationId);
+    expect(staged?.phase).toBe("prepared");
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
-    expect(run.durableOutcome).toBe(true);
-  });
-});
 
-describe("publishAttempt", () => {
-  test("a staged payload is published once, without any runner work", async () => {
-    const { deps } = await makeDeps();
-    const payload = makePayload();
-    registerGitOpsCommands(h.sandbox, payload);
-    const run = makeRun(deps, payload);
-    const prepared = makePrepared(payload);
-    const reviewed = {
-      execution: {
-        run: { stdout: JSON.stringify(VALID_OUTPUT), stderr: "", exitCode: 0 },
-        recheck: null,
-        report: null,
-        appliedProvider: null,
-      },
-      recheckDoc: null,
-      rejectedRowIds: new Set<string>(),
-      anonymousRejectedRows: 0,
-    };
-    const step = await collectAttempt(run, prepared, reviewed);
-    if (step.kind !== "collected") throw new Error(`collect did not hand off: ${step.kind}`);
-    const runnerCallsBefore = h.sandbox.calls.length;
-
-    const outcome = await publishAttempt(run, prepared, step.collected);
-
+    // --- invocation 4: publish, from the journal row alone ----------------
+    const { deps: publishing } = await makeDeps({ db });
+    const outcome = await publishAttempt(publishing, ref, collected.collected.publicationId);
     expect(outcome).toEqual({ kind: "ok" });
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
-    // No runner work in this phase: the paid result was already durable.
-    expect(h.sandbox.calls.length).toBe(runnerCallsBefore);
+
+    // --- invocation 5: cleanup, whose proof comes from the launch row -----
+    const { deps: cleaning } = await makeDeps({ db });
+    expect(await cleanupAttempt(cleaning, ref)).toEqual({ retention: "retained" });
+    expect(h.sandbox.destroyCalls).toBe(1);
   });
 });
 
 describe("cleanupAttempt", () => {
-  /** A sandbox double that records the retention proof the teardown was authorised by. */
-  function recordingSandbox(previous: ReviewSandbox): { sandbox: ReviewSandbox; retentions: unknown[] } {
-    const retentions: unknown[] = [];
-    return {
-      sandbox: {
-        runCommand: (...args) => previous.runCommand(...args),
-        claimMarker: (marker) => previous.claimMarker(marker),
-        runMarked: (marker, command, opts) => previous.runMarked(marker, command, opts),
-        destroyMarked: async (marker, retention) => {
-          retentions.push(retention);
-          await previous.destroy();
-          return "destroyed";
-        },
-        destroy: () => previous.destroy(),
-      },
-      retentions,
-    };
-  }
+  test("a launched row with no persisted result destroys nothing and releases nothing", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    // The claim was written AND the paid step was taken: no proof it returned.
+    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now());
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
 
-  test("no paid work destroys the container on that fact alone and releases the row", async () => {
-    const { deps } = await makeDeps();
-    const payload = makePayload();
-    const { sandbox, retentions } = recordingSandbox(h.fakeSandbox as unknown as ReviewSandbox);
-    const run = makeRun(deps, payload, sandbox);
-
-    await cleanupAttempt(run);
-
-    expect(retentions).toEqual([{ kind: "no-paid-work" }]);
-    expect(h.sandbox.destroyCalls).toBe(1);
-    expect(run.containerUnproven).toBe(false);
-  });
-
-  test("a paid call that returned WITHOUT a durable outcome is never destroyed", async () => {
-    const { deps } = await makeDeps();
-    const payload = makePayload();
-    const { sandbox, retentions } = recordingSandbox(h.fakeSandbox as unknown as ReviewSandbox);
-    const run = makeRun(deps, payload, sandbox);
-    run.progress.runnerStartedAt = Date.now();
-    run.progress.runnerReturned = true;
-    run.durableOutcome = false;
-
-    await cleanupAttempt(run);
-
-    expect(retentions).toEqual([]);
+    expect(await cleanupAttempt(deps, ref)).toEqual({ retention: "unknown" });
     expect(h.sandbox.destroyCalls).toBe(0);
-    expect(run.containerUnproven).toBe(true);
   });
 
-  test("a retained result destroys the proven container and releases capacity", async () => {
+  test("no launch row proves no paid work and destroys nothing", async () => {
+    const { deps } = await makeDeps();
+    const ref = makeRef(makePayload());
+
+    expect(await cleanupAttempt(deps, ref)).toEqual({ retention: "no-paid-work" });
+    expect(h.sandbox.destroyCalls).toBe(0);
+  });
+
+  test("a persisted launch row authorises the teardown with the retained proof", async () => {
     const { deps } = await makeDeps();
     const payload = makePayload();
-    const { sandbox, retentions } = recordingSandbox(h.fakeSandbox as unknown as ReviewSandbox);
-    const run = makeRun(deps, payload, sandbox);
-    run.progress.runnerStartedAt = Date.now();
-    run.progress.runnerReturned = true;
-    run.durableOutcome = true;
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+    // The durable facts a restart would find: prepared, launched, persisted.
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    await reviewAttempt(deps, ref, JSON.parse(JSON.stringify(step.prepared)));
 
-    await cleanupAttempt(run);
-
-    expect(retentions).toEqual([{ kind: "retained" }]);
+    expect(await cleanupAttempt(deps, ref)).toEqual({ retention: "retained" });
     expect(h.sandbox.destroyCalls).toBe(1);
-    expect(run.containerUnproven).toBe(false);
   });
 });
+
+describe("runAdmittedReviewAttempt", () => {
+  test("the inline route composes the same five phases end to end", async () => {
+    const { deps } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+
+    const outcome = await runAdmittedReviewAttempt({ deps, ref: makeRef(payload) });
+
+    expect(outcome).toEqual({ kind: "ok" });
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
+    expect(h.sandbox.destroyCalls).toBe(1);
+  });
+});
+

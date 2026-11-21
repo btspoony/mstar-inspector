@@ -1123,6 +1123,50 @@ async function claimAttemptMarker(
 }
 
 /**
+ * The purpose-scoped sandbox read credential, mintable by ANY phase: a step
+ * that re-derives its live objects after a restart needs the same repository-
+ * scoped, read-only grant the preparing invocation received, and the adapter's
+ * own installation-token cache makes the repeat call free.
+ */
+export async function mintSandboxReadToken(input: {
+  payload: ReviewJobPayload;
+  commenter: Pick<ReviewCommenter, "getInstallationToken">;
+}): Promise<string> {
+  const grant = await input.commenter.getInstallationToken({
+    scope: {
+      appId: input.payload.botRef.appId,
+      installationId: input.payload.installation_id,
+      owner: input.payload.owner,
+      repo: input.payload.repo,
+      prNumber: input.payload.pr_number,
+    },
+    purpose: "sandbox-read",
+  });
+  assertSandboxGrant(grant, input.payload.repo);
+  return grant.token;
+}
+
+/**
+ * The attempt's session secret values (SEC-01), re-derived by a phase that must
+ * exact-redact model output without having run the paid step itself: the token
+ * it mints here, the App's own provider keys and the runner env's passthrough
+ * values — the SAME source the exec used, so the redaction set cannot drift
+ * from what the session actually held. It logs nothing (the exec's own line is
+ * the one record of the credential payload).
+ */
+export async function deriveSessionSecrets(input: {
+  payload: ReviewJobPayload;
+  commenter: Pick<ReviewCommenter, "getInstallationToken">;
+  appCfg: RunnerAppConfig;
+  customProviders: readonly CustomProviderConsumerConfig[] | undefined;
+}): Promise<string[]> {
+  const token = await mintSandboxReadToken({ payload: input.payload, commenter: input.commenter });
+  const runnerEnv = buildRunnerEnv(input.appCfg);
+  const credentials = buildRunnerCredentials(input.appCfg, undefined, undefined, input.customProviders);
+  return sessionSecretValues(runnerEnv, credentials.keyValues, token);
+}
+
+/**
  * Acquire the attempt's container, mint its purpose-scoped read credential,
  * clone the PR head and resolve the AUTHORITATIVE checkout SHA. The caller's
  * failure path reads `progress.failureStage` and `progress.secretValues`, so
@@ -1214,18 +1258,7 @@ export async function prepareReviewAttempt(input: {
   // proceeds on the RETURNED capabilities — assertSandboxGrant fails
   // closed on any broader grant (RL-6: the request is never presented as
   // proof of the response).
-  const grant = await commenter.getInstallationToken({
-    scope: {
-      appId: payload.botRef.appId,
-      installationId: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      prNumber: payload.pr_number,
-    },
-    purpose: "sandbox-read",
-  });
-  assertSandboxGrant(grant, payload.repo);
-  const token = grant.token;
+  const token = await mintSandboxReadToken({ payload, commenter });
   // SEC-01: seed the exact-value list with the minted token immediately —
   // a failure before the runner env is assembled (clone/diff/input steps)
   // still exact-redacts the token in the catch path.
