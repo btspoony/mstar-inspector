@@ -266,6 +266,9 @@ function clockSpendingSandbox(needle: string, spentMs: number, clock: { now: num
         return h.fakeSandbox.runCommand(cmd, opts);
       },
       destroy: h.fakeSandbox.destroy,
+      claimMarker: h.fakeSandbox.claimMarker,
+      runMarked: h.fakeSandbox.runMarked,
+      destroyMarked: h.fakeSandbox.destroyMarked,
     }),
   };
 }
@@ -1908,6 +1911,9 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
+          claimMarker: h.fakeSandbox.claimMarker,
+          runMarked: h.fakeSandbox.runMarked,
+          destroyMarked: h.fakeSandbox.destroyMarked,
         }),
       });
       await consumer(h.makeBatch(makePayload()));
@@ -1955,6 +1961,9 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
+          claimMarker: h.fakeSandbox.claimMarker,
+          runMarked: h.fakeSandbox.runMarked,
+          destroyMarked: h.fakeSandbox.destroyMarked,
         }),
       });
       await consumer(h.makeBatch(makePayload()));
@@ -1991,6 +2000,9 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
+          claimMarker: h.fakeSandbox.claimMarker,
+          runMarked: h.fakeSandbox.runMarked,
+          destroyMarked: h.fakeSandbox.destroyMarked,
         }),
       });
       await consumer(h.makeBatch(makePayload()));
@@ -2032,6 +2044,9 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
+          claimMarker: h.fakeSandbox.claimMarker,
+          runMarked: h.fakeSandbox.runMarked,
+          destroyMarked: h.fakeSandbox.destroyMarked,
         }),
       });
       // No await separates the anchor from the write-timeout read, but the
@@ -2097,6 +2112,9 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
+          claimMarker: h.fakeSandbox.claimMarker,
+          runMarked: h.fakeSandbox.runMarked,
+          destroyMarked: h.fakeSandbox.destroyMarked,
         }),
       });
       // The write spent the whole anchored window, so the exec is declined
@@ -2134,6 +2152,9 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
+          claimMarker: h.fakeSandbox.claimMarker,
+          runMarked: h.fakeSandbox.runMarked,
+          destroyMarked: h.fakeSandbox.destroyMarked,
         }),
       });
       // Real synchronous serialization runs between the payload build and the
@@ -2197,6 +2218,9 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
+          claimMarker: h.fakeSandbox.claimMarker,
+          runMarked: h.fakeSandbox.runMarked,
+          destroyMarked: h.fakeSandbox.destroyMarked,
         }),
       });
       await consumer(h.makeBatch(makePayload()));
@@ -2289,6 +2313,9 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
+          claimMarker: h.fakeSandbox.claimMarker,
+          runMarked: h.fakeSandbox.runMarked,
+          destroyMarked: h.fakeSandbox.destroyMarked,
         }),
       });
       await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
@@ -2331,6 +2358,9 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
+          claimMarker: h.fakeSandbox.claimMarker,
+          runMarked: h.fakeSandbox.runMarked,
+          destroyMarked: h.fakeSandbox.destroyMarked,
         }),
       });
       // A confirmed stop is terminal: ack, never a paid retry for the same clock.
@@ -7095,6 +7125,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           return h.fakeSandbox.runCommand(cmd, opts);
         },
         destroy: h.fakeSandbox.destroy,
+        claimMarker: h.fakeSandbox.claimMarker,
+        runMarked: h.fakeSandbox.runMarked,
+        destroyMarked: h.fakeSandbox.destroyMarked,
       }),
       createAppCommenter: () => commenterWithChecks(adapter),
     });

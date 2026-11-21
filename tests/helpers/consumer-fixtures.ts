@@ -450,6 +450,12 @@ export type FakeSandboxState = {
   error: Error | undefined;
   destroyCalls: number;
   destroyError: Error | undefined;
+  /** What the marker claim answers ("written" = a fresh container). */
+  markerClaim: "written" | "matched" | "unknown";
+  /** A marked read refuses (`unknown`) instead of running its command. */
+  markedUnknown: boolean;
+  /** The guarded destroy refuses (`unknown`) instead of destroying. */
+  destroyMarkedUnknown: boolean;
   /** Runs at the FIRST sandbox command of a test (ordering probes). */
   probe: (() => void) | undefined;
   /** Holds the FIRST runner exec; `reached` resolves once it is parked. */
@@ -513,6 +519,9 @@ export function initialFakeSandboxState(): FakeSandboxState {
     error: undefined,
     destroyCalls: 0,
     destroyError: undefined,
+    markerClaim: "written",
+    markedUnknown: false,
+    destroyMarkedUnknown: false,
     probe: undefined,
     gate: undefined,
   };
@@ -674,9 +683,31 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
   throw new Error(`fake sandbox: unrecognized command — declare it in tests/helpers/consumer-fixtures.ts: ${cmd}`);
 }
 
+/**
+ * The marker RPCs over a sandbox's own `runCommand`/`destroy` — the shape an
+ * attempt-owned sandbox must answer. A case that needs a refusal sets the
+ * state knobs instead of replacing these.
+ */
+export function markerGate(sandbox: {
+  runCommand: (cmd: string, opts?: unknown) => Promise<ExecResult>;
+  destroy: () => Promise<void>;
+}) {
+  return {
+    claimMarker: async () => "written" as const,
+    runMarked: async (_marker: string, cmd: string, opts?: unknown) => ({
+      kind: "ran" as const,
+      ...(await sandbox.runCommand(cmd, opts)),
+    }),
+    destroyMarked: async () => {
+      await sandbox.destroy();
+      return "destroyed" as const;
+    },
+  };
+}
+
 /** The injected sandbox double: `state` carries every per-test knob. */
 export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxState()) {
-  return {
+  const sandbox = {
     state,
     runCommand: mock(async (cmd: string, opts?: unknown) => {
       const first = state.calls.length === 0;
@@ -691,11 +722,23 @@ export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxSt
       }
       return answerCommand(cmd, opts, state);
     }),
+    claimMarker: mock(async (_marker: string) => state.markerClaim),
+    runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) =>
+      state.markedUnknown
+        ? { kind: "unknown" as const }
+        : { kind: "ran" as const, ...(await sandbox.runCommand(cmd, opts)) },
+    ),
+    destroyMarked: mock(async (_marker: string) => {
+      if (state.destroyMarkedUnknown) return "unknown" as const;
+      await sandbox.destroy();
+      return "destroyed" as const;
+    }),
     destroy: mock(async () => {
       state.destroyCalls += 1;
       if (state.destroyError !== undefined) throw state.destroyError;
     }),
   };
+  return sandbox;
 }
 
 // ---------------------------------------------------------------------------

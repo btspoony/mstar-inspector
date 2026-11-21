@@ -89,14 +89,68 @@ export const MAX_EXEC_ENV_VALUE_BYTES = 8 * 1024;
  */
 export { shellCommand, type ShellCommand };
 
+/** One exec's options (command, env and stdin bounds all apply). */
+type CommandOpts = { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string };
+
+/**
+ * The result of a marker-guarded operation: either it ran on a container that
+ * still carries the attempt's exact marker bytes, or the container could not
+ * be proven to be that one and NOTHING ran.
+ */
+export type MarkedRun =
+  | { kind: "ran"; stdout: string; stderr: string; exitCode: number }
+  | { kind: "unknown" };
+
 /** Locked contract (compass contracts B). */
 export type ReviewSandbox = {
   runCommand(
     command: ShellCommand,
-    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
+    opts?: CommandOpts,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  /**
+   * Write this attempt's marker exactly once. `matched` = the container already
+   * carries those exact bytes (a replay of the same attempt's prepare);
+   * `unknown` = it carries other bytes, so it is NOT this attempt's container
+   * and the marker is never repaired over it.
+   */
+  claimMarker(marker: string): Promise<"written" | "matched" | "unknown">;
+  /**
+   * Run `command` ONLY on an already-running container whose marker is exactly
+   * `marker`. Never starts a container: a missing/different marker, or no live
+   * container at all, runs nothing and reports `unknown` (not a failure — the
+   * state of the container is unknown, so no result may be claimed from it).
+   */
+  runMarked(marker: string, command: ShellCommand, opts?: CommandOpts): Promise<MarkedRun>;
+  /**
+   * Destroy ONLY an already-running container whose marker is exactly `marker`.
+   * A missing/different marker destroys nothing and reports `unknown`, so a
+   * replacement incarnation is never torn down on another attempt's behalf.
+   */
+  destroyMarked(marker: string): Promise<"destroyed" | "unknown">;
+  /**
+   * Unproven teardown, for a container that is not an attempt's (the smoke's
+   * own health-check sandbox). Attempt-owned containers use `destroyMarked`.
+   */
   destroy(): Promise<void>;
 };
+
+/** The attempt marker's fixed in-container path: ephemeral `/tmp`, outside the checkout and any mount. */
+const MARKER_PATH = "/tmp/mstar-review-attempt";
+/**
+ * Read the marker; exit 3 names "absent" so a missing file stays distinct from
+ * an unreadable one (both refuse, but only one means "wrong container").
+ */
+const MARKER_READ_COMMAND = shellCommand(`[ -f '${MARKER_PATH}' ] || exit 3; cat -- '${MARKER_PATH}'`);
+/**
+ * Exclusive create: noclobber makes the redirection itself fail when the file
+ * exists, so an existing marker is never truncated or replaced. The payload
+ * rides the env (bounded above), never the command string.
+ */
+const MARKER_CLAIM_COMMAND = shellCommand(
+  `umask 077; set -C; printf '%s' "$MSTAR_ATTEMPT_MARKER" > '${MARKER_PATH}'`,
+);
+/** The marker is ~60 bytes; a hung read must not hold an attempt's collection. */
+const MARKER_READ_TIMEOUT_MS = 30_000;
 
 /** Container image key in `wrangler.jsonc` → `containers[].images`. */
 const CONTAINER_IMAGE_KEY = "sandbox";
@@ -226,7 +280,74 @@ export class SandboxV1 extends DurableObject {
    */
   async runCommand(
     command: ShellCommand,
-    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
+    opts?: CommandOpts,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    return this.execCommand(command, opts, true);
+  }
+
+  /**
+   * Write the attempt marker once. `ensureRunning` is deliberate: prepare owns
+   * provisioning, so this is the ONE marker path allowed to start a container.
+   * A lost reply is resolved by reading the marker back — a replay sees the
+   * same bytes and reports `matched` instead of failing.
+   */
+  async claimMarker(marker: string): Promise<"written" | "matched" | "unknown"> {
+    let exitCode: number;
+    try {
+      exitCode = (
+        await this.execCommand(MARKER_CLAIM_COMMAND, { env: { MSTAR_ATTEMPT_MARKER: marker } }, true)
+      ).exitCode;
+    } catch {
+      // The write failed (noclobber refusal, container loss). Only a matching
+      // marker can turn that into a replay; anything else is not provable.
+      exitCode = 1;
+    }
+    if (exitCode === 0) return "written";
+    return (await this.readMarker()) === marker ? "matched" : "unknown";
+  }
+
+  /**
+   * The sameness gate: the marker bytes are read from the SAME container handle
+   * the command then runs on, in ONE request, so a probe can never describe a
+   * container that a later call no longer reaches. `running` is checked first —
+   * an absent container is `unknown`, and this path never starts one.
+   */
+  async runMarked(marker: string, command: ShellCommand, opts?: CommandOpts): Promise<MarkedRun> {
+    if (!this.container.running) return { kind: "unknown" };
+    if ((await this.readMarker()) !== marker) return { kind: "unknown" };
+    return { kind: "ran", ...(await this.execCommand(command, opts, false)) };
+  }
+
+  /**
+   * Prove sameness, then destroy — the same one-request gate as `runMarked`.
+   * An attempt's collect and cleanup are serial workflow steps, so nothing on
+   * the DO can swap the container between the proof and the destroy.
+   */
+  async destroyMarked(marker: string): Promise<"destroyed" | "unknown"> {
+    if (!this.container.running) return "unknown";
+    if ((await this.readMarker()) !== marker) return "unknown";
+    await this.container.destroy();
+    return "destroyed";
+  }
+
+  /** The marker's exact bytes, or null when it is absent/unreadable. Never starts a container. */
+  private async readMarker(): Promise<string | null> {
+    try {
+      const read = await this.execCommand(MARKER_READ_COMMAND, { timeout: MARKER_READ_TIMEOUT_MS }, false);
+      return read.exitCode === 0 ? read.stdout : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The bounded exec itself. `start` is the caller's decision — prepare (and a
+   * plain run) may provision, a marker-guarded operation must not.
+   */
+  private async execCommand(
+    command: ShellCommand,
+    opts: CommandOpts | undefined,
+    start: boolean,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     // Linux caps ONE argv string at MAX_ARG_STRLEN (128 KiB); these bounds leave
     // headroom and fail before `execve` can report E2BIG. No value is echoed.
@@ -249,7 +370,7 @@ export class SandboxV1 extends DurableObject {
         `the exec stdin payload is ${stdinPayload.byteLength} bytes, above the ${MAX_EXEC_STDIN_BYTES}-byte bound`,
       );
     }
-    await this.ensureRunning();
+    if (start) await this.ensureRunning();
     // Clamp before converting: a zero/negative value must never reach the argv
     // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
     // non-finite override (NaN/Infinity) is not a duration at all — default.

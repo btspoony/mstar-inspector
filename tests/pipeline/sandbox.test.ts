@@ -424,6 +424,9 @@ describe("getSandbox", () => {
     const names: string[] = [];
     const stub: ReviewSandbox = {
       runCommand: async () => ({ stdout: "out", stderr: "", exitCode: 0 }),
+      claimMarker: async () => "written",
+      runMarked: async () => ({ kind: "ran", stdout: "out", stderr: "", exitCode: 0 }),
+      destroyMarked: async () => "destroyed",
       destroy: async () => {},
     };
     const binding = { getByName(name: string): ReviewSandbox { names.push(name); return stub; } };

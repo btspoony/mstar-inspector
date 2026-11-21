@@ -181,6 +181,8 @@ import {
   parseBoundedRead,
   prepareReviewAttempt,
   runReviewAttempt,
+  attemptSandboxId,
+  discardReviewAttempt,
   type ReviewAttemptProgress,
   type RunnerAppConfig,
 } from "./review-attempt";
@@ -3530,9 +3532,13 @@ async function processMessage(
   // `deps.roundBudgetMs`, so it can never eat the window the paid run and its
   // publication need.
   const roundStartedAt = Date.now();
-  // Unique per attempt: a destroyed sandbox's id is never
-  // reused — attach-after-destroy behavior is unknown, uniqueness wins.
-  const sandboxId = `review-${crypto.randomUUID()}`;
+  // The attempt identity: minted once per delivery, immutable, and the ONE
+  // source the container name derives from (a destroyed sandbox's id is never
+  // reused — attach-after-destroy behavior is unknown, uniqueness wins). Every
+  // later step addresses the container through it, so a recovery run can reach
+  // the one that holds this attempt's checkout.
+  const attemptId = crypto.randomUUID();
+  const sandboxId = attemptSandboxId(attemptId);
   let sandbox: ReviewSandbox | null = null;
   // Set once the sha is resolved from the checkout; the failure log carries
   // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
@@ -4293,7 +4299,6 @@ async function processMessage(
       pr_number: payload.pr_number,
       workspace_id: workspaceId,
     };
-    const attemptId = crypto.randomUUID();
     const ttlSeconds = reviewGuardTtlSeconds(level);
     const admission = await acquireInflight(deps.env.DB, inflightKey, {
       // Each cap binds to its own predicate: `system` bounds the global live
@@ -4491,7 +4496,7 @@ async function processMessage(
       payload,
       deps,
       commenter,
-      attemptId: sandboxId,
+      attemptId,
       sandbox,
       onSandbox: (acquired) => {
         sandbox = acquired;
@@ -5517,6 +5522,7 @@ async function processMessage(
       runnerAnchor: anchor,
       observedChangedLines,
       progress,
+      attemptId,
     });
     const { run, recheck, report, appliedProvider } = execution;
     const recheckDoc = recheck?.doc ?? null;
@@ -6460,7 +6466,15 @@ async function processMessage(
     // min(system, workspace) by the destroy latency. Both blocks warn only.
     if (sandbox !== null) {
       try {
-        await sandbox.destroy();
+        // Proven sameness, not a name: a container this attempt cannot prove it
+        // prepared is left alone (its result may be the only copy) and the
+        // teardown is reported as unknown.
+        if ((await discardReviewAttempt(sandbox, attemptId)) !== "destroyed") {
+          deps.log.warn(
+            { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+            "sandbox not destroyed: the container is not proven to be this attempt's",
+          );
+        }
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(

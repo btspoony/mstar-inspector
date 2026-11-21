@@ -117,6 +117,15 @@ const fakeSandbox = {
     }
     return { stdout: "", stderr: "", exitCode: 0 };
   }),
+  claimMarker: mock(async () => "written" as const),
+  runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => ({
+    kind: "ran" as const,
+    ...(await fakeSandbox.runCommand(cmd, opts)),
+  })),
+  destroyMarked: mock(async () => {
+    await fakeSandbox.destroy();
+    return "destroyed" as const;
+  }),
   destroy: mock(async () => {}),
 };
 

@@ -1,0 +1,372 @@
+/**
+ * The attempt-scoped sandbox: identity, the marker written at prepare and the
+ * sameness gate every later collect/destroy runs behind.
+ *
+ * Two directions are proven here. A container that still carries this
+ * attempt's exact marker bytes — the same live incarnation prepare provisioned
+ * — runs the collect read and is destroyed. A container that carries no
+ * marker, different bytes, or no live container at all runs NOTHING and
+ * destroys NOTHING, and the outcome is `unknown`: the result is neither
+ * collected nor reported as a failure.
+ */
+
+import { describe, expect, mock, test } from "bun:test";
+import type { ExecOutput } from "@cloudflare/workers-types";
+import type { ReviewJobPayload } from "../../src/contracts/review-job";
+import type { ReviewSandbox } from "../../src/pipeline/sandbox";
+
+// The shared mock must register the workerd builtin BEFORE the sandbox adapter
+// loads, so those two modules cannot be static imports here.
+import "../helpers/cloudflare-workers-mock";
+
+const { SandboxV1, shellCommand } = await import("../../src/pipeline/sandbox");
+const {
+  AttemptUnknownError,
+  attemptMarker,
+  attemptSandboxId,
+  discardReviewAttempt,
+  prepareReviewAttempt,
+  runReviewAttempt,
+} = await import("../../src/pipeline/review-attempt");
+
+const ATTEMPT_A = "2b0c4f8e-7a11-4a4e-9b1f-2a5f4f2f1c01";
+const ATTEMPT_B = "9d7e1a20-33c4-4f0b-8a6d-51c9d2e7b902";
+const SHA = "a".repeat(40);
+
+const encoder = new TextEncoder();
+
+function bytes(text: string): ArrayBuffer {
+  return encoder.encode(text).buffer as ArrayBuffer;
+}
+
+// ---------------------------------------------------------------------------
+// A container double that models the ONE fact the gate reads: the marker file
+// on its own ephemeral filesystem, plus whether an incarnation is running.
+// ---------------------------------------------------------------------------
+
+type MarkerContainer = {
+  running: boolean;
+  marker: string | null;
+  images: Record<string, string>;
+  startCalls: number;
+  /** Shell commands the DO actually ran through the gate (not the marker traffic). */
+  ran: string[];
+  destroyed: boolean;
+  start(opts: unknown): void;
+  setInactivityTimeout(ms: number): Promise<void>;
+  exec(cmd: string[], opts?: unknown): Promise<{ output: () => Promise<ExecOutput>; stdin: null }>;
+  destroy(): Promise<void>;
+};
+
+function makeContainer(running = false): MarkerContainer {
+  const container: MarkerContainer = {
+    running,
+    marker: null,
+    images: { sandbox: "registry.example/review-sandbox@sha256:abc" },
+    startCalls: 0,
+    ran: [],
+    destroyed: false,
+    start() {
+      container.startCalls += 1;
+      container.running = true;
+    },
+    async setInactivityTimeout() {},
+    async exec(cmd, opts) {
+      const command = cmd[cmd.length - 1] ?? "";
+      const env = (opts as { env?: Record<string, string> } | undefined)?.env ?? {};
+      const answer = (stdout: string, exitCode: number) => ({
+        output: async () =>
+          ({ stdout: bytes(stdout), stderr: new ArrayBuffer(0), exitCode }) as unknown as ExecOutput,
+        stdin: null,
+      });
+      if (command.includes("mstar-review-attempt")) {
+        // Exclusive create, then the plain read the gate performs.
+        if (command.includes("printf")) {
+          if (container.marker !== null) return answer("", 1);
+          container.marker = env["MSTAR_ATTEMPT_MARKER"] ?? "";
+          return answer("", 0);
+        }
+        return container.marker === null ? answer("", 3) : answer(container.marker, 0);
+      }
+      container.ran.push(command);
+      return answer("ran", 0);
+    },
+    async destroy() {
+      container.destroyed = true;
+      container.running = false;
+    },
+  };
+  return container;
+}
+
+function makeDo(container: MarkerContainer) {
+  const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
+  return new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
+}
+
+// ---------------------------------------------------------------------------
+// A sandbox double for the attempt module: the marker decision is the test's.
+// ---------------------------------------------------------------------------
+
+/** The attempt module's view of an attempt-owned sandbox, with the test's decision. */
+type SandboxDouble = {
+  events: string[];
+  claimMarker: (marker: string) => Promise<"written" | "matched" | "unknown">;
+  runMarked: (
+    marker: string,
+    command: string,
+  ) => Promise<{ kind: "ran"; stdout: string; stderr: string; exitCode: number } | { kind: "unknown" }>;
+  destroyMarked: (marker: string) => Promise<"destroyed" | "unknown">;
+  runCommand: (command: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  destroy: () => Promise<void>;
+};
+
+function attemptSandboxDouble(decision: {
+  claim?: "written" | "matched" | "unknown";
+  marked?: "ran" | "unknown";
+}): SandboxDouble {
+  const events: string[] = [];
+  const sandbox = {
+    events,
+    claimMarker: mock(async (marker: string) => {
+      events.push(`claim:${marker}`);
+      return decision.claim ?? "written";
+    }),
+    runMarked: mock(async (_marker: string, command: string) => {
+      events.push(`marked:${command}`);
+      return decision.marked === "unknown"
+        ? ({ kind: "unknown" as const } as const)
+        : { kind: "ran" as const, stdout: "", stderr: "", exitCode: 0 };
+    }),
+    destroyMarked: mock(async () => {
+      events.push("destroyMarked");
+      return decision.marked === "unknown" ? ("unknown" as const) : ("destroyed" as const);
+    }),
+    runCommand: mock(async (command: string) => {
+      events.push(`run:${command}`);
+      return command.includes("rev-parse")
+        ? { stdout: `${SHA}\n`, stderr: "", exitCode: 0 }
+        : { stdout: "", stderr: "", exitCode: 0 };
+    }),
+    destroy: mock(async () => {
+      events.push("destroy");
+    }),
+  };
+  return sandbox;
+}
+
+const PAYLOAD = {
+  installation_id: 123,
+  owner: "acme",
+  repo: "widgets",
+  pr_number: 42,
+  head_sha: SHA,
+  botRef: { appId: "app-id" },
+} as unknown as ReviewJobPayload;
+
+const GRANT = {
+  token: "ghs_sandbox_read",
+  permissions: { contents: "read", metadata: "read", pull_requests: "read" },
+  repositorySelection: "selected",
+  repositoryNames: ["widgets"],
+};
+
+function progress() {
+  return { failureStage: "pipeline" as const, secretValues: [] as string[], runnerStartedAt: undefined };
+}
+
+describe("attempt identity", () => {
+  test("the container name and the marker derive from the attempt id alone", () => {
+    expect(attemptSandboxId(ATTEMPT_A)).toBe(`review-${ATTEMPT_A}`);
+    expect(attemptSandboxId(ATTEMPT_A)).not.toBe(attemptSandboxId(ATTEMPT_B));
+
+    // Exact bytes: literal prefix, the lowercase attempt id, one LF — no
+    // credential, no host, no checkout fact to read back.
+    expect(attemptMarker(ATTEMPT_A)).toBe(`mstar.review-attempt/v1:${ATTEMPT_A}\n`);
+    expect(attemptMarker(ATTEMPT_A)).toMatch(/^mstar\.review-attempt\/v1:[0-9a-f-]+\n$/);
+    expect(attemptMarker(ATTEMPT_A.toUpperCase())).toBe(attemptMarker(ATTEMPT_A));
+  });
+});
+
+describe("prepare writes the marker before any checkout work", () => {
+  test("the container is resolved by attempt id and claimed before the clone", async () => {
+    const sandbox = attemptSandboxDouble({});
+    const acquired: string[] = [];
+    const prepared = await prepareReviewAttempt({
+      payload: PAYLOAD,
+      deps: {
+        env: { SANDBOX: {} },
+        getSandbox: async (_binding: unknown, id: string) => {
+          acquired.push(id);
+          return sandbox as never;
+        },
+      },
+      commenter: { getInstallationToken: async () => GRANT as never },
+      attemptId: ATTEMPT_A,
+      sandbox: null,
+      onSandbox: () => {},
+      progress: progress(),
+    });
+
+    expect(acquired).toEqual([`review-${ATTEMPT_A}`]);
+    expect(prepared.headSha).toBe(SHA);
+    // The claim comes FIRST: the checkout never runs on a container that has
+    // not proven it is this attempt's.
+    expect(sandbox.events[0]).toBe(`claim:${attemptMarker(ATTEMPT_A)}`);
+  });
+
+  test("a container carrying other bytes is refused, and no checkout runs on it", async () => {
+    const sandbox = attemptSandboxDouble({ claim: "unknown" });
+    await expect(
+      prepareReviewAttempt({
+        payload: PAYLOAD,
+        deps: { env: { SANDBOX: {} }, getSandbox: async () => sandbox as never },
+        commenter: { getInstallationToken: async () => GRANT as never },
+        attemptId: ATTEMPT_A,
+        sandbox: null,
+        onSandbox: () => {},
+        progress: progress(),
+      }),
+    ).rejects.toBeInstanceOf(AttemptUnknownError);
+
+    expect(sandbox.events.some((event) => event.startsWith("run:"))).toBe(false);
+  });
+});
+
+describe("collection refuses an unproven container", () => {
+  const executionInput = (sandbox: SandboxDouble) => ({
+    deps: { log: { info: () => {}, warn: () => {} } },
+    deadlineMs: Date.now() + 600_000,
+    sandbox: sandbox as never,
+    headSha: SHA,
+    token: "ghs_sandbox_read",
+    level: "default" as const,
+    appCfg: { keys: {}, modelChain: "ark/deepseek-v4-flash" },
+    fields: {},
+    reconFacts: [],
+    modelOverrides: undefined,
+    customProviders: undefined,
+    recheckInput: undefined,
+    recheckAssignmentMaxBytes: undefined,
+    prContext: undefined,
+    runnerAnchor: {
+      kind: "allocated" as const,
+      requestedBudgetMs: 600_000,
+      effectiveBudgetMs: 600_000,
+      execDeadlineMs: Date.now() + 600_000,
+    },
+    observedChangedLines: null,
+    progress: progress(),
+    attemptId: ATTEMPT_A,
+  });
+
+  test("a missing/different marker yields unknown, never a collected result", async () => {
+    const sandbox = attemptSandboxDouble({ marked: "unknown" });
+    await expect(runReviewAttempt(executionInput(sandbox))).rejects.toBeInstanceOf(AttemptUnknownError);
+
+    // Exactly one guarded read was attempted, and it returned nothing.
+    expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(1);
+  });
+
+  test("a matching live incarnation collects the result documents", async () => {
+    const sandbox = attemptSandboxDouble({ marked: "ran" });
+    const execution = await runReviewAttempt(executionInput(sandbox));
+
+    expect(execution.run.exitCode).toBe(0);
+    expect(execution.appliedProvider).toBeNull();
+    // Recheck is not requested in this round; the report needs PR context.
+    expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(1);
+  });
+});
+
+describe("destroy refuses an unproven container", () => {
+  test("no marker match: nothing is destroyed and the outcome is unknown", async () => {
+    const sandbox = attemptSandboxDouble({ marked: "unknown" });
+    expect(await discardReviewAttempt(sandbox as never, ATTEMPT_A)).toBe("unknown");
+    expect(sandbox.events).not.toContain("destroy");
+  });
+
+  test("a matching live incarnation is destroyed", async () => {
+    const sandbox = attemptSandboxDouble({});
+    expect(await discardReviewAttempt(sandbox as never, ATTEMPT_A)).toBe("destroyed");
+    expect(sandbox.events).toContain("destroyMarked");
+  });
+});
+
+describe("SandboxV1 marker gate", () => {
+  test("the marker is written exactly once, and an occupied marker is never repaired", async () => {
+    const container = makeContainer();
+    const sandbox = makeDo(container);
+    const marker = attemptMarker(ATTEMPT_A);
+
+    expect(await sandbox.claimMarker(marker)).toBe("written");
+    expect(container.marker).toBe(marker);
+
+    expect(await sandbox.claimMarker(marker)).toBe("matched");
+    expect(await sandbox.claimMarker(attemptMarker(ATTEMPT_B))).toBe("unknown");
+    // Not overwritten, not truncated: the other bytes are still there.
+    expect(container.marker).toBe(marker);
+  });
+
+  test("a probe never starts a container and never runs a command on a dead one", async () => {
+    const container = makeContainer(false);
+    const sandbox = makeDo(container);
+
+    expect(await sandbox.runMarked(attemptMarker(ATTEMPT_A), shellCommand("cat result.json"))).toEqual({
+      kind: "unknown",
+    });
+    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A))).toBe("unknown");
+
+    expect(container.startCalls).toBe(0);
+    expect(container.ran).toEqual([]);
+    expect(container.destroyed).toBe(false);
+  });
+
+  test("a live container without this attempt's marker runs and destroys nothing", async () => {
+    const container = makeContainer(true);
+    const sandbox = makeDo(container);
+    container.marker = attemptMarker(ATTEMPT_B);
+
+    expect(await sandbox.runMarked(attemptMarker(ATTEMPT_A), shellCommand("cat result.json"))).toEqual({
+      kind: "unknown",
+    });
+    expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A))).toBe("unknown");
+
+    expect(container.ran).toEqual([]);
+    expect(container.destroyed).toBe(false);
+  });
+
+  test("a replacement between preparation and the gated operation refuses both", async () => {
+    const container = makeContainer();
+    const sandbox = makeDo(container);
+    const marker = attemptMarker(ATTEMPT_A);
+    expect(await sandbox.claimMarker(marker)).toBe("written");
+
+    // The prepared container is gone; what the name resolves to now is a new
+    // incarnation with its own empty filesystem.
+    container.marker = null;
+
+    expect(await sandbox.runMarked(marker, shellCommand("cat result.json"))).toEqual({ kind: "unknown" });
+    expect(await sandbox.destroyMarked(marker)).toBe("unknown");
+    expect(container.ran).toEqual([]);
+    expect(container.destroyed).toBe(false);
+  });
+
+  test("the prepared incarnation allows collect-then-destroy", async () => {
+    const container = makeContainer();
+    const sandbox = makeDo(container);
+    const marker = attemptMarker(ATTEMPT_A);
+    expect(await sandbox.claimMarker(marker)).toBe("written");
+
+    expect(await sandbox.runMarked(marker, shellCommand("cat result.json"))).toEqual({
+      kind: "ran",
+      stdout: "ran",
+      stderr: "",
+      exitCode: 0,
+    });
+    expect(container.ran).toEqual(["cat result.json"]);
+
+    expect(await sandbox.destroyMarked(marker)).toBe("destroyed");
+    expect(container.destroyed).toBe(true);
+  });
+});

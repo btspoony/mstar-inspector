@@ -54,8 +54,52 @@ import {
   runnerCommand,
   writeJsonCommand,
 } from "./gitops";
-import type { ReviewSandbox } from "./sandbox";
+import type { MarkedRun, ReviewSandbox } from "./sandbox";
 import type { ShellCommand } from "./shell-command";
+
+/**
+ * The attempt token's exact bytes: literal prefix, lowercase attempt id, one
+ * LF. It identifies the attempt and nothing else — no credential, no host, no
+ * checkout fact — so it can be read back from the container and compared
+ * verbatim.
+ */
+export function attemptMarker(attemptId: string): string {
+  return `mstar.review-attempt/v1:${attemptId.toLowerCase()}\n`;
+}
+
+/**
+ * The container one attempt owns. The id derives only from the attempt, so two
+ * attempts can never address the same container and a later step (or a
+ * recovery run) can address the one that holds the prepared checkout.
+ */
+export function attemptSandboxId(attemptId: string): string {
+  return `review-${attemptId.toLowerCase()}`;
+}
+
+/**
+ * The attempt's container could not be proven to be the one this attempt
+ * prepared: its marker is missing or different (a replacement incarnation, a
+ * lost container, an unreadable filesystem). Nothing was read or destroyed on
+ * that evidence and the outcome is unknown — neither a failure nor a success.
+ */
+export class AttemptUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AttemptUnknownError";
+  }
+}
+
+/**
+ * Destroy the attempt's container ONLY after proving it is still the one this
+ * attempt prepared. No marker match performs neither action and reports
+ * `unknown`, so a replacement incarnation is never torn down.
+ */
+export async function discardReviewAttempt(
+  sandbox: ReviewSandbox,
+  attemptId: string,
+): Promise<"destroyed" | "unknown"> {
+  return sandbox.destroyMarked(attemptMarker(attemptId));
+}
 
 /**
  * Structured log sink of one attempt. The caller owns the field schema; this
@@ -193,26 +237,37 @@ export function parseBoundedRead(stdout: string, provesAbsence = false): ReportB
 
 async function boundedRead(
   sandbox: ReviewSandbox,
+  marker: string,
   command: ShellCommand,
   timeoutMs: number,
 ): Promise<BoundedRead>;
 async function boundedRead(
   sandbox: ReviewSandbox,
+  marker: string,
   command: ShellCommand,
   timeoutMs: number,
   provesAbsence: true,
 ): Promise<ReportBoundedRead>;
 async function boundedRead(
   sandbox: ReviewSandbox,
+  marker: string,
   command: ShellCommand,
   timeoutMs: number,
   provesAbsence = false,
 ): Promise<ReportBoundedRead> {
-  let read;
+  // The marker is re-proved on EVERY read, from the same container the command
+  // then runs on: a replacement between collection steps yields unknown, never
+  // a document from a container this attempt did not prepare.
+  let read: MarkedRun;
   try {
-    read = await sandbox.runCommand(command, { timeout: timeoutMs });
+    read = await sandbox.runMarked(marker, command, { timeout: timeoutMs });
   } catch {
     return { text: null, failure: "unreadable" };
+  }
+  if (read.kind === "unknown") {
+    throw new AttemptUnknownError(
+      "the attempt container could not be proven to be this attempt's — its result is not collected",
+    );
   }
   if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
   return provesAbsence ? parseBoundedRead(read.stdout, true) : parseBoundedRead(read.stdout);
@@ -308,10 +363,14 @@ export type RecheckRead = {
   status: RecheckStatus | null;
 };
 
-async function readRecheckDoc(sandbox: ReviewSandbox, recheckInput: RecheckInput): Promise<RecheckRead> {
+async function readRecheckDoc(
+  sandbox: ReviewSandbox,
+  marker: string,
+  recheckInput: RecheckInput,
+): Promise<RecheckRead> {
   const [docRead, statusRead] = await Promise.all([
-    boundedRead(sandbox, readRecheckCommand(RECHECK_OUTPUT_PATH), POST_RUNNER_READ_TIMEOUT_MS),
-    boundedRead(sandbox, readRecheckStatusCommand(), POST_RUNNER_READ_TIMEOUT_MS),
+    boundedRead(sandbox, marker, readRecheckCommand(RECHECK_OUTPUT_PATH), POST_RUNNER_READ_TIMEOUT_MS),
+    boundedRead(sandbox, marker, readRecheckStatusCommand(), POST_RUNNER_READ_TIMEOUT_MS),
   ]);
   let doc: RecheckDoc | null = null;
   // A zero-byte payload is the seat writing nothing: absent, not malformed.
@@ -380,11 +439,18 @@ async function readRecheckDoc(sandbox: ReviewSandbox, recheckInput: RecheckInput
  */
 async function readAppliedProvider(
   sandbox: ReviewSandbox,
+  marker: string,
   secretValues: string[],
   log: AttemptLog,
   fields: AttemptLogFields,
 ): Promise<string | null> {
-  const read = await boundedRead(sandbox, readReportCommand(APPLIED_MODEL_PATH), POST_RUNNER_READ_TIMEOUT_MS, true);
+  const read = await boundedRead(
+    sandbox,
+    marker,
+    readReportCommand(APPLIED_MODEL_PATH),
+    POST_RUNNER_READ_TIMEOUT_MS,
+    true,
+  );
   if (read.failure !== null) {
     // `absent` is the ordinary no-model-served shape — no warn without a fault.
     if (read.failure !== "absent") {
@@ -433,12 +499,13 @@ async function readAppliedProvider(
 
 async function readReportDoc(
   sandbox: ReviewSandbox,
+  marker: string,
   secretValues: string[],
   expectedHeadSha: string,
   log: AttemptLog,
   fields: AttemptLogFields,
 ): Promise<ReportDoc | null> {
-  const read = await boundedRead(sandbox, readReportCommand(), POST_RUNNER_READ_TIMEOUT_MS, true);
+  const read = await boundedRead(sandbox, marker, readReportCommand(), POST_RUNNER_READ_TIMEOUT_MS, true);
   if (read.failure !== null) {
     // `absent` and `unreadable` are distinct failures of the SAME disclosure:
     // the seat wrote no document vs. the read of it broke. Both render `none`.
@@ -765,7 +832,7 @@ export async function prepareReviewAttempt(input: {
     getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
   };
   commenter: Pick<ReviewCommenter, "getInstallationToken">;
-  /** The attempt identity: the container is resolved by it. */
+  /** The attempt identity: the container derives from it, and so does the marker written here. */
   attemptId: string;
   sandbox: ReviewSandbox | null;
   /**
@@ -787,8 +854,17 @@ export async function prepareReviewAttempt(input: {
   // stage "pipeline" and is never mis-tagged as a sandbox/infra failure.
   if (sandbox === null) {
     progress.failureStage = "sandbox";
-    sandbox = await deps.getSandbox(deps.env.SANDBOX, attemptId);
+    sandbox = await deps.getSandbox(deps.env.SANDBOX, attemptSandboxId(attemptId));
     input.onSandbox(sandbox);
+  }
+  // The marker is written BEFORE the checkout and every runner input: it is
+  // the one fact that later proves a collect/destroy addresses THIS attempt's
+  // live container. A container already carrying other bytes is not repaired
+  // (it belongs to someone else), so preparing on it is refused.
+  if ((await sandbox.claimMarker(attemptMarker(attemptId))) === "unknown") {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: the container is not this attempt's (its marker is missing or different)`,
+    );
   }
   progress.failureStage = "pipeline";
   // Purpose-scoped sandbox read grant (§7.6 / RL-6): the mint is
@@ -872,6 +948,8 @@ export async function runReviewAttempt(input: {
   runnerAnchor: RunnerBudgetAnchor;
   observedChangedLines: number | null;
   progress: ReviewAttemptProgress;
+  /** The attempt identity: its container's marker is the proof collection runs on. */
+  attemptId: string;
 }): Promise<ReviewAttemptExecution> {
   const {
     deps,
@@ -891,6 +969,7 @@ export async function runReviewAttempt(input: {
     runnerAnchor,
     observedChangedLines,
     progress,
+    attemptId,
   } = input;
   // The input carries the SAME absolute deadline every post-diff step bills —
   // the exec's own end instant, never a duration. The runner anchors its own
@@ -1099,7 +1178,8 @@ export async function runReviewAttempt(input: {
   // rejected — by rowId when it had one, by position among the unanswered
   // sent rows when it did not — so they are never mistaken for rows the seat
   // never reached.
-  const recheck = recheckInput !== undefined ? await readRecheckDoc(sandbox, recheckInput) : null;
+  const marker = attemptMarker(attemptId);
+  const recheck = recheckInput !== undefined ? await readRecheckDoc(sandbox, marker, recheckInput) : null;
 
   // The report document (mstar.report/v1) rides the SAME audited bounded read
   // and the SAME fail-closed rule: the Worker validates it against its own
@@ -1107,7 +1187,7 @@ export async function runReviewAttempt(input: {
   // nothing. Read only when the runner was actually given `--report-out`.
   const report: ReportDoc | null =
     prContext !== undefined
-      ? await readReportDoc(sandbox, progress.secretValues, headSha, deps.log, fields)
+      ? await readReportDoc(sandbox, marker, progress.secretValues, headSha, deps.log, fields)
       : null;
 
   // Which provider actually served — the runner's own observation, projected
@@ -1115,7 +1195,7 @@ export async function runReviewAttempt(input: {
   // served), which stays null on the row; it is never replaced with the chain
   // head, because that would report the configured first selector as if it
   // had run.
-  const appliedProvider = await readAppliedProvider(sandbox, progress.secretValues, deps.log, fields);
+  const appliedProvider = await readAppliedProvider(sandbox, marker, progress.secretValues, deps.log, fields);
 
   return { run, recheck, report, appliedProvider };
 }

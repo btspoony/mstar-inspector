@@ -79,6 +79,13 @@ export type ConsumerHarness = {
   fakeSandbox: {
     state: FakeSandboxState;
     runCommand: (cmd: string, opts?: unknown) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+    claimMarker: (marker: string) => Promise<"written" | "matched" | "unknown">;
+    runMarked: (
+      marker: string,
+      cmd: string,
+      opts?: unknown,
+    ) => Promise<{ kind: "ran"; stdout: string; stderr: string; exitCode: number } | { kind: "unknown" }>;
+    destroyMarked: (marker: string) => Promise<"destroyed" | "unknown">;
     destroy: () => Promise<void>;
   };
   sandbox: FakeSandboxState;
