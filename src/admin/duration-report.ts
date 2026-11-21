@@ -8,11 +8,10 @@
  * the Check pair the attempt froze must read terminal at or before that instant
  * (a Check that concludes later, or a row the database does not hold, means the
  * settlement instant truncated the interval), and the settlement's own completion
- * record must name the effect it discharged — the durable answer for the success
- * claim, with the 24 h delivery key only as a fallback for a silent record.
- * Everything else is counted under one of the five reasons below and never
- * supplied as a zero, because "not measured" and "took no time" are different
- * answers — and only a proven interval may steer the operator's cap.
+ * record must exist — the only durable proof that the obligations it incurred
+ * were discharged. Everything else is counted under one of the five reasons below
+ * and never supplied as a zero, because "not measured" and "took no time" are
+ * different answers — and only a proven interval may steer the operator's cap.
  *
  * The buckets are the attempt's own durable stamps, half-open:
  *   queue wait            [enqueued_ms, created_ms)
@@ -28,9 +27,6 @@
  * publication and Check lanes closed, so a Check that concluded while a
  * publication recovery was still due cannot truncate the third bucket.
  */
-import type { KVNamespace } from "@cloudflare/workers-types";
-import { IDEM_DONE, idemKey } from "../contracts/idem";
-import type { ReviewJobPayload } from "../contracts/review-job";
 import type { D1Like } from "../store/types";
 
 /** The report's stated window: complete attempts admitted in the last 30 days. */
@@ -66,13 +62,11 @@ export type DurationPercentiles = { p50Ms: number; p90Ms: number; maxMs: number 
  * - `check-open-at-settle` — the attempt froze a Check pair whose row is
  *   missing, still open, or concluded AFTER the instant it claims to have
  *   settled: its end boundary is not proven.
- * - `claim-unproven` — the attempt's success claim has no durable proof. The
- *   settlement's own completion record is the durable answer and is read first;
- *   only a settlement whose record is SILENT (written before migration 0085)
- *   falls back to the delivery-time KV key, where a missing or expired key,
- *   another value, a read fault or no binding leaves the obligation UNKNOWN —
- *   and an unknown obligation is not a closed one. An expiring guard never
- *   outranks a completed settlement.
+ * - `claim-unproven` — the attempt has no settlement completion record: it was
+ *   written before migration 0085 added `settled_effects`, or the record is
+ *   unreadable. Excluded BY RULE — the delivery-time KV key expires and does not
+ *   identify the attempt, so it can never prove what that attempt discharged at
+ *   settlement, and an unproven obligation is not a closed one.
  * - `no-boundary` — no usable start or end instant: no launch row, a pre-0087
  *   row without its queue stamp, no durable result (the settlement's start is
  *   not an outcome), or boundaries that do not run forwards.
@@ -160,10 +154,8 @@ type DurationRow = {
   created_ms: number;
   settling_ms: number | null;
   settled_ms: number | null;
-  /** The effects the settlement made durable — the record that names its lane. */
+  /** The settlement's completion record — the durable proof it discharged its lane. */
   settled_effects: string | null;
-  /** The delivery payload: the identity the idempotency claim is keyed from. */
-  payload_json: string;
   persisted_at_ms: number | null;
   /** `null` when the attempt never had a launch row. */
   launch_state: string | null;
@@ -179,59 +171,13 @@ function executionEndOf(row: DurationRow): number | null {
   return Math.min(row.persisted_at_ms, row.settling_ms);
 }
 
-/** Does the settlement's own completion record name a success publication? */
-function settlementEffectsOf(raw: string | null): string[] | null {
-  if (raw === null) return null;
+/** Does the row hold the settlement's completion record? */
+function hasSettlementRecord(raw: string | null): boolean {
+  if (raw === null) return false;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? (parsed as string[]) : null;
+    return Array.isArray(JSON.parse(raw));
   } catch {
     // An unreadable record is SILENT, not empty: it proves nothing either way.
-    return null;
-  }
-}
-
-/**
- * The delivery's success-claim key, or `null` when it owes no commit claim (a
- * delivery without a head). An unreadable payload is not "no claim".
- */
-function successClaimKeyOf(payloadJson: string): string | null | undefined {
-  let payload: ReviewJobPayload;
-  try {
-    payload = JSON.parse(payloadJson) as ReviewJobPayload;
-  } catch {
-    return undefined;
-  }
-  if (!payload.head_sha) return null;
-  return idemKey({
-    installation_id: payload.installation_id,
-    owner: payload.owner,
-    repo: payload.repo,
-    pr_number: payload.pr_number,
-    head_sha: payload.head_sha,
-  });
-}
-
-/**
- * Is the success claim discharged? The settlement's own completion record is the
- * durable statement made by the transition that closed the obligation, so it is
- * read FIRST and it never expires: `settled_ms` is written only when the
- * required set for that settlement's lane is complete, so a recorded settlement
- * is a completed one — `publication` names the success claim's discharge,
- * `claim-stamp` the failure lane's, and a `skip` or no-head lane owed none. The
- * delivery-time KV key is a 24 h idempotency guard, so it can only be a
- * SECONDARY check: it is asked solely when the durable record is silent (a
- * settlement written before migration 0085 added the column), and there an
- * unproven claim is excluded rather than assumed.
- */
-async function claimDischarged(row: DurationRow, claims: KVNamespace | null): Promise<boolean> {
-  if (settlementEffectsOf(row.settled_effects) !== null) return true;
-  const key = successClaimKeyOf(row.payload_json);
-  if (key === null) return true;
-  if (key === undefined || claims === null) return false;
-  try {
-    return (await claims.get(key)) === IDEM_DONE;
-  } catch {
     return false;
   }
 }
@@ -250,13 +196,11 @@ function checkClosedAt(row: DurationRow, settledMs: number): boolean {
 
 /**
  * Read the report. `capMs` is the operator's candidate (analysis only — this
- * module never writes configuration and owns no key). `claims` is the KV the
- * success claim lives in; without it a success publication cannot be proven
- * discharged and is excluded.
+ * module never writes configuration and owns no key).
  */
 export async function readReviewDurationReport(
   db: D1Like,
-  input: { nowMs: number; capMs: number | null; claims: KVNamespace | null },
+  input: { nowMs: number; capMs: number | null },
 ): Promise<DurationReport> {
   const startMs = input.nowMs - DURATION_REPORT_WINDOW_DAYS * DAY_MS;
   // `review_launches.attempt_id` is a primary key and `review_checks` is UNIQUE
@@ -266,7 +210,7 @@ export async function readReviewDurationReport(
   const rows = await db
     .prepare(
       `SELECT h.state AS handoff_state, h.enqueued_ms, h.created_ms, h.settling_ms, h.settled_ms,
-              h.settled_effects, h.payload_json,
+              h.settled_effects,
               l.state AS launch_state, l.persisted_at_ms, l.attempt_key AS check_key,
               c.terminal_ms AS check_terminal_ms
          FROM review_attempt_handoffs h
@@ -285,7 +229,7 @@ export async function readReviewDurationReport(
     unsettled: 0,
     "pre-prepare": 0,
   };
-  const candidates: Array<{ row: DurationRow; bucket: DurationBuckets }> = [];
+  const buckets: DurationBuckets[] = [];
   for (const row of rows.results) {
     if (row.launch_state === null) {
       // No launch row: there is no execution boundary to measure from. A
@@ -326,20 +270,17 @@ export async function readReviewDurationReport(
       excluded["no-boundary"] += 1;
       continue;
     }
-    candidates.push({ row, bucket });
+    // The completion record IS the discharge of every obligation the settlement
+    // incurred: `settled_ms` is written together with it, only when the required
+    // set for that lane is complete. A settled row without one was written
+    // before migration 0085 — and nothing else can prove that attempt's claim,
+    // because the delivery-time KV key expires and does not identify the attempt.
+    if (!hasSettlementRecord(row.settled_effects)) {
+      excluded["claim-unproven"] += 1;
+      continue;
+    }
+    buckets.push(bucket);
   }
-
-  // The claim is the one obligation that leaves the database. It is proven only
-  // for the rows that would otherwise be measured — never to rescue an excluded
-  // row, and never assumed for one whose settlement names a success publication.
-  const discharged = await Promise.all(
-    candidates.map((candidate) => claimDischarged(candidate.row, input.claims)),
-  );
-  const buckets: DurationBuckets[] = [];
-  candidates.forEach((candidate, index) => {
-    if (discharged[index] === true) buckets.push(candidate.bucket);
-    else excluded["claim-unproven"] += 1;
-  });
 
   return {
     window: { days: DURATION_REPORT_WINDOW_DAYS, startMs, endMs: input.nowMs },

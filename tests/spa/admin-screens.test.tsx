@@ -858,6 +858,11 @@ describe("Runtime screen", () => {
     expect(surface.container.querySelector('[data-duration="excluded"]')?.textContent).toBe(
       "Excluded from the percentiles: 3 with a Check still open at settlement, 4 with an unproven success claim, 2 without a measurable boundary, 1 unsettled, 1 stopped before prepare.",
     );
+    // The failure tail is excluded by ruling, so the card must say so beside the
+    // counts — otherwise successful durations read as "review never fails".
+    expect(surface.container.querySelector('[data-duration="failure-tail"]')?.textContent).toBe(
+      "Confirmed failures are not in this distribution — a failure's duration measures a different thing — and are counted elsewhere.",
+    );
     await surface.close();
   });
 
@@ -884,6 +889,9 @@ describe("Runtime screen", () => {
     expect(chinese.text()).toContain("此窗口内没有可测量的尝试");
     expect(chinese.text()).toContain("2 个结算时 Check 仍未关闭");
     expect(chinese.text()).toContain("1 个成功声明无法证明");
+    expect(chinese.container.querySelector('[data-duration="failure-tail"]')?.textContent).toBe(
+      "确认失败的尝试不在此分布内——失败路径的耗时度量的是另一件事——它们在别处计数。",
+    );
     await chinese.close();
   });
 

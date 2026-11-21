@@ -1596,6 +1596,8 @@ export const en = {
         "Every attempt's interval splits into these three phases. Percentiles are per row, so one column does not add up across rows.",
       durationExcluded:
         "Excluded from the percentiles: {checkOpen} with a Check still open at settlement, {claimUnproven} with an unproven success claim, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
+      durationFailureTail:
+        "Confirmed failures are not in this distribution — a failure's duration measures a different thing — and are counted elsewhere.",
       durationCandidateLabel: "Candidate cap (ms)",
       durationCandidateApply: "Show cutoff",
       durationCutoff: "A {cap} ms cap would exclude {over} of {n} attempts ({share}).",

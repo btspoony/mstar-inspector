@@ -15,7 +15,6 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { DURATION_REPORT_WINDOW_DAYS, phaseBuckets } from "../../src/admin/duration-report";
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
-import { IDEM_DONE, idemKey } from "../../src/contracts/idem";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const SESSION_SECRET = ["test", "duration", "report", "session", "32-bytes!"].join("-");
@@ -38,40 +37,10 @@ const PAYLOAD: ReviewJobPayload = {
   targetId: "target-1",
 };
 
-/** The success-claim key a seeded attempt with this head owes. */
-function claimKeyFor(headSha: string): string {
-  return idemKey({
-    installation_id: PAYLOAD.installation_id,
-    owner: PAYLOAD.owner,
-    repo: PAYLOAD.repo,
-    pr_number: PAYLOAD.pr_number,
-    head_sha: headSha,
-  });
-}
-
-/** A KV double that proves every claim (`done`) — the live-success default. */
-function provenClaims(): NonNullable<Env["IDEMPOTENCY_KV"]> {
-  return { get: async () => IDEM_DONE, put: async () => {} } as unknown as NonNullable<Env["IDEMPOTENCY_KV"]>;
-}
-
-/** A KV double: `values` answers a key, `failKeys` throw like a KV fault. */
-function claimsKv(
-  values: Record<string, string> = {},
-  failKeys: readonly string[] = [],
-): NonNullable<Env["IDEMPOTENCY_KV"]> {
-  return {
-    get: async (key: string) => {
-      if (failKeys.includes(key)) throw new Error("kv read failed");
-      return values[key] ?? null;
-    },
-    put: async () => {},
-  } as unknown as NonNullable<Env["IDEMPOTENCY_KV"]>;
-}
-
-function envFor(db: TestD1, claims: NonNullable<Env["IDEMPOTENCY_KV"]> = provenClaims()): Env {
+function envFor(db: TestD1): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} },
-    IDEMPOTENCY_KV: claims,
+    IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
     DEPLOYMENT_MODE: "saas",
@@ -98,17 +67,12 @@ function fixture(): TestD1 {
   return db;
 }
 
-async function getReport(
-  db: TestD1,
-  query = "",
-  login: string | null = OPERATOR,
-  claims: NonNullable<Env["IDEMPOTENCY_KV"]> = provenClaims(),
-): Promise<Response> {
+async function getReport(db: TestD1, query = "", login: string | null = OPERATOR): Promise<Response> {
   const headers: Record<string, string> = {};
   if (login !== null) headers.Cookie = `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}`;
   return worker.fetch(
     new Request(`https://worker.local/_internal_admin/api/runtime/duration-report${query}`, { headers }),
-    envFor(db, claims),
+    envFor(db),
   );
 }
 
@@ -140,6 +104,16 @@ type AttemptSeed = {
 /** One attempt: its handoff row, plus its launch row when a paid step ran. */
 function seedAttempt(db: TestD1, seed: AttemptSeed): void {
   const payload: ReviewJobPayload = { ...PAYLOAD, head_sha: seed.headSha ?? PAYLOAD.head_sha };
+  // A settlement written today always records the lane it closed;
+  // `settledEffects: null` models the pre-0085 record that says nothing.
+  const settlementRecord =
+    seed.settledEffects === undefined
+      ? seed.settledMs === null
+        ? null
+        : JSON.stringify(["publication"])
+      : seed.settledEffects === null
+        ? null
+        : JSON.stringify(seed.settledEffects);
   db.raw
     .prepare(
       `INSERT INTO review_attempt_handoffs
@@ -157,9 +131,7 @@ function seedAttempt(db: TestD1, seed: AttemptSeed): void {
       seed.admittedMs,
       seed.settlingMs ?? null,
       seed.settledMs,
-      seed.settledEffects === undefined || seed.settledEffects === null
-        ? null
-        : JSON.stringify(seed.settledEffects),
+      settlementRecord,
     );
   const hasLaunch =
     seed.persistedMs !== undefined ||
@@ -588,50 +560,46 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     });
   });
 
-  test("claim-unproven: a SILENT settlement record whose claim the key cannot prove is excluded", async () => {
+  test("claim-unproven: a settlement with no completion record is excluded by rule", async () => {
     const db = fixture();
     const t0 = Date.now() - 3_600_000;
-    // A settlement written before migration 0085 carries no effect record, so
-    // the KV guard is the only remaining witness — and it expires.
-    const seen = (headSha: string) =>
-      seedAttempt(db, {
-        attemptId: `claim-${headSha.slice(0, 4)}`,
-        headSha,
-        enqueuedMs: t0,
-        admittedMs: t0,
-        persistedMs: t0 + 20_000,
-        settledMs: t0 + 30_000,
-      });
-    const expired = "b".repeat(40);
-    const queued = "c".repeat(40);
-    const faulted = "d".repeat(40);
-    const done = "e".repeat(40);
-    const doneTwin = "f".repeat(40);
-    for (const head of [expired, queued, faulted, done, doneTwin]) seen(head);
+    // A settlement written before migration 0085: `settled_ms` exists, the
+    // record that would prove its obligations does not. No key can stand in —
+    // it expires and never identifies this attempt — so the rows are excluded.
+    seedAttempt(db, {
+      attemptId: "legacy-a",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 30_000,
+      settledEffects: null,
+    });
+    seedAttempt(db, {
+      attemptId: "legacy-b",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 40_000,
+      settledEffects: null,
+    });
 
-    const claims = claimsKv(
-      { [claimKeyFor(queued)]: "1", [claimKeyFor(done)]: "done", [claimKeyFor(doneTwin)]: "done" },
-      [claimKeyFor(faulted)],
-    );
-    const body = (await (await getReport(db, "", OPERATOR, claims)).json()) as {
+    const body = (await (await getReport(db)).json()) as {
       sampleSize: number;
-      total: { p50Ms: number; p90Ms: number; maxMs: number } | null;
+      total: unknown;
       excluded: Record<string, number>;
     };
-    // Only the two whose claim still reads `done` are measurable: with a silent
-    // record an expired key, a still-queued claim and a read fault are unknown.
-    expect(body.sampleSize).toBe(2);
-    expect(body.total).toEqual({ p50Ms: 30_000, p90Ms: 30_000, maxMs: 30_000 });
+    expect(body.sampleSize).toBe(0);
+    expect(body.total).toBeNull();
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
-      "claim-unproven": 3,
+      "claim-unproven": 2,
       "no-boundary": 0,
       unsettled: 0,
       "pre-prepare": 0,
     });
   });
 
-  test("the durable settlement record discharges the claim, whatever an expired key says", async () => {
+  test("the completion record is the discharge, for either lane", async () => {
     const db = fixture();
     const t0 = Date.now() - 3_600_000;
     // A success lane: `publication` is the transition that closed the claim.
@@ -653,9 +621,9 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
       settledEffects: ["failure-row", "claim-stamp"],
     });
 
-    // The KV double answers nothing at all: thirty-day-old keys have expired,
-    // and an expiring guard must never outrank a completed settlement.
-    const body = (await (await getReport(db, "", OPERATOR, claimsKv())).json()) as {
+    // Both are measured: the record the settlement wrote IS the proof, and it
+    // never expires with a delivery-time key.
+    const body = (await (await getReport(db)).json()) as {
       sampleSize: number;
       excluded: Record<string, number>;
     };
@@ -696,13 +664,14 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
       admittedMs: t0,
       persistedMs: t0 + 20_000,
       settledMs: t0 + 30_000,
+      settledEffects: null,
     });
     seedAttempt(db, { attemptId: "queueless", enqueuedMs: null, admittedMs: t0, persistedMs: t0 + 20_000, settledMs: t0 + 30_000 });
     seedAttempt(db, { attemptId: "running", enqueuedMs: t0, admittedMs: t0, persistedMs: t0 + 10_000, settledMs: null });
     seedAttempt(db, { attemptId: "create-rejected", handoffState: "failed", enqueuedMs: t0, admittedMs: t0, settledMs: null });
 
-    // An empty KV: the one row with a SILENT record cannot prove its claim.
-    const body = (await (await getReport(db, "", OPERATOR, claimsKv())).json()) as {
+    // The claim row has no completion record, so it cannot be proven discharged.
+    const body = (await (await getReport(db)).json()) as {
       sampleSize: number;
       excluded: Record<string, number>;
     };

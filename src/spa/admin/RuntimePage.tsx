@@ -199,6 +199,9 @@ function DurationReportCard({ locale }: { locale: Locale }) {
                     </p>
                   </>
                 )}
+                <p className="mt-2 text-xs text-muted-foreground" data-duration="failure-tail">
+                  {t(locale, "admin.runtime.durationFailureTail")}
+                </p>
                 <form
                   className="mt-4 flex flex-wrap items-end gap-2"
                   onSubmit={(event) => {

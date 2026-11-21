@@ -325,13 +325,7 @@ async function readDurationReport(c: AdminContext): Promise<Response> {
     }
     capMs = parsed;
   }
-  return c.json(
-    await readReviewDurationReport(db, {
-      nowMs: Date.now(),
-      capMs,
-      claims: c.env.IDEMPOTENCY_KV ?? null,
-    }),
-  );
+  return c.json(await readReviewDurationReport(db, { nowMs: Date.now(), capMs }));
 }
 
 /** The accepted `commentClaim` body shape; the store owns the accepted ranges. */

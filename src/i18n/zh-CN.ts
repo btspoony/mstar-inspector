@@ -1331,6 +1331,7 @@ export const zhCN: Dictionary = {
       durationBuckets: "每个尝试的区间都拆分为这三个阶段。百分位按行计算，同一列不可跨行相加。",
       durationExcluded:
         "未计入百分位：{checkOpen} 个结算时 Check 仍未关闭、{claimUnproven} 个成功声明无法证明、{noBoundary} 个没有可测量的边界、{unsettled} 个未结算、{prePrepare} 个在 prepare 之前就终止。",
+      durationFailureTail: "确认失败的尝试不在此分布内——失败路径的耗时度量的是另一件事——它们在别处计数。",
       durationCandidateLabel: "候选上限（毫秒）",
       durationCandidateApply: "查看截断",
       durationCutoff: "{cap} 毫秒的上限会排除 {n} 个尝试中的 {over} 个（{share}）。",
