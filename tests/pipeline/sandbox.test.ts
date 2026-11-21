@@ -204,6 +204,7 @@ import "../helpers/cloudflare-workers-mock";
 const {
   SandboxV1,
   getSandbox,
+  EXEC_DEADLINE_WRAPPER,
   DEFAULT_EXEC_TIMEOUT_MS,
   MAX_EXEC_COMMAND_BYTES,
   MAX_EXEC_ENV_VALUE_BYTES,
@@ -721,19 +722,37 @@ describe("SandboxV1 absolute exec deadline", () => {
     expect(execCalls[0]!.cmd[5]).toContain("cat --");
   });
 
-  test("the kill grace is reserved out of the remaining window", async () => {
+  test("the argv carries the container-side computation, not a frozen duration", async () => {
     reset();
     running = true;
+    let deadline = 0;
     await withFrozenClock(async (clock) => {
       const { sandbox } = proofSpendingContainer(4_000, clock);
+      deadline = clock.now + 10_000;
       const result = await sandbox.runMarked(MARKER, shellCommand("bun run x"), {
-        deadlineEpochMs: clock.now + 10_000,
+        deadlineEpochMs: deadline,
       });
       expect(result.kind).toBe("ran");
     });
-    const child = execCalls.find((call) => call.cmd[0] === "timeout" && call.cmd[5]?.includes("bun run x"))!;
-    // 6 s left after the proof − the 5 s kill grace = a 1 s SIGTERM budget;
-    // SIGKILL still lands at the deadline, never at grace + deadline.
-    expect(child.cmd).toEqual(["timeout", "--kill-after=5", "1", "/bin/sh", "-lc", "bun run x"]);
+    const child = execCalls.find((call) => call.cmd[0] === "/bin/sh")!;
+    // The container's own shell derives `timeout` from the epoch it is handed:
+    // queueing between this request and the process start cannot move the
+    // bound, because no duration was frozen host-side.
+    expect(child.cmd.slice(0, 3)).toEqual(["/bin/sh", "-c", EXEC_DEADLINE_WRAPPER]);
+    expect(child.cmd[2]).toContain("$(date +%s)");
+    expect(child.cmd[2]).toContain("exec timeout --kill-after=$grace_s");
+    expect(child.cmd[4]).toBe(String(Math.floor(deadline / 1000)));
+    expect(child.cmd[6]).toBe("bun run x");
+    expect(child.cmd).not.toContain("timeout");
+  });
+
+  test("a container clock past the deadline exits 124 without running the runner", () => {
+    // Execute the EXACT wrapper the container runs, on the test host's shell.
+    // A deadline a minute in the past must reach the `exit 124` branch before
+    // `timeout` (and the command) is ever started.
+    const past = Math.floor(Date.now() / 1000) - 60;
+    const result = Bun.spawnSync(["/bin/sh", "-c", EXEC_DEADLINE_WRAPPER, "mstar-deadline", String(past), "5000", "echo ran"]);
+    expect(result.exitCode).toBe(124);
+    expect(result.stdout.toString()).toBe("");
   });
 });

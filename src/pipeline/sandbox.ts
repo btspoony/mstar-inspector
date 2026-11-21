@@ -191,9 +191,31 @@ const LOCKED_AWAIT_TIMEOUT = Symbol("locked-await-timeout");
 /**
  * GNU `timeout`'s SIGKILL grace (ms): SIGTERM first, SIGKILL this much later.
  * An absolute deadline reserves it OUT of the remaining window, so the kill
- * never lands after the deadline.
+ * never lands after the deadline. Drives BOTH the in-container subtraction and
+ * the `--kill-after` argument.
  */
 const KILL_GRACE_MS = 5_000;
+
+/**
+ * The in-container deadline evaluation, run by the container's own shell:
+ * `$1` = the absolute deadline in Unix SECONDS, `$2` = the SIGKILL grace in ms,
+ * `$3` = the command. `container.exec`'s relative timeout restarts when the
+ * process actually starts, so a host-side number can never be absolute; the
+ * wrapper reads `date +%s` immediately before `exec`, and a window at or below
+ * the grace exits 124 WITHOUT starting anything.
+ *
+ * Exported so the suite can execute the exact wrapper the container runs.
+ */
+export const EXEC_DEADLINE_WRAPPER = [
+  "deadline_s=$1; grace_ms=$2; shift 2",
+  "now_s=$(date +%s)",
+  // Whole-second clock: one extra second is shaved so SIGKILL still lands at
+  // or before the millisecond deadline, never up to a second after it.
+  "remaining=$((deadline_s - now_s - 1))",
+  "grace_s=$((grace_ms / 1000))",
+  'if [ "$remaining" -le "$grace_s" ]; then exit 124; fi',
+  'exec timeout --kill-after=$grace_s "$((remaining - grace_s))" /bin/sh -lc "$1"',
+].join("; ");
 
 /** The ONE clamp: a zero/negative/NaN override is not a duration (GNU `timeout 0` disables its bound). */
 function normalizedTimeoutMs(requested: number | undefined): number {
@@ -571,27 +593,41 @@ export class SandboxV1 extends DurableObject {
     prepared?: { stdin: Uint8Array | undefined },
   ): Promise<{ stdout: string; stderr: string; exitCode: number } | ExecDeadlineSpent> {
     const stdinPayload = prepared === undefined ? this.assertBounds(command, opts) : prepared.stdin;
-    // The child's own bound. With an absolute deadline the remainder is read
-    // HERE — in the DO, immediately before the process starts — because the
-    // request queue, this RPC and any marker proof already spent it. The kill
-    // grace is reserved OUT of that remainder: SIGTERM lands at
-    // `deadline − grace` and SIGKILL at the deadline, never after it. A
-    // remainder at or below the grace starts NOTHING.
-    let timeoutMs: number;
-    if (opts?.deadlineEpochMs === undefined) {
-      timeoutMs = normalizedTimeoutMs(opts?.timeout);
-    } else {
-      const remainingMs = opts.deadlineEpochMs - Date.now();
-      if (remainingMs <= KILL_GRACE_MS) return { kind: "deadline-spent", remainingMs };
-      timeoutMs = remainingMs - KILL_GRACE_MS;
+    const deadlineMs = opts?.deadlineEpochMs;
+    // FAST PATH only: the shell below is the GUARANTEE. A window the DO can
+    // already see as spent returns before a process exists; a window this
+    // check still believes in is evaluated again by the container's own clock,
+    // so queueing between this request and the process start cannot move it.
+    if (deadlineMs !== undefined && deadlineMs - Date.now() <= KILL_GRACE_MS) {
+      return { kind: "deadline-spent", remainingMs: deadlineMs - Date.now() };
     }
-    // Clamp before converting: a zero/negative value must never reach the argv
-    // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
-    // non-finite override (NaN/Infinity) is not a duration at all — default.
-    const timeoutSeconds = normalizedTimeoutMs(timeoutMs) / 1000;
-    const process = await container.exec(
-      ["timeout", `--kill-after=${KILL_GRACE_MS / 1000}`, String(timeoutSeconds), "/bin/sh", "-lc", command],
-      {
+    // Two shapes: the relative bound every ordinary step uses, and the
+    // absolute one whose arithmetic the container's shell performs. The shell
+    // receives the epoch in seconds and the grace in ms — never a frozen
+    // duration — so the `timeout` it starts is derived at the last instant.
+    const argv =
+      deadlineMs === undefined
+        ? [
+            "timeout",
+            `--kill-after=${KILL_GRACE_MS / 1000}`,
+            // Clamp before converting: a zero/negative value must never reach
+            // the argv as a zero or negative duration (GNU `timeout 0`
+            // DISABLES the bound); a non-finite override is not a duration.
+            String(normalizedTimeoutMs(opts?.timeout) / 1000),
+            "/bin/sh",
+            "-lc",
+            command,
+          ]
+        : [
+            "/bin/sh",
+            "-c",
+            EXEC_DEADLINE_WRAPPER,
+            "mstar-deadline",
+            String(Math.floor(deadlineMs / 1000)),
+            String(KILL_GRACE_MS),
+            command,
+          ];
+    const process = await container.exec(argv, {
         cwd: opts?.cwd,
         env: opts?.env,
         // No `stdin` option at all = the platform closes stdin and sends EOF.
