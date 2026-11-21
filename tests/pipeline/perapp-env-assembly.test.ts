@@ -269,6 +269,9 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
   postLineComments: mock(async () => {
     throw new Error("unexpected: no qualifying findings → no line comments");
   }),
+  recoverLineComments: mock(async () => {
+    throw new Error("unexpected: no dispatched line batch → no discovery");
+  }),
   // §7.8 discussion capture + §7.5 resolution: no open lifecycle
   // rows in these fixtures → never triggered.
   listDiscussion: mock(async () => {

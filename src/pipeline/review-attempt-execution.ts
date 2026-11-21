@@ -78,15 +78,17 @@ import {
 } from "../store/review-route-store";
 import {
   applyPublishedLifecycle,
-  claimAppliedLineBatch,
+  captureLineComments,
   claimPublication,
   countRecheckableFindings,
   findPublicationJournal,
   hasUnprovenDegradedPublication,
   PUBLICATION_HANDOFF_PHASES,
   markPublicationFailed,
+  readLineBatchState,
   recordPublicationProof,
-  releaseAppliedLineBatchClaim,
+  recordLineDispatchIntent,
+  releaseLineDispatch,
   releaseUnspentPublicationClaim,
   readPublication,
   selectAssessmentTargets,
@@ -178,6 +180,7 @@ import {
   renderLineCommentText,
   type ClosureRow,
   type CommenterEnv,
+  type PostPreparedLineCommentsInput,
   type ReviewCommenter,
   type UpsertPlan,
 } from "./comment";
@@ -2048,6 +2051,8 @@ async function publishDegradedPublication(input: {
   commenter: ReviewCommenter;
   scope: Scope;
   headSha: string;
+  /** §7.9a: the attempt this publication is admitted under (launch row id). */
+  admittedAttemptId: string;
   /**
    * The owning Check attempt (§7.9): the degraded comment send takes the
    * publication lease of its action for it. Absent when this host has no
@@ -2091,6 +2096,7 @@ async function publishDegradedPublication(input: {
       lifecycle: null,
       lineIntents: [],
       attemptId: input.attemptId,
+      admittedAttemptId: input.admittedAttemptId,
     };
     const staged = await stagePublication(input.db, { id: publicationId, payload, nowMs: Date.now() });
     // §7.7: an insert conflict returns the EXISTING immutable payload — never
@@ -2115,6 +2121,7 @@ async function publishDegradedPublication(input: {
     try {
       sent = await commenter.postPreparedDegraded({
         ...target,
+        appId: input.scope.appId,
         headSha: input.headSha,
         round: plan.round,
         targetCommentId: plan.action === "update" ? plan.commentId : null,
@@ -4906,6 +4913,7 @@ async function collectPhase(
       commenter,
       scope: lifecycleScope,
       headSha,
+      admittedAttemptId: ref.attemptId,
       ...(check?.handle?.attemptId === undefined ? {} : { attemptId: check.handle.attemptId }),
       redactedError,
       redactedStdout,
@@ -5264,6 +5272,7 @@ async function collectPhase(
     },
     lifecycle: lifecycleRound,
     lineIntents,
+    admittedAttemptId: ref.attemptId,
   };
   const staged = await stagePublication(deps.env.DB, { id: publicationId, payload: payloadDoc, nowMs: Date.now() });
   // An insert conflict returns the EXISTING immutable payload — a
@@ -5311,6 +5320,36 @@ export async function publishAttempt(
       changedLines: null,
       sendAttemptPublicationId: sent.publicationId,
     });
+  }
+}
+
+/**
+ * Read-only completion of an ALREADY-DISPATCHED line batch (spec §7.9a
+ * condition 2): capture the ids when the batch is visible remotely and never
+ * send. A failed read leaves the durable intent in place — the work stays
+ * discovery, never permission for another create.
+ */
+async function discoverLineBatch(
+  deps: ProcessDeps,
+  commenter: ReviewCommenter,
+  input: PostPreparedLineCommentsInput,
+  fields: ConsumerLogFields,
+): Promise<void> {
+  try {
+    const recovered = await commenter.recoverLineComments(input);
+    await captureLineComments(deps.env.DB, input.publicationId, recovered.reviewId, recovered.posted, Date.now());
+    if (!recovered.captured) {
+      deps.log.info(
+        fields,
+        "line-comment batch stays discovery-only — its dispatch intent is recorded, so no second send is permitted",
+      );
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(
+      { ...fields, line_comments_fallback: true },
+      `line-comment discovery failed (dispatch intent retained, no resend): ${detail}`,
+    );
   }
 }
 
@@ -5521,73 +5560,68 @@ async function publishPhase(
   // discoverable), never fabricated mappings.
   if (lineIntents.length > 0) {
     const lineAttemptId = check?.handle?.attemptId;
-    // §7.9a condition 2: the applied mark cleared the journal claim, so on the
-    // no-Check lane the batch takes a FRESH claim of its own. A competitor
-    // holding it dispatches instead; this lane then sends nothing. The settled
-    // attempt is not a claimant.
-    const lineLease =
-      lineAttemptId === undefined
-        ? await claimAppliedLineBatch(deps.env.DB, stagedId, `consumer-lines:${sandboxId}`, Date.now())
-        : null;
-    if (lineAttemptId === undefined && lineLease === null) {
-      deps.log.warn(
-        fields,
-        "line-comment batch not dispatched — another holder owns the applied publication's line work (the intents stay discoverable)",
-      );
+    const lineInput = {
+      installationId: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      prNumber: payload.pr_number,
+      headSha,
+      round,
+      publicationId: stagedId,
+      intents: lineIntents,
+    };
+    // §7.9a condition 2: the applied mark cleared the journal claim, so the
+    // batch takes a FRESH claim — and records its DISPATCH INTENT in the same
+    // conditional transition. Exactly one lane ever reaches the send; every
+    // other lane, and every retry, is discovery.
+    const lineLease = await recordLineDispatchIntent(deps.env.DB, stagedId, `consumer-lines:${sandboxId}`, Date.now());
+    if (lineLease === null) {
+      const state = await readLineBatchState(deps.env.DB, stagedId);
+      if (state.pending) {
+        deps.log.info(
+          fields,
+          "line-comment batch already dispatched or owned by another lane — discovery only, never a second send",
+        );
+        await discoverLineBatch(deps, commenter, lineInput, fields);
+      }
     } else {
-      // Released only when nothing was sent or the batch was fully captured.
-      // An ambiguous send keeps the claim: it is discovery work, never
-      // permission to create a second batch. shortcut: the claim lapses at
-      // PUBLICATION_LEASE_MS; upgrade to a durable dispatch mark if an
-      // ambiguous batch must stay undispatched beyond that window.
-      let releaseLineClaim = false;
+      // The intent survives a returned request (the batch landed, or may
+      // have); only a DEFINITIVE pre-send refusal clears it. An unresolved
+      // send keeps both, so the next lane discovers instead of sending.
+      let outcome: "sent" | "refused" | "unknown" = "unknown";
       try {
         const postedLine = await commenter.postLineComments({
-          installationId: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          prNumber: payload.pr_number,
-          headSha,
-          round,
-          publicationId: stagedId,
-          intents: lineIntents,
+          ...lineInput,
           // `review_checks.id`, not the container identity (see the marker
           // send); the fresh journal claim is the no-Check lane's authority.
-          journalClaim: lineLease ?? lease,
+          journalClaim: lineLease,
           ...(lineAttemptId === undefined ? {} : { attemptId: lineAttemptId }),
         });
-        if (postedLine.posted.length > 0) {
-          try {
-            const captureStmts = postedLine.posted.map((p) =>
-              deps.env.DB
-                .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ?`)
-                .bind(postedLine.reviewId, p.commentId, Date.now(), p.associationId),
-            );
-            await deps.env.DB.batch(captureStmts);
-          } catch (err) {
-            const detail = err instanceof Error ? err.message : String(err);
-            deps.log.warn(fields, `line-comment id capture failed (intents stay discoverable): ${detail}`);
-          }
+        try {
+          await captureLineComments(deps.env.DB, stagedId, postedLine.reviewId, postedLine.posted, Date.now());
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(fields, `line-comment id capture failed (intents stay discoverable): ${detail}`);
         }
-        releaseLineClaim = postedLine.captured && postedLine.ambiguous.length === 0;
+        outcome = "sent";
         if (!postedLine.captured || postedLine.ambiguous.length > 0) {
           deps.log.warn(
             { ...fields, line_comments_fallback: true },
-            `line-comment capture incomplete (ambiguous: ${postedLine.ambiguous.join(", ") || "none"}) — never fabricated, batch claim retained`,
+            `line-comment capture incomplete (ambiguous: ${postedLine.ambiguous.join(", ") || "none"}) — never fabricated, discovery owns the rest`,
           );
         }
       } catch (err) {
-        // A definitive pre-send refusal left nothing at GitHub, so the claim
-        // is unspent and may be handed back; anything else may have landed.
-        releaseLineClaim = err instanceof PreparedSendRejected || err instanceof PublicationDeadlineSpent;
+        // A definitive pre-send refusal left nothing at GitHub: the intent is
+        // unspent. Anything else may have landed — keep it.
+        outcome = err instanceof PreparedSendRejected || err instanceof PublicationDeadlineSpent ? "refused" : "unknown";
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(
           { ...fields, line_comments_fallback: true },
           `line comments failed — overall comment already published, continuing overall-only: ${detail}`,
         );
       } finally {
-        if (lineLease !== null && releaseLineClaim) {
-          await releaseAppliedLineBatchClaim(deps.env.DB, stagedId, lineLease, Date.now());
+        if (outcome !== "unknown") {
+          await releaseLineDispatch(deps.env.DB, stagedId, lineLease, Date.now(), outcome === "sent");
         }
       }
     }

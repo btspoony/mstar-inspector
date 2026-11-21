@@ -18,6 +18,7 @@ import "../helpers/cloudflare-workers-mock";
 import {
   SHA,
   TEST_APP_ID,
+  TEST_KEY,
   TEST_OWNER,
   TEST_PR_NUMBER,
   TEST_REPO,
@@ -25,6 +26,8 @@ import {
   createSeededTestD1,
   registerGitOpsCommands,
 } from "../helpers/consumer-fixtures";
+import { testAppPem } from "../helpers/rsa-key";
+import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createConsumerHarness, makePayload } from "../helpers/consumer-harness";
 import { inlineWorkflowStep } from "../helpers/workflow-route";
 import { createArtifactStore } from "../../src/store/artifact-store";
@@ -37,7 +40,7 @@ import {
   claimReviewLaunch,
   readReviewLaunch,
 } from "../../src/pipeline/review-attempt";
-import { claimAppliedLineBatch, readPublication } from "../../src/store/finding-lifecycle";
+import { PUBLICATION_LEASE_MS, claimAppliedLineBatch, readLineBatchState, recordLineDispatchIntent, readPublication } from "../../src/store/finding-lifecycle";
 import {
   deliveryKeyOf,
   readAttemptHandoff,
@@ -73,6 +76,7 @@ const { PublicationDeadlineSpent, postLineCommentsWithOctokit, publicationSendGu
   "../../src/pipeline/comment"
 );
 const { RoundBudgetSpent } = await import("../../src/pipeline/review-attempt");
+const { reconcileReviewLifecycle } = await import("../../src/worker/lifecycle-reconcile");
 
 const ATTEMPT_ID = "attempt-4b-0001";
 const SCOPE: Scope = {
@@ -358,7 +362,7 @@ describe("the restart round trip", () => {
 });
 
 describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () => {
-  test("the applied publication's pending batch dispatches once under a fresh claim, and the cleared claim dispatches zero", async () => {
+  test("foreground and recovery share one dispatch intent; the batch lands once even after its claim lapses", async () => {
     const { deps, db } = await makeDeps();
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
@@ -376,11 +380,29 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
     const publicationId = collected.collected.publicationId;
     // The fixture's diff covers the finding's line, so the staged publication
-    // carries exactly one frozen line intent (the batch this test dispatches).
+    // carries exactly one frozen line intent (the batch under test).
     const staged = await readPublication(db as never, publicationId);
     expect(staged?.payload.lineIntents).toHaveLength(1);
 
-    // The REAL send, under the authority the phase hands over.
+    // A REAL decryptable PEM: the recovery lane in the hook must resolve this
+    // App for itself (it is the production factory, not an injected reviewer).
+    const pem = await testAppPem();
+    db.raw
+      .prepare(`UPDATE review_bots SET private_key_enc = ? WHERE id = ?`)
+      .run(
+        await createSecretbox(TEST_KEY).encryptSecret(pem, `github_apps.private_key_enc:${TEST_APP_ID}`),
+        TEST_APP_ID,
+      );
+    // The recovery lane routes by the EXACT (bot, installation) pair.
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+         VALUES (?, ?, 123, 'acme', datetime('now'))`,
+      )
+      .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
+    const env = { DB: db as never, DASHBOARD_ENCRYPTION_KEY: TEST_KEY, REVIEW_QUEUE: { send: async () => {} } as never };
+
+    const clock = { now: Date.now(), recoveryCreate: 0, recoveryReads: 0 };
     const batches: unknown[] = [];
     const lineOctokit: PostOctokit = {
       paginate: async () => [],
@@ -393,6 +415,44 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
         pulls: {
           createReview: async (params) => {
             batches.push(params);
+            // The foreground's send window lapses HERE, inside the mutation —
+            // then the recovery lane runs against the SAME applied batch.
+            clock.now = Date.now() + PUBLICATION_LEASE_MS + 1;
+            const realFetch = globalThis.fetch;
+            globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+              const url = String(input);
+              const json = (status: number, body: unknown) =>
+                new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+              if (url.endsWith("/app")) return json(200, { id: 424242, slug: "acme-inspector" });
+              if (url.endsWith("/access_tokens")) {
+                return json(200, {
+                  token: "ghs_recovery",
+                  expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+                  repositories: [{ id: 1, name: TEST_REPO }],
+                  permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+                  repository_selection: "selected",
+                });
+              }
+              if (url.includes("/pulls/") && url.includes("/reviews")) {
+                if (init?.method === "POST") {
+                  // A second createReview: the forbidden duplicate batch.
+                  clock.recoveryCreate += 1;
+                  return json(201, { id: 9100 });
+                }
+                clock.recoveryReads += 1;
+                return json(200, []);
+              }
+              if (url.includes("/issues/") && init?.method === "POST") {
+                clock.recoveryCreate += 1;
+                return json(201, { id: 9100 });
+              }
+              return json(200, {});
+            }) as unknown as typeof fetch;
+            try {
+              await reconcileReviewLifecycle(env as never, { log: { warn: () => {}, info: () => {} }, now: () => clock.now });
+            } finally {
+              globalThis.fetch = realFetch;
+            }
             // GitHub's real response omits ids; the capture reads them back by
             // the trusted thread marker, so echo the created batch with ids.
             const comments = (params.comments as Array<Record<string, unknown>>).map((comment, index) => ({
@@ -404,37 +464,29 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
         },
       },
     };
-    let handedOver: PostPreparedLineCommentsInput | undefined;
-    h.fakeCommenter.postLineComments = async (input) => {
-      handedOver = input;
-      return postLineCommentsWithOctokit(lineOctokit, input, publicationSendGuard(db as never, () => Date.now(), input));
-    };
+    h.fakeCommenter.postLineComments = async (input) =>
+      postLineCommentsWithOctokit(lineOctokit, input, publicationSendGuard(db as never, () => clock.now, input));
 
     const { deps: publishing } = await makeDeps({ db });
     expect(await publishAttempt(publishing, ref, publicationId)).toEqual({ kind: "ok" });
-    expect(batches).toHaveLength(1);
 
-    // A cleared claim (holder gone, epoch no longer current) is not authority:
-    // reusing it dispatches zero further batches.
-    const row = db.raw
-      .prepare(`SELECT holder, lease_epoch FROM review_publications WHERE id = ?`)
-      .get(publicationId) as { holder: string | null; lease_epoch: number };
-    expect(row.holder).toBeNull();
-    const cleared: Lease = { holder: "consumer:stale", epoch: row.lease_epoch - 1, untilMs: Date.now() + 60_000 };
-    const reused = await postLineCommentsWithOctokit(
-      lineOctokit,
-      { ...handedOver!, journalClaim: cleared },
-      publicationSendGuard(db as never, () => Date.now(), {
-        publicationId,
-        journalClaim: cleared,
-      }),
-    ).catch((error: unknown) => error);
-    expect(reused).toBeInstanceOf(PreparedSendRejected);
+    // One mutation for one eligible batch: the foreground sent it; recovery
+    // found the durable intent and only read back (no second create).
     expect(batches).toHaveLength(1);
+    expect(clock.recoveryCreate).toBe(0);
+    expect(clock.recoveryReads).toBeGreaterThanOrEqual(1);
+    const after = await readLineBatchState(db as never, publicationId);
+    expect(after).toEqual({ pending: false, dispatched: true });
+    const captured = db.raw
+      .prepare(`SELECT COUNT(*) AS n FROM review_threads WHERE publication_id = ? AND review_id IS NOT NULL`)
+      .get(publicationId) as { n: number };
+    expect(captured.n).toBe(1);
 
-    // The applied mark cleared the claim, and the batch is closed: no further
-    // claim for this publication's line work is available.
-    expect(await claimAppliedLineBatch(db as never, publicationId, "recovery:9", Date.now())).toBeNull();
+    // The intent is terminal for sending: even with the lease long lapsed, the
+    // same batch can never be claimed again.
+    expect(
+      await recordLineDispatchIntent(db as never, publicationId, "recovery-again", clock.now + PUBLICATION_LEASE_MS * 4),
+    ).toBeNull();
   });
 });
 

@@ -106,6 +106,15 @@ export type PublicationPayload = {
    * completing one has no attempt to settle.
    */
   attemptId?: string;
+  /**
+   * §7.9a binding: the attempt this publication was ADMITTED under (the launch
+   * row id), frozen into the staged payload. Later lanes resolve the launch
+   * row's frozen `(attempt_key, generation)` from it — never "the newest Check
+   * linked to the publication" — so send and recovery name the same identity.
+   * Absent only on rows staged before this field existed; recovery refuses
+   * those rather than falling back to a second identity.
+   */
+  admittedAttemptId?: string;
 };
 
 export type PublicationRow = {
@@ -1351,14 +1360,38 @@ export async function releaseUnspentPublicationClaim(
   return result.meta.changes > 0;
 }
 
+/** One applied publication's post-apply line batch: is work still pending, and
+ *  has a dispatch intent already been recorded (the batch may have been sent)? */
+export type LineBatchState = { pending: boolean; dispatched: boolean };
+
 /**
- * §7.9a condition 2: the applied mark clears the journal claim, so the no-Check
- * lane's line batch takes a FRESH claim of its own — conditional on the row
- * actually being `applied` with a pending (uncaptured) line intent, and on no
- * live holder. A competitor that loses gets `null` and dispatches nothing.
- * The epoch keeps rising, so the cleared claim can never authorise the batch.
+ * Read the batch's durable state. `dispatched` is the §7.9a evidence question:
+ * an intent means some lane took the send right for this exact batch, so the
+ * only remaining work is read-only discovery — never a second send.
  */
-export async function claimAppliedLineBatch(
+export async function readLineBatchState(db: D1Like, id: string): Promise<LineBatchState> {
+  const row = await db
+    .prepare(`SELECT line_dispatch_ms FROM review_publications WHERE id = ?`)
+    .bind(id)
+    .first<{ line_dispatch_ms: number | null }>();
+  if (row === null) return { pending: false, dispatched: false };
+  const pending = await db
+    .prepare(`SELECT 1 AS hit FROM review_threads WHERE publication_id = ? AND review_id IS NULL LIMIT 1`)
+    .bind(id)
+    .first<{ hit: number }>();
+  return { pending: pending !== null, dispatched: row.line_dispatch_ms !== null };
+}
+
+/**
+ * §7.9a condition 2: the applied mark cleared the journal claim, so the no-Check
+ * lane's line batch takes a FRESH claim of its own — and records the DISPATCH
+ * INTENT in that same conditional transition. One statement decides who may
+ * send this exact batch: the row must be `applied`, carry no prior intent, hold
+ * a free/expired lease, and still have an uncaptured line intent. `null` means
+ * the batch was already dispatched (discovery only), another lane owns it, or
+ * nothing is pending.
+ */
+export async function recordLineDispatchIntent(
   db: D1Like,
   id: string,
   holder: string,
@@ -1368,13 +1401,14 @@ export async function claimAppliedLineBatch(
   const claim = await db
     .prepare(
       `UPDATE review_publications
-          SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?, updated_ms = ?
-        WHERE id = ? AND phase = 'applied'
+          SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?,
+              line_dispatch_ms = ?, updated_ms = ?
+        WHERE id = ? AND phase = 'applied' AND line_dispatch_ms IS NULL
           AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
           AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = ? AND t.review_id IS NULL)
         RETURNING holder, lease_epoch, lease_until_ms`,
     )
-    .bind(holder, nowMs + PUBLICATION_LEASE_MS, nowMs, id, nowMs, id)
+    .bind(holder, nowMs + PUBLICATION_LEASE_MS, nowMs, nowMs, id, nowMs, id)
     .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
   const written = claim.results[0];
   if (
@@ -1388,25 +1422,141 @@ export async function claimAppliedLineBatch(
 }
 
 /**
- * Hand the applied line-batch claim back (under the exact epoch it was granted
- * with). `phase` stays `applied`: this releases the batch's send right, never
- * the publication.
+ * Hand the line-batch send right back under the exact epoch it was granted with.
+ * `sent: true` (the batch landed, or may have) KEEPS the durable intent — from
+ * then on the work is discovery. `sent: false` is a definitive pre-send refusal:
+ * nothing left the Worker, so the intent is cleared and a later lane may record
+ * a new one. `phase` stays `applied` in both cases.
  */
-export async function releaseAppliedLineBatchClaim(
+export async function releaseLineDispatch(
   db: D1Like,
   id: string,
   lease: Lease,
   nowMs: number,
+  sent: boolean,
 ): Promise<boolean> {
   const released = await db
     .prepare(
       `UPDATE review_publications
-          SET holder = NULL, lease_until_ms = NULL, updated_ms = ?
+          SET holder = NULL, lease_until_ms = NULL,
+              line_dispatch_ms = CASE WHEN ? THEN line_dispatch_ms ELSE NULL END,
+              updated_ms = ?
         WHERE id = ? AND holder = ? AND lease_epoch = ? AND phase = 'applied'`,
     )
-    .bind(nowMs, id, lease.holder, lease.epoch)
+    .bind(sent ? 1 : 0, nowMs, id, lease.holder, lease.epoch)
     .run();
   return released.meta.changes > 0;
+}
+
+/**
+ * Persist the captured line-comment ids against their associations (the §7.7
+ * step 10 capture). Replay-safe and scoped to the publication, so a discovery
+ * pass in another lane can complete what a send could not read back.
+ */
+export async function captureLineComments(
+  db: D1Like,
+  publicationId: string,
+  reviewId: number | null,
+  posted: readonly { associationId: string; commentId: number }[],
+  nowMs: number,
+): Promise<void> {
+  if (posted.length === 0) return;
+  await db.batch(
+    posted.map((p) =>
+      db
+        .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ? AND publication_id = ?`)
+        .bind(reviewId, p.commentId, nowMs, p.associationId, publicationId),
+    ),
+  );
+}
+
+/**
+ * The post-apply line lane's selection: applied rows that still carry an
+ * uncaptured line intent and no live holder. `line_dispatch_ms` is deliberately
+ * not filtered — a dispatched row is returned so the recovery lane can run the
+ * read-only discovery the intent allows.
+ */
+export async function listLineBatchRecovery(db: D1Like, nowMs: number, limit: number): Promise<PublicationRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT * FROM review_publications p
+        WHERE p.phase = 'applied'
+          AND (p.lease_until_ms IS NULL OR p.lease_until_ms <= ?)
+          AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)
+        ORDER BY COALESCE(p.applied_ms, p.updated_ms), p.id
+        LIMIT ?`,
+    )
+    .bind(nowMs, limit)
+    .all<ReviewPublicationRow>();
+  return rows.results.map(publicationRowOf);
+}
+
+// ---------------------------------------------------------------------------
+// §7.9a condition 3 — one authority over ONE degraded target comment
+// ---------------------------------------------------------------------------
+
+/** The exact degraded comment a cleanup and its publishers contend on. */
+export type DegradedTargetRef = { scope: Scope; commentId: number };
+
+/** Stable key: the authenticated App/installation/repo/PR plus the comment id. */
+export function degradedTargetKey({ scope, commentId }: DegradedTargetRef): string {
+  return `${scope.appId}:${scope.installationId}:${scope.owner}/${scope.repo}#${scope.prNumber}:${commentId}`;
+}
+
+/**
+ * Claim writer exclusion for ONE degraded target comment (spec §7.9a condition
+ * 3). Both sides take this before touching the comment remotely: the cleanup
+ * before DELETE, a degraded publisher before an update of that target. One
+ * conditional row, one epoch: a live holder refuses the other side, and the
+ * cleanup keeps it for the whole delete (an unresolved delete leaves it held
+ * until its expiry, so no writer can reuse the target meanwhile). Uses the same
+ * 120 s window as every other send right.
+ */
+export async function claimDegradedTarget(
+  db: D1Like,
+  input: DegradedTargetRef & { holder: string; nowMs: number },
+): Promise<Lease | null> {
+  if (input.holder.length === 0) throw new Error("finding-lifecycle: degraded target claim requires a nonblank holder identity");
+  const key = degradedTargetKey(input);
+  const claim = await db
+    .prepare(
+      `INSERT INTO degraded_target_leases (target_key, holder, lease_epoch, lease_until_ms, updated_ms)
+       VALUES (?, ?, 1, ?, ?)
+       ON CONFLICT (target_key) DO UPDATE
+         SET holder = excluded.holder,
+             lease_epoch = degraded_target_leases.lease_epoch + 1,
+             lease_until_ms = excluded.lease_until_ms,
+             updated_ms = excluded.updated_ms
+         WHERE degraded_target_leases.lease_until_ms IS NULL
+            OR degraded_target_leases.lease_until_ms <= ?`,
+    )
+    .bind(key, input.holder, input.nowMs + PUBLICATION_LEASE_MS, input.nowMs, input.nowMs)
+    .run();
+  if (claim.meta.changes === 0) return null;
+  const row = await db
+    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM degraded_target_leases WHERE target_key = ?`)
+    .bind(key)
+    .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
+  if (row === null || row.holder !== input.holder || row.lease_until_ms !== input.nowMs + PUBLICATION_LEASE_MS) {
+    return null;
+  }
+  return { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+}
+
+/** Release the target exclusion under the exact epoch it was granted with. */
+export async function releaseDegradedTarget(
+  db: D1Like,
+  input: DegradedTargetRef & { lease: Lease; nowMs: number },
+): Promise<boolean> {
+  const released = await db
+    .prepare(
+      `UPDATE degraded_target_leases
+          SET holder = NULL, lease_until_ms = NULL, updated_ms = ?
+        WHERE target_key = ? AND holder = ? AND lease_epoch = ?`,
+    )
+    .bind(input.nowMs, degradedTargetKey(input), input.lease.holder, input.lease.epoch)
+    .run();
+  return released.meta.changes === 1;
 }
 
 /**

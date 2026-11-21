@@ -1791,6 +1791,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
     const { calls, octokit } = mockOctok([]);
     await expect(
       postPreparedDegradedWithOctokit(octokit, {
+        appId: "11111111-2222-3333-4444-555555555555",
         installationId: 123,
         owner: "acme",
         repo: "widgets",
@@ -2080,6 +2081,7 @@ describe("prepared degraded publication wiring (mock octokit, spec §7.7)", () =
   });
   const sendInput = {
     ...degradeTarget,
+    appId: "11111111-2222-3333-4444-555555555555",
     headSha: "0123456789abcdef0123456789abcdef01234567",
     round: 3,
     targetCommentId: 7 as number | null,
@@ -2327,6 +2329,7 @@ describe("missing octokit surface → per-chain error noun (review feedback fix)
     ).rejects.toThrow(/cannot publish the prepared review/);
     await expect(
       postPreparedDegradedWithOctokit(bare, {
+        appId: "11111111-2222-3333-4444-555555555555",
         installationId: 1,
         owner: "acme",
         repo: "widgets",

@@ -68,11 +68,13 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like, D1StatementLike } from "../store/types";
 import {
   applyPublishedLifecycle,
+  captureLineComments,
   claimPublication,
   deferPublicationRecovery,
   deferResolutionRecovery,
   getPublicationCreatedMs,
   getResolutionRecoveryRow,
+  listLineBatchRecovery,
   listPublicationRecovery,
   listResolutionRecovery,
   listSuspendedLifecycleApps,
@@ -83,9 +85,12 @@ import {
   markPublicationUnknown,
   markResolutionLocalError,
   PREPARED_SEND_MIN_AGE_MS,
+  readLineBatchState,
   recordNeedsRecheck,
   recordPublicationProof,
+  recordLineDispatchIntent,
   reenableLifecycleForApps,
+  releaseLineDispatch,
   releaseUnspentPublicationClaim,
   supersedePublication,
   suspendPublicationRecovery,
@@ -94,7 +99,7 @@ import {
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
-import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
+import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type PostPreparedLineCommentsInput, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 import { sha256Hex } from "../pipeline/review-threads";
 import { settlementStatementIfDischarged } from "../store/review-route-store";
 
@@ -163,7 +168,7 @@ const HOLDER = "lifecycle-reconcile";
  */
 export type ReconcileReviewer = Pick<
   ReviewCommenter,
-  "planReviewUpsert" | "postPreparedReview" | "postPreparedDegraded" | "listDiscussion"
+  "planReviewUpsert" | "postPreparedReview" | "postPreparedDegraded" | "postLineComments" | "recoverLineComments" | "listDiscussion"
 > & {
   resolveFindingThread: NonNullable<ReviewCommenter["resolveFindingThread"]>;
 };
@@ -315,6 +320,8 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
         planReviewUpsert: (input) => commenter.planReviewUpsert(input),
         postPreparedReview: (input) => commenter.postPreparedReview(input),
         postPreparedDegraded: (input) => commenter.postPreparedDegraded(input),
+        postLineComments: (input) => commenter.postLineComments(input),
+        recoverLineComments: (input) => commenter.recoverLineComments(input),
         listDiscussion: (input) => commenter.listDiscussion(input),
         resolveFindingThread,
       },
@@ -592,6 +599,10 @@ export async function reconcileReviewLifecycle(
     budget.laneCap = RECONCILE_PUBLICATION_LANE_MAX_REQUESTS;
     await reconcilePublications(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
+    // 1b. Post-apply line lane (spec §7.9a condition 2) — the same half share:
+    // applied publications that still owe a line batch, or owe its capture.
+    await reconcileLineBatches(db, now, budget, reviewerFactory, env, transport, reviewerCache, log, summary);
+
     // 2. Thread lane — the remaining run budget (its own ≤15-request
     // per-operation envelope is the admission estimate; the actual requests
     // are metered under the whole-run cap).
@@ -797,6 +808,145 @@ async function applyConfirmedPublication(
 }
 
 /**
+ * §7.9a condition 2's recovery half: the post-apply line lane. It selects
+ * `applied` publications that still carry an uncaptured line intent and either
+ *   - records the dispatch intent and sends the batch under the SAME conditional
+ *     transition the foreground uses (exactly one lane wins), or
+ *   - finds an intent already recorded and performs read-only discovery —
+ *     never a second send.
+ */
+async function reconcileLineBatches(
+  db: D1Like,
+  now: () => number,
+  budget: RunBudget,
+  reviewerFactory: NonNullable<LifecycleReconcileDeps["reviewer"]>,
+  env: ScheduledEnv,
+  transport: ReconcileTransport,
+  reviewerCache: Map<string, Promise<ReviewerResolution>>,
+  log: ReconcileLog,
+  summary: LifecycleReconcileSummary,
+): Promise<void> {
+  const rows = await listLineBatchRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+  for (const row of rows) {
+    const scope = row.payload.scope;
+    if (!canSpend(budget, now(), 1, true)) continue; // stays due, no claim
+    // ONE conditional transition decides who sends: the durable dispatch
+    // intent. `null` means the batch was already dispatched (or another lane
+    // holds it) — then the only work left is read-only discovery.
+    const lease = await recordLineDispatchIntent(db, row.id, `recovery-lines:${row.id}`, now());
+    if (lease === null) {
+      const state = await readLineBatchState(db, row.id);
+      if (!state.pending) continue;
+      const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
+      if (resolved.kind === "unavailable") continue;
+      try {
+        const recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
+        await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
+        log.info(
+          { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },
+          "line-comment batch discovered without a second send",
+        );
+      } catch (error) {
+        log.warn(
+          { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+          "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
+        );
+      }
+      continue;
+    }
+    const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
+    if (resolved.kind === "unavailable") {
+      await releaseLineDispatch(db, row.id, lease, now(), false);
+      continue;
+    }
+    const input = lineInputOf(row);
+    const admitted = await admittedAttemptOf(db, row.payload.admittedAttemptId);
+    if (admitted.kind === "unresolved") {
+      await releaseLineDispatch(db, row.id, lease, now(), false);
+      log.warn(
+        { event: "ops_lifecycle_line_unresolved", detail: `publication=${row.id}: ${admitted.reason}` },
+        "line-comment batch not sent — its admitted attempt cannot be resolved",
+      );
+      continue;
+    }
+    let outcome: "sent" | "refused" | "unknown" = "unknown";
+    try {
+      const posted = await resolved.reviewer.postLineComments({
+        ...input,
+        journalClaim: lease,
+        ...(admitted.kind === "check" ? { attemptId: admitted.attemptId } : {}),
+      });
+      try {
+        await captureLineComments(db, row.id, posted.reviewId, posted.posted, now());
+      } catch (error) {
+        log.warn(
+          { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+          "line-comment id capture failed — the intent stays, discovery owns the rest",
+        );
+      }
+      outcome = "sent";
+    } catch (error) {
+      // A definitive pre-send refusal proves nothing was sent; anything else
+      // may have landed, so the intent is kept and only discovery may follow.
+      if (error instanceof PreparedSendRejected) outcome = "refused";
+      log.warn(
+        { event: "ops_lifecycle_line_send_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+        "line-comment batch send failed — an unresolved send stays discovery-only",
+      );
+    } finally {
+      if (outcome !== "unknown") await releaseLineDispatch(db, row.id, lease, now(), outcome === "sent");
+    }
+  }
+}
+
+/** The exact frozen batch of one applied publication. */
+function lineInputOf(row: PublicationRow): PostPreparedLineCommentsInput {
+  const scope = row.payload.scope;
+  return {
+    installationId: scope.installationId,
+    owner: scope.owner,
+    repo: scope.repo,
+    prNumber: scope.prNumber,
+    headSha: row.payload.headSha,
+    round: row.payload.round,
+    publicationId: row.id,
+    intents: row.payload.lineIntents,
+  };
+}
+
+/** The identity a publication was admitted under, resolved from its FROZEN
+ *  evidence — the staged payload's launch-attempt id plus that row's
+ *  `(attempt_key, generation)` pair. Never a recency lookup. */
+type AdmittedAttempt =
+  | { kind: "check"; attemptId: string }
+  | { kind: "no-check" }
+  | { kind: "unresolved"; reason: string };
+
+async function admittedAttemptOf(db: D1Like, admittedAttemptId: string | undefined): Promise<AdmittedAttempt> {
+  if (admittedAttemptId === undefined) {
+    return { kind: "unresolved", reason: "the staged payload records no admitted attempt (pre-binding row)" };
+  }
+  const launch = await db
+    .prepare(`SELECT attempt_key, attempt_generation FROM review_launches WHERE attempt_id = ?`)
+    .bind(admittedAttemptId)
+    .first<{ attempt_key: string | null; attempt_generation: number | null }>();
+  if (launch === null) return { kind: "unresolved", reason: `admitted attempt ${admittedAttemptId} has no launch row` };
+  if (launch.attempt_key === null || launch.attempt_generation === null) return { kind: "no-check" };
+  const check = await db
+    .prepare(`SELECT id FROM review_checks WHERE attempt_key = ? AND generation = ?`)
+    .bind(launch.attempt_key, launch.attempt_generation)
+    .first<{ id: string }>();
+  if (check === null) {
+    // The frozen identity names this attempt, and it never created a Check
+    // run (no Checks surface): the lane the foreground also uses — the
+    // journal claim — is its one authority. Rows are retained, so absence is
+    // not a lost link.
+    return { kind: "no-check" };
+  }
+  return { kind: "check", attemptId: check.id };
+}
+
+/**
  * Send a prepared publication once, with the same identity (§7.7 failure
  * matrix: "Staged, before send → M8 sends once with same identity when
  * enabled/current"). Order: pause gate → age gate → budget → read-only
@@ -856,16 +1006,17 @@ async function sendPreparedPublication(
   if (lease === null) return; // claimed elsewhere between pre-check and claim
   try {
     // §7.9a condition 1: a Check-backed publication's recovery send must meet
-    // the foreground send on the SAME per-action lease, so the attempt that
-    // owns the publication is the key — not this lane's journal claim.
-    const owningAttempt = await db
-      .prepare(
-        `SELECT id FROM review_checks WHERE publication_id = ?
-          ORDER BY generation DESC, id DESC LIMIT 1`,
-      )
-      .bind(row.id)
-      .first<{ id: string }>();
+    // the foreground send on the SAME per-action lease. That key is the attempt
+    // the publication was ADMITTED under — resolved from the launch row's
+    // frozen pair, never "the newest Check linked to this publication". An
+    // identity that cannot be resolved refuses; a fallback would be a second
+    // authority.
+    const admitted = await admittedAttemptOf(db, row.payload.admittedAttemptId);
+    if (admitted.kind === "unresolved") {
+      throw new PublicationAuthorityUnavailable(`${admitted.reason} — nothing was sent`);
+    }
     const target = {
+      appId: scope.appId,
       installationId: scope.installationId,
       owner: scope.owner,
       repo: scope.repo,
@@ -875,11 +1026,12 @@ async function sendPreparedPublication(
       targetCommentId: row.payload.targetCommentId,
       body: row.payload.body,
       publicationId: row.id,
-      // The per-action lease is the one authority, when the attempt has a
-      // Check row; the journal claim is only the fallback for a lane with no
-      // Check attempt to key one on.
+      // The per-action lease is the one authority when the admitted attempt
+      // has a Check row; the journal claim is the authority for the lane that
+      // has no Check attempt to key one on (and the foreground uses the same
+      // one there).
       journalClaim: lease,
-      ...(owningAttempt === null ? {} : { attemptId: owningAttempt.id }),
+      ...(admitted.kind === "check" ? { attemptId: admitted.attemptId } : {}),
     };
     let commentId: number;
     if (row.payload.kind === "degraded") {

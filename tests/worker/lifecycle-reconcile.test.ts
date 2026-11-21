@@ -36,7 +36,7 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
   applyPublishedLifecycle,
   claimPublication,
-  claimPublicationLease,
+  PUBLICATION_LEASE_MS,
   listPublicationRecovery,
   listResolutionRecovery,
   recordPublicationProof,
@@ -49,7 +49,7 @@ import {
   type PublicationProof,
   type VerifiedResolution,
 } from "../../src/store/finding-lifecycle";
-import { CHECK_LEASE_MS, claimAttempt, linkCheckPublication } from "../../src/store/review-checks";
+import { CHECK_LEASE_MS, claimAttempt, linkCheckPublication, releaseCheckClaim } from "../../src/store/review-checks";
 import type { D1Like } from "../../src/store/types";
 import {
   buildLineCommentBody,
@@ -77,7 +77,7 @@ import {
 import type { UpsertPlan } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { ScheduledEnv } from "../../src/worker/env";
-import { PreparedSendRejected } from "../../src/pipeline/comment";
+import { createReviewCommenter, PreparedSendRejected } from "../../src/pipeline/comment";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
 import { claimAttempt } from "../../src/store/review-checks";
@@ -212,10 +212,18 @@ function lifecycleRound(seenRowIds: string[]): LifecycleRound {
   };
 }
 
+/**
+ * The default admitted attempt: a launch row with NO frozen Check identity —
+ * the lane whose authority is the journal claim (an App without Checks). The
+ * Check-backed case seeds its own row with the frozen pair.
+ */
+const DEFAULT_ADMITTED_ATTEMPT = "attempt-no-check-0001";
+
 function reviewPayload(scope: Scope, overrides: Partial<PublicationPayload> = {}): PublicationPayload {
   return {
     version: 1,
     scope,
+    admittedAttemptId: DEFAULT_ADMITTED_ATTEMPT,
     headSha: SHA,
     kind: "review",
     round: 1,
@@ -233,6 +241,7 @@ function degradedPayload(scope: Scope, overrides: Partial<PublicationPayload> = 
   return {
     version: 1,
     scope,
+    admittedAttemptId: DEFAULT_ADMITTED_ATTEMPT,
     headSha: SHA,
     kind: "degraded",
     round: 1,
@@ -272,6 +281,13 @@ async function seedConfirmedCrashed(db: TestD1, id: string, pay: PublicationPayl
 /** Seed a prepared (never sent) publication row staged `ageMs` ago. */
 async function seedPrepared(db: TestD1, id: string, pay: PublicationPayload, ageMs: number): Promise<void> {
   await stagePublication(db, { id, payload: pay, nowMs: T0 - ageMs });
+  // The payload's admitted attempt must be readable by every later lane: a
+  // no-Check binding is a launch row whose pair was never frozen.
+  if (pay.admittedAttemptId === DEFAULT_ADMITTED_ATTEMPT) {
+    db.raw
+      .prepare(`INSERT OR IGNORE INTO review_launches (attempt_id, state, claimed_at_ms) VALUES (?, 'provisioned', ?)`)
+      .run(DEFAULT_ADMITTED_ATTEMPT, T0 - ageMs);
+  }
 }
 
 /**
@@ -400,6 +416,12 @@ function okResolution(
       },
       postPreparedDegraded: async () => {
         throw new Error("postPreparedDegraded not expected");
+      },
+      postLineComments: async () => {
+        throw new Error("postLineComments not expected");
+      },
+      recoverLineComments: async () => {
+        throw new Error("recoverLineComments not expected");
       },
       listDiscussion: async () => {
         throw new Error("listDiscussion not expected");
@@ -727,15 +749,17 @@ describe("publication lane — prepared send", () => {
 });
 
 describe("§7.9a condition 1 — a Check-backed send and its recovery share one action lease", () => {
+  const ADMITTED_ATTEMPT = "attempt-two-lane-0001";
+
   /**
-   * A prepared publication whose owning Check attempt is linked (`review_checks
-   * .publication_id`), a real encrypted App PEM, and no thread work: the
-   * production factory must reach GitHub for the identity probe and (only if
-   * authorised) the send.
+   * A prepared publication admitted under a Check attempt, with the launch
+   * row's FROZEN `(attempt_key, generation)` pair and a real encrypted PEM.
+   * Nothing links the publication by recency: the binding is the payload's
+   * admitted attempt plus that row.
    */
-  async function seedCheckBackedPrepared(db: TestD1, id: string): Promise<string> {
+  async function seedCheckAdmittedPrepared(db: TestD1, id: string): Promise<string> {
     await seedRealApp(db, APP, 1001);
-    await seedPrepared(db, id, reviewPayload(SCOPE, { round: 2 }), 120_000);
+    await seedPrepared(db, id, reviewPayload(SCOPE, { round: 2, admittedAttemptId: ADMITTED_ATTEMPT }), 120_000);
     const claimed = await claimAttempt(db as never, {
       scope: SCOPE,
       githubAppId: 1001,
@@ -748,108 +772,139 @@ describe("§7.9a condition 1 — a Check-backed send and its recovery share one 
     });
     if (claimed.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${claimed.kind}`);
     const attemptId = claimed.attempt.identity.attemptId;
-    expect(await linkCheckPublication(db as never, attemptId, claimed.lease, id, T0)).toBe(true);
+    const identity = db.raw
+      .prepare(`SELECT attempt_key, generation FROM review_checks WHERE id = ?`)
+      .get(attemptId) as { attempt_key: string; generation: number };
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation)
+         VALUES (?, 'provisioned', ?, ?, ?)`,
+      )
+      .run(ADMITTED_ATTEMPT, T0, identity.attempt_key, identity.generation);
+    // A LATER generation also linked to the same publication: resolving by
+    // recency would take ITS action lease instead of the admitted one. Close
+    // the admitted row so the same key's next generation may open.
+    expect(await releaseCheckClaim(db as never, attemptId, claimed.lease, T0)).toBe(true);
+    db.raw.prepare(`UPDATE review_checks SET terminal_ms = ? WHERE id = ?`).run(T0, attemptId);
+    const decoy = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 1001,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      holder: "run-b",
+      nowMs: T0,
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+    });
+    if (decoy.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${decoy.kind}`);
+    expect(await linkCheckPublication(db as never, decoy.attempt.identity.attemptId, decoy.lease, id, T0)).toBe(true);
     return attemptId;
   }
 
-  /** Live App identity + installation token + empty comment scan; counts POSTs to the PR conversation. */
-  function stubAppTransport(posts: Array<{ url: string }>): typeof fetch {
-    return (async (input: unknown, init?: RequestInit) => {
+  test("foreground mid-send and recovery on the same admitted action produce exactly one mutation", async () => {
+    const db = createMigratedTestD1();
+    const attemptId = await seedCheckAdmittedPrepared(db, "pub-lease");
+    const clock = { now: T0 };
+    const fg = { posts: 0 };
+    const bg = { posts: 0 };
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const token = (name: string) =>
+      json(200, {
+        token: name,
+        expires_at: new Date(T0 + 3_600_000).toISOString(),
+        repositories: [{ id: 1, name: "widgets" }],
+        permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+        repository_selection: "selected",
+      });
+
+    // The recovery lane is STARTED FIRST and paused inside its plan: it has
+    // already selected the publication as `prepared`, exactly the window in
+    // which the foreground may take it.
+    const planGate = Promise.withResolvers<void>();
+    const planReached = Promise.withResolvers<void>();
+    let planSuspensionUsed = false;
+    const backgroundFetch = (async (input: unknown, init?: RequestInit) => {
       const url = String(input);
-      const json = (status: number, body: unknown) =>
-        new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
       if (url.endsWith("/app")) return json(200, { id: 1001, slug: "acme-inspector" });
-      if (url.endsWith("/access_tokens")) {
-        return json(200, {
-          token: "ghs_test",
-          expires_at: new Date(T0 + 3_600_000).toISOString(),
-          repositories: [{ id: 1, name: "widgets" }],
-          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
-          repository_selection: "selected",
-        });
-      }
+      if (url.endsWith("/access_tokens")) return token("ghs_bg");
       if (url.includes("/issues/42/comments")) {
         if (init?.method === "POST") {
-          posts.push({ url });
-          return json(201, { id: 9001, body: "posted" });
+          bg.posts += 1;
+          return json(201, { id: 9100, body: "second" });
+        }
+        if (!planSuspensionUsed) {
+          planSuspensionUsed = true;
+          planReached.resolve();
+          await planGate.promise;
         }
         return json(200, []);
       }
-      return json(200, { id: 1 });
+      return json(200, {});
     }) as unknown as typeof fetch;
-  }
 
-  test("foreground owning the action makes the recovery send nothing, and the batch still lands exactly once", async () => {
-    const db = createMigratedTestD1();
-    const attemptId = await seedCheckBackedPrepared(db, "pub-lease");
-    // The foreground send acquired the action's lease and is mid-send: same
-    // action key, same holder identity the comment module uses.
-    expect(
-      await claimPublicationLease(db as never, {
-        attemptId,
-        actionKey: "comment:pub-lease",
-        holder: "send:comment:pub-lease",
-        mode: "send",
-        nowMs: T0,
-      }),
-    ).not.toBeNull();
-
-    const posts: Array<{ url: string }> = [];
     const realFetch = globalThis.fetch;
+    globalThis.fetch = backgroundFetch;
+    const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE };
+    const running = reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => clock.now });
+
+    // The foreground lane: publishPhase's own journal claim, then a send whose
+    // 120 s claim window has lapsed while the action lease is live.
+    await planReached.promise;
+    // The foreground's journal claim was taken one window ago and has lapsed;
+    // its ACTION lease is taken now, at T0, and is live for the whole send.
+    const journalLease = await claimPublication(db as never, "pub-lease", "consumer:fg", T0 - PUBLICATION_LEASE_MS - 1);
+    if (journalLease === null) throw new Error("fixture: the foreground journal claim was refused");
+    clock.now = T0;
+
+    const foregroundFetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/access_tokens")) return token("ghs_fg");
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          fg.posts += 1;
+          return json(201, { id: 9001, body: "posted" });
+        }
+        // Mid-send: let the paused recovery finish against this exact
+        // publication while the action lease is still held here.
+        planGate.resolve();
+        await running;
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
     try {
-      globalThis.fetch = stubAppTransport(posts);
-      const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE };
+      const commenter = createReviewCommenter(
+        { APP_ID: "1001", PRIVATE_KEY: await testAppPem() },
+        { db, nowMs: () => clock.now, fetchImpl: foregroundFetch },
+      );
+      const sent = await commenter.postPreparedReview({
+        installationId: 123,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        headSha: SHA,
+        round: 2,
+        targetCommentId: null,
+        body: "review body",
+        publicationId: "pub-lease",
+        attemptId,
+        journalClaim: journalLease,
+      });
 
-      const refused = await reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => T0 });
-      // The one action lease is the dispatch authority: the recovery lane
-      // acquired the journal claim, lost the action, and sent nothing.
-      expect(posts).toHaveLength(0);
-      expect(refused.applied).toBe(0);
-
-      // The foreground releases when it settles; exactly ONE send then lands.
-      const held = db.raw
-        .prepare(`SELECT lease_epoch FROM publication_leases WHERE attempt_id = ? AND action_key = ?`)
-        .get(attemptId, "comment:pub-lease") as { lease_epoch: number };
-      db.raw
-        .prepare(`UPDATE publication_leases SET holder = NULL, lease_until_ms = NULL WHERE attempt_id = ? AND action_key = ?`)
-        .run(attemptId, "comment:pub-lease");
-      expect(held.lease_epoch).toBeGreaterThan(0);
-
-      const applied = await reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => T0 });
-      expect(posts).toHaveLength(1);
-      expect(applied.applied).toBe(1);
+      expect(sent.commentId).toBe(9001);
+      // ONE mutation for the one eligible action: the foreground's create. The
+      // recovery lane claimed the lapsed journal row, contended on the SAME
+      // admitted action lease, and sent nothing.
+      expect(fg.posts).toBe(1);
+      expect(bg.posts).toBe(0);
+      // …and the loser committed no outcome: its claim is unspent and the row
+      // is still due for the lane that holds the send right.
+      expect(pubRow(db, "pub-lease")).toMatchObject({ phase: "prepared", last_error: null });
     } finally {
       globalThis.fetch = realFetch;
-    }
-  });
-
-  test("the lane that loses the action records no definitive outcome — the row stays due", async () => {
-    const db = createMigratedTestD1();
-    const attemptId = await seedCheckBackedPrepared(db, "pub-lease");
-    expect(
-      await claimPublicationLease(db as never, {
-        attemptId,
-        actionKey: "comment:pub-lease",
-        holder: "send:comment:pub-lease",
-        mode: "send",
-        nowMs: T0,
-      }),
-    ).not.toBeNull();
-
-    const posts: Array<{ url: string }> = [];
-    const realFetch = globalThis.fetch;
-    try {
-      globalThis.fetch = stubAppTransport(posts);
-      const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE };
-
-      await reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => T0 });
-
-      // Nothing was sent, so nothing may be claimed about the outcome: the
-      // claim is handed back (attempt returned) and the row is still sendable.
-      expect(posts).toHaveLength(0);
-      expect(pubRow(db, "pub-lease")).toMatchObject({ phase: "prepared", attempts: 0, last_error: null });
-    } finally {
-      globalThis.fetch = realFetch;
+      await running;
     }
   });
 });

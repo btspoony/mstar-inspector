@@ -33,9 +33,9 @@ import {
 } from "../../src/store/review-checks";
 import {
   PUBLICATION_LEASE_MS,
+  claimDegradedTarget,
   claimPublication,
   claimPublicationLease,
-  hasUnprovenDegradedPublication,
   releasePublicationLease,
   stagePublication,
 } from "../../src/store/finding-lifecycle";
@@ -620,18 +620,34 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
     expect(deleted).toEqual([]);
   });
 
-  test("a newer staged degraded body survives an old cleanup's scan-then-resume", async () => {
+  test("a newer staged body survives, and no writer may reuse the target during the delete", async () => {
     const db = await seededDb();
     const marker = `<!-- mstar-inspector:review-degraded:v1 round=1 -->\n**Review degraded: output failed schema validation**`;
     let scans = 0;
-    const deleted: number[] = [];
-    const octokit: PostOctokit = {
-      paginate: async () => {
+    let deletes = 0;
+    let writerClaimWon = false;
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/access_tokens")) {
+        return json(200, {
+          token: "ghs_cleanup",
+          expires_at: new Date(T0 + 3_600_000).toISOString(),
+          repositories: [{ id: 1, name: "widgets" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+          repository_selection: "selected",
+        });
+      }
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "DELETE") {
+          deletes += 1;
+          return json(200, {});
+        }
         scans += 1;
-        // Pause after the scan: a newer degraded body is staged for the SAME
-        // target before it reaches GitHub. Its only recovery evidence is this
-        // comment, so the delete must not destroy it.
         if (scans === 2) {
+          // Paused between the scan and the delete: a newer degraded body is
+          // staged for the SAME target, and a writer tries to reuse it.
           await stagePublication(db, {
             id: "pub-newer-degraded",
             nowMs: T0,
@@ -649,40 +665,43 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
               lineIntents: [],
             },
           });
+          const writer = await claimDegradedTarget(db, {
+            scope: SCOPE,
+            commentId: 7001,
+            holder: "degraded:writer",
+            nowMs: T0,
+          });
+          writerClaimWon = writer !== null;
         }
-        return [{ id: 7001, body: marker, user: { type: "Bot" } }];
-      },
-      rest: {
-        issues: {
-          listComments: async () => ({ data: [] }),
-          updateComment: async () => ({}),
-          createComment: async () => ({}),
-          deleteComment: async (params) => {
-            deleted.push(params.comment_id as number);
-            return {};
-          },
-        },
-      },
-    };
+        return json(200, [{ id: 7001, body: marker, user: { type: "Bot" } }]);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
 
-    const outcome = await deleteDegradedCommentWithOctokit(
-      octokit,
-      {
-        appId: APP_ID,
-        installationId: 123,
-        owner: "acme",
-        repo: "widgets",
-        prNumber: 42,
-        error: "",
-        rawOutput: "",
-      },
-      { preserve: () => hasUnprovenDegradedPublication(db, SCOPE) },
+    // The PRODUCTION factory: its delete wires both the preservation recheck
+    // and the target exclusion against the same journal.
+    const commenter = createReviewCommenter(
+      { APP_ID: "1001", PRIVATE_KEY: TEST_PRIVATE_KEY },
+      { db, nowMs: () => T0, fetchImpl },
     );
+    const outcome = await commenter.deleteDegradedComment({
+      appId: APP_ID,
+      installationId: 123,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 42,
+      error: "",
+      rawOutput: "",
+    });
 
     expect(scans).toBeGreaterThanOrEqual(2);
+    // The cleanup holds the exact target while its delete is in flight: the
+    // writer's acquisition must lose, not race the DELETE.
+    expect(writerClaimWon).toBe(false);
+    // A newer staged body is still that comment's evidence: no delete.
     expect(outcome.deleted).toBe(0);
     expect(outcome.skipped).toBe(1);
-    expect(deleted).toEqual([]);
+    expect(deletes).toBe(0);
   });
 });
 

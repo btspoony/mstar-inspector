@@ -90,7 +90,7 @@ import { redactSecrets } from "./redact";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
-import { hasUnprovenDegradedPublication, type Lease, type LineIntent, type VerifiedResolution } from "../store/finding-lifecycle";
+import { claimDegradedTarget, hasUnprovenDegradedPublication, releaseDegradedTarget, type Lease, type LineIntent, type VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
 import {
@@ -1335,6 +1335,8 @@ export type PostPreparedReviewInput = CommenterTargetInput & {
 };
 
 export type PostPreparedDegradedInput = CommenterTargetInput & {
+  /** The App the target exclusion is keyed on (spec §7.9a condition 3). */
+  appId: string;
   headSha: string;
   round: number;
   targetCommentId: number | null;
@@ -1380,6 +1382,13 @@ export type ReviewCommenter = {
   postPreparedReview(input: PostPreparedReviewInput): Promise<{ commentId: number }>;
   /** postPreparedReview for the degraded chain; the id may be uncaptured (null). */
   postPreparedDegraded(input: PostPreparedDegradedInput): Promise<{ posted: boolean; commentId: number | null }>;
+  /**
+   * Read-only readback of an ALREADY-DISPATCHED line batch (spec §7.9a
+   * condition 2): locate the review whose body carries this publication's
+   * batch marker and capture its comment ids. Never creates anything — an
+   * intent without a captured id is discovery, not permission to send again.
+   */
+  recoverLineComments(input: PostPreparedLineCommentsInput): Promise<PostedLineComments>;
   /**
    * Delete stale bot-authored `review-degraded:v1` comments (Bugbot
    * finding — degraded-comment lifecycle): the success path calls this
@@ -1490,6 +1499,12 @@ export type PostOctokit = {
      */
     pulls?: {
       createReview?: (parameters: Record<string, unknown>) => Promise<unknown>;
+      /**
+       * The PR's reviews (spec §7.9a discovery): a dispatched line batch is
+       * found by its publication marker, then its comments are captured — the
+       * read-only path an uncertain send leaves behind.
+       */
+      listReviews?: (parameters: Record<string, unknown>) => Promise<unknown>;
       /**
        * The created review's comments connection (§7.5 discovery anchor):
        * GitHub's create-review response carries no comments array, so the
@@ -1982,13 +1997,26 @@ export type PostDegradedInput = {
 };
 
 /**
- * §7.9a condition 3's preservation half: answers "does a NEWER unproven
+ * §7.9a condition 3's guard. `preserve` answers "does a NEWER unproven
  * degraded publication for this exact target still need the scanned comment as
- * its evidence?". It is re-run inside the delete verb, after the body re-read,
- * so a body staged across the scan keeps the delete from removing its evidence.
+ * its evidence?"; `claimTarget` takes the writer exclusion for that exact
+ * comment so staging/recovery cannot reuse it while this delete is in flight.
+ * Both are re-run at the delete verb, after the body re-read.
  */
 export type DegradedCleanupGuard = {
   preserve: (match: { id: number; body: string }) => Promise<boolean>;
+  /** null = a competing writer owns the exact target: skip, do not delete. */
+  claimTarget?: (commentId: number) => Promise<DegradedTargetLock | null>;
+};
+
+/** The target exclusion a cleanup holds across one DELETE. */
+export type DegradedTargetLock = {
+  /**
+   * `keep: true` = the delete may have landed / is unresolved, so the
+   * exclusion stays held until its expiry; `false` = the outcome is known and
+   * the target is free for writers again.
+   */
+  release: (keep: boolean) => Promise<void>;
 };
 
 /** Degraded-comment delete outcome (Bugbot round-2 fix): the consumer logs
@@ -2087,6 +2115,15 @@ export async function deleteDegradedCommentWithOctokit(
     rateLimited: { primary: 0, secondary: 0 },
   };
   for (const match of matches) {
+    // §7.9a condition 3: the delete and every writer that could reuse this
+    // exact comment contend on ONE target row. Losing it here means a publisher
+    // owns the comment: skip rather than delete what it depends on.
+    const lock = guard?.claimTarget === undefined ? null : await guard.claimTarget(match.id);
+    if (guard?.claimTarget !== undefined && lock === null) {
+      outcome.skipped += 1;
+      continue;
+    }
+    let keepLock = false;
     try {
       // The identity proof for THIS delete: re-read the list and require the
       // same id to still carry the same body. It runs inside the verb wrapper
@@ -2128,8 +2165,13 @@ export async function deleteDegradedCommentWithOctokit(
         outcome.skipped += 1;
         continue;
       }
+      // An unresolved DELETE may still land: the exclusion stays held until it
+      // lapses, so no writer reuses the target while the outcome is unknown.
+      keepLock = true;
       outcome.skipped += 1;
       outcome.errors.push(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (lock !== null) await lock.release(keepLock);
     }
   }
   return outcome;
@@ -2481,14 +2523,26 @@ async function publishLineComments(
     // No returned comments in the response — nothing can be captured.
     return { posted: [], ambiguous: [], captured: false, reviewId };
   }
-  // The review's comments connection reports `line`/`original_line` as null
-  // for comments the PR-wide comments list anchors, so the trusted thread
-  // marker is the primary key; the row anchor only backs a comment carrying no
-  // marker at all (an unknown or duplicated marker never falls back).
+  return captureLineCommentsOf(input.intents, returned, reviewId);
+}
+
+/**
+ * Match returned comments back to the frozen intents. The trusted thread
+ * marker is the primary key; the row anchor only backs a comment carrying no
+ * marker at all (an unknown or duplicated marker never falls back). Shared by
+ * the send's capture and the read-only recovery readback so both agree.
+ */
+function captureLineCommentsOf(
+  intents: readonly LineIntent[],
+  returned: Array<{ id?: unknown; path?: unknown; line?: unknown; original_line?: unknown; body?: unknown }>,
+  reviewId: number | null,
+): PostedLineComments {
+  const posted: PostedLineComments["posted"] = [];
+  const ambiguous: string[] = [];
   const associations = returned.map((c) =>
     typeof c.body === "string" ? (parseLineMarker(c.body)?.associationId ?? null) : null,
   );
-  for (const intent of input.intents) {
+  for (const intent of intents) {
     const byMarker = returned.filter((c, i) => typeof c.id === "number" && associations[i] === intent.associationId);
     const matches =
       byMarker.length > 0
@@ -2511,7 +2565,73 @@ async function publishLineComments(
       ambiguous.push(`${intent.path}:${intent.line}`);
     }
   }
-  return { posted, ambiguous, captured: ambiguous.length === 0 && posted.length === input.intents.length, reviewId };
+  return { posted, ambiguous, captured: ambiguous.length === 0 && posted.length === intents.length, reviewId };
+}
+
+/**
+ * A PR review that carries this publication's batch marker. `listReviews`
+ * returns an untyped boundary payload, so the two fields the readback needs
+ * are narrowed explicitly.
+ */
+function isBatchReviewOf(candidate: unknown, marker: string): candidate is { id: number; body: string } {
+  if (typeof candidate !== "object" || candidate === null) return false;
+  if (!("id" in candidate) || !("body" in candidate)) return false;
+  return (
+    typeof candidate.id === "number" &&
+    typeof candidate.body === "string" &&
+    candidate.body.includes(marker)
+  );
+}
+
+/**
+ * §7.9a condition 2's discovery half: read back a line batch that was already
+ * dispatched (the durable intent exists) without creating anything. The batch
+ * is identified by its publication marker in the review body; its comments are
+ * then matched by the trusted thread marker. Any missing surface or failed
+ * read stays `captured: false` — the work remains discovery, never a second
+ * send.
+ */
+export async function recoverLineCommentsWithOctokit(
+  octokit: PostOctokit,
+  input: PostPreparedLineCommentsInput,
+): Promise<PostedLineComments> {
+  const nothing: PostedLineComments = { posted: [], ambiguous: [], captured: false, reviewId: null };
+  if (input.intents.length === 0) return { posted: [], ambiguous: [], captured: true, reviewId: null };
+  const pulls = octokit.rest?.pulls;
+  if (pulls?.listReviews === undefined || pulls.listCommentsForReview === undefined || typeof octokit.paginate !== "function") {
+    return nothing;
+  }
+  const marker = buildLineBatchMarker(input.publicationId);
+  let reviews: unknown;
+  try {
+    reviews = await octokit.paginate(pulls.listReviews, {
+      owner: input.owner,
+      repo: input.repo,
+      pull_number: input.prNumber,
+      per_page: 100,
+    });
+  } catch {
+    return nothing;
+  }
+  const review = (Array.isArray(reviews) ? reviews : []).find((candidate: unknown) =>
+    isBatchReviewOf(candidate, marker),
+  );
+  if (review === undefined) return nothing;
+  let returned: Array<{ id?: unknown; path?: unknown; line?: unknown; original_line?: unknown; body?: unknown }> | null;
+  try {
+    const listed = await pulls.listCommentsForReview({
+      owner: input.owner,
+      repo: input.repo,
+      pull_number: input.prNumber,
+      review_id: review.id,
+      per_page: 100,
+    });
+    returned = Array.isArray(listed?.data) ? listed.data : null;
+  } catch {
+    returned = null;
+  }
+  if (returned === null) return { posted: [], ambiguous: [], captured: false, reviewId: review.id };
+  return captureLineCommentsOf(input.intents, returned, review.id);
 }
 
 /**
@@ -2745,32 +2865,77 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
     },
     async postPreparedDegraded(input) {
       const guard = publicationSendGuard(options?.db, clock, input);
-      return postPreparedDegradedWithOctokit(
-        await getOctokit({ installationId: input.installationId, repo: input.repo }),
-        input,
-        guard,
-      );
+      const octokit = await getOctokit({ installationId: input.installationId, repo: input.repo });
+      const db = options?.db;
+      // §7.9a condition 3: an UPDATE reuses the very comment a cleanup may be
+      // deleting. Both sides take the target's exclusion before touching it, so
+      // a delete in flight and a publisher cannot win separately.
+      if (db === undefined || input.targetCommentId === null) {
+        return postPreparedDegradedWithOctokit(octokit, input, guard);
+      }
+      const ref = {
+        scope: {
+          appId: input.appId,
+          installationId: input.installationId,
+          owner: input.owner,
+          repo: input.repo,
+          prNumber: input.prNumber,
+        },
+        commentId: input.targetCommentId,
+      };
+      const target = await claimDegradedTarget(db, {
+        ...ref,
+        holder: `degraded:${input.publicationId}`,
+        nowMs: clock(),
+      });
+      if (target === null) {
+        throw new PublicationAuthorityUnavailable(
+          `degraded target ${input.targetCommentId} is held by its cleanup — nothing was sent`,
+        );
+      }
+      try {
+        return await postPreparedDegradedWithOctokit(octokit, input, guard);
+      } finally {
+        await releaseDegradedTarget(db, { ...ref, lease: target, nowMs: clock() });
+      }
     },
     async deleteDegradedComment(input) {
-      // §7.9a condition 3: without the journal store the preservation condition
-      // cannot be re-proved at dispatch, and an unproved delete is not
-      // authority to destroy a newer publication's evidence — fail closed.
+      // §7.9a condition 3: without the journal store neither the preservation
+      // condition nor the target exclusion can be proved at dispatch — fail
+      // closed rather than destroy a newer publication's evidence.
       const db = options?.db;
+      const scope = {
+        appId: input.appId,
+        installationId: input.installationId,
+        owner: input.owner,
+        repo: input.repo,
+        prNumber: input.prNumber,
+      };
       return deleteDegradedCommentWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
         {
-          preserve:
-            db === undefined
-              ? async () => true
-              : () =>
-                  hasUnprovenDegradedPublication(db, {
-                    appId: input.appId,
-                    installationId: input.installationId,
-                    owner: input.owner,
-                    repo: input.repo,
-                    prNumber: input.prNumber,
-                  }),
+          preserve: db === undefined ? async () => true : () => hasUnprovenDegradedPublication(db, scope),
+          ...(db === undefined
+            ? {}
+            : {
+                claimTarget: async (commentId: number) => {
+                  const lease = await claimDegradedTarget(db, {
+                    scope,
+                    commentId,
+                    holder: `cleanup:${input.installationId}:${commentId}`,
+                    nowMs: clock(),
+                  });
+                  if (lease === null) return null;
+                  return {
+                    release: async (keep: boolean) => {
+                      if (!keep) {
+                        await releaseDegradedTarget(db, { scope, commentId, lease, nowMs: clock() });
+                      }
+                    },
+                  };
+                },
+              }),
         },
       );
     },
@@ -2780,6 +2945,12 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
         guard,
+      );
+    },
+    async recoverLineComments(input) {
+      return recoverLineCommentsWithOctokit(
+        await getOctokit({ installationId: input.installationId, repo: input.repo }),
+        input,
       );
     },
     async listDiscussion(input) {
