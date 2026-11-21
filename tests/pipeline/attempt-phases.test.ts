@@ -772,7 +772,9 @@ describe("cleanupAttempt", () => {
     // row after this cleanup decided there was none.
     expect(await cleanupAttempt(deps, ref)).toEqual({ retention: "no-paid-work" });
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("abandoned");
-    expect(h.sandbox.destroyCalls).toBe(1);
+    // Nothing was ever activated, and activation precedes every container
+    // handle — so there is no container to destroy and none is addressed.
+    expect(h.sandbox.destroyCalls).toBe(0);
   });
 
   test("a persisted launch row authorises the teardown with the retained proof", async () => {

@@ -125,6 +125,7 @@ import {
   RoundBudgetSpent,
   STDERR_TAIL_MAX,
   attemptSandboxId,
+  readAttemptActivation,
   reviewAttemptSandbox,
   boundedStepTimeout,
   chainHeadSelector,
@@ -6353,8 +6354,12 @@ export async function cleanupAttempt(
   let retention: RetentionProof | undefined;
   let containerMayExist = claimed;
   if (claimed) {
-    // This caller WON the row: the container, if any, is ours to destroy.
+    // This caller WON the row: the container, if any, is ours to destroy. A row
+    // the claim itself INSERTED was never activated, and the activation is the
+    // precondition of every container handle (migrations 0090/0091) — so there
+    // is nothing to destroy and the sandbox is not even addressed.
     retention = { kind: "no-paid-work" };
+    containerMayExist = (await readAttemptActivation(deps.env.DB, attemptId))?.activated === true;
   } else {
     const verdict = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
     switch (verdict.kind) {

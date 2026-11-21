@@ -112,19 +112,79 @@ export async function reviewAttemptSandbox(
   },
   attemptId: string,
 ): Promise<ReviewSandbox> {
-  const sandboxId = await readAttemptSandboxId(deps.env.DB, attemptId);
-  if (sandboxId === null) {
+  const activation = await readAttemptActivation(deps.env.DB, attemptId);
+  if (activation === null || !activation.activated) {
     throw new AttemptUnknownError(
-      `attempt ${attemptId}: no provisioning row, so no container was ever created for it — nothing may be addressed`,
+      `attempt ${attemptId}: it has not won the activation transition, so no container may be addressed for it`,
     );
   }
-  return deps.getSandbox(deps.env.SANDBOX, sandboxId);
+  if (activation.revoked) {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: a successor revoked it, so nothing may start for it again`,
+    );
+  }
+  if (activation.sandboxId === null) {
+    throw new AttemptUnknownError(`attempt ${attemptId}: its provisioning row carries no minted container id`);
+  }
+  return deps.getSandbox(deps.env.SANDBOX, activation.sandboxId);
 }
 
-/** The id the provisioning row committed, or null when the attempt never claimed one. */
-export async function readAttemptSandboxId(db: D1Like, attemptId: string): Promise<string | null> {
-  const row = await db.prepare(READ_SANDBOX_ID_SQL).bind(attemptId).first<{ sandbox_id: string | null }>();
-  return row?.sandbox_id ?? null;
+/** One attempt's activation state, as the provisioning row records it. */
+export type AttemptActivation = {
+  /** The container id the claim minted; null on a row written before it existed. */
+  sandboxId: string | null;
+  /** The guarded transition that precedes every start has been won. */
+  activated: boolean;
+  /** A successor took this attempt's PR: nothing may start again. */
+  revoked: boolean;
+};
+
+/** The attempt's activation state, or null when it never claimed a provisioning row. */
+export async function readAttemptActivation(db: D1Like, attemptId: string): Promise<AttemptActivation | null> {
+  const row = await db
+    .prepare(`SELECT sandbox_id, activated_ms, revoked_ms FROM review_launches WHERE attempt_id = ?`)
+    .bind(attemptId)
+    .first<{ sandbox_id: string | null; activated_ms: number | null; revoked_ms: number | null }>();
+  if (row === null) return null;
+  return { sandboxId: row.sandbox_id, activated: row.activated_ms !== null, revoked: row.revoked_ms !== null };
+}
+
+/**
+ * The successor's claim over an attempt that never activated. ONE guarded
+ * write: it INSERTS the row (which is the claim when there is none) or revokes
+ * one that was never activated, and it refuses a row that activated — that is
+ * the case where only the container itself can say whether anything runs.
+ *
+ * `true` means this caller now holds the fact "no container could ever have
+ * been created for that attempt", which is the ONLY way capacity and the PR
+ * move without observing the container.
+ */
+export async function claimUnactivatedAttempt(db: D1Like, attemptId: string, nowMs: number): Promise<boolean> {
+  const written = await db
+    .prepare(
+      `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms, sandbox_id, revoked_ms)
+       VALUES (?, 'abandoned', ?, ?, ?, ?)
+       ON CONFLICT (attempt_id) DO UPDATE
+          SET revoked_ms = excluded.revoked_ms
+        WHERE review_launches.activated_ms IS NULL AND review_launches.revoked_ms IS NULL`,
+    )
+    .bind(attemptId, nowMs, nowMs, attemptSandboxId(attemptId), nowMs)
+    .run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * Record a revocation that the attempt's OWN container already proved
+ * (`revoke()` answered not-running). The write is not assumed: the caller gets
+ * `true` only when the row now reads revoked, so a failed or lost write keeps
+ * the takeover from proceeding.
+ */
+export async function markAttemptRevoked(db: D1Like, attemptId: string, nowMs: number): Promise<boolean> {
+  await db
+    .prepare(`UPDATE review_launches SET revoked_ms = ? WHERE attempt_id = ? AND revoked_ms IS NULL`)
+    .bind(nowMs, attemptId)
+    .run();
+  return (await readAttemptActivation(db, attemptId))?.revoked === true;
 }
 
 /**
@@ -184,13 +244,12 @@ export async function discardReviewAttempt(
  * never re-claimed, from the second entry on.
  */
 const CLAIM_ATTEMPT_SQL = `
-INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation, sandbox_id)
-VALUES (?, 'provisioned', ?, ?, ?, ?)
+INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation, sandbox_id, activated_ms)
+VALUES (?, 'provisioned', ?, ?, ?, ?, ?)
 ON CONFLICT (attempt_id) DO NOTHING
 `;
 
-/** The attempt's container id, as the provisioning write minted it. */
-const READ_SANDBOX_ID_SQL = `SELECT sandbox_id FROM review_launches WHERE attempt_id = ?`;
+
 
 /**
  * Fill the frozen IDENTITY once — key AND generation — for a delivery that had
@@ -448,7 +507,7 @@ export async function claimReviewAttempt(
 ): Promise<"claimed" | "already-claimed"> {
   const written = await db
     .prepare(CLAIM_ATTEMPT_SQL)
-    .bind(attemptId, nowMs, identity?.key ?? null, identity?.generation ?? null, attemptSandboxId(attemptId))
+    .bind(attemptId, nowMs, identity?.key ?? null, identity?.generation ?? null, attemptSandboxId(attemptId), nowMs)
     .run();
   return written.meta.changes === 1 ? "claimed" : "already-claimed";
 }

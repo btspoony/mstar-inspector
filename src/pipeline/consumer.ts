@@ -129,7 +129,9 @@ import type { D1Like } from "../store/types";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import {
   attemptSandboxId,
-  readAttemptSandboxId,
+  claimUnactivatedAttempt,
+  markAttemptRevoked,
+  readAttemptActivation,
   type RunnerAppConfig,
 } from "./review-attempt";
 import {
@@ -1390,18 +1392,20 @@ function queueStampOf(timestamp: unknown): number | null {
 }
 
 /**
- * The successor's two legal facts, in order.
+ * The successor's evidence, in the order the state makes decidable.
  *
- * 1. NO CONTAINER COULD EXIST: the attempt has no provisioning row, and that row
- *    is the precondition of every container handle (migration 0090) — nothing
- *    can have started. This is a positive fact about this database, not an
- *    inference from silence.
- * 2. THE CONTAINER ANSWERED NOT-RUNNING, and the same critical section revoked
- *    the attempt so it cannot start again. `running: true` writes nothing: an
- *    attempt whose container is alive keeps its PR and its authority.
- *
- * Anything else — an unreadable row, a host that cannot observe or revoke, a
- * throw — is `unavailable`, and the caller holds the PR where it is.
+ * 1. CLAIM THE ACTIVATION FIRST (`claimUnactivatedAttempt`). Winning it is a
+ *    fact about the future: no container can ever be created for that attempt,
+ *    so capacity and the PR may move. It wins only when nothing activated the
+ *    attempt — an INSERT when no row exists, or a revoke of a row that never
+ *    activated.
+ * 2. LOSING means the attempt is or was activated, and the only remaining
+ *    evidence is that attempt's OWN container answering not-running. The id
+ *    comes from that row (a minted-but-unwritten handle is not a stop, item 4),
+ *    and `revoke()` observes then revokes in one critical section.
+ * 3. A REVOCATION THAT FAILED IS NOT DONE: a throw, a `revoked: false`, or a
+ *    durable mark that did not land all answer `unavailable`, and the caller
+ *    holds the PR and retries next round.
  */
 export async function priorAttemptStopEvidence(
   db: D1Like,
@@ -1409,21 +1413,35 @@ export async function priorAttemptStopEvidence(
   binding: unknown,
   attemptId: string,
 ): Promise<SuccessorStopEvidence> {
-  let sandboxId: string | null;
   try {
-    sandboxId = await readAttemptSandboxId(db, attemptId);
+    if (await claimUnactivatedAttempt(db, attemptId, Date.now())) return "no-container";
+  } catch {
+    // An unreadable claim is not a won claim.
+    return "unavailable";
+  }
+  let activation: Awaited<ReturnType<typeof readAttemptActivation>>;
+  try {
+    activation = await readAttemptActivation(db, attemptId);
   } catch {
     return "unavailable";
   }
-  if (sandboxId === null) return "no-container";
+  if (activation === null || activation.sandboxId === null) return "unavailable";
+  let verdict: { revoked: boolean; running: boolean };
   try {
-    const sandbox = await getSandbox(binding, sandboxId);
+    const sandbox = await getSandbox(binding, activation.sandboxId);
     if (sandbox.revoke === undefined) return "unavailable";
-    const verdict = await sandbox.revoke();
-    if (verdict.running) return "running";
-    return verdict.revoked ? "revoked" : "unavailable";
+    verdict = await sandbox.revoke();
   } catch {
     // An unreadable sandbox is not a stopped one.
+    return "unavailable";
+  }
+  if (verdict.running) return "running";
+  if (!verdict.revoked) return "unavailable";
+  // The durable mark must land too: the acquisition below requires it, and a
+  // revocation nobody can read is not a revocation.
+  try {
+    return (await markAttemptRevoked(db, attemptId, Date.now())) ? "revoked" : "unavailable";
+  } catch {
     return "unavailable";
   }
 }

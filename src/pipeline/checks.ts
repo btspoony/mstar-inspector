@@ -2794,11 +2794,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // predicate is part of the UPDATE, so a concurrent terminalize's
       // proof-derived conclusion and its exact summary survive this write.
       await setCheckFallbackDesired(deps.db, handle.attemptId, fence.lease, conclusion, fence.nowMs);
-      // The give-up is the ONE place a terminal update's dispatch right is
-      // HANDED OVER, not retried: recovery reads the run back and sends only
-      // what the readback cannot prove already landed (§7.10). Everywhere else
-      // the intent keeps a second lane from issuing the same request.
-      await clearTerminalDispatch(deps.db, handle.attemptId, fence.lease, fence.nowMs);
+      // The dispatch intent is NOT cleared here. The abandoned send may already
+      // have landed, and a give-up is a statement about the WAIT, not about what
+      // GitHub received: recovery reconciles by readback and never re-sends
+      // (§7.9a). A give-up that cleared it would be the resend path the rule
+      // forbids.
       // Released on BOTH branches — an already-frozen intent is sent by
       // recovery exactly as it stands. `requestsSpent: true` keeps the row
       // `remote-unconfirmed`, so recovery ADOPTS the run the interrupted

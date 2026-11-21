@@ -142,12 +142,12 @@ const PAID_STATE_UNKNOWN = `EXISTS (SELECT 1 FROM review_launches l
  * that its container stopped.
  *
  * An expired row is free on exactly TWO facts, matching the takeover rule: the
- * attempt was REVOKED (its container was observed not running, in the same
- * transition that moved the PR), or no provisioning row exists at all — that
- * row is the precondition of every container handle (migration 0090), so its
- * absence rules the container out. `provisioned` is NOT free: the container is
- * created before the paid call, so a provisioning row with no `launched` row
- * may be running right now.
+ * attempt was REVOKED (its container was observed not running, or a successor
+ * won the claim over an attempt that never activated), or no provisioning row
+ * exists at all — the row is the precondition of every container handle
+ * (migrations 0090/0091), so its absence rules the container out. `provisioned`
+ * is NOT free: the container is created before the paid call, so a provisioning
+ * row with no `launched` row may be running right now.
  *
  * Binds, in order: now (unexpired side), now (expired side of the act test).
  */
@@ -155,6 +155,7 @@ const HOLDS_CAP_SQL = `(r.expires_at > ? OR ${PAID_STATE_UNKNOWN}
           OR (r.expires_at <= ? AND EXISTS (
                 SELECT 1 FROM review_launches l
                  WHERE l.attempt_id = r.attempt_id
+                   AND l.activated_ms IS NOT NULL
                    AND l.revoked_ms IS NULL)))`;
 
 /**
@@ -194,18 +195,6 @@ WHERE review_inflight.expires_at <= ?
            AND NOT EXISTS (SELECT 1 FROM review_launches l
                             WHERE l.attempt_id = review_inflight.attempt_id
                               AND l.revoked_ms IS NULL)))
-`;
-
-/**
- * The successor's revocation of the attempt it displaces, written in the SAME
- * transaction as the acquisition. `revoked_ms` is the durable "this attempt may
- * not start anything again" fact: the sandbox refuses every later start, and
- * the cap counts stop charging the row. Idempotent (a second revoke keeps the
- * first instant).
- */
-const REVOKE_SQL = `
-UPDATE review_launches SET revoked_ms = ?
- WHERE attempt_id = ? AND revoked_ms IS NULL
 `;
 
 /**
@@ -304,19 +293,7 @@ export async function acquireInflight(
         opts.attemptId,
         opts.priorStopped?.attemptId ?? "",
       );
-    let written: { meta: { changes: number } };
-    if (opts.priorStopped === undefined) {
-      written = await acquire.run();
-    } else {
-      // ONE transaction: the revocation and the acquisition commit together, so
-      // capacity can never move to a successor while the attempt it displaces
-      // may still start something.
-      const [, taken] = await db.batch([
-        db.prepare(REVOKE_SQL).bind(nowMs, opts.priorStopped.attemptId),
-        acquire,
-      ]);
-      written = taken!;
-    }
+    const written = await acquire.run();
     if (written.meta.changes === 1) return { ok: true };
 
     const row = await db
