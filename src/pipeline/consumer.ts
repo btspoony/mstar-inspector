@@ -874,14 +874,18 @@ export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_ca
  * this settlement identity follows the attach.
  *
  * Best-effort by contract: one warn on a fault, and the caller's ACK/return is
- * never changed. A delivery with nothing to settle is logged once instead of
- * returning silently, so a skipped settlement never reads like a settled run.
+ * never changed. A delivery with nothing to settle is announced only when the
+ * caller asks for it (`announceNoOp`): every other caller has already logged
+ * WHY it skipped, so a second line would merely repeat the reason — a paused
+ * App must log exactly one line.
  */
 async function settleSkippedRow(
   deps: ProcessDeps,
   payload: ReviewJobPayload,
   attachedHeadSha: string | null | undefined,
   reason: string,
+  /** Name a no-op settlement (the moved-head path, whose only other line says why). */
+  announceNoOp = false,
 ): Promise<void> {
   if (
     deps.checks?.settleSkipped === undefined ||
@@ -889,13 +893,15 @@ async function settleSkippedRow(
     attachedHeadSha === undefined ||
     // No attach identity means the delivery attached no run at all (a mention
     // with no SHA the webhook could attach for): the lifecycle would answer
-    // `false` silently, so the no-op is named here.
+    // `false` silently.
     payload.attachDeliveryId === undefined
   ) {
-    deps.log.info(
-      payloadIdentityFields(payload),
-      `check skip settlement skipped — nothing to settle for this delivery (${reason})`,
-    );
+    if (announceNoOp) {
+      deps.log.info(
+        payloadIdentityFields(payload),
+        `check skip settlement skipped — nothing to settle for this delivery (${reason})`,
+      );
+    }
     return;
   }
   try {
@@ -5140,7 +5146,7 @@ async function processMessage(
           // `in_progress` until its deadline. The attach key is the payload sha
           // OR the watermark a mention carried — `earlyHeadSha` is exactly that
           // head, so a mention settles its run too.
-          await settleSkippedRow(deps, payload, earlyHeadSha, "superseded by a newer commit");
+          await settleSkippedRow(deps, payload, earlyHeadSha, "superseded by a newer commit", true);
         }
         checkClaimAttempted = true;
         checkHandle = await beginCheck(lifecycleScope, githubAppId, movedHeadSha ?? earlyHeadSha);
