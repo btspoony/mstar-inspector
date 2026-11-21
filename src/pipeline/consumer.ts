@@ -89,7 +89,7 @@
  * never src/worker/**.
  */
 
-import type { Message, MessageBatch } from "@cloudflare/workers-types";
+import type { Message, MessageBatch, Workflow } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   classifyGithubRateLimit,
@@ -188,11 +188,9 @@ import {
   journalHandoffRow,
   kvDoneHit,
   payloadIdentityFields,
-  runAdmittedReviewAttempt,
   settleSkippedRow,
   toBaseFields,
   type AdmissionRefusalFields,
-  type AdmittedReviewAttempt,
   type AttemptRef,
   type CheckBackgroundSink,
   type ConsumerLog,
@@ -1072,8 +1070,9 @@ async function newerCommitHasJob(
 /**
  * Test seam for createReviewConsumer: additive overrides for the process
  * dependencies (store / failureStore / per-App commenter factory /
- * getSandbox). The contract `createReviewConsumer(env)` is unchanged
- * — every field defaults to the production implementation when omitted.
+ * getSandbox) plus the execution route. The contract
+ * `createReviewConsumer(env)` is unchanged — every field defaults to the
+ * production implementation when omitted.
  */
 type ConsumerOverrides = Partial<
   Pick<
@@ -1087,27 +1086,66 @@ type ConsumerOverrides = Partial<
     | "findIncrementBase"
     | "roundBudgetMs"
   >
->;
+> & {
+  /**
+   * How this host starts an admitted attempt. Production's queue handler passes
+   * the Workflow binding — one instance per admitted attempt; a test harness
+   * passes the same step composition with an in-place step, so every suite
+   * drives the phases through the one route.
+   */
+  startAttempt?: AttemptStarter;
+};
+
+/** How a host hands an admitted attempt to the execution route. */
+export type AttemptStarter = (deps: ProcessDeps, ref: AttemptRef) => Promise<void>;
 
 /**
- * Create the queue consumer. The store and commenters are created once per
- * consumer instance (per-App commenter instances live in the appCommenters
- * Map — one per appId, lock L4). Each message
- * gets its own sandbox, destroyed in finally; failures rethrow so the queue
- * retries and eventually DLQs.
- *
- * `log` is injectable for tests (default: structured JSON lines). `overrides`
- * lets tests substitute the store / failureStore / per-App commenter
- * factory / sandbox factory without process-wide mock.module (bun's
- * relative-path mock.module leaks across test files sharing a worker — CI
- * run 32946710695).
+ * A Workflow `create` whose reply was lost or rejected. The instance may exist,
+ * so the delivery is ACKED and never retried: a redelivery mints a fresh
+ * attempt id and could pay twice. Any other starter error is NOT ambiguous and
+ * propagates.
  */
-export function createReviewConsumer(
+export class WorkflowCreateAmbiguousError extends Error {
+  constructor(
+    readonly attemptId: string,
+    readonly cause: unknown,
+  ) {
+    super(
+      `attempt ${attemptId}: the Workflow instance creation reply was not confirmed (${cause instanceof Error ? cause.message : String(cause)})`,
+    );
+    this.name = "WorkflowCreateAmbiguousError";
+  }
+}
+
+/**
+ * Create the attempt's Workflow instance. Instance id = attempt id, so a replay
+ * of the same admitted attempt addresses the same instance. A rejection is
+ * classified as AMBIGUOUS — the create may have landed — which is the one
+ * failure the consumer acks instead of propagating.
+ */
+export async function createWorkflowInstance(
+  workflow: Workflow<AttemptRef>,
+  ref: AttemptRef,
+): Promise<void> {
+  try {
+    await workflow.create({ id: ref.attemptId, params: ref });
+  } catch (err) {
+    throw new WorkflowCreateAmbiguousError(ref.attemptId, err);
+  }
+}
+
+/**
+ * Build one host's channel to the pipeline: the stores, the per-App caches and
+ * the factories a phase re-derives its live objects from. Both hosts share it —
+ * the queue consumer that admits, and the Workflow step host that executes — so
+ * a phase sees the same surface on either side of the handoff.
+ */
+export function createProcessDeps(
   env: PipelineEnv,
   log: ConsumerLog = defaultConsumerLog,
   overrides: ConsumerOverrides = {},
   background?: CheckBackgroundSink,
-): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
+): ProcessDeps {
   // The per-App commenter cache (lock L4) is also the Check lane's
   // credential route: the lifecycle resolves THIS message's App adapter from
   // it, so a Check never mints a token, client or permission set of its own.
@@ -1174,6 +1212,33 @@ export function createReviewConsumer(
         return checkGateOf(await readEffectiveTargetSettings(env.DB, row));
       },
     });
+  return deps;
+}
+
+/**
+ * Create the queue consumer: admission, dedupe, skip settlement and the
+ * hand-off only. One admitted delivery becomes one Workflow instance through
+ * the caller's `startAttempt` (or the `startAttempt` override); the consumer
+ * itself never creates a container, mints a credential or runs the model.
+ *
+ * The store and commenters are created once per consumer instance (per-App
+ * commenter instances live in the appCommenters Map — one per appId, lock L4).
+ *
+ * `log` is injectable for tests (default: structured JSON lines). `overrides`
+ * lets tests substitute the store / failureStore / per-App commenter
+ * factory / sandbox factory without process-wide mock.module (bun's
+ * relative-path mock.module leaks across test files sharing a worker — CI
+ * run 32946710695).
+ */
+export function createReviewConsumer(
+  env: PipelineEnv,
+  log: ConsumerLog = defaultConsumerLog,
+  overrides: ConsumerOverrides = {},
+  background?: CheckBackgroundSink,
+  startAttempt?: AttemptStarter,
+): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
+  const deps = createProcessDeps(env, log, overrides, background);
+  const starter = overrides.startAttempt ?? startAttempt;
   return async (batch) => {
     // The maintenance window (D20) defers the whole invocation: a mid-upgrade
     // pipeline write could land on a ledger row the backfill just repointed.
@@ -1234,7 +1299,7 @@ export function createReviewConsumer(
       return;
     }
     for (const message of batch.messages) {
-      const outcome = await processMessage(message.body, deps, message.attempts);
+      const outcome = await processMessage(message.body, deps, message.attempts, starter);
       // BB-3: guard-held is a typed outcome — schedule the per-message
       // delayed retry (or the final ack-with-warning) instead of throwing
       // into the queue's immediate ×3 retry → DLQ path.
@@ -1265,6 +1330,12 @@ export function createReviewConsumer(
         // is a leftover, acked directly before any container. No retry (the
         // newer delivery is the one that reviews) and no DLQ.
         message.ack();
+      } else if (outcome.kind === "routed") {
+        // The admitted attempt now lives in its Workflow instance. The delivery
+        // is acked once the instance is created — or once creation was
+        // ambiguous, because a redelivery mints a fresh attempt id and could
+        // pay twice. Every later settlement belongs to the instance.
+        message.ack();
       } else if (outcome.kind === "unknown") {
         // The attempt's container could not be proven, so its result is
         // uncollected and nothing was claimed about it. Ack: a retry would
@@ -1287,6 +1358,31 @@ export function createReviewConsumer(
 
 
 /**
+ * Rebuild the per-App host channel for a Workflow step host. A separate
+ * invocation has none of the admission invocation's resolved state, so the
+ * phases' live objects (the App adapter and the keys-bearing runner config)
+ * are resolved again from `payload` + `deps`; nothing secret crosses the
+ * boundary. The paused gate and the sandbox-image gate already ran before the
+ * instance was created — this only supplies what execution needs.
+ *
+ * Returns `"paused"` when the App was paused after admission: the attempt owes
+ * no review, and the caller settles its attached run as skipped.
+ */
+export async function hydrateAttemptHost(
+  payload: ReviewJobPayload,
+  deps: ProcessDeps,
+): Promise<"ready" | "paused"> {
+  const resolution = await resolveCommenter(payload, deps);
+  if (resolution.kind === "paused") return "paused";
+  const appCfg = await resolveAppConfig(payload, deps);
+  const modelOverrides = await resolveModelOverrides(payload, deps);
+  const customProviders = await resolveCustomProviders(payload, deps);
+  assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.botRef.appId);
+  deps.runnerConfigs.set(payload.botRef.appId, { appCfg, modelOverrides, customProviders });
+  return "ready";
+}
+
+/**
  * @param attempts the delivery number of this message (1 = first delivery);
  *   only the value past the queue's retry budget matters — it stamps the
  *   idempotency key `failed` so a DLQ-bound commit stops counting as reviewed-
@@ -1296,6 +1392,7 @@ async function processMessage(
   payload: ReviewJobPayload,
   deps: ProcessDeps,
   attempts = 1,
+  startAttempt?: AttemptStarter,
 ): Promise<ProcessOutcome> {
   // The round's wall clock starts HERE: every best-effort step that can spend a
   // sandbox window (the PR-context capture) is measured against this instant and
@@ -1838,33 +1935,55 @@ async function processMessage(
       }
     }
     // Handoff: everything from here on belongs to the admitted attempt's own
-    // body. This invocation keeps admission, dedupe and skip settlement; the
-    // attempt takes the container, the credential and the paid step, and what
-    // crosses the boundary is DATA — the durable ids plus the delivery's facts.
-    // The App adapter and the keys stay on `deps`, which is how the host
-    // supplies them (and how a resumed step re-derives them).
+    // Workflow instance. This invocation keeps admission, dedupe and skip
+    // settlement; what crosses the boundary is DATA — the durable ids plus the
+    // delivery's facts. The App adapter and the keys stay on the consumer's
+    // own host channel; the instance's host resolves its own.
+    if (startAttempt === undefined) {
+      // Fail loud BEFORE ownership moves: an admitted attempt with nowhere to
+      // execute must not strand its row or silently drop the review.
+      throw new Error(
+        "review route: no attempt starter is configured — the queue handler must pass the Workflow route",
+      );
+    }
     const usageSource: AttemptRef["usageSource"] = resolution.scope === "shared" ? "shared" : "byok";
     deps.runnerConfigs.set(payload.botRef.appId, { appCfg, modelOverrides, customProviders });
-    const admitted: AdmittedReviewAttempt = {
-      deps,
-      ref: {
-        attemptId,
-        payload,
-        level,
-        roundStartedAt,
-        githubAppId,
-        usageWorkspaceId,
-        usageSource,
-        checkBudgets,
-        checkClaimSha,
-        inflight,
-        attempts,
-      },
+    const attemptRef: AttemptRef = {
+      attemptId,
+      payload,
+      level,
+      roundStartedAt,
+      githubAppId,
+      usageWorkspaceId,
+      usageSource,
+      checkBudgets,
+      checkClaimSha,
+      inflight,
+      attempts,
     };
-    // Ownership moves with the attempt: its own cleanup releases the row.
+    // Ownership moves with the attempt: its own cleanup releases the row, even
+    // when the create reply is lost.
     inflight = null;
     handedOff = true;
-    return await runAdmittedReviewAttempt(admitted);
+    try {
+      await startAttempt(deps, attemptRef);
+    } catch (err) {
+      // ONLY an ambiguous create is acked: the instance may exist, so a
+      // redelivery (fresh attempt id, possible second paid run) is worse than
+      // holding the attempt to its TTL. Any other error is a real failure and
+      // propagates.
+      if (!(err instanceof WorkflowCreateAmbiguousError)) throw err;
+      deps.log.warn(
+        {
+          ...(baseFields ?? payloadIdentityFields(payload)),
+          sandbox_id: sandboxId,
+          attempt_id: attemptId,
+          event: "review_workflow_create_failed",
+        },
+        `workflow instance creation was not confirmed — acked without a retry: the instance may exist and own this attempt (${err.message})`,
+      );
+    }
+    return { kind: "routed" };
   } catch (err) {
     // The attempt body owns every failure past the handoff — it recorded the
     // row, terminalized the Check and released the row. Only propagate.

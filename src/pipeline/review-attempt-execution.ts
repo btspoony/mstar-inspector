@@ -346,8 +346,14 @@ export type ConsumerLogFields = {
    * `maintenance_defer` (same channel, additive): the invocation found the
    * platform closed (D20) and deferred the whole batch instead of running it —
    * one line per invocation, not per message.
+   * `review_workflow_create_failed` / `review_moved_head_successor` /
+   * `review_moved_head_no_successor` / `review_successor_enqueue_failed`
+   * (union widened ADDITIVELY, the Workflow route): the queue's hand-off could
+   * not confirm the instance (the instance may exist — acked, never retried),
+   * and the moved-head path re-admitted the observed head for a successor
+   * attempt (or named why it could not).
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_failed" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -639,6 +645,12 @@ export type ConsumerLog = {
  */
 export type ProcessOutcome =
   | { kind: "ok" }
+  /**
+   * The admitted attempt was handed to its Workflow instance. The delivery's
+   * work is over here: the instance owns every later settlement, so the queue
+   * acks and never redelivers into a second attempt.
+   */
+  | { kind: "routed" }
   /**
    * `heldHeadSha` is the commit the live row was taken for (`null` when the
    * refusal was a cap/storage one, so no row holds this PR): the terminal ack
@@ -2545,9 +2557,6 @@ export type CheckSettlementInput = {
 /** A phase's early settlement: the attempt owes nothing more. */
 export type SettledAttempt = { kind: "settled"; outcome: ProcessOutcome };
 
-/** The inline route's input: the host channel plus the attempt's data. */
-export type AdmittedReviewAttempt = { deps: ProcessDeps; ref: AttemptRef };
-
 /** The App/PR identity, derived from the payload without dereferencing a legacy `botRef`. */
 function scopeOf(payload: ReviewJobPayload): Scope | undefined {
   const bot = payload.botRef as { appId?: string } | undefined;
@@ -3232,35 +3241,6 @@ async function readPaidExecution(deps: ProcessDeps, attemptId: string): Promise<
       );
     default:
       return noLaunchState(verdict);
-  }
-}
-
-/**
- * The inline route: exactly the five calls a Workflow step host makes, composed
- * in one invocation. Every value it passes between them is data, and every
- * decision a phase makes is re-derivable from that data plus its durable
- * carrier — so an inline run and a resumed step reach the same conclusions.
- */
-export async function runAdmittedReviewAttempt(
-  input: AdmittedReviewAttempt,
-): Promise<ProcessOutcome> {
-  const { deps, ref } = input;
-  // The facts cleanup needs from this invocation: the checkout sha it knew, the
-  // durable proof the failure path established, and whether the container's
-  // state was left unknown. Everything else it proves from the launch row.
-  const cleanup: CleanupInput = {};
-  try {
-    const prepared = await prepareAttempt(deps, ref);
-    if (prepared.kind === "settled") return prepared.outcome;
-    cleanup.headSha = prepared.prepared.headSha;
-    await reviewAttempt(deps, ref, prepared.prepared);
-    const collected = await collectAttempt(deps, ref, prepared.prepared);
-    if (collected.kind === "settled") return collected.outcome;
-    return await publishAttempt(deps, ref, collected.collected.publicationId);
-  } catch (err) {
-    return await settleAttemptFailure(deps, ref, err, cleanup);
-  } finally {
-    await cleanupAttempt(deps, ref, cleanup);
   }
 }
 

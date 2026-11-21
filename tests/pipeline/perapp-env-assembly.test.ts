@@ -52,6 +52,7 @@ import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generate
 import { PROVIDER_CATALOG } from "../../src/contracts/provider-catalog.generated";
 import { sk, fakePem } from "../helpers/fake-secrets";
 import { withFrozenClock } from "../helpers/clock";
+import { inlineWorkflowStarter } from "../helpers/workflow-route";
 import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 import { runnerTimeoutMs } from "../../src/review-budget";
@@ -284,6 +285,7 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
 const testOverrides = {
   createAppCommenter: appCommenterFactory,
   getSandbox: async () => fakeSandbox,
+  startAttempt: inlineWorkflowStarter([]),
 };
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---

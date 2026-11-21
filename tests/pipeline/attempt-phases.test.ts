@@ -26,6 +26,7 @@ import {
   registerGitOpsCommands,
 } from "../helpers/consumer-fixtures";
 import { createConsumerHarness, makePayload } from "../helpers/consumer-harness";
+import { inlineWorkflowStep } from "../helpers/workflow-route";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
@@ -57,8 +58,8 @@ const {
   prepareAttempt,
   publishAttempt,
   reviewAttempt,
-  runAdmittedReviewAttempt,
 } = await import("../../src/pipeline/review-attempt-execution");
+const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 
 const ATTEMPT_ID = "attempt-4b-0001";
 const SCOPE: Scope = {
@@ -407,17 +408,16 @@ describe("cleanupAttempt", () => {
   });
 });
 
-describe("runAdmittedReviewAttempt", () => {
-  test("the inline route composes the same five phases end to end", async () => {
+describe("runReviewAttemptWorkflow", () => {
+  test("the workflow route composes the same five phases end to end", async () => {
     const { deps } = await makeDeps();
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
 
-    const outcome = await runAdmittedReviewAttempt({ deps, ref: makeRef(payload) });
+    await runReviewAttemptWorkflow(deps, makeRef(payload), inlineWorkflowStep(), async () => {});
 
-    expect(outcome).toEqual({ kind: "ok" });
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
     expect(h.sandbox.destroyCalls).toBe(1);
   });
@@ -486,10 +486,13 @@ describe("the owed Check mark", () => {
     const { handle } = await seedOwnedCheck(db);
     deps.checks = { begin: async () => handle, terminalize: async () => {} };
 
-    // The whole route runs: a moved head ACKS (skip) — no failure row, no
-    // pre-publication settlement, no retry.
-    const outcome = await runAdmittedReviewAttempt({ deps, ref });
-    expect(outcome).toEqual({ kind: "ok" });
+    // The whole route runs: a moved head settles as skipped — no failure row,
+    // no pre-publication settlement, no retry — and the observed head is
+    // re-admitted so a successor attempt owns it.
+    const successors: ReviewJobPayload[] = [];
+    await runReviewAttemptWorkflow(deps, ref, inlineWorkflowStep(), async (successor) => {
+      successors.push(successor);
+    });
     const failures = db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get() as { n: number };
     expect(failures.n).toBe(0);
     const row = db.raw
@@ -498,6 +501,12 @@ describe("the owed Check mark", () => {
     expect(row.attempt_key).toBe("rival-head-key");
     // Nothing was launched on our identity.
     expect(row.state).not.toBe("launched");
+    // The bare ack is gone: admission gets the observed head to start the
+    // successor attempt, and no claim from the skipped delivery rides along.
+    expect(successors).toHaveLength(1);
+    expect(successors[0]!.head_sha).toBe(SHA);
+    expect(successors[0]!.comment_id).toBeUndefined();
+    expect(successors[0]!.attachDeliveryId).toBeUndefined();
   });
 
   test("a same-identity freeze proceeds rather than skipping", async () => {

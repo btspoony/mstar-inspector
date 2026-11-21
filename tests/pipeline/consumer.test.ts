@@ -4730,7 +4730,9 @@ describe("createReviewConsumer", () => {
     // message whose review already posted (a throw would retry it).
     expect(inflightRows(db)).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);
-    expect(h.messageAckCalls).toHaveLength(0);
+    // The admitted attempt handed off to its Workflow instance: the delivery is
+    // acked here, and the instance's cleanup owns the row.
+    expect(h.messageAckCalls).toHaveLength(1);
     const warnLine = h.logLines.find((l) => l.level === "warn" && l.msg.includes("release failed"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.msg).toContain("expires by TTL");
@@ -6131,7 +6133,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       verified_json: string | null;
     };
     expect(threadRow.verified_json).not.toBeNull();
-    expect(h.messageAckCalls).toHaveLength(0); // ok path — queue auto-ack, nothing retried
+    // A completed review handed off to its Workflow instance: the delivery is
+    // acked and nothing is retried.
+    expect(h.messageAckCalls).toHaveLength(1);
   });
 
   test("marker ambiguity / foreign marker at discovery → the verified resolve stays queued, resolveFindingThread never called", async () => {
