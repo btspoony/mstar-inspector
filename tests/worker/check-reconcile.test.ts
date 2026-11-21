@@ -1051,6 +1051,80 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(three[2]!.identity.attemptId).toBe(staleId);
   });
 
+  test("§7.9a: the ordering class is exactly the transition's precondition", async () => {
+    const db = seededDb();
+    const CORRUPT_SHA = "fedcba9876543210fedcba9876543210fedcba99";
+    // A marked row whose own link carries a valid proof — but a newer unfinished
+    // generation of the same key already owns the live Check, so the transition
+    // refuses it. MINTED FIRST: with the proof in place the key could not claim
+    // the next generation.
+    const blockedId = await markedUnconfirmed(db, SHA, "publication-blocked");
+    const next = await claim(db, { nowMs: CLAIM_AT + 2_000, executionDeadlineMs: CLAIM_AT + 3_000 });
+    expect(next.attempt.identity.generation).toBe(2);
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(
+        JSON.stringify({
+          publicationId: "publication-blocked",
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 3,
+          commentId: 77,
+          bodySha256: "a".repeat(64),
+          confirmedMs: CLAIM_AT + 2_500,
+        }),
+        "publication-blocked",
+      );
+    // A corrupt proof is equally uncorrectable: the reader cannot parse it.
+    const corruptId = await markedUnconfirmed(db, CORRUPT_SHA, "publication-corrupt");
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run("{not json", "publication-corrupt");
+
+    // At LIMIT 1 the due generation is chosen — never a mark the transition
+    // would refuse.
+    const one = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 1);
+    expect(one.map((row) => row.identity.attemptId)).toEqual([next.attempt.identity.attemptId]);
+    // The marks appear only when nothing better is left.
+    const all = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 5);
+    expect(all[0]!.identity.attemptId).toBe(next.attempt.identity.attemptId);
+    expect(all.slice(1).map((row) => row.identity.attemptId).sort()).toEqual([blockedId, corruptId].sort());
+  });
+
+  test("§7.9a: a mark whose App pair is unusable is ordered behind due work", async () => {
+    const db = seededDb();
+    const blockedId = await markedUnconfirmed(db, SHA, "publication-disabled");
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(
+        JSON.stringify({
+          publicationId: "publication-disabled",
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 3,
+          commentId: 77,
+          bodySha256: "a".repeat(64),
+          confirmedMs: CLAIM_AT + 2_500,
+        }),
+        "publication-disabled",
+      );
+    // The lane would never reopen a record of an App D1 reports as unusable
+    // (§7.6 pair gate), so the mark belongs behind work that can run.
+    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP);
+    const other = await claim(db, {
+      scope: SCOPE_B,
+      githubAppId: NUMERIC_APP_B,
+      headSha: SHA,
+      executionDeadlineMs: CLAIM_AT + 1_000,
+    });
+    const one = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 1);
+    expect(one.map((row) => row.identity.attemptId)).toEqual([other.attempt.identity.attemptId]);
+    const both = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 2);
+    expect(both.map((row) => row.identity.attemptId)).toEqual([other.attempt.identity.attemptId, blockedId]);
+  });
+
   test("§7.9a: the recovery lane's own proof-free `expired` carries the same mark", async () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });

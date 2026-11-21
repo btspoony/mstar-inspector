@@ -1768,6 +1768,46 @@ export async function recordCheckObservation(
 }
 
 /**
+ * The §7.9a correction's PRECONDITION beyond the row's own marker shape — and
+ * the ONE text that decides both "is it correctable now?" (the batch's
+ * ordering class) and "may it be reopened?" (the transition's WHERE clause).
+ * Sharing the fragment is the point: a weaker ordering predicate would put a
+ * record at the head of every batch that the transition refuses every time,
+ * where it could only starve the work it waits on.
+ *
+ * It states, from the row's own columns:
+ *  - the linked publication carries a READABLE proof of itself — exactly what
+ *    the lane's proof read needs to answer `read` (`proof_json` present, valid
+ *    JSON, and its embedded id is that publication);
+ *  - no newer unfinished generation of the same key owns the live Check;
+ *  - the App pair is usable as far as D1 can tell (the §7.6 routing gate the
+ *    lane applies before it reopens anything).
+ *
+ * Placeholder-free by design, so it can be interpolated into a `WHERE` and an
+ * `ORDER BY` alike.
+ */
+const CORRECTABLE_NOW_SQL = `EXISTS (
+            SELECT 1 FROM review_publications pub
+             WHERE pub.id = review_checks.publication_id
+               AND pub.proof_json IS NOT NULL
+               AND json_valid(pub.proof_json)
+               AND json_extract(pub.proof_json, '$.publicationId') = review_checks.publication_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM review_checks n
+             WHERE n.attempt_key = review_checks.attempt_key
+               AND n.${NONTERMINAL_WHERE}
+               AND n.generation > review_checks.generation
+          )
+          AND EXISTS (
+            SELECT 1 FROM bot_installations ai
+              JOIN review_bots ga ON ga.id = ai.bot_id
+             WHERE ai.bot_id = review_checks.bot_id
+               AND ai.installation_id = review_checks.installation_id
+               AND ga.status = 'active' AND ga.deleted_at IS NULL
+          )`;
+
+/**
  * Reopen a TERMINAL unconfirmed failure for its own publication's confirmed
  * outcome — the one revision a terminal Check record permits (spec §7.9a: the
  * record asserts an outcome; evidence that contradicts it means the record is
@@ -1809,21 +1849,7 @@ export async function reopenTerminalCorrection(
           AND recovery_state = 'remote-unconfirmed'
           AND desired = 'failure' AND observed = 'failure'
           AND publication_id = ?
-          AND EXISTS (
-            SELECT 1 FROM review_publications pub
-             WHERE pub.id = review_checks.publication_id
-               AND pub.proof_json IS NOT NULL
-          )
-          -- A newer unfinished generation of the same key owns the live Check
-          -- for that head: revising this superseded record would either re-send
-          -- an older run or collide with the one-open-row index. It stays as
-          -- published.
-          AND NOT EXISTS (
-            SELECT 1 FROM review_checks n
-             WHERE n.attempt_key = review_checks.attempt_key
-               AND n.${NONTERMINAL_WHERE}
-               AND n.generation > review_checks.generation
-          )`,
+          AND ${CORRECTABLE_NOW_SQL}`,
     )
     .bind(nowMs, id, publicationId)
     .run();
@@ -2135,17 +2161,16 @@ export async function listCheckReconcileBatch(
           AND desired = 'failure' AND observed = 'failure'
           AND publication_id IS NOT NULL
         )
-        -- PARTITION the batch so an old mark that never confirms can never
-        -- displace work that is ready: marks whose own link already carries a
-        -- proof are actionable NOW and come first, due rows keep their place,
-        -- and marks still awaiting proof fill the remainder of the bound.
+        -- PARTITION the batch so a mark that cannot be corrected costs a read
+        -- and never displaces work that can. Class 0 is the transition's OWN
+        -- precondition (CORRECTABLE_NOW_SQL), not an approximation of it:
+        -- a record with a valid proof, no newer open generation and an usable
+        -- pair is actionable NOW and comes first; due rows keep their place;
+        -- every other mark (still awaiting proof, corrupt proof, superseded,
+        -- unusable pair) fills only the remainder.
         ORDER BY
           CASE
-            WHEN terminal_ms IS NOT NULL AND EXISTS (
-              SELECT 1 FROM review_publications pub
-               WHERE pub.id = review_checks.publication_id
-                 AND pub.proof_json IS NOT NULL AND json_valid(pub.proof_json)
-            ) THEN 0
+            WHEN terminal_ms IS NOT NULL AND ${CORRECTABLE_NOW_SQL} THEN 0
             WHEN terminal_ms IS NULL THEN 1
             ELSE 2
           END,
