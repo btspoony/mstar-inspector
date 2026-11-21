@@ -179,9 +179,11 @@ WHERE attempt_id = ? AND state = 'launched'
  * container may be paying and cleanup must report `unknown` instead.
  */
 const ABANDON_LAUNCH_SQL = `
-UPDATE review_launches
-SET state = 'abandoned', abandoned_at_ms = ?
-WHERE attempt_id = ? AND state = 'provisioned'
+INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms)
+VALUES (?, 'abandoned', ?, ?)
+ON CONFLICT (attempt_id) DO UPDATE
+   SET state = 'abandoned', abandoned_at_ms = excluded.abandoned_at_ms
+ WHERE review_launches.state = 'provisioned'
 `;
 
 /**
@@ -242,6 +244,18 @@ FROM review_launches
 WHERE attempt_id = ?
 `;
 
+/**
+ * The row's state vocabulary — exactly the schema's CHECK list. A value outside
+ * it means this build is older than the row, which decodes as `unknown` (never
+ * as "no row"), so a new state can never be read as permission.
+ */
+export const LAUNCH_STATES = ["provisioned", "launched", "persisted", "failed", "abandoned"] as const;
+export type LaunchRowState = (typeof LAUNCH_STATES)[number];
+
+function isLaunchState(raw: string): raw is LaunchRowState {
+  return (LAUNCH_STATES as readonly string[]).includes(raw);
+}
+
 type LaunchRow = {
   state: string;
   claimed_at_ms: number;
@@ -266,6 +280,7 @@ export function noLaunchState(state: never): never {
  * answer (and `noLaunchState` proves the switch is complete).
 
  *   absent      → never-claimed      (nothing was ever provisioned)
+ *   unknown     → unrecognised       (a row this build cannot interpret)
  *   provisioned → never-paid         (a container may exist; no paid exec sent)
  *   abandoned   → owned-by-cleanup   (another cleanup owns its destruction)
  *   launched    → paid-unknown       (the paid exec was sent, no durable outcome)
@@ -274,6 +289,7 @@ export function noLaunchState(state: never): never {
  */
 export type LaunchVerdict =
   | { kind: "never-claimed" }
+  | { kind: "unrecognised" }
   | { kind: "never-paid" }
   | { kind: "owned-by-cleanup" }
   | { kind: "paid-unknown" }
@@ -283,6 +299,8 @@ export type LaunchVerdict =
 export function launchVerdict(state: ReviewLaunchState | null): LaunchVerdict {
   if (state === null) return { kind: "never-claimed" };
   switch (state.state) {
+    case "unknown":
+      return { kind: "unrecognised" };
     case "provisioned":
       return { kind: "never-paid" };
     case "abandoned":
@@ -322,7 +340,14 @@ export type ReviewLaunchState =
       checkOwedMs: number | null;
     }
   | { state: "failed"; claimedAtMs: number; launchedAtMs: number; failedAtMs: number; checkOwedMs: number | null }
-  | { state: "abandoned"; claimedAtMs: number; abandonedAtMs: number; checkOwedMs: number | null };
+  | { state: "abandoned"; claimedAtMs: number; abandonedAtMs: number; checkOwedMs: number | null }
+  /**
+   * A row this build cannot interpret — an unrecognised state, or a state whose
+   * coupled facts are missing. It is NEVER `null`: "no row" means nothing was
+   * ever claimed, while `unknown` means a row exists that this code must not
+   * reason about.
+   */
+  | { state: "unknown"; claimedAtMs: number | null };
 
 /**
  * The launch decision. `ok` means this caller owns the one paid step of the
@@ -385,6 +410,9 @@ export async function claimReviewLaunch(
     case "owned-by-cleanup":
       // A cleanup claimed this attempt for destruction: the paid step must not
       // start on a container that is being removed.
+      return { ok: false, reason: "no-claim" };
+    case "unrecognised":
+      // A row this build cannot interpret: no launch may be taken on it.
       return { ok: false, reason: "no-claim" };
     default:
       return noLaunchState(verdict);
@@ -449,29 +477,20 @@ export async function noteCheckOwed(
 }
 
 /**
- * The generation this attempt OBSERVED for its Check: the row its own settlement
- * holds when there is one, otherwise the open generation of that attempt key at
- * this instant. The caller records exactly this — never a value re-resolved
- * later, so a newer generation can never inherit the obligation.
+ * The generation this attempt OBSERVED for its Check — read from the row the
+ * attempt's own settlement held, never picked from "the open generation at that
+ * instant": an unowned guess could be cleared by the wrong generation, which is
+ * worse than a missing mark. `null` means nothing was observed (no settlement
+ * row), and the caller then writes no mark at all.
  */
 export async function observeCheckGeneration(
   db: D1Like,
-  input: { checkKey: string; checkAttemptId?: string },
+  checkAttemptId: string,
 ): Promise<number | null> {
-  const row =
-    input.checkAttemptId === undefined
-      ? await db
-          .prepare(
-            `SELECT generation FROM review_checks
-              WHERE attempt_key = ? AND terminal_ms IS NULL
-              ORDER BY generation DESC LIMIT 1`,
-          )
-          .bind(input.checkKey)
-          .first<{ generation: number }>()
-      : await db
-          .prepare(`SELECT generation FROM review_checks WHERE id = ? AND terminal_ms IS NULL`)
-          .bind(input.checkAttemptId)
-          .first<{ generation: number }>();
+  const row = await db
+    .prepare(`SELECT generation FROM review_checks WHERE id = ? AND terminal_ms IS NULL`)
+    .bind(checkAttemptId)
+    .first<{ generation: number }>();
   return row?.generation ?? null;
 }
 
@@ -515,13 +534,18 @@ export async function clearConcludedCheckOwed(db: D1Like): Promise<number> {
 }
 
 /**
- * Claim the attempt for destruction: `provisioned → abandoned` in one
- * conditional statement. `true` means THIS caller won and may destroy the
- * container; `false` means the row moved on (a concurrent attempt launched the
- * paid step) and no destruction may follow a read that is now stale.
+ * Claim the attempt for destruction — and `absent` is NO EXCEPTION: with no row
+ * this INSERTs one already `abandoned`, with a row it moves `provisioned` →
+ * `abandoned`, in ONE statement whose `changes` is the whole answer. `true`
+ * means THIS caller won and may destroy the container; `false` means another
+ * caller owns the attempt (it may be about to send the exec), so no destruction
+ * may follow a read that is now stale.
+ *
+ * Writing the row is what closes the first-provisioning race: a caller can no
+ * longer insert a paid row after cleanup decided there was none.
  */
 export async function abandonReviewLaunch(db: D1Like, attemptId: string, nowMs: number): Promise<boolean> {
-  const written = await db.prepare(ABANDON_LAUNCH_SQL).bind(nowMs, attemptId).run();
+  const written = await db.prepare(ABANDON_LAUNCH_SQL).bind(attemptId, nowMs, nowMs).run();
   return written.meta.changes === 1;
 }
 
@@ -547,21 +571,38 @@ export async function deferCheckWithOwed(
     reason?: string;
   },
 ): Promise<boolean> {
-  const deferred =
-    input.kind === "proof-wait"
-      ? await deferCheckForPendingPublication(db, input.checkAttemptId, input.lease, input.nextAttemptMs, input.nowMs)
-      : await deferCheckRecovery(
-          db,
-          input.checkAttemptId,
-          input.lease,
-          {
-            state: input.state ?? "remote-unconfirmed",
-            nextAttemptMs: input.nextAttemptMs,
-            reason: input.reason ?? "recovery deferred",
-          },
-          input.nowMs,
-        );
-  if (deferred) await bumpCheckOwed(db, input.checkAttemptId, input.nextAttemptMs).catch(() => {});
+  // The bump goes FIRST, so a defer that then fails or loses its fence cannot
+  // leave the obligation silently un-advanced: it is compensated by clearing the
+  // mark. Neither error is swallowed — a bump fault is the caller's failed
+  // defer, and a defer fault propagates after the compensation.
+  await bumpCheckOwed(db, input.checkAttemptId, input.nextAttemptMs);
+  let deferred: boolean;
+  try {
+    deferred =
+      input.kind === "proof-wait"
+        ? await deferCheckForPendingPublication(db, input.checkAttemptId, input.lease, input.nextAttemptMs, input.nowMs)
+        : await deferCheckRecovery(
+            db,
+            input.checkAttemptId,
+            input.lease,
+            {
+              state: input.state ?? "remote-unconfirmed",
+              nextAttemptMs: input.nextAttemptMs,
+              reason: input.reason ?? "recovery deferred",
+            },
+            input.nowMs,
+          );
+  } catch (err) {
+    // The fence faulted after the instant moved: drop the obligation rather than
+    // leave an advanced mark with no check movement behind it.
+    await clearCheckOwed(db, input.checkAttemptId).catch(() => {});
+    throw err;
+  }
+  if (!deferred) {
+    // A lost fence means another holder moved the row: the advanced instant
+    // must not outlive this pass.
+    await clearCheckOwed(db, input.checkAttemptId).catch(() => {});
+  }
   return deferred;
 }
 
@@ -586,63 +627,68 @@ export async function listCheckOwed(
   return results.map((row) => ({ attemptId: row.attempt_id, owedMs: row.check_owed_ms }));
 }
 
-/** The attempt's launch row, or null when it never prepared. */
+/**
+ * The attempt's launch row, or null when it never prepared.
+ *
+ * The state is parsed as a UNION: every member is mapped explicitly (with the
+ * `never` default proving completeness), and anything this build does not know —
+ * an unrecognised state value, or a state whose coupled facts are missing —
+ * decodes as `unknown`. It is never `null`: "no row" means nothing was ever
+ * claimed, and collapsing the two would turn an unreadable row into permission.
+ */
 export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<ReviewLaunchState | null> {
   const row = await db.prepare(READ_LAUNCH_SQL).bind(attemptId).first<LaunchRow>();
   if (row === null) return null;
-  if (row.state === "provisioned") {
-    return { state: "provisioned", claimedAtMs: row.claimed_at_ms, checkOwedMs: row.check_owed_ms };
+  const unreadable = (): ReviewLaunchState => ({ state: "unknown", claimedAtMs: row.claimed_at_ms });
+  if (!isLaunchState(row.state)) return unreadable();
+  switch (row.state) {
+    case "provisioned":
+      return { state: "provisioned", claimedAtMs: row.claimed_at_ms, checkOwedMs: row.check_owed_ms };
+    case "abandoned":
+      return row.abandoned_at_ms === null
+        ? unreadable()
+        : {
+            state: "abandoned",
+            claimedAtMs: row.claimed_at_ms,
+            abandonedAtMs: row.abandoned_at_ms,
+            checkOwedMs: row.check_owed_ms,
+          };
+    case "launched":
+      return row.launched_at_ms === null
+        ? unreadable()
+        : {
+            state: "launched",
+            claimedAtMs: row.claimed_at_ms,
+            launchedAtMs: row.launched_at_ms,
+            checkOwedMs: row.check_owed_ms,
+          };
+    case "failed":
+      return row.launched_at_ms === null || row.failed_at_ms === null
+        ? unreadable()
+        : {
+            state: "failed",
+            claimedAtMs: row.claimed_at_ms,
+            launchedAtMs: row.launched_at_ms,
+            failedAtMs: row.failed_at_ms,
+            checkOwedMs: row.check_owed_ms,
+          };
+    case "persisted":
+      if (row.launched_at_ms === null || row.persisted_at_ms === null || row.result_json === null) {
+        return unreadable();
+      }
+      return {
+        state: "persisted",
+        claimedAtMs: row.claimed_at_ms,
+        launchedAtMs: row.launched_at_ms,
+        persistedAtMs: row.persisted_at_ms,
+        execution: decodeExecution(attemptId, row.result_json),
+        checkOwedMs: row.check_owed_ms,
+      };
+    default:
+      // The switch is exhaustive over `LaunchRowState`; this arm is unreachable
+      // and exists so adding a union member without a decoder arm fails to build.
+      return noLaunchState(row.state);
   }
-  if (row.state === "launched" && row.launched_at_ms !== null) {
-    return {
-      state: "launched",
-      claimedAtMs: row.claimed_at_ms,
-      launchedAtMs: row.launched_at_ms,
-      checkOwedMs: row.check_owed_ms,
-    };
-  }
-  if (
-    row.state === "abandoned" &&
-    row.abandoned_at_ms !== null
-  ) {
-    return {
-      state: "abandoned",
-      claimedAtMs: row.claimed_at_ms,
-      abandonedAtMs: row.abandoned_at_ms,
-      checkOwedMs: row.check_owed_ms,
-    };
-  }
-  if (
-    row.state === "failed" &&
-    row.launched_at_ms !== null &&
-    row.failed_at_ms !== null
-  ) {
-    return {
-      state: "failed",
-      claimedAtMs: row.claimed_at_ms,
-      launchedAtMs: row.launched_at_ms,
-      failedAtMs: row.failed_at_ms,
-      checkOwedMs: row.check_owed_ms,
-    };
-  }
-  if (
-    row.state === "persisted" &&
-    row.launched_at_ms !== null &&
-    row.persisted_at_ms !== null &&
-    row.result_json !== null
-  ) {
-    return {
-      state: "persisted",
-      claimedAtMs: row.claimed_at_ms,
-      launchedAtMs: row.launched_at_ms,
-      persistedAtMs: row.persisted_at_ms,
-      execution: decodeExecution(attemptId, row.result_json),
-      checkOwedMs: row.check_owed_ms,
-    };
-  }
-  // The schema's CHECKs make an inconsistent row unreachable; reading it as "no
-  // row" keeps every caller on the refusing side if it ever happens.
-  return null;
 }
 
 /**
@@ -1756,6 +1802,10 @@ export async function runReviewAttempt(input: {
     case "owned-by-cleanup":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: a cleanup owns this container's destruction — refusing to run the paid step on it`,
+      );
+    case "unrecognised":
+      throw new AttemptUnknownError(
+        `attempt ${attemptId}: its launch row is in a state this build cannot interpret — refusing the paid step`,
       );
     case "never-claimed":
       throw new AttemptUnknownError(

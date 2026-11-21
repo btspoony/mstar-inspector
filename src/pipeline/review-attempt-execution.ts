@@ -3080,13 +3080,12 @@ async function noteOwedCheck(
     triggeredBy: ref.payload.triggered_by,
     action: ref.payload.action,
   });
-  // The generation OBSERVED here is bound into the mark; a later generation
-  // can never match it, and the write itself requires that row to still be open.
-  const checkGeneration = await observeCheckGeneration(deps.env.DB, {
-    checkKey,
-    ...(checkAttemptId === undefined ? {} : { checkAttemptId }),
-  });
-  if (checkGeneration === null) return; // no open Check of this attempt: nothing owed
+  // NOTHING OBSERVED, NOTHING RECORDED: without a row of its own this attempt
+  // has no generation it can name, and an unowned guess could be cleared by the
+  // wrong generation — worse than a missing mark.
+  if (checkAttemptId === undefined) return;
+  const checkGeneration = await observeCheckGeneration(deps.env.DB, checkAttemptId);
+  if (checkGeneration === null) return; // that row already concluded: nothing owed
   const owed = await noteCheckOwed(deps.env.DB, {
     attemptId: ref.attemptId,
     checkKey,
@@ -3161,6 +3160,7 @@ async function readPersistedLaunch(deps: ProcessDeps, attemptId: string): Promis
     case "never-claimed":
     case "never-paid":
     case "owned-by-cleanup":
+    case "unrecognised":
     case "paid-unknown":
     case "paid-failed":
       throw new AttemptUnknownError(
@@ -3180,6 +3180,7 @@ async function readPaidExecution(deps: ProcessDeps, attemptId: string): Promise<
     case "never-claimed":
     case "never-paid":
     case "owned-by-cleanup":
+    case "unrecognised":
     case "paid-unknown":
     case "paid-failed":
       throw new AttemptUnknownError(
@@ -5688,10 +5689,18 @@ export async function cleanupAttempt(
   // because a concurrent attempt can move the row to `launched` between the
   // read and the destroy. The CAS is the authority — only a won CAS may destroy,
   // and a loser reports `unknown` because the container may be paying.
-  const abandoned = await abandonReviewLaunch(deps.env.DB, attemptId, Date.now());
+  // The claim is the ONLY way to authorise destroying an attempt that has not
+  // reached a terminal state — and `absent` is no exception. A faulted claim
+  // (the write's reply was lost) is a LOSING claim: nothing is destroyed.
+  let claimed = false;
+  try {
+    claimed = await abandonReviewLaunch(deps.env.DB, attemptId, Date.now());
+  } catch {
+    claimed = false;
+  }
   let retention: RetentionProof | undefined;
-  let containerMayExist = abandoned;
-  if (abandoned) {
+  let containerMayExist = claimed;
+  if (claimed) {
     // This caller WON the row: the container, if any, is ours to destroy.
     retention = { kind: "no-paid-work" };
   } else {
@@ -5699,12 +5708,14 @@ export async function cleanupAttempt(
     switch (verdict.kind) {
       case "never-claimed":
       case "never-paid":
-        // Nothing was ever claimed (or a concurrent caller held it at
-        // `provisioned` when we lost the CAS): nothing was charged.
-        retention = { kind: "no-paid-work" };
+        // The claim was lost or faulted, so this caller does not own the
+        // attempt: hold, and never fall back to `no-paid-work`.
+        containerMayExist = false;
+        retention = undefined;
         break;
       case "persisted":
       case "paid-failed":
+        // Terminal states cannot move to `launched`, so no claim is needed.
         containerMayExist = true;
         retention = { kind: "retained" };
         break;
@@ -5712,6 +5723,11 @@ export async function cleanupAttempt(
         // ANOTHER cleanup owns this container: return unknown and touch
         // neither the container nor capacity — never `no-paid-work`.
         containerMayExist = false;
+        retention = undefined;
+        break;
+      case "unrecognised":
+        // A row this build cannot interpret is never permission: hold.
+        containerMayExist = true;
         retention = undefined;
         break;
       case "paid-unknown":

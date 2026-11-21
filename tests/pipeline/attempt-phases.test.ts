@@ -378,12 +378,16 @@ describe("cleanupAttempt", () => {
     expect(h.sandbox.destroyCalls).toBe(0);
   });
 
-  test("no launch row proves no paid work and destroys nothing", async () => {
-    const { deps } = await makeDeps();
+  test("no launch row still CLAIMS: absent is no exception", async () => {
+    const { deps, db } = await makeDeps();
     const ref = makeRef(makePayload());
 
+    // Absent is a state read like any other: the claim INSERTs the row already
+    // `abandoned`, so a first-provisioning caller can no longer insert a paid
+    // row after this cleanup decided there was none.
     expect(await cleanupAttempt(deps, ref)).toEqual({ retention: "no-paid-work" });
-    expect(h.sandbox.destroyCalls).toBe(0);
+    expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("abandoned");
+    expect(h.sandbox.destroyCalls).toBe(1);
   });
 
   test("a persisted launch row authorises the teardown with the retained proof", async () => {
@@ -418,8 +422,8 @@ describe("runAdmittedReviewAttempt", () => {
   });
 });
 
-describe("a refused Check adoption", () => {
-  test("names the obligation on the row it may not take", async () => {
+describe("the owed Check mark", () => {
+  test("a refused adoption records NOTHING: it observed no generation", async () => {
     const { deps, db } = await makeDeps();
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
@@ -435,8 +439,9 @@ describe("a refused Check adoption", () => {
     const collected = await collectAttempt(collecting, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
 
-    // A LIVE original holder owns the attempt's Check: the real lifecycle
-    // refuses to adopt a row somebody else holds a lease on.
+    // A LIVE holder owns the attempt's Check, so the real lifecycle refuses to
+    // adopt it — and no generation is OBSERVED, so no mark is written: an
+    // unowned guess could be cleared by the wrong generation.
     const claimed = await claimAttempt(db as never, {
       scope: SCOPE,
       githubAppId: 424242,
@@ -461,10 +466,20 @@ describe("a refused Check adoption", () => {
 
     expect(await publishAttempt(publishing.deps, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
 
-    // Nothing was cached, nothing was touched on the Check row, and the
-    // obligation is recorded on the ATTEMPT row instead.
     expect(begun).toBe(1);
     expect(publishing.deps.checkSettlements.size).toBe(0);
+    const launch = db.raw
+      .prepare("SELECT check_owed_ms, check_key, check_generation FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as {
+      check_owed_ms: number | null;
+      check_key: string | null;
+      check_generation: number | null;
+    };
+    expect(launch.check_owed_ms).toBeNull();
+    expect(launch.check_key).toBeNull();
+    expect(launch.check_generation).toBeNull();
+    // The Check row it could not take is untouched, and the publication is the
+    // durable record the recovery lane concludes from.
     const check = db.raw
       .prepare("SELECT holder, terminal_ms, next_attempt_ms FROM review_checks WHERE holder = ?")
       .get("consumer:original") as {
@@ -472,20 +487,56 @@ describe("a refused Check adoption", () => {
       terminal_ms: number | null;
       next_attempt_ms: number | null;
     };
-    expect(check.holder).toBe("consumer:original");
-    expect(check.terminal_ms).toBeNull();
-    expect(check.next_attempt_ms).toBeNull();
+    expect(check).toEqual({ holder: "consumer:original", terminal_ms: null, next_attempt_ms: null });
+    expect((await readPublication(db as never, collected.collected.publicationId))?.proof).not.toBeNull();
+  });
+
+  test("an adopted Check that stays open records the generation it observed", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    await reviewAttempt(deps, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+
+    // THIS attempt owns the Check row (its settlement adopts it), but the
+    // conclusion does not land, so the row stays open.
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: `consumer:${ATTEMPT_ID}`,
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`the test could not create the row: ${claimed.kind}`);
+    const row = db.raw
+      .prepare("SELECT id, generation FROM review_checks WHERE id = ?")
+      .get(claimed.attempt.identity.attemptId) as { id: string; generation: number };
+
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = {
+      begin: async () => ({ ...HANDLE, attemptId: row.id }),
+      terminalize: async () => {}, // the conclusion never lands
+    };
+
+    expect(await publishAttempt(publishing.deps, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+
     const launch = db.raw
-      .prepare("SELECT check_owed_ms, result_outcome FROM review_launches WHERE attempt_id = ?")
-      .get(ATTEMPT_ID) as { check_owed_ms: number | null; result_outcome: string | null };
-    expect(launch.check_owed_ms).toBeGreaterThan(0);
-    expect(launch.result_outcome).toBe("persisted");
-    // The publication is the proof the recovery lane concludes from.
-    const published = await readPublication(db as never, collected.collected.publicationId);
-    expect(published?.proof).not.toBeNull();
-    // And the handoff named itself on the log line.
-    const warn = h.logLines.find((line) => line.fields.event === "check_settlement_owed");
-    expect(warn).toBeDefined();
+      .prepare("SELECT check_owed_ms, check_generation FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { check_owed_ms: number | null; check_generation: number | null };
+    expect(launch.check_owed_ms).toBeGreaterThan(Date.now());
+    expect(launch.check_generation).toBe(row.generation);
+    expect(h.logLines.some((line) => line.fields.event === "check_settlement_owed")).toBe(true);
   });
 });
-
