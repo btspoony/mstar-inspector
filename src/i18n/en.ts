@@ -1543,6 +1543,26 @@ export const en = {
       /** The stored budget could not be read — the number is the documented default. */
       recheckUnreadable:
         "The stored recheck assignment budget could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
+      /** The platform's one end-to-end maximum review duration. */
+      attemptCapTitle: "Maximum review duration",
+      attemptCapDescription:
+        "The whole attempt stops at this cap: queue wait, execution and publication together. A review stopped by it is terminal and is not re-run automatically.",
+      attemptCapLabel: "Maximum duration (ms)",
+      /** {min}/{max} in ms plus minutes; a refusal names the same range. */
+      attemptCapRange:
+        "Accepted range: {min}–{max} ms ({minMinutes}–{maxMinutes} minutes). A value outside it is refused.",
+      attemptCapSave: "Save",
+      attemptCapSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      attemptCapFailed: "Could not change the maximum review duration.",
+      /** {value} = the stored cap, so the operator knows it is a save. */
+      attemptCapCurrentSaved: "Effective on the next review: {value} ms (saved value).",
+      /** {value} = the absent-row default — never presented as a saved value. */
+      attemptCapCurrentDefault:
+        "Effective on the next review: {value} ms (platform default — no value is saved).",
+      /** No attempt is admitted while the stored cap cannot be read. */
+      attemptCapUnreadable:
+        "The stored maximum duration could not be read, so no new review is admitted until it is readable again or a new value is saved.",
       /** Admission refusals the pipeline recorded over the trailing 24h. */
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:

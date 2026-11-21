@@ -30,6 +30,7 @@ import {
   readDurationReport,
   readRuntime,
   saveSweepSettings,
+  setAttemptCap,
   setCheckBudgets,
   setCommentClaimSettings,
   setMaintenance,
@@ -37,6 +38,7 @@ import {
   setSystemConcurrency,
   useLoaded,
   type AdmissionDropCounts,
+  type AttemptCapConfig,
   type CheckBudgetConfig,
   type CommentClaimConfig,
   type DurationPercentiles,
@@ -277,6 +279,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [outboxDraft, setOutboxDraft] = useState<string | null>(null);
   const [sweepDraft, setSweepDraft] = useState<Partial<Record<SweepField, string>>>({});
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
+  const [attemptCapDraft, setAttemptCapDraft] = useState<string | null>(null);
   /** The window's pending state: `null` = untouched, so the stored one shows. */
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
   const [reasonDraft, setReasonDraft] = useState<string | null>(null);
@@ -289,6 +292,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const commentClaimSignal = useSaveSignal();
   const sweepSignal = useSaveSignal();
   const recheckAssignmentSignal = useSaveSignal();
+  const attemptCapSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
   // the terminalize/update relation included — reads as that field's error
@@ -302,6 +306,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       | "commentClaim"
       | "sweep"
       | "recheckAssignment"
+      | "attemptCap"
       | "maintenance";
   } | null>(null);
 
@@ -519,6 +524,46 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
+  async function onSaveAttemptCap(
+    event: FormEvent<HTMLFormElement>,
+    stored: AttemptCapConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    if (concurrencySubmitBlocked(stored.degraded, attemptCapDraft)) return;
+    // Same browser-side parsing as the sibling fields: the server's range gate
+    // is the only validator.
+    const capMs = Number((attemptCapDraft ?? String(stored.capMs)).trim());
+    setBusy(true);
+    setNotice(null);
+    attemptCapSignal.start();
+    try {
+      const saved = await setAttemptCap(capMs, stored);
+      // A 2xx rewrote the row, so the card reads as a saved, trusted value.
+      update((data) => ({ ...data, attemptCap: saved }));
+      setAttemptCapDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.attemptCapSaved"),
+        source: "attemptCap",
+      });
+      attemptCapSignal.succeed();
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.attemptCapFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "attemptCap",
+      });
+      attemptCapSignal.fail();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /**
    * Close or reopen the platform. `enabled` is the state the operator asked
    * for; the reason rides only a close (the store drops it on reopen, so
@@ -584,6 +629,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const sweep = data.sweep;
           // And for the recheck seat's ask budget.
           const recheck = data.recheckAssignment;
+          // And the platform's one end-to-end attempt cap.
+          const attemptCap = data.attemptCap;
           // And for the admission-drop counts.
           const drops = data.admissionDrops24h;
           // The live queue gauge; `null` is "not readable", never an empty queue.
@@ -758,6 +805,84 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 )}
               </CardContent>
             </SectionCard>
+            {attemptCap === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.attemptCapTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.attemptCapDescription")}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground" data-attempt-cap="range">
+                  {t(locale, "admin.runtime.attemptCapRange", {
+                    min: attemptCap.min,
+                    max: attemptCap.max,
+                    minMinutes: Math.round(attemptCap.min / 60_000),
+                    maxMinutes: Math.round(attemptCap.max / 60_000),
+                  })}
+                </p>
+                {notice?.source === "attemptCap" ? (
+                  <CardOutcome notice={notice} status={attemptCapSignal.status} />
+                ) : null}
+                {attemptCap.degraded ? (
+                  // While the row is unreadable admission refuses every
+                  // delivery, so no effective value is claimed and the form
+                  // starts empty; a typed value or Retry repairs the state.
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.attemptCapUnreadable")} />
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveAttemptCap(event, attemptCap)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="attempt-cap-ms">
+                      {t(locale, "admin.runtime.attemptCapLabel")}
+                    </label>
+                    <Input
+                      id="attempt-cap-ms"
+                      type="number"
+                      min={attemptCap.min}
+                      max={attemptCap.max}
+                      className="w-40"
+                      autoComplete="off"
+                      required
+                      value={attemptCapDraft ?? (attemptCap.degraded ? "" : String(attemptCap.capMs))}
+                      onChange={(event) => setAttemptCapDraft(event.target.value)}
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={attemptCapSignal.status === "idle" ? undefined : attemptCapSignal.status}
+                  >
+                    {t(locale, "admin.runtime.attemptCapSave")}
+                  </Button>
+                  <SaveInFlight show={attemptCapSignal.status === "loading"} locale={locale} />
+                  {attemptCap.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
+                {attemptCap.degraded ? null : (
+                  // The two copies are the whole point: a stored value says so,
+                  // and an absent row says "default — nothing saved".
+                  <p className="mt-2 text-xs text-muted-foreground" data-attempt-cap="effective">
+                    {t(
+                      locale,
+                      attemptCap.saved
+                        ? "admin.runtime.attemptCapCurrentSaved"
+                        : "admin.runtime.attemptCapCurrentDefault",
+                      { value: attemptCap.capMs },
+                    )}
+                  </p>
+                )}
+              </CardContent>
+            </SectionCard>
+            )}
             {budgets === null ? null : (
             <SectionCard tier="secondary">
               <CardHeader>

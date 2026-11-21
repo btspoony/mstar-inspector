@@ -766,6 +766,74 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("the attempt-cap card calls an absent row a default, never a saved value", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...RUNTIME,
+        attemptCap: { capMs: 1_200_000, saved: false, min: 900_000, max: 3_600_000, degraded: false },
+      }),
+    );
+    const field = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
+    expect(field).not.toBeNull();
+    // The effective value is offered as the starting number…
+    expect(field.value).toBe("1200000");
+    // …the accepted range is stated where the operator types it…
+    expect(surface.container.querySelector('[data-attempt-cap="range"]')?.textContent).toContain(
+      "900000–3600000 ms (15–60 minutes)",
+    );
+    // …and the default says it is a default, never a stored value.
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 1200000 ms (platform default — no value is saved).",
+    );
+    await surface.close();
+  });
+
+  test("the attempt-cap card reports a saved value as saved, and one save fires one PATCH", async () => {
+    let stored = { capMs: 1_800_000, saved: true, min: 900_000, max: 3_600_000, degraded: false };
+    const surface = await runtimeScreen((request) => {
+      if (request.method !== "PATCH") return json({ ...RUNTIME, attemptCap: stored });
+      stored = { ...stored, capMs: 2_400_000 };
+      return json({ attemptCap: { capMs: 2_400_000 } });
+    });
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 1800000 ms (saved value).",
+    );
+    await surface.type("#attempt-cap-ms", "2400000");
+    const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { attemptCap: { capMs: 2_400_000 } },
+      },
+    ]);
+    // The card adopts the stored echo and still calls it a save.
+    expect((surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement).value).toBe(
+      "2400000",
+    );
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 2400000 ms (saved value).",
+    );
+    await surface.close();
+  });
+
+  test("an unreadable cap claims no effective value and starts the field empty", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...RUNTIME,
+        attemptCap: { capMs: 1_200_000, saved: false, min: 900_000, max: 3_600_000, degraded: true },
+      }),
+    );
+    // Admission refuses every delivery while the row is unreadable, so no
+    // number is presented as the effective cap.
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')).toBeNull();
+    expect((surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement).value).toBe("");
+    expect(surface.text()).toContain("no new review is admitted until it is readable again");
+    await surface.close();
+  });
+
   test("the admission-drop card renders all four reasons and their 24h counts", async () => {
     const surface = await runtimeScreen(() =>
       json({

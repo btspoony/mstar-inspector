@@ -28,6 +28,8 @@ import {
   CONCURRENCY_MIN,
   RECHECK_ASSIGNMENT_MAX,
   RECHECK_ASSIGNMENT_MIN,
+  REVIEW_ATTEMPT_CAP_MAX_MS,
+  REVIEW_ATTEMPT_CAP_MIN_MS,
   RuntimeConfigError,
   SWEEP_LIMITS,
   SYSTEM_CONCURRENCY_MAX,
@@ -36,6 +38,7 @@ import {
   getCommentClaimSettings,
   getMaintenanceMode,
   getRecheckAssignmentMaxBytes,
+  getReviewAttemptCapSetting,
   getSweepSettings,
   getSystemConcurrency,
   isConcurrencyValue,
@@ -47,6 +50,7 @@ import {
   setMaintenanceMode,
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
+  setReviewAttemptCap,
   setSweepSettings,
   setSystemConcurrency,
   type CheckBudgetValues,
@@ -225,6 +229,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     sweep,
     level,
     recheck,
+    attemptCap,
     officialWorkspaceId,
     admissionDrops24h,
     githubRateLimited24h,
@@ -236,6 +241,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     getSweepSettings(db),
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
+    getReviewAttemptCapSetting(db),
     readOfficialWorkspaceId(db),
     failures.countAdmissionDrops24h(),
     failures.countGithubRateLimited24h(),
@@ -282,6 +288,15 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       min: RECHECK_ASSIGNMENT_MIN,
       max: RECHECK_ASSIGNMENT_MAX,
       degraded: recheck.degraded,
+    },
+    // The one end-to-end attempt cap. `saved` separates a stored value from
+    // the absent-row default, so the console never shows a default as a save.
+    attemptCap: {
+      capMs: attemptCap.capMs,
+      saved: attemptCap.saved,
+      min: REVIEW_ATTEMPT_CAP_MIN_MS,
+      max: REVIEW_ATTEMPT_CAP_MAX_MS,
+      degraded: attemptCap.degraded,
     },
     // Admission drops the pipeline already records as `review_failures` rows,
     // grouped by the reason token of the drop prefix over the last 24h — the
@@ -381,6 +396,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawSweep: unknown;
   let rawLevel: unknown;
   let rawRecheck: unknown;
+  let rawAttemptCap: unknown;
   let rawMaintenance: unknown;
   try {
     const body = (await c.req.json()) as {
@@ -390,6 +406,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       sweep?: unknown;
       reviewLevel?: unknown;
       recheckAssignment?: unknown;
+      attemptCap?: unknown;
       maintenance?: unknown;
     };
     concurrency = body.concurrency;
@@ -398,6 +415,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawSweep = body.sweep;
     rawLevel = body.reviewLevel;
     rawRecheck = body.recheckAssignment;
+    rawAttemptCap = body.attemptCap;
     rawMaintenance = body.maintenance;
   } catch {
     // malformed body → the shape gate's 400, never a 500
@@ -405,14 +423,21 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   // One save writes one parameter: a body carrying more than one is a shape
   // error, so a refused half can never leave another half written.
   if (
-    [concurrency, rawBudgets, rawClaim, rawSweep, rawLevel, rawRecheck, rawMaintenance].filter(
-      (value) => value !== undefined,
-    ).length > 1
+    [
+      concurrency,
+      rawBudgets,
+      rawClaim,
+      rawSweep,
+      rawLevel,
+      rawRecheck,
+      rawAttemptCap,
+      rawMaintenance,
+    ].filter((value) => value !== undefined).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reviewLevel | recheckAssignment | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reviewLevel | recheckAssignment | attemptCap | maintenance",
       },
       400,
     );
@@ -465,6 +490,22 @@ async function setRuntime(c: AdminContext): Promise<Response> {
           maxBytes: await setRecheckAssignmentMaxBytes(db, maxBytes, login),
         },
       });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawAttemptCap !== undefined) {
+    const capMs =
+      typeof rawAttemptCap === "object" && rawAttemptCap !== null && "capMs" in rawAttemptCap
+        ? rawAttemptCap.capMs
+        : undefined;
+    if (typeof capMs !== "number") {
+      return c.json({ error: "body must be { attemptCap: { capMs } }" }, 400);
+    }
+    try {
+      // The store owns the accepted range and names it in the refusal.
+      return c.json({ attemptCap: { capMs: await setReviewAttemptCap(db, capMs, login) } });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;

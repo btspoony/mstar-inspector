@@ -207,6 +207,18 @@ const DEFAULT_RECHECK_ASSIGNMENT = {
   degraded: false,
 };
 
+/**
+ * The documented absent-row attempt cap as the operator API reports it:
+ * `saved: false` is the whole reason the console can call it a default.
+ */
+const DEFAULT_ATTEMPT_CAP = {
+  capMs: 1_200_000,
+  saved: false,
+  min: 900_000,
+  max: 3_600_000,
+  degraded: false,
+};
+
 /** The empty trailing-24h admission-drop read: every reason present at zero. */
 const DEFAULT_ADMISSION_DROPS = {
   "pr-held": 0,
@@ -391,6 +403,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       sweep: DEFAULT_SWEEP,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
+      attemptCap: DEFAULT_ATTEMPT_CAP,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -490,6 +503,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       sweep: DEFAULT_SWEEP,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
+      attemptCap: DEFAULT_ATTEMPT_CAP,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -507,6 +521,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       sweep: DEFAULT_SWEEP,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
+      attemptCap: DEFAULT_ATTEMPT_CAP,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,

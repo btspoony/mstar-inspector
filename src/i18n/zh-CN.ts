@@ -1279,6 +1279,25 @@ export const zhCN: Dictionary = {
       /** 已存储的预算无法读取——显示的数值是文档默认值。 */
       recheckUnreadable:
         "无法读取已存储的重审提问预算，因此正在使用文档默认值。输入范围内的数值可保存为新值，重新读取会重新检查该行。",
+      /** 平台唯一的端到端审查时长上限。 */
+      attemptCapTitle: "审查最长时长",
+      attemptCapDescription:
+        "整个审查尝试在此上限处停止：排队等待、执行与发布合计。被该上限停止的审查即终结，不会自动重跑。",
+      attemptCapLabel: "最长时长（毫秒）",
+      /** {min}/{max} 以毫秒与分钟给出；拒绝文案使用同一范围。 */
+      attemptCapRange:
+        "接受范围：{min}–{max} 毫秒（{minMinutes}–{maxMinutes} 分钟）。超出该范围的数值会被拒绝。",
+      attemptCapSave: "保存",
+      attemptCapSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      attemptCapFailed: "修改审查最长时长失败。",
+      /** {value} = 已存储的上限，因此运维知道这是保存值。 */
+      attemptCapCurrentSaved: "下一次审查生效：{value} 毫秒（已保存值）。",
+      /** {value} = 行缺失时的默认值——绝不会显示为已保存值。 */
+      attemptCapCurrentDefault: "下一次审查生效：{value} 毫秒（平台默认值——尚未保存任何值）。",
+      /** 已存储的上限无法读取时不会准入任何审查。 */
+      attemptCapUnreadable:
+        "无法读取已存储的审查最长时长，因此在重新可读或保存新值之前，不会准入任何新审查。",
       /** 流水线在最近 24 小时记录的准入拒绝。 */
       admissionDropsTitle: "准入拒绝（最近 24 小时）",
       admissionDropsDescription:

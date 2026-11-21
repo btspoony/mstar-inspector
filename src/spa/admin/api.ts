@@ -150,6 +150,20 @@ export type RecheckAssignmentConfig = {
 };
 
 /**
+ * The one end-to-end attempt cap. `saved` is true only when a stored row
+ * produced `capMs`; an absent row answers the platform default with
+ * `saved: false`, and the card must not present that as a saved value.
+ */
+export type AttemptCapConfig = {
+  capMs: number;
+  saved: boolean;
+  min: number;
+  max: number;
+  /** No attempt is admitted while the stored row cannot be read. */
+  degraded: boolean;
+};
+
+/**
  * The maintenance window (D20): whether the platform is closed, the Operator's
  * reason and when it closed. `reason` / `since` are `null` whenever the window
  * is open — the store deletes both on disable, so a closed platform never
@@ -205,6 +219,11 @@ export type RuntimeConfig = {
   sweep: SweepConfig | null;
   /** The recheck ask-budget surface; `null` under the same older-Worker rule. */
   recheckAssignment: RecheckAssignmentConfig | null;
+  /**
+   * The one end-to-end attempt cap; `null` under the same older-Worker rule.
+   * Its `saved` flag is what separates a stored value from the default.
+   */
+  attemptCap: AttemptCapConfig | null;
   /** The maintenance window; `null` under the same older-Worker rule. */
   maintenance: MaintenanceConfig | null;
   /** The 24h admission-drop counts; `null` under the same older-Worker rule. */
@@ -283,6 +302,19 @@ function parseRecheckAssignment(row: Json): RecheckAssignmentConfig | null {
   };
 }
 
+function parseAttemptCap(row: Json): AttemptCapConfig | null {
+  const raw = row.attemptCap;
+  if (raw === undefined) return null;
+  const cap = map(raw, "runtime attemptCap");
+  return {
+    capMs: num(cap, "capMs"),
+    saved: bool(cap, "saved"),
+    min: num(cap, "min"),
+    max: num(cap, "max"),
+    degraded: bool(cap, "degraded"),
+  };
+}
+
 /** The maintenance window; absent (older Worker) answers `null`. */
 function parseMaintenance(row: Json): MaintenanceConfig | null {
   const raw = row.maintenance;
@@ -344,6 +376,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     commentClaim: parseCommentClaim(body),
     sweep: parseSweep(body),
     recheckAssignment: parseRecheckAssignment(body),
+    attemptCap: parseAttemptCap(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
@@ -563,6 +596,28 @@ export async function setRecheckAssignmentMaxBytes(
     }
   }
   return { ...stored, maxBytes, degraded: false };
+}
+
+/**
+ * Save the end-to-end attempt cap, answering the value the server stored. The
+ * echo is the stored number only, so `saved: true` rides the landed write; a
+ * 2xx with an unreadable body still landed, so the request value stands in —
+ * the same rule as `setSystemConcurrency`.
+ */
+export async function setAttemptCap(capMs: number, stored: AttemptCapConfig): Promise<AttemptCapConfig> {
+  const answer = await write("PATCH", "/runtime", { attemptCap: { capMs } });
+  if (typeof answer === "object" && answer !== null && "attemptCap" in answer) {
+    const saved = answer.attemptCap;
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "capMs" in saved &&
+      typeof saved.capMs === "number"
+    ) {
+      return { ...stored, capMs: saved.capMs, saved: true, degraded: false };
+    }
+  }
+  return { ...stored, capMs, saved: true, degraded: false };
 }
 
 /**
