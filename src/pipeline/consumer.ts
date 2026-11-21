@@ -901,6 +901,7 @@ async function settleSkippedRow(
       // nothing rather than taking another delivery's run (§7.9).
       attachDeliveryId: payload.attachDeliveryId,
       reason,
+      warn: (detail) => deps.log.warn(payloadIdentityFields(payload), detail),
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -1305,10 +1306,10 @@ export type CheckLifecycleHooks = {
    * §7.9 skip settlement (optional, additive): the delivery ACKs before (or
    * without) a handle — an idempotency hit, a publication-journal hand-off, an
    * in-flight guard rejection, a paused App — so its attached run has nobody to
-   * terminalize it. The lifecycle takes that row and concludes it `neutral`
-   * with the skip reason instead of leaving it to close red at the attach
-   * window (RL-10). `false` means there was nothing to settle; a fault
-   * rejects and the caller logs it.
+   * terminalize it. The lifecycle takes that row and concludes it from the
+   * head's own published result against the App's current gate — `neutral`
+   * with the skip reason only when there is nothing to inherit. `false` means
+   * there was nothing to settle; a fault rejects and the caller logs it.
    */
   settleSkipped?(input: {
     scope: Scope;
@@ -1318,6 +1319,8 @@ export type CheckLifecycleHooks = {
     /** THIS delivery's attach identity — absent means it created no row. */
     attachDeliveryId?: string;
     reason: string;
+    /** One warn when a publication proof exists but cannot be parsed. */
+    warn?: (detail: string) => void;
     updateBudgetMs?: number;
   }): Promise<boolean>;
   /**
@@ -3178,35 +3181,13 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
 }
 
 /**
- * Read the PR's head watermark from the App ledger (migration 0044) — ONE
- * select-only point read on `pull_requests`' UNIQUE key, used to tell a
- * delivery the queue has already overtaken from the newest one.
- *
- * Fail-open by construction: an absent row, a column the row never had, or a
- * storage fault all return `null`, and the caller then reviews normally. A
- * skip is only ever the product of two readable, strictly ordered stamps —
- * never of a missing input.
+ * One PR head watermark answer, read from the App ledger (migration 0044) — the
+ * select-only point read on `pull_requests`' UNIQUE key that tells a delivery
+ * whether the queue has already overtaken it. `null` shas mean the row exists
+ * but no delivery ever stamped it; a `null` answer means the read could not
+ * answer at all.
  */
-async function readPrHead(
-  deps: ProcessDeps,
-  payload: ReviewJobPayload,
-): Promise<{ headSha: string | null; headAt: string | null } | null> {
-  try {
-    return await deps.selectPrHead({
-      targetId: payload.targetId,
-      owner: payload.owner,
-      repo: payload.repo,
-      prNumber: payload.pr_number,
-    });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    deps.log.warn(
-      { ...payloadIdentityFields(payload), app_id: payload.botRef.appId },
-      `PR head watermark read failed (fail-open: reviewing normally): ${detail}`,
-    );
-    return null;
-  }
-}
+type PrHeadAnswer = { headSha: string | null; headAt: string | null };
 
 /**
  * Base64-encode UTF-8 text for the in-image JSON write step (workerd-safe).
@@ -4780,10 +4761,43 @@ async function processMessage(
     // The ledger stamp is a DELIVERY watermark, so a later delivery naming the
     // SAME sha moves it too (migration 0044): expected and harmless here, since
     // the skip also requires the ledger's sha to differ from this payload's.
+    // ONE PR-watermark read per delivery (migration 0044): the supersede skip,
+    // the early dedup key and the hit-time freshness check share it. A FAILED
+    // read is cached with the single warning it earned, so a second site reuses
+    // that outcome instead of re-reading — and re-logging — one root cause. A
+    // readable answer is re-read only by the hit-time check (`fresh`), because
+    // that second read is what catches a push that landed after the key.
+    let watermark: PrHeadAnswer | null | undefined;
+    let watermarkFaulted = false;
+    let watermarkFaultLogged = false;
+    const readWatermark = async (fallback: string, fresh = false): Promise<PrHeadAnswer | null> => {
+      if (watermark === undefined || (fresh && watermark !== null)) {
+        try {
+          watermark = await deps.selectPrHead({
+            targetId: payload.targetId,
+            owner: payload.owner,
+            repo: payload.repo,
+            prNumber: payload.pr_number,
+          });
+        } catch (err) {
+          watermark = null;
+          watermarkFaulted = true;
+          if (!watermarkFaultLogged) {
+            watermarkFaultLogged = true;
+            const detail = err instanceof Error ? err.message : String(err);
+            deps.log.warn(
+              { ...payloadIdentityFields(payload), app_id: payload.botRef.appId },
+              `PR head watermark read failed (${fallback}): ${detail}`,
+            );
+          }
+        }
+      }
+      return watermark;
+    };
     const payloadHeadSha = payload.head_sha;
     const payloadHeadAt = payload.head_at;
     if (payloadHeadSha && payloadHeadAt) {
-      const ledgerHead = await readPrHead(deps, payload);
+      const ledgerHead = await readWatermark("fail-open: reviewing normally");
       // Two readable stamps on both sides, the ledger strictly newer, a
       // different commit, and a queued job for that commit: only then is this
       // delivery a leftover. Missing or unreadable input never skips.
@@ -4991,7 +5005,7 @@ async function processMessage(
         warn: (readerFields, msg) =>
           deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
       });
-      const earlyHeadSha = payload.head_sha || (await readPrHead(deps, payload))?.headSha || null;
+      const earlyHeadSha = payload.head_sha || (await readWatermark("fail-open: reviewing normally"))?.headSha || null;
       if (earlyHeadSha !== null) {
         // §7.7 step 2, moved ahead of the claim: a head this lane already
         // reviewed has nothing to review, so a repeat trigger (the same commit,
@@ -5017,29 +5031,19 @@ async function processMessage(
           head_sha: earlyHeadSha,
           idempotency_key: idemKey(earlyKey),
         };
-        // One read per delivery, and only when a hit needs it: the watermark is
-        // read AGAIN here and compared with the head the hit was keyed on —
-        // never with itself, so a mention keyed on an older watermark still
-        // sees the push that overtook it. Read inline (not via `readPrHead`)
-        // so a fault and an absent row produce the SAME single warning naming
-        // the fallback, instead of two lines for one condition.
+        // One FRESH read per hit — never on a miss — compared with the head the
+        // key was made against, never with itself, so a mention keyed on an
+        // older watermark still sees the push that overtook it. A watermark
+        // read that already FAULTED earlier in this delivery is reused as-is:
+        // one root cause, one warning (see `readWatermark`).
         let liveHeadSha: string | null | undefined;
         const liveHead = async (): Promise<string | null> => {
           if (liveHeadSha === undefined) {
-            try {
-              liveHeadSha =
-                (
-                  await deps.selectPrHead({
-                    targetId: payload.targetId,
-                    owner: payload.owner,
-                    repo: payload.repo,
-                    prNumber: payload.pr_number,
-                  })
-                )?.headSha ?? null;
-            } catch {
-              liveHeadSha = null;
-            }
-            if (liveHeadSha === null) {
+            const read = await readWatermark("ack the keyed head now, do not re-review", true);
+            liveHeadSha = read?.headSha ?? null;
+            // An ANSWER without a head (no ledger row) names the fallback here;
+            // a fault already logged its own single line, once per delivery.
+            if (!watermarkFaulted && liveHeadSha === null) {
               deps.log.warn(
                 earlyFields,
                 "PR head watermark unreadable — ack the keyed head now, do not re-review",

@@ -3003,6 +3003,58 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     expect(row.desired).toBe("failure");
   });
 
+  test("a malformed proof falls back to the reviews projection — one warning, never a throw", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The publication row exists but its proof cannot be parsed. The settlement
+    // must fall back to the projection (which carries the failing gate) instead
+    // of throwing into the caller's catch, which would leave the run to the
+    // recovery lane.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('broken-proof', ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', '{not json', 1, 'done', ?, ?)`,
+      )
+      .run(APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, T0, T0);
+    seedHeadReview(db, "needs fixes", 40);
+    const fake = settlingFake();
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
+    const warnings: string[] = [];
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    expect(
+      await lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        attachDeliveryId: deliveryId,
+        reason: "already reviewed for this head",
+        warn: (detail) => warnings.push(detail),
+      }),
+    ).toBe(true);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE),
+    );
+    // ONE warning, naming the read that failed.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("publication proof unreadable");
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.desired).toBe("failure");
+  });
+
   test("a confirmed publication without a reviews row still settles the gate result", async () => {
     const db = await seededDb();
     CLOCK = T0;

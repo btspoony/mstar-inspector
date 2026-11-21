@@ -1623,6 +1623,12 @@ export type CheckLifecycle = {
     attachDeliveryId?: string;
     /** Why the delivery was skipped — the `neutral` summary names it. */
     reason: string;
+    /**
+     * One warn when the publication proof exists but cannot be parsed and the
+     * settlement falls back to the persisted review. Never a throw: an omitted
+     * hook just drops the line.
+     */
+    warn?: (detail: string) => void;
     /** The operator-configured bound on the one terminal `checks.update`. */
     updateBudgetMs?: number;
   }): Promise<boolean>;
@@ -2197,7 +2203,17 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // success when it meets the gate, failure when it does not). `neutral` is
       // only the skip with nothing to inherit: no proof and no readable review,
       // an unreadable gate, or a score neither carries.
-      const proof = await readPublicationProof(deps.db, { scope: input.scope, headSha: input.headSha });
+      let proof: PublicationProof | null = null;
+      try {
+        proof = await readPublicationProof(deps.db, { scope: input.scope, headSha: input.headSha });
+      } catch (err) {
+        // A row whose proof cannot be parsed is UNREADABLE, exactly like a
+        // missing one: the projection below is the fallback and one warn names
+        // the read that failed. A parse fault must never escape a settlement —
+        // the caller's catch would leave the run to the recovery lane.
+        const detail = err instanceof Error ? err.message : String(err);
+        input.warn?.(`publication proof unreadable (falling back to the persisted review): ${detail}`);
+      }
       const review =
         (proof === null
           ? null
