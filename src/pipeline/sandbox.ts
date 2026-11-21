@@ -96,9 +96,10 @@ type CommandOpts = {
   timeout?: number;
   /**
    * An ABSOLUTE Unix-ms instant the child must be gone by. When set, `timeout`
-   * is ignored: the remaining window is read INSIDE the DO immediately before
-   * the process starts, so the request queue, the RPC and any marker proof are
-   * all charged to it. A window at or below the kill grace starts nothing.
+   * is ignored: the remaining window is derived inside the CONTAINER's shell
+   * immediately before it starts the bounded command, so the request queue, the
+   * RPC, any marker proof and the DO's own scheduling are all charged to it. A
+   * window at or below the kill grace starts nothing.
    */
   deadlineEpochMs?: number;
   stdin?: string;
@@ -201,18 +202,33 @@ const KILL_GRACE_MS = 5_000;
  * `$1` = the absolute deadline in Unix SECONDS, `$2` = the SIGKILL grace in ms,
  * `$3` = the command. `container.exec`'s relative timeout restarts when the
  * process actually starts, so a host-side number can never be absolute; the
- * wrapper reads `date +%s` immediately before `exec`, and a window at or below
- * the grace exits 124 WITHOUT starting anything.
+ * wrapper reads `date +%s` inside the container and a window at or below the
+ * grace exits 124 WITHOUT starting anything.
+ *
+ * The clock is sampled TWICE, the second time immediately before the exec: a
+ * single early sample can be stale by a container suspension, and a duration
+ * derived from it would let the child outlive the instant on resume. The first
+ * sample still answers the cheap case (a window already spent when the shell
+ * started) without paying the rest of the wrapper.
+ *
+ * Residual (documented in the review-budget deployment gate): a suspension
+ * strictly between the FINAL sample and `exec timeout` still hands the child a
+ * duration computed before the freeze. No shell can close that — it needs a
+ * kernel-side watchdog the platform does not expose — and it is now a window of
+ * a few syscalls rather than the whole request.
  *
  * Exported so the suite can execute the exact wrapper the container runs.
  */
 export const EXEC_DEADLINE_WRAPPER = [
   "deadline_s=$1; grace_ms=$2; shift 2",
-  "now_s=$(date +%s)",
-  // Whole-second clock: one extra second is shaved so SIGKILL still lands at
-  // or before the millisecond deadline, never up to a second after it.
-  "remaining=$((deadline_s - now_s - 1))",
   "grace_s=$((grace_ms / 1000))",
+  "remaining=$((deadline_s - $(date +%s) - 1))",
+  'if [ "$remaining" -le "$grace_s" ]; then exit 124; fi',
+  // Re-sample: the first read may predate a suspension, and the duration the
+  // child is granted must be what is left NOW, not what was left then. The
+  // extra second is shaved so SIGKILL still lands at or before the millisecond
+  // deadline, never up to a second after it.
+  "remaining=$((deadline_s - $(date +%s) - 1))",
   'if [ "$remaining" -le "$grace_s" ]; then exit 124; fi',
   'exec timeout --kill-after=$grace_s "$((remaining - grace_s))" /bin/sh -lc "$1"',
 ].join("; ");

@@ -1,17 +1,22 @@
 /**
  * The review route's durable recovery pass (migration 0083).
  *
- * Two things can be owed after a host is interrupted:
+ * Three things can be owed after a host is interrupted:
  *
  * - an ATTEMPT HANDOFF whose instance creation was never confirmed (`owed`, or
  *   `ambiguous` because the create reply was lost). The pass re-enqueues the
  *   recorded payload; the queue handler reads the handoff row, reuses its
  *   attempt id and re-tries create. A replay is idempotent: an instance that
- *   exists answers "already exists" and is recorded as created, never a second
- *   attempt.
+ *   exists answers "already exists" (and is probed for this attempt's id) and
+ *   is recorded as created, never a second attempt.
+ * - a CONSUMED COMMENT CLAIM still carrying its payload: the host died between
+ *   consuming the claim and writing the handoff, so the claim row is the only
+ *   record left. The pass hands it back to the queue (once — the state
+ *   transition is the fence) and the re-delivery takes the ordinary claim path.
  * - a SUCCESSOR intent a moved head recorded but the immediate send did not
- *   deliver. The pass sends it; the outbox dedupe key (the observed head) means
- *   one moved head can never produce two successor admissions.
+ *   deliver. The pass sends it; the outbox dedupe key (App/target, observed head
+ *   and originating delivery) means one intent can never produce two
+ *   admissions, while an independent origin keeps its own row.
  *
  * `updated_ms` is bumped after a re-enqueue so one sweep cannot hot-loop on the
  * same row; a failed send leaves the clock untouched, so the next pass retries.
@@ -19,9 +24,11 @@
 import type { D1Database, Queue } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
+  listCommentClaimsForRecovery,
   listHandoffsForRecovery,
   listOwedSuccessors,
   markSuccessorDelivered,
+  restoreCommentClaimForRecovery,
   touchAttemptHandoff,
 } from "../store/review-route-store";
 
@@ -57,6 +64,21 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       await touchAttemptHandoff(env.DB, handoff.deliveryKey, nowMs);
     } catch {
       // Stays owed (the clock is untouched); the next pass retries it.
+    }
+  }
+  // A claim whose delivery died before recording anything. The state transition
+  // is the exclusive hand-back (a second pass finds it `queued`), and sending
+  // AFTER it means a failed send is still owned by the comment outbox lane,
+  // which applies that row's own attempt cap.
+  for (const claim of await listCommentClaimsForRecovery(env.DB, {
+    consumedBeforeMs: nowMs - HANDOFF_RECOVERY_AFTER_MS,
+    limit: ROUTE_RECOVERY_LIMIT,
+  })) {
+    try {
+      if (!(await restoreCommentClaimForRecovery(env.DB, claim, nowMs))) continue;
+      await queue.send(claim.payload);
+    } catch {
+      // Already `queued` with its payload: the outbox lane retries it.
     }
   }
 }

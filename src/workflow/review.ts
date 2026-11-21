@@ -35,13 +35,11 @@ import {
 import { MovedHeadError } from "../pipeline/review-attempt";
 import { POST_RUNNER_READ_BUDGET_MS } from "../review-budget";
 import {
-  claimAttemptSettlement,
   deliveryKeyOf,
   markSuccessorDelivered,
   readAttemptHandoff,
   recordSuccessorIntent,
-  successorAttachIdOf,
-  successorDedupeKeyOf,
+  successorIntentOf,
 } from "../store/review-route-store";
 import type { Env } from "../worker/env";
 import type { PipelineEnv } from "../pipeline/review-attempt-execution";
@@ -102,20 +100,20 @@ export async function runReviewAttemptWorkflow(
     if (facts?.runnerStartedAt !== undefined && !facts.runnerReturned) cleanup.unproven = true;
     const moved = movedHeadOf(err);
     // Everything after the paid step is its own durable step: a JavaScript
-    // `catch`/`finally` does not survive an interrupted host.
+    // `catch`/`finally` does not survive an interrupted host. The settlement
+    // step retries ONCE: its first attempt can hit a transient fault, and a
+    // settlement that never runs leaves the Check open forever.
     await step.do(
       "settle-failure",
-      { retries: { limit: 0, delay: 0 }, timeout: "5 minutes" },
+      { retries: { limit: 1, delay: 1 }, timeout: "5 minutes" },
       async () => {
-        // The settle-once mark on the delivery's handoff row: a re-executed
-        // settlement step after a completed one is a no-op. A direct phase
-        // caller (no handoff row) has nothing to dedupe and settles once.
+        // The mark is COMPLETION, written by the settlement itself once its
+        // effects are durable — never an entry claim. Reading it here skips a
+        // settlement that finished; an interruption before it finished leaves
+        // no mark, so this step (or its retry, or a resumed host) settles again.
         const deliveryKey = deliveryKeyOf(ref.payload);
-        if ((await readAttemptHandoff(deps.env.DB, deliveryKey)) !== null) {
-          if (!(await claimAttemptSettlement(deps.env.DB, deliveryKey, Date.now()))) {
-            return { settled: true };
-          }
-        }
+        const handoff = await readAttemptHandoff(deps.env.DB, deliveryKey);
+        if (handoff !== null && handoff.settledMs !== null) return { settled: true };
         await settleAttemptFailure(deps, ref, err, cleanup);
         return { settled: true };
       },
@@ -176,16 +174,12 @@ function movedHeadOf(err: unknown): { headSha: string | null } | null {
  * A moved head does not continue under the frozen identity: the attempt has
  * already settled as skipped, and the head it actually observed is written to
  * the successor OUTBOX — a durable row the route's recovery pass retries — then
- * delivered on a best-effort basis. Admission decides the successor (capacity,
- * dedupe, Check claim); the workflow never mints an attempt those rules never
- * saw. The outbox dedupe key is the observed head, so one moved head can never
- * produce two successor admissions.
+ * delivered on a best-effort basis. The moved head's own settlement
+ * (`settleMovedHead`) writes that row BEFORE it terminalizes the old Check, so
+ * this step only re-records the same intent (idempotent) and sends it.
  *
- * The successor carries only the identity and ordering it actually has: the
- * delivery's own `head_at` when it describes this head (never the current
- * clock, which could outrank a genuinely newer head at admission), the original
- * comment identity (the claim is not re-consumed; `successor_of` says why), and
- * its own explicit Check-attach identity.
+ * Admission decides the successor (capacity, dedupe, Check claim); the workflow
+ * never mints an attempt those rules never saw.
  */
 async function recordSuccessor(
   deps: ProcessDeps,
@@ -201,33 +195,20 @@ async function recordSuccessor(
     );
     return;
   }
-  const dedupeKey = successorDedupeKeyOf({
-    installation_id: ref.payload.installation_id,
-    owner: ref.payload.owner,
-    repo: ref.payload.repo,
-    pr_number: ref.payload.pr_number,
-    headSha: moved.headSha,
-  });
-  const successor: ReviewJobPayload = {
-    ...ref.payload,
-    head_sha: moved.headSha,
-    // Ordering authority: the delivery's own stamp only when it describes the
-    // SAME head. When the observed head differs, we hold no stamp for it, so
-    // the successor carries none — a fabricated "now" could outrank a genuinely
-    // newer head in the admission comparison.
-    head_at: moved.headSha === ref.payload.head_sha ? ref.payload.head_at : undefined,
-    // The comment identity is preserved; the marker tells admission its claim
-    // was already consumed by the skipped attempt.
-    successor_of: deliveryKeyOf(ref.payload),
-    // The successor's own attach identity, stable across outbox retries.
-    attachDeliveryId: successorAttachIdOf(dedupeKey),
-  };
+  const intent = successorIntentOf(ref.payload, moved.headSha);
+  if (intent === null) return;
   // The durable fact first: the outbox row. Even if the send below never
-  // happens, the recovery pass delivers it.
-  await recordSuccessorIntent(deps.env.DB, { dedupeKey, payload: successor, nowMs: Date.now() });
+  // happens, the recovery pass delivers it. The payload SENT is the stored one:
+  // a concurrent writer of the same intent wins, and its payload is what
+  // admission must see — never a locally rebuilt variant beside it.
+  const stored = await recordSuccessorIntent(deps.env.DB, {
+    dedupeKey: intent.dedupeKey,
+    payload: intent.payload,
+    nowMs: Date.now(),
+  });
   try {
-    await enqueueSuccessor(successor);
-    await markSuccessorDelivered(deps.env.DB, dedupeKey, Date.now());
+    await enqueueSuccessor(stored);
+    await markSuccessorDelivered(deps.env.DB, intent.dedupeKey, Date.now());
     deps.log.warn(
       { ...fields, event: "review_moved_head_successor", head_sha: moved.headSha },
       "moved head settled as skipped — the observed head was re-admitted so a new attempt owns it",

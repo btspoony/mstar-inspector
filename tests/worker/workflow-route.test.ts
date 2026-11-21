@@ -31,7 +31,7 @@ import {
   readAttemptHandoff,
   recordSuccessorIntent,
   reserveAttemptHandoff,
-  successorDedupeKeyOf,
+  successorIntentOf,
   type AttemptHandoff,
 } from "../../src/store/review-route-store";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
@@ -305,23 +305,18 @@ describe("review route — every handoff is a durable record", () => {
   test("a successor is an outbox row: one per observed head, delivered once, retried by the recovery pass", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
-    const successorPayload: ReviewJobPayload = {
-      ...payload,
-      head_sha: "feedfacefeedfacefeedfacefeedfacefeedface",
-      successor_of: deliveryKeyOf(payload),
-      attachDeliveryId: "successor:test",
-    };
-    const dedupeKey = successorDedupeKeyOf({
-      installation_id: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      pr_number: payload.pr_number,
-      headSha: successorPayload.head_sha!,
-    });
+    const movedHeadSha = "feedfacefeedfacefeedfacefeedfacefeedface";
+    const intent = successorIntentOf(payload, movedHeadSha)!;
 
-    // Two records of the same moved head collapse to one outbox row.
-    await recordSuccessorIntent(db as never, { dedupeKey, payload: successorPayload, nowMs: 1 });
-    await recordSuccessorIntent(db as never, { dedupeKey, payload: successorPayload, nowMs: 2 });
+    // Two records of the same intent collapse to one outbox row, and the
+    // sender is handed the STORED payload, never a locally rebuilt variant.
+    await recordSuccessorIntent(db as never, { dedupeKey: intent.dedupeKey, payload: intent.payload, nowMs: 1 });
+    const stored = await recordSuccessorIntent(db as never, {
+      dedupeKey: intent.dedupeKey,
+      payload: { ...intent.payload, attachDeliveryId: "a different local build" },
+      nowMs: 2,
+    });
+    expect(stored.attachDeliveryId).toBe(intent.payload.attachDeliveryId);
     expect(await listOwedSuccessors(db as never, 10)).toHaveLength(1);
 
     const sent: ReviewJobPayload[] = [];
@@ -335,7 +330,7 @@ describe("review route — every handoff is a durable record", () => {
     };
     await reconcileReviewRoute(env, 3);
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.head_sha).toBe(successorPayload.head_sha);
+    expect(sent[0]!.head_sha).toBe(movedHeadSha);
     // Delivered rows are not re-sent.
     expect(await listOwedSuccessors(db as never, 10)).toHaveLength(0);
     await reconcileReviewRoute(env, 4);

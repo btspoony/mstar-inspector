@@ -63,6 +63,12 @@ import {
   recordTerminalizeOutcome,
 } from "../store/review-checks";
 import {
+  deliveryKeyOf,
+  markAttemptSettled,
+  recordSuccessorIntent,
+  successorIntentOf,
+} from "../store/review-route-store";
+import {
   applyPublishedLifecycle,
   claimPublication,
   countRecheckableFindings,
@@ -3117,6 +3123,21 @@ async function settleMovedHead(
   frozenKey: string,
   observedKey: string,
 ): Promise<never> {
+  // THE OUTBOX ROW PRECEDES THE SETTLEMENT. This attempt is about to conclude
+  // its Check as skipped, and once that is done nothing else records the head
+  // that displaced it — an interruption below would leave a head with no review
+  // and no record of what was owed. The intent is written first (idempotent, so
+  // a retry writes the same row), and a failure to write it aborts the
+  // settlement: the delivery retries and detects the moved head again, instead
+  // of terminalizing a run whose successor was never recorded.
+  const intent = successorIntentOf(ref.payload, headSha);
+  if (intent !== null) {
+    await recordSuccessorIntent(deps.env.DB, {
+      dedupeKey: intent.dedupeKey,
+      payload: intent.payload,
+      nowMs: Date.now(),
+    });
+  }
   await check.terminalize(null, "skipped", headSha);
   // A skip-settlement fault must not mask the moved head: the attempt is over
   // either way, and the error below is what starts the new one.
@@ -5434,11 +5455,32 @@ export async function settleAttemptFailure(
   const failure = thrown instanceof AttemptPhaseError ? thrown : undefined;
   const facts = failure?.facts;
   const err = failure?.cause ?? thrown;
+  /**
+   * The settle-once mark is written HERE, at the settlement's own completion,
+   * never at its entry: a host interrupted mid-settlement leaves the mark
+   * unset, so the next execution settles again. It is best-effort — a lost mark
+   * only means a replay settles twice, which the settlement already tolerates
+   * (a duplicate event row, never a second terminal claim) — and a delivery with
+   * no handoff row (a direct phase caller) matches no row.
+   */
+  const markSettled = async (): Promise<void> => {
+    try {
+      await markAttemptSettled(deps.env.DB, deliveryKeyOf(payload), Date.now());
+    } catch (markErr) {
+      deps.log.warn(
+        { ...payloadIdentityFields(payload), attempt_id: attemptId },
+        `settle-once mark write failed — a replay will settle again: ${markErr instanceof Error ? markErr.message : String(markErr)}`,
+      );
+    }
+  };
   // A moved head is a SKIP, not a failure: the attempt already concluded its
   // Check as skipped and wrote its skip row, so it acks here — no failure row,
   // no pre-publication settlement, no retry. (Quiet instead of rethrowing: the
   // queue's next delivery would mint a fresh attempt id and could pay twice.)
-  if (err instanceof MovedHeadError) return { kind: "ok" };
+  if (err instanceof MovedHeadError) {
+    await markSettled();
+    return { kind: "ok" };
+  }
   const progress: ReviewAttemptProgress = {
     failureStage: facts?.stage ?? "pipeline",
     secretValues: facts?.secretValues ?? [],
@@ -5595,6 +5637,7 @@ export async function settleAttemptFailure(
       }
       // The row is durable: now the Check may carry the stop's conclusion.
     await check?.terminalize(null, "budget-exhausted", undefined, budgetOutcome);
+    await markSettled();
     return { kind: "budget-exhausted", outcome: budgetOutcome };
   }
 
@@ -5753,6 +5796,9 @@ export async function settleAttemptFailure(
       );
     }
   }
+  // Every durable effect is done; the mark now records COMPLETION, and only
+  // then does the attempt's own error propagate.
+  await markSettled();
   throw err;
 }
 /**

@@ -72,22 +72,77 @@ export function deliveryKeyOf(payload: ReviewJobPayload): string {
   ]);
 }
 
-/** One moved head, one successor: the observed head's identity is the dedupe key. */
-export function successorDedupeKeyOf(input: {
+/**
+ * One moved head of ONE origin, one successor. The key names the owner (App and
+ * target), the observed head, and the delivery whose attempt observed it, so:
+ * a replay of the SAME intent (a re-executed step, the immediate send racing
+ * the reconciler) collapses into one row; an independent App/target observing
+ * that head keeps its own row instead of being silently refused by another
+ * owner's; and a later genuine recurrence of the head is a new intent, not a
+ * row that was delivered once and can never be sent again.
+ */
+function successorDedupeKeyOf(input: {
+  appId: string;
+  targetId: string;
   installation_id: number;
   owner: string;
   repo: string;
   pr_number: number;
   headSha: string;
+  origin: string;
 }): string {
   return JSON.stringify([
     "successor",
+    input.appId,
+    input.targetId,
     input.installation_id,
     input.owner.toLowerCase(),
     input.repo.toLowerCase(),
     input.pr_number,
     input.headSha,
+    input.origin,
   ]);
+}
+
+/**
+ * The successor intent for a moved head: the outbox row's identity plus the
+ * delivery admission will re-run. Built BEFORE the settlement that
+ * terminalizes the old Check (the record precedes the effect) and rebuilt
+ * identically by every replay, because it reads only durable fields.
+ */
+export function successorIntentOf(
+  payload: ReviewJobPayload,
+  movedHeadSha: string | null,
+): { dedupeKey: string; payload: ReviewJobPayload } | null {
+  if (movedHeadSha === null) return null;
+  const origin = deliveryKeyOf(payload);
+  const dedupeKey = successorDedupeKeyOf({
+    appId: payload.botRef.appId,
+    targetId: payload.targetId,
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+    headSha: movedHeadSha,
+    origin,
+  });
+  return {
+    dedupeKey,
+    payload: {
+      ...payload,
+      head_sha: movedHeadSha,
+      // Ordering authority: the delivery's own stamp only when it describes the
+      // SAME head. When the observed head differs, we hold no stamp for it, so
+      // the successor carries none — a fabricated "now" could outrank a
+      // genuinely newer head in the admission comparison.
+      head_at: movedHeadSha === payload.head_sha ? payload.head_at : undefined,
+      // The comment identity is preserved; the marker tells admission its claim
+      // was already consumed by the skipped attempt.
+      successor_of: origin,
+      // The successor's own attach identity, stable across outbox retries.
+      attachDeliveryId: successorAttachIdOf(dedupeKey),
+    },
+  };
 }
 
 /**
@@ -217,11 +272,14 @@ export async function touchAttemptHandoff(db: D1Like, deliveryKey: string, nowMs
 }
 
 /**
- * The settle-once mark. `true` means THIS caller took it and must run the
- * settlement; `false` means a previous execution already completed it (or is
- * completing it), so the settlement step returns without settling again.
+ * Complete the settle-once mark. It is written only AFTER the settlement's
+ * effects (failure row, Check conclusion, claim stamp) are done, so the mark
+ * proves COMPLETION: an interruption before this line leaves the settlement
+ * replayable instead of skipped. `true` means this caller wrote it; `false`
+ * means another execution got there first — the effects it already made are
+ * the settlement, and there is nothing to undo.
  */
-export async function claimAttemptSettlement(db: D1Like, deliveryKey: string, nowMs: number): Promise<boolean> {
+export async function markAttemptSettled(db: D1Like, deliveryKey: string, nowMs: number): Promise<boolean> {
   const written = await db
     .prepare(
       `UPDATE review_attempt_handoffs SET settled_ms = ?
@@ -254,11 +312,17 @@ export async function listHandoffsForRecovery(
   return rows.results.map(toHandoff);
 }
 
-/** Record the moved head's successor intent. Idempotent: one row per observed head. */
+/**
+ * Record the moved head's successor intent. Idempotent: one row per intent.
+ * Returns the row's STORED payload — the winner's — because that is what
+ * admission must be handed: a second caller that builds a different payload for
+ * the same intent (another `successor_of`, another attach id) must not send its
+ * own version beside the recorded one.
+ */
 export async function recordSuccessorIntent(
   db: D1Like,
   input: { dedupeKey: string; payload: ReviewJobPayload; nowMs: number },
-): Promise<void> {
+): Promise<ReviewJobPayload> {
   await db
     .prepare(
       `INSERT INTO review_successors (dedupe_key, payload_json, state, created_ms)
@@ -267,6 +331,14 @@ export async function recordSuccessorIntent(
     )
     .bind(input.dedupeKey, JSON.stringify(input.payload), input.nowMs)
     .run();
+  const row = await db
+    .prepare(`SELECT payload_json FROM review_successors WHERE dedupe_key = ?`)
+    .bind(input.dedupeKey)
+    .first<{ payload_json: string }>();
+  if (row === null) {
+    throw new Error(`review successor intent for ${input.dedupeKey} disappeared after its insert`);
+  }
+  return JSON.parse(row.payload_json) as ReviewJobPayload;
 }
 
 /** Successor intents still owed a queue send. */
@@ -295,5 +367,105 @@ export async function markSuccessorDelivered(db: D1Like, dedupeKey: string, nowM
         WHERE dedupe_key = ? AND state = 'owed'`,
     )
     .bind(nowMs, dedupeKey)
+    .run();
+}
+
+/**
+ * The outbox identity of a delivery the guard gave up on for good. One dropped
+ * delivery is owed ONE retry — the dedupe key is the delivery itself, so the
+ * retry it produces, if it is dropped too, records nothing new and the loop
+ * ends after that single second chance.
+ */
+export function guardDropDedupeKeyOf(payload: ReviewJobPayload): string {
+  return JSON.stringify(["guard-drop", deliveryKeyOf(payload)]);
+}
+
+/** One consumed comment claim whose delivery died before it recorded anything. */
+export type CommentClaimRecovery = {
+  installation_id: number;
+  owner: string;
+  repo: string;
+  pr_number: number;
+  comment_id: number;
+  payload: ReviewJobPayload;
+};
+
+/**
+ * Consumed comment claims that STILL CARRY their payload. The consumer clears
+ * the payload once the delivery's handoff row exists (or once an ordinary
+ * failure ends the delivery), so a row that keeps it is a delivery that died
+ * between consuming the claim and writing the handoff — the one window the
+ * claim row itself has to record.
+ */
+export async function listCommentClaimsForRecovery(
+  db: D1Like,
+  input: { consumedBeforeMs: number; limit: number },
+): Promise<CommentClaimRecovery[]> {
+  const rows = await db
+    .prepare(
+      `SELECT installation_id, owner, repo, pr_number, comment_id, payload_json
+         FROM comment_trigger_claims
+        WHERE state = 'consumed' AND payload_json IS NOT NULL AND consumed_ms <= ?
+        ORDER BY consumed_ms
+        LIMIT ?`,
+    )
+    .bind(input.consumedBeforeMs, input.limit)
+    .all<{
+      installation_id: number;
+      owner: string;
+      repo: string;
+      pr_number: number;
+      comment_id: number;
+      payload_json: string;
+    }>();
+  return rows.results.map((row) => ({
+    installation_id: row.installation_id,
+    owner: row.owner,
+    repo: row.repo,
+    pr_number: row.pr_number,
+    comment_id: row.comment_id,
+    payload: JSON.parse(row.payload_json) as ReviewJobPayload,
+  }));
+}
+
+/**
+ * Hand one orphaned claim back to the queue. The conditional update IS the
+ * hand-back: only one recovery pass can move the row out of `consumed`, so a
+ * second pass sends nothing. The row goes back to `queued` (not to a new
+ * state) so the re-delivery takes the ordinary claim path, and so a failed send
+ * is retried by the existing comment outbox lane, which owns the attempt cap.
+ */
+export async function restoreCommentClaimForRecovery(
+  db: D1Like,
+  claim: CommentClaimRecovery,
+  nowMs: number,
+): Promise<boolean> {
+  const written = await db
+    .prepare(
+      `UPDATE comment_trigger_claims
+          SET state = 'queued', consumed_ms = NULL, queued_ms = ?
+        WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+          AND state = 'consumed' AND payload_json IS NOT NULL`,
+    )
+    .bind(nowMs, claim.installation_id, claim.owner, claim.repo, claim.pr_number, claim.comment_id)
+    .run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * Drop a comment claim's payload once the delivery no longer needs the claim
+ * row to carry it: the handoff row now owns recovery, or an ordinary failure
+ * ended the delivery (a comment review is re-run by posting a new comment).
+ * Best-effort by contract — a fault only leaves the row recoverable.
+ */
+export async function clearCommentClaimPayload(db: D1Like, payload: ReviewJobPayload): Promise<void> {
+  if (payload.comment_id === undefined) return;
+  await db
+    .prepare(
+      `UPDATE comment_trigger_claims SET payload_json = NULL
+        WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+          AND state = 'consumed'`,
+    )
+    .bind(payload.installation_id, payload.owner, payload.repo, payload.pr_number, payload.comment_id)
     .run();
 }

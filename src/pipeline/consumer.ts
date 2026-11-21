@@ -92,9 +92,12 @@
 import type { Message, MessageBatch, Workflow } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
+  clearCommentClaimPayload,
   deliveryKeyOf,
+  guardDropDedupeKeyOf,
   markAttemptHandoff,
   readAttemptHandoff,
+  recordSuccessorIntent,
   reserveAttemptHandoff,
 } from "../store/review-route-store";
 import {
@@ -168,6 +171,7 @@ import { createCheckLifecycle } from "./checks";
 import {
   acquireInflight,
   describeInflightError,
+  extendInflightTtl,
   releaseInflight,
   type InflightKey,
 } from "../store/inflight-store";
@@ -441,35 +445,42 @@ async function handleGuardHeld(
   const delaySeconds = delays[message.attempts - 1];
   let retryAllowed = delaySeconds !== undefined;
   let restoreFailure: string | null = null;
-  if (delaySeconds !== undefined) {
-    if (commentClaimConsumed && message.body.comment_id !== undefined) {
-      const payload = message.body;
-      try {
-        // Other deliveries cannot consume a consumed row; only this delivery can restore it.
-        await deps.env.DB.prepare(
-          `UPDATE comment_trigger_claims
-              SET state = 'queued', payload_json = ?, consumed_ms = NULL, queued_ms = ?
-            WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
-              AND state = 'consumed'`,
+  /**
+   * Hand the comment claim back so a LATER delivery of this message can run:
+   * the scheduled retry below, or the outbox retry the terminal drop records.
+   * Other deliveries cannot consume a consumed row; only this delivery can
+   * restore it.
+   */
+  const restoreClaimForRetry = async (queuedMs: number): Promise<void> => {
+    if (!commentClaimConsumed || message.body.comment_id === undefined) return;
+    const payload = message.body;
+    try {
+      await deps.env.DB.prepare(
+        `UPDATE comment_trigger_claims
+            SET state = 'queued', payload_json = ?, consumed_ms = NULL, queued_ms = ?
+          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+            AND state = 'consumed'`,
+      )
+        .bind(
+          JSON.stringify(payload),
+          queuedMs,
+          payload.installation_id,
+          payload.owner,
+          payload.repo,
+          payload.pr_number,
+          payload.comment_id,
         )
-          .bind(
-            JSON.stringify(payload),
-            // Let the scheduled delivery arrive before the outbox recovery window starts.
-            Date.now() + delaySeconds * 1000,
-            payload.installation_id,
-            payload.owner,
-            payload.repo,
-            payload.pr_number,
-            payload.comment_id,
-          )
-          .run();
-      } catch (err) {
-        retryAllowed = false;
-        const detail = err instanceof Error ? err.message : String(err);
-        restoreFailure = `comment claim restore failed: ${detail}`;
-        deps.log.warn(fields, `comment claim restore failed — dropping through terminal handling: ${detail}`);
-      }
+        .run();
+    } catch (err) {
+      retryAllowed = false;
+      const detail = err instanceof Error ? err.message : String(err);
+      restoreFailure = `comment claim restore failed: ${detail}`;
+      deps.log.warn(fields, `comment claim restore failed — dropping through terminal handling: ${detail}`);
     }
+  };
+  if (delaySeconds !== undefined) {
+    // Let the scheduled delivery arrive before the outbox recovery window starts.
+    await restoreClaimForRetry(Date.now() + delaySeconds * 1000);
   }
   if (retryAllowed) {
     // Say WHY nothing has started: the attach already put a `queued` run on
@@ -558,6 +569,26 @@ async function handleGuardHeld(
   // This is the real drop: the run attached for this message will never
   // execute, so it is settled `neutral` with the refusal named. Best-effort;
   // the ack and the drop record are unaffected.
+  // A drop is not the end of the route's obligation: the review this delivery
+  // named is still owed, and the guard can release later than the fixed ladder
+  // (an operator cap may exceed it). The comment claim is handed back in the
+  // same breath — the re-delivery this records would otherwise be refused by
+  // the claim this delivery consumed — and the retry is written to the
+  // successor outbox, so ack-and-forget never happens: the reconciler
+  // re-enqueues it after the guard has had time to release. The dedupe key is
+  // the delivery itself: a second drop of the same delivery records nothing, so
+  // the recovery is a single second chance, not a loop.
+  await restoreClaimForRetry(Date.now());
+  try {
+    await recordSuccessorIntent(deps.env.DB, {
+      dedupeKey: guardDropDedupeKeyOf(message.body),
+      payload: message.body,
+      nowMs: Date.now(),
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `dropped delivery could not be recorded as owed (the drop record below is its trace): ${detail}`);
+  }
   await settleSkippedRow(deps, message.body, message.body.head_sha, `review admission refused: ${admission.reason}`);
   return deps.failureStore
     .record({
@@ -1130,9 +1161,11 @@ export class WorkflowCreateFailedError extends Error {
 }
 
 /**
- * A Workflow `create` whose reply was lost. The instance may exist, so the
- * delivery is ACKED and never retried: a redelivery mints a fresh attempt id
- * and could pay twice. The handoff row stays for recovery.
+ * A Workflow `create` whose outcome is not confirmed. The instance MAY exist,
+ * so the delivery is ACKED and never retried in place: a queue retry could pay
+ * twice. The handoff row stays `ambiguous` and the delivery's OWN recorded
+ * attempt id is what the route's recovery pass replays, so a create that did
+ * land is never duplicated by a second attempt id.
  */
 export class WorkflowCreateAmbiguousError extends Error {
   constructor(
@@ -1149,16 +1182,19 @@ export class WorkflowCreateAmbiguousError extends Error {
 /**
  * Read a create rejection's class. Only a genuinely unknown outcome may be
  * acked as ambiguous:
- * - "already exists" means the instance IS there (our own redelivery) → exists;
- * - an RPC status in the 4xx range (except the retryable 408/425/429) and a
- *   `TypeError` (a binding/class/validation failure, thrown before the call
- *   left this isolate) are DEFINITE;
- * - anything else — no status, a transport error, a 5xx — is unknown.
+ * - an RPC status in the 4xx range (except the retryable 408/425/429) is the
+ *   binding answering for THIS request → DEFINITE;
+ * - anything else — no status, a transport error, a 5xx, a `TypeError` — is
+ *   UNKNOWN: the catch surrounds an async call, so a TypeError can be raised
+ *   while processing a reply the platform already accepted, and the error type
+ *   carries no acceptance boundary.
+ *
+ * "already exists" is NOT a class here: the message names no instance, so it
+ * proves nothing about THIS attempt's id. Both the unknown class and that
+ * message are resolved by one fact only — reading this attempt's own instance
+ * back from the platform (see `attemptInstanceExists`).
  */
-function classifyWorkflowCreateFailure(err: unknown): "exists" | "definite" | "unknown" {
-  const message = err instanceof Error ? err.message : String(err);
-  if (/already exists/i.test(message)) return "exists";
-  if (err instanceof TypeError) return "definite";
+function classifyWorkflowCreateFailure(err: unknown): "definite" | "unknown" {
   const status = (err as { status?: unknown } | null)?.status;
   if (
     typeof status === "number" &&
@@ -1174,6 +1210,20 @@ function classifyWorkflowCreateFailure(err: unknown): "exists" | "definite" | "u
 }
 
 /**
+ * Does an instance with THIS attempt's id exist? The platform's own answer for
+ * that id — never an error message, which cannot name one.
+ */
+async function attemptInstanceExists(workflow: Workflow<AttemptRef>, attemptId: string): Promise<boolean> {
+  try {
+    const handle = await workflow.get(attemptId);
+    await handle.status();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Create the attempt's Workflow instance. Instance id = attempt id, so a replay
  * of the same admitted attempt addresses the same instance and a lost reply
  * cannot create a second one.
@@ -1186,9 +1236,14 @@ export async function createWorkflowInstance(
     await workflow.create({ id: ref.attemptId, params: ref });
     return "created";
   } catch (err) {
-    const verdict = classifyWorkflowCreateFailure(err);
-    if (verdict === "exists") return "exists";
-    if (verdict === "definite") throw new WorkflowCreateFailedError(ref.attemptId, err);
+    if (classifyWorkflowCreateFailure(err) === "definite") {
+      throw new WorkflowCreateFailedError(ref.attemptId, err);
+    }
+    // An unclassified rejection (a lost reply, a transport fault, "already
+    // exists", a TypeError) is resolved by finding the instance itself: if this
+    // attempt's id is already there, the create landed; otherwise the outcome
+    // stays unknown and is acked without a retry.
+    if (await attemptInstanceExists(workflow, ref.attemptId)) return "exists";
     throw new WorkflowCreateAmbiguousError(ref.attemptId, err);
   }
 }
@@ -1504,6 +1559,10 @@ async function processMessage(
   // Set once the attempt owns its body: its catch has already recorded,
   // terminalized and released, so this invocation must only propagate.
   let handedOff = false;
+  // Set once this delivery's handoff row owns recovery. The comment claim's
+  // payload is cleared at that point; every other outcome clears it in the
+  // finally, and an interrupted host leaves it for the recovery pass.
+  let handoffRecorded = false;
   // §7.10 Check budgets, filled by the ONE per-message runtime read (after the
   // level resolves, before the begin hook). Every terminal path runs after that
   // read; a path that somehow reached one without it is still bounded by the
@@ -1542,23 +1601,25 @@ async function processMessage(
     // review is re-run by posting a new comment (a new id), never by replaying
     // this one (the documented accepted limit).
     //
-    // The payload is cleared in the same statement: it is only needed while
-    // `queued` (the outbox re-send), and the row itself lives on as the
-    // tombstone that refuses every later delivery of this comment.
+    // The payload is KEPT at consumption and cleared only once a durable record
+    // owns recovery (the handoff row) or an ordinary failure ends the delivery:
+    // if the host dies in between, this row is the only thing left, and the
+    // route's recovery pass hands it back to the queue. A claim that is already
+    // consumed by an ATTEMPT THIS DELIVERY IS REPLAYING is not a second claim —
+    // the handoff row (and its attempt id) is that attempt's at-most-once fence.
     if (payload.comment_id !== undefined) {
-      if (payload.successor_of !== undefined) {
-        // A successor re-admitted after a moved head. The comment claim that
-        // produced the original job is already `consumed`, and the successor is
-        // not a replay of that comment: its at-most-once guarantee is the
-        // outbox dedupe key (the observed head) plus this delivery's own
-        // handoff row, so the identity is preserved without a second claim.
+      if (payload.successor_of !== undefined || previousHandoff !== null) {
+        // A successor re-admitted after a moved head (its comment claim was
+        // consumed by the skipped attempt, and the outbox key is its
+        // at-most-once), or a replay of a delivery whose handoff row already
+        // records this attempt: neither consumes a SECOND claim.
         deps.log.info(
-          { ...payloadIdentityFields(payload) },
-          "successor delivery — the comment claim was consumed by the skipped attempt; the outbox key is its at-most-once",
+          { ...payloadIdentityFields(payload), attempt_id: attemptId },
+          "replay of a recorded attempt — the comment claim was consumed before the handoff row; the handoff is its at-most-once",
         );
       } else {
         const claimed = await deps.env.DB.prepare(
-          `UPDATE comment_trigger_claims SET state = 'consumed', consumed_ms = ?, payload_json = NULL
+          `UPDATE comment_trigger_claims SET state = 'consumed', consumed_ms = ?
             WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
               AND state = 'queued'`,
         )
@@ -2099,6 +2160,32 @@ async function processMessage(
       );
       return { kind: "routed" };
     }
+    // The row now owns recovery, so the comment claim no longer has to carry
+    // the payload for the host that died before this point.
+    if (commentClaimConsumed) {
+      await clearCommentClaimPayload(deps.env.DB, payload).catch((err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          { ...(baseFields ?? payloadIdentityFields(payload)), attempt_id: attemptId },
+          `comment claim payload clear failed — the row stays recoverable: ${detail}`,
+        );
+      });
+    }
+    handoffRecorded = true;
+    // ONE SETTLED INSTANT: the deadline above was a CANDIDATE for a row that had
+    // not been anchored yet, and a legacy row anchored concurrently by another
+    // delivery settles on ITS first writer. This attempt executes under the
+    // row's value, so the admission lease must cover that same instant — a
+    // shorter candidate must never expire while the attempt is still allowed
+    // to run.
+    if (handoff.deadlineMs !== null && handoff.deadlineMs !== deadlineMs) {
+      await extendInflightTtl(
+        deps.env.DB,
+        inflightKey,
+        attemptId,
+        reviewGuardTtlForDeadline(handoff.deadlineMs, Date.now(), level),
+      );
+    }
     const attemptRef: AttemptRef = {
       attemptId,
       payload,
@@ -2234,6 +2321,21 @@ async function processMessage(
     }
     throw err;
   } finally {
+    // The comment claim carries its payload only while this delivery may still
+    // need it recovered: an interrupted host runs no finally, so the row it
+    // leaves behind is exactly the window the recovery pass restores. Every
+    // outcome that REACHES here has ended — a handoff row owns the attempt, or
+    // the delivery is done — so the payload is dropped (a `queued` row restored
+    // by the guard path is untouched: it owns its own retry).
+    if (commentClaimConsumed && !handoffRecorded) {
+      await clearCommentClaimPayload(deps.env.DB, payload).catch((err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+          `comment claim payload clear failed — the recovery pass may replay this delivery: ${detail}`,
+        );
+      });
+    }
     // The row is released unless the attempt took ownership of it (the handoff
     // clears the local). Scoped to THIS attempt's id, so an older attempt can
     // never delete a row a newer one reclaimed after expiry; a release failure

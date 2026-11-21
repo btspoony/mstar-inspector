@@ -108,18 +108,34 @@ export type AcquireInflightOptions = {
 };
 
 /**
- * Acquire the PR's lock and a capacity slot in ONE conditional insert.
+ * A `review_launches` row that is `launched` with NO outcome is the ONE unknown
+ * paid state (migration 0082): the exec was sent and nothing says it stopped.
+ * It holds the PR and its capacity PAST the lease, because a lease window is
+ * not a liveness observation. The readiness predicate is repeated in the
+ * acquire, both cap counts and the refusal read so all four agree on it.
+ */
+const PAID_STATE_UNKNOWN = `EXISTS (SELECT 1 FROM review_launches l
+           WHERE l.attempt_id = r.attempt_id
+             AND l.state = 'launched' AND l.result_outcome IS NULL)`;
+
+/**
+ * The PR's lock and a capacity slot in ONE conditional insert.
  *
  * `meta.changes === 1` is the only success signal: it means the anchor row was
  * new (or its expired predecessor was replaced). `0` means the PR is held, a
  * cap is reached, or the row raced away — disambiguated below.
+ *
+ * An expired row whose paid state is UNKNOWN is not replaceable: expiry only
+ * schedules a check, never a replacement run.
  */
 const ACQUIRE_SQL = `
 INSERT INTO review_inflight
   (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
-WHERE (SELECT COUNT(*) FROM review_inflight WHERE expires_at > ?) < ?
-  AND (SELECT COUNT(*) FROM review_inflight WHERE workspace_id = ? AND expires_at > ?) < ?
+WHERE (SELECT COUNT(*) FROM review_inflight r
+        WHERE r.expires_at > ? OR ${PAID_STATE_UNKNOWN}) < ?
+  AND (SELECT COUNT(*) FROM review_inflight r
+        WHERE r.workspace_id = ? AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) < ?
 ON CONFLICT (installation_id, owner, repo, pr_number) DO UPDATE SET
   workspace_id = excluded.workspace_id,
   attempt_id   = excluded.attempt_id,
@@ -127,20 +143,24 @@ ON CONFLICT (installation_id, owner, repo, pr_number) DO UPDATE SET
   acquired_at  = excluded.acquired_at,
   expires_at   = excluded.expires_at
 WHERE review_inflight.expires_at <= ?
+  AND NOT EXISTS (SELECT 1 FROM review_launches l
+                   WHERE l.attempt_id = review_inflight.attempt_id
+                     AND l.state = 'launched' AND l.result_outcome IS NULL)
 `;
 
 /** The one follow-up read a zero-row acquire owes (diagnostic only). */
 const REFUSAL_SQL = `
 SELECT
-  (SELECT COUNT(*) FROM review_inflight
-    WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-      AND expires_at > ?) AS held,
-  (SELECT head_sha FROM review_inflight
-    WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-      AND expires_at > ?) AS held_head_sha,
-  (SELECT COUNT(*) FROM review_inflight WHERE expires_at > ?) AS total,
-  (SELECT COUNT(*) FROM review_inflight
-    WHERE workspace_id = ? AND expires_at > ?) AS workspace_total
+  (SELECT COUNT(*) FROM review_inflight r
+    WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?
+      AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) AS held,
+  (SELECT r.head_sha FROM review_inflight r
+    WHERE r.installation_id = ? AND r.owner = ? AND r.repo = ? AND r.pr_number = ?
+      AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) AS held_head_sha,
+  (SELECT COUNT(*) FROM review_inflight r
+    WHERE r.expires_at > ? OR ${PAID_STATE_UNKNOWN}) AS total,
+  (SELECT COUNT(*) FROM review_inflight r
+    WHERE r.workspace_id = ? AND (r.expires_at > ? OR ${PAID_STATE_UNKNOWN})) AS workspace_total
 `;
 
 const RELEASE_SQL = `
@@ -248,6 +268,33 @@ export async function acquireInflight(
       cause: { kind: "fault", detail: err instanceof Error ? err.message : String(err) },
     };
   }
+}
+
+/**
+ * Extend the lease of the row THIS attempt wrote (scoped by `attempt_id`, so a
+ * newer owner's row is never touched). Needed when the attempt ends up
+ * executing under a LATER settled instant than the candidate its admission was
+ * sized from: the lease and the attempt's hard stop must cover one value.
+ * Monotonic — an already-longer row is left alone, so a replay never shortens a
+ * lease.
+ */
+export async function extendInflightTtl(
+  db: D1Like,
+  rawKey: InflightKey,
+  attemptId: string,
+  ttlSeconds: number,
+): Promise<void> {
+  const key = normalizeKey(rawKey);
+  const nowMs = Date.now();
+  const expiresAt = isoInstant(nowMs + ttlSeconds * 1000);
+  await db
+    .prepare(
+      `UPDATE review_inflight SET expires_at = ?
+        WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND attempt_id = ?
+          AND expires_at < ?`,
+    )
+    .bind(expiresAt, key.installation_id, key.owner, key.repo, key.pr_number, attemptId, expiresAt)
+    .run();
 }
 
 /**

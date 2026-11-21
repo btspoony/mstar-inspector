@@ -169,22 +169,79 @@ The runner reports, the Worker publishes:
   re-enqueue replays it, and the Check row carries the same instant for the independent reconciler.
   A step that re-derives it, or a redelivery that refreshes it, is a defect.
 
+## Deployment gate — the review route
+
+The Workflow route (`src/workflow/review.ts`, handed off by the queue consumer) is
+wired as the production queue path, and this page is where an operator reads what
+must hold before it carries real deliveries. **Do not enable the route for real
+traffic until every claim below holds with its test.** The route is proven only
+by interruption tests: each one simulates the interruption or the lying signal
+it names, and each one failed against the code before this gate was written
+(except claim 6, which already held and is pinned so a later change cannot
+regress it).
+
+| # | Recovery claim | Test |
+|---|---|---|
+| 1 | A comment delivery whose claim was already consumed is still recoverable: a redelivery that finds an `owed`/`ambiguous`/`failed` handoff reaches create, and an interruption between consuming the claim and writing the handoff leaves a row the reconciler hands back. | `tests/pipeline/route-recovery-handoff.test.ts` — all three cases |
+| 2 | The settle-once mark proves **completion**, not entry: a host killed inside the settlement leaves no mark and the resumed run settles; a completed settlement is not repeated; one transient error is retried. | `tests/pipeline/route-recovery-settlement.test.ts` — all four cases |
+| 3 | The successor outbox row exists **before** the moved-head settlement that terminalizes the old Check, so an interruption leaves an owed row rather than nothing. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-3 cases |
+| 4 | The successor dedupe key fences sends and identifies its owner (App/target, observed head, originating delivery); the stored winning payload is what gets sent; a replay of one intent admits once. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-4 cases |
+| 5 | Error classification carries proof: a `TypeError` is not evidence a create did not land, and "already exists" is not evidence the same instance exists — this attempt's own instance id is read back, or the outcome is unknown. | `tests/pipeline/route-recovery-handoff.test.ts` — all three claim-5 cases |
+| 6 | The paid call cannot start or end past the frozen instant when the request queues or the marker proof takes time: the remaining window is re-derived inside the container, kill grace subtracted. | `tests/pipeline/route-recovery-deadline.test.ts` — both claim-6 cases |
+| 7 | The guard window and the attempt's instant come from **one** settled value, including a legacy row anchored concurrently by two callers. | `tests/pipeline/route-recovery-deadline.test.ts` — the claim-7 case |
+| 8 | A widened guard never ack-and-forgets a queued retry (the drop records the retry the reconciler owes), and while a paid exec's state is unknown the PR and its capacity are not reassigned. | `tests/pipeline/route-recovery-guard.test.ts` — all three cases |
+| 9 | A container suspended between reading its clock and starting the bounded command cannot start the paid command after the deadline (`date` blocked past the instant). | `tests/pipeline/route-recovery-deadline.test.ts` — the claim-9 case |
+
+**What these tests cannot prove, and must be observed on the platform before
+enabling.** The tests own the database, the clock and the command line; they do
+not own Cloudflare's behaviour. Before the route carries real deliveries:
+
+- a Workflow **step** that was interrupted mid-callback re-executes its callback
+  on resume (claims 2 and 3 assume this, and that a completed step's result is
+  not re-run);
+- `step.do` **retries** honour the declared `retries.limit` (claim 2's transient
+  case is a model of that policy, not the platform's implementation);
+- `Workflow.get(id).status()` **rejects** for an id that has no instance
+  (claim 5's proof reads that answer; if it synthesizes a status, the probe
+  confirms nothing);
+- a queue **redelivery** preserves the message body (the delivery key depends on
+  it) and a re-enqueue is at-least-once;
+- the container's shell and GNU `timeout` behave as the image pins them.
+
+**Accepted residual (claim 9).** A suspension strictly between the *final* clock
+sample and `exec timeout` still hands the child a duration computed before the
+freeze. No shell can close that gap — it needs a kernel-side watchdog the
+sandbox SDK does not expose — and it is now a few syscalls wide instead of the
+whole request. The claim-9 test proves the observable half: a stale sample can
+no longer start the paid command after the deadline. If the platform later
+exposes a kernel-side deadline, the wrapper's second sample is what it replaces.
+
 ## Where it lives
 
 - `src/review-budget.ts` — the cap's read and structured warn, the derivation, constants and types
   above.
 - `src/dashboard/runtime-config-store.ts` — the `review.attempt.duration_cap_ms` row's parse, the
   absent-row default and the degraded answer.
-- `src/pipeline/consumer.ts` — freezes `deadlineMs` on the delivery's handoff row at admission.
+- `src/pipeline/consumer.ts` — freezes `deadlineMs` on the delivery's handoff row at admission, extends
+  the lease to that settled value, and records a terminal guard drop as an owed retry.
+- `src/store/review-route-store.ts` — the handoff, settle-once (completion) mark, successor outbox and
+  the comment-claim payload lifecycle the recovery pass replays.
+- `src/pipeline/route-reconcile.ts` — the pass that delivers what an interrupted host left owed:
+  successors, unconfirmed handoffs and orphaned comment claims.
+- `src/workflow/review.ts` — the five durable phases, the settlement step and the successor step.
+- `src/store/inflight-store.ts` — the guard row; an expired row whose paid state is unknown holds the
+  PR and its capacity until a fact says the paid process stopped.
 - `src/pipeline/review-attempt-execution.ts` — derives each phase's windows from that instant and
-  writes it as the Check row's `execution_deadline_ms`.
+  writes it as the Check row's `execution_deadline_ms`; writes the moved-head successor intent before
+  it terminalizes the old Check; marks a settlement complete only at its own end.
 - `src/pipeline/review-attempt.ts` — takes the exec bound after the launch claim, at the last instant
   before the send, and carries it into the container as an absolute epoch.
-- `src/pipeline/sandbox.ts` — hands the epoch to the container's shell, which derives the bound at
-  the last instant and reserves the kill grace out of it.
+- `src/pipeline/sandbox.ts` — hands the epoch to the container's shell, which re-derives the bound
+  from a fresh clock sample and reserves the kill grace out of it.
 - `tests/pipeline/review-budget.test.ts` — the tier-table and allocation cases.
 - `tests/pipeline/hard-stop.test.ts` — the container stop, the lost reply, the resume and the cap's
   read path.
+- `tests/pipeline/route-recovery-*.test.ts` — the nine recovery claims above, one file per claim group.
 - `docs/specs/architecture/review-budget.md` — this page.
 
 ## Change obligations
@@ -206,4 +263,6 @@ floors, the saturation point or the refusal vocabulary updates this page,
   window rather than the cap.
 - A delivery the guard refuses is retried on the level's ladder, which is sized against the level's
   TTL floor. With an operator cap above that floor the live row can outlast the ladder, so the last
-  retry is ack-recorded as held rather than reclaiming the row — never a second execution.
+  retry is ack-recorded as held rather than reclaiming the row — never a second execution. That drop
+  is not the end of the obligation: it is recorded once per delivery in the successor outbox, and the
+  route's recovery pass re-enqueues it after the guard has had time to release (claim 8).
