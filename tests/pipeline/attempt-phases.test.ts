@@ -997,6 +997,64 @@ describe("the publication settlement mark", () => {
     expect(handoff?.settledEffects).toContain("publication");
   });
 
+  test("an apply whose settlement never lands leaves the attempt unmeasured", async () => {
+    const { db, ref, payload, publicationId } = await stagedPublication();
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
+    // The apply succeeds; the settlement write is the crash window: it never
+    // lands, and nothing later revisits an applied row.
+    const underlying = db as unknown as { prepare(query: string): unknown };
+    publishing.deps.env.DB = new Proxy(db as unknown as object, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql.includes("UPDATE review_attempt_handoffs")) {
+              throw new Error("injected: the settlement write never landed");
+            }
+            return underlying.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as never;
+
+    expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
+
+    expect((await readPublication(db as never, publicationId))?.phase).toBe("applied");
+    // Not measured: the report says so instead of timing a step's finish.
+    expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.settledMs).toBeNull();
+  });
+
+  test("a journal that refuses to close leaves the attempt unmeasured", async () => {
+    const { db, ref, payload, publicationId } = await stagedPublication();
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
+    // The send is definitively rejected, but the failed-phase mark cannot land:
+    // the journal stays recoverable, so the publication lane is still open.
+    h.commenterState.preparedReviewReject = true;
+    const underlying = db as unknown as { prepare(query: string): unknown };
+    publishing.deps.env.DB = new Proxy(db as unknown as object, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql.includes("phase = 'failed'")) {
+              throw new Error("injected: the journal refused to close");
+            }
+            return underlying.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as never;
+
+    expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
+
+    expect((await readPublication(db as never, publicationId))?.phase).not.toBe("failed");
+    expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.settledMs).toBeNull();
+  });
+
   test("a degraded notice settles the attempt it completed", async () => {
     const { deps, db } = await makeDeps();
     const payload = makePayload();

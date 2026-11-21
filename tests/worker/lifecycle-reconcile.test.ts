@@ -78,6 +78,7 @@ import type { ScheduledEnv } from "../../src/worker/env";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
+import { claimAttempt } from "../../src/store/review-checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { testAppPem } from "../helpers/rsa-key";
 
@@ -536,6 +537,64 @@ describe("publication lane — confirmed apply", () => {
     // attempt is measurable by the operator report.
     const handoff = await readAttemptHandoff(db as never, "delivery-recovered-apply");
     expect(handoff?.settledMs).toEqual(expect.any(Number));
+    expect(handoff?.settledEffects).toContain("publication");
+  });
+
+  test("a recovery apply records the publication but leaves an open Check's attempt unmeasured", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    const attemptId = "attempt-recovered-open-check";
+    // The attempt froze an OPEN Check on its launch row.
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 1001,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: `consumer:${attemptId}`,
+      nowMs: T0,
+      executionDeadlineMs: T0 + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`test setup: claim failed: ${claimed.kind}`);
+    const check = db.raw
+      .prepare("SELECT attempt_key, generation FROM review_checks WHERE id = ?")
+      .get(claimed.attempt.identity.attemptId) as { attempt_key: string; generation: number };
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome,
+            attempt_key, attempt_generation)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted', ?, ?)`,
+      )
+      .run(attemptId, T0, T0 + 1, T0 + 2, check.attempt_key, check.generation);
+    await seedConfirmedCrashed(db, "pub-open-check", reviewPayload(SCOPE, { attemptId }));
+    const payload: ReviewJobPayload = {
+      installation_id: SCOPE.installationId,
+      owner: SCOPE.owner,
+      repo: SCOPE.repo,
+      pr_number: SCOPE.prNumber,
+      head_sha: SHA,
+      action: "opened",
+      triggered_by: "pull_request",
+      botRef: { appId: SCOPE.appId },
+      targetId: `target-${SCOPE.appId}`,
+    };
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: "delivery-open-check",
+      attemptId,
+      payload,
+      nowMs: T0,
+      enqueuedMs: T0 - 2_000,
+      deadlineMs: T0 + 600_000,
+    });
+
+    const summary = await reconcile(db, { now: () => T0 + 1_000 });
+
+    expect(summary.applied).toBe(1);
+    // The publication effect is recorded, but the Check lane is still open, so
+    // the attempt is not settled: the obligation model refuses to certify it.
+    const handoff = await readAttemptHandoff(db as never, "delivery-open-check");
+    expect(handoff?.settledMs).toBeNull();
     expect(handoff?.settledEffects).toContain("publication");
   });
 

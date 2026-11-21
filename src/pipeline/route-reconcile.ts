@@ -33,18 +33,16 @@ import {
   putAbandonClaim,
 } from "../contracts/idem";
 import { createFailureStore } from "../store/failure-store";
-import { readOpenCheckIdentityForKey } from "../store/review-checks";
 import { readReviewLaunch } from "./review-attempt";
 import {
   listCommentClaimsForRecovery,
   listHandoffsForRecovery,
   listIncompleteSettlements,
   listOwedSuccessors,
-  markAttemptSettled,
   markSuccessorDelivered,
   readAttemptCheckKey,
   restoreCommentClaimForRecovery,
-  settlementObligationsOf,
+  settleAttemptIfDischarged,
   successorGeneration,
   touchAttemptHandoff,
   type SettlementEffect,
@@ -119,12 +117,6 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       const launch = await readReviewLaunch(env.DB, handoff.attemptId);
       if (launch === null || (launch.state !== "failed" && launch.state !== "persisted")) continue;
       const checkKey = await readAttemptCheckKey(env.DB, handoff.attemptId);
-      // The one effect this pass cannot produce: an open Check is not
-      // concluded here, so the mark must not complete until the Check row is
-      // terminal — the check reconciler closes it at its own lease, and the
-      // next pass records it. A mark never claims completeness over an open
-      // Check.
-      const checkOpen = checkKey === null ? null : await readOpenCheckIdentityForKey(env.DB, checkKey.key);
       if (!landed.has("failure-row")) {
         await createFailureStore(env.DB).record({
           target_id: handoff.payload.targetId,
@@ -155,12 +147,13 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
         );
         landed.add("claim-stamp");
       }
-      if (checkKey !== null && checkOpen === null) landed.add("check");
-      await markAttemptSettled(
+      // The ONE settlement rule decides completeness from durable facts: the
+      // Check must actually be terminal (this pass never concludes it), and the
+      // failed-claim stamp is required only when the lane names a commit. The
+      // effects this pass landed are the facts; it never certifies the rest.
+      await settleAttemptIfDischarged(
         env.DB,
-        handoff.deliveryKey,
-        [...landed],
-        settlementObligationsOf(handoff.payload, checkKey !== null),
+        { attemptId: handoff.attemptId, landed: [...landed], checkInvolved: checkKey !== null },
         nowMs,
       );
     } catch {

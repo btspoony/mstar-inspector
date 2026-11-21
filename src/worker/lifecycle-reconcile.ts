@@ -91,13 +91,12 @@ import {
   suspendPublicationRecovery,
   suspendResolutionRecovery,
   type Lease,
-  type PublicationPayload,
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
 import { createReviewCommenter, PreparedSendRejected, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 import { sha256Hex } from "../pipeline/review-threads";
-import { publicationSettledStatement } from "../store/review-route-store";
+import { readAttemptCheckKey, settlementStatementIfDischarged } from "../store/review-route-store";
 
 // ---------------------------------------------------------------------------
 // Summary + budget constants (spec §7.11.1 verbatim values)
@@ -734,21 +733,31 @@ async function reconcilePublications(
 }
 
 /**
- * A recovery apply COMPLETES the attempt that staged the publication, so its
- * settlement rides the apply's own transaction: the applied mark and the
- * attempt's end can never diverge, and a recovered attempt is a measured
- * attempt in the operator report. A pre-deploy row carries no `attemptId`;
- * there is no attempt to settle.
+ * A recovery apply COMPLETES the attempt that staged the publication. The
+ * settlement statement is planned from the attempt's durable obligations
+ * before the batch and rides the apply's own transaction, so the applied mark
+ * and the attempt's end cannot diverge — and when an obligation is still open
+ * (an open Check), the statement records the publication effect WITHOUT
+ * `settled_ms`. A pre-deploy row carries no `attemptId`: there is no attempt.
  */
-function settlementTail(
+async function settlementTailStatements(
   db: D1Like,
-  publicationId: string,
+  row: PublicationRow,
   nowMs: number,
-): (payload: PublicationPayload) => D1StatementLike[] {
-  return (payload) =>
-    payload.attemptId === undefined
-      ? []
-      : [publicationSettledStatement(db, payload.attemptId, publicationId, nowMs)];
+): Promise<D1StatementLike[]> {
+  const attemptId = row.payload.attemptId;
+  if (attemptId === undefined) return [];
+  const statement = await settlementStatementIfDischarged(
+    db,
+    {
+      attemptId,
+      publicationId: row.id,
+      landed: ["publication"],
+      checkInvolved: (await readAttemptCheckKey(db, attemptId)) !== null,
+    },
+    nowMs,
+  );
+  return statement === null ? [] : [statement];
 }
 
 /**
@@ -767,7 +776,8 @@ async function applyConfirmedPublication(
   if (lease === null) return; // another invocation owns the live lease
   try {
     const at = now();
-    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, settlementTail(db, row.id, at));
+    const tail = await settlementTailStatements(db, row, at);
+    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, () => tail);
     if (applied) {
       summary.applied += 1;
       return;
@@ -873,7 +883,8 @@ async function sendPreparedPublication(
       return;
     }
     const at = now();
-    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, settlementTail(db, row.id, at));
+    const tail = await settlementTailStatements(db, row, at);
+    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, () => tail);
     if (applied) {
       summary.applied += 1;
       return;
@@ -993,7 +1004,8 @@ async function discoverUncertainPublication(
       return;
     }
     const at = now();
-    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, settlementTail(db, row.id, at));
+    const tail = await settlementTailStatements(db, row, at);
+    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, () => tail);
     if (applied) {
       summary.applied += 1;
       return;

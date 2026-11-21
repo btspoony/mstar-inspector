@@ -64,10 +64,10 @@ import {
 } from "../store/review-checks";
 import {
   deliveryKeyOf,
-  markAttemptSettled,
-  publicationSettledStatement,
+  readAttemptCheckKey,
   recordSuccessorIntent,
-  settlementObligationsOf,
+  settleAttemptIfDischarged,
+  settlementStatementIfDischarged,
   successorIntentOf,
   type SettlementEffect,
 } from "../store/review-route-store";
@@ -796,21 +796,23 @@ export async function settleSkippedRow(
 }
 
 /**
- * Record that this attempt's publication lane closed, for the operator's
- * duration report. A mark fault leaves the attempt unsettled — the report says
- * exactly that — and never fails the review.
+ * Apply the ONE settlement rule for this attempt and report a fault without
+ * failing the review: an attempt whose mark could not be written stays
+ * unsettled, which is exactly what the operator's report will say.
  */
 async function settleAttemptPublication(
   deps: ProcessDeps,
-  payload: ReviewJobPayload,
+  attemptId: string,
   fields: ConsumerLogFields,
+  landed: readonly SettlementEffect[],
+  checkInvolved: boolean,
 ): Promise<void> {
   try {
-    await markAttemptSettled(deps.env.DB, deliveryKeyOf(payload), ["publication"], ["publication"], Date.now());
+    await settleAttemptIfDischarged(deps.env.DB, { attemptId, landed, checkInvolved }, Date.now());
   } catch (err) {
     deps.log.warn(
       fields,
-      `publication settlement mark failed — the attempt stays unsettled in the duration report: ${err instanceof Error ? err.message : String(err)}`,
+      `attempt settlement mark failed — the attempt stays unsettled in the duration report: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }
@@ -1083,11 +1085,27 @@ async function applyPendingLifecycleJournals(
     try {
       const at = Date.now();
       // The apply COMPLETES the attempt that staged this journal, so its
-      // settlement rides the same transaction (the report's third bucket).
-      applied = await applyPublishedLifecycle(db, id, lease, at, undefined, (payload) =>
-        payload.attemptId === undefined
-          ? []
-          : [publicationSettledStatement(db, payload.attemptId, id, at)],
+      // settlement rides the same transaction — but the rule reads the
+      // attempt's durable obligations BEFORE the batch and emits a
+      // self-checking statement for it.
+      const publication = await readPublication(db, id);
+      if (publication === null) return false;
+      const attemptId = publication.payload.attemptId;
+      const settlement =
+        attemptId === undefined
+          ? null
+          : await settlementStatementIfDischarged(
+              db,
+              {
+                attemptId,
+                publicationId: id,
+                landed: ["publication"],
+                checkInvolved: (await readAttemptCheckKey(db, attemptId)) !== null,
+              },
+              at,
+            );
+      applied = await applyPublishedLifecycle(db, id, lease, at, undefined, () =>
+        settlement === null ? [] : [settlement],
       );
     } catch {
       return false;
@@ -1977,7 +1995,8 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 type DegradedPublicationOutcome =
   | { phase: "confirmed"; publicationId: string }
   | { phase: "unknown"; publicationId: string }
-  | { phase: "failed"; reason: string };
+  /** `publicationClosed`: the journal reached `failed` (or never existed), so nothing is owed. */
+  | { phase: "failed"; reason: string; publicationClosed: boolean };
 
 /**
  * The frozen instant fences a FIRST publication: at or past the attempt's
@@ -2064,11 +2083,14 @@ async function publishDegradedPublication(input: {
       return {
         phase: "failed",
         reason: `publication journal conflict (existing row ${staged.id}, phase ${staged.phase}) — the immutable payload wins; not sending a second degraded notice`,
+        // No row of THIS attempt's is owed; the existing row belongs to another.
+        publicationClosed: true,
       };
     }
     const lease = await claimPublication(input.db, staged.id, `consumer-degraded:${staged.id}`, Date.now());
     if (lease === null) {
-      return { phase: "failed", reason: "publication journal claim failed — degraded notice not sent" };
+      // Our staged row stays `prepared`: recovery still owns it.
+      return { phase: "failed", reason: "publication journal claim failed — degraded notice not sent", publicationClosed: false };
     }
     let sent: { posted: boolean; commentId: number | null };
     try {
@@ -2092,17 +2114,16 @@ async function publishDegradedPublication(input: {
         throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner");
       }
       if (err instanceof PreparedSendRejected) {
-        // A definitive pre-send rejection (§7.7): NO request left the
-        // Worker, so the truthful durable phase is `failed` — never the
-        // post-attempt `unknown`. The complete payload and its digest stay
-        // retained for operator inspection; the row is never re-sent.
+        // The complete payload and its digest stay retained for operator
+        // inspection; the row is never re-sent. Only a mark that actually
+        // landed closes the attempt's publication lane.
+        let publicationClosed = false;
         try {
-          await markPublicationFailed(input.db, staged.id, lease, err.message, Date.now());
+          publicationClosed = await markPublicationFailed(input.db, staged.id, lease, err.message, Date.now());
         } catch {
-          // A D1 failure of the failed-mark does not change the verdict: the
-          // degraded notice was still definitively not sent.
+          publicationClosed = false;
         }
-        return { phase: "failed", reason: err.message };
+        return { phase: "failed", reason: err.message, publicationClosed };
       }
       // A throw AT the send is post-attempt uncertainty: whether GitHub
       // received it is unknown (§7.9 — only a definitive rejection is "not
@@ -2147,7 +2168,8 @@ async function publishDegradedPublication(input: {
     // into a typed outcome: swallowing it here would be the "a refusal is not
     // an observation" mistake — the stop must reach the settlement as itself.
     if (err instanceof RoundBudgetSpent) throw err;
-    return { phase: "failed", reason: err instanceof Error ? err.message : String(err) };
+    // A staging/unknown fault may have left a row behind: the lane stays open.
+    return { phase: "failed", reason: err instanceof Error ? err.message : String(err), publicationClosed: false };
   }
 }
 
@@ -4780,8 +4802,15 @@ async function collectPhase(
     });
     if (degradedOutcome.phase === "failed") {
       await check?.terminalize(null, "degraded-not-posted");
-      // A definitive pre-send rejection leaves no publication work owed.
-      await settleAttemptPublication(deps, payload, fields);
+      // Only a journal that actually closed discharges the publication lane;
+      // a refusal/throw of the close leaves it recoverable and unsettled.
+      await settleAttemptPublication(
+        deps,
+        attemptId,
+        fields,
+        degradedOutcome.publicationClosed ? ["publication"] : [],
+        check !== undefined,
+      );
     } else {
       await check?.terminalize(degradedOutcome.publicationId, "publication-unknown");
       // A durable degraded publication is the proof the Check concludes from:
@@ -4789,8 +4818,7 @@ async function collectPhase(
       // whether it is still open.
       if (degradedOutcome.phase === "confirmed") {
         await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
-        // Applied and concluded: the attempt's publication lane has closed.
-        await settleAttemptPublication(deps, payload, fields);
+        await settleAttemptPublication(deps, attemptId, fields, ["publication"], check !== undefined);
       }
       // `unknown` stays unsettled: read-only discovery still owes the send.
     }
@@ -5253,17 +5281,25 @@ async function publishPhase(
       // `failed` is the truthful durable phase (never the post-attempt
       // `unknown`); payload/digest/attempts are retained and recovery
       // never re-sends. The Check conclusion is the honest
-      // pre-publication failure.
+      // pre-publication failure. The publication lane closes ONLY when the
+      // journal itself reached `failed`; a refused/throw mark leaves it
+      // recoverable and the attempt unsettled.
+      let publicationClosed = false;
       try {
-        await markPublicationFailed(deps.env.DB, stagedId, lease, err.message, Date.now());
+        publicationClosed = await markPublicationFailed(deps.env.DB, stagedId, lease, err.message, Date.now());
       } catch (markErr) {
         const detail = markErr instanceof Error ? markErr.message : String(markErr);
         deps.log.warn(fields, `failed-phase mark could not be persisted: ${detail}`);
       }
       await check?.terminalize(null, "pre-publication-failure");
       deps.log.warn(fields, `prepared review definitively rejected before send — recorded failed: ${err.message}`);
-      // No publication work remains: the journal row is closed as `failed`.
-      await settleAttemptPublication(deps, payload, fields);
+      await settleAttemptPublication(
+        deps,
+        attemptId,
+        fields,
+        publicationClosed ? ["publication"] : [],
+        check !== undefined,
+      );
       return { kind: "ok" };
     }
     throw err;
@@ -5567,8 +5603,9 @@ async function publishPhase(
   // row itself decides whether it is still open — never from whether this host
   // happened to cache a handle. A settled Check makes the note a no-op.
   await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
-  // Every required publication and Check lane has closed here.
-  await settleAttemptPublication(deps, payload, fields);
+  // The rule decides completeness from durable facts: an open Check leaves the
+  // attempt unsettled even though the publication is applied.
+  await settleAttemptPublication(deps, attemptId, fields, ["publication"], check !== undefined);
   return { kind: "ok" };
 }
 
@@ -5594,28 +5631,16 @@ export async function settleAttemptFailure(
   const err = failure?.cause ?? thrown;
   const detail = err instanceof Error ? err.message : String(err);
   /**
-   * The settle-once mark is written HERE, at the settlement's own completion,
-   * never at its entry: a host interrupted mid-settlement leaves the mark
-   * unset, so the next execution settles again. It certifies only effects that
-   * actually landed:
-   * - the failure row is a PRECONDITION (`durableOutcome`): a rejected insert
-   *   leaves no mark, so a replay finishes the settlement instead of skipping
-   *   it — that is why the generic path passes `durableOutcome` here;
-   * - the Check conclusion is a precondition by construction: a throwing
-   *   `terminalize` propagates before this is reached;
-   * - the failed-claim KV stamp is NOT: it is best-effort by its own contract,
-   *   and requiring a KV write would let a KV fault block settlement forever.
-   * A delivery with no handoff row (a direct phase caller) matches no row.
+   * The settlement rule owns completeness; this only reports the effects that
+   * actually landed and a fault. The rule reads the attempt's durable
+   * obligations (outcome lane, Check conclusion, failed-claim stamp) and sets
+   * `settled_ms` only when they are all discharged — a step finishing never
+   * certifies the attempt by itself. A delivery with no handoff row (a direct
+   * phase caller) matches no row.
    */
-  const markSettled = async (landed: readonly SettlementEffect[], required: readonly SettlementEffect[]): Promise<void> => {
+  const markSettled = async (landed: readonly SettlementEffect[], checkInvolved: boolean): Promise<void> => {
     try {
-      await markAttemptSettled(
-        deps.env.DB,
-        deliveryKeyOf(payload),
-        landed,
-        required,
-        Date.now(),
-      );
+      await settleAttemptIfDischarged(deps.env.DB, { attemptId, landed, checkInvolved }, Date.now());
     } catch (markErr) {
       deps.log.warn(
         { ...payloadIdentityFields(payload), attempt_id: attemptId },
@@ -5631,7 +5656,7 @@ export async function settleAttemptFailure(
     // The moved head's own settlement (skip row + Check conclusion + outbox
     // row) ran before this settlement was called, so there is nothing left to
     // finish and the mark can say so.
-    await markSettled(["skip"], ["skip"]);
+    await markSettled(["skip"], false);
     return { kind: "ok" };
   }
   const progress: ReviewAttemptProgress = {
@@ -5825,12 +5850,9 @@ export async function settleAttemptFailure(
       // The row is durable: now the Check may carry the stop's conclusion.
     await check?.terminalize(null, "budget-exhausted", undefined, budgetOutcome);
     // The row is durable here (the !durableOutcome case returned `unknown`
-    // above) and the Check conclusion just landed. The budget stop writes no
-    // failed-claim stamp on this route, so none is owed.
-    await markSettled(
-      check === undefined ? ["failure-row"] : ["failure-row", "check"],
-      settlementObligationsOf(payload, check !== undefined),
-    );
+    // above) and the Check conclusion just landed; the rule decides whether
+    // that closes the attempt.
+    await markSettled(["failure-row"], check !== undefined);
     return { kind: "budget-exhausted", outcome: budgetOutcome };
   }
 
@@ -5996,23 +6018,14 @@ export async function settleAttemptFailure(
       );
     }
   }
-  // The mark records the effects that ACTUALLY landed, and completes only when
-  // the set this settlement owed is closed: the failure row (when a container
-  // may exist, a settlement with no durable outcome returned `unknown` above;
-  // otherwise a replay retries the write), the Check conclusion when this
-  // attempt had a Check, and the failed-claim stamp when the delivery names a
-  // commit. A missing effect is not swallowed: it is recorded, so an operator
-  // reads it and a replay finishes it — a KV blip never leaves the review
-  // unsettled, and a lost row is never certified.
+  // The effects that ACTUALLY landed. The rule owns the required set: it adds
+  // a Check conclusion only when the row is terminal, requires the
+  // failed-claim stamp when the delivery names a commit, and never certifies a
+  // missing effect.
   const effects: SettlementEffect[] = [];
   if (durableOutcome) effects.push("failure-row");
-  if (check !== undefined) effects.push("check");
   if (claimStampLanded) effects.push("claim-stamp");
-  // The required set is the settlement's own obligation (`settlementObligationsOf`):
-  // the mark completes only when the UNION of every settlement execution for
-  // this delivery covers it, so two racing settlements cannot erase each
-  // other's progress and neither can certify a missing effect.
-  await markSettled(effects, settlementObligationsOf(payload, check !== undefined));
+  await markSettled(effects, check !== undefined);
   throw err;
 }
 /**

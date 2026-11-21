@@ -215,6 +215,40 @@ export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promi
 }
 
 /**
+ * The handoff row by its attempt id — the handle a recovery lane holds (a
+ * publication names its attempt, never the delivery key). `attempt_id` is
+ * UNIQUE, so this is the same row `readAttemptHandoff` answers.
+ */
+export async function readAttemptHandoffByAttempt(db: D1Like, attemptId: string): Promise<AttemptHandoff | null> {
+  const row = await db
+    .prepare(
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
+         FROM review_attempt_handoffs WHERE attempt_id = ?`,
+    )
+    .bind(attemptId)
+    .first<HandoffRow>();
+  return row === null ? null : toHandoff(row);
+}
+
+/**
+ * Whether this attempt's Check is still open. The pair is the one the attempt
+ * froze on its launch row; a row with no frozen key has no Check to conclude.
+ */
+export async function attemptCheckIsOpen(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS open FROM review_launches l
+         JOIN review_checks c
+           ON c.attempt_key = l.attempt_key AND c.generation = l.attempt_generation
+        WHERE l.attempt_id = ? AND c.terminal_ms IS NULL
+        LIMIT 1`,
+    )
+    .bind(attemptId)
+    .first<{ open: number }>();
+  return row !== null;
+}
+
+/**
  * Write the handoff BEFORE the create, or read back the row a previous delivery
  * of the same message wrote. `INSERT … ON CONFLICT DO NOTHING` makes two
  * concurrent attempts to reserve the same delivery harmless: both read back the
@@ -325,27 +359,94 @@ export async function markAttemptSettled(
   return written.meta.changes === 1;
 }
 
+/** What one settlement execution actually made durable for its attempt. */
+export type AttemptSettlementInput = {
+  attemptId: string;
+  landed: readonly SettlementEffect[];
+  /** A Check exists for this attempt, so its conclusion is one of the obligations. */
+  checkInvolved: boolean;
+};
+
 /**
- * The settlement statement for one attempt by its UNIQUE attempt id — the
- * handle a recovery lane holds (a publication row names its attempt, never the
- * delivery key). It is guarded by the publication actually being applied, so a
- * caller may append it to that apply's own batch after the applied mark: the
- * transaction then records both facts or neither.
+ * THE settlement rule. An attempt settles only when every obligation it
+ * incurred is discharged; a caller reports the effects it actually made durable
+ * and never decides completeness for itself.
+ *
+ * The obligations come from the attempt's own durable facts:
+ * - the OUTCOME lane — `publication` (the journal reached applied, or a
+ *   definitive close) or `failure-row` (the failure settlement);
+ * - `check` when the attempt has a Check. Its conclusion is a DURABLE fact: a
+ *   row that is still open is not a conclusion, whatever a handle saw;
+ * - the failed-claim stamp when the failure lane names a commit — the lane that
+ *   can leave a stale "1" claiming a review that will never come. A
+ *   publication's success is its claim's discharge.
+ *
+ * The Check effect is added here when the row is terminal (a conclusion another
+ * lane recorded) and dropped when it is open, so `settled_effects` never claims
+ * a conclusion the database does not hold. Returns `null` when no lane has
+ * closed yet — nothing may be settled or certified.
  */
-export function publicationSettledStatement(
+async function settlementPlan(
   db: D1Like,
-  attemptId: string,
-  publicationId: string,
+  input: AttemptSettlementInput,
+): Promise<{ deliveryKey: string; landed: SettlementEffect[]; required: SettlementEffect[] } | null> {
+  const handoff = await readAttemptHandoffByAttempt(db, input.attemptId);
+  if (handoff === null) return null;
+  const landed = new Set<SettlementEffect>([...(handoff.settledEffects ?? []), ...input.landed]);
+  const checkOpen = await attemptCheckIsOpen(db, input.attemptId);
+  if (checkOpen) landed.delete("check");
+  else if (input.checkInvolved) landed.add("check");
+
+  let required: SettlementEffect[];
+  if (landed.has("skip")) {
+    required = ["skip"];
+  } else if (landed.has("failure-row")) {
+    required = settlementObligationsOf(handoff.payload, input.checkInvolved);
+  } else if (landed.has("publication")) {
+    required = ["publication"];
+    if (input.checkInvolved) required.push("check");
+  } else {
+    return null;
+  }
+  return { deliveryKey: handoff.deliveryKey, landed: [...landed], required };
+}
+
+/**
+ * Apply the rule now: merge what this execution landed and complete the mark
+ * only when the attempt's obligations are discharged. `false` means nothing was
+ * written (no lane closed, or no handoff row).
+ */
+export async function settleAttemptIfDischarged(
+  db: D1Like,
+  input: AttemptSettlementInput,
   nowMs: number,
-): D1StatementLike {
+): Promise<boolean> {
+  const plan = await settlementPlan(db, input);
+  if (plan === null) return false;
+  return markAttemptSettled(db, plan.deliveryKey, plan.landed, plan.required, nowMs);
+}
+
+/**
+ * The rule as a STATEMENT for a caller that must record it inside another
+ * transaction (a recovery apply). The publication guard makes the statement
+ * self-checking: it only lands when the journal really reached `applied`. The
+ * obligations are read from durable facts NOW, before the batch.
+ */
+export async function settlementStatementIfDischarged(
+  db: D1Like,
+  input: AttemptSettlementInput & { publicationId: string },
+  nowMs: number,
+): Promise<D1StatementLike | null> {
+  const plan = await settlementPlan(db, input);
+  if (plan === null) return null;
   return settlementStatement(
     db,
     `attempt_id = ? AND EXISTS (
        SELECT 1 FROM review_publications WHERE id = ? AND phase = 'applied'
      )`,
-    [attemptId, publicationId],
-    ["publication"],
-    ["publication"],
+    [input.attemptId, input.publicationId],
+    plan.landed,
+    plan.required,
     nowMs,
   );
 }
