@@ -354,10 +354,11 @@ describe("claim 5 — error classification carries proof", () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     const batch = h.makeBatch(payload);
-    // A hand-built message carries no send stamp; the platform always does.
+    // A hand-built message may carry `null`; `Number(null)` is 0, which would
+    // become a fabricated origin if the boundary did not normalize it.
     const message = batch.messages[0]!;
-    const unstamped = message as unknown as { timestamp?: Date };
-    unstamped.timestamp = undefined;
+    const unstamped = message as unknown as { timestamp?: Date | null };
+    unstamped.timestamp = null;
 
     const route = recordingStarter();
     const consumer = createReviewConsumer(

@@ -856,19 +856,27 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
-  test("an empty window says whether nothing was admitted or everything was excluded", async () => {
+  test("an excluded-but-completed window names itself as unmeasured in both locales", async () => {
     const none = await runtimeScreen(() => json(RUNTIME));
     expect(none.text()).toContain("No attempt was admitted in this window.");
     await none.close();
 
-    const excluded = await runtimeScreen(() => json(RUNTIME), "en", {
+    // A completed attempt whose queue stamp is missing is EXCLUDED, not
+    // uncompleted — the sentence must say so.
+    const report = {
       ...DURATION_REPORT,
       excluded: { unsettled: 2, skipped: 1, missingQueueStamp: 1, missingPhaseBoundary: 0, invalid: 0 },
-    });
-    expect(excluded.text()).toContain("No attempt completed: all 4 admitted attempts were excluded");
-    expect(excluded.text()).toContain("2 unsettled");
+    };
+    const excluded = await runtimeScreen(() => json(RUNTIME), "en", report);
+    expect(excluded.text()).toContain("No attempt was measured: all 4 admitted attempts were excluded");
+    expect(excluded.text()).toContain("1 without a queue stamp");
     expect(excluded.text()).not.toContain("No attempt was admitted in this window.");
     await excluded.close();
+
+    const chinese = await runtimeScreen(() => json(RUNTIME), "zh_CN", report);
+    expect(chinese.text()).toContain("此窗口内没有可测量的尝试");
+    expect(chinese.text()).toContain("1 个缺少队列时间戳");
+    await chinese.close();
   });
 
   /** The maintenance card's read cells, keyed by their `data-maintenance` field. */

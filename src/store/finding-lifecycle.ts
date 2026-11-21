@@ -99,6 +99,13 @@ export type PublicationPayload = {
   round: number; targetCommentId: number | null; body: string; bodySha256: string;
   artifact: ReviewArtifactDoc | null; lifecycle: LifecycleRound | null;
   lineIntents: LineIntent[];
+  /**
+   * The attempt that staged this publication (migration 0087's report uses it
+   * to end that attempt's interval when a recovery lane completes the apply).
+   * Optional: rows staged before this field existed carry none, and a recovery
+   * completing one has no attempt to settle.
+   */
+  attemptId?: string;
 };
 
 export type PublicationRow = {
@@ -590,23 +597,42 @@ export async function applyPublishedLifecycle(
    * observed between chunks instead of being assumed live.
    */
   clock?: () => number,
+  /**
+   * Statements appended to the SAME atomic apply as the applied mark, after it:
+   * a caller that must record a completion fact (the attempt's settlement) can
+   * never observe an applied publication with that fact missing. The mark runs
+   * first, so a tail predicate can require `phase = 'applied'`. An idempotent
+   * replay (row already applied) runs the tail alone — it is the only work left.
+   */
+  tail?: (payload: PublicationPayload) => D1StatementLike[],
 ): Promise<boolean> {
   const nowAt = clock ?? (() => nowMs);
   const row = await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(id).first<ReviewPublicationRow>();
   if (row === null) return false;
-  if (row.phase === "applied") return true; // idempotent replay — nothing left to apply
+  if (row.phase === "applied") {
+    // Idempotent replay: nothing left to apply, but a caller's completion fact
+    // may still be owed.
+    const tailStatements = tail?.(JSON.parse(row.payload_json) as PublicationPayload) ?? [];
+    if (tailStatements.length > 0) await db.batch(tailStatements);
+    return true;
+  }
   // Live lease fence (holder + epoch + unexpired) and positive persisted proof.
   if (row.holder !== lease.holder || row.lease_epoch !== lease.epoch) return false;
   if (row.lease_until_ms === null || row.lease_until_ms <= nowAt()) return false;
   if (row.phase !== "confirmed" || row.proof_json === null) return false;
 
   const payload = JSON.parse(row.payload_json) as PublicationPayload;
+  const tailStatements = tail?.(payload) ?? [];
 
   if (payload.kind === "degraded") {
     // Degraded payload: artifact/lifecycle null, empty line intents — no
     // normal review or lifecycle rows are created from it (spec §7.7).
-    const applied = await markPublicationApplied(db, row.id, lease, nowMs).run();
-    return applied.meta.changes > 0;
+    if (tailStatements.length === 0) {
+      const applied = await markPublicationApplied(db, row.id, lease, nowMs).run();
+      return applied.meta.changes > 0;
+    }
+    const [applied] = await db.batch([markPublicationApplied(db, row.id, lease, nowMs), ...tailStatements]);
+    return (applied?.meta.changes ?? 0) > 0;
   }
   if (payload.kind !== "review" || payload.artifact === null || payload.lifecycle === null) {
     // A review-kind payload without its complete artifact/lifecycle is
@@ -663,19 +689,22 @@ export async function applyPublishedLifecycle(
       LIFECYCLE_APPLY_BATCH_STATEMENTS,
     ),
   ];
+  // The caller's completion facts ride the FINAL chunk, after the applied mark:
+  // same transaction, so neither fact can land without the other.
+  if (tailStatements.length > 0) chunks[chunks.length - 1]!.push(...tailStatements);
   const results: D1BatchResult[] = [];
   for (const chunk of chunks) {
     // Per-chunk fence (§7.11.1): the apply may span a real time window, and
     // once the 120s lease expires another invocation can claim a NEWER epoch.
     // Re-prove the SAME live holder/epoch before this chunk writes, so a
     // stale invocation stops instead of mutating findings/rounds/associations
-    // under an ownership it no longer holds. The final chunk still carries
-    // the applied mark as its last statement — its SQL re-checks the same
-    // predicate, so a replacement mid-chunk can never mark complete.
+    // under an ownership it no longer holds. The final chunk's applied mark
+    // still re-checks the same predicate in its own SQL, so a replacement
+    // mid-chunk can never mark complete (nor satisfy a tail's `applied` guard).
     if (!(await publicationLeaseIsLive(db, id, lease, nowAt()))) return false;
     results.push(...(await db.batch(chunk)));
   }
-  const applied = results[results.length - 1]!;
+  const applied = results[results.length - 1 - tailStatements.length]!;
   return applied.meta.changes > 0;
 }
 

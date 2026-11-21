@@ -65,6 +65,7 @@ import {
 import {
   deliveryKeyOf,
   markAttemptSettled,
+  publicationSettledStatement,
   recordSuccessorIntent,
   settlementObligationsOf,
   successorIntentOf,
@@ -795,6 +796,26 @@ export async function settleSkippedRow(
 }
 
 /**
+ * Record that this attempt's publication lane closed, for the operator's
+ * duration report. A mark fault leaves the attempt unsettled — the report says
+ * exactly that — and never fails the review.
+ */
+async function settleAttemptPublication(
+  deps: ProcessDeps,
+  payload: ReviewJobPayload,
+  fields: ConsumerLogFields,
+): Promise<void> {
+  try {
+    await markAttemptSettled(deps.env.DB, deliveryKeyOf(payload), ["publication"], ["publication"], Date.now());
+  } catch (err) {
+    deps.log.warn(
+      fields,
+      `publication settlement mark failed — the attempt stays unsettled in the duration report: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
  * Run one best-effort step under a hard deadline. Resolves `null` when the
  * deadline wins: the step keeps running (a fetch or a D1 statement cannot be
  * cancelled from here) but the caller stops waiting for it. A rejection still
@@ -1060,7 +1081,14 @@ async function applyPendingLifecycleJournals(
     if (lease === null) return false;
     let applied = false;
     try {
-      applied = await applyPublishedLifecycle(db, id, lease, Date.now());
+      const at = Date.now();
+      // The apply COMPLETES the attempt that staged this journal, so its
+      // settlement rides the same transaction (the report's third bucket).
+      applied = await applyPublishedLifecycle(db, id, lease, at, undefined, (payload) =>
+        payload.attemptId === undefined
+          ? []
+          : [publicationSettledStatement(db, payload.attemptId, id, at)],
+      );
     } catch {
       return false;
     }
@@ -1990,6 +2018,8 @@ async function publishDegradedPublication(input: {
   headSha: string;
   redactedError: string;
   redactedStdout: string;
+  /** The attempt that stages it, so a recovery completing the apply can settle it. */
+  attemptId: string;
   /** The attempt's frozen instant, enforced at the mutation (see `guardMutations`). */
   notAfterMs: number;
 }): Promise<DegradedPublicationOutcome> {
@@ -2022,6 +2052,7 @@ async function publishDegradedPublication(input: {
       artifact: null,
       lifecycle: null,
       lineIntents: [],
+      attemptId: input.attemptId,
     };
     const staged = await stagePublication(input.db, { id: publicationId, payload, nowMs: Date.now() });
     // §7.7: an insert conflict returns the EXISTING immutable payload — never
@@ -4744,10 +4775,13 @@ async function collectPhase(
       headSha,
       redactedError,
       redactedStdout,
+      attemptId,
       notAfterMs: ref.deadlineMs,
     });
     if (degradedOutcome.phase === "failed") {
       await check?.terminalize(null, "degraded-not-posted");
+      // A definitive pre-send rejection leaves no publication work owed.
+      await settleAttemptPublication(deps, payload, fields);
     } else {
       await check?.terminalize(degradedOutcome.publicationId, "publication-unknown");
       // A durable degraded publication is the proof the Check concludes from:
@@ -4755,7 +4789,10 @@ async function collectPhase(
       // whether it is still open.
       if (degradedOutcome.phase === "confirmed") {
         await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
+        // Applied and concluded: the attempt's publication lane has closed.
+        await settleAttemptPublication(deps, payload, fields);
       }
+      // `unknown` stays unsettled: read-only discovery still owes the send.
     }
     deps.log.warn(
       fields,
@@ -5067,6 +5104,7 @@ async function collectPhase(
     targetCommentId: plan.action === "update" ? plan.commentId : null,
     body: preparedBody,
     bodySha256,
+    attemptId,
     artifact: {
       kind: "review",
       key: idemKey(key),
@@ -5175,21 +5213,6 @@ async function publishPhase(
   // settlement is adopted from the D1 attempt row when this host has none.
   const check = await settlementFor(deps, ref, headSha);
   const stagedId = publicationId;
-  // The publication settlement's COMPLETION mark, written ONLY when no
-  // publication work remains for this attempt. It is the one instant every
-  // required publication and Check lane has closed (or was explicitly closed
-  // unconfirmed), so the operator's publication bucket ends here — never at the
-  // Check's own terminal stamp, which can precede a still-due recovery.
-  const markPublicationSettled = async (): Promise<void> => {
-    try {
-      await markAttemptSettled(deps.env.DB, deliveryKeyOf(payload), ["publication"], ["publication"], Date.now());
-    } catch (err) {
-      deps.log.warn(
-        fields,
-        `publication settlement mark failed — the attempt stays unsettled in the duration report: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  };
   // The frozen instant fences the FIRST send BEFORE the journal is claimed, so
   // a refused publication leaves no `sending` row behind for a reconciler to
   // read as an attempted send.
@@ -5239,7 +5262,8 @@ async function publishPhase(
       }
       await check?.terminalize(null, "pre-publication-failure");
       deps.log.warn(fields, `prepared review definitively rejected before send — recorded failed: ${err.message}`);
-      await markPublicationSettled();
+      // No publication work remains: the journal row is closed as `failed`.
+      await settleAttemptPublication(deps, payload, fields);
       return { kind: "ok" };
     }
     throw err;
@@ -5543,7 +5567,8 @@ async function publishPhase(
   // row itself decides whether it is still open — never from whether this host
   // happened to cache a handle. A settled Check makes the note a no-op.
   await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
-  await markPublicationSettled();
+  // Every required publication and Check lane has closed here.
+  await settleAttemptPublication(deps, payload, fields);
   return { kind: "ok" };
 }
 

@@ -77,6 +77,8 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
+import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { testAppPem } from "../helpers/rsa-key";
 
 const APP = "11111111-2222-3333-4444-555555555555";
@@ -498,6 +500,43 @@ describe("publication lane — confirmed apply", () => {
     expect(reviews.n).toBe(1);
     expect(findings.n).toBe(1);
     expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied", recovery_state: "done" });
+  });
+
+  test("the apply that completes a recovered publication also settles its attempt", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    const attemptId = "attempt-recovered-apply";
+    // The consumer staged the publication and crashed before the apply; the
+    // staged payload names the attempt that must be measured.
+    await seedConfirmedCrashed(db, "pub-settled", reviewPayload(SCOPE, { attemptId }));
+    const payload: ReviewJobPayload = {
+      installation_id: SCOPE.installationId,
+      owner: SCOPE.owner,
+      repo: SCOPE.repo,
+      pr_number: SCOPE.prNumber,
+      head_sha: SHA,
+      action: "opened",
+      triggered_by: "pull_request",
+      botRef: { appId: SCOPE.appId },
+      targetId: `target-${SCOPE.appId}`,
+    };
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: "delivery-recovered-apply",
+      attemptId,
+      payload,
+      nowMs: T0,
+      enqueuedMs: T0 - 2_000,
+      deadlineMs: T0 + 600_000,
+    });
+
+    const summary = await reconcile(db, { now: () => T0 + 1_000 });
+
+    expect(summary.applied).toBe(1);
+    // The applied mark and the attempt's end landed together: a recovered
+    // attempt is measurable by the operator report.
+    const handoff = await readAttemptHandoff(db as never, "delivery-recovered-apply");
+    expect(handoff?.settledMs).toEqual(expect.any(Number));
+    expect(handoff?.settledEffects).toContain("publication");
   });
 
   test("re-apply is idempotent; a crash between store.put and the applied mark re-runs the artifact as a no-op", async () => {

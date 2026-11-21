@@ -996,4 +996,37 @@ describe("the publication settlement mark", () => {
     expect(handoff?.settledMs).toEqual(expect.any(Number));
     expect(handoff?.settledEffects).toContain("publication");
   });
+
+  test("a degraded notice settles the attempt it completed", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    // Invalid output: collect publishes a degraded notice instead of a review.
+    h.sandbox.runnerStdout = "not a verdict";
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    const { deps: collecting } = await makeDeps({ db });
+    expect(await collectAttempt(collecting, ref, prepared)).toEqual({
+      kind: "settled",
+      outcome: { kind: "degraded" },
+    });
+
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.settledMs).toEqual(expect.any(Number));
+    expect(handoff?.settledEffects).toContain("publication");
+  });
 });

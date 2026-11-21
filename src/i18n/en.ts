@@ -1583,7 +1583,7 @@ export const en = {
         "Attempts admitted in the last {days} days. Percentiles use only complete end-to-end intervals, and an empty window stays empty — it never reads as a zero.",
       durationEmpty: "No attempt was admitted in this window.",
       durationEmptyExcluded:
-        "No attempt completed: all {n} admitted attempts were excluded — {unsettled} unsettled, {skipped} skipped, {missingQueue} without a queue stamp, {missingBoundary} without a phase boundary, {invalid} out of order.",
+        "No attempt was measured: all {n} admitted attempts were excluded — {unsettled} unsettled, {skipped} skipped, {missingQueue} without a queue stamp, {missingBoundary} without a phase boundary, {invalid} out of order.",
       durationSample: "{n} complete attempts",
       durationTotal: "End to end",
       durationQueueWait: "Queue wait",

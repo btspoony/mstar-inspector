@@ -18,7 +18,7 @@
  * worker imports.
  */
 import type { ReviewJobPayload } from "../contracts/review-job";
-import type { D1Like } from "./types";
+import type { D1Like, D1StatementLike } from "./types";
 
 export type AttemptHandoffState = "owed" | "ambiguous" | "created" | "failed";
 
@@ -321,12 +321,51 @@ export async function markAttemptSettled(
   required: readonly SettlementEffect[],
   nowMs: number,
 ): Promise<boolean> {
-  // ONE statement, because two settlements can run for one row (a step retry
-  // racing a resumed host): the effects ACCUMULATE (the union keeps what the
-  // other execution landed) and completeness is decided against the union, so
-  // neither write can erase the other's progress and neither can certify an
-  // effect that is missing. `json_each` is SQLite's own JSON1 surface.
-  const written = await db
+  const written = await settlementStatement(db, "delivery_key = ?", [deliveryKey], landed, required, nowMs).run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * The settlement statement for one attempt by its UNIQUE attempt id — the
+ * handle a recovery lane holds (a publication row names its attempt, never the
+ * delivery key). It is guarded by the publication actually being applied, so a
+ * caller may append it to that apply's own batch after the applied mark: the
+ * transaction then records both facts or neither.
+ */
+export function publicationSettledStatement(
+  db: D1Like,
+  attemptId: string,
+  publicationId: string,
+  nowMs: number,
+): D1StatementLike {
+  return settlementStatement(
+    db,
+    `attempt_id = ? AND EXISTS (
+       SELECT 1 FROM review_publications WHERE id = ? AND phase = 'applied'
+     )`,
+    [attemptId, publicationId],
+    ["publication"],
+    ["publication"],
+    nowMs,
+  );
+}
+
+/**
+ * ONE statement, because two settlements can run for one row (a step retry
+ * racing a resumed host): the effects ACCUMULATE (the union keeps what the
+ * other execution landed) and completeness is decided against the union, so
+ * neither write can erase the other's progress and neither can certify an
+ * effect that is missing. `json_each` is SQLite's own JSON1 surface.
+ */
+function settlementStatement(
+  db: D1Like,
+  whereSql: string,
+  whereBinds: readonly string[],
+  landed: readonly SettlementEffect[],
+  required: readonly SettlementEffect[],
+  nowMs: number,
+): D1StatementLike {
+  return db
     .prepare(
       `UPDATE review_attempt_handoffs
           SET settled_effects = (
@@ -348,17 +387,15 @@ export async function markAttemptSettled(
                 ) THEN ?
                 ELSE NULL
               END
-        WHERE delivery_key = ?`,
+        WHERE ${whereSql}`,
     )
     .bind(
       JSON.stringify(landed),
       JSON.stringify(required),
       JSON.stringify(landed),
       nowMs,
-      deliveryKey,
-    )
-    .run();
-  return written.meta.changes === 1;
+      ...whereBinds,
+    );
 }
 
 /**
