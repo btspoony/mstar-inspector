@@ -281,9 +281,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
   const [attemptCapDraft, setAttemptCapDraft] = useState<string | null>(null);
   /**
-   * A save was accepted and its re-read has not confirmed the stored value yet.
-   * While true the card renders no number and blocks editing: this request's
-   * echo is a value the row may no longer hold.
+   * A save is in flight, or accepted and not yet read back. While true the card
+   * renders no number and blocks editing: once the request leaves, this page's
+   * last number — and the request's own echo — are values the row may not hold.
    */
   const [attemptCapConfirming, setAttemptCapConfirming] = useState(false);
   /** The last accepted save's echo — what a later re-read is compared with. */
@@ -581,14 +581,17 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     setBusy(true);
     setNotice(null);
     attemptCapSignal.start();
+    // The row may already be committed — and overwritten — while the request is
+    // in flight, so the number on screen stops being a claim the moment it
+    // leaves. Enter the unconfirmed state BEFORE dispatching, not on the reply.
+    setAttemptCapConfirming(true);
     try {
       const saved = await setAttemptCap(capMs, stored);
-      // The write landed, so it is reported. The VALUE is not: the echo is what
-      // this request wrote, not what the row holds now, so the card shows no
-      // number and blocks editing until the re-read answers.
+      // The write landed. The VALUE still is not shown: the echo is what this
+      // request wrote, not what the row holds now, so the card stays
+      // unconfirmed until the re-read answers.
       setAttemptCapDraft(null);
       setAttemptCapEcho(saved.capMs);
-      setAttemptCapConfirming(true);
       setNotice({
         kind: "success",
         message: t(locale, "admin.runtime.attemptCapSaved"),
@@ -599,6 +602,10 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       // its retry are the whole report, so this read never reaches the catch.
       await confirmAttemptCap(saved.capMs);
     } catch (error) {
+      // No save landed: leave the unconfirmed state so the operator can fix the
+      // number and resend, and report this as a failure rather than a confirm.
+      setAttemptCapConfirming(false);
+      setAttemptCapEcho(null);
       const generic = t(locale, "admin.runtime.attemptCapFailed");
       setNotice({
         kind: "error",
@@ -883,8 +890,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.attemptCapUnreadable")} />
                   </div>
                 ) : attemptCapConfirming ? (
-                  // A save landed but the row has not been read back: the echo
-                  // is not shown, and nothing is editable until a read answers.
+                  // A save is in flight or landed, but the row has not been read
+                  // back: no echo is shown, and nothing is editable until a read
+                  // answers.
                   <div className="mt-4" data-attempt-cap="confirming">
                     <p className="text-sm text-muted-foreground">
                       {t(locale, "admin.runtime.attemptCapConfirming")}

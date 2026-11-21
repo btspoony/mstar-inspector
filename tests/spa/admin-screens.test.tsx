@@ -868,6 +868,83 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("the card stops showing a number while the save request is in flight", async () => {
+    let releasePatch: ((response: Response) => void) | null = null;
+    let stored = false;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") {
+        const gate = Promise.withResolvers<Response>();
+        releasePatch = gate.resolve;
+        return gate.promise;
+      }
+      return json({
+        ...RUNTIME,
+        attemptCap: stored
+          ? { capMs: 1_800_000, saved: true, min: 900_000, max: 3_600_000, degraded: false }
+          : { capMs: 1_200_000, saved: false, min: 900_000, max: 3_600_000, degraded: false },
+      });
+    });
+    // The card starts on the default it read.
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 1200000 ms (platform default — no value is saved).",
+    );
+    await surface.type("#attempt-cap-ms", "1800000");
+    const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
+    // The PATCH promise stays open, so what renders here is the pre-reply state:
+    // the server may already have committed and been overwritten.
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    expect(surface.container.querySelector('[data-attempt-cap="confirming"]')?.textContent).toContain(
+      "A save was sent and the stored value is being confirmed.",
+    );
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')).toBeNull();
+    const field = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
+    expect(field.value).toBe("");
+    expect(field.disabled).toBe(true);
+
+    // Releasing the reply lets the re-read answer; only then does a number return.
+    stored = true;
+    await act(async () => {
+      releasePatch?.(json({ attemptCap: { capMs: 1_800_000 } }));
+    });
+    await act(async () => {});
+    expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).toBeNull();
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 1800000 ms (saved value).",
+    );
+    await surface.close();
+  });
+
+  test("a failed save leaves the unconfirmed state and shows the failure", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? new Response(JSON.stringify({ error: "the cap could not be stored" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          })
+        : json({
+            ...RUNTIME,
+            attemptCap: { capMs: 1_200_000, saved: false, min: 900_000, max: 3_600_000, degraded: false },
+          }),
+    );
+    await surface.type("#attempt-cap-ms", "1800000");
+    const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    // The save did not land: the card returns to the last confirmed value and
+    // reports the failure, with the typed number still editable.
+    expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).toBeNull();
+    expect(surface.text()).toContain("Could not change the maximum review duration.");
+    expect(surface.text()).toContain("the cap could not be stored");
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 1200000 ms (platform default — no value is saved).",
+    );
+    const field = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
+    expect(field.disabled).toBe(false);
+    expect(field.value).toBe("1800000");
+    await surface.close();
+  });
+
   test("a save whose re-read fails shows no number, and a retry returns to one", async () => {
     let reads = 0;
     let readsFail = true;
@@ -888,7 +965,7 @@ describe("Runtime screen", () => {
 
     // The write is acknowledged; the value is not shown and nothing is editable.
     expect(surface.container.querySelector('[data-attempt-cap="confirming"]')?.textContent).toContain(
-      "A save was accepted; the stored value is being confirmed.",
+      "A save was sent and the stored value is being confirmed.",
     );
     expect(surface.container.querySelector('[data-attempt-cap="effective"]')).toBeNull();
     const field = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
