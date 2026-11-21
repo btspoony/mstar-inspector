@@ -515,6 +515,8 @@ export type FakeSandboxState = {
   destroyError: Error | undefined;
   /** What the marker claim answers ("written" = a fresh container). */
   markerClaim: "written" | "matched" | "unknown";
+  /** Thrown by the marker claim: its reply was lost, so the marker may be written. */
+  markerError: Error | undefined;
   /** A marked read refuses (`unknown`) instead of running its command. */
   markedUnknown: boolean;
   /** Every guarded read's command, in order. */
@@ -590,6 +592,7 @@ export function initialFakeSandboxState(): FakeSandboxState {
     destroyCalls: 0,
     destroyError: undefined,
     markerClaim: "written",
+    markerError: undefined,
     markedUnknown: false,
     markedCalls: [],
     markedError: undefined,
@@ -804,7 +807,10 @@ export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxSt
       }
       return answerCommand(cmd, opts, state);
     }),
-    claimMarker: mock(async (_marker: string) => state.markerClaim),
+    claimMarker: mock(async (_marker: string) => {
+      if (state.markerError !== undefined) throw state.markerError;
+      return state.markerClaim;
+    }),
     runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => {
       state.markedCalls.push(cmd);
       if (state.markedError !== undefined && state.markedCalls.length >= state.markedErrorFromCall) {

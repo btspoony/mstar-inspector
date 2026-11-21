@@ -1168,6 +1168,23 @@ describe("createReviewConsumer", () => {
     expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
   });
 
+  test("a rejected marker claim is unknown: nothing settled, nothing destroyed, capacity held", async () => {
+    const db = await createSeededTestD1();
+    const check = attachedCheck("attempt-marker-claim-lost");
+    // The write may already have landed: a concurrent replay can prove this
+    // container and start paying on it, so this entry may not settle or destroy.
+    h.sandbox.markerError = new Error("marker claim reply lost");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: check.hooks,
+    });
+
+    await consumer(h.makeBatch(makePayload())); // unknown acks
+
+    expectUnknownOutcome(db, check.state.terminalized);
+    expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
+  });
+
   test("a rejected guarded command after the proof is unknown: nothing settled, nothing destroyed", async () => {
     const db = await createSeededTestD1();
     const check = attachedCheck("attempt-replay-command-lost");

@@ -1095,6 +1095,34 @@ async function runPreparedCommand(
 }
 
 /**
+ * Write the attempt's marker on the container this entry provisioned. Only a
+ * returned `written`/`matched` continues: other bytes mean the container is not
+ * this attempt's, and a REJECTED write is `unknown` — a lost reply leaves the
+ * marker possibly written, so a concurrent replay can prove this container and
+ * launch paid work on it. Settling this entry as a failure would then destroy a
+ * container that may be paying, and a retry would mint a fresh attempt id.
+ */
+async function claimAttemptMarker(
+  sandbox: ReviewSandbox,
+  marker: string,
+  attemptId: string,
+): Promise<void> {
+  let claimed: "written" | "matched" | "unknown";
+  try {
+    claimed = await sandbox.claimMarker(marker);
+  } catch {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: the marker claim's reply was lost — the container's state is unknown`,
+    );
+  }
+  if (claimed === "unknown") {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: the container is not this attempt's (its marker is missing or different)`,
+    );
+  }
+}
+
+/**
  * Acquire the attempt's container, mint its purpose-scoped read credential,
  * clone the PR head and resolve the AUTHORITATIVE checkout SHA. The caller's
  * failure path reads `progress.failureStage` and `progress.secretValues`, so
@@ -1165,13 +1193,11 @@ export async function prepareReviewAttempt(input: {
     // First provisioning: the marker is written BEFORE the checkout and every
     // runner input. It is the one fact that later proves a collect/destroy
     // addresses THIS attempt's live container. A container already carrying
-    // other bytes is not repaired (it belongs to someone else), so preparing
-    // on it is refused.
-    if ((await sandbox.claimMarker(marker)) === "unknown") {
-      throw new AttemptUnknownError(
-        `attempt ${attemptId}: the container is not this attempt's (its marker is missing or different)`,
-      );
-    }
+    // other bytes is not repaired (it belongs to someone else), and a lost
+    // reply is not an ordinary failure either: the marker may already be there,
+    // so a concurrent replay can prove this container and start paying on it
+    // (see claimAttemptMarker).
+    await claimAttemptMarker(sandbox, marker, attemptId);
   } else {
     // A replayed prepare may NOT provision: an earlier entry claimed that
     // right, so the only accepted outcome is the incarnation it started — and

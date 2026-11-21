@@ -86,6 +86,7 @@ function sandboxDouble(
     lostReply?: boolean;
     marker?: "present" | "absent" | "foreign";
     vanishAfterProof?: boolean;
+    markerClaimThrows?: boolean;
     /** A guarded read's reply is lost: the proof (`proof`) or the command after it. */
     guardedThrows?: "proof" | "command";
   } = {},
@@ -100,6 +101,7 @@ function sandboxDouble(
     counts,
     async claimMarker(marker: string) {
       events.push(`claim:${marker}`);
+      if (decision.markerClaimThrows === true) throw new Error("marker claim reply lost");
       if (decision.marker === "foreign") return "unknown" as const;
       container.marked = true;
       return "written" as const;
@@ -430,5 +432,24 @@ describe("a replayed prepare never provisions a second container", () => {
 
     expect(sandbox.events).toEqual([]);
     expect(await readReviewLaunch(db, ATTEMPT)).toBeNull();
+  });
+});
+
+describe("a lost marker reply is unknown", () => {
+  test("the first entry's marker claim rejects: nothing runs and the row stays pending", async () => {
+    const db = createMigratedTestD1();
+    const sandbox = sandboxDouble({ markerClaimThrows: true });
+
+    // The write may already have landed, so a concurrent replay can prove this
+    // container and start paying on it: settling this entry as a failure would
+    // then destroy a paying container. Unknown.
+    await expect(prepareReviewAttempt(prepareInput(db, sandbox))).rejects.toBeInstanceOf(
+      AttemptUnknownError,
+    );
+
+    expect(sandbox.events.some((event) => event.startsWith("run:"))).toBe(false);
+    // The provisioning claim itself succeeded: this entry owns the attempt, and
+    // the attempt's outcome — not its claim — is what is unknown.
+    expect(await readReviewLaunch(db, ATTEMPT)).toMatchObject({ state: "pending" });
   });
 });
