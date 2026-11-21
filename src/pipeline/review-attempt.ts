@@ -23,6 +23,7 @@ import { providerEnvName } from "./provider-catalog";
 import { redactExactSecrets, redactSecrets } from "./redact";
 import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
+import type { D1Like } from "../store/types";
 import { parseBudgetExhaustedSignal, type BudgetExhaustedOutcome } from "../review/schema";
 import {
   isRecheckStatusReason,
@@ -55,7 +56,7 @@ import {
   writeJsonCommand,
 } from "./gitops";
 import type { MarkedRun, RetentionProof, ReviewSandbox } from "./sandbox";
-import type { ShellCommand } from "./shell-command";
+import { shellCommand, type ShellCommand } from "./shell-command";
 
 /**
  * The attempt token's exact bytes: literal prefix, lowercase attempt id, one
@@ -117,6 +118,218 @@ export async function discardReviewAttempt(
 ): Promise<"destroyed" | "unknown"> {
   return sandbox.destroyMarked(attemptMarker(attemptId), retention);
 }
+
+/**
+ * The attempt's own row: the only authority to provision its container, the
+ * fence in front of the paid step, and the record that the paid step's result
+ * is durable. `migrations/0082_review_launches.sql` enforces the identity, the
+ * forward-only state machine and the coupling of `persisted` to a stored
+ * result; every transition below is ONE conditional statement whose
+ * `meta.changes` is the only success signal, so the row — not the caller —
+ * decides whether an attempt may provision, launch or record completion.
+ *
+ * The INSERT is the first-provisioning claim: only the entry whose INSERT
+ * created the row may start a container for this attempt. A later entry finds
+ * the row held and may never stamp a replacement as the original — not even
+ * after a crash before the marker write, which is why the marker is proven,
+ * never re-claimed, from the second entry on.
+ */
+const CLAIM_ATTEMPT_SQL = `
+INSERT INTO review_launches (attempt_id, state, claimed_at_ms)
+VALUES (?, 'pending', ?)
+ON CONFLICT (attempt_id) DO NOTHING
+`;
+
+const CLAIM_LAUNCH_SQL = `
+UPDATE review_launches
+SET state = 'launched', launched_at_ms = ?
+WHERE attempt_id = ? AND state = 'pending'
+`;
+
+const COMPLETE_LAUNCH_SQL = `
+UPDATE review_launches
+SET state = 'persisted', persisted_at_ms = ?, result_json = ?
+WHERE attempt_id = ? AND state = 'launched'
+`;
+
+const READ_LAUNCH_SQL = `
+SELECT state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json
+FROM review_launches
+WHERE attempt_id = ?
+`;
+
+type LaunchRow = {
+  state: string;
+  claimed_at_ms: number;
+  launched_at_ms: number | null;
+  persisted_at_ms: number | null;
+  result_json: string | null;
+};
+
+/** Where one attempt is in the paid-step machine, as the row records it. */
+export type ReviewLaunchState =
+  | { state: "pending"; claimedAtMs: number }
+  | { state: "launched"; claimedAtMs: number; launchedAtMs: number }
+  | {
+      state: "persisted";
+      claimedAtMs: number;
+      launchedAtMs: number;
+      persistedAtMs: number;
+      execution: ReviewAttemptExecution;
+    };
+
+/**
+ * The launch decision. `ok` means this caller owns the one paid step of the
+ * attempt; every refusal names why the step may not be taken, and `persisted`
+ * carries the durable result so a replay reads it instead of paying again.
+ * `no-claim` covers an attempt that never prepared (no row) and a row that is
+ * not in a launchable state — both refuse.
+ */
+export type LaunchClaim =
+  | { ok: true }
+  | { ok: false; reason: "already-launched" }
+  | { ok: false; reason: "persisted"; execution: ReviewAttemptExecution }
+  | { ok: false; reason: "no-claim" };
+
+/**
+ * Claim the right to provision this attempt's container. `claimed` means THIS
+ * entry created the row and may start the container; `already-claimed` means an
+ * earlier entry did, so this one may only prove the incarnation that already
+ * exists.
+ */
+export async function claimReviewAttempt(
+  db: D1Like,
+  attemptId: string,
+  nowMs: number,
+): Promise<"claimed" | "already-claimed"> {
+  const written = await db.prepare(CLAIM_ATTEMPT_SQL).bind(attemptId, nowMs).run();
+  return written.meta.changes === 1 ? "claimed" : "already-claimed";
+}
+
+/**
+ * Take the attempt's one paid step: `pending` → `launched` in one conditional
+ * statement. A row that already launched — a lost reply, a retried entry, a
+ * restart — changes nothing and is refused, and a persisted row hands back its
+ * durable result instead.
+ */
+export async function claimReviewLaunch(
+  db: D1Like,
+  attemptId: string,
+  nowMs: number,
+): Promise<LaunchClaim> {
+  const written = await db.prepare(CLAIM_LAUNCH_SQL).bind(nowMs, attemptId).run();
+  if (written.meta.changes === 1) return { ok: true };
+  // A zero-row claim carries no cause, so the refusal costs one read — only on
+  // the refusal path, and only to name it. It never decides anything.
+  const state = await readReviewLaunch(db, attemptId);
+  if (state === null) return { ok: false, reason: "no-claim" };
+  if (state.state === "persisted") return { ok: false, reason: "persisted", execution: state.execution };
+  if (state.state === "launched") return { ok: false, reason: "already-launched" };
+  return { ok: false, reason: "no-claim" };
+}
+
+/**
+ * Record the paid step's RESULT and its completion as one fact: the row reaches
+ * `persisted` only in the statement that stores the result, so completion
+ * cannot be recorded before the result is durable (the schema refuses the
+ * combination). `false` means the row did not move — nothing is confirmed.
+ */
+export async function completeReviewLaunch(
+  db: D1Like,
+  attemptId: string,
+  execution: ReviewAttemptExecution,
+  nowMs: number,
+): Promise<boolean> {
+  const written = await db
+    .prepare(COMPLETE_LAUNCH_SQL)
+    .bind(nowMs, encodeExecution(execution), attemptId)
+    .run();
+  return written.meta.changes === 1;
+}
+
+/** The attempt's launch row, or null when it never prepared. */
+export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<ReviewLaunchState | null> {
+  const row = await db.prepare(READ_LAUNCH_SQL).bind(attemptId).first<LaunchRow>();
+  if (row === null) return null;
+  if (row.state === "pending") return { state: "pending", claimedAtMs: row.claimed_at_ms };
+  if (row.state === "launched" && row.launched_at_ms !== null) {
+    return { state: "launched", claimedAtMs: row.claimed_at_ms, launchedAtMs: row.launched_at_ms };
+  }
+  if (
+    row.state === "persisted" &&
+    row.launched_at_ms !== null &&
+    row.persisted_at_ms !== null &&
+    row.result_json !== null
+  ) {
+    return {
+      state: "persisted",
+      claimedAtMs: row.claimed_at_ms,
+      launchedAtMs: row.launched_at_ms,
+      persistedAtMs: row.persisted_at_ms,
+      execution: decodeExecution(attemptId, row.result_json),
+    };
+  }
+  // The schema's CHECKs make an inconsistent row unreachable; reading it as "no
+  // row" keeps every caller on the refusing side if it ever happens.
+  return null;
+}
+
+/**
+ * The paid step's collected result as the row stores it. `recheck.rejected` is
+ * a Set in memory and a plain array on the row — the one shape that needs a
+ * codec; everything else is stored and read back verbatim.
+ *
+ * `run.stderr` is deliberately NOT stored: it is untrusted provider text used
+ * only on the failure paths, which never reach a persisted row, and keeping it
+ * out of D1 keeps an unredacted stream out of the durable store.
+ */
+function encodeExecution(execution: ReviewAttemptExecution): string {
+  return JSON.stringify({
+    run: { stdout: execution.run.stdout, exitCode: execution.run.exitCode },
+    recheck:
+      execution.recheck === null ? null : { ...execution.recheck, rejected: [...execution.recheck.rejected] },
+    report: execution.report,
+    appliedProvider: execution.appliedProvider,
+  });
+}
+
+function decodeExecution(attemptId: string, json: string): ReviewAttemptExecution {
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    // Falls through to the one shape check below — an unreadable row is the
+    // same refusal as a row that does not carry a paid outcome.
+  }
+  const stored = parsed as
+    | ((Partial<{ run: { stdout: string; exitCode: number } }> & {
+        recheck?: (Omit<RecheckRead, "rejected"> & { rejected: string[] }) | null;
+        report?: ReportDoc | null;
+        appliedProvider?: string | null;
+      }))
+    | null;
+  if (typeof stored?.run?.exitCode !== "number" || typeof stored.run.stdout !== "string") {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: its recorded result cannot be read back — nothing was launched`,
+    );
+  }
+  return {
+    run: { stdout: stored.run.stdout, stderr: "", exitCode: stored.run.exitCode },
+    // A row written by this module always carries the array; a `Set` of
+    // undefined would still be an empty set, so a truncated field degrades to
+    // "no rejected rows" rather than a throw.
+    recheck:
+      stored.recheck == null ? null : { ...stored.recheck, rejected: new Set(stored.recheck.rejected) },
+    report: stored.report ?? null,
+    appliedProvider: stored.appliedProvider ?? null,
+  };
+}
+
+/**
+ * A replay's marker proof: an existing incarnation may be PROVEN, never
+ * re-claimed, so the guarded read needs a command that changes nothing.
+ */
+const MARKER_PROOF_COMMAND = shellCommand("true");
 
 /**
  * Structured log sink of one attempt. The caller owns the field schema; this
@@ -851,11 +1064,16 @@ function toBase64Utf8(text: string): string {
  * clone the PR head and resolve the AUTHORITATIVE checkout SHA. The caller's
  * failure path reads `progress.failureStage` and `progress.secretValues`, so
  * both are updated in place as the steps advance.
+ *
+ * The attempt's own row grants the container: the entry whose INSERT creates it
+ * provisions, and every later entry may only prove the incarnation that entry
+ * started (it never starts or re-marks a container). A prepare that cannot
+ * prove that incarnation is `unknown`, not a retry.
  */
 export async function prepareReviewAttempt(input: {
   payload: ReviewJobPayload;
   deps: {
-    env: { SANDBOX: unknown };
+    env: { SANDBOX: unknown; DB: D1Like };
     getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
   };
   commenter: Pick<ReviewCommenter, "getInstallationToken">;
@@ -879,18 +1097,35 @@ export async function prepareReviewAttempt(input: {
   // call, not a sandbox step — it stays OUTSIDE the sandbox window so a
   // mint failure (bad App credentials, GitHub auth outage) records
   // stage "pipeline" and is never mis-tagged as a sandbox/infra failure.
+  //
+  // The durable first-provisioning claim comes FIRST, before a container is
+  // even resolved: only the entry whose row INSERT created it may start one.
+  const provisioning = await claimReviewAttempt(deps.env.DB, attemptId, Date.now());
   if (sandbox === null) {
     progress.failureStage = "sandbox";
     sandbox = await deps.getSandbox(deps.env.SANDBOX, attemptSandboxId(attemptId));
     input.onSandbox(sandbox);
   }
-  // The marker is written BEFORE the checkout and every runner input: it is
-  // the one fact that later proves a collect/destroy addresses THIS attempt's
-  // live container. A container already carrying other bytes is not repaired
-  // (it belongs to someone else), so preparing on it is refused.
-  if ((await sandbox.claimMarker(attemptMarker(attemptId))) === "unknown") {
+  const marker = attemptMarker(attemptId);
+  if (provisioning === "claimed") {
+    // First provisioning: the marker is written BEFORE the checkout and every
+    // runner input. It is the one fact that later proves a collect/destroy
+    // addresses THIS attempt's live container. A container already carrying
+    // other bytes is not repaired (it belongs to someone else), so preparing
+    // on it is refused.
+    if ((await sandbox.claimMarker(marker)) === "unknown") {
+      throw new AttemptUnknownError(
+        `attempt ${attemptId}: the container is not this attempt's (its marker is missing or different)`,
+      );
+    }
+  } else if ((await sandbox.runMarked(marker, MARKER_PROOF_COMMAND)).kind !== "ran") {
+    // A replayed prepare may NOT provision: an earlier entry claimed that
+    // right, so the only accepted outcome is the incarnation it started. A
+    // fresh container (no marker, not running) is never stamped as the
+    // original — including after a crash before the marker write, which leaves
+    // the attempt unknown rather than a second container wearing its name.
     throw new AttemptUnknownError(
-      `attempt ${attemptId}: the container is not this attempt's (its marker is missing or different)`,
+      `attempt ${attemptId}: its container was provisioned by an earlier entry and cannot be proven now — no replacement is provisioned`,
     );
   }
   progress.failureStage = "pipeline";
@@ -955,9 +1190,16 @@ export async function prepareReviewAttempt(input: {
  * the result documents. The caller's failure path reads the same
  * `progress` object, so a throw still carries the runner stage, its start
  * instant and the session's exact secret values.
+ *
+ * The attempt's row fences the paid step: this function claims `launched` in
+ * one conditional statement before the call, so a lost reply, a retried entry
+ * or a restart finds the row already launched and refuses a second launch as
+ * `unknown`. After the paid call returns, the collected result and the
+ * completion are written in ONE statement; a result that cannot be made durable
+ * leaves the attempt `launched` and refuses to confirm completion.
  */
 export async function runReviewAttempt(input: {
-  deps: { log: AttemptLog };
+  deps: { log: AttemptLog; env: { DB: D1Like } };
   /** The absolute instant the exec is killed at (`anchorRunnerBudget`'s end). */
   deadlineMs: number;
   sandbox: ReviewSandbox;
@@ -998,6 +1240,26 @@ export async function runReviewAttempt(input: {
     progress,
     attemptId,
   } = input;
+  // THE paid-step fence: one conditional statement decides who may pay, and
+  // nothing below it is reachable without the claim. A refusal touches neither
+  // the container nor the model — a lost reply, a retried entry and a restart
+  // all land here, and a persisted row hands back its durable result instead of
+  // paying again.
+  const launch = await claimReviewLaunch(deps.env.DB, attemptId, Date.now());
+  if (!launch.ok) {
+    if (launch.reason === "persisted") {
+      // The paid step ran and its result is durable, even though this entry did
+      // not run it: a replay must never claim "no paid work started", because
+      // that fact is what authorises a teardown.
+      progress.runnerReturned = true;
+      return launch.execution;
+    }
+    throw new AttemptUnknownError(
+      launch.reason === "already-launched"
+        ? `attempt ${attemptId}: its paid step was already launched and its result is not durable — refusing a second launch`
+        : `attempt ${attemptId}: it holds no provisioning claim — nothing was launched for it`,
+    );
+  }
   // The input carries the SAME absolute deadline every post-diff step bills —
   // the exec's own end instant, never a duration. The runner anchors its own
   // review deadline AT it, so the write's own window and the runner's parse
@@ -1227,5 +1489,17 @@ export async function runReviewAttempt(input: {
   // had run.
   const appliedProvider = await readAppliedProvider(sandbox, marker, progress.secretValues, deps.log, fields);
 
-  return { run, recheck, report, appliedProvider };
+  // Result and completion are ONE statement: the row reaches `persisted` only
+  // in the write that stores the result, so completion is never recorded before
+  // the result is durable. Anything else — a row that moved, a result too large
+  // for the row, a storage fault — leaves the attempt `launched` and refuses to
+  // confirm: the paid outcome is not yet readable, so it is `unknown`, never a
+  // failure and never a second launch.
+  const execution = { run, recheck, report, appliedProvider };
+  if (!(await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now()))) {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: the paid result could not be recorded as durable — completion is not confirmed`,
+    );
+  }
+  return execution;
 }

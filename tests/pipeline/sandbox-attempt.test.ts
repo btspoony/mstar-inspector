@@ -14,6 +14,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { ExecOutput } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
+import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 // The shared mock must register the workerd builtin BEFORE the sandbox adapter
 // loads, so those two modules cannot be static imports here.
@@ -24,6 +25,7 @@ const {
   AttemptUnknownError,
   attemptMarker,
   attemptSandboxId,
+  claimReviewAttempt,
   discardReviewAttempt,
   prepareReviewAttempt,
   runReviewAttempt,
@@ -230,12 +232,13 @@ describe("attempt identity", () => {
 
 describe("prepare writes the marker before any checkout work", () => {
   test("the container is resolved by attempt id and claimed before the clone", async () => {
+    const db = createMigratedTestD1();
     const sandbox = attemptSandboxDouble({});
     const acquired: string[] = [];
     const prepared = await prepareReviewAttempt({
       payload: PAYLOAD,
       deps: {
-        env: { SANDBOX: {} },
+        env: { SANDBOX: {}, DB: db },
         getSandbox: async (_binding: unknown, id: string) => {
           acquired.push(id);
           return sandbox as never;
@@ -256,11 +259,12 @@ describe("prepare writes the marker before any checkout work", () => {
   });
 
   test("a container carrying other bytes is refused, and no checkout runs on it", async () => {
+    const db = createMigratedTestD1();
     const sandbox = attemptSandboxDouble({ claim: "unknown" });
     await expect(
       prepareReviewAttempt({
         payload: PAYLOAD,
-        deps: { env: { SANDBOX: {} }, getSandbox: async () => sandbox as never },
+        deps: { env: { SANDBOX: {}, DB: db }, getSandbox: async () => sandbox as never },
         commenter: { getInstallationToken: async () => GRANT as never },
         attemptId: ATTEMPT_A,
         sandbox: null,
@@ -274,8 +278,8 @@ describe("prepare writes the marker before any checkout work", () => {
 });
 
 describe("collection refuses an unproven container", () => {
-  const executionInput = (sandbox: SandboxDouble) => ({
-    deps: { log: { info: () => {}, warn: () => {} } },
+  const executionInput = (sandbox: SandboxDouble, db: TestD1) => ({
+    deps: { log: { info: () => {}, warn: () => {} }, env: { DB: db } },
     deadlineMs: Date.now() + 600_000,
     sandbox: sandbox as never,
     headSha: SHA,
@@ -301,21 +305,27 @@ describe("collection refuses an unproven container", () => {
   });
 
   test("a missing/different marker yields unknown, never a collected result", async () => {
+    const db = createMigratedTestD1();
+    await claimReviewAttempt(db, ATTEMPT_A, Date.now());
     const sandbox = attemptSandboxDouble({ marked: "unknown" });
-    await expect(runReviewAttempt(executionInput(sandbox))).rejects.toBeInstanceOf(AttemptUnknownError);
+    await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toBeInstanceOf(AttemptUnknownError);
 
     // Exactly one guarded read was attempted, and it returned nothing.
     expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(1);
   });
 
   test("a rejected guarded read is unknown, not an unreadable document", async () => {
+    const db = createMigratedTestD1();
+    await claimReviewAttempt(db, ATTEMPT_A, Date.now());
     const sandbox = attemptSandboxDouble({ markedRejected: true });
-    await expect(runReviewAttempt(executionInput(sandbox))).rejects.toBeInstanceOf(AttemptUnknownError);
+    await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toBeInstanceOf(AttemptUnknownError);
   });
 
   test("a matching live incarnation collects the result documents", async () => {
+    const db = createMigratedTestD1();
+    await claimReviewAttempt(db, ATTEMPT_A, Date.now());
     const sandbox = attemptSandboxDouble({ marked: "ran" });
-    const execution = await runReviewAttempt(executionInput(sandbox));
+    const execution = await runReviewAttempt(executionInput(sandbox, db));
 
     expect(execution.run.exitCode).toBe(0);
     expect(execution.appliedProvider).toBeNull();
