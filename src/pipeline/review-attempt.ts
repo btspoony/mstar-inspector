@@ -1060,15 +1060,39 @@ function toBase64Utf8(text: string): string {
 }
 
 /**
+ * Run one prepare command on the incarnation this entry proved. The first
+ * provisioner may start the container it owns; a replay may only ACT on the
+ * live incarnation it just proved — a container that vanished after the proof
+ * runs nothing and is `unknown`, so a replay never starts, or acts on, a
+ * replacement and never turns an old proof into evidence for new operations.
+ */
+async function runPreparedCommand(
+  sandbox: ReviewSandbox,
+  marker: string,
+  provisioning: "claimed" | "already-claimed",
+  command: ShellCommand,
+  opts?: { env?: Record<string, string>; timeout?: number },
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (provisioning === "claimed") return sandbox.runCommand(command, opts);
+  const read = await sandbox.runMarked(marker, command, opts);
+  if (read.kind === "unknown") {
+    throw new AttemptUnknownError(
+      "the attempt container could not be proven while preparing — nothing ran on a replacement",
+    );
+  }
+  return read;
+}
+
+/**
  * Acquire the attempt's container, mint its purpose-scoped read credential,
  * clone the PR head and resolve the AUTHORITATIVE checkout SHA. The caller's
  * failure path reads `progress.failureStage` and `progress.secretValues`, so
  * both are updated in place as the steps advance.
  *
  * The attempt's own row grants the container: the entry whose INSERT creates it
- * provisions, and every later entry may only prove the incarnation that entry
- * started (it never starts or re-marks a container). A prepare that cannot
- * prove that incarnation is `unknown`, not a retry.
+ * provisions, and every later entry may only prove — and then act on — the
+ * incarnation that entry started. A prepare that cannot prove that incarnation
+ * is `unknown`, not a retry.
  */
 export async function prepareReviewAttempt(input: {
   payload: ReviewJobPayload;
@@ -1165,7 +1189,7 @@ export async function prepareReviewAttempt(input: {
   // the ONE `gitTransportEnv` the oversized-diff fetch also uses. GH_TOKEN
   // stays for the gh steps below. Credentials are exec env only — never in
   // the command string, never in the image, never in logs.
-  const clone = await sandbox.runCommand(cmds.clone, {
+  const clone = await runPreparedCommand(sandbox, marker, provisioning, cmds.clone, {
     env: gitTransportEnv(token),
     timeout: EXEC_TIMEOUT_GIT_MS,
   });
@@ -1177,7 +1201,9 @@ export async function prepareReviewAttempt(input: {
   // downstream — idempotency key, D1 row, posted commit_id, KV state — is
   // keyed off this sha, so diff/files/commit_id always describe the same
   // commit and a force-push mid-flight is captured here, not drifted.
-  const rev = await sandbox.runCommand(cmds.checkedOutSha, { timeout: EXEC_TIMEOUT_GIT_MS });
+  const rev = await runPreparedCommand(sandbox, marker, provisioning, cmds.checkedOutSha, {
+    timeout: EXEC_TIMEOUT_GIT_MS,
+  });
   if (rev.exitCode !== 0 || rev.stdout.trim() === "") {
     throw new Error(`cannot resolve head sha: git exit ${rev.exitCode}, stdout ${rev.stdout.length}B`);
   }
@@ -1245,7 +1271,23 @@ export async function runReviewAttempt(input: {
   // the container nor the model — a lost reply, a retried entry and a restart
   // all land here, and a persisted row hands back its durable result instead of
   // paying again.
-  const launch = await claimReviewLaunch(deps.env.DB, attemptId, Date.now());
+  //
+  // A REJECTED claim is not a zero-row claim: the write may have landed, so the
+  // attempt may already own its one paid step. Unknown, never a settleable
+  // failure — a failure the caller could retry would pay twice.
+  let launch: LaunchClaim;
+  try {
+    launch = await claimReviewLaunch(deps.env.DB, attemptId, Date.now());
+  } catch (err) {
+    const detail = redactExactSecrets(
+      redactSecrets(err instanceof Error ? err.message : String(err)),
+      progress.secretValues,
+    );
+    deps.log.warn({ ...fields, error: detail }, "launch claim failed — the paid step is not taken");
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: the launch claim could not be read back — the paid step is not taken`,
+    );
+  }
   if (!launch.ok) {
     if (launch.reason === "persisted") {
       // The paid step ran and its result is durable, even though this entry did
@@ -1492,11 +1534,25 @@ export async function runReviewAttempt(input: {
   // Result and completion are ONE statement: the row reaches `persisted` only
   // in the write that stores the result, so completion is never recorded before
   // the result is durable. Anything else — a row that moved, a result too large
-  // for the row, a storage fault — leaves the attempt `launched` and refuses to
-  // confirm: the paid outcome is not yet readable, so it is `unknown`, never a
-  // failure and never a second launch.
+  // for the row, a storage fault, a lost reply — leaves the attempt `launched`
+  // and refuses to confirm: the paid outcome is not proven durable, so it is
+  // `unknown`, never a failure the caller may settle, destroy on, or retry. A
+  // rejected write is explicitly unknown: it may have landed.
   const execution = { run, recheck, report, appliedProvider };
-  if (!(await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now()))) {
+  let recorded = false;
+  try {
+    recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now());
+  } catch (err) {
+    const detail = redactExactSecrets(
+      redactSecrets(err instanceof Error ? err.message : String(err)),
+      progress.secretValues,
+    );
+    deps.log.warn(
+      { ...fields, error: detail },
+      "launch completion write failed — the result is not confirmed durable",
+    );
+  }
+  if (!recorded) {
     throw new AttemptUnknownError(
       `attempt ${attemptId}: the paid result could not be recorded as durable — completion is not confirmed`,
     );

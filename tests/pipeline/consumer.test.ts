@@ -128,6 +128,7 @@ import {
   TEST_APP_ID,
   TEST_SECOND_APP_ID,
   createSeededTestD1,
+  failingDb,
   seedAppConfig,
   seedReviewingApp,
   setAppReviewLevel,
@@ -1016,6 +1017,83 @@ describe("createReviewConsumer", () => {
     // The error itself is still recorded — it just never justifies a teardown.
     expect(failureRows(db)).toHaveLength(1);
     expect(h.logLines.filter((line) => line.fields.event === "sandbox_teardown_unproven")).toHaveLength(1);
+  });
+
+  test("a rejected launch claim is unknown: nothing settled, nothing destroyed, capacity held", async () => {
+    const db = await createSeededTestD1();
+    let terminalized = 0;
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: failingDb(db, "SET state = 'launched'") as never }),
+      h.testLog,
+      {
+        ...h.overrides,
+        // An attached Check: an unprovable paid step must not conclude it,
+        // because a terminal Check cannot be taken back.
+        checks: {
+          begin: async () => ({
+            attemptId: "attempt-launch-claim-unreadable",
+            scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+            githubAppId: 424242,
+            headSha: SHA,
+            lease: { holder: "h", epoch: 1, untilMs: 1 },
+          }),
+          terminalize: async () => {
+            terminalized += 1;
+          },
+        },
+      },
+    );
+
+    await consumer(h.makeBatch(makePayload())); // unknown acks
+
+    expect(terminalized).toBe(0);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(h.sandbox.destroyCalls).toBe(0);
+    expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
+    expect(inflightRows(db)).toHaveLength(1);
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.logLines.filter((line) => line.fields.event === "review_unresolved")).toHaveLength(1);
+  });
+
+  test("a rejected result write after the paid call returned is unknown: nothing settled, nothing destroyed", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    let terminalized = 0;
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: failingDb(db, "SET state = 'persisted'") as never }),
+      h.testLog,
+      {
+        ...h.overrides,
+        checks: {
+          begin: async () => ({
+            attemptId: "attempt-result-write-unconfirmed",
+            scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+            githubAppId: 424242,
+            headSha: SHA,
+            lease: { holder: "h", epoch: 1, untilMs: 1 },
+          }),
+          terminalize: async () => {
+            terminalized += 1;
+          },
+        },
+      },
+    );
+
+    await consumer(h.makeBatch(makePayload())); // unknown acks
+
+    // The paid call ran exactly once and returned; only its durability is
+    // unconfirmed. That is unknown: no failure row, no Check conclusion, no
+    // teardown, and the capacity reservation stays.
+    expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(1);
+    expect(terminalized).toBe(0);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(h.sandbox.destroyCalls).toBe(0);
+    expect(inflightRows(db)).toHaveLength(1);
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.logLines.filter((line) => line.fields.event === "review_unresolved")).toHaveLength(1);
   });
 
   test("a refused destroy proof after a matching collection keeps capacity and retries nothing", async () => {

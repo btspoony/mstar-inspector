@@ -45,6 +45,7 @@ import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/
 import { REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import type { D1Like, D1StatementLike } from "../../src/store/types";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { fakePem } from "./fake-secrets";
@@ -162,6 +163,27 @@ export async function createSeededTestD1(): Promise<TestD1> {
   // later awaited re-seeds — last-writer-wins could flake success paths).
   await seedAppConfig(db, TEST_APP_ID);
   return db;
+}
+
+/**
+ * The seeded double with ONE statement class rejecting: every `run()` whose SQL
+ * contains `fragment` rejects with `message`, while reads and `batch` delegate
+ * to the real double. It models a D1 reply lost AFTER the write may have
+ * landed, so a caller must report the attempt as unknown instead of settling,
+ * retrying or destroying on it.
+ */
+export function failingDb(db: TestD1, fragment: string, message = "D1 write reply lost"): D1Like {
+  const wrap = (sql: string, statement: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(sql, statement.bind(...values)),
+    first: <T = Record<string, unknown>>() => statement.first<T>(),
+    all: <T = Record<string, unknown>>() => statement.all<T>(),
+    run: <T = Record<string, unknown>>() =>
+      sql.includes(fragment) ? Promise.reject(new Error(message)) : statement.run<T>(),
+  });
+  return {
+    prepare: (sql: string) => wrap(sql, db.prepare(sql)),
+    batch: (statements: D1StatementLike[]) => db.batch(statements),
+  };
 }
 
 /**

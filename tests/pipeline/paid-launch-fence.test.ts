@@ -13,6 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { MarkedRun } from "../../src/pipeline/sandbox";
+import { failingDb } from "../helpers/consumer-fixtures";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 // The shared mock must register the workerd builtin BEFORE the sandbox adapter
@@ -64,9 +65,10 @@ function progress() {
 }
 
 /**
- * The attempt module's view of a sandbox, with the test deciding the two facts
- * that matter here: whether the paid exec's reply is lost, and whether the
- * container already carries the attempt's marker.
+ * The attempt module's view of a sandbox, with the test deciding the facts that
+ * matter here: whether the paid exec's reply is lost, whether the container
+ * already carries the attempt's marker, and whether that container is replaced
+ * right after the replay proves it.
  */
 type SandboxDouble = {
   events: string[];
@@ -78,12 +80,14 @@ type SandboxDouble = {
   destroy(): Promise<void>;
 };
 
-function sandboxDouble(decision: { lostReply?: boolean; marker?: "present" | "absent" | "foreign" } = {}): SandboxDouble {
+function sandboxDouble(
+  decision: { lostReply?: boolean; marker?: "present" | "absent" | "foreign"; vanishAfterProof?: boolean } = {},
+): SandboxDouble {
   const events: string[] = [];
   const counts = { paidCalls: 0 };
   // The container's own filesystem: the claim writes these bytes, so a later
   // guarded read answers `ran` only on the incarnation the claim stamped.
-  const container = { marked: decision.marker === "present" };
+  const container = { marked: decision.marker === "present", proofServed: false };
   return {
     events,
     counts,
@@ -95,9 +99,20 @@ function sandboxDouble(decision: { lostReply?: boolean; marker?: "present" | "ab
     },
     async runMarked(_marker: string, command: string) {
       events.push(`marked:${command}`);
-      return container.marked
-        ? { kind: "ran" as const, stdout: "", stderr: "", exitCode: 0 }
-        : { kind: "unknown" as const };
+      if (!container.marked) return { kind: "unknown" as const };
+      // The proof lands on the incarnation that exists; a container replaced
+      // immediately afterwards answers `unknown` to every later guarded
+      // command, so the caller must not act on a replacement.
+      if (decision.vanishAfterProof === true) {
+        if (container.proofServed) return { kind: "unknown" as const };
+        container.proofServed = true;
+      }
+      return {
+        kind: "ran" as const,
+        stdout: command.includes("rev-parse") ? `${SHA}\n` : "",
+        stderr: "",
+        exitCode: 0,
+      };
     },
     async runCommand(command: string) {
       events.push(`run:${command}`);
@@ -233,6 +248,42 @@ describe("the paid step is taken at most once per attempt", () => {
     expect(sandbox.events).toEqual([]);
     expect(await readReviewLaunch(db, ATTEMPT)).toBeNull();
   });
+
+  test("a rejected launch claim is unknown: the paid step is not taken", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    const sandbox = sandboxDouble({ marker: "present" });
+
+    // The claim's reply is lost. It may have landed, so the attempt may already
+    // own its one paid step — that is `unknown`, never a settleable failure and
+    // never a second launch.
+    await expect(
+      runReviewAttempt({
+        ...executionInput(sandbox, db),
+        deps: { log: log(), env: { DB: failingDb(db, "SET state = 'launched'") } },
+      }),
+    ).rejects.toBeInstanceOf(AttemptUnknownError);
+
+    expect(sandbox.events).toEqual([]);
+    expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("pending");
+  });
+
+  test("a rejected completion write after a returned paid call is unknown, and the row stays launched", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    const sandbox = sandboxDouble({ marker: "present" });
+
+    await expect(
+      runReviewAttempt({
+        ...executionInput(sandbox, db),
+        deps: { log: log(), env: { DB: failingDb(db, "SET state = 'persisted'") } },
+      }),
+    ).rejects.toBeInstanceOf(AttemptUnknownError);
+
+    // The paid call did run; only its durability is unconfirmed.
+    expect(sandbox.counts.paidCalls).toBe(1);
+    expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
+  });
 });
 
 describe("the state machine cannot be walked twice", () => {
@@ -308,5 +359,22 @@ describe("a replayed prepare never provisions a second container", () => {
     // Provisioning is granted by the row, so the claim exists before anything
     // touched the container.
     expect(await readReviewLaunch(db, ATTEMPT)).not.toBeNull();
+  });
+
+  test("a container replaced between the replay's proof and its commands runs nothing", async () => {
+    const db = createMigratedTestD1();
+    await prepareReviewAttempt(prepareInput(db, sandboxDouble()));
+
+    // The proof lands on the incarnation that exists; the container is gone
+    // before the clone, so every later command must stay guarded and refuse.
+    const replaced = sandboxDouble({ marker: "present", vanishAfterProof: true });
+    await expect(prepareReviewAttempt(prepareInput(db, replaced))).rejects.toBeInstanceOf(
+      AttemptUnknownError,
+    );
+
+    // Nothing was run through the start-permitted path: an unguarded clone here
+    // would have started (and used) a replacement the proof never covered.
+    expect(replaced.events.some((event) => event.startsWith("run:"))).toBe(false);
+    expect(replaced.events.filter((event) => event.startsWith("marked:"))).toHaveLength(2);
   });
 });
