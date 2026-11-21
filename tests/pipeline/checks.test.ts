@@ -2969,15 +2969,81 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     expect(row.observed).toBe("success");
   });
 
-  test("a skip inherits a FAILING head review — failure, never neutral", async () => {
+  test("a skip inherits a head review below the floor — failure, never neutral", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    seedHeadReview(db, "needs fixes", 40);
+    // Allowed verdict, score under the floor: the gate is missed on the score.
+    seedHeadReview(db, "ship it", 70);
     const fake = settlingFake();
     const { row } = await skipHead(db, fake);
 
     // The bypass this test exists for: a repeat delivery of this head must not
     // turn its missed gate into a neutral required check.
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "ship it", 70, GATE),
+    );
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+  });
+
+  test("a skip inherits a disallowed verdict above the floor — failure, never neutral", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // Passing score, verdict outside the gate's set: the gate is missed on the
+    // verdict alone, which a score-only comparison would let through.
+    seedHeadReview(db, "needs fixes", 95);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "needs fixes", 95, GATE),
+    );
+    expect(row.desired).toBe("failure");
+  });
+
+  test("a confirmed publication without a reviews row still settles the gate result", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The publication is confirmed (its proof is persisted) while the `reviews`
+    // projection has not landed: reading the projection alone would answer
+    // "nothing to inherit" and settle neutral over a review that missed the
+    // gate.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
+            confirmed_ms, applied_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'confirmed', ?, ?, 1, 'done', ?, ?, ?, NULL)`,
+      )
+      .run(
+        "confirmed-proof",
+        APP_ID,
+        SCOPE.installationId,
+        SCOPE.owner,
+        SCOPE.repo,
+        SCOPE.prNumber,
+        SHA,
+        JSON.stringify({ version: 1, artifact: { payload: { verdict: "needs fixes", tally: { scorePct: 40 } } } }),
+        JSON.stringify({
+          publicationId: "confirmed-proof",
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 1,
+          commentId: 7,
+          bodySha256: "b".repeat(64),
+          confirmedMs: T0,
+        }),
+        T0,
+        T0,
+        T0,
+      );
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
     expect(fake.updates[0]!.params.output.summary).toBe(
       CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE),

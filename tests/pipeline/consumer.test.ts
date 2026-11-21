@@ -9178,7 +9178,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(1); // the reviewed head's row, untouched
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
-    expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("unreadable — keeping the ack"))).toHaveLength(1);
+    expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("ack the keyed head now"))).toHaveLength(1);
   });
 
   test("check lifecycle: a stale reviewed head falls through and reviews the live head", async () => {
@@ -9197,18 +9197,52 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       targetId: `target-${TEST_APP_ID}`,
     });
     await seedPrHead(db, { headSha: SHA2, headAt: new Date().toISOString() });
+    const adapter = checksAdapterFor(db);
+    // This delivery's run for the OLD head was attached at admission: it has no
+    // review coming now, so the round must settle it, not leave it in progress.
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: TEST_APP_ID,
+          installationId: 123,
+          owner: "acme",
+          repo: "widgets",
+          prNumber: 42,
+        },
+        githubAppId: 424242,
+        headSha: SHA,
+        triggeredBy: "pull_request",
+        action: "opened",
+        deliveryId: "stale-delivery",
+      },
+    );
+    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
+    let liveHeadReads = 0;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+      selectPrHead: async (input) => {
+        liveHeadReads += 1;
+        return createReviewBotsStore(db).selectPrHead(input);
+      },
+      createAppCommenter: () => commenterWithChecks(adapter),
     });
 
-    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: attached.deliveryId })));
 
+    // ONE live-head read on the hit path — and it is the comparison that
+    // decided this delivery was stale.
+    expect(liveHeadReads).toBe(1);
     // The live head was reviewed and posted...
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(2);
-    // ...and the Check belongs to SHA2 alone: the stale key claims nothing.
-    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA2]);
+    // ...the old head's run is settled (it inherits that head's passing gate
+    // result) instead of waiting out its lease...
+    const stale = checkRowFor(db, SHA);
+    expect(stale.desired).toBe("success");
+    expect(stale.terminal_ms).not.toBeNull();
+    // ...and the new Check belongs to SHA2 alone.
+    expect(checkRowFor(db, SHA2).head_sha).toBe(SHA2);
     expect(h.logLines.some((line) => line.level === "info" && line.msg.includes("reviewing the live head"))).toBe(true);
     expect(h.messageRetryCalls).toHaveLength(0);
   });
@@ -9225,19 +9259,62 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     });
     // The watermark agrees with the keyed head: the hit is the live head.
     await seedPrHead(db, { headSha: SHA, headAt: new Date().toISOString() });
+    let liveHeadReads = 0;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      selectPrHead: async (input) => {
+        liveHeadReads += 1;
+        return createReviewBotsStore(db).selectPrHead(input);
+      },
       createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
     });
 
     await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
 
+    expect(liveHeadReads).toBe(1);
     expect(h.sandbox.calls).toHaveLength(0);
     expect(checkRequests).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
     expect(h.logLines.some((line) => line.msg === "idempotency hit — ack")).toBe(true);
-    expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("unreadable — keeping the ack"))).toHaveLength(0);
+    expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("ack the keyed head now"))).toHaveLength(0);
     expect(h.logLines.some((line) => line.msg.includes("reviewing the live head"))).toBe(false);
+  });
+
+  test("check lifecycle: a mention keyed on a stale watermark still reviews the live head", async () => {
+    // No payload SHA: admission keys the hit on the watermark it reads. The PR
+    // head ADVANCES right after that read (a push queued no review in `manual`
+    // mode), so the hit-time read must see the new head — comparing the
+    // watermark with itself would ack and lose the commit.
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: GATED_OUTPUT,
+      appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
+    });
+    let liveHeadReads = 0;
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      selectPrHead: async () => {
+        liveHeadReads += 1;
+        // First read (the admission key): SHA. Every read after it: the push.
+        return { headSha: liveHeadReads === 1 ? SHA : SHA2, headAt: new Date().toISOString() };
+      },
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+
+    await consumer(h.makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })));
+
+    // The admission read plus ONE hit-time read, and the hit fell through.
+    expect(liveHeadReads).toBe(2);
+    expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(reviewCount(db)).toBe(2);
+    expect(checkRowFor(db, SHA2).head_sha).toBe(SHA2);
+    expect(h.logLines.some((line) => line.level === "info" && line.msg.includes("reviewing the live head"))).toBe(true);
   });
 
   test("check lifecycle: an unreviewed head reviews as before — the live head is never read", async () => {

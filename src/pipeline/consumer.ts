@@ -5017,16 +5017,32 @@ async function processMessage(
           head_sha: earlyHeadSha,
           idempotency_key: idemKey(earlyKey),
         };
-        // One read per delivery, and only when a hit needs it. A mention's key
-        // IS the watermark read above, so no second read is issued for it.
+        // One read per delivery, and only when a hit needs it: the watermark is
+        // read AGAIN here and compared with the head the hit was keyed on —
+        // never with itself, so a mention keyed on an older watermark still
+        // sees the push that overtook it. Read inline (not via `readPrHead`)
+        // so a fault and an absent row produce the SAME single warning naming
+        // the fallback, instead of two lines for one condition.
         let liveHeadSha: string | null | undefined;
         const liveHead = async (): Promise<string | null> => {
           if (liveHeadSha === undefined) {
-            liveHeadSha = payload.head_sha ? ((await readPrHead(deps, payload))?.headSha ?? null) : earlyHeadSha;
+            try {
+              liveHeadSha =
+                (
+                  await deps.selectPrHead({
+                    targetId: payload.targetId,
+                    owner: payload.owner,
+                    repo: payload.repo,
+                    prNumber: payload.pr_number,
+                  })
+                )?.headSha ?? null;
+            } catch {
+              liveHeadSha = null;
+            }
             if (liveHeadSha === null) {
               deps.log.warn(
                 earlyFields,
-                `PR head watermark unreadable — keeping the ack for ${earlyHeadSha.slice(0, 7)} (never a second paid review)`,
+                "PR head watermark unreadable — ack the keyed head now, do not re-review",
               );
             }
           }
@@ -5090,6 +5106,11 @@ async function processMessage(
             earlyFields,
             `delivery keyed on ${earlyHeadSha.slice(0, 7)} but the PR head is ${movedHeadSha.slice(0, 7)} — reviewing the live head`,
           );
+          // The run THIS delivery attached for the old head has no review
+          // coming now, so it is settled under this delivery's own attach
+          // identity (inheriting that head's conclusion) instead of sitting
+          // `in_progress` until its deadline.
+          await settleSkippedRow(deps, payload, payload.head_sha, "superseded by a newer commit");
         }
         checkClaimAttempted = true;
         checkHandle = await beginCheck(lifecycleScope, githubAppId, movedHeadSha ?? earlyHeadSha);

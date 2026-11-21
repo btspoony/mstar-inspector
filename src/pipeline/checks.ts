@@ -1599,15 +1599,16 @@ export type CheckLifecycle = {
    * rejection, a paused App), so its attached run has no review to report and
    * nobody holds a handle to terminalize it. The attached row — released, or
    * still under a stalled delivery holder — is taken with the same fenced
-   * claim and concluded from THIS head's own persisted review against the
-   * App's CURRENT gate (the `inherited` branch, same head both sides): a head
-   * whose review met the gate stays `success`, one that missed it stays
-   * `failure`. `neutral` — with the skip reason — is only the skip with
-   * nothing to inherit: no published review, an unreadable gate, or a review
-   * without a readable score. A live consumer holder, a frozen intent and a
-   * terminal row are never taken; `false` means there was nothing to settle. A
-   * store or transport fault rejects — the caller logs it and the ACK is
-   * unaffected.
+   * claim and concluded from THIS head's own published result against the
+   * App's CURRENT gate (the `inherited` branch, same head both sides): the
+   * confirmed publication's proof first, its persisted `reviews` row when that
+   * projection has not landed. A head whose review met the gate stays
+   * `success`, one that missed it stays `failure`. `neutral` — with the skip
+   * reason — is only the skip with nothing to inherit: no proof and no
+   * readable review, an unreadable gate, or a result without a readable score.
+   * A live consumer holder, a frozen intent and a terminal row are never
+   * taken; `false` means there was nothing to settle. A store or transport
+   * fault rejects — the caller logs it and the ACK is unaffected.
    */
   settleSkipped(input: {
     scope: Scope;
@@ -2188,13 +2189,23 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // live consumer's, already frozen, or terminal.
       if (claimed === null) return false;
       const { identity } = claimed.attempt;
-      // A skip must never overwrite the head's own gate result with `neutral`:
-      // when THIS head has a published review, the run carries that review's
-      // result against the App's CURRENT gate (the inherited branch — success
-      // when it meets the gate, failure when it does not). `neutral` is only
-      // the skip with nothing to inherit: no published review, an unreadable
-      // gate, or a score the envelope never carried.
-      const review = await readInheritedReview(deps.db, { scope: input.scope, headSha: input.headSha });
+      // A skip must never overwrite the head's own gate result with `neutral`.
+      // A CONFIRMED publication is the proof the review landed, while its
+      // `reviews` projection can still lag the apply — so the proof is read
+      // first and the projection only backs it up. Either way the run carries
+      // that result against the App's CURRENT gate (the inherited branch:
+      // success when it meets the gate, failure when it does not). `neutral` is
+      // only the skip with nothing to inherit: no proof and no readable review,
+      // an unreadable gate, or a score neither carries.
+      const proof = await readPublicationProof(deps.db, { scope: input.scope, headSha: input.headSha });
+      const review =
+        (proof === null
+          ? null
+          : await readPublishedReview(deps.db, {
+              scope: input.scope,
+              headSha: input.headSha,
+              publicationId: proof.publicationId,
+            })) ?? (await readInheritedReview(deps.db, { scope: input.scope, headSha: input.headSha }));
       const gate = review === null ? null : await deps.getCheckGate(input.scope);
       const conclusion: CheckConclusion =
         review === null || gate === null || review.scorePct === null
