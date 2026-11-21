@@ -31,6 +31,7 @@ import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import { claimAttempt } from "../../src/store/review-checks";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { AttemptRef, CheckSettlement, ProcessDeps } from "../../src/pipeline/review-attempt-execution";
+import type { D1Like, D1StatementLike } from "../../src/store/types";
 import type { TestD1 } from "../store/helpers";
 
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
@@ -550,6 +551,41 @@ describe("claim 2 — the mark proves completion, not entry", () => {
   });
 });
 
+/**
+ * A D1 double whose launch-row read answers a row THIS BUILD cannot interpret
+ * (a state/outcome pair the decoder refuses). Schema enforcement means such a
+ * row can only come from another build or a damaged database — which is exactly
+ * the case the settlement must survive without concluding anything. Every other
+ * statement delegates to the real double.
+ */
+function unreadableLaunchDb(db: TestD1): D1Like {
+  const row = {
+    state: "launched",
+    claimed_at_ms: 1,
+    launched_at_ms: 2,
+    persisted_at_ms: null,
+    failed_at_ms: null,
+    abandoned_at_ms: null,
+    result_json: null,
+    result_outcome: "persisted",
+    check_owed_ms: null,
+  };
+  return {
+    prepare: (sql: string) => {
+      const statement = db.prepare(sql);
+      if (!sql.includes("FROM review_launches") || !sql.includes("WHERE attempt_id = ?")) return statement;
+      const unreadable: D1StatementLike = {
+        bind: () => unreadable,
+        first: async <T = Record<string, unknown>>() => row as T,
+        all: async () => ({ results: [] }),
+        run: async () => ({ results: [], meta: { changes: 0, last_row_id: 0 } }),
+      };
+      return unreadable;
+    },
+    batch: (statements: D1StatementLike[]) => db.batch(statements),
+  };
+}
+
 describe("a rejection is not an observation", () => {
   /** The attempt's row after a paid exec that was SENT and never answered. */
   async function launchedAttempt(db: TestD1): Promise<void> {
@@ -584,6 +620,54 @@ describe("a rejection is not an observation", () => {
     // No failure row, no Check conclusion, no stamp: the row that fences the
     // launch says the outcome is unknown, and that outranks the step's story.
     expect(failureRows(db)).toHaveLength(0);
+    expect(launchState(db)).toBe("launched");
+  });
+
+  test("an unreadable launch row is unobservable: nothing settles, whatever the phase saw", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const ref = makeRef(payload);
+    await seedHandoff(db, payload);
+    await launchedAttempt(db);
+    const deps = await makeDeps(db);
+    deps.env = { ...deps.env, DB: unreadableLaunchDb(db) as never };
+
+    // The phase even OBSERVED a return; the row cannot say which outcome it
+    // records, so the outcome is unobservable and its story must not settle it.
+    const err = new BudgetExhaustedError(
+      {
+        kind: "budget-exhausted",
+        cause: "runner-deadline",
+        tier: "default",
+        budgetWindow: "runner",
+        budgetMs: 600_000,
+        seatsDispatched: 1,
+        seatsStopped: 1,
+        changedLines: null,
+      },
+      "runner signalled budget exhaustion",
+    );
+    const phase = new AttemptPhaseError(
+      {
+        phase: "review",
+        stage: "runner",
+        headSha: null,
+        secretValues: [],
+        runnerStartedAt: 1,
+        runnerReturned: true,
+        runnerEffectiveBudgetMs: 600_000,
+        changedLines: null,
+        sendAttemptPublicationId: null,
+      },
+      err,
+    );
+
+    const outcome = await settleAttemptFailure(deps, ref, phase, {});
+
+    expect(outcome).toEqual({ kind: "unknown" });
+    expect(failureRows(db)).toHaveLength(0);
+    expect(settledMark(db)).toBeNull();
+    // The real row is untouched: only the READ was damaged.
     expect(launchState(db)).toBe("launched");
   });
 

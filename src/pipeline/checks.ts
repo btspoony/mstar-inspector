@@ -61,6 +61,7 @@ import {
   deferCheckRecovery,
   readCheckIdentity,
   readInheritedReview,
+  readOpenCheckIdentityForKey,
   readPublicationProof,
   readPublishedReview,
   recordCheckObservation,
@@ -2038,6 +2039,15 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // created for an attempt nothing could ever drive, and no lease is taken.
       const adapter = deps.getAdapter(input.scope);
       if (adapter === null) return null;
+      // A RESUMED phase acts only on the generation ITS ROW froze, and this is
+      // verified BEFORE the claim because the claim IS the mint: if the frozen
+      // generation is not the open one (it ended, or no row carries it), there
+      // is nothing for this attempt to settle and this call must create no row
+      // at all — a fresh generation here would belong to nobody.
+      if (input.expect !== undefined) {
+        const open = await readOpenCheckIdentityForKey(deps.db, input.expect.key);
+        if (open === null || open.generation !== input.expect.generation) return null;
+      }
       // The claim INSERT establishes ownership, so no lease exists to fence on
       // yet; the clock is sampled for this write.
       const claim = await claimAttempt(deps.db, {
@@ -2050,10 +2060,9 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         nowMs: deps.nowMs(),
         executionDeadlineMs: input.executionDeadlineMs,
       });
-      // A RESUMED phase acts only on the generation ITS ROW froze. This must
-      // be decided after the claim (that is where the generation becomes
-      // known) and before anything is adopted, attached, promoted or
-      // terminalized: a mismatch is not this attempt's Check at all.
+      // A concurrent claimer can still move the key between the check above and
+      // this claim, so the pair is compared once more after it — before
+      // anything is adopted, attached, promoted or terminalized.
       if (input.expect !== undefined) {
         const ownsFrozenPair =
           claim.attempt.identity.generation === input.expect.generation &&

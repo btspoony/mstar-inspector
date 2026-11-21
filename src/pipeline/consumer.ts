@@ -1234,16 +1234,23 @@ function classifyWorkflowCreateFailure(err: unknown): "definite" | "unknown" {
 }
 
 /**
- * Does an instance with THIS attempt's id exist? The platform's own answer for
- * that id — never an error message, which cannot name one.
+ * Is an instance with THIS attempt's id present? THREE answers, never two: the
+ * platform's "no such instance" reply (a 404) is `absent`; anything else — a
+ * transport fault, a lost reply, a malformed status — is `unknown`. Collapsing
+ * a failed read into "does not exist" is the same error as treating a create
+ * rejection as an observation: it lets a status class settle an attempt whose
+ * instance nobody looked at.
  */
-async function attemptInstanceExists(workflow: Workflow<AttemptRef>, attemptId: string): Promise<boolean> {
+async function attemptInstancePresence(
+  workflow: Workflow<AttemptRef>,
+  attemptId: string,
+): Promise<"exists" | "absent" | "unknown"> {
   try {
     const handle = await workflow.get(attemptId);
     await handle.status();
-    return true;
-  } catch {
-    return false;
+    return "exists";
+  } catch (err) {
+    return (err as { status?: unknown } | null)?.status === 404 ? "absent" : "unknown";
   }
 }
 
@@ -1265,13 +1272,18 @@ export async function createWorkflowInstance(
     // A structured conflict or validation status must not skip it — a replay
     // that receives one while its same-id instance exists was never a
     // definite failure.
-    if (await attemptInstanceExists(workflow, ref.attemptId)) return "exists";
+    const presence = await attemptInstancePresence(workflow, ref.attemptId);
+    if (presence === "exists") return "exists";
+    // A READ THAT FAILED IS NOT AN ABSENCE. With presence unknown, no status
+    // class may take the non-acceptance path: the instance could be there and
+    // the read simply did not answer.
+    if (presence === "unknown") throw new WorkflowCreateAmbiguousError(ref.attemptId, err);
     if (classifyWorkflowCreateFailure(err) === "definite") {
       throw new WorkflowCreateFailedError(ref.attemptId, err);
     }
-    // No instance for this id and no definite status (a lost reply, a
-    // transport fault, "already exists", a TypeError, a conflict): the outcome
-    // stays unknown and is acked without a retry.
+    // Confirmed absent and no definite status (a lost reply, a transport
+    // fault, "already exists", a TypeError, a conflict): the outcome stays
+    // unknown and is acked without a retry.
     throw new WorkflowCreateAmbiguousError(ref.attemptId, err);
   }
 }

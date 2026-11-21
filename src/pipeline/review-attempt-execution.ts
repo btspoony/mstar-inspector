@@ -164,6 +164,7 @@ import {
   buildRevalidatedSection,
   filterLineCommentFindings,
   PreparedSendRejected,
+  PublicationDeadlineSpent,
   renderLineCommentText,
   type ClosureRow,
   type CommenterEnv,
@@ -1989,6 +1990,8 @@ async function publishDegradedPublication(input: {
   headSha: string;
   redactedError: string;
   redactedStdout: string;
+  /** The attempt's frozen instant, enforced at the mutation (see `guardMutations`). */
+  notAfterMs: number;
 }): Promise<DegradedPublicationOutcome> {
   const { commenter } = input;
   const target = {
@@ -2045,8 +2048,13 @@ async function publishDegradedPublication(input: {
         targetCommentId: plan.action === "update" ? plan.commentId : null,
         body,
         publicationId: staged.id,
+        notAfterMs: input.notAfterMs,
       });
     } catch (err) {
+      // Refused AT the mutation because the instant had passed: nothing left
+      // the Worker, so this is a wall-clock stop, never the `unknown` of a
+      // possibly-sent request. It propagates so the caller settles it as one.
+      if (err instanceof PublicationDeadlineSpent) throw err;
       if (err instanceof PreparedSendRejected) {
         // A definitive pre-send rejection (§7.7): NO request left the
         // Worker, so the truthful durable phase is `failed` — never the
@@ -3123,14 +3131,20 @@ async function settlementFor(
   settlement.claimAttempted = true;
   // ADOPTION USES THE FROZEN PAIR, never "the latest open generation of this
   // key": the launch row recorded which generation this attempt owns when it
-  // was created, and a newer one belongs to another attempt. Without the frozen
-  // pair an older attempt could promote or conclude somebody else's run.
-  const handle = await settlement.begin(
-    scope,
-    ref.githubAppId,
-    headSha,
-    (await readAttemptIdentity(deps.env.DB, ref.attemptId)) ?? undefined,
-  );
+  // was created, and a newer one belongs to another attempt. NO PAIR, NO CLAIM:
+  // passing `undefined` would select the unrestricted fresh-claim path, which
+  // can MINT a generation for a key this attempt does not own — so a resumed
+  // settlement with no frozen identity claims nothing at all and leaves the run
+  // to the reconciler.
+  const identity = await readAttemptIdentity(deps.env.DB, ref.attemptId);
+  if (identity === null) {
+    deps.log.warn(
+      { ...settlement.fields, event: "check_settlement_not_adopted" },
+      "check settlement not adopted on a resumed step — the attempt row froze no Check identity, so nothing is claimed",
+    );
+    return undefined;
+  }
+  const handle = await settlement.begin(scope, ref.githubAppId, headSha, identity);
   if (handle === null) {
     // No adoption: a live holder owns the row (the real lifecycle refuses to
     // take it) or nothing was adoptable. Cache NOTHING — a settlement without
@@ -4721,6 +4735,7 @@ async function collectPhase(
       headSha,
       redactedError,
       redactedStdout,
+      notAfterMs: ref.deadlineMs,
     });
     if (degradedOutcome.phase === "failed") {
       await check?.terminalize(null, "degraded-not-posted");
@@ -5176,8 +5191,16 @@ async function publishPhase(
       targetCommentId: stagedPayload.targetCommentId,
       body: preparedBody,
       publicationId: stagedId,
+      notAfterMs: ref.deadlineMs,
     });
   } catch (err) {
+    // The adapter refused at the mutation because the instant had passed:
+    // nothing was sent, so the attempt settles as a confirmed wall-clock stop
+    // (the same rule the early refusal takes) rather than as a send with an
+    // unknown outcome, and the staged row stays `prepared` for discovery.
+    if (err instanceof PublicationDeadlineSpent) {
+      throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner");
+    }
     if (err instanceof PreparedSendRejected) {
       // Definitive pre-send rejection (§7.7): no request left the Worker.
       // `failed` is the truthful durable phase (never the post-attempt
@@ -5597,14 +5620,22 @@ export async function settleAttemptFailure(
   // `runnerReturned` fact at all, so it may not conclude the Check, stamp the
   // commit or release capacity. Only a settlement whose phase facts OBSERVED
   // the return continues to the terminal path below.
+  //
+  // An UNREADABLE row is the same refusal, unconditionally: this build cannot
+  // say which outcome that row records, so the outcome is unobservable — no
+  // phase's story may substitute for it, not even an observed return.
   const paidStateObserved = progress.runnerReturned;
-  if (launchVerdict(launch).kind === "paid-unknown" && !paidStateObserved) {
+  const launchJudgement = launchVerdict(launch);
+  const outcomeUnobservable =
+    launchJudgement.kind === "unrecognised" ||
+    (launchJudgement.kind === "paid-unknown" && !paidStateObserved);
+  if (outcomeUnobservable) {
     deps.log.warn(
       {
         ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
         event: "review_unresolved",
       },
-      `review unresolved: ${detail} — the launch row records no paid outcome, so nothing was concluded, destroyed or reclaimed`,
+      `review unresolved: ${detail} — the launch row records no readable paid outcome (${launchJudgement.kind}), so nothing was concluded, destroyed or reclaimed`,
     );
     cleanup.unproven = true;
     return { kind: "unknown" };

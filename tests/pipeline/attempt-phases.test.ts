@@ -291,13 +291,27 @@ describe("the restart round trip", () => {
     h.sandbox.resolvedSha = SHA;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const ref = makeRef(payload);
+    // A REAL Check row: the launch row's frozen identity is read from it, and a
+    // resumed settlement may claim only that generation.
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: `consumer:${ATTEMPT_ID}`,
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`the test could not create the row: ${claimed.kind}`);
+    const handle: CheckHandle = { ...HANDLE, attemptId: claimed.attempt.identity.attemptId };
     // The §7.10 seam, with its own record of what was adopted and concluded.
     const checks = {
       begun: 0,
       terminalized: [] as Array<{ publicationId: string | null; outcome: string }>,
       begin: async () => {
         checks.begun += 1;
-        return HANDLE;
+        return handle;
       },
       markInProgress: async () => ({ kind: "settled" as const, promoted: true }),
       terminalize: async (input: { publicationId: string | null; outcome: string }) => {
@@ -722,6 +736,51 @@ describe("a first publication past the frozen instant", () => {
     expect((await readPublication(db as never, collected.collected.publicationId))?.phase).toBe("prepared");
   });
 
+  test("a first send carries the frozen instant into the adapter, which enforces it at the mutation", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+
+    const { deps: publishing } = await makeDeps({ db });
+    expect(await publishAttempt(publishing, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+
+    // The phase cannot be authoritative alone: the marker scan inside the send
+    // is an unbounded await, so the instant rides the send and the adapter
+    // checks it on the last line before the first write.
+    const send = h.commenterCalls.find((call) => call.op === "post-prepared");
+    expect((send?.args as { notAfterMs?: number } | undefined)?.notAfterMs).toBe(ref.deadlineMs);
+  });
+
+  test("the degraded notice carries the same instant", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = "not a verdict";
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    expect(await collectAttempt(collecting, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "degraded" } });
+
+    const send = h.commenterCalls.find((call) => call.op === "post-prepared-degraded");
+    expect((send?.args as { notAfterMs?: number } | undefined)?.notAfterMs).toBe(ref.deadlineMs);
+  });
+
   test("the degraded notice takes the same refusal", async () => {
     const { deps, db } = await makeDeps();
     const payload = makePayload();
@@ -762,5 +821,61 @@ describe("the workflow host entry", () => {
     const config = await ensureRunnerConfig(payload, deps);
     expect(config.appCfg.modelChain).toBe("ark/deepseek-v4-flash");
     expect(deps.runnerConfigs.get(TEST_APP_ID)).toBe(config);
+  });
+});
+
+describe("a resumed settlement claims only the frozen pair", () => {
+  test("an attempt whose row froze no Check identity claims nothing at all", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+    // A real Check row, so prepare freezes the pair on the launch row.
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: `consumer:${ATTEMPT_ID}`,
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`the test could not create the row: ${claimed.kind}`);
+    const handle: CheckHandle = { ...HANDLE, attemptId: claimed.attempt.identity.attemptId };
+    deps.checks = { begin: async () => handle, terminalize: async () => {} };
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+
+    // The pair a resumed host has to claim on is gone: passing `undefined` would
+    // select the unrestricted fresh-claim path, which may MINT a generation.
+    db.raw
+      .prepare("UPDATE review_launches SET attempt_key = NULL, attempt_generation = NULL WHERE attempt_id = ?")
+      .run(ATTEMPT_ID);
+
+    let begun = 0;
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = {
+      begin: async () => {
+        begun += 1;
+        return handle;
+      },
+      terminalize: async () => {},
+    };
+    expect(await publishAttempt(publishing.deps, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+
+    expect(begun).toBe(0);
+    const launch = db.raw
+      .prepare("SELECT check_owed_ms FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { check_owed_ms: number | null };
+    expect(launch.check_owed_ms).toBeNull();
   });
 });

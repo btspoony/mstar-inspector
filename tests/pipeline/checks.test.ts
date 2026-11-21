@@ -4169,11 +4169,13 @@ describe("a resumed settlement acts only on the frozen generation", () => {
     });
   }
 
-  test("a claim that would mint a new generation is handed back instead of used", async () => {
+  test("a frozen generation that has ended is never re-minted by a resumed claim", async () => {
     const db = await seededDb();
     const first = await claimedAttempt(db);
     const frozen = await readCheckIdentity(db, first.attempt.identity.attemptId);
     if (frozen === null) throw new Error("fixture: the claim wrote no identity");
+    // The attempt's own generation ended WITHOUT a proven publication, so the
+    // unrestricted claim path would happily mint generation 2 for this key.
     await db
       .prepare("UPDATE review_checks SET terminal_ms = ?, holder = NULL, lease_until_ms = NULL WHERE id = ?")
       .bind(T0, first.attempt.identity.attemptId)
@@ -4193,17 +4195,48 @@ describe("a resumed settlement acts only on the frozen generation", () => {
       expect: frozen,
     });
 
+    // Refused BEFORE the claim, so no row exists for this call to leave behind.
     expect(adopted).toBeNull();
     expect(remoteCalls).toBe(0);
-    // The row this call minted is handed to recovery: no lease held, no run.
-    const minted = db.raw
-      .prepare(
-        "SELECT holder, recovery_state, last_error FROM review_checks WHERE attempt_key = ? ORDER BY generation DESC LIMIT 1",
-      )
-      .get(frozen.key) as { holder: string | null; recovery_state: string; last_error: string | null };
-    expect(minted.holder).toBeNull();
-    expect(minted.recovery_state).toBe("pending");
-    // The refusal is named, so the handoff says why this generation exists.
-    expect(minted.last_error).toMatch(/frozen identity/);
+    const rows = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_checks WHERE attempt_key = ?")
+      .get(frozen.key) as { n: number };
+    expect(rows.n).toBe(1);
+  });
+
+  test("a frozen pair whose row is still open is not refused by the identity check", async () => {
+    const db = await seededDb();
+    const attempt = await claimedAttempt(db);
+    const frozen = await readCheckIdentity(db, attempt.attempt.identity.attemptId);
+    if (frozen === null) throw new Error("fixture: the claim wrote no identity");
+
+    let began = 0;
+    const adapter = {
+      beginCheck: async () => {
+        began += 1;
+        return { kind: "unavailable", reason: "test surface", requests: 0 };
+      },
+    } as never;
+    const lifecycle = createCheckLifecycle({ db, nowMs: () => CLOCK, getAdapter: () => adapter, getCheckGate: async () => GATE });
+    const adopted = await lifecycle.begin({
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      executionDeadlineMs: CLOCK + CHECK_LEASE_MS,
+      expect: frozen,
+    });
+
+    // The identity check passes and the claim path runs: the open row is busy
+    // (held by this very claim), so no adoption and no second row — but this
+    // call is NOT refused by the frozen-pair rule, which is what the previous
+    // case pins in the other direction.
+    expect(adopted).toBeNull();
+    expect(began).toBe(0);
+    const rows = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_checks WHERE attempt_key = ?")
+      .get(frozen.key) as { n: number };
+    expect(rows.n).toBe(1);
   });
 });

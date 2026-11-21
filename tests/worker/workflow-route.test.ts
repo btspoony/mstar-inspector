@@ -256,8 +256,13 @@ describe("review route — every handoff is a durable record", () => {
             calls === 1
               ? {
                   create: async () => {
-                    // A definite configuration rejection: no instance exists.
+                    // A definite configuration rejection, AND the platform
+                    // confirms this attempt's instance is absent (404) — the
+                    // two facts the non-acceptance path requires.
                     throw Object.assign(new Error("invalid workflow configuration"), { status: 400 });
+                  },
+                  get: async () => {
+                    throw Object.assign(new Error("no such instance"), { status: 404 });
                   },
                 }
               : { create: async () => ({}) };
@@ -455,7 +460,7 @@ describe("review route — a conflict is resolved by the exact instance", () => 
     expect(verdict).toBe("exists");
   });
 
-  test("a 409 with no instance for this id stays unknown — acked, never settled as failed", async () => {
+  test("a 409 with a confirmed absence still stays unknown — acked, never settled as failed", async () => {
     // No 4xx status may skip the exact-instance readback: a conflict is a
     // statement about existence, and the attempt id is the only fact that
     // answers it.
@@ -466,8 +471,47 @@ describe("review route — a conflict is resolved by the exact instance", () => 
             throw Object.assign(new Error("instance already exists"), { status: 409 });
           },
           get: async () => {
-            throw new Error("no such instance");
+            throw Object.assign(new Error("no such instance"), { status: 404 });
           },
+        } as never,
+        ref(),
+      ),
+    ).rejects.toBeInstanceOf(WorkflowCreateAmbiguousError);
+  });
+
+  test("a definite 4xx with a FAILED instance read is unknown, never a definite failure", async () => {
+    // The read did not answer, so nobody knows whether the instance is there.
+    // Treating that as absence would settle the attempt as failed and hand its
+    // capacity to a second attempt over an instance that may exist.
+    await expect(
+      createWorkflowInstance(
+        {
+          create: async () => {
+            throw Object.assign(new Error("invalid params"), { status: 422 });
+          },
+          get: async () => {
+            throw new Error("Workflows API unavailable");
+          },
+        } as never,
+        ref(),
+      ),
+    ).rejects.toBeInstanceOf(WorkflowCreateAmbiguousError);
+  });
+
+  test("a failed instance read also overrides a status the classifier would call definite", async () => {
+    // Same rule, reached through `status()` rather than `get()`: the handle
+    // exists, the status read fails, and that is still not evidence of absence.
+    await expect(
+      createWorkflowInstance(
+        {
+          create: async () => {
+            throw Object.assign(new Error("invalid workflow configuration"), { status: 400 });
+          },
+          get: async () => ({
+            status: async () => {
+              throw new Error("status read failed");
+            },
+          }),
         } as never,
         ref(),
       ),
