@@ -1316,7 +1316,7 @@ export const zhCN: Dictionary = {
       /** 时长分析：运营方选择时长上限的依据。 */
       durationTitle: "审查时长分布",
       durationDescription:
-        "最近 {days} 天内被准入的尝试。百分位只统计已写入结算时点、且义务（Check 结论与成功声明）全部证明关闭的区间；空窗口就显示为空，绝不当作 0。",
+        "最近 {days} 天内被准入的尝试。百分位只统计已写入结算时点、结算把发布义务记为已解除、且数据库显示其 Check 已结论的区间；空窗口就显示为空，绝不当作 0。",
       durationEmpty: "此窗口内没有准入任何尝试。",
       durationEmptyExcluded:
         "此窗口内没有可测量的尝试：{n} 个已准入尝试全部被排除——{checkOpen} 个结算时 Check 仍未关闭、{recordMissing} 个没有结算记录、{noBoundary} 个没有可测量的边界、{unsettled} 个未结算、{prePrepare} 个在 prepare 之前就终止。",
@@ -1333,7 +1333,8 @@ export const zhCN: Dictionary = {
         "未计入百分位：{checkOpen} 个结算时 Check 仍未关闭、{recordMissing} 个没有结算记录、{noBoundary} 个没有可测量的边界、{unsettled} 个未结算、{prePrepare} 个在 prepare 之前就终止。",
       durationFailureTail:
         "付费步骤失败且没有产出持久结果的尝试没有可测量的区间，按「没有可测量的边界」排除；已经产出结果的尝试即使后续某一步失败也照常统计。",
-      durationSettlementBasis: "该分布依据结算记录构建，不重新校验投递幂等性。",
+      durationSettlementBasis:
+        "样本之所以可测，是因为它的这次结算把发布义务记为已解除；投递幂等性不属于该区间，这里也不对它作任何断言。",
       durationCandidateLabel: "候选上限（毫秒）",
       durationCandidateApply: "查看截断",
       durationCutoff: "{cap} 毫秒的上限会排除 {n} 个尝试中的 {over} 个（{share}）。",

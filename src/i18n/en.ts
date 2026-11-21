@@ -1580,7 +1580,7 @@ export const en = {
       /** The duration analysis: the evidence for choosing the attempt cap. */
       durationTitle: "Review duration distribution",
       durationDescription:
-        "Attempts admitted in the last {days} days. Percentiles use only intervals whose settlement instant is written and whose obligations — Check conclusion and success claim — are all proven closed, and an empty window stays empty — it never reads as a zero.",
+        "Attempts admitted in the last {days} days. Percentiles use only intervals whose settlement instant is written, whose settlement recorded the publication obligation as discharged, and whose Check the database shows concluded, and an empty window stays empty — it never reads as a zero.",
       durationEmpty: "No attempt was admitted in this window.",
       durationEmptyExcluded:
         "No attempt was measured: all {n} admitted attempts were excluded — {checkOpen} with a Check still open at settlement, {recordMissing} with no settlement record, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
@@ -1599,7 +1599,7 @@ export const en = {
       durationFailureTail:
         "A launch whose paid step failed without a durable result has no interval to measure and is excluded as having no measurable boundary; an attempt that produced a result is measured even if a later step failed.",
       durationSettlementBasis:
-        "The distribution is built from settlement records and does not re-verify delivery idempotency.",
+        "A sample is measured because its settlement recorded the publication obligation as discharged; delivery idempotency is not part of the interval and is not claimed here.",
       durationCandidateLabel: "Candidate cap (ms)",
       durationCandidateApply: "Show cutoff",
       durationCutoff: "A {cap} ms cap would exclude {over} of {n} attempts ({share}).",

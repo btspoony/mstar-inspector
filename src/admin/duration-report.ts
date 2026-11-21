@@ -8,8 +8,10 @@
  * the Check pair the attempt froze must read terminal at or before that instant
  * (a Check that concludes later, or a row the database does not hold, means the
  * settlement instant truncated the interval), and the settlement's own completion
- * record must exist — a local transition proves its own effect, and delivery
- * idempotency is never re-verified here. Everything else is counted under one of
+ * record must exist. The record is the narrower claim: it says THIS SETTLEMENT
+ * considered the publication obligation discharged. It does not say the delivery
+ * idempotency key is valid — that is a transporter fact, not part of the interval,
+ * and nothing in this module certifies it. Everything else is counted under one of
  * the five reasons below
  * and never supplied as a zero, because "not measured" and "took no time" are
  * different answers — and only a proven interval may steer the operator's cap.
@@ -64,11 +66,10 @@ export type DurationPercentiles = { p50Ms: number; p90Ms: number; maxMs: number 
  *   missing, still open, or concluded AFTER the instant it claims to have
  *   settled: its end boundary is not proven.
  * - `no-settlement-record` — the attempt settled before migration 0085 added
- *   `settled_effects`, or its record is unreadable, so it cannot show which
- *   obligations it discharged. Excluded BY RULE: the delivery-time idempotency
- *   key is a statement about the transporter, not about whether the review
- *   finished, and it is unobservable after its TTL — it is never used as a
- *   completion witness.
+ *   `settled_effects`, or its record is unreadable, so nothing states what that
+ *   settlement discharged. Excluded BY RULE: the delivery-time idempotency key
+ *   says what the transporter did, is unobservable after its TTL, and is never
+ *   used as a completion witness.
  * - `no-boundary` — no usable start or end instant: no launch row, a pre-0087
  *   row without its queue stamp, no durable result (the settlement's start is
  *   not an outcome), or boundaries that do not run forwards.
@@ -272,10 +273,11 @@ export async function readReviewDurationReport(
       excluded["no-boundary"] += 1;
       continue;
     }
-    // The completion record IS the discharge of every obligation the settlement
-    // incurred: `settled_ms` is written together with it, only when the required
-    // set for that lane is complete. A settled row without one was written
-    // before migration 0085, and nothing else witnesses what it discharged.
+    // The record is the settlement's own statement that the obligations it
+    // incurred were discharged: `settled_ms` is written together with it, only
+    // when the required set for that lane is complete. It is not a statement
+    // about the delivery key. A settled row without one was written before
+    // migration 0085, and nothing else witnesses what it discharged.
     if (!hasSettlementRecord(row.settled_effects)) {
       excluded["no-settlement-record"] += 1;
       continue;

@@ -864,7 +864,7 @@ describe("Runtime screen", () => {
       "A launch whose paid step failed without a durable result has no interval to measure and is excluded as having no measurable boundary; an attempt that produced a result is measured even if a later step failed.",
     );
     expect(surface.container.querySelector('[data-duration="settlement-basis"]')?.textContent).toBe(
-      "The distribution is built from settlement records and does not re-verify delivery idempotency.",
+      "A sample is measured because its settlement recorded the publication obligation as discharged; delivery idempotency is not part of the interval and is not claimed here.",
     );
     await surface.close();
   });
@@ -896,7 +896,7 @@ describe("Runtime screen", () => {
       "付费步骤失败且没有产出持久结果的尝试没有可测量的区间，按「没有可测量的边界」排除；已经产出结果的尝试即使后续某一步失败也照常统计。",
     );
     expect(chinese.container.querySelector('[data-duration="settlement-basis"]')?.textContent).toBe(
-      "该分布依据结算记录构建，不重新校验投递幂等性。",
+      "样本之所以可测，是因为它的这次结算把发布义务记为已解除；投递幂等性不属于该区间，这里也不对它作任何断言。",
     );
     await chinese.close();
   });
