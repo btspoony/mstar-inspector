@@ -22,7 +22,7 @@
 
 import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
-import worker, { settleRefusedAfterAttach } from "../../src/worker/index";
+import worker, { refusalSkipSettlement, settleRefusedAfterAttach } from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import {
@@ -33,7 +33,14 @@ import {
   SHARED_BOT_ENTITLEMENT_STAGE,
 } from "../../src/contracts/failure-stages";
 import { quotaMonth } from "../../src/store/quota-store";
-import { CHECK_SUMMARIES } from "../../src/pipeline/checks";
+import {
+  CHECK_SUMMARIES,
+  attachCheckAtAcceptance,
+  createChecksAdapter,
+  type ChecksCreateParams,
+  type ChecksOctokit,
+} from "../../src/pipeline/checks";
+import type { ReviewTargetRow } from "../../src/dashboard/targets-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -2690,14 +2697,121 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
     expect(warn.mock.calls[0]?.[0]).toContain("store down");
   });
 
-  test("a rejected attach still counts as finished, so the settlement is attempted", async () => {
-    const settle = mock(async () => false);
-    const warn = mock((_detail: string) => {});
+  test("a refusal settles from the head's confirmed proof against the App's real gate, with no adapter call", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{}] });
+    const target = db.raw
+      .query("SELECT * FROM review_targets WHERE id = ?")
+      .get(appRow.targetId) as ReviewTargetRow;
+    const bot = db.raw.query("SELECT github_app_id FROM review_bots WHERE id = ?").get(appRow.id) as {
+      github_app_id: number;
+    };
+    const scope = {
+      appId: appRow.id,
+      installationId: 123,
+      owner: FIXTURE_REPO.owner,
+      repo: FIXTURE_REPO.name,
+      prNumber: 42,
+    };
+    const HEAD = "0123456789abcdef0123456789abcdef01234567";
+    // The head's publication already CONFIRMED and passed (85 ≥ the App gate's
+    // default floor of 80, verdict "ship it"); there is no `reviews` row.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
+         VALUES ('refused-proof', ?, 123, ?, ?, 42, ?, 'review', 'confirmed', ?, ?, 1, 'done', 1000, 1000, 1000)`,
+      )
+      .run(
+        appRow.id,
+        scope.owner,
+        scope.repo,
+        HEAD,
+        JSON.stringify({ version: 1, artifact: { payload: { verdict: "ship it", tally: { scorePct: 85 } } } }),
+        JSON.stringify({
+          publicationId: "refused-proof",
+          scope,
+          headSha: HEAD,
+          kind: "review",
+          round: 1,
+          commentId: 7,
+          bodySha256: "b".repeat(64),
+          confirmedMs: 1000,
+        }),
+      );
+    // The delivery's own attach (a create only). The scripted surface counts
+    // any UPDATE, which the refusal lane must never issue: its adapter is null.
+    let updateCalls = 0;
+    const octokit: ChecksOctokit = {
+      rest: {
+        checks: {
+          create: async (params: ChecksCreateParams) => ({
+            data: {
+              id: 4242,
+              name: params.name,
+              head_sha: params.head_sha,
+              external_id: params.external_id,
+              status: "queued",
+              conclusion: null,
+              app: { id: bot.github_app_id },
+            },
+          }),
+          update: async () => {
+            updateCalls += 1;
+            throw new Error("the refusal lane must never call GitHub");
+          },
+          get: async () => {
+            throw new Error("the refusal lane must never call GitHub");
+          },
+          listForRef: async () => {
+            throw new Error("the refusal lane must never call GitHub");
+          },
+        },
+      },
+    };
+    const adapter = createChecksAdapter({
+      db: db as never,
+      nowMs: () => Date.now(),
+      getOctokit: async () => octokit,
+    });
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope,
+        githubAppId: bot.github_app_id,
+        headSha: HEAD,
+        triggeredBy: "pull_request",
+        action: "opened",
+        deliveryId: "refused-delivery",
+      },
+    );
+    expect(attached.kind).toBe("attached");
 
-    await settleRefusedAfterAttach({ attach: Promise.reject(new Error("attach died")), settle, warn });
+    const settled = await refusalSkipSettlement({ db: db as never, target }).settleSkipped({
+      scope,
+      headSha: HEAD,
+      triggeredBy: "pull_request",
+      action: "opened",
+      attachDeliveryId: "refused-delivery",
+      reason: "review admission refused: pr-held",
+    });
 
-    expect(settle).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledTimes(0);
+    // The head's own confirmed proof, judged against the App's REAL gate: a
+    // success — not a deferral a reconciler would later freeze as failure.
+    expect(settled).toBe(true);
+    const row = db.raw.query("SELECT * FROM review_checks WHERE head_sha = ?").get(HEAD) as {
+      desired: string;
+      observed: string;
+      terminal_ms: number | null;
+      holder: string | null;
+    };
+    expect(row.desired).toBe("success");
+    // Store-only: nothing was sent, so the reconciler owns the single update.
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.holder).toBeNull();
+    expect(updateCalls).toBe(0);
   });
 });
 
