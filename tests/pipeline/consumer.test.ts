@@ -1002,6 +1002,43 @@ describe("createReviewConsumer", () => {
     expect(h.logLines.filter((line) => line.fields.event === "review_unresolved")).toHaveLength(1);
   });
 
+  test("a refused destroy proof after a matching collection keeps capacity and retries nothing", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The review finished and published; only the teardown cannot prove the
+    // container is this attempt's.
+    h.sandbox.destroyMarkedUnknown = true;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // Nothing was destroyed, so the capacity reservation must not be handed to
+    // a new attempt while the unproven container may still be running.
+    expect(h.sandbox.destroyCalls).toBe(0);
+    expect(inflightRows(db)).toHaveLength(1);
+    // A successful round is acked implicitly (no explicit ack recorded), so a
+    // retry would be the only way this attempt could run again — and there is
+    // none.
+    expect(h.messageRetryCalls).toHaveLength(0);
+    // The review itself is durable and stands.
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(h.logLines.filter((line) => line.fields.event === "sandbox_teardown_unproven")).toHaveLength(1);
+  });
+
+  test("a lost destroy proof after a matching collection keeps capacity and retries nothing", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.destroyError = new Error("destroy rpc lost");
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    expect(inflightRows(db)).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(h.logLines.filter((line) => line.fields.event === "sandbox_teardown_unproven")).toHaveLength(1);
+  });
+
   test("propagated GitHub secondary rate limit → the persisted error starts with the stable prefix, after redaction", async () => {
     // The octokit request-error shape a rejected GitHub call throws: a 403
     // that carries `retry-after` is GitHub's secondary limit, not a

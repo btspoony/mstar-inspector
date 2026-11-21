@@ -437,20 +437,39 @@ describe("SandboxV1 marker gate", () => {
     const { promise, resolve } = Promise.withResolvers<void>();
     container.slow = promise;
 
-    const slowRun = sandbox.runCommand(shellCommand("slow"));
-    const teardown = sandbox.destroyMarked(marker);
+    // The guarded read holds the pair (proof → its own slow command).
+    const guardedRead = sandbox.runMarked(marker, shellCommand("slow-read"));
+    // A start-permitted run arrives mid-pair: its start must wait for it.
+    const laterRun = sandbox.runCommand(shellCommand("later"));
     await Bun.sleep(0);
 
-    // The teardown is queued behind the in-flight run: it has read no marker
-    // and destroyed nothing while another operation owns the container.
-    expect(container.markerReads).toBe(0);
-    expect(container.destroyed).toBe(false);
+    expect(container.markerReads).toBe(1);
+    expect(container.ran).toEqual([]);
 
     resolve();
-    expect(await slowRun).toEqual({ stdout: "ran", stderr: "", exitCode: 0 });
+    expect(await guardedRead).toEqual({ kind: "ran", stdout: "ran", stderr: "", exitCode: 0 });
+    expect(await laterRun).toEqual({ stdout: "ran", stderr: "", exitCode: 0 });
+    expect(container.ran).toEqual(["slow-read", "later"]);
+  });
+
+  test("a long paid run does not prevent a teardown from acquiring the lock", async () => {
+    const container = makeContainer(true);
+    const sandbox = makeDo(container);
+    const marker = attemptMarker(ATTEMPT_A);
+    container.marker = marker;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    container.slow = promise;
+
+    const paidRun = sandbox.runCommand(shellCommand("slow"));
+    await Bun.sleep(0);
+    // The run is in flight and holds no lock: the teardown proves and destroys
+    // now instead of waiting for the execution to settle.
+    const teardown = sandbox.destroyMarked(marker);
     expect(await teardown).toBe("destroyed");
-    expect(container.markerReads).toBe(1);
     expect(container.destroyed).toBe(true);
+
+    resolve();
+    expect(await paidRun).toEqual({ stdout: "ran", stderr: "", exitCode: 0 });
   });
 
   test("the prepared incarnation allows collect-then-destroy", async () => {

@@ -264,12 +264,20 @@ export class SandboxV1 extends DurableObject {
   }
 
   /**
-   * One container operation at a time on this DO. The guarded operations prove
-   * the marker on the SAME handle they then act on, and a start-permitted path
-   * must not provision between that proof and that use — this lock is what
-   * makes the pair one incarnation-bound step against another request. A
-   * platform eviction or an out-of-band container restart stays outside any
-   * in-DO guarantee: it shows up as a missing marker, i.e. `unknown`.
+   * One guarded critical section at a time on this DO: a guarded operation's
+   * proof-and-action pair, and the start decision of a plain run (the only
+   * start-permitted path). Holding it across the pair is what stops another
+   * request from provisioning between the marker read and the command/destroy
+   * that read justifies.
+   *
+   * It is deliberately NOT held across a paid execution: `runCommand` leaves
+   * the queue as soon as its container is ready, so a hung exec can never keep
+   * a later teardown from acquiring the lock and checking sameness.
+   *
+   * Bound: an out-of-band platform restart between the marker read and the
+   * action is outside what this DO can serialise. The guarantee is "the same
+   * handle this request proved", not "the same process across a platform
+   * restart".
    */
   private gate: Promise<unknown> = Promise.resolve();
 
@@ -300,23 +308,33 @@ export class SandboxV1 extends DurableObject {
     command: ShellCommand,
     opts?: CommandOpts,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    return this.exclusive(() => this.execCommand(this.container, command, opts, true));
+    // Bounds first: a payload that can never be delivered must not start a
+    // container. The start is serialized with the guarded pair; the exec that
+    // follows is not — a long run must not hold the queue.
+    const prepared = { stdin: this.assertBounds(command, opts) };
+    const container = await this.exclusive(async () => {
+      const handle = this.container;
+      await this.ensureRunning(handle);
+      return handle;
+    });
+    return this.execCommand(container, command, opts, prepared);
   }
 
   /**
-   * Write the attempt marker once. `start` is deliberate: prepare owns
+   * Write the attempt marker once. Starting is deliberate: prepare owns
    * provisioning, so this is the ONE marker path allowed to start a container.
    * A lost reply is resolved by reading the marker back from the same handle —
    * a replay sees the same bytes and reports `matched` instead of failing.
    */
   async claimMarker(marker: string): Promise<"written" | "matched" | "unknown"> {
+    const opts = { env: { MSTAR_ATTEMPT_MARKER: marker } };
+    this.assertBounds(MARKER_CLAIM_COMMAND, opts);
     return this.exclusive(async () => {
       const container = this.container;
       let exitCode: number;
       try {
-        exitCode = (
-          await this.execCommand(container, MARKER_CLAIM_COMMAND, { env: { MSTAR_ATTEMPT_MARKER: marker } }, true)
-        ).exitCode;
+        await this.ensureRunning(container);
+        exitCode = (await this.execCommand(container, MARKER_CLAIM_COMMAND, opts)).exitCode;
       } catch {
         // The write failed (noclobber refusal, container loss). Only a matching
         // marker can turn that into a replay; anything else is not provable.
@@ -340,7 +358,7 @@ export class SandboxV1 extends DurableObject {
       if (!container.running) return { kind: "unknown" };
       if ((await this.readMarker(container)) !== marker) return { kind: "unknown" };
       try {
-        return { kind: "ran", ...(await this.execCommand(container, command, opts, false)) };
+        return { kind: "ran", ...(await this.execCommand(container, command, opts)) };
       } catch {
         // The exec reply was lost: whether the command ran is unprovable, so
         // the outcome is `unknown` — never a document read as unreadable.
@@ -363,7 +381,7 @@ export class SandboxV1 extends DurableObject {
   /** The marker's exact bytes, or null when it is absent/unreadable. Never starts a container. */
   private async readMarker(container: Container): Promise<string | null> {
     try {
-      const read = await this.execCommand(container, MARKER_READ_COMMAND, { timeout: MARKER_READ_TIMEOUT_MS }, false);
+      const read = await this.execCommand(container, MARKER_READ_COMMAND, { timeout: MARKER_READ_TIMEOUT_MS });
       return read.exitCode === 0 ? read.stdout : null;
     } catch {
       return null;
@@ -371,16 +389,11 @@ export class SandboxV1 extends DurableObject {
   }
 
   /**
-   * The bounded exec itself, on the caller's handle. `start` is the caller's
-   * decision — prepare (and a plain run) may provision, a marker-guarded
-   * operation must not.
+   * The exec bounds, checked before anything starts: an argv or payload that
+   * can never be delivered must not provision a container. Returns the encoded
+   * stdin so the caller can hand it to `execCommand` instead of re-encoding.
    */
-  private async execCommand(
-    container: Container,
-    command: ShellCommand,
-    opts: CommandOpts | undefined,
-    start: boolean,
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  private assertBounds(command: ShellCommand, opts: CommandOpts | undefined): Uint8Array | undefined {
     // Linux caps ONE argv string at MAX_ARG_STRLEN (128 KiB); these bounds leave
     // headroom and fail before `execve` can report E2BIG. No value is echoed.
     const commandBytes = utf8Encoder.encode(command).byteLength;
@@ -393,16 +406,26 @@ export class SandboxV1 extends DurableObject {
         throw new Error(`exec env ${name} is ${valueBytes} bytes, above the ${MAX_EXEC_ENV_VALUE_BYTES}-byte bound`);
       }
     }
-    // Every bound — including the stdin payload — runs BEFORE the container
-    // starts: a payload that can never be delivered must not start one. The
-    // encode still happens before `exec`, which is where it is written.
     const stdinPayload = opts?.stdin === undefined ? undefined : utf8Encoder.encode(opts.stdin);
     if (stdinPayload !== undefined && stdinPayload.byteLength > MAX_EXEC_STDIN_BYTES) {
       throw new Error(
         `the exec stdin payload is ${stdinPayload.byteLength} bytes, above the ${MAX_EXEC_STDIN_BYTES}-byte bound`,
       );
     }
-    if (start) await this.ensureRunning(container);
+    return stdinPayload;
+  }
+
+  /**
+   * The bounded exec itself, on the caller's handle. Never starts a container:
+   * a start is the caller's separate, locked decision.
+   */
+  private async execCommand(
+    container: Container,
+    command: ShellCommand,
+    opts: CommandOpts | undefined,
+    prepared?: { stdin: Uint8Array | undefined },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const stdinPayload = prepared === undefined ? this.assertBounds(command, opts) : prepared.stdin;
     // Clamp before converting: a zero/negative value must never reach the argv
     // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
     // non-finite override (NaN/Infinity) is not a duration at all — default.

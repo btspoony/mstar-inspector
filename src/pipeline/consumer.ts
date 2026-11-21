@@ -453,7 +453,7 @@ export type ConsumerLogFields = {
    * platform closed (D20) and deferred the whole batch instead of running it —
    * one line per invocation, not per message.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer";
   action: string;
   installation_id: number;
   owner: string;
@@ -3560,9 +3560,10 @@ async function processMessage(
   const attemptId = crypto.randomUUID();
   const sandboxId = attemptSandboxId(attemptId);
   let sandbox: ReviewSandbox | null = null;
-  // Set when the attempt's container could not be proven: teardown and capacity
-  // release are skipped (both would act on unknown evidence).
-  let attemptUnknown = false;
+  // Set when the attempt's container could not be proven — by collection OR by
+  // teardown: the other half is skipped too, and capacity is never released on
+  // unknown evidence (a new attempt could start on a container that still runs).
+  let containerUnproven = false;
   // Set once the sha is resolved from the checkout; the failure log carries
   // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
   // criteria: 失败路径错误日志含幂等键).
@@ -6388,7 +6389,7 @@ async function processMessage(
     // the model again on ambiguous acceptance. The Check stays `in_progress`
     // for the reconciler, which owns the abandoned-attempt outcome.
     if (err instanceof AttemptUnknownError) {
-      attemptUnknown = true;
+      containerUnproven = true;
       deps.log.warn(
         {
           ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
@@ -6513,22 +6514,34 @@ async function processMessage(
     // the next attempt for this PR acquire the slot and start its container
     // while this one is still alive, so live containers could exceed
     // min(system, workspace) by the destroy latency. Both blocks warn only.
-    if (sandbox !== null && !attemptUnknown) {
+    if (sandbox !== null && !containerUnproven) {
       try {
         // Proven sameness, not a name: a container this attempt cannot prove it
         // prepared is left alone (its result may be the only copy) and the
         // teardown is reported as unknown.
         if ((await discardReviewAttempt(sandbox, attemptId)) !== "destroyed") {
+          containerUnproven = true;
           deps.log.warn(
-            { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
-            "sandbox not destroyed: the container is not proven to be this attempt's",
+            {
+              ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
+              sandbox_id: sandboxId,
+              event: "sandbox_teardown_unproven",
+            },
+            "sandbox not destroyed: the container is not proven to be this attempt's — capacity held, nothing released",
           );
         }
       } catch (err) {
+        // A LOST proof is the same fact as a refused one: the container's state
+        // is unknown, so capacity must not be handed to a new attempt.
+        containerUnproven = true;
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(
-          { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
-          `sandbox destroy failed: ${detail}`,
+          {
+            ...(fields ?? baseFields ?? payloadIdentityFields(payload)),
+            sandbox_id: sandboxId,
+            event: "sandbox_teardown_unproven",
+          },
+          `sandbox teardown unproven: ${detail} — capacity held, nothing released`,
         );
       }
     }
@@ -6537,7 +6550,7 @@ async function processMessage(
     // Scoped to THIS attempt's id, so an older attempt can never delete a row
     // a newer one reclaimed after expiry; a release failure only warns (the
     // row expires by TTL), never masks the review's own outcome.
-    if (inflight !== null && !attemptUnknown) {
+    if (inflight !== null && !containerUnproven) {
       try {
         await releaseInflight(deps.env.DB, inflight.key, inflight.attemptId);
       } catch (err) {
