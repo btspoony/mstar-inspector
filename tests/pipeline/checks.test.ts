@@ -3766,6 +3766,10 @@ describe("markQueuedBehindInflight — the held-check relabel is bounded", () =>
       scope: SCOPE,
       checkRunId: 4242,
       summary: "Queued behind the review in flight for this pull request.",
+      // The store re-check at the PATCH agrees with the selection (the real
+      // lifecycle passes the same predicate; see `publication-lease.test.ts`
+      // for the disagreeing case).
+      recheck: async () => 4242,
       updateBudgetMs,
       warn: (detail) => warns.push(detail),
     });

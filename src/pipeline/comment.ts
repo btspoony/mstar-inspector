@@ -1589,6 +1589,14 @@ function guardMutations<T extends { createComment: unknown; updateComment: unkno
 ): T {
   if (notAfterMs === undefined && fence === undefined) return issues;
   const atDispatch = async (verb: string): Promise<void> => {
+    // The publication lease is proved FIRST, and the frozen instant is read
+    // only after that await resolves: a clock read before the verification
+    // would let a slow lease read carry the mutation past `notAfterMs`.
+    if (fence !== undefined && !(await fence.verify())) {
+      throw new PreparedSendRejected(
+        `${verb}: the publication lease ${fence.actionKey} is no longer held by this sender — nothing was sent`,
+      );
+    }
     if (notAfterMs !== undefined) {
       const lateMs = Date.now() - notAfterMs;
       if (lateMs >= 0) {
@@ -1596,11 +1604,6 @@ function guardMutations<T extends { createComment: unknown; updateComment: unkno
           `${verb}: the attempt's frozen deadline passed ${lateMs}ms ago — nothing was sent`,
         );
       }
-    }
-    if (fence !== undefined && !(await fence.verify())) {
-      throw new PreparedSendRejected(
-        `${verb}: the publication lease ${fence.actionKey} is no longer held by this sender — nothing was sent`,
-      );
     }
   };
   return {
@@ -1939,6 +1942,16 @@ export async function deleteDegradedCommentWithOctokit(
   };
   for (const match of matches) {
     try {
+      // The marker's identity is its EXACT body: a newer degraded publication
+      // can rewrite this same comment (round+1) between the scan and this
+      // delete, and removing it would destroy the newer evidence the recovery
+      // lane reconciles against. Re-read at the delete and require the body
+      // that was scanned; anything else is not ours to delete.
+      const atDelete = await scanCommentsWithOctokit(octokit, input, "degraded");
+      if (!atDelete.some((c) => c.id === match.id && c.body === match.body)) {
+        outcome.skipped += 1;
+        continue;
+      }
       await issues.deleteComment({
         owner: input.owner,
         repo: input.repo,
@@ -2538,14 +2551,22 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       })
     : null;
 
-  // §7.9 publication authority for comment sends: the caller names the attempt
-  // it is sending for, and the send takes that action's publication lease. No
-  // store or no attempt id (a caller outside an attempt) sends unguarded,
-  // exactly like an omitted `notAfterMs`.
-  const publicationGuard = (attemptId: string | undefined): PublicationSendGuard | undefined =>
-    attemptId === undefined || options?.db === undefined
-      ? undefined
-      : { db: options.db, nowMs: options.nowMs ?? (() => Date.now()), attemptId };
+  // §7.9 publication authority for comment sends: the caller names the Check
+  // attempt it is sending for, and the send takes that action's publication
+  // lease. A caller that NAMES an attempt is fenced or refused — never sent
+  // unfenced because this instance happens to lack the journal store. Only a
+  // caller with NO Check attempt at all (the Check lane never opened for this
+  // App, so there is no attempt row to key a lease on) reaches the send
+  // unguarded; the journal's own claim remains its fence.
+  const publicationGuard = (attemptId: string | undefined): PublicationSendGuard | undefined => {
+    if (attemptId === undefined) return undefined;
+    if (options?.db === undefined) {
+      throw new PreparedSendRejected(
+        `the publication lease of attempt ${attemptId} cannot be read — this commenter was built without the journal store; nothing was sent`,
+      );
+    }
+    return { db: options.db, nowMs: options.nowMs ?? (() => Date.now()), attemptId };
+  };
 
   return {
     getAppIdentity,
@@ -2572,27 +2593,30 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       return planDegradedUpsertWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postPreparedReview(input) {
+      const guard = publicationGuard(input.attemptId);
       return postPreparedReviewWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
-        publicationGuard(input.attemptId),
+        guard,
       );
     },
     async postPreparedDegraded(input) {
+      const guard = publicationGuard(input.attemptId);
       return postPreparedDegradedWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
-        publicationGuard(input.attemptId),
+        guard,
       );
     },
     async deleteDegradedComment(input) {
       return deleteDegradedCommentWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postLineComments(input) {
+      const guard = publicationGuard(input.attemptId);
       return postLineCommentsWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
-        publicationGuard(input.attemptId),
+        guard,
       );
     },
     async listDiscussion(input) {

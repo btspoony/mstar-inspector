@@ -5362,7 +5362,10 @@ async function publishPhase(
       body: preparedBody,
       publicationId: stagedId,
       notAfterMs: ref.deadlineMs,
-      attemptId,
+      // The LEASE key is a `review_checks.id`, never `ref.attemptId` (the
+      // container identity): the send must contend with this attempt's own
+      // Check sends and with recovery, which key on the Check row.
+      ...(check?.handle?.attemptId === undefined ? {} : { attemptId: check.handle.attemptId }),
     });
   } catch (err) {
     // The adapter refused at the mutation because the instant had passed:
@@ -5493,7 +5496,8 @@ async function publishPhase(
         round,
         publicationId: stagedId,
         intents: lineIntents,
-        attemptId,
+        // `review_checks.id`, not the container identity (see the marker send).
+        ...(check?.handle?.attemptId === undefined ? {} : { attemptId: check.handle.attemptId }),
       });
       if (postedLine.posted.length > 0) {
         try {

@@ -17,6 +17,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
   CHECK_LEASE_MS,
@@ -35,7 +36,7 @@ import {
   claimPublicationLease,
   releasePublicationLease,
 } from "../../src/store/finding-lifecycle";
-import type { D1Like } from "../../src/store/types";
+import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   PUBLICATION_ACTION_CHECK_COMPLETE,
   createChecksAdapter,
@@ -45,6 +46,9 @@ import {
 } from "../../src/pipeline/checks";
 import {
   PreparedSendRejected,
+  PublicationDeadlineSpent,
+  createReviewCommenter,
+  deleteDegradedCommentWithOctokit,
   postPreparedReviewWithOctokit,
   type PostOctokit,
   type PublicationSendGuard,
@@ -372,5 +376,172 @@ describe("the two lease tiers release independently", () => {
     const row = await checkRow(db, attemptId);
     expect(row.holder).toBeNull(); // cleared by the EXECUTION release above, not by the publication one
     expect(row.execution_deadline_ms).toBe(T0 + CHECK_LEASE_MS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-round regressions: identity, absence, and the pre-dispatch re-proofs
+// ---------------------------------------------------------------------------
+
+/**
+ * A store whose `publication_leases` reads answer late — the await between
+ * acquiring the action and the mutation that no in-process clock otherwise
+ * produces.
+ */
+function delayedFenceRead(db: D1Like, delayMs: number): D1Like {
+  const wrap = (query: string, inner: D1StatementLike): D1StatementLike => ({
+    bind: (...values) => wrap(query, inner.bind(...values)),
+    first: async <T = Record<string, unknown>>() => {
+      if (query.includes("FROM publication_leases")) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return inner.first<T>();
+    },
+    all: <T = Record<string, unknown>>() => inner.all<T>(),
+    run: <T = Record<string, unknown>>() => inner.run<T>(),
+  });
+  return {
+    prepare: (query) => wrap(query, db.prepare(query)),
+    batch: (statements) => db.batch(statements),
+  };
+}
+
+const TEST_PRIVATE_KEY = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+}).privateKey;
+
+describe("the key's identity is the Check attempt, never the execution one", () => {
+  test("a comment send naming an id that is not a Check attempt is refused", async () => {
+    const db = await seededDb();
+    await claimedAttempt(db);
+    // The container/execution identity the pipeline used to pass. A lease row
+    // for it exists and is live — the exact phantom fence the wrong id built.
+    const executionId = "review-0e5c1f2a-container";
+    expect(
+      await claimPublicationLease(db, {
+        attemptId: executionId, actionKey: "comment:pub-x", holder: "send:comment:pub-x", mode: "send", nowMs: T0,
+      }),
+    ).not.toBeNull();
+    const fake = fakeIssues();
+
+    const failure = await postPreparedReviewWithOctokit(fake.octokit, commentInput("pub-x"), guardFor(db, executionId)).catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(PreparedSendRejected);
+    expect((failure as Error).message).toMatch(/is not a Check attempt/);
+    expect(fake.calls).toHaveLength(0);
+  });
+});
+
+describe("a named attempt is fenced or refused, never sent unfenced", () => {
+  test("a send naming an attempt through a store-less commenter is refused before any request", async () => {
+    let requests = 0;
+    const commenter = createReviewCommenter(
+      { APP_ID: "1", PRIVATE_KEY: TEST_PRIVATE_KEY },
+      {
+        fetchImpl: async () => {
+          requests += 1;
+          return new Response("{}", { status: 200 });
+        },
+      },
+    );
+
+    const failure = await commenter
+      .postPreparedReview({ ...commentInput("pub-5"), attemptId: "attempt-without-store" })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PreparedSendRejected);
+    expect((failure as Error).message).toMatch(/built without the journal store/);
+    expect(requests).toBe(0);
+  });
+});
+
+describe("the held-check relabel re-proves its row at dispatch", () => {
+  test("a row that stopped qualifying during client resolution is not relabelled", async () => {
+    const db = await seededDb();
+    const { identity } = await claimedAttempt(db);
+    const fake = fakeChecks(identity);
+    const adapter = createChecksAdapter({ db, nowMs: () => CLOCK, getOctokit: async () => fake.octokit });
+    let rechecks = 0;
+
+    const sent = await adapter.markQueuedBehindInflight!({
+      scope: SCOPE,
+      checkRunId: RUN_ID,
+      summary: "Queued behind the live review for this pull request.",
+      // The store predicate, re-asked at the PATCH: another holder froze or
+      // terminalized the row in between, so it no longer selects.
+      recheck: async () => {
+        rechecks += 1;
+        return null;
+      },
+      updateBudgetMs: 1_000,
+      warn: () => {},
+    });
+
+    expect(sent).toBe(false);
+    expect(rechecks).toBe(1);
+    expect(fake.updates).toHaveLength(0);
+  });
+});
+
+describe("the degraded cleanup deletes only the marker it scanned", () => {
+  test("a marker rewritten after the scan is left in place", async () => {
+    const marker = (round: number) =>
+      `<!-- mstar-inspector:review-degraded:v1 round=${round} -->\n**Review degraded: output failed schema validation**`;
+    // The scan sees round 1; by the delete the same comment carries round 2 —
+    // a newer degraded publication that must survive.
+    const bodies = [marker(1), marker(2)];
+    let scans = 0;
+    const deleted: number[] = [];
+    const octokit: PostOctokit = {
+      paginate: async () => [{ id: 7001, body: bodies[Math.min(scans++, bodies.length - 1)]!, user: { type: "Bot" } }],
+      rest: {
+        issues: {
+          listComments: async () => ({ data: [] }),
+          updateComment: async () => ({}),
+          createComment: async () => ({}),
+          deleteComment: async (params) => {
+            deleted.push(params.comment_id as number);
+            return {};
+          },
+        },
+      },
+    };
+
+    const outcome = await deleteDegradedCommentWithOctokit(octokit, {
+      installationId: 123,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 42,
+      error: "",
+      rawOutput: "",
+    });
+
+    expect(outcome.deleted).toBe(0);
+    expect(outcome.skipped).toBe(1);
+    expect(deleted).toEqual([]);
+  });
+});
+
+describe("the frozen deadline is read after the lease proof", () => {
+  test("a lease read that outlives notAfterMs refuses at dispatch", async () => {
+    const db = await seededDb();
+    const { attemptId } = await claimedAttempt(db);
+    const fake = fakeIssues();
+    // The lease proof's read answers 250ms late; the frozen instant is 150ms
+    // away. A clock read BEFORE the verification would see 150ms of room.
+    const slow = delayedFenceRead(db, 250);
+    const notAfterMs = Date.now() + 150;
+
+    const failure = await postPreparedReviewWithOctokit(
+      fake.octokit,
+      { ...commentInput("pub-timing"), notAfterMs },
+      { db: slow, nowMs: () => Date.now(), attemptId },
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PublicationDeadlineSpent);
+    expect((failure as Error).message).toMatch(/frozen deadline passed/);
+    expect(fake.calls).toHaveLength(0);
   });
 });

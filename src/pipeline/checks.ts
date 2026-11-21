@@ -361,6 +361,15 @@ export type ChecksAdapter = {
     scope: Scope;
     checkRunId: number;
     summary: string;
+    /**
+     * Re-run the store predicate that selected this row, immediately before the
+     * PATCH. The first run happens before the client resolution is awaited, so
+     * a different holder can freeze or terminalize the row in between and this
+     * relabel would overwrite a settled run's output. A different (or null)
+     * answer refuses the relabel. Required: absence would mean an unauthorised
+     * write.
+     */
+    recheck: () => Promise<number | null>;
     /** The operator-configured bound; omitted → the adapter, then the store's default. */
     updateBudgetMs?: number;
     /** One warn when the send failed or ran out of budget — never a throw. */
@@ -915,6 +924,7 @@ async function markQueuedBehindInflightWith(
     scope: Scope;
     checkRunId: number;
     summary: string;
+    recheck: () => Promise<number | null>;
     updateBudgetMs?: number;
     warn: (detail: string) => void;
   },
@@ -925,6 +935,11 @@ async function markQueuedBehindInflightWith(
     if ("reason" in resolvedClient) return false;
     const client = resolvedClient.client;
     if (!hasChecksMethod(client, "update")) return false;
+    // The row was selected BEFORE this client resolution was awaited. Re-ask
+    // the SAME predicate here: a different holder may have frozen the intent or
+    // terminalized the run in between, and a relabel would then overwrite the
+    // settled text of a run nobody owns any more.
+    if ((await input.recheck()) !== input.checkRunId) return false;
     await client.rest.checks.update({
       owner: input.scope.owner,
       repo: input.scope.repo,
@@ -1179,6 +1194,17 @@ export async function openPublicationFence(
   deps: { db: D1Like; nowMs: () => number },
   input: { attemptId: string; actionKey: string; holder: string },
 ): Promise<{ fence: PublicationFence } | { reason: string }> {
+  // The key's `attempt_id` is a `review_checks.id`, NEVER a container or
+  // execution identity: a lease taken under anything else can never contend
+  // with this attempt's own sends or with recovery, so the identity is proved
+  // BEFORE the row is written instead of fencing a phantom key.
+  try {
+    if ((await getCheckAttempt(deps.db, input.attemptId)) === null) {
+      return { reason: `${input.actionKey}: ${input.attemptId} is not a Check attempt — no publication authority` };
+    }
+  } catch (error) {
+    return { reason: `publication lease for ${input.actionKey} unreadable: ${safeDetail(error)}` };
+  }
   let lease: Lease | null;
   try {
     lease = await claimPublicationLease(deps.db, {
@@ -2512,17 +2538,22 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     },
 
     async markQueuedBehindInflight(input) {
-      const nowMs = deps.nowMs();
-      const checkRunId = await markCheckQueuedBehindInflight(deps.db, {
-        scope: input.scope,
-        headSha: input.headSha,
-        triggeredBy: input.triggeredBy,
-        action: input.action,
-        attachDeliveryId: input.attachDeliveryId,
-        title: CHECK_NAME,
-        summary: input.summary,
-        nowMs,
-      });
+      // The SAME store predicate selects the row and is re-asked at the PATCH
+      // (the adapter's `recheck`): the client resolution between them is an
+      // unbounded await, and a relabel must never land on a row another holder
+      // froze or terminalized meanwhile.
+      const selectRelabelable = () =>
+        markCheckQueuedBehindInflight(deps.db, {
+          scope: input.scope,
+          headSha: input.headSha,
+          triggeredBy: input.triggeredBy,
+          action: input.action,
+          attachDeliveryId: input.attachDeliveryId,
+          title: CHECK_NAME,
+          summary: input.summary,
+          nowMs: deps.nowMs(),
+        });
+      const checkRunId = await selectRelabelable();
       // No own attach row (another delivery owns the key), a row that is no
       // longer running, or no remote run: nothing to label.
       if (checkRunId === null) return false;
@@ -2532,6 +2563,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         scope: input.scope,
         checkRunId,
         summary: input.summary,
+        recheck: selectRelabelable,
         updateBudgetMs: input.updateBudgetMs,
         warn: input.warn,
       });
