@@ -1,0 +1,8 @@
+---
+category: Changed
+---
+
+- **Harness 4.8.1 across root, runner and the review image; suggestion fences leave the overall comment**: the root manifest's `@mstar-harness/engine` range moves to `^4.8.1`, `packages/runner`'s exact pin to `4.8.1`, and the image's `@mstar-harness/cli` global install, `HARNESS_VERSION` / `harnessRef` pin (ref `021b28e9b92e1b1981043a393e107bd121a84b7b`, tag `v4.8.1`) and Dockerfile clone ref move with them; every lockfile regenerates and the image-inputs fingerprint is refreshed in the same commit. The overall review summary no longer repeats a finding's ````suggestion` block — the fence belongs to the finding's inline line-comment body; the surrounding prose is kept, the caller's findings are not mutated, and bodies without fences are unchanged.
+
+<!-- CN -->
+- **harness 升至 4.8.1（根、runner 与审查镜像）；总体评论不再重复 suggestion 围栏**：根 manifest 的 `@mstar-harness/engine` 区间改为 `^4.8.1`，`packages/runner` 的精确 pin 改为 `4.8.1`，镜像全局安装的 `@mstar-harness/cli`、`HARNESS_VERSION` / `harnessRef` pin（ref `021b28e9b92e1b1981043a393e107bd121a84b7b`，tag `v4.8.1`）与 Dockerfile 克隆 ref 一并移动；所有 lock 重新生成，并在同一提交中刷新 image-inputs 指纹。审查总体 summary 不再重复 finding 的 ````suggestion` 块——围栏属于该 finding 的行内评论；保留周围散文，不改动调用方的 findings，无围栏的正文逐字节不变。

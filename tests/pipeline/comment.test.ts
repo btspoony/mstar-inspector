@@ -181,6 +181,44 @@ describe("buildReviewBody", () => {
     expect(body).toContain("- **Merge class**: should-fix");
   });
 
+  test("a finding's suggestion fence renders only in the inline path, never in the summary", () => {
+    const bt = "```";
+    const fenced: ReviewOutput = {
+      ...output,
+      findings: [
+        {
+          ...finding("should-fix", "Fractional expiry comparison"),
+          body: "Before the fence.\n\n" + bt + "suggestion\nfixed code here\n" + bt + "\n\nAfter the fence.",
+        },
+      ],
+    };
+    const stored = JSON.parse(JSON.stringify(fenced)) as ReviewOutput;
+    const body = buildReviewBody(fenced);
+    expect(body).not.toContain(bt + "suggestion");
+    expect(body).not.toContain("fixed code here");
+    expect(body).toContain("Before the fence.");
+    expect(body).toContain("After the fence.");
+    // never mutates the caller's findings: the fence stays for the inline path
+    expect(fenced.findings[0]!.body).toBe(stored.findings[0]!.body);
+    // fence-free bodies stay byte-identical: the exact pre-change rendering
+    expect(buildReviewBody(output)).toBe(
+      "## \u26a0\ufe0f Verdict: \u0060needs fixes\u0060\n\n## \ud83d\udccb Review\n\nTwo issues found in the diff.\n\n### Findings\n\n#### \ud83d\udfe0 Fractional expiry comparison\n\n- **Evidence**: \u0060Fractional expiry comparison\u0060 body.\n- **Location**: \u0060src/auth.ts:21\u0060\n- **Category**: logic\n- **Merge class**: should-fix",
+    );
+  });
+
+  test("an unclosed suggestion fence at the summary budget cannot swallow a following finding (qc re-check)", () => {
+    const narrative = "Intro prose.\n\n\u0060\u0060\u0060suggestion\n" + "x".repeat(SUMMARY_MD_LIMIT) + "\nEnd of narrative.";
+    const body = buildReviewBody({
+      ...output,
+      summary_md: narrative,
+      findings: [finding("must-fix", "Survivor finding")],
+    });
+    expect(body).not.toContain("\u0060\u0060\u0060suggestion");
+    expect(body).toContain("Survivor finding");
+    expect(body).toContain("Survivor finding\u0060 body.");
+    expect(body).toContain("Intro prose.");
+  });
+
   test("a summary cut inside a fence keeps the findings outside the code block", () => {
     const body = buildReviewBody({
       ...output,
