@@ -66,15 +66,19 @@
  * rev-parse instead of drifting silently. The ONE pre-sandbox read (step 4)
  * consults the delivery's OWN head — the payload sha, or the PR watermark a
  * mention carries — and only short-circuits a head this lane already
- * reviewed: that duplicate creates no Check attempt and no container. It is
- * a fast path, not the dedup authority: the checkout-keyed read below still
- * decides what the live clone holds — so a force-push after delivery is
- * caught there, and the clone's head is claimed only on a dedup AND journal
- * miss. A duplicate whose own head was reviewed while the PR has since
- * advanced acks here: that newer head is reviewed only when its own delivery
- * arrives, and nothing here creates one. An already-published head is as
- * final as an already-reviewed one — a live journal row hands off to recovery
- * with no claim and no paid work.
+ * reviewed AND that is still the PR's live head: that duplicate creates no
+ * Check attempt and no container. A hit is verified against the ledger
+ * watermark before it acks, so a delivery whose keyed head has since moved
+ * falls through and reviews the live head — in `manual` mode a push queues
+ * nothing, so this delivery is that commit's only chance. An unreadable
+ * watermark keeps the ack with one warning (it must never become a second
+ * paid review), and the read runs only on a hit. It is a fast path, not the
+ * dedup authority: the checkout-keyed read below still decides what the live
+ * clone holds — so a force-push after delivery is caught there, and the
+ * clone's head is claimed only on a dedup AND journal miss. An
+ * already-published head is as final as an already-reviewed one — a live
+ * journal row hands off to recovery with no claim and no paid work — but
+ * only while that journal row is keyed on the live head.
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
@@ -858,27 +862,48 @@ export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_ca
 /**
  * §7.9 skip settlement over one delivery's identity: a delivery that ACKs
  * before (or without) a handle leaves its attached run with nobody to
- * terminalize it, so the lifecycle takes that row and concludes it `neutral`
- * with the skip reason (RL-10).
+ * terminalize it, so the lifecycle takes that row and concludes it from the
+ * head's own persisted review against the App's current gate — `neutral`
+ * (with the skip reason) only when there is nothing to inherit.
  *
- * `attachedHeadSha` MUST be the PAYLOAD's head SHA — the one the delivery path
- * attached with (`payload.head_sha`), never the authoritative checkout SHA:
- * after a force push the checkout names a commit with no attach row, and
- * settling on it would be a silent no-op while the stale run waited out its
- * window. Dedup KEYS still use the checkout SHA; only this settlement identity
- * follows the attach. A job that carried no SHA (a bot mention) has nothing to
- * settle.
+ * `attachedHeadSha` MUST be the head the delivery ATTACHED with — the payload's
+ * own `head_sha`, or the PR watermark a mention carried — never the
+ * authoritative checkout SHA: after a force push the checkout names a commit
+ * with no attach row, and settling on it would be a silent no-op while the
+ * stale run waited out its window. Dedup KEYS still use the checkout SHA; only
+ * this settlement identity follows the attach.
  *
  * Best-effort by contract: one warn on a fault, and the caller's ACK/return is
- * never changed.
+ * never changed. A delivery with nothing to settle is announced only when the
+ * caller asks for it (`announceNoOp`): every other caller has already logged
+ * WHY it skipped, so a second line would merely repeat the reason — a paused
+ * App must log exactly one line.
  */
 async function settleSkippedRow(
   deps: ProcessDeps,
   payload: ReviewJobPayload,
   attachedHeadSha: string | null | undefined,
   reason: string,
+  /** Name a no-op settlement (the moved-head path, whose only other line says why). */
+  announceNoOp = false,
 ): Promise<void> {
-  if (deps.checks?.settleSkipped === undefined || attachedHeadSha === null || attachedHeadSha === undefined) return;
+  if (
+    deps.checks?.settleSkipped === undefined ||
+    attachedHeadSha === null ||
+    attachedHeadSha === undefined ||
+    // No attach identity means the delivery attached no run at all (a mention
+    // with no SHA the webhook could attach for): the lifecycle would answer
+    // `false` silently.
+    payload.attachDeliveryId === undefined
+  ) {
+    if (announceNoOp) {
+      deps.log.info(
+        payloadIdentityFields(payload),
+        `check skip settlement skipped — nothing to settle for this delivery (${reason})`,
+      );
+    }
+    return;
+  }
   try {
     await deps.checks.settleSkipped({
       scope: {
@@ -896,6 +921,7 @@ async function settleSkippedRow(
       // nothing rather than taking another delivery's run (§7.9).
       attachDeliveryId: payload.attachDeliveryId,
       reason,
+      warn: (detail) => deps.log.warn(payloadIdentityFields(payload), detail),
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -1300,10 +1326,10 @@ export type CheckLifecycleHooks = {
    * §7.9 skip settlement (optional, additive): the delivery ACKs before (or
    * without) a handle — an idempotency hit, a publication-journal hand-off, an
    * in-flight guard rejection, a paused App — so its attached run has nobody to
-   * terminalize it. The lifecycle takes that row and concludes it `neutral`
-   * with the skip reason instead of leaving it to close red at the attach
-   * window (RL-10). `false` means there was nothing to settle; a fault
-   * rejects and the caller logs it.
+   * terminalize it. The lifecycle takes that row and concludes it from the
+   * head's own published result against the App's current gate — `neutral`
+   * with the skip reason only when there is nothing to inherit. `false` means
+   * there was nothing to settle; a fault rejects and the caller logs it.
    */
   settleSkipped?(input: {
     scope: Scope;
@@ -1313,6 +1339,8 @@ export type CheckLifecycleHooks = {
     /** THIS delivery's attach identity — absent means it created no row. */
     attachDeliveryId?: string;
     reason: string;
+    /** One warn when the proof cannot be parsed (fallback) or read (nothing settled). */
+    warn?: (detail: string) => void;
     updateBudgetMs?: number;
   }): Promise<boolean>;
   /**
@@ -3173,35 +3201,13 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
 }
 
 /**
- * Read the PR's head watermark from the App ledger (migration 0044) — ONE
- * select-only point read on `pull_requests`' UNIQUE key, used to tell a
- * delivery the queue has already overtaken from the newest one.
- *
- * Fail-open by construction: an absent row, a column the row never had, or a
- * storage fault all return `null`, and the caller then reviews normally. A
- * skip is only ever the product of two readable, strictly ordered stamps —
- * never of a missing input.
+ * One PR head watermark answer, read from the App ledger (migration 0044) — the
+ * select-only point read on `pull_requests`' UNIQUE key that tells a delivery
+ * whether the queue has already overtaken it. `null` shas mean the row exists
+ * but no delivery ever stamped it; a `null` answer means the read could not
+ * answer at all.
  */
-async function readPrHead(
-  deps: ProcessDeps,
-  payload: ReviewJobPayload,
-): Promise<{ headSha: string | null; headAt: string | null } | null> {
-  try {
-    return await deps.selectPrHead({
-      targetId: payload.targetId,
-      owner: payload.owner,
-      repo: payload.repo,
-      prNumber: payload.pr_number,
-    });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    deps.log.warn(
-      { ...payloadIdentityFields(payload), app_id: payload.botRef.appId },
-      `PR head watermark read failed (fail-open: reviewing normally): ${detail}`,
-    );
-    return null;
-  }
-}
+type PrHeadAnswer = { headSha: string | null; headAt: string | null };
 
 /**
  * Base64-encode UTF-8 text for the in-image JSON write step (workerd-safe).
@@ -4775,10 +4781,46 @@ async function processMessage(
     // The ledger stamp is a DELIVERY watermark, so a later delivery naming the
     // SAME sha moves it too (migration 0044): expected and harmless here, since
     // the skip also requires the ledger's sha to differ from this payload's.
+    // The watermark read (migration 0044), memoized for the SKIP decisions
+    // only: the supersede skip and the early dedup key share one answer. The
+    // hit-time live-head check below always issues its OWN read — a memo must
+    // never supply the value that comparison decides on, or a mention whose
+    // head advanced would be acked. A fault is memoized as a warning, never as
+    // an answer: one root cause, one line, however many reads it took.
+    let watermark: PrHeadAnswer | null | undefined;
+    let watermarkFaultLogged = false;
+    const selectWatermark = (): Promise<PrHeadAnswer | null> =>
+      deps.selectPrHead({
+        targetId: payload.targetId,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+      });
+    /** One warn per delivery for a watermark read that could not answer. */
+    const warnWatermarkFault = (fallback: string, err: unknown): void => {
+      if (watermarkFaultLogged) return;
+      watermarkFaultLogged = true;
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        { ...payloadIdentityFields(payload), app_id: payload.botRef.appId },
+        `PR head watermark read failed (${fallback}): ${detail}`,
+      );
+    };
+    const readWatermark = async (fallback: string): Promise<PrHeadAnswer | null> => {
+      if (watermark === undefined) {
+        try {
+          watermark = await selectWatermark();
+        } catch (err) {
+          watermark = null;
+          warnWatermarkFault(fallback, err);
+        }
+      }
+      return watermark;
+    };
     const payloadHeadSha = payload.head_sha;
     const payloadHeadAt = payload.head_at;
     if (payloadHeadSha && payloadHeadAt) {
-      const ledgerHead = await readPrHead(deps, payload);
+      const ledgerHead = await readWatermark("fail-open: reviewing normally");
       // Two readable stamps on both sides, the ledger strictly newer, a
       // different commit, and a queued job for that commit: only then is this
       // delivery a leftover. Missing or unreadable input never skips.
@@ -4986,13 +5028,20 @@ async function processMessage(
         warn: (readerFields, msg) =>
           deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
       });
-      const earlyHeadSha = payload.head_sha || (await readPrHead(deps, payload))?.headSha || null;
+      const earlyHeadSha = payload.head_sha || (await readWatermark("fail-open: reviewing normally"))?.headSha || null;
       if (earlyHeadSha !== null) {
         // §7.7 step 2, moved ahead of the claim: a head this lane already
         // reviewed has nothing to review, so a repeat trigger (the same commit,
         // typically a comment) must ACK here — a claim it can only close red
         // would overwrite the head's own result. Same key family as the
         // checkout-keyed dedup below; an unreadable answer falls through to it.
+        // A HIT is final only for the head it was KEYED on: the PR's live head
+        // is read here and ONLY here, so a miss never pays for it. When the
+        // keyed head is behind — a delivery queued before a push, and `manual`
+        // mode queues nothing, so this delivery is the newer commit's only
+        // chance — the hit falls through and the checkout reviews the live
+        // head. An unreadable head keeps the ack with one warning: it must
+        // never become a second paid review.
         const earlyKey: IdempotencyKey = {
           installation_id: payload.installation_id,
           owner: payload.owner,
@@ -5004,6 +5053,34 @@ async function processMessage(
           ...(baseFields ?? payloadIdentityFields(payload)),
           head_sha: earlyHeadSha,
           idempotency_key: idemKey(earlyKey),
+        };
+        // One FRESH read per hit — never on a miss — compared with the head the
+        // key was made against, never with itself, so a mention keyed on an
+        // older watermark still sees the push that overtook it. This read is
+        // ALWAYS its own: the memo above may deduplicate a repeated fault's
+        // warning, but it can never supply the value this comparison decides.
+        let liveHeadSha: string | null | undefined;
+        const liveHead = async (): Promise<string | null> => {
+          if (liveHeadSha === undefined) {
+            let read: PrHeadAnswer | null = null;
+            let faulted = false;
+            try {
+              read = await selectWatermark();
+            } catch (err) {
+              faulted = true;
+              warnWatermarkFault("ack the keyed head now, do not re-review", err);
+            }
+            liveHeadSha = read?.headSha ?? null;
+            // An ANSWER without a head (no ledger row) names the fallback here;
+            // a thrown read already logged its one line for the delivery.
+            if (!faulted && liveHeadSha === null) {
+              deps.log.warn(
+                earlyFields,
+                "PR head watermark unreadable — ack the keyed head now, do not re-review",
+              );
+            }
+          }
+          return liveHeadSha;
         };
         const earlyDone = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(earlyKey), earlyFields, deps.log);
         let earlyReviewed = earlyDone;
@@ -5020,10 +5097,16 @@ async function processMessage(
             );
           }
         }
+        // The head this delivery ends up reviewing, when the keyed one moved.
+        let movedHeadSha: string | null = null;
         if (earlyReviewed) {
-          deps.log.info(earlyFields, earlyDone ? "KV idempotency hit — ack" : "idempotency hit — ack");
-          await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
-          return { kind: "ok" };
+          const live = await liveHead();
+          if (live === null || live === earlyHeadSha) {
+            deps.log.info(earlyFields, earlyDone ? "KV idempotency hit — ack" : "idempotency hit — ack");
+            await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
+            return { kind: "ok" };
+          }
+          movedHeadSha = live;
         }
         // An already-PUBLISHED head is as final as an already-REVIEWED one: a
         // live journal row hands off to recovery here exactly as the
@@ -5039,15 +5122,34 @@ async function processMessage(
           );
         }
         if (earlyJournal !== null) {
+          const live = await liveHead();
+          if (live === null || live === earlyHeadSha) {
+            deps.log.info(
+              earlyFields,
+              `publication journal hit (phase ${earlyJournal.phase}, id ${earlyJournal.id}) — handing off to recovery, ack without a second paid review`,
+            );
+            await settleSkippedRow(deps, payload, payload.head_sha, "a publication for this head already exists");
+            return { kind: "ok" };
+          }
+          movedHeadSha = live;
+        }
+        if (movedHeadSha !== null) {
+          // The keyed head was final, the PR's is not: acking here is exactly
+          // what loses the newer commit when no push queues its own review.
           deps.log.info(
             earlyFields,
-            `publication journal hit (phase ${earlyJournal.phase}, id ${earlyJournal.id}) — handing off to recovery, ack without a second paid review`,
+            `delivery keyed on ${earlyHeadSha.slice(0, 7)} but the PR head is ${movedHeadSha.slice(0, 7)} — reviewing the live head`,
           );
-          await settleSkippedRow(deps, payload, payload.head_sha, "a publication for this head already exists");
-          return { kind: "ok" };
+          // The run THIS delivery attached for the old head has no review
+          // coming now, so it is settled under this delivery's own attach
+          // identity (inheriting that head's conclusion) instead of sitting
+          // `in_progress` until its deadline. The attach key is the payload sha
+          // OR the watermark a mention carried — `earlyHeadSha` is exactly that
+          // head, so a mention settles its run too.
+          await settleSkippedRow(deps, payload, earlyHeadSha, "superseded by a newer commit", true);
         }
         checkClaimAttempted = true;
-        checkHandle = await beginCheck(lifecycleScope, githubAppId, earlyHeadSha);
+        checkHandle = await beginCheck(lifecycleScope, githubAppId, movedHeadSha ?? earlyHeadSha);
       }
     }
     // 1. Sandbox + installation token (created lazily; destroyed in finally).
@@ -5211,6 +5313,9 @@ async function processMessage(
         fields,
         `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
       );
+      // A `prepared` row hands delivery to the recovery lane; it does NOT
+      // claim the review is visible — the publication still owes its send, and
+      // recovery owns it. Nothing here waits for it or asserts it.
       // Deliberately NOT terminalized: this attempt published nothing, and the
       // publication on this head belongs to an earlier generation. LINKING that
       // row is what makes it this attempt's proof, so the conclusion stays with
@@ -5276,7 +5381,8 @@ async function processMessage(
         }
       } else {
         // §7.9: no handle was adopted for this hand-off, so the delivery's own
-        // attached run has nobody to close it — settle it `neutral`.
+        // attached run has nobody to close it — settlement carries the head's
+        // own gate result (or `neutral` when it has none).
         await settleSkippedRow(deps, payload, payload.head_sha, "a publication for this head already exists");
       }
       return { kind: "ok" };

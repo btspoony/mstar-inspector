@@ -49,8 +49,10 @@ import {
 } from "../dashboard/apps-store";
 import {
   createTargetsStore,
+  checkGateOf,
   getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
+  readEffectiveTargetSettings,
   type ReviewTargetRow,
 } from "../dashboard/targets-store";
 import {
@@ -331,6 +333,28 @@ async function attachCheckOnAcceptance(input: {
       "check attach failed — delivery unaffected (best-effort)",
     );
   }
+}
+
+/**
+ * The store-only settlement lane a REFUSED delivery uses (spec §7.9): a `null`
+ * adapter freezes the skip's conclusion and releases the lease, so the minute
+ * reconciler performs the single remote update and the webhook does ZERO
+ * credential work.
+ *
+ * The App's REAL gate is read lazily — only when a settlement actually runs and
+ * its head carries a readable result. Judging a head against an ABSENT gate
+ * defers the run to a reconciler that only sees publications linked to the
+ * attempt (or written after it), so a head whose publication already confirmed
+ * and passed would freeze `failure` at the deadline. A gate read that faults
+ * still rejects, which defers exactly as before (the transient-I/O case).
+ */
+export function refusalSkipSettlement(input: { db: D1Database; target: ReviewTargetRow }) {
+  return createCheckLifecycle({
+    db: input.db,
+    nowMs: () => Date.now(),
+    getAdapter: () => null,
+    getCheckGate: async () => checkGateOf(await readEffectiveTargetSettings(input.db, input.target)),
+  });
 }
 
 /**
@@ -1014,15 +1038,12 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // remaining outcome is a `job`, and a job is only produced once the resolver
   // returned a target (the no-target path classifies `ignore`, returned above).
   // Store-only settlement lifecycle for a refusal (spec §7.9): a `null` adapter
-  // freezes the neutral intent and releases the lease, and the minute
-  // reconciler performs the single remote update — so a refused delivery does
-  // ZERO credential work while its Check still closes honestly.
-  const skipSettlement = createCheckLifecycle({
-    db,
-    nowMs: () => Date.now(),
-    getAdapter: () => null,
-    getCheckGate: async () => null,
-  });
+  // freezes the conclusion and releases the lease, and the minute reconciler
+  // performs the single remote update — so a refused delivery does ZERO
+  // credential work while its Check still closes honestly. The gate is read
+  // lazily from the target when a settlement runs, so the head's own confirmed
+  // proof is judged against the App's REAL gate instead of being deferred.
+  const skipSettlement = refusalSkipSettlement({ db, target: target! });
   await handleReviewJob({ ...outcome.payload, botRef: { appId: row.id }, targetId: target!.id }, {
     // `db` is the route's already-narrowed binding (the unbound guard above
     // returned 500): the durable comment claim must never run against a

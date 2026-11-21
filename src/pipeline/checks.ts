@@ -1599,12 +1599,24 @@ export type CheckLifecycle = {
    * rejection, a paused App), so its attached run has no review to report and
    * nobody holds a handle to terminalize it. The attached row — released, or
    * still under a stalled delivery holder — is taken with the same fenced
-   * claim and concluded `neutral` with the skip reason.
-   *
-   * Deliberately NOT routed through `decideConclusion`: that function's
-   * contract is "no proof ⇒ failure", which is right for an EXECUTED attempt
-   * and wrong for a delivery that was never going to run (RL-10). A live
-   * consumer holder, a frozen intent and a terminal row are never taken;
+   * claim and concluded from THIS head's own published result against the
+   * App's CURRENT gate (the `inherited` branch, same head both sides): the
+   * confirmed publication's proof first, its persisted `reviews` row when that
+   * projection has not landed. A head whose review met the gate stays
+   * `success`, one that missed it stays `failure`, and an unreadable tally fails
+   * closed exactly as that head's own run does — a skip never concludes more
+   * favourably than the run it stands in for. A confirmed publication whose
+   * payload yields no readable review is evidence that one exists and fails
+   * closed the same way. An ABSENT gate is different: it is no evidence at all
+   * (the webhook lane passes one deliberately, a damaged row reads the same),
+   * so nothing is frozen and the attempt is left to the reconciler. A degraded
+   * publication settles `failure` from its own summary, without reading the
+   * projection. `neutral` — with the skip reason — is only the skip with
+   * NOTHING to inherit: no readable proof and no readable review. A proof whose
+   * bytes do not parse falls back to the projection; a proof that cannot be
+   * READ settles nothing at all (the run is left to the reconciler's deadline
+   * path) — evidence this lane cannot read is never turned into a verdict. A
+   * live consumer holder, a frozen intent and a terminal row are never taken;
    * `false` means there was nothing to settle. A store or transport fault
    * rejects — the caller logs it and the ACK is unaffected.
    */
@@ -1619,8 +1631,15 @@ export type CheckLifecycle = {
      * taking a row would mean taking another delivery's.
      */
     attachDeliveryId?: string;
-    /** Why the delivery was skipped — the Check summary names it. */
+    /** Why the delivery was skipped — the `neutral` summary names it. */
     reason: string;
+    /**
+     * One warn when the settlement had to fall back off the publication proof:
+     * its bytes do not parse (the `reviews` projection is then the fallback),
+     * or the proof could not be READ at all (nothing is settled — the run is
+     * left to the recovery lane). Never a throw; an omitted hook drops the line.
+     */
+    warn?: (detail: string) => void;
     /** The operator-configured bound on the one terminal `checks.update`. */
     updateBudgetMs?: number;
   }): Promise<boolean>;
@@ -2187,14 +2206,74 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // live consumer's, already frozen, or terminal.
       if (claimed === null) return false;
       const { identity } = claimed.attempt;
-      // The conclusion is written DIRECTLY (RL-10): a skip is not a verdict on
-      // the commit, so it must never reach `decideConclusion`'s
-      // "no proof ⇒ failure" rule.
-      const conclusion: CheckConclusion = {
-        desired: "neutral",
-        title: CHECK_NAME,
-        summary: CHECK_SUMMARIES.skippedByDelivery(input.reason),
-      };
+      // A skip must never conclude more favourably than the same head's own run
+      // would on the same evidence. A CONFIRMED publication is the proof the
+      // review landed, while its `reviews` projection can still lag the apply —
+      // so the proof is read first and the projection only backs it up. A
+      // DEGRADED publication is a parse-degrade notice, not a verdict: that head
+      // concluded `failure` and the skip carries the same summary, from the
+      // proof alone.
+      let proof: PublicationProof | null = null;
+      try {
+        proof = await readPublicationProof(deps.db, { scope: input.scope, headSha: input.headSha });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        if (!(err instanceof SyntaxError)) {
+          // The SELECT itself could not answer — a fault, not an unreadable
+          // payload. Settling now would conclude from evidence this lane cannot
+          // read and could freeze `neutral` over a confirmed failing review, so
+          // NOTHING is frozen: the attempt is left to the reconciler's own
+          // deadline path, which re-reads proof and review with its own
+          // fallbacks. One warn names the fault.
+          input.warn?.(`publication proof read failed (settling nothing; left to the recovery lane): ${detail}`);
+          return false;
+        }
+        // The row exists and its bytes do not parse: UNREADABLE, exactly like a
+        // missing proof — the projection below is the fallback.
+        input.warn?.(`publication proof unreadable (falling back to the persisted review): ${detail}`);
+      }
+      const degraded = proof !== null && proof.kind === "degraded";
+      const review = degraded
+        ? null
+        : (proof === null
+            ? null
+            : await readPublishedReview(deps.db, {
+                scope: input.scope,
+                headSha: input.headSha,
+                publicationId: proof.publicationId,
+              })) ?? (await readInheritedReview(deps.db, { scope: input.scope, headSha: input.headSha }));
+      const gate = review === null ? null : await deps.getCheckGate(input.scope);
+      if (review !== null && gate === null) {
+        // NO GATE EVIDENCE here (the webhook lane passes an absent gate on
+        // purpose; a damaged row reads the same way). "Cannot read the gate" is
+        // not "the gate was missed": freezing a failure would turn a passing
+        // head red on a zero-config lane, so NOTHING is frozen and the run is
+        // left to the reconciler, which reads the real gate. One warn says why.
+        input.warn?.(
+          "the App's gate is unreadable from this lane — settling nothing; the recovery lane reads the real gate",
+        );
+        return false;
+      }
+      // ANY readable review goes through the inherited branch, which fails
+      // closed on an unreadable tally exactly as that head's own run does. A
+      // confirmed publication whose payload yields no review is EVIDENCE that a
+      // review exists, so it fails closed the same way. `neutral` is only
+      // "nothing to inherit": no readable proof AND no readable review.
+      const conclusion: CheckConclusion = degraded
+        ? { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degraded }
+        : proof !== null || review !== null
+          ? decideConclusion({
+              proof: null,
+              outcome: "skipped",
+              gate,
+              review,
+              inherited: { headSha: input.headSha, reviewedHeadSha: input.headSha },
+            })
+          : {
+              desired: "neutral",
+              title: CHECK_NAME,
+              summary: CHECK_SUMMARIES.skippedByDelivery(input.reason),
+            };
       const intentFence = fenceFor(claimed.lease);
       if (!(await setCheckDesired(deps.db, identity.attemptId, intentFence.lease, conclusion, null, intentFence.nowMs))) {
         return false;

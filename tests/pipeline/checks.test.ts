@@ -2900,7 +2900,406 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     });
   }
 
-  test("a skipped delivery settles the attached run neutral with the reason", async () => {
+  /**
+   * The attached head's OWN persisted review — the row a skip inherits. `null`
+   * score writes an envelope without a tally (readable verdict, unreadable
+   * gate input).
+   */
+  function seedHeadReview(db: TestD1, verdict: string, scorePct: number | null): void {
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, envelope)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        SCOPE.installationId,
+        SCOPE.owner,
+        SCOPE.repo,
+        SCOPE.prNumber,
+        SHA,
+        verdict,
+        SCOPE.appId,
+        JSON.stringify(scorePct === null ? { verdict } : { verdict, tally: { scorePct } }),
+      );
+  }
+
+  /** One skip of an attached run; returns the row the settlement left. */
+  async function skipHead(
+    db: TestD1,
+    fake: ReturnType<typeof fakeChecks>,
+    gate: ReviewGate | null = GATE,
+  ): Promise<{ attemptId: string; row: Record<string, string | number | null> }> {
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => gate,
+    });
+    expect(
+      await lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        attachDeliveryId: deliveryId,
+        reason: "already reviewed for this head",
+      }),
+    ).toBe(true);
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    return { attemptId, row };
+  }
+
+  test("a skip inherits a passing head review — success, never a neutral that masks it", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    seedHeadReview(db, "ship it", 92);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("success");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMet(SHA.slice(0, 7), "ship it", 92, GATE),
+    );
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+  });
+
+  test("a skip inherits a head review below the floor — failure, never neutral", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // Allowed verdict, score under the floor: the gate is missed on the score.
+    seedHeadReview(db, "ship it", 70);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    // The bypass this test exists for: a repeat delivery of this head must not
+    // turn its missed gate into a neutral required check.
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "ship it", 70, GATE),
+    );
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+  });
+
+  test("a skip inherits a disallowed verdict above the floor — failure, never neutral", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // Passing score, verdict outside the gate's set: the gate is missed on the
+    // verdict alone, which a score-only comparison would let through.
+    seedHeadReview(db, "needs fixes", 95);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "needs fixes", 95, GATE),
+    );
+    expect(row.desired).toBe("failure");
+  });
+
+  test("a malformed proof falls back to the reviews projection — one warning, never a throw", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The publication row exists but its proof cannot be parsed. The settlement
+    // must fall back to the projection (which carries the failing gate) instead
+    // of throwing into the caller's catch, which would leave the run to the
+    // recovery lane.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('broken-proof', ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', '{not json', 1, 'done', ?, ?)`,
+      )
+      .run(APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, T0, T0);
+    seedHeadReview(db, "needs fixes", 40);
+    const fake = settlingFake();
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
+    const warnings: string[] = [];
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    expect(
+      await lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        attachDeliveryId: deliveryId,
+        reason: "already reviewed for this head",
+        warn: (detail) => warnings.push(detail),
+      }),
+    ).toBe(true);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE),
+    );
+    // ONE warning, naming the read that failed.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("publication proof unreadable");
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.desired).toBe("failure");
+  });
+
+  test("a proof read fault settles nothing — no intent frozen, one warning", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The projection is readable, but the proof SELECT itself fails. The lane
+    // must not guess a verdict from a partially readable evidence set: it
+    // settles nothing and leaves the run to the reconciler's deadline path.
+    seedHeadReview(db, "needs fixes", 40);
+    const fake = settlingFake();
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
+    const failingDb = {
+      prepare: (sql: string) => {
+        if (sql.includes("review_publications")) throw new Error("D1 unavailable");
+        return db.prepare(sql);
+      },
+      batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    };
+    const warnings: string[] = [];
+    const lifecycle = createCheckLifecycle({
+      db: failingDb as never,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      getCheckGate: async () => GATE,
+    });
+
+    expect(
+      await lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        attachDeliveryId: deliveryId,
+        reason: "already reviewed for this head",
+        warn: (detail) => warnings.push(detail),
+      }),
+    ).toBe(false);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("publication proof read failed");
+    // No intent, no remote request: the row keeps its claim and its
+    // `in_progress` conclusion, which the deadline path corrects.
+    expect(fake.updates).toHaveLength(0);
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.desired).toBe("in_progress");
+    expect(row.desired_summary).toBeNull();
+    expect(row.desired_title).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    expect(row.holder).not.toBeNull();
+  });
+
+  test("a confirmed publication without a reviews row still settles the gate result", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The publication is confirmed (its proof is persisted) while the `reviews`
+    // projection has not landed: reading the projection alone would answer
+    // "nothing to inherit" and settle neutral over a review that missed the
+    // gate.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms,
+            confirmed_ms, applied_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'confirmed', ?, ?, 1, 'done', ?, ?, ?, NULL)`,
+      )
+      .run(
+        "confirmed-proof",
+        APP_ID,
+        SCOPE.installationId,
+        SCOPE.owner,
+        SCOPE.repo,
+        SCOPE.prNumber,
+        SHA,
+        JSON.stringify({ version: 1, artifact: { payload: { verdict: "needs fixes", tally: { scorePct: 40 } } } }),
+        JSON.stringify({
+          publicationId: "confirmed-proof",
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 1,
+          commentId: 7,
+          bodySha256: "b".repeat(64),
+          confirmedMs: T0,
+        }),
+        T0,
+        T0,
+        T0,
+      );
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE),
+    );
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+  });
+
+  test("a confirmed publication with no readable payload fails closed, never neutral", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The publication is confirmed (its proof persisted) but its payload carries
+    // no artifact, and there is no `reviews` row. A confirmed publication is
+    // evidence that a review exists: not being able to read it must fail closed.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
+         VALUES ('no-payload', ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', ?, 1, 'done', ?, ?, ?)`,
+      )
+      .run(
+        APP_ID,
+        SCOPE.installationId,
+        SCOPE.owner,
+        SCOPE.repo,
+        SCOPE.prNumber,
+        SHA,
+        JSON.stringify({
+          publicationId: "no-payload",
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 1,
+          commentId: 7,
+          bodySha256: "b".repeat(64),
+          confirmedMs: T0,
+        }),
+        T0,
+        T0,
+        T0,
+      );
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(CHECK_SUMMARIES.sameHeadInheritedUnreadable(SHA.slice(0, 7)));
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+  });
+
+  test("an absent gate defers the settlement — nothing frozen, one warning", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    seedHeadReview(db, "needs fixes", 40);
+    const fake = settlingFake();
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
+    const warnings: string[] = [];
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      // The webhook lane's zero-config placeholder: absent, not "missed".
+      getCheckGate: async () => null,
+    });
+
+    expect(
+      await lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        attachDeliveryId: deliveryId,
+        reason: "already reviewed for this head",
+        warn: (detail) => warnings.push(detail),
+      }),
+    ).toBe(false);
+
+    // No evidence is not "the gate was missed": nothing is frozen and the run
+    // is left to the reconciler, which reads the real gate.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("gate is unreadable from this lane");
+    expect(fake.updates).toHaveLength(0);
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.desired).toBe("in_progress");
+    expect(row.desired_summary).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+  });
+
+  test("a head review without a readable score fails closed, never neutral", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    seedHeadReview(db, "ship it", null);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(
+      CHECK_SUMMARIES.sameHeadInheritedGateUnreadable(
+        SHA.slice(0, 7),
+        "the inherited review carries no readable score",
+      ),
+    );
+    expect(row.desired).toBe("failure");
+  });
+
+  test("a degraded publication settles failure from its own summary, not the projection", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // The head's only confirmed publication is a parse-degrade notice; its
+    // `reviews` row is PASSING. The degrade notice is what this head published,
+    // and its own round concluded failure — the projection must not rescue it.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('degraded-proof', ?, ?, ?, ?, ?, ?, 'degraded', 'confirmed', '{"version":1,"artifact":null}', ?, 1, 'done', ?, ?)`,
+      )
+      .run(
+        APP_ID,
+        SCOPE.installationId,
+        SCOPE.owner,
+        SCOPE.repo,
+        SCOPE.prNumber,
+        SHA,
+        JSON.stringify({
+          publicationId: "degraded-proof",
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "degraded",
+          round: 1,
+          commentId: 7,
+          bodySha256: "b".repeat(64),
+          confirmedMs: T0,
+        }),
+        T0,
+        T0,
+      );
+    seedHeadReview(db, "ship it", 92);
+    const fake = settlingFake();
+    const { row } = await skipHead(db, fake);
+
+    expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
+    expect(fake.updates[0]!.params.output.summary).toBe(CHECK_SUMMARIES.degraded);
+    expect(row.desired).toBe("failure");
+  });
+
+  test("a skip with no published review settles the attached run neutral with the reason", async () => {
     const db = await seededDb();
     CLOCK = T0;
     const fake = settlingFake();
