@@ -78,6 +78,7 @@ import {
 } from "../store/review-route-store";
 import {
   applyPublishedLifecycle,
+  claimAppliedLineBatch,
   claimPublication,
   countRecheckableFindings,
   findPublicationJournal,
@@ -85,6 +86,8 @@ import {
   PUBLICATION_HANDOFF_PHASES,
   markPublicationFailed,
   recordPublicationProof,
+  releaseAppliedLineBatchClaim,
+  releaseUnspentPublicationClaim,
   readPublication,
   selectAssessmentTargets,
   stagePublication,
@@ -170,6 +173,7 @@ import {
   buildRevalidatedSection,
   filterLineCommentFindings,
   PreparedSendRejected,
+  PublicationAuthorityUnavailable,
   PublicationDeadlineSpent,
   renderLineCommentText,
   type ClosureRow,
@@ -2129,6 +2133,17 @@ async function publishDegradedPublication(input: {
       // conclusion, safe cleanup) instead of a pre-publication failure.
       if (err instanceof PublicationDeadlineSpent) {
         throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner");
+      }
+      if (err instanceof PublicationAuthorityUnavailable) {
+        // The lane holding this action's lease is the sender; this one is not.
+        // Hand the row back and let recovery reconcile, never a false failure.
+        try {
+          await releaseUnspentPublicationClaim(input.db, staged.id, lease, Date.now());
+        } catch {
+          // A D1 failure of the release does not change the fact: nothing was
+          // sent here; the row keeps its truthful state for the next owner.
+        }
+        return { phase: "unknown", publicationId: staged.id };
       }
       if (err instanceof PreparedSendRejected) {
         // The complete payload and its digest stay retained for operator
@@ -5379,6 +5394,21 @@ async function publishPhase(
     if (err instanceof PublicationDeadlineSpent) {
       throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner");
     }
+    if (err instanceof PublicationAuthorityUnavailable) {
+      // Another lane holds this action's publication lease, so it is the
+      // sender and this one is not: send nothing and commit no outcome — a
+      // `failed` mark would assert a definitive failure we never observed.
+      // Return the unspent claim and hand the Check to recovery.
+      try {
+        await releaseUnspentPublicationClaim(deps.env.DB, stagedId, lease, Date.now());
+      } catch (releaseErr) {
+        const detail = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
+        deps.log.warn(fields, `unspent publication claim could not be returned: ${detail}`);
+      }
+      deps.log.warn(fields, `publication handed to the lane holding its action — ${err.message}`);
+      await check?.terminalize(null, "publication-unknown");
+      return { kind: "ok" };
+    }
     if (err instanceof PreparedSendRejected) {
       // Definitive pre-send rejection (§7.7): no request left the Worker.
       // `failed` is the truthful durable phase (never the post-attempt
@@ -5490,46 +5520,76 @@ async function publishPhase(
   // line failure is an explicit fallback log (the intents stay staged and
   // discoverable), never fabricated mappings.
   if (lineIntents.length > 0) {
-    try {
-      const postedLine = await commenter.postLineComments({
-        installationId: payload.installation_id,
-        owner: payload.owner,
-        repo: payload.repo,
-        prNumber: payload.pr_number,
-        headSha,
-        round,
-        publicationId: stagedId,
-        intents: lineIntents,
-        // `review_checks.id`, not the container identity (see the marker send);
-        // the journal claim covers the no-Check-row lane.
-        journalClaim: lease,
-        ...(check?.handle?.attemptId === undefined ? {} : { attemptId: check.handle.attemptId }),
-      });
-      if (postedLine.posted.length > 0) {
-        try {
-          const captureStmts = postedLine.posted.map((p) =>
-            deps.env.DB
-              .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ?`)
-              .bind(postedLine.reviewId, p.commentId, Date.now(), p.associationId),
-          );
-          await deps.env.DB.batch(captureStmts);
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          deps.log.warn(fields, `line-comment id capture failed (intents stay discoverable): ${detail}`);
+    const lineAttemptId = check?.handle?.attemptId;
+    // §7.9a condition 2: the applied mark cleared the journal claim, so on the
+    // no-Check lane the batch takes a FRESH claim of its own. A competitor
+    // holding it dispatches instead; this lane then sends nothing. The settled
+    // attempt is not a claimant.
+    const lineLease =
+      lineAttemptId === undefined
+        ? await claimAppliedLineBatch(deps.env.DB, stagedId, `consumer-lines:${sandboxId}`, Date.now())
+        : null;
+    if (lineAttemptId === undefined && lineLease === null) {
+      deps.log.warn(
+        fields,
+        "line-comment batch not dispatched — another holder owns the applied publication's line work (the intents stay discoverable)",
+      );
+    } else {
+      // Released only when nothing was sent or the batch was fully captured.
+      // An ambiguous send keeps the claim: it is discovery work, never
+      // permission to create a second batch. shortcut: the claim lapses at
+      // PUBLICATION_LEASE_MS; upgrade to a durable dispatch mark if an
+      // ambiguous batch must stay undispatched beyond that window.
+      let releaseLineClaim = false;
+      try {
+        const postedLine = await commenter.postLineComments({
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+          headSha,
+          round,
+          publicationId: stagedId,
+          intents: lineIntents,
+          // `review_checks.id`, not the container identity (see the marker
+          // send); the fresh journal claim is the no-Check lane's authority.
+          journalClaim: lineLease ?? lease,
+          ...(lineAttemptId === undefined ? {} : { attemptId: lineAttemptId }),
+        });
+        if (postedLine.posted.length > 0) {
+          try {
+            const captureStmts = postedLine.posted.map((p) =>
+              deps.env.DB
+                .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ?`)
+                .bind(postedLine.reviewId, p.commentId, Date.now(), p.associationId),
+            );
+            await deps.env.DB.batch(captureStmts);
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            deps.log.warn(fields, `line-comment id capture failed (intents stay discoverable): ${detail}`);
+          }
         }
-      }
-      if (!postedLine.captured || postedLine.ambiguous.length > 0) {
+        releaseLineClaim = postedLine.captured && postedLine.ambiguous.length === 0;
+        if (!postedLine.captured || postedLine.ambiguous.length > 0) {
+          deps.log.warn(
+            { ...fields, line_comments_fallback: true },
+            `line-comment capture incomplete (ambiguous: ${postedLine.ambiguous.join(", ") || "none"}) — never fabricated, batch claim retained`,
+          );
+        }
+      } catch (err) {
+        // A definitive pre-send refusal left nothing at GitHub, so the claim
+        // is unspent and may be handed back; anything else may have landed.
+        releaseLineClaim = err instanceof PreparedSendRejected || err instanceof PublicationDeadlineSpent;
+        const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(
           { ...fields, line_comments_fallback: true },
-          `line-comment capture incomplete (ambiguous: ${postedLine.ambiguous.join(", ") || "none"}) — never fabricated`,
+          `line comments failed — overall comment already published, continuing overall-only: ${detail}`,
         );
+      } finally {
+        if (lineLease !== null && releaseLineClaim) {
+          await releaseAppliedLineBatchClaim(deps.env.DB, stagedId, lineLease, Date.now());
+        }
       }
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(
-        { ...fields, line_comments_fallback: true },
-        `line comments failed — overall comment already published, continuing overall-only: ${detail}`,
-      );
     }
   }
 
@@ -5662,6 +5722,7 @@ async function publishPhase(
       );
     } else {
       const deleteOutcome = await commenter.deleteDegradedComment({
+        appId: lifecycleScope.appId,
         installationId: payload.installation_id,
         owner: payload.owner,
         repo: payload.repo,

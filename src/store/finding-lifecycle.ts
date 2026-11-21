@@ -1352,6 +1352,64 @@ export async function releaseUnspentPublicationClaim(
 }
 
 /**
+ * §7.9a condition 2: the applied mark clears the journal claim, so the no-Check
+ * lane's line batch takes a FRESH claim of its own — conditional on the row
+ * actually being `applied` with a pending (uncaptured) line intent, and on no
+ * live holder. A competitor that loses gets `null` and dispatches nothing.
+ * The epoch keeps rising, so the cleared claim can never authorise the batch.
+ */
+export async function claimAppliedLineBatch(
+  db: D1Like,
+  id: string,
+  holder: string,
+  nowMs: number,
+): Promise<Lease | null> {
+  if (holder.length === 0) throw new Error("finding-lifecycle: line-batch claim requires a nonblank holder identity");
+  const claim = await db
+    .prepare(
+      `UPDATE review_publications
+          SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?, updated_ms = ?
+        WHERE id = ? AND phase = 'applied'
+          AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+          AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = ? AND t.review_id IS NULL)
+        RETURNING holder, lease_epoch, lease_until_ms`,
+    )
+    .bind(holder, nowMs + PUBLICATION_LEASE_MS, nowMs, id, nowMs, id)
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  const written = claim.results[0];
+  if (
+    written === undefined ||
+    written.holder !== holder ||
+    written.lease_until_ms !== nowMs + PUBLICATION_LEASE_MS
+  ) {
+    return null;
+  }
+  return { holder: written.holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
+}
+
+/**
+ * Hand the applied line-batch claim back (under the exact epoch it was granted
+ * with). `phase` stays `applied`: this releases the batch's send right, never
+ * the publication.
+ */
+export async function releaseAppliedLineBatchClaim(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: number,
+): Promise<boolean> {
+  const released = await db
+    .prepare(
+      `UPDATE review_publications
+          SET holder = NULL, lease_until_ms = NULL, updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND phase = 'applied'`,
+    )
+    .bind(nowMs, id, lease.holder, lease.epoch)
+    .run();
+  return released.meta.changes > 0;
+}
+
+/**
  * After an UNCERTAIN send/discovery attempt (spec §7.7 "Remote unknowns"):
  * the row becomes phase `unknown` (from `sending`) — the payload is retained
  * and ONLY read-only discovery may touch it — plus backoff and the released

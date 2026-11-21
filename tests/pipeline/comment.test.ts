@@ -2167,6 +2167,7 @@ describe("prepared degraded publication wiring (mock octokit, spec §7.7)", () =
 
 describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => {
   const degradeInput = {
+    appId: "11111111-2222-3333-4444-555555555555",
     installationId: 1,
     owner: "acme",
     repo: "widgets",

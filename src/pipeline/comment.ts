@@ -90,7 +90,7 @@ import { redactSecrets } from "./redact";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
-import type { Lease, LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
+import { hasUnprovenDegradedPublication, type Lease, type LineIntent, type VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
 import {
@@ -1646,6 +1646,42 @@ export type PublicationSendGuard =
   | { kind: "journal"; db: D1Like; nowMs: () => number; publicationId: string; claim: Lease };
 
 /**
+ * NO authority was available for this send: another holder owns the action, or
+ * the lease could not be read. Nothing was sent, and nothing is known to be
+ * wrong with the prepared target either — so a recovery lane must leave the
+ * publication due (never record a definitive failure) and a caller that hands
+ * the send to another lane must not commit its own outcome.
+ */
+export class PublicationAuthorityUnavailable extends PreparedSendRejected {}
+
+/**
+ * Build a send's authority from what the caller presents (spec §7.9/§7.7).
+ * THE rule every prepared send uses, exported so a test drives the real one:
+ * a named Check attempt wins (its per-action lease), else the caller's journal
+ * claim, else a refusal — absence of a Check handle is not authority.
+ */
+export function publicationSendGuard(
+  db: D1Like | undefined,
+  nowMs: () => number,
+  input: { publicationId: string; attemptId?: string; journalClaim?: Lease },
+): PublicationSendGuard {
+  if (db === undefined) {
+    throw new PreparedSendRejected(
+      `the publication authority of ${input.publicationId} cannot be read — this commenter was built without the journal store; nothing was sent`,
+    );
+  }
+  if (input.attemptId !== undefined) {
+    return { kind: "lease", db, nowMs, attemptId: input.attemptId };
+  }
+  if (input.journalClaim !== undefined) {
+    return { kind: "journal", db, nowMs, publicationId: input.publicationId, claim: input.journalClaim };
+  }
+  throw new PreparedSendRejected(
+    `no publication authority for ${input.publicationId}: neither a Check attempt nor a journal claim was supplied — nothing was sent`,
+  );
+}
+
+/**
  * The journal claim as a dispatch-time fence: the row must still carry THIS
  * holder, THIS epoch and the expiry the caller was granted, and that expiry
  * must still be in the future. A late sender therefore cannot mutate after a
@@ -1705,7 +1741,7 @@ async function underPublicationFence<T>(
     { db: guard.db, nowMs: guard.nowMs },
     { attemptId: guard.attemptId, actionKey, holder: `send:${actionKey}` },
   );
-  if ("reason" in opened) throw new PreparedSendRejected(`${opened.reason} — nothing was sent`);
+  if ("reason" in opened) throw new PublicationAuthorityUnavailable(`${opened.reason} — nothing was sent`);
   try {
     return await run(opened.fence);
   } finally {
@@ -1933,6 +1969,8 @@ async function publishPreparedDegraded(
 }
 
 export type PostDegradedInput = {
+  /** The App whose journal the delete re-reads (spec §7.9a condition 3). */
+  appId: string;
   installationId: number;
   owner: string;
   repo: string;
@@ -1941,6 +1979,16 @@ export type PostDegradedInput = {
   error: string;
   /** Raw runner stdout — redacted + truncated inside buildDegradedBody. */
   rawOutput: string;
+};
+
+/**
+ * §7.9a condition 3's preservation half: answers "does a NEWER unproven
+ * degraded publication for this exact target still need the scanned comment as
+ * its evidence?". It is re-run inside the delete verb, after the body re-read,
+ * so a body staged across the scan keeps the delete from removing its evidence.
+ */
+export type DegradedCleanupGuard = {
+  preserve: (match: { id: number; body: string }) => Promise<boolean>;
 };
 
 /** Degraded-comment delete outcome (Bugbot round-2 fix): the consumer logs
@@ -1972,6 +2020,7 @@ export type DegradedDeleteOutcome = {
 function guardDeletes(
   issues: NonNullable<PostOctokit["rest"]>["issues"],
   unchanged: () => Promise<boolean>,
+  preserve?: () => Promise<boolean>,
 ): NonNullable<PostOctokit["rest"]>["issues"] {
   return {
     ...issues,
@@ -1979,6 +2028,14 @@ function guardDeletes(
       if (!(await unchanged())) {
         throw new PreparedSendRejected(
           "degraded marker: the comment no longer carries the body that was scanned — nothing was deleted",
+        );
+      }
+      // §7.9a condition 3: the binding+evidence check is only half the proof —
+      // a newer staged/uncertain degraded body for this target still depends on
+      // this comment, so the delete must skip rather than destroy its evidence.
+      if (preserve !== undefined && (await preserve())) {
+        throw new PreparedSendRejected(
+          "degraded marker: a newer unproven degraded publication still needs this comment as evidence — nothing was deleted",
         );
       }
       return (issues.deleteComment as (inner: Record<string, unknown>) => Promise<unknown>)(params);
@@ -2004,6 +2061,7 @@ function guardDeletes(
 export async function deleteDegradedCommentWithOctokit(
   octokit: PostOctokit,
   input: PostDegradedInput,
+  guard?: DegradedCleanupGuard,
 ): Promise<DegradedDeleteOutcome> {
   const issues = octokit.rest?.issues;
   if (
@@ -2033,10 +2091,14 @@ export async function deleteDegradedCommentWithOctokit(
       // The identity proof for THIS delete: re-read the list and require the
       // same id to still carry the same body. It runs inside the verb wrapper
       // below, so it is the last thing before the request.
-      const deleting = guardDeletes(issues, async () => {
-        const atDelete = await scanCommentsWithOctokit(octokit, input, "degraded");
-        return atDelete.some((c) => c.id === match.id && c.body === match.body);
-      });
+      const deleting = guardDeletes(
+        issues,
+        async () => {
+          const atDelete = await scanCommentsWithOctokit(octokit, input, "degraded");
+          return atDelete.some((c) => c.id === match.id && c.body === match.body);
+        },
+        guard === undefined ? undefined : () => guard.preserve({ id: match.id, body: match.body }),
+      );
       await deleting.deleteComment!({
         owner: input.owner,
         repo: input.repo,
@@ -2649,27 +2711,6 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
   // journal claim — and a send that presents neither is refused here rather
   // than mutating GitHub unfenced.
   const clock = options?.nowMs ?? (() => Date.now());
-  const publicationAuthority = (input: {
-    publicationId: string;
-    attemptId?: string;
-    journalClaim?: Lease;
-  }): PublicationSendGuard => {
-    if (options?.db === undefined) {
-      throw new PreparedSendRejected(
-        `the publication authority of ${input.publicationId} cannot be read — this commenter was built without the journal store; nothing was sent`,
-      );
-    }
-    if (input.attemptId !== undefined) {
-      return { kind: "lease", db: options.db, nowMs: clock, attemptId: input.attemptId };
-    }
-    if (input.journalClaim !== undefined) {
-      return { kind: "journal", db: options.db, nowMs: clock, publicationId: input.publicationId, claim: input.journalClaim };
-    }
-    throw new PreparedSendRejected(
-      `no publication authority for ${input.publicationId}: neither a Check attempt nor a journal claim was supplied — nothing was sent`,
-    );
-  };
-
   return {
     getAppIdentity,
     ...(threadSurface
@@ -2695,7 +2736,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       return planDegradedUpsertWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postPreparedReview(input) {
-      const guard = publicationAuthority(input);
+      const guard = publicationSendGuard(options?.db, clock, input);
       return postPreparedReviewWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
@@ -2703,7 +2744,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       );
     },
     async postPreparedDegraded(input) {
-      const guard = publicationAuthority(input);
+      const guard = publicationSendGuard(options?.db, clock, input);
       return postPreparedDegradedWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,
@@ -2711,10 +2752,30 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       );
     },
     async deleteDegradedComment(input) {
-      return deleteDegradedCommentWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
+      // §7.9a condition 3: without the journal store the preservation condition
+      // cannot be re-proved at dispatch, and an unproved delete is not
+      // authority to destroy a newer publication's evidence — fail closed.
+      const db = options?.db;
+      return deleteDegradedCommentWithOctokit(
+        await getOctokit({ installationId: input.installationId, repo: input.repo }),
+        input,
+        {
+          preserve:
+            db === undefined
+              ? async () => true
+              : () =>
+                  hasUnprovenDegradedPublication(db, {
+                    appId: input.appId,
+                    installationId: input.installationId,
+                    owner: input.owner,
+                    repo: input.repo,
+                    prNumber: input.prNumber,
+                  }),
+        },
+      );
     },
     async postLineComments(input) {
-      const guard = publicationAuthority(input);
+      const guard = publicationSendGuard(options?.db, clock, input);
       return postLineCommentsWithOctokit(
         await getOctokit({ installationId: input.installationId, repo: input.repo }),
         input,

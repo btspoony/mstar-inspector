@@ -94,7 +94,7 @@ import {
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
-import { createReviewCommenter, PreparedSendRejected, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
+import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 import { sha256Hex } from "../pipeline/review-threads";
 import { settlementStatementIfDischarged } from "../store/review-route-store";
 
@@ -855,6 +855,16 @@ async function sendPreparedPublication(
   const lease = await claimPublication(db, row.id, HOLDER, now());
   if (lease === null) return; // claimed elsewhere between pre-check and claim
   try {
+    // §7.9a condition 1: a Check-backed publication's recovery send must meet
+    // the foreground send on the SAME per-action lease, so the attempt that
+    // owns the publication is the key — not this lane's journal claim.
+    const owningAttempt = await db
+      .prepare(
+        `SELECT id FROM review_checks WHERE publication_id = ?
+          ORDER BY generation DESC, id DESC LIMIT 1`,
+      )
+      .bind(row.id)
+      .first<{ id: string }>();
     const target = {
       installationId: scope.installationId,
       owner: scope.owner,
@@ -865,10 +875,11 @@ async function sendPreparedPublication(
       targetCommentId: row.payload.targetCommentId,
       body: row.payload.body,
       publicationId: row.id,
-      // This lane's authority is the journal claim it just took: the send
-      // re-proves it at dispatch, so a claim taken over (or expired) mid-send
-      // cannot mutate GitHub on a stale owner's behalf.
+      // The per-action lease is the one authority, when the attempt has a
+      // Check row; the journal claim is only the fallback for a lane with no
+      // Check attempt to key one on.
       journalClaim: lease,
+      ...(owningAttempt === null ? {} : { attemptId: owningAttempt.id }),
     };
     let commentId: number;
     if (row.payload.kind === "degraded") {
@@ -903,6 +914,25 @@ async function sendPreparedPublication(
     }
     await settleFailedPublicationAttempt(db, now, row, lease, "post-proof apply did not complete", summary, false);
   } catch (error) {
+    if (error instanceof PublicationAuthorityUnavailable) {
+      // Another lane holds this action's lease and is the sender: nothing was
+      // sent here, so the claim is unspent. Hand the row back as due instead
+      // of recording a definitive failure we never observed (§7.9a).
+      const restored = await releaseUnspentPublicationClaim(db, row.id, lease, now());
+      if (!restored) {
+        summary.errors += 1;
+        log.warn(
+          { event: "ops_lifecycle_publication_claim_restore_missed", detail: `publication=${row.id}` },
+          "action contended by another lane and the claim had already moved — row left to its current owner",
+        );
+        return;
+      }
+      log.info(
+        { event: "ops_lifecycle_publication_authority_busy", detail: `publication=${row.id}: ${error.message}` },
+        "publication action held by another lane — no send, claim returned, row stays due",
+      );
+      return;
+    }
     if (error instanceof PreparedSendRejected) {
       // A definitive pre-send rejection (§7.7): no request left the Worker,
       // so `failed` is the truthful durable phase — never the post-attempt

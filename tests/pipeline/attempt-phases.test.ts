@@ -37,7 +37,7 @@ import {
   claimReviewLaunch,
   readReviewLaunch,
 } from "../../src/pipeline/review-attempt";
-import { readPublication } from "../../src/store/finding-lifecycle";
+import { claimAppliedLineBatch, readPublication } from "../../src/store/finding-lifecycle";
 import {
   deliveryKeyOf,
   readAttemptHandoff,
@@ -47,6 +47,7 @@ import { claimAttempt } from "../../src/store/review-checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { Lease } from "../../src/store/finding-lifecycle";
+import type { PostOctokit, PostPreparedLineCommentsInput } from "../../src/pipeline/comment";
 // Type-only (erased at compile time, so it cannot run before the shim above).
 import type {
   AttemptRef,
@@ -66,7 +67,11 @@ const {
 } = await import("../../src/pipeline/review-attempt-execution");
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 const { hydrateAttemptHost, ensureRunnerConfig } = await import("../../src/pipeline/consumer");
-const { PublicationDeadlineSpent } = await import("../../src/pipeline/comment");
+// Dynamic so the module graph loads AFTER the workerd shim above (same reason
+// every product module in this file is loaded dynamically).
+const { PublicationDeadlineSpent, postLineCommentsWithOctokit, publicationSendGuard, PreparedSendRejected } = await import(
+  "../../src/pipeline/comment"
+);
 const { RoundBudgetSpent } = await import("../../src/pipeline/review-attempt");
 
 const ATTEMPT_ID = "attempt-4b-0001";
@@ -349,6 +354,87 @@ describe("the restart round trip", () => {
     expect(checks.terminalized).toEqual([
       { publicationId: collected.collected.publicationId, outcome: "publication-unknown" },
     ]);
+  });
+});
+
+describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () => {
+  test("the applied publication's pending batch dispatches once under a fresh claim, and the cleared claim dispatches zero", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publicationId = collected.collected.publicationId;
+    // The fixture's diff covers the finding's line, so the staged publication
+    // carries exactly one frozen line intent (the batch this test dispatches).
+    const staged = await readPublication(db as never, publicationId);
+    expect(staged?.payload.lineIntents).toHaveLength(1);
+
+    // The REAL send, under the authority the phase hands over.
+    const batches: unknown[] = [];
+    const lineOctokit: PostOctokit = {
+      paginate: async () => [],
+      rest: {
+        issues: {
+          listComments: async () => ({ data: [] }),
+          updateComment: async () => ({}),
+          createComment: async () => ({}),
+        },
+        pulls: {
+          createReview: async (params) => {
+            batches.push(params);
+            // GitHub's real response omits ids; the capture reads them back by
+            // the trusted thread marker, so echo the created batch with ids.
+            const comments = (params.comments as Array<Record<string, unknown>>).map((comment, index) => ({
+              ...comment,
+              id: 2001 + index,
+            }));
+            return { data: { id: 77, comments } };
+          },
+        },
+      },
+    };
+    let handedOver: PostPreparedLineCommentsInput | undefined;
+    h.fakeCommenter.postLineComments = async (input) => {
+      handedOver = input;
+      return postLineCommentsWithOctokit(lineOctokit, input, publicationSendGuard(db as never, () => Date.now(), input));
+    };
+
+    const { deps: publishing } = await makeDeps({ db });
+    expect(await publishAttempt(publishing, ref, publicationId)).toEqual({ kind: "ok" });
+    expect(batches).toHaveLength(1);
+
+    // A cleared claim (holder gone, epoch no longer current) is not authority:
+    // reusing it dispatches zero further batches.
+    const row = db.raw
+      .prepare(`SELECT holder, lease_epoch FROM review_publications WHERE id = ?`)
+      .get(publicationId) as { holder: string | null; lease_epoch: number };
+    expect(row.holder).toBeNull();
+    const cleared: Lease = { holder: "consumer:stale", epoch: row.lease_epoch - 1, untilMs: Date.now() + 60_000 };
+    const reused = await postLineCommentsWithOctokit(
+      lineOctokit,
+      { ...handedOver!, journalClaim: cleared },
+      publicationSendGuard(db as never, () => Date.now(), {
+        publicationId,
+        journalClaim: cleared,
+      }),
+    ).catch((error: unknown) => error);
+    expect(reused).toBeInstanceOf(PreparedSendRejected);
+    expect(batches).toHaveLength(1);
+
+    // The applied mark cleared the claim, and the batch is closed: no further
+    // claim for this publication's line work is available.
+    expect(await claimAppliedLineBatch(db as never, publicationId, "recovery:9", Date.now())).toBeNull();
   });
 });
 

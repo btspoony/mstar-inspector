@@ -35,6 +35,7 @@ import {
   PUBLICATION_LEASE_MS,
   claimPublication,
   claimPublicationLease,
+  hasUnprovenDegradedPublication,
   releasePublicationLease,
   stagePublication,
 } from "../../src/store/finding-lifecycle";
@@ -605,6 +606,7 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
     };
 
     const outcome = await deleteDegradedCommentWithOctokit(octokit, {
+      appId: APP_ID,
       installationId: 123,
       owner: "acme",
       repo: "widgets",
@@ -613,6 +615,71 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
       rawOutput: "",
     });
 
+    expect(outcome.deleted).toBe(0);
+    expect(outcome.skipped).toBe(1);
+    expect(deleted).toEqual([]);
+  });
+
+  test("a newer staged degraded body survives an old cleanup's scan-then-resume", async () => {
+    const db = await seededDb();
+    const marker = `<!-- mstar-inspector:review-degraded:v1 round=1 -->\n**Review degraded: output failed schema validation**`;
+    let scans = 0;
+    const deleted: number[] = [];
+    const octokit: PostOctokit = {
+      paginate: async () => {
+        scans += 1;
+        // Pause after the scan: a newer degraded body is staged for the SAME
+        // target before it reaches GitHub. Its only recovery evidence is this
+        // comment, so the delete must not destroy it.
+        if (scans === 2) {
+          await stagePublication(db, {
+            id: "pub-newer-degraded",
+            nowMs: T0,
+            payload: {
+              version: 1,
+              scope: SCOPE,
+              headSha: SHA,
+              kind: "degraded",
+              round: 2,
+              targetCommentId: 7001,
+              body: "newer degraded body",
+              bodySha256: "d".repeat(64),
+              artifact: null,
+              lifecycle: null,
+              lineIntents: [],
+            },
+          });
+        }
+        return [{ id: 7001, body: marker, user: { type: "Bot" } }];
+      },
+      rest: {
+        issues: {
+          listComments: async () => ({ data: [] }),
+          updateComment: async () => ({}),
+          createComment: async () => ({}),
+          deleteComment: async (params) => {
+            deleted.push(params.comment_id as number);
+            return {};
+          },
+        },
+      },
+    };
+
+    const outcome = await deleteDegradedCommentWithOctokit(
+      octokit,
+      {
+        appId: APP_ID,
+        installationId: 123,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        error: "",
+        rawOutput: "",
+      },
+      { preserve: () => hasUnprovenDegradedPublication(db, SCOPE) },
+    );
+
+    expect(scans).toBeGreaterThanOrEqual(2);
     expect(outcome.deleted).toBe(0);
     expect(outcome.skipped).toBe(1);
     expect(deleted).toEqual([]);

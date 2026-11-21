@@ -36,6 +36,7 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
   applyPublishedLifecycle,
   claimPublication,
+  claimPublicationLease,
   listPublicationRecovery,
   listResolutionRecovery,
   recordPublicationProof,
@@ -48,6 +49,7 @@ import {
   type PublicationProof,
   type VerifiedResolution,
 } from "../../src/store/finding-lifecycle";
+import { CHECK_LEASE_MS, claimAttempt, linkCheckPublication } from "../../src/store/review-checks";
 import type { D1Like } from "../../src/store/types";
 import {
   buildLineCommentBody,
@@ -721,6 +723,134 @@ describe("publication lane — prepared send", () => {
     expect(summary.examined).toBe(1);
     expect(routed).toBe(1);
     expect(pubRow(db, "pub-1")).toMatchObject({ phase: "prepared", recovery_state: "pending", attempts: 0 });
+  });
+});
+
+describe("§7.9a condition 1 — a Check-backed send and its recovery share one action lease", () => {
+  /**
+   * A prepared publication whose owning Check attempt is linked (`review_checks
+   * .publication_id`), a real encrypted App PEM, and no thread work: the
+   * production factory must reach GitHub for the identity probe and (only if
+   * authorised) the send.
+   */
+  async function seedCheckBackedPrepared(db: TestD1, id: string): Promise<string> {
+    await seedRealApp(db, APP, 1001);
+    await seedPrepared(db, id, reviewPayload(SCOPE, { round: 2 }), 120_000);
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 1001,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      holder: "run-a",
+      nowMs: T0,
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${claimed.kind}`);
+    const attemptId = claimed.attempt.identity.attemptId;
+    expect(await linkCheckPublication(db as never, attemptId, claimed.lease, id, T0)).toBe(true);
+    return attemptId;
+  }
+
+  /** Live App identity + installation token + empty comment scan; counts POSTs to the PR conversation. */
+  function stubAppTransport(posts: Array<{ url: string }>): typeof fetch {
+    return (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      const json = (status: number, body: unknown) =>
+        new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      if (url.endsWith("/app")) return json(200, { id: 1001, slug: "acme-inspector" });
+      if (url.endsWith("/access_tokens")) {
+        return json(200, {
+          token: "ghs_test",
+          expires_at: new Date(T0 + 3_600_000).toISOString(),
+          repositories: [{ id: 1, name: "widgets" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+          repository_selection: "selected",
+        });
+      }
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          posts.push({ url });
+          return json(201, { id: 9001, body: "posted" });
+        }
+        return json(200, []);
+      }
+      return json(200, { id: 1 });
+    }) as unknown as typeof fetch;
+  }
+
+  test("foreground owning the action makes the recovery send nothing, and the batch still lands exactly once", async () => {
+    const db = createMigratedTestD1();
+    const attemptId = await seedCheckBackedPrepared(db, "pub-lease");
+    // The foreground send acquired the action's lease and is mid-send: same
+    // action key, same holder identity the comment module uses.
+    expect(
+      await claimPublicationLease(db as never, {
+        attemptId,
+        actionKey: "comment:pub-lease",
+        holder: "send:comment:pub-lease",
+        mode: "send",
+        nowMs: T0,
+      }),
+    ).not.toBeNull();
+
+    const posts: Array<{ url: string }> = [];
+    const realFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = stubAppTransport(posts);
+      const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE };
+
+      const refused = await reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => T0 });
+      // The one action lease is the dispatch authority: the recovery lane
+      // acquired the journal claim, lost the action, and sent nothing.
+      expect(posts).toHaveLength(0);
+      expect(refused.applied).toBe(0);
+
+      // The foreground releases when it settles; exactly ONE send then lands.
+      const held = db.raw
+        .prepare(`SELECT lease_epoch FROM publication_leases WHERE attempt_id = ? AND action_key = ?`)
+        .get(attemptId, "comment:pub-lease") as { lease_epoch: number };
+      db.raw
+        .prepare(`UPDATE publication_leases SET holder = NULL, lease_until_ms = NULL WHERE attempt_id = ? AND action_key = ?`)
+        .run(attemptId, "comment:pub-lease");
+      expect(held.lease_epoch).toBeGreaterThan(0);
+
+      const applied = await reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => T0 });
+      expect(posts).toHaveLength(1);
+      expect(applied.applied).toBe(1);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("the lane that loses the action records no definitive outcome — the row stays due", async () => {
+    const db = createMigratedTestD1();
+    const attemptId = await seedCheckBackedPrepared(db, "pub-lease");
+    expect(
+      await claimPublicationLease(db as never, {
+        attemptId,
+        actionKey: "comment:pub-lease",
+        holder: "send:comment:pub-lease",
+        mode: "send",
+        nowMs: T0,
+      }),
+    ).not.toBeNull();
+
+    const posts: Array<{ url: string }> = [];
+    const realFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = stubAppTransport(posts);
+      const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE };
+
+      await reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => T0 });
+
+      // Nothing was sent, so nothing may be claimed about the outcome: the
+      // claim is handed back (attempt returned) and the row is still sendable.
+      expect(posts).toHaveLength(0);
+      expect(pubRow(db, "pub-lease")).toMatchObject({ phase: "prepared", attempts: 0, last_error: null });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });
 
