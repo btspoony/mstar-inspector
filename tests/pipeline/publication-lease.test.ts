@@ -332,7 +332,7 @@ async function journalClaim(db: D1Like, publicationId: string): Promise<Lease> {
       lineIntents: [],
     },
   });
-  const lease = await claimPublication(db, publicationId, "consumer:journal", T0);
+  const lease = await claimPublication(db, publicationId, "consumer:journal", T0, "prepared");
   if (lease === null) throw new Error("fixture: journal claim refused");
   return lease;
 }
@@ -743,7 +743,7 @@ describe("the no-Check lane proves its journal claim at dispatch", () => {
     const claim = await journalClaim(db, "pub-j1");
     // The recovery lane takes the journal row over while this sender scans.
     const fake = fakeIssues(async () => {
-      expect(await claimPublication(db, "pub-j1", "recovery:9", T0 + PUBLICATION_LEASE_MS + 1)).not.toBeNull();
+      expect(await claimPublication(db, "pub-j1", "recovery:9", T0 + PUBLICATION_LEASE_MS + 1, "sending")).not.toBeNull();
     });
 
     const failure = await postPreparedReviewWithOctokit(
@@ -836,11 +836,12 @@ describe("the line-batch readback verifies authorship, uniqueness and publicatio
       },
     ],
   };
-  type ReadbackReview = { id: number; body: string; user: { login: string; type: string } };
-  type ReadbackComment = { id: number; path: string; line: number; body: string; user: { login: string } };
-  const review = (id: number, login: string, body: string): ReadbackReview => ({
+  type ReadbackReview = { id: number; body: string; commit_id: string; user: { login: string; type: string } };
+  type ReadbackComment = { id: number; path: string; line: number; body: string; user: { login: string; type: string } };
+  const review = (id: number, login: string, body: string, commitId = SHA): ReadbackReview => ({
     id,
     body,
+    commit_id: commitId,
     user: { login, type: "Bot" },
   });
   const comment = (
@@ -853,21 +854,31 @@ describe("the line-batch readback verifies authorship, uniqueness and publicatio
     path: "src/a.ts",
     line: 10,
     body: `a fix\n${lineMarker({ publicationId, associationId })}`,
-    user: { login },
+    user: { login, type: "Bot" },
   });
-  function readback(reviews: ReadbackReview[], comments: ReadbackComment[]): PostOctokit {
+  function readback(
+    reviews: ReadbackReview[],
+    comments: ReadbackComment[],
+    opts: { directCommentsRead?: "throw" } = {},
+  ): PostOctokit {
+    const listReviews = async () => ({ data: reviews });
+    const listCommentsForReview = async () => {
+      if (opts.directCommentsRead === "throw") {
+        throw new Error("the readback must paginate, not read one page");
+      }
+      return { data: comments };
+    };
     return {
-      paginate: async () => reviews,
+      // Route-aware pagination: reviews and the review's comments each get
+      // their complete list.
+      paginate: async (route: unknown) => (route === listReviews ? reviews : comments),
       rest: {
         issues: {
           listComments: async () => ({ data: [] }),
           updateComment: async () => ({}),
           createComment: async () => ({}),
         },
-        pulls: {
-          listReviews: async () => ({ data: reviews }),
-          listCommentsForReview: async () => ({ data: comments }),
-        },
+        pulls: { listReviews, listCommentsForReview },
       },
     };
   }
@@ -900,6 +911,26 @@ describe("the line-batch readback verifies authorship, uniqueness and publicatio
     );
     expect(recovered.captured).toBe(false);
     expect(recovered.posted).toEqual([]);
+  });
+
+  test("a review for another head is unverified", async () => {
+    const recovered = await recoverLineCommentsWithOctokit(
+      readback([review(7, LOGIN, marker, "b".repeat(40))], [comment(2001, LOGIN, PUB, ASSOC)]),
+      input,
+      LOGIN,
+    );
+    expect(recovered.captured).toBe(false);
+    expect(recovered.posted).toEqual([]);
+  });
+
+  test("the review's comments are read through the paginating route", async () => {
+    const recovered = await recoverLineCommentsWithOctokit(
+      readback([review(7, LOGIN, marker)], [comment(2001, LOGIN, PUB, ASSOC)], { directCommentsRead: "throw" }),
+      input,
+      LOGIN,
+    );
+    expect(recovered.captured).toBe(true);
+    expect(recovered.posted).toEqual([{ associationId: ASSOC, commentId: 2001, path: "src/a.ts", line: 10 }]);
   });
 
   test("a review whose last marker names another publication is unverified", async () => {
@@ -944,18 +975,133 @@ describe("the line-batch readback verifies authorship, uniqueness and publicatio
   });
 });
 
+describe("the degraded-target acquisition uses the row its own statement wrote", () => {
+  test("a same-holder acquisition landing between write and read cannot be mistaken for this one", async () => {
+    const inner = await seededDb();
+    // A store whose degraded_target_leases READ is delayed; the hook models a
+    // same-holder release + re-claim that lands in that window.
+    let hookFired = false;
+    const delaying: D1Like = {
+      prepare: (query) => {
+        const statement = inner.prepare(query);
+        const wrap = (bound: D1StatementLike): D1StatementLike => ({
+          bind: (...values: unknown[]) => wrap(bound.bind(...values)),
+          first: async <T = Record<string, unknown>>() => {
+            if (!hookFired && query.includes("FROM degraded_target_leases")) {
+              hookFired = true;
+              await inner
+                .prepare(
+                  `UPDATE degraded_target_leases SET holder = NULL, lease_until_ms = NULL
+                    WHERE holder = ? AND lease_epoch = 1`,
+                )
+                .bind("cleanup")
+                .run();
+              // Same holder, SAME clock: the re-claim has the same expiry, so
+              // only the epoch distinguishes it from this acquisition.
+              await claimDegradedTarget(inner, {
+                scope: SCOPE,
+                commentId: 7001,
+                holder: "cleanup",
+                nowMs: T0,
+              });
+            }
+            return bound.first<T>();
+          },
+          all: <T = Record<string, unknown>>() => bound.all<T>(),
+          run: <T = Record<string, unknown>>() => bound.run<T>(),
+        });
+        return wrap(statement);
+      },
+      batch: (statements) => inner.batch(statements),
+    };
+
+    const lease = await claimDegradedTarget(delaying, {
+      scope: SCOPE,
+      commentId: 7001,
+      holder: "cleanup",
+      nowMs: T0,
+      deleting: true,
+    });
+    // The exclusive RETURNING row is this acquisition's, not a later epoch's.
+    expect(lease).toEqual({ holder: "cleanup", epoch: 1, untilMs: T0 + PUBLICATION_LEASE_MS });
+  });
+});
+
 describe("a degraded target whose delete is unresolved blocks every writer", () => {
-  test("an unresolved delete stays closed until a fresh observation proves the outcome", async () => {
+  test("an incomplete scan never resolves an unresolved target", async () => {
     const db = await seededDb();
     const ref = { scope: SCOPE, commentId: 7001 };
-    const cleanup = await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0 });
-    if (cleanup === null) throw new Error("fixture: the cleanup claim was refused");
-    // The DELETE may have landed: its outcome is unknown.
-    expect(await releaseDegradedTarget(db, { ...ref, lease: cleanup, nowMs: T0, keep: true })).toBe(true);
-    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([7001]);
+    expect(await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0, deleting: true })).not.toBeNull();
 
-    // No lapse re-opens it: a writer long after the lease would have expired is
-    // still refused until resolution is PROVEN.
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const fetchImpl = (async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith("/access_tokens")) {
+        return json(200, {
+          token: "ghs_scan",
+          expires_at: new Date(T0 + 3_600_000).toISOString(),
+          repositories: [{ id: 1, name: "widgets" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+          repository_selection: "selected",
+        });
+      }
+      throw new Error("the comment scan failed mid-walk");
+    }) as unknown as typeof fetch;
+    const commenter = createReviewCommenter(
+      { APP_ID: "1001", PRIVATE_KEY: TEST_PRIVATE_KEY },
+      { db, nowMs: () => T0, fetchImpl },
+    );
+
+    await expect(
+      commenter.deleteDegradedComment({
+        appId: APP_ID,
+        installationId: 123,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        error: "",
+        rawOutput: "",
+      }),
+    ).rejects.toThrow(/scan failed/);
+
+    // A walk that did not complete proves nothing about the comment.
+    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([7001]);
+  });
+
+  test("the delete records its unresolved intent in the acquiring statement, before dispatch", async () => {
+    const db = await seededDb();
+    const ref = { scope: SCOPE, commentId: 7001 };
+    const cleanup = await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0, deleting: true });
+    if (cleanup === null) throw new Error("fixture: the cleanup claim was refused");
+
+    // The intent is durable from the acquisition onward: a writer is refused
+    // while the DELETE runs and, if the worker died, after the lease lapses.
+    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([7001]);
+    expect(await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 })).toBeNull();
+    expect(
+      await claimDegradedTarget(db, {
+        ...ref,
+        holder: "degraded:writer",
+        nowMs: T0 + PUBLICATION_LEASE_MS * 10,
+      }),
+    ).toBeNull();
+
+    // A known outcome (the DELETE request returned) resolves it.
+    expect(await releaseDegradedTarget(db, { ...ref, lease: cleanup, nowMs: T0, keep: false })).toBe(true);
+    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([]);
+    expect(
+      await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 + PUBLICATION_LEASE_MS * 10 + 1 }),
+    ).not.toBeNull();
+  });
+
+  test("a crashed delete stays unresolved until a fresh complete observation proves it", async () => {
+    const db = await seededDb();
+    const ref = { scope: SCOPE, commentId: 7001 };
+    const cleanup = await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0, deleting: true });
+    if (cleanup === null) throw new Error("fixture: the cleanup claim was refused");
+
+    // No release: the process died mid-DELETE. The intent outlives the lease.
     expect(
       await claimDegradedTarget(db, {
         ...ref,
@@ -966,13 +1112,8 @@ describe("a degraded target whose delete is unresolved blocks every writer", () 
 
     // A fresh complete observation (the comment is still present) resolves it.
     expect(await resolveDegradedTarget(db, ref, T0 + PUBLICATION_LEASE_MS * 10 + 1)).toBe(true);
-    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([]);
     expect(
-      await claimDegradedTarget(db, {
-        ...ref,
-        holder: "degraded:writer",
-        nowMs: T0 + PUBLICATION_LEASE_MS * 10 + 2,
-      }),
+      await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 + PUBLICATION_LEASE_MS * 10 + 2 }),
     ).not.toBeNull();
   });
 });

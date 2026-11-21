@@ -3562,7 +3562,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     // admits the row to the probe, but a proofless row can only answer
     // `pending`: it must defer, never conclude.
     const journalId = seedJournal(db, SCOPE, SHA, "prepared", T0 - 5_000);
-    expect(await claimPublication(db, journalId, "earlier-generation", T0 + 5_000)).not.toBeNull();
+    expect(await claimPublication(db, journalId, "earlier-generation", T0 + 5_000, "prepared")).not.toBeNull();
 
     const stub = stubFetch();
     let factoryCalls = 0;

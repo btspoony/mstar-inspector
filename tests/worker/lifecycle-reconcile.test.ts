@@ -271,7 +271,7 @@ function proofOf(id: string, pay: PublicationPayload, confirmedMs: number): Publ
 /** Stage → claim → record proof → expire the lease (the crashed-window shape). */
 async function seedConfirmedCrashed(db: TestD1, id: string, pay: PublicationPayload, nowMs = T0): Promise<void> {
   await stagePublication(db, { id, payload: pay, nowMs });
-  const lease = await claimPublication(db, id, "consumer", nowMs + 1);
+  const lease = await claimPublication(db, id, "consumer", nowMs + 1, "prepared");
   if (lease === null) throw new Error("test setup: claim failed");
   const recorded = await recordPublicationProof(db, id, lease, proofOf(id, pay, nowMs + 2));
   if (!recorded) throw new Error("test setup: proof recording failed");
@@ -846,14 +846,13 @@ describe("§7.9a condition 1 — a Check-backed send and its recovery share one 
     const realFetch = globalThis.fetch;
     globalThis.fetch = backgroundFetch;
     const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE };
+    // Recovery selects the row as `prepared` and suspends in its plan.
     const running = reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => clock.now });
-
-    // The foreground lane: publishPhase's own journal claim, then a send whose
-    // 120 s claim window has lapsed while the action lease is live.
     await planReached.promise;
-    // The foreground's journal claim was taken one window ago and has lapsed;
-    // its ACTION lease is taken now, at T0, and is live for the whole send.
-    const journalLease = await claimPublication(db as never, "pub-lease", "consumer:fg", T0 - PUBLICATION_LEASE_MS - 1);
+    // The foreground's journal claim was taken one window ago and has lapsed
+    // (the row is now `sending`); its ACTION lease is taken at T0 and is live
+    // for the whole send.
+    const journalLease = await claimPublication(db as never, "pub-lease", "consumer:fg", T0 - PUBLICATION_LEASE_MS - 1, "prepared");
     if (journalLease === null) throw new Error("fixture: the foreground journal claim was refused");
     clock.now = T0;
 
@@ -895,13 +894,12 @@ describe("§7.9a condition 1 — a Check-backed send and its recovery share one 
 
       expect(sent.commentId).toBe(9001);
       // ONE mutation for the one eligible action: the foreground's create. The
-      // recovery lane claimed the lapsed journal row, contended on the SAME
-      // admitted action lease, and sent nothing.
+      // recovery had resumed `prepared`; the row had left it, so the claim
+      // re-checked inside the dispatching statement refused and nothing was
+      // sent — the row still carries the foreground's claim.
       expect(fg.posts).toBe(1);
       expect(bg.posts).toBe(0);
-      // …and the loser committed no outcome: its claim is unspent and the row
-      // is still due for the lane that holds the send right.
-      expect(pubRow(db, "pub-lease")).toMatchObject({ phase: "prepared", last_error: null });
+      expect(pubRow(db, "pub-lease")).toMatchObject({ phase: "sending", attempts: 1, last_error: null });
     } finally {
       globalThis.fetch = realFetch;
       await running;
@@ -958,7 +956,7 @@ describe("§7.9a condition 1 — a Check-backed send and its recovery share one 
     // The recovery has selected the row as `prepared` and is suspended in its
     // plan. The foreground now takes THE claim for this publication.
     await planReached.promise;
-    const journalLease = await claimPublication(db as never, "pub-journal", "consumer:fg", T0);
+    const journalLease = await claimPublication(db as never, "pub-journal", "consumer:fg", T0, "prepared");
     if (journalLease === null) throw new Error("fixture: the foreground journal claim was refused");
     clock.now = T0;
 
@@ -1009,6 +1007,77 @@ describe("§7.9a condition 1 — a Check-backed send and its recovery share one 
     } finally {
       globalThis.fetch = realFetch;
       await running;
+    }
+  });
+});
+
+describe("§7.9a condition 1 — a recovery acts only on the state it resumed", () => {
+  test("a row that left `prepared` while recovery was planning is refused inside the claim", async () => {
+    const db = createMigratedTestD1();
+    await seedRealApp(db, APP, 1001);
+    await seedPrepared(db, "pub-stale", reviewPayload(SCOPE, { round: 2 }), 120_000);
+    const clock = { now: T0 };
+    const bg = { posts: 0 };
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+    const planGate = Promise.withResolvers<void>();
+    const planReached = Promise.withResolvers<void>();
+    let planSuspensionUsed = false;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/app")) return json(200, { id: 1001, slug: "acme-inspector" });
+      if (url.endsWith("/access_tokens")) {
+        return json(200, {
+          token: "ghs_stale",
+          expires_at: new Date(T0 + 3_600_000).toISOString(),
+          repositories: [{ id: 1, name: "widgets" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+          repository_selection: "selected",
+        });
+      }
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          bg.posts += 1;
+          return json(201, { id: 9300 });
+        }
+        if (!planSuspensionUsed) {
+          planSuspensionUsed = true;
+          planReached.resolve();
+          await planGate.promise;
+        }
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    try {
+      const running = reconcileReviewLifecycle(
+        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE },
+        { log: SILENT_LOG, now: () => clock.now },
+      );
+      // The recovery selected the row as `prepared` and is suspended in its
+      // plan. Another lane now takes it and its lease lapses (a crashed send).
+      await planReached.promise;
+      expect(
+        await claimPublication(db as never, "pub-stale", "consumer:crashed", T0, "prepared"),
+      ).not.toBeNull();
+      db.raw.prepare(`UPDATE review_publications SET lease_until_ms = ? WHERE id = ?`).run(T0 - 1, "pub-stale");
+      clock.now = T0;
+      planGate.resolve();
+      await running;
+
+      // The claim re-checked the phase inside the dispatching statement: the
+      // row is `sending` now, not the `prepared` this lane resumed for.
+      expect(bg.posts).toBe(0);
+      const row = db.raw
+        .prepare(`SELECT phase, holder FROM review_publications WHERE id = ?`)
+        .get("pub-stale") as { phase: string; holder: string | null };
+      expect(row.phase).toBe("sending");
+      expect(row.holder).toBe("consumer:crashed");
+    } finally {
+      globalThis.fetch = realFetch;
     }
   });
 });

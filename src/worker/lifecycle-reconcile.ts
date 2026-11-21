@@ -793,7 +793,7 @@ async function applyConfirmedPublication(
   row: PublicationRow,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
-  const lease = await claimPublication(db, row.id, HOLDER, now());
+  const lease = await claimPublication(db, row.id, HOLDER, now(), row.phase);
   if (lease === null) return; // another invocation owns the live lease
   try {
     const at = now();
@@ -1026,7 +1026,7 @@ async function sendPreparedPublication(
       return;
     }
   }
-  const lease = await claimPublication(db, row.id, HOLDER, now());
+  const lease = await claimPublication(db, row.id, HOLDER, now(), row.phase);
   if (lease === null) {
     if (degradedTarget !== null && degradedTargetLease !== null) {
       await releaseDegradedTarget(db, { ...degradedTarget, lease: degradedTargetLease, nowMs: now(), keep: false });
@@ -1191,7 +1191,7 @@ async function discoverUncertainPublication(
 ): Promise<void> {
   const scope = row.payload.scope;
   if (!canSpend(budget, now(), DISCOVERY_REQUESTS, true)) return; // stays unknown/due, no attempt
-  const lease = await claimPublication(db, row.id, HOLDER, now());
+  const lease = await claimPublication(db, row.id, HOLDER, now(), row.phase);
   if (lease === null) return; // another invocation owns discovery
   try {
     const discussion = await resolved.reviewer.listDiscussion({

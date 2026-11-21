@@ -10133,7 +10133,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(linked.terminal_ms).toBeNull();
 
     // The publication this attempt was LINKED to goes on to persist its proof.
-    const journalLease = await claimPublication(db, "journal-prepared", "publisher", linked.next_attempt_ms!);
+    const journalLease = await claimPublication(db, "journal-prepared", "publisher", linked.next_attempt_ms!, "prepared");
     expect(journalLease).not.toBeNull();
     expect(
       await recordPublicationProof(db, "journal-prepared", journalLease!, {

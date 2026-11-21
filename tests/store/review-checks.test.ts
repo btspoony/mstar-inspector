@@ -2009,7 +2009,7 @@ async function stageProof(
   headSha = SHA,
 ): Promise<PublicationProof> {
   await stagePublication(db, { id: publicationId, payload: payloadFor(publicationId, kind, prNumber, headSha), nowMs: T0 });
-  const lease = await claimPublication(db, publicationId, `pub-${publicationId}`, T0);
+  const lease = await claimPublication(db, publicationId, `pub-${publicationId}`, T0, "prepared");
   if (lease === null) throw new Error("fixture: publication claim failed");
   const proof: PublicationProof = {
     publicationId,

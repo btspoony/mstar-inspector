@@ -19,12 +19,13 @@ UPDATE review_publications SET line_dispatch_ms = -1;
 -- 2. Writer exclusion for ONE degraded target comment. A cleanup may delete a
 --    stale degraded marker only when no newer degraded publication can reuse
 --    that exact comment; the publishers (staging AND recovery send) and the
---    delete therefore contend on the same row. `unresolved_ms` records a delete
---    whose outcome is unknown: while it is set, no writer may reuse the target
---    and no new delete may start until a fresh complete observation proves
---    what happened. The row is keyed by the authenticated scope plus the
---    App-owned comment id, with the same epoch/holder protocol as every other
---    lease.
+--    delete therefore contend on the same row. A DELETE records its intent by
+--    setting `unresolved_ms` in the same statement that acquires the target,
+--    BEFORE the request: while it is set, no writer may reuse the target and no
+--    new delete may start until a fresh complete observation proves what
+--    happened (a crash or a lapsed lease leaves it set). The row is keyed by
+--    the authenticated scope plus the App-owned comment id, with the same
+--    epoch/holder protocol as every other lease.
 CREATE TABLE degraded_target_leases (
   bot_id TEXT NOT NULL,
   installation_id INTEGER NOT NULL,

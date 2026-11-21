@@ -117,6 +117,11 @@ export type PublicationPayload = {
   admittedAttemptId?: string;
 };
 
+/** The phases a claimer may resume for: terminal rows are never claimable. */
+export type PublicationClaimPhase = 'prepared' | 'sending' | 'unknown' | 'confirmed';
+
+export type PublicationPhase = PublicationClaimPhase | 'applied' | 'failed' | 'superseded';
+
 export type PublicationRow = {
   id: string; payload: PublicationPayload; proof: PublicationProof | null;
   phase: 'prepared' | 'sending' | 'confirmed' | 'applied' | 'failed' | 'unknown' | 'superseded';
@@ -379,22 +384,43 @@ export async function readPublication(db: D1Like, id: string): Promise<Publicati
  * Returns null when the row is gone, terminal, or another holder owns a
  * live lease.
  */
-export async function claimPublication(db: D1Like, id: string, holder: string, nowMs: number): Promise<Lease | null> {
+export async function claimPublication(
+  db: D1Like,
+  id: string,
+  holder: string,
+  nowMs: number,
+  /**
+   * The phase this caller RESUMED for. The READ and the claim are separated by
+   * an unbounded wait, so a row that moved on in between (another lane took the
+   * expired claim, or the work completed) must not be taken by this caller: the
+   * conditional write re-checks the phase in the same statement that dispatches.
+   */
+  expectPhase: PublicationPhase,
+): Promise<Lease | null> {
   const claim = await db
     .prepare(
       `UPDATE review_publications
        SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?, updated_ms = ?,
            attempts = attempts + 1,
            phase = CASE WHEN phase = 'prepared' THEN 'sending' ELSE phase END
-       WHERE id = ? AND phase IN ('prepared','sending','unknown','confirmed')
-         AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
+       WHERE id = ? AND phase = ?
+         AND phase IN ('prepared','sending','unknown','confirmed')
+         AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+       RETURNING holder, lease_epoch, lease_until_ms`,
     )
-    .bind(holder, nowMs + PUBLICATION_LEASE_MS, nowMs, id, nowMs)
-    .run();
-  if (claim.meta.changes === 0) return null;
-  const row = await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(id).first<ReviewPublicationRow>();
-  if (row === null || row.holder !== holder || row.lease_until_ms === null) return null;
-  return { holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+    .bind(holder, nowMs + PUBLICATION_LEASE_MS, nowMs, id, expectPhase, nowMs)
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  // The statement RETURNS the row it wrote: no later lookup can hand this
+  // claimant a row a same-holder acquisition took after it.
+  const written = claim.results[0];
+  if (
+    written === undefined ||
+    written.holder !== holder ||
+    written.lease_until_ms !== nowMs + PUBLICATION_LEASE_MS
+  ) {
+    return null;
+  }
+  return { holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,40 +1547,50 @@ function degradedTargetBinds({ scope, commentId }: DegradedTargetRef): [string, 
  */
 export async function claimDegradedTarget(
   db: D1Like,
-  input: DegradedTargetRef & { holder: string; nowMs: number },
+  input: DegradedTargetRef & { holder: string; nowMs: number; deleting?: boolean },
 ): Promise<Lease | null> {
   if (input.holder.length === 0) throw new Error("finding-lifecycle: degraded target claim requires a nonblank holder identity");
+  // A DELETE records its unresolved intent IN the acquiring statement: from the
+  // moment the target is held, every writer is refused — and a crash before the
+  // DELETE even starts leaves the intent durable once the lease lapses.
+  const unresolvedMs = input.deleting === true ? input.nowMs : null;
   const claim = await db
     .prepare(
       `INSERT INTO degraded_target_leases
-         (bot_id, installation_id, owner, repo, pr_number, comment_id, holder, lease_epoch, lease_until_ms, updated_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+         (bot_id, installation_id, owner, repo, pr_number, comment_id,
+          holder, lease_epoch, lease_until_ms, unresolved_ms, updated_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
        ON CONFLICT (bot_id, installation_id, owner, repo, pr_number, comment_id) DO UPDATE
          SET holder = excluded.holder,
              lease_epoch = degraded_target_leases.lease_epoch + 1,
              lease_until_ms = excluded.lease_until_ms,
+             unresolved_ms = excluded.unresolved_ms,
              updated_ms = excluded.updated_ms
          WHERE (degraded_target_leases.lease_until_ms IS NULL
                 OR degraded_target_leases.lease_until_ms <= ?)
-           AND degraded_target_leases.unresolved_ms IS NULL`,
+           AND degraded_target_leases.unresolved_ms IS NULL
+       RETURNING holder, lease_epoch, lease_until_ms`,
     )
     .bind(
       ...degradedTargetBinds(input),
       input.holder,
       input.nowMs + PUBLICATION_LEASE_MS,
+      unresolvedMs,
       input.nowMs,
       input.nowMs,
     )
-    .run();
-  if (claim.meta.changes === 0) return null;
-  const row = await db
-    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM degraded_target_leases WHERE ${DEGRADED_TARGET_COLUMNS}`)
-    .bind(...degradedTargetBinds(input))
-    .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
-  if (row === null || row.holder !== input.holder || row.lease_until_ms !== input.nowMs + PUBLICATION_LEASE_MS) {
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  // The statement RETURNS the row it wrote: a same-holder acquisition that took
+  // a later epoch can never be mistaken for this one (no read-back).
+  const written = claim.results[0];
+  if (
+    written === undefined ||
+    written.holder !== input.holder ||
+    written.lease_until_ms !== input.nowMs + PUBLICATION_LEASE_MS
+  ) {
     return null;
   }
-  return { holder: input.holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+  return { holder: written.holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
 }
 
 /**
@@ -1571,7 +1607,7 @@ export async function releaseDegradedTarget(
     .prepare(
       `UPDATE degraded_target_leases
           SET holder = NULL, lease_until_ms = NULL,
-              unresolved_ms = CASE WHEN ? THEN ? ELSE unresolved_ms END,
+              unresolved_ms = CASE WHEN ? THEN ? ELSE NULL END,
               updated_ms = ?
         WHERE ${DEGRADED_TARGET_COLUMNS} AND holder = ? AND lease_epoch = ?`,
     )

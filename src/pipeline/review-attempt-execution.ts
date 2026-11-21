@@ -1098,7 +1098,7 @@ async function applyPendingLifecycleJournals(
     .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
     .all<{ id: string }>();
   for (const { id } of rows.results) {
-    const lease = await claimPublication(db, id, `consumer-journal-apply:${id}`, nowMs);
+    const lease = await claimPublication(db, id, `consumer-journal-apply:${id}`, nowMs, "confirmed");
     if (lease === null) return false;
     let applied = false;
     try {
@@ -2134,7 +2134,7 @@ async function publishDegradedPublication(input: {
         publicationClosed: true,
       };
     }
-    const lease = await claimPublication(input.db, staged.id, `consumer-degraded:${staged.id}`, Date.now());
+    const lease = await claimPublication(input.db, staged.id, `consumer-degraded:${staged.id}`, Date.now(), "prepared");
     if (lease === null) {
       // Our staged row stays `prepared`: recovery still owns it.
       return { phase: "failed", reason: "publication journal claim failed — degraded notice not sent", publicationClosed: false };
@@ -5431,7 +5431,7 @@ async function publishPhase(
   // prepared upsert, validate the response id, persist proof BEFORE KV
   // done. A response/proof loss retains the staged payload for read-only
   // discovery — never a second paid review, never a blind re-send.
-  const lease = await claimPublication(deps.env.DB, stagedId, `consumer:${sandboxId}`, Date.now());
+  const lease = await claimPublication(deps.env.DB, stagedId, `consumer:${sandboxId}`, Date.now(), publication.phase);
   if (lease === null) {
     throw new Error("publication journal claim failed — refusing to send without the epoch-fenced lease");
   }

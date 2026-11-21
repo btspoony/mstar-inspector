@@ -2016,12 +2016,14 @@ export type DegradedCleanupGuard = {
   resolveAbsent?: (presentIds: readonly number[]) => Promise<void>;
 };
 
-/** The target exclusion a cleanup holds across one DELETE. */
+/** The target exclusion a cleanup holds across one DELETE. The delete's
+ *  UNRESOLVED intent was recorded when the lock was acquired, before the
+ *  request — so a crash leaves it durable. */
 export type DegradedTargetLock = {
   /**
-   * `keep: true` = the delete may have landed / is unresolved, so the
-   * exclusion stays held until its expiry; `false` = the outcome is known and
-   * the target is free for writers again.
+   * `keep: true` = the outcome is still unknown, so the unresolved marker
+   * stays (the lease may lapse; the marker does not); `false` = the response
+   * proved the outcome and the target is free for writers again.
    */
   release: (keep: boolean) => Promise<void>;
 };
@@ -2605,15 +2607,19 @@ function captureLineCommentsOf(
  */
 function isBatchReviewOf(
   candidate: unknown,
-  publicationId: string,
-  login: string,
+  input: { publicationId: string; headSha: string; login: string },
 ): candidate is { id: number; body: string } {
   if (typeof candidate !== "object" || candidate === null) return false;
-  if (!("id" in candidate) || !("body" in candidate) || !("user" in candidate)) return false;
+  if (!("id" in candidate) || !("body" in candidate) || !("user" in candidate) || !("commit_id" in candidate)) {
+    return false;
+  }
   if (typeof candidate.id !== "number" || typeof candidate.body !== "string") return false;
+  // The head the publication was admitted for: a batch for another commit is a
+  // different publication generation, never this one.
+  if (candidate.commit_id !== input.headSha) return false;
   const user = candidate.user;
-  if (typeof user !== "object" || user === null || !("login" in user) || user.login !== login) return false;
-  return parseLineBatchMarker(candidate.body)?.publicationId === publicationId;
+  if (typeof user !== "object" || user === null || !("login" in user) || user.login !== input.login) return false;
+  return parseLineBatchMarker(candidate.body)?.publicationId === input.publicationId;
 }
 
 /**
@@ -2624,6 +2630,26 @@ function isBatchReviewOf(
  * read stays `captured: false` — the work remains discovery, never a second
  * send.
  */
+/** The paginating route hands back `ReviewComment`-typed rows; the capture
+ *  reads path/line/user from the same objects, so widen the view once here. */
+function asComments(rows: unknown[]): Array<{
+  id?: unknown;
+  path?: unknown;
+  line?: unknown;
+  original_line?: unknown;
+  body?: unknown;
+  user?: { login?: unknown } | null;
+}> {
+  return rows as Array<{
+    id?: unknown;
+    path?: unknown;
+    line?: unknown;
+    original_line?: unknown;
+    body?: unknown;
+    user?: { login?: unknown } | null;
+  }>;
+}
+
 export async function recoverLineCommentsWithOctokit(
   octokit: PostOctokit,
   input: PostPreparedLineCommentsInput,
@@ -2640,6 +2666,8 @@ export async function recoverLineCommentsWithOctokit(
   }
   let reviews: unknown;
   try {
+    // ALL pages: a later page may hold our review, and a partial walk must not
+    // be read as "there is none".
     reviews = await octokit.paginate(pulls.listReviews, {
       owner: input.owner,
       repo: input.repo,
@@ -2649,30 +2677,24 @@ export async function recoverLineCommentsWithOctokit(
   } catch {
     return nothing;
   }
-  // EXACTLY ONE review may claim this publication: two candidates are
-  // ambiguous, and an ambiguous readback captures nothing.
+  // EXACTLY ONE review may claim this publication (and its admitted head): two
+  // candidates are ambiguous, and an ambiguous readback captures nothing.
   const candidates = (Array.isArray(reviews) ? reviews : []).filter((candidate: unknown) =>
-    isBatchReviewOf(candidate, input.publicationId, expectedLogin),
+    isBatchReviewOf(candidate, { publicationId: input.publicationId, headSha: input.headSha, login: expectedLogin }),
   );
   if (candidates.length !== 1) return nothing;
   const review = candidates[0]!;
-  let returned: Array<{
-    id?: unknown;
-    path?: unknown;
-    line?: unknown;
-    original_line?: unknown;
-    body?: unknown;
-    user?: { login?: unknown } | null;
-  }> | null;
+  let returned: ReturnType<typeof asComments> | null;
   try {
-    const listed = await pulls.listCommentsForReview({
+    // ALL pages of the review's comments, through the paginating route.
+    const listed = await octokit.paginate(pulls.listCommentsForReview, {
       owner: input.owner,
       repo: input.repo,
       pull_number: input.prNumber,
       review_id: review.id,
       per_page: 100,
     });
-    returned = Array.isArray(listed?.data) ? listed.data : null;
+    returned = Array.isArray(listed) ? asComments(listed) : null;
   } catch {
     returned = null;
   }
@@ -2949,6 +2971,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
                     commentId,
                     holder: `cleanup:${input.installationId}:${commentId}`,
                     nowMs: clock(),
+                    deleting: true,
                   });
                   if (lease === null) return null;
                   return {
