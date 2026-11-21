@@ -866,16 +866,16 @@ export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_ca
  * head's own persisted review against the App's current gate — `neutral`
  * (with the skip reason) only when there is nothing to inherit.
  *
- * `attachedHeadSha` MUST be the PAYLOAD's head SHA — the one the delivery path
- * attached with (`payload.head_sha`), never the authoritative checkout SHA:
- * after a force push the checkout names a commit with no attach row, and
- * settling on it would be a silent no-op while the stale run waited out its
- * window. Dedup KEYS still use the checkout SHA; only this settlement identity
- * follows the attach. A job that carried no SHA (a bot mention) has nothing to
- * settle.
+ * `attachedHeadSha` MUST be the head the delivery ATTACHED with — the payload's
+ * own `head_sha`, or the PR watermark a mention carried — never the
+ * authoritative checkout SHA: after a force push the checkout names a commit
+ * with no attach row, and settling on it would be a silent no-op while the
+ * stale run waited out its window. Dedup KEYS still use the checkout SHA; only
+ * this settlement identity follows the attach.
  *
  * Best-effort by contract: one warn on a fault, and the caller's ACK/return is
- * never changed.
+ * never changed. A delivery with nothing to settle is logged once instead of
+ * returning silently, so a skipped settlement never reads like a settled run.
  */
 async function settleSkippedRow(
   deps: ProcessDeps,
@@ -883,7 +883,13 @@ async function settleSkippedRow(
   attachedHeadSha: string | null | undefined,
   reason: string,
 ): Promise<void> {
-  if (deps.checks?.settleSkipped === undefined || attachedHeadSha === null || attachedHeadSha === undefined) return;
+  if (deps.checks?.settleSkipped === undefined || attachedHeadSha === null || attachedHeadSha === undefined) {
+    deps.log.info(
+      payloadIdentityFields(payload),
+      `check skip settlement skipped — nothing to settle for this delivery (${reason})`,
+    );
+    return;
+  }
   try {
     await deps.checks.settleSkipped({
       scope: {
@@ -5123,8 +5129,10 @@ async function processMessage(
           // The run THIS delivery attached for the old head has no review
           // coming now, so it is settled under this delivery's own attach
           // identity (inheriting that head's conclusion) instead of sitting
-          // `in_progress` until its deadline.
-          await settleSkippedRow(deps, payload, payload.head_sha, "superseded by a newer commit");
+          // `in_progress` until its deadline. The attach key is the payload sha
+          // OR the watermark a mention carried — `earlyHeadSha` is exactly that
+          // head, so a mention settles its run too.
+          await settleSkippedRow(deps, payload, earlyHeadSha, "superseded by a newer commit");
         }
         checkClaimAttempted = true;
         checkHandle = await beginCheck(lifecycleScope, githubAppId, movedHeadSha ?? earlyHeadSha);

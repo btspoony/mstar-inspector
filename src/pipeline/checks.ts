@@ -1603,15 +1603,18 @@ export type CheckLifecycle = {
    * App's CURRENT gate (the `inherited` branch, same head both sides): the
    * confirmed publication's proof first, its persisted `reviews` row when that
    * projection has not landed. A head whose review met the gate stays
-   * `success`, one that missed it stays `failure`. `neutral` — with the skip
-   * reason — is only the skip with nothing to inherit: no proof and no readable
-   * review, an unreadable gate, or a result without a readable score. A proof
-   * whose bytes do not parse falls back to the projection; a proof that cannot
-   * be READ settles nothing at all (the run is left to the reconciler's
-   * deadline path) — evidence this lane cannot read is never turned into a
-   * verdict. A live consumer holder, a frozen intent and a terminal row are
-   * never taken; `false` means there was nothing to settle. A store or
-   * transport fault rejects — the caller logs it and the ACK is unaffected.
+   * `success`, one that missed it stays `failure`, and an unreadable gate row
+   * or tally fails closed exactly as that head's own run does — a skip never
+   * concludes more favourably than the run it stands in for. A degraded
+   * publication settles `failure` from its own summary, without reading the
+   * projection. `neutral` — with the skip reason — is only the skip with
+   * NOTHING to inherit: no readable proof and no readable review. A proof whose
+   * bytes do not parse falls back to the projection; a proof that cannot be
+   * READ settles nothing at all (the run is left to the reconciler's deadline
+   * path) — evidence this lane cannot read is never turned into a verdict. A
+   * live consumer holder, a frozen intent and a terminal row are never taken;
+   * `false` means there was nothing to settle. A store or transport fault
+   * rejects — the caller logs it and the ACK is unaffected.
    */
   settleSkipped(input: {
     scope: Scope;
@@ -2199,14 +2202,13 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // live consumer's, already frozen, or terminal.
       if (claimed === null) return false;
       const { identity } = claimed.attempt;
-      // A skip must never overwrite the head's own gate result with `neutral`.
-      // A CONFIRMED publication is the proof the review landed, while its
-      // `reviews` projection can still lag the apply — so the proof is read
-      // first and the projection only backs it up. Either way the run carries
-      // that result against the App's CURRENT gate (the inherited branch:
-      // success when it meets the gate, failure when it does not). `neutral` is
-      // only the skip with nothing to inherit: no proof and no readable review,
-      // an unreadable gate, or a score neither carries.
+      // A skip must never conclude more favourably than the same head's own run
+      // would on the same evidence. A CONFIRMED publication is the proof the
+      // review landed, while its `reviews` projection can still lag the apply —
+      // so the proof is read first and the projection only backs it up. A
+      // DEGRADED publication is a parse-degrade notice, not a verdict: that head
+      // concluded `failure` and the skip carries the same summary, from the
+      // proof alone.
       let proof: PublicationProof | null = null;
       try {
         proof = await readPublicationProof(deps.db, { scope: input.scope, headSha: input.headSha });
@@ -2226,17 +2228,23 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         // missing proof — the projection below is the fallback.
         input.warn?.(`publication proof unreadable (falling back to the persisted review): ${detail}`);
       }
-      const review =
-        (proof === null
-          ? null
-          : await readPublishedReview(deps.db, {
-              scope: input.scope,
-              headSha: input.headSha,
-              publicationId: proof.publicationId,
-            })) ?? (await readInheritedReview(deps.db, { scope: input.scope, headSha: input.headSha }));
+      const degraded = proof !== null && proof.kind === "degraded";
+      const review = degraded
+        ? null
+        : (proof === null
+            ? null
+            : await readPublishedReview(deps.db, {
+                scope: input.scope,
+                headSha: input.headSha,
+                publicationId: proof.publicationId,
+              })) ?? (await readInheritedReview(deps.db, { scope: input.scope, headSha: input.headSha }));
       const gate = review === null ? null : await deps.getCheckGate(input.scope);
-      const conclusion: CheckConclusion =
-        review === null || gate === null || review.scorePct === null
+      // ANY readable review goes through the inherited branch, which fails
+      // closed on an unreadable gate or tally exactly as that head's own run
+      // does. `neutral` is only "nothing to inherit": no proof and no review.
+      const conclusion: CheckConclusion = degraded
+        ? { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degraded }
+        : review === null
           ? {
               desired: "neutral",
               title: CHECK_NAME,
