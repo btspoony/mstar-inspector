@@ -3156,24 +3156,88 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     expect(row.observed).toBe("failure");
   });
 
-  test("an unreadable gate fails closed — failure, never the skip's own neutral", async () => {
+  test("a confirmed publication with no readable payload fails closed, never neutral", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    seedHeadReview(db, "ship it", 92);
+    // The publication is confirmed (its proof persisted) but its payload carries
+    // no artifact, and there is no `reviews` row. A confirmed publication is
+    // evidence that a review exists: not being able to read it must fail closed.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
+         VALUES ('no-payload', ?, ?, ?, ?, ?, ?, 'review', 'confirmed', '{"version":1,"artifact":null}', ?, 1, 'done', ?, ?, ?)`,
+      )
+      .run(
+        APP_ID,
+        SCOPE.installationId,
+        SCOPE.owner,
+        SCOPE.repo,
+        SCOPE.prNumber,
+        SHA,
+        JSON.stringify({
+          publicationId: "no-payload",
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 1,
+          commentId: 7,
+          bodySha256: "b".repeat(64),
+          confirmedMs: T0,
+        }),
+        T0,
+        T0,
+        T0,
+      );
     const fake = settlingFake();
-    const { row } = await skipHead(db, fake, null);
+    const { row } = await skipHead(db, fake);
 
-    // The same head's own run fails closed on an unreadable gate, so a skip
-    // standing in for it must not be more permissive.
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
-    expect(fake.updates[0]!.params.output.summary).toBe(
-      CHECK_SUMMARIES.sameHeadInheritedGateUnreadable(
-        SHA.slice(0, 7),
-        "the App's gate configuration could not be read",
-      ),
-    );
+    expect(fake.updates[0]!.params.output.summary).toBe(CHECK_SUMMARIES.sameHeadInheritedUnreadable(SHA.slice(0, 7)));
     expect(row.desired).toBe("failure");
     expect(row.observed).toBe("failure");
+  });
+
+  test("an absent gate defers the settlement — nothing frozen, one warning", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    seedHeadReview(db, "needs fixes", 40);
+    const fake = settlingFake();
+    const { attemptId, deliveryId } = await attachedAttempt(db, fake);
+    const warnings: string[] = [];
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapterFor(db, fake.octokit),
+      // The webhook lane's zero-config placeholder: absent, not "missed".
+      getCheckGate: async () => null,
+    });
+
+    expect(
+      await lifecycle.settleSkipped({
+        scope: SCOPE,
+        headSha: SHA,
+        triggeredBy: "octocat",
+        action: "review",
+        attachDeliveryId: deliveryId,
+        reason: "already reviewed for this head",
+        warn: (detail) => warnings.push(detail),
+      }),
+    ).toBe(false);
+
+    // No evidence is not "the gate was missed": nothing is frozen and the run
+    // is left to the reconciler, which reads the real gate.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("gate is unreadable from this lane");
+    expect(fake.updates).toHaveLength(0);
+    const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
+      string,
+      string | number | null
+    >;
+    expect(row.desired).toBe("in_progress");
+    expect(row.desired_summary).toBeNull();
+    expect(row.terminal_ms).toBeNull();
   });
 
   test("a head review without a readable score fails closed, never neutral", async () => {

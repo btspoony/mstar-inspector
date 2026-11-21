@@ -883,7 +883,15 @@ async function settleSkippedRow(
   attachedHeadSha: string | null | undefined,
   reason: string,
 ): Promise<void> {
-  if (deps.checks?.settleSkipped === undefined || attachedHeadSha === null || attachedHeadSha === undefined) {
+  if (
+    deps.checks?.settleSkipped === undefined ||
+    attachedHeadSha === null ||
+    attachedHeadSha === undefined ||
+    // No attach identity means the delivery attached no run at all (a mention
+    // with no SHA the webhook could attach for): the lifecycle would answer
+    // `false` silently, so the no-op is named here.
+    payload.attachDeliveryId === undefined
+  ) {
     deps.log.info(
       payloadIdentityFields(payload),
       `check skip settlement skipped — nothing to settle for this delivery (${reason})`,

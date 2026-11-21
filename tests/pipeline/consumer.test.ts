@@ -9474,11 +9474,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(h.logLines.some((line) => line.level === "info" && line.msg.includes("reviewing the live head"))).toBe(true);
   });
 
-  test("check lifecycle: a mention settles the old run under the watermark head it attached with", async () => {
-    // No payload SHA at all: the attach keyed on the watermark (SHA). The push
-    // to SHA2 makes this delivery stale, and the settlement has to name the
-    // head the ATTACH used — `payload.head_sha` is null and would settle
-    // nothing at all.
+  test("check lifecycle: a no-SHA mention settles nothing and says so once", async () => {
+    // Production attaches no run for a mention without a SHA (the webhook only
+    // attaches for a payload SHA), so there is genuinely nothing to settle —
+    // and the no-op must be one line, not silence. The live head is still
+    // reviewed, under a fresh claim.
     const db = await createSeededTestD1();
     h.sandbox.resolvedSha = SHA2;
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
@@ -9490,25 +9490,6 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       appId: TEST_APP_ID,
       targetId: `target-${TEST_APP_ID}`,
     });
-    const adapter = checksAdapterFor(db);
-    const attached = await attachCheckAtAcceptance(
-      { db: db as never, adapter, nowMs: () => Date.now() },
-      {
-        scope: {
-          appId: TEST_APP_ID,
-          installationId: 123,
-          owner: "acme",
-          repo: "widgets",
-          prNumber: 42,
-        },
-        githubAppId: 424242,
-        headSha: SHA,
-        triggeredBy: "issue_comment",
-        action: "created",
-        deliveryId: "mention-delivery",
-      },
-    );
-    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
     let watermarkReads = 0;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
@@ -9519,28 +9500,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           ? { headSha: SHA, headAt: new Date().toISOString() }
           : { headSha: SHA2, headAt: new Date().toISOString() };
       },
-      createAppCommenter: () => commenterWithChecks(adapter),
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
     });
 
-    await consumer(
-      h.makeBatch(
-        makePayload({
-          head_sha: null,
-          triggered_by: "issue_comment",
-          action: "created",
-          attachDeliveryId: attached.deliveryId,
-        }),
-      ),
-    );
+    await consumer(h.makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })));
 
-    // The old head's run is settled with its own (passing) result...
-    const stale = checkRowFor(db, SHA);
-    expect(stale.desired).toBe("success");
-    expect(stale.terminal_ms).not.toBeNull();
-    // ...and the live head was reviewed under a fresh claim, so the PR holds
-    // exactly one row per head and the settled one carries a real verdict.
-    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA, SHA2]);
-    expect(checkRowFor(db, SHA).observed).toBe("success");
+    // No attach identity ⇒ the settlement names the no-op exactly once.
+    expect(h.logLines.filter((line) => line.msg.includes("nothing to settle for this delivery"))).toHaveLength(1);
+    // Only the live head holds a Check, and it was reviewed.
+    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA2]);
+    expect(checkRowForPr(db, 42).head_sha).toBe(SHA2);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(2);
   });

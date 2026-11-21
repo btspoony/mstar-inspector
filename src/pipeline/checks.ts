@@ -1603,9 +1603,13 @@ export type CheckLifecycle = {
    * App's CURRENT gate (the `inherited` branch, same head both sides): the
    * confirmed publication's proof first, its persisted `reviews` row when that
    * projection has not landed. A head whose review met the gate stays
-   * `success`, one that missed it stays `failure`, and an unreadable gate row
-   * or tally fails closed exactly as that head's own run does — a skip never
-   * concludes more favourably than the run it stands in for. A degraded
+   * `success`, one that missed it stays `failure`, and an unreadable tally fails
+   * closed exactly as that head's own run does — a skip never concludes more
+   * favourably than the run it stands in for. A confirmed publication whose
+   * payload yields no readable review is evidence that one exists and fails
+   * closed the same way. An ABSENT gate is different: it is no evidence at all
+   * (the webhook lane passes one deliberately, a damaged row reads the same),
+   * so nothing is frozen and the attempt is left to the reconciler. A degraded
    * publication settles `failure` from its own summary, without reading the
    * projection. `neutral` — with the skip reason — is only the skip with
    * NOTHING to inherit: no readable proof and no readable review. A proof whose
@@ -2239,24 +2243,37 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
                 publicationId: proof.publicationId,
               })) ?? (await readInheritedReview(deps.db, { scope: input.scope, headSha: input.headSha }));
       const gate = review === null ? null : await deps.getCheckGate(input.scope);
+      if (review !== null && gate === null) {
+        // NO GATE EVIDENCE here (the webhook lane passes an absent gate on
+        // purpose; a damaged row reads the same way). "Cannot read the gate" is
+        // not "the gate was missed": freezing a failure would turn a passing
+        // head red on a zero-config lane, so NOTHING is frozen and the run is
+        // left to the reconciler, which reads the real gate. One warn says why.
+        input.warn?.(
+          "the App's gate is unreadable from this lane — settling nothing; the recovery lane reads the real gate",
+        );
+        return false;
+      }
       // ANY readable review goes through the inherited branch, which fails
-      // closed on an unreadable gate or tally exactly as that head's own run
-      // does. `neutral` is only "nothing to inherit": no proof and no review.
+      // closed on an unreadable tally exactly as that head's own run does. A
+      // confirmed publication whose payload yields no review is EVIDENCE that a
+      // review exists, so it fails closed the same way. `neutral` is only
+      // "nothing to inherit": no readable proof AND no readable review.
       const conclusion: CheckConclusion = degraded
         ? { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degraded }
-        : review === null
-          ? {
-              desired: "neutral",
-              title: CHECK_NAME,
-              summary: CHECK_SUMMARIES.skippedByDelivery(input.reason),
-            }
-          : decideConclusion({
+        : proof !== null || review !== null
+          ? decideConclusion({
               proof: null,
               outcome: "skipped",
               gate,
               review,
               inherited: { headSha: input.headSha, reviewedHeadSha: input.headSha },
-            });
+            })
+          : {
+              desired: "neutral",
+              title: CHECK_NAME,
+              summary: CHECK_SUMMARIES.skippedByDelivery(input.reason),
+            };
       const intentFence = fenceFor(claimed.lease);
       if (!(await setCheckDesired(deps.db, identity.attemptId, intentFence.lease, conclusion, null, intentFence.nowMs))) {
         return false;
