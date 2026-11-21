@@ -1309,7 +1309,10 @@ describe("createReviewConsumer", () => {
     expect(message.length).toBeLessThan(600 + 60);
   });
 
-  test("infra failure with a failing failure-store → rethrow not masked (AL-6 best-effort)", async () => {
+  test("failure-row write rejects after a returned paid exit → unknown, nothing destroyed, capacity held", async () => {
+    // The paid exec RETURNED (a non-zero exit) but the terminal outcome could
+    // not be written. Nothing durable confirms what happened, so the attempt
+    // ends unknown: no destroy, no capacity release, no failure claim.
     h.sandbox.runnerExitCode = 1;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
@@ -1323,10 +1326,15 @@ describe("createReviewConsumer", () => {
       },
     });
 
-    await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/runner failed: exit 1, stdout 0B, stderr empty/);
+    await consumer(h.makeBatch(makePayload())); // resolves — unknown acks
 
-    const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("review_failures insert failed"));
-    expect(warn).toBeDefined();
+    expect(failureRows(db)).toHaveLength(0);
+    expect(h.sandbox.destroyCalls).toBe(0);
+    expect(inflightRows(db)).toHaveLength(1);
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.logLines.some((l) => l.level === "warn" && l.msg.includes("review_failures insert failed"))).toBe(true);
+    expect(h.logLines.filter((l) => l.fields.event === "review_unresolved")).toHaveLength(1);
   });
 
   test("the final delivery stamps the key failed so the commit stops counting as queued", async () => {
@@ -1838,6 +1846,43 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
     expect(String(failureRows(db)[0]!.error)).toContain('"cause":"consumer-deadline"');
     expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"preparation"');
+  });
+
+  test("a budget stop with no Check destroys only when its failure row actually wrote", async () => {
+    // The paid exec was killed at its deadline and returned 124: a confirmed
+    // stop, no Check attached (no checks dependency). The durable row is the
+    // only outcome record, so it is what authorises the teardown.
+    h.sandbox.runnerExitCode = 124;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(h.sandbox.destroyCalls).toBe(1);
+    expect(inflightRows(db)).toHaveLength(0);
+  });
+
+  test("a budget stop whose failure row rejects destroys nothing and holds capacity", async () => {
+    h.sandbox.runnerExitCode = 124;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      failureStore: {
+        record: async () => {
+          throw new Error("d1 down");
+        },
+        listRecent: async () => [],
+        countAdmissionDrops24h: async () => ({ "pr-held": 0, "system-cap": 0, "workspace-cap": 0, error: 0 }),
+      },
+    });
+
+    await consumer(h.makeBatch(makePayload())); // the stop still acks
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(h.sandbox.destroyCalls).toBe(0);
+    expect(inflightRows(db)).toHaveLength(1);
+    expect(h.logLines.filter((line) => line.fields.event === "sandbox_teardown_unproven")).toHaveLength(1);
   });
 
   test("the fallback's steps shrink to what the refused capture left of the ONE diff window", async () => {

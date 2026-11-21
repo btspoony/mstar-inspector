@@ -70,10 +70,12 @@ import type { ShellCommand } from "./shell-command";
  * row exists, no recovery path may be enabled, and none is wired here.
  *
  * An unproven container is never destroyed: no counter, elapsed time or lost
- * reply proves a paid child stopped, so it is left to the platform's inactivity
- * reclamation (the sandbox DO's own idle bound), which is what makes the
- * leftover acceptable. Nothing may "clean up" an unproven attempt — not a
- * recovery path, not a reconciler, not a later same-name call.
+ * reply proves a paid child stopped, so it is left to the platform. Its
+ * absolute lifetime is UNVERIFIED — the configured inactivity timeout is not
+ * evidence of a hard reclamation bound (a still-active process or a stalled
+ * destroy RPC is not shown to be bounded by idleness). The leftover is accepted
+ * on that unverified footing, and nothing may "clean up" an unproven attempt —
+ * not a recovery path, not a reconciler, not a later same-name call.
  */
 export function attemptMarker(attemptId: string): string {
   return `mstar.review-attempt/v1:${attemptId.toLowerCase()}\n`;

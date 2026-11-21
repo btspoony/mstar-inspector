@@ -451,8 +451,10 @@ export class SandboxV1 extends DurableObject {
    * one of the two facts, when the container is not live, when it carries other
    * bytes, or when the marker read cannot be bounded. There is deliberately no
    * allowance for an unsettled run: an in-memory count, elapsed time or a lost
-   * reply never proves a paid child stopped, and a leftover is reclaimed by the
-   * platform instead.
+   * reply never proves a paid child stopped. The refused container is left to
+   * the platform, whose absolute reclamation bound is UNVERIFIED — the
+   * configured inactivity timeout bounds idle gaps only, not a still-active
+   * process or a stalled destroy.
    *
    * `destroy()` is NOT bounded and never abandoned: when it is issued the
    * attempt is already safe to lose, and abandoning it mid-flight would let it

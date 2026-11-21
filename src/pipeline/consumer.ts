@@ -6355,7 +6355,6 @@ async function processMessage(
         checkHandle = await beginCheck(lifecycleScope, resolvedGithubAppId, resolvedHeadSha);
       }
       await terminalizeCheck(null, "budget-exhausted", undefined, budgetOutcome);
-      durableOutcome = true;
       const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${err instanceof Error ? err.message : String(err)}`;
       deps.log.error(
         {
@@ -6383,6 +6382,9 @@ async function processMessage(
           stage: progress.failureStage,
           error: redactExactSecrets(redactSecrets(budgetDetail), progress.secretValues),
         });
+        // Confirmed by the await above: only a write that RESOLVED is durable.
+        // A no-op Check terminalize is not, so it never counts on its own.
+        durableOutcome = true;
       } catch (recordErr) {
         const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
         deps.log.warn(
@@ -6419,16 +6421,6 @@ async function processMessage(
       return { kind: "unknown" };
     }
 
-    // §7.7 step 12 on the failure path: a Check begun at step 4 must
-    // terminalize even when the pipeline throws. After a send ATTEMPT the
-    // publication status is unknown (the request may have landed); before
-    // any send the honest outcome is pre-publication-failure. Isolated —
-    // never masks the throw.
-    if (sendAttempt !== null) {
-      await terminalizeCheck(sendAttempt.publicationId, "publication-unknown");
-    } else {
-      await terminalizeCheck(null, "pre-publication-failure");
-    }
     // Structured failure log carrying the idempotency key + sandbox id
     // (the failure log must carry the idempotency key: 失败路径错误日志含幂等键), then
     // rethrow so the worker retries and eventually DLQs.
@@ -6481,15 +6473,52 @@ async function processMessage(
         stage: progress.failureStage,
         error: redactExactSecrets(redactSecrets(persistedDetail), progress.secretValues),
       });
+      // Confirmed by the await above: a resolved write is the attempt's durable
+      // terminal no-result outcome. A rejection leaves the latch false.
+      durableOutcome = true;
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
       deps.log.warn(
         fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
-        `review_failures insert failed (rethrow unchanged): ${recordDetail}`,
+        `review_failures insert failed: ${recordDetail}`,
       );
     }
-    // A durable failure row is this attempt's terminal no-result outcome.
-    durableOutcome = true;
+    if (!durableOutcome && sandbox !== null) {
+      // A container exists and nothing durable came of this attempt: no row
+      // landed, so no terminal outcome can be claimed. It ends `unknown` — no
+      // destruction, no capacity release, no Check conclusion — instead of a
+      // failure nobody can read back later. (A failure BEFORE any container —
+      // credential gate, configuration — keeps the retry → DLQ path: there is
+      // nothing unresolved to leave behind.)
+      containerUnproven = true;
+      deps.log.warn(
+        {
+          ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+          ...(level === undefined
+            ? {}
+            : {
+                level,
+                runner_timeout_ms: runnerTimeoutMs(level),
+                orchestration: level === "deep" ? "parent" : "bun-fanout",
+              }),
+          ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
+          event: "review_unresolved",
+        },
+        `review unresolved: ${detail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
+      );
+      return { kind: "unknown" };
+    }
+
+    // §7.7 step 12 on the failure path: a Check begun at step 4 must
+    // terminalize even when the pipeline throws. After a send ATTEMPT the
+    // publication status is unknown (the request may have landed); before
+    // any send the honest outcome is pre-publication-failure. Isolated —
+    // never masks the throw.
+    if (sendAttempt !== null) {
+      await terminalizeCheck(sendAttempt.publicationId, "publication-unknown");
+    } else {
+      await terminalizeCheck(null, "pre-publication-failure");
+    }
 
     // This delivery is the last one the queue will make (the next stop is the
     // DLQ), so the commit will never be reviewed: overwrite its idempotency
