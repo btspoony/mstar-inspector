@@ -2723,7 +2723,7 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain('"budgetWindow":"preparation"');
   });
 
-  test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
+  test("runner input write failure → no runner, no post, no insert, rethrow, container held", async () => {
     h.sandbox.writeInputExitCode = 1;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -2734,9 +2734,10 @@ describe("createReviewConsumer", () => {
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    // The failure row that wrote is the terminal outcome: destroy and release.
-    expect(h.sandbox.destroyCalls).toBe(1);
-    expect(inflightRows(db)).toHaveLength(0);
+    // The exec never started, so the row records NO outcome: `launched` with
+    // neither is `unknown`, and the container plus its capacity are held.
+    expect(h.sandbox.destroyCalls).toBe(0);
+    expect(inflightRows(db)).toHaveLength(1);
   });
 
   test("an input write the anchored deadline killed acks the typed stop — the runner never ran, so 0/0 is KNOWN", async () => {

@@ -329,6 +329,19 @@ export async function listCheckOwed(
   return results.map((row) => ({ attemptId: row.attempt_id, owedMs: row.check_owed_ms }));
 }
 
+/**
+ * The Check obligation this attempt recorded is settled: clear it, so the
+ * reconciler stops selecting the attempt. Called by the lane that concluded the
+ * Check, never by the writer that noted it.
+ */
+export async function clearCheckOwed(db: D1Like, attemptId: string): Promise<boolean> {
+  const written = await db
+    .prepare(`UPDATE review_launches SET check_owed_ms = NULL WHERE attempt_id = ? AND check_owed_ms IS NOT NULL`)
+    .bind(attemptId)
+    .run();
+  return written.meta.changes === 1;
+}
+
 /** The attempt's launch row, or null when it never prepared. */
 export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<ReviewLaunchState | null> {
   const row = await db.prepare(READ_LAUNCH_SQL).bind(attemptId).first<LaunchRow>();
@@ -1632,6 +1645,10 @@ export async function runReviewAttempt(input: {
       },
       "runner exec killed at the anchored deadline (provider stderr on this line only)",
     );
+    // THIS phase saw the reply, so THIS phase records the terminal outcome:
+    // one conditional statement on the row that fences the launch, before the
+    // throw leaves. No other writer may set `result_outcome`.
+    await recordReviewFailure(deps.env.DB, attemptId);
     throw new BudgetExhaustedError(
       {
         kind: "budget-exhausted",
@@ -1647,6 +1664,9 @@ export async function runReviewAttempt(input: {
     );
   }
   if (run.exitCode !== 0) {
+    // A RETURNED nonzero status is this phase's own observation — recorded here,
+    // in one conditional statement, before the throw leaves the phase.
+    await recordReviewFailure(deps.env.DB, attemptId);
     throw new Error(runnerFailureDetail(run, progress.secretValues));
   }
   // d5-budget AC-S10-logs: one runner attempt → at least one budget line

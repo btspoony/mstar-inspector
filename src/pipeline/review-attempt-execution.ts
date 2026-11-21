@@ -108,7 +108,6 @@ import {
   parseBoundedRead,
   prepareReviewAttempt,
   readReviewLaunch,
-  recordReviewFailure,
   noteCheckOwed,
   runReviewAttempt,
   AttemptUnknownError,
@@ -3091,16 +3090,6 @@ function attemptFields(
   };
 }
 
-/**
- * Whether the paid step's outcome is KNOWN, as the failing phase observed it:
- * the call never started, or it returned a status. A started call whose return
- * was never observed is not a known outcome — the row then records nothing and
- * cleanup holds the container, because the child may still be running.
- */
-function paidOutcomeKnown(facts: FailureFacts | undefined): boolean {
-  return facts !== undefined && (facts.runnerStartedAt === undefined || facts.runnerReturned);
-}
-
 /** A phase failure carrying the facts as data, with the cause intact. */
 function phaseFailure(
   phase: FailureFacts["phase"],
@@ -5393,13 +5382,6 @@ export async function settleAttemptFailure(
       });
       // Confirmed by the await above: only a write that RESOLVED is durable.
       durableOutcome = true;
-      // The row records ITS OWN terminal outcome — one conditional statement on
-      // the row that fences the launch. Only a RETURNED paid call qualifies (a
-      // rejected exec is not evidence the child stopped), so an ambiguous
-      // attempt records nothing and a resumed cleanup still holds the container.
-      if (paidOutcomeKnown(facts)) {
-        await recordReviewFailure(deps.env.DB, attemptId);
-      }
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
       deps.log.warn(
@@ -5514,9 +5496,6 @@ export async function settleAttemptFailure(
     // Confirmed by the await above: a resolved write is the attempt's durable
     // terminal no-result outcome. A rejection leaves the latch false.
     durableOutcome = true;
-    if (paidOutcomeKnown(facts)) {
-      await recordReviewFailure(deps.env.DB, attemptId);
-    }
   } catch (recordErr) {
     const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
     deps.log.warn(

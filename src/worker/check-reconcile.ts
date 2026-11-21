@@ -46,6 +46,7 @@
 
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
+import { clearCheckOwed } from "../pipeline/review-attempt";
 import type { D1Like } from "../store/types";
 import {
   attachCheckRunId,
@@ -1202,6 +1203,10 @@ async function recordTerminal(
   if (!agrees) return "mismatch";
   const written = await recordCheckObservation(db, attemptId, lease, remote, now());
   if (!written) return "lost";
+  // The Check is concluded: clear the attempt row's owed flag so this lane
+  // stops selecting it. Bookkeeping only — the conclusion is already durable,
+  // so a fault here is a warn, never a failed pass.
+  await clearCheckOwed(db, attemptId).catch(() => {});
   summary.completed += 1;
   return "recorded";
 }
@@ -1264,6 +1269,8 @@ async function settleFailedAttempt(
     const line = giveUpLine(row.identity.scope, attemptId, attemptsAfter, reason);
     const marked = await markCheckLocalError(db, attemptId, lease, line, now());
     if (marked) {
+      // Settled as `local-error`: the attempt no longer owes a settlement.
+      await clearCheckOwed(db, attemptId).catch(() => {});
       summary.gaveUp += 1;
       log.warn({ event: "ops_check_reconcile_gave_up", detail: line }, "check recovery gave up at the attempt cap");
     } else {
