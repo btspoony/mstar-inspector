@@ -15,7 +15,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { DURATION_REPORT_WINDOW_DAYS, phaseBuckets } from "../../src/admin/duration-report";
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
-import { idemKey } from "../../src/contracts/idem";
+import { IDEM_DONE, idemKey } from "../../src/contracts/idem";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const SESSION_SECRET = ["test", "duration", "report", "session", "32-bytes!"].join("-");
@@ -49,6 +49,11 @@ function claimKeyFor(headSha: string): string {
   });
 }
 
+/** A KV double that proves every claim (`done`) — the live-success default. */
+function provenClaims(): NonNullable<Env["IDEMPOTENCY_KV"]> {
+  return { get: async () => IDEM_DONE, put: async () => {} } as unknown as NonNullable<Env["IDEMPOTENCY_KV"]>;
+}
+
 /** A KV double: `values` answers a key, `failKeys` throw like a KV fault. */
 function claimsKv(
   values: Record<string, string> = {},
@@ -63,7 +68,7 @@ function claimsKv(
   } as unknown as NonNullable<Env["IDEMPOTENCY_KV"]>;
 }
 
-function envFor(db: TestD1, claims: NonNullable<Env["IDEMPOTENCY_KV"]> = claimsKv()): Env {
+function envFor(db: TestD1, claims: NonNullable<Env["IDEMPOTENCY_KV"]> = provenClaims()): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} },
     IDEMPOTENCY_KV: claims,
@@ -97,7 +102,7 @@ async function getReport(
   db: TestD1,
   query = "",
   login: string | null = OPERATOR,
-  claims: NonNullable<Env["IDEMPOTENCY_KV"]> = claimsKv(),
+  claims: NonNullable<Env["IDEMPOTENCY_KV"]> = provenClaims(),
 ): Promise<Response> {
   const headers: Record<string, string> = {};
   if (login !== null) headers.Cookie = `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}`;
@@ -583,9 +588,11 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     });
   });
 
-  test("claim-unproven: a success claim the report cannot prove discharged is not measured", async () => {
+  test("claim-unproven: a SILENT settlement record whose claim the key cannot prove is excluded", async () => {
     const db = fixture();
     const t0 = Date.now() - 3_600_000;
+    // A settlement written before migration 0085 carries no effect record, so
+    // the KV guard is the only remaining witness — and it expires.
     const seen = (headSha: string) =>
       seedAttempt(db, {
         attemptId: `claim-${headSha.slice(0, 4)}`,
@@ -594,9 +601,6 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
         admittedMs: t0,
         persistedMs: t0 + 20_000,
         settledMs: t0 + 30_000,
-        // The settlement's own record names a success publication, so the
-        // success claim is an obligation of this attempt.
-        settledEffects: ["publication"],
       });
     const expired = "b".repeat(40);
     const queued = "c".repeat(40);
@@ -614,8 +618,8 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
       total: { p50Ms: number; p90Ms: number; maxMs: number } | null;
       excluded: Record<string, number>;
     };
-    // Only the two whose claim reads `done` are measurable: an expired key, a
-    // still-queued claim and a read fault all leave the obligation unknown.
+    // Only the two whose claim still reads `done` are measurable: with a silent
+    // record an expired key, a still-queued claim and a read fault are unknown.
     expect(body.sampleSize).toBe(2);
     expect(body.total).toEqual({ p50Ms: 30_000, p90Ms: 30_000, maxMs: 30_000 });
     expect(body.excluded).toEqual({
@@ -627,11 +631,19 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
     });
   });
 
-  test("a settlement that names no success publication owes no claim", async () => {
+  test("the durable settlement record discharges the claim, whatever an expired key says", async () => {
     const db = fixture();
     const t0 = Date.now() - 3_600_000;
-    // A failure lane: its claim is the `claim-stamp` effect the settlement
-    // certifies, not the success claim KV holds.
+    // A success lane: `publication` is the transition that closed the claim.
+    seedAttempt(db, {
+      attemptId: "success-lane",
+      enqueuedMs: t0,
+      admittedMs: t0,
+      persistedMs: t0 + 20_000,
+      settledMs: t0 + 30_000,
+      settledEffects: ["publication"],
+    });
+    // A failure lane: its `claim-stamp` is the discharge of its own obligation.
     seedAttempt(db, {
       attemptId: "failed-lane",
       enqueuedMs: t0,
@@ -641,12 +653,13 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
       settledEffects: ["failure-row", "claim-stamp"],
     });
 
-    // The KV double answers nothing at all: that must not exclude this row.
-    const body = (await (await getReport(db)).json()) as {
+    // The KV double answers nothing at all: thirty-day-old keys have expired,
+    // and an expiring guard must never outrank a completed settlement.
+    const body = (await (await getReport(db, "", OPERATOR, claimsKv())).json()) as {
       sampleSize: number;
       excluded: Record<string, number>;
     };
-    expect(body.sampleSize).toBe(1);
+    expect(body.sampleSize).toBe(2);
     expect(body.excluded).toEqual({
       "check-open-at-settle": 0,
       "claim-unproven": 0,
@@ -683,14 +696,13 @@ describe("GET /_internal_admin/api/runtime/duration-report", () => {
       admittedMs: t0,
       persistedMs: t0 + 20_000,
       settledMs: t0 + 30_000,
-      settledEffects: ["publication"],
     });
     seedAttempt(db, { attemptId: "queueless", enqueuedMs: null, admittedMs: t0, persistedMs: t0 + 20_000, settledMs: t0 + 30_000 });
     seedAttempt(db, { attemptId: "running", enqueuedMs: t0, admittedMs: t0, persistedMs: t0 + 10_000, settledMs: null });
     seedAttempt(db, { attemptId: "create-rejected", handoffState: "failed", enqueuedMs: t0, admittedMs: t0, settledMs: null });
 
-    const claims = claimsKv({ [claimKeyFor("e".repeat(40))]: "done" });
-    const body = (await (await getReport(db, "", OPERATOR, claims)).json()) as {
+    // An empty KV: the one row with a SILENT record cannot prove its claim.
+    const body = (await (await getReport(db, "", OPERATOR, claimsKv())).json()) as {
       sampleSize: number;
       excluded: Record<string, number>;
     };
