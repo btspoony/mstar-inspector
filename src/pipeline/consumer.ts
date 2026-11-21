@@ -182,7 +182,7 @@ import {
 // side owns a second copy of the arithmetic.
 import {
   readReviewAttemptCapMs,
-  reviewGuardTtlSeconds,
+  reviewGuardTtlForDeadline,
   runnerTimeoutMs,
 } from "../review-budget";
 // The admitted attempt's execution lives in its own module (layering:
@@ -1846,7 +1846,30 @@ async function processMessage(
       pr_number: payload.pr_number,
       workspace_id: workspaceId,
     };
-    const ttlSeconds = reviewGuardTtlSeconds(level);
+    // THE ATTEMPT'S ONE HARD STOP is frozen HERE, before the admission row is
+    // taken: that row's TTL must hold the whole attempt, so the instant cannot
+    // be discovered afterwards. A row written before the deadline column
+    // existed is anchored ONCE from its OWN admission stamp — the only instant
+    // that attempt had — never from this delivery's clock, so a redelivery or
+    // a recovery re-enqueue cannot move it. The first writer wins the write
+    // itself (store), and a degraded cap read throws so admission retries
+    // instead of inventing a cap.
+    let deadlineMs: number;
+    if (previousHandoff?.deadlineMs !== null && previousHandoff?.deadlineMs !== undefined) {
+      deadlineMs = previousHandoff.deadlineMs;
+    } else {
+      const capMs =
+        deps.attemptCapMs ??
+        (await readReviewAttemptCapMs(deps.env.DB, {
+          warn: (readerFields, msg) =>
+            deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
+        }));
+      deadlineMs = (previousHandoff?.createdMs ?? enqueuedMs) + capMs;
+    }
+    // The guard row must outlive the attempt's own hard stop: an operator cap
+    // can exceed the level's ceiling-derived TTL, and a guard that expired
+    // first would let a second delivery start the same PR.
+    const ttlSeconds = reviewGuardTtlForDeadline(deadlineMs, Date.now(), level);
     const admission = await acquireInflight(deps.env.DB, inflightKey, {
       // Each cap binds to its own predicate: `system` bounds the global live
       // count, `workspace` the tenant's — never the effective min here.
@@ -2050,26 +2073,11 @@ async function processMessage(
     }
     const usageSource: AttemptRef["usageSource"] = resolution.scope === "shared" ? "shared" : "byok";
     deps.runnerConfigs.set(payload.botRef.appId, { appCfg, modelOverrides, customProviders });
-    // THE ATTEMPT'S ONE HARD STOP is frozen HERE, at its first admission: the
-    // original Queue send stamp plus the operator's end-to-end cap, read once.
-    // A redelivery or a recovery re-enqueue replays the instant recorded on its
-    // handoff row — it never re-reads the cap (which an operator may have
-    // changed) and never takes a fresh origin, so being delivered again cannot
-    // extend an attempt. A degraded cap read throws, which leaves admission
-    // retryable instead of inventing a cap.
-    const deadlineMs =
-      previousHandoff?.deadlineMs ??
-      enqueuedMs +
-        (deps.attemptCapMs ??
-          (await readReviewAttemptCapMs(deps.env.DB, {
-            warn: (readerFields, msg) =>
-              deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
-          })));
     // THE HANDOFF IS A RECORD BEFORE IT IS AN EFFECT: write (or read back) the
-    // delivery's handoff row, with this attempt id, payload and deadline,
-    // BEFORE the instance is created. An interruption after this line leaves a
-    // row the recovery pass replays; a concurrent duplicate of the same message
-    // uses the id and instant this row already holds.
+    // delivery's handoff row with this attempt id, payload and the deadline
+    // frozen above, BEFORE the instance is created. An interruption after this
+    // line leaves a row the recovery pass replays; a concurrent duplicate of the
+    // same message uses the id and instant this row already holds.
     const handoff = await reserveAttemptHandoff(deps.env.DB, {
       deliveryKey,
       attemptId,

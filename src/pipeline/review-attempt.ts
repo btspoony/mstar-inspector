@@ -2031,7 +2031,6 @@ export async function runReviewAttempt(input: {
   // AL-6 stage window: the review run itself — a non-zero exit or an exec
   // exception (timeout / container error) here classifies "runner".
   progress.failureStage = "runner";
-  progress.runnerStartedAt = Date.now();
   // SEC-01 exact-value defense: the SAME credential resolution the runner
   // exec used is captured here (single source — no re-resolution
   // split-brain) so the session's actual secret values can be
@@ -2057,11 +2056,14 @@ export async function runReviewAttempt(input: {
   // write consumed its window: the write and startup spend the deadline
   // instead of being added back onto it. A deadline the write finished is
   // declined explicitly, never started as a 1ms exec that fails for the
-  // wrong cause. No tier clamp is re-applied — the derivation was the only.
-  const runnerTimeout = deadlineMs - Date.now();
-  if (runnerTimeout <= 0) {
+  // wrong cause. This is the EARLY refusal — it keeps the row releasable
+  // (`provisioned`) when the claim would be pointless; the authoritative
+  // bound is taken after the claim below, because the claim is a D1 round
+  // trip and its latency belongs to the attempt's clock too.
+  const beforeClaimMs = deadlineMs - Date.now();
+  if (beforeClaimMs <= 0) {
     throw new RoundBudgetSpent(
-      `round budget spent: runner declined — the exec deadline is spent (${runnerTimeout}ms left for it)`,
+      `round budget spent: runner declined — the exec deadline is spent (${beforeClaimMs}ms left for it)`,
       "runner",
     );
   }
@@ -2094,6 +2096,34 @@ export async function runReviewAttempt(input: {
       `attempt ${attemptId}: another entry owns the paid step (${launch.reason}) — refusing a second launch`,
     );
   }
+  // THE exec bound is taken at the LAST possible instant: the claim above is a
+  // D1 write, and its round trip is part of the attempt's clock. A clamped
+  // `deadline − now` (never a negative one) is what the sandbox will kill the
+  // child at, so a hung call stops without any further checkpoint.
+  const runnerTimeout = Math.max(0, deadlineMs - Date.now());
+  if (runnerTimeout === 0) {
+    // We own the row now, so leaving it `launched` would be an `unknown` that
+    // holds the container and capacity forever. The paid call was never sent:
+    // record the confirmed no-result stop (so cleanup may release) and settle
+    // with the typed outcome — never a zero-length exec.
+    await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+    throw new BudgetExhaustedError(
+      {
+        kind: "budget-exhausted",
+        cause: "consumer-deadline",
+        tier: level,
+        budgetWindow: "runner",
+        budgetMs: runnerAnchor.effectiveBudgetMs,
+        seatsDispatched: 0,
+        seatsStopped: 0,
+        changedLines: observedChangedLines,
+      },
+      "runner declined after the launch claim — the deadline was spent by the claim",
+    );
+  }
+  // The runner started HERE: everything after this line is the paid child's
+  // window, so a throw before it is not evidence that a child ran.
+  progress.runnerStartedAt = Date.now();
   // Guarded: the paid exec is proven and executed in ONE request, so a
   // replacement container can never receive credentials or run the review.
   const run = await runPreparedCommand(sandbox, attemptMarker(attemptId), "already-claimed", runnerCmd, {

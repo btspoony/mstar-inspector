@@ -254,6 +254,26 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
   );
 }
 
+/**
+ * Margin after the attempt's hard stop before its guard row may expire
+ * (seconds): the handoff → instance-create hop that happens while the row is
+ * already held. A guard that expires before the attempt's own stop would let a
+ * second delivery start the same PR, so the two numbers are never independent.
+ */
+const GUARD_RELEASE_MARGIN_S = 60;
+
+/**
+ * Admission row TTL (seconds) for ONE attempt: the level's own ceiling, or what
+ * the attempt's frozen deadline still needs — whichever is longer. The operator
+ * cap may exceed the level's ceiling-derived TTL, so the row that serialises
+ * the PR is widened to the attempt's actual hard stop instead of drifting
+ * below it.
+ */
+export function reviewGuardTtlForDeadline(deadlineMs: number, nowMs: number, level: ReviewLevel): number {
+  const attemptTtl = Math.ceil(Math.max(0, deadlineMs - nowMs) / 1000) + GUARD_RELEASE_MARGIN_S;
+  return Math.max(reviewGuardTtlSeconds(level), attemptTtl);
+}
+
 /** What every round still owes AFTER the paid runner (ms); see the header table. */
 export function postRunnerReserveMs(terminalizeMs: number): number {
   return (

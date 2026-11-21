@@ -30,8 +30,9 @@ Check reconciler all read the same value. No step re-derives it, and a
 present-but-untrusted cap leaves admission retryable instead of inventing one.
 
 The Queue consumer's 900 000 ms invocation cap remains an **admission**
-invariant — the guard TTL and the Check attach window derive from it — and no
-longer bounds execution.
+invariant — the guard TTL's FLOOR and the Check attach window derive from it —
+and no longer bounds execution; the guard row itself is widened to the frozen
+deadline below.
 
 The runner budget is derived from that instant, never typed per tier:
 
@@ -51,12 +52,22 @@ tier maximum fits inside the cutoff at each supported terminalize value.
 
 The paid exec is started with the remaining time to its anchored instant
 (`min(tier request, cutoff − anchor)`) and the sandbox's own timeout kills a hung
-child there. A returned status (`124` included) is a confirmed stop and is
-recorded as one; a lost reply is `unknown` — no Check conclusion, no destruction,
-no capacity release.
+child there. That bound is taken at the LAST possible instant — after the
+one-way launch claim succeeds, because the claim is a D1 round trip inside the
+attempt's clock — and a window the claim spent refuses the exec instead of
+issuing a zero-length one. A returned status (`124` included) is a confirmed
+stop and is recorded as one; a lost reply is `unknown` — no Check conclusion, no
+destruction, no capacity release.
 
-| Tier | `tierMaxMs` | Guard TTL |
-|------|-------------|-----------|
+A handoff row written before the deadline column existed carries
+`deadline_ms = NULL`. It means "not yet anchored": the next admission anchors
+it ONCE from that row's own `created_ms` (the only instant the attempt actually
+had) and the store's conditional write makes the first writer win, so every
+delivery of that attempt reads the same instant. A row that is still unanchored
+after that write refuses to run.
+
+| Tier | `tierMaxMs` | Guard TTL floor |
+|------|-------------|-------------------|
 | `quick` | 480 000 | 2 292 s |
 | `default` | 600 000 | 2 412 s |
 | `deep` | 646 000 | 2 458 s |
@@ -141,11 +152,12 @@ The runner reports, the Worker publishes:
   imports none of it, names the bounds in a comment, and the table test exercises both store
   endpoints. Widening the store's range past the shipped deep ceiling fails the proof, never drifts
   silently.
-- The guard TTL is `ceil((tierMax + 14 × 120 000 + 12 000 + 120 000) / 1000)`, derived from the same
-  budget. Admission retry rungs stay below their TTL with a cumulative sum above it.
-- The allocation never reaches the admission windows: the guard TTL derives from the tier ceiling,
-  and the Check row's lease IS the attempt's frozen deadline, so a small PR cannot shorten the
-  window a retry or recovery needs.
+- The guard TTL's FLOOR is `ceil((tierMax + 14 × 120 000 + 12 000 + 120 000) / 1000)`, derived from
+  the tier ceiling. The row taken for one attempt is
+  `max(floor, ceil((deadline − now) / 1000) + 60)`, so an operator cap above the level ceiling can
+  never let the row that serialises the PR expire before the attempt's own stop.
+- The allocation never reaches the admission windows: the guard TTL is widened to the attempt's
+  frozen deadline (never shortened by a small PR), and the Check row's lease IS that same deadline.
 - The deadline is written once: the admission handoff freezes it, a redelivery or a recovery
   re-enqueue replays it, and the Check row carries the same instant for the independent reconciler.
   A step that re-derives it, or a redelivery that refreshes it, is a defect.
@@ -159,6 +171,8 @@ The runner reports, the Worker publishes:
 - `src/pipeline/consumer.ts` — freezes `deadlineMs` on the delivery's handoff row at admission.
 - `src/pipeline/review-attempt-execution.ts` — derives each phase's windows from that instant and
   writes it as the Check row's `execution_deadline_ms`.
+- `src/pipeline/review-attempt.ts` — takes the exec bound after the launch claim, at the last instant
+  before the send.
 - `tests/pipeline/review-budget.test.ts` — the tier-table and allocation cases.
 - `tests/pipeline/hard-stop.test.ts` — the container stop, the lost reply, the resume and the cap's
   read path.
@@ -181,6 +195,6 @@ floors, the saturation point or the refusal vocabulary updates this page,
   operator duration plan. Until that lands, an attempt that cannot start or finish inside the frozen
   deadline reports the existing `budget-exhausted` outcome, whose Check summary names the budget
   window rather than the cap.
-- A cap set far above the admission guard TTL would outlive the row that serialises the PR. The
-  documented range tops out at one hour, and the shipped guard TTLs (2 292–2 458 s) cover the
-  20-minute default with the queue wait inside it.
+- A delivery the guard refuses is retried on the level's ladder, which is sized against the level's
+  TTL floor. With an operator cap above that floor the live row can outlast the ladder, so the last
+  retry is ack-recorded as held rather than reclaiming the row — never a second execution.

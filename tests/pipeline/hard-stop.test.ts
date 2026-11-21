@@ -35,6 +35,7 @@ import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { readReviewLaunch } from "../../src/pipeline/review-attempt";
+import { deliveryKeyOf, readAttemptHandoff } from "../../src/store/review-route-store";
 import {
   CHECK_TERMINALIZE_DEFAULT,
   REVIEW_ATTEMPT_CAP_DEFAULT_MS,
@@ -378,5 +379,162 @@ describe("the cap's settings read", () => {
       readReviewAttemptCapMs(db as never, { warn: (fields) => warns.push({ event: fields.event }) }),
     ).rejects.toThrow(/not readable/);
     expect(warns).toEqual([{ event: "review_attempt_cap_degraded" }]);
+  });
+});
+
+/**
+ * A DB whose launch-claim write spends `spentMs` of the frozen clock: the claim
+ * is a D1 round trip taken INSIDE the attempt's own window, not before it.
+ */
+function claimSpendingDb(db: unknown, spentMs: number, clock: { now: number }): unknown {
+  const real = db as { prepare(query: string): { bind(...values: unknown[]): unknown } };
+  return {
+    prepare(query: string) {
+      const statement = real.prepare(query);
+      if (!query.includes("SET state = 'launched'")) return statement;
+      return {
+        bind: (...values: unknown[]) => {
+          const bound = statement.bind(...values) as { run(): Promise<unknown> };
+          return {
+            run: async () => {
+              clock.now += spentMs;
+              return bound.run();
+            },
+          };
+        },
+      };
+    },
+  };
+}
+
+describe("the launch claim is part of the attempt's clock", () => {
+  test("the exec bound is taken after the claim, so the claim's round trip is charged", async () => {
+    const { deps } = await makeDeps();
+    await withFrozenClock(async (clock) => {
+      const ref = makeRef(makePayload(), clock.now + CAP_MS);
+      const step = await prepareFor(deps, ref);
+      if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+
+      deps.env = { ...deps.env, DB: claimSpendingDb(deps.env.DB, 10_000, clock) as never };
+      await reviewAttempt(deps, ref, step.prepared);
+
+      const runnerCall = h.sandbox.calls.find((call) => call.cmd.includes("--input"));
+      expect(runnerCall).toBeDefined();
+      const runnerOpts = runnerCall!.opts as { timeout?: number };
+      // The 10s the claim spent came out of the exec's own bound: the clock
+      // already includes it, and the timeout is the remainder at the send.
+      expect(runnerOpts.timeout).toBe(step.prepared.runnerDeadlineMs - clock.now);
+    });
+  });
+
+  test("a claim that spends the whole window refuses the exec and records a confirmed stop", async () => {
+    const { deps, db } = await makeDeps();
+    await withFrozenClock(async (clock) => {
+      const ref = makeRef(makePayload(), clock.now + CAP_MS);
+      const step = await prepareFor(deps, ref);
+      if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+
+      deps.env = {
+        ...deps.env,
+        DB: claimSpendingDb(deps.env.DB, step.prepared.runnerDeadlineMs - clock.now, clock) as never,
+      };
+      let thrown: unknown;
+      try {
+        await reviewAttempt(deps, ref, step.prepared);
+      } catch (err) {
+        thrown = err;
+      }
+      const failure = thrown as { cause?: unknown };
+      expect(failure.cause).toBeInstanceOf(BudgetExhaustedError);
+      expect((failure.cause as BudgetExhaustedError).outcome).toMatchObject({
+        kind: "budget-exhausted",
+        cause: "consumer-deadline",
+        budgetWindow: "runner",
+        seatsDispatched: 0,
+        seatsStopped: 0,
+      });
+      // Never a zero/negative exec: the paid call was not sent at all.
+      expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
+      expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("failed");
+
+      const cleanup = {};
+      expect(await settleAttemptFailure(deps, ref, thrown, cleanup)).toMatchObject({ kind: "budget-exhausted" });
+      expect(failureRows(db)).toHaveLength(1);
+      // No paid work was sent, and the stop is durable: the container is
+      // releasable rather than held as an unproven `launched` row.
+      expect(await cleanupAttempt(deps, ref, cleanup)).toEqual({ retention: "retained" });
+      expect(h.sandbox.destroyCalls).toBe(1);
+    });
+  });
+});
+
+describe("the admission guard and the attempt deadline agree", () => {
+  test("a cap beyond the level ceiling widens the guard to the attempt's own stop", async () => {
+    const db = await createSeededTestD1();
+    await db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, '2026-11-21T00:00:00.000Z')`,
+      )
+      .run(REVIEW_ATTEMPT_CAP_KEY, "3000000");
+    const seen: AttemptRef[] = [];
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      startAttempt: async (_deps, ref) => {
+        seen.push(ref);
+      },
+    });
+
+    await withFrozenClock(async (clock) => {
+      await consumer(h.makeBatch(makePayload()));
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.deadlineMs).toBe(clock.now + 3_000_000);
+      const rows = db.raw.query("SELECT acquired_at, expires_at FROM review_inflight").all() as Array<{
+        acquired_at: string;
+        expires_at: string;
+      }>;
+      expect(rows).toHaveLength(1);
+      // 3,000 s of attempt + the 60 s handoff→create margin; the level's own
+      // 2,412 s floor is smaller, so the frozen deadline wins the TTL.
+      expect(Date.parse(rows[0]!.expires_at) - Date.parse(rows[0]!.acquired_at)).toBe(3_060_000);
+    });
+  });
+});
+
+describe("a pre-deadline handoff row is anchored once", () => {
+  test("a NULL deadline is taken from the row's own admission stamp, not the delivery clock", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const key = deliveryKeyOf(payload);
+    const createdMs = 1_000_000;
+    await db.raw
+      .prepare(
+        `INSERT INTO review_attempt_handoffs
+           (delivery_key, attempt_id, payload_json, state, created_ms, updated_ms)
+         VALUES (?, ?, ?, 'owed', ?, ?)`,
+      )
+      .run(key, "legacy-attempt", JSON.stringify(payload), createdMs, createdMs);
+    const seen: AttemptRef[] = [];
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      startAttempt: async (_deps, ref) => {
+        seen.push(ref);
+        throw new WorkflowCreateFailedError(ref.attemptId, new Error("no instance"));
+      },
+    });
+
+    await withFrozenClock(async (clock) => {
+      await consumer(h.makeBatch(payload)).catch(() => {});
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.attemptId).toBe("legacy-attempt");
+      // The legacy row's own admission instant + the cap — never this
+      // delivery's clock, which a recovery re-enqueue would move.
+      expect(seen[0]!.deadlineMs).toBe(createdMs + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
+      expect((await readAttemptHandoff(db as never, key))?.deadlineMs).toBe(createdMs + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
+
+      clock.now += 60_000;
+      await consumer(h.makeBatch(payload)).catch(() => {});
+      expect(seen).toHaveLength(2);
+      expect(seen[1]!.deadlineMs).toBe(seen[0]!.deadlineMs);
+    });
   });
 });

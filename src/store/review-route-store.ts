@@ -31,9 +31,16 @@ export type AttemptHandoff = {
    * The attempt's absolute hard stop, frozen when this row was first written:
    * the delivery's Queue send stamp plus the operator's end-to-end cap. Every
    * replay of the same attempt reads it instead of re-deriving it. `null` only
-   * on a row written before the column existed; the next admission freezes it.
+   * on a row written before the column existed — "not yet anchored"; the next
+   * admission anchors it ONCE from `createdMs` (the only instant that attempt
+   * actually had), never from a later delivery's clock.
    */
   deadlineMs: number | null;
+  /**
+   * When this row was first written — the immutable origin a pre-migration row
+   * is anchored from. Read-only after its insert.
+   */
+  createdMs: number;
   /** The settle-once mark the Workflow's settlement step takes after completing. */
   settledMs: number | null;
 };
@@ -100,6 +107,7 @@ type HandoffRow = {
   payload_json: string;
   state: AttemptHandoffState;
   deadline_ms: number | null;
+  created_ms: number;
   settled_ms: number | null;
 };
 
@@ -110,6 +118,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
     payload: JSON.parse(row.payload_json) as ReviewJobPayload,
     state: row.state,
     deadlineMs: row.deadline_ms,
+    createdMs: row.created_ms,
     settledMs: row.settled_ms,
   };
 }
@@ -118,7 +127,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
 export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promise<AttemptHandoff | null> {
   const row = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, settled_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms
          FROM review_attempt_handoffs WHERE delivery_key = ?`,
     )
     .bind(deliveryKey)
@@ -135,7 +144,11 @@ export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promi
  * `deadlineMs` is frozen by the FIRST writer: a conflicting insert changes
  * nothing, and the conditional UPDATE only fills the column a pre-migration row
  * left NULL. So a redelivery, a concurrent duplicate or a recovery re-enqueue
- * can never move the attempt's hard stop.
+ * can never move the attempt's hard stop. The caller derives the candidate for
+ * a NULL row from that row's `createdMs`, so two deliveries of one attempt
+ * compute the same instant even before the write lands. A row that is STILL
+ * unanchored after this call refuses to run: no caller may execute an attempt
+ * without the instant its Check row will carry.
  */
 export async function reserveAttemptHandoff(
   db: D1Like,
@@ -173,6 +186,11 @@ export async function reserveAttemptHandoff(
   const row = await readAttemptHandoff(db, input.deliveryKey);
   if (row === null) {
     throw new Error(`review attempt handoff for ${input.deliveryKey} disappeared after its insert`);
+  }
+  if (row.deadlineMs === null) {
+    throw new Error(
+      `review attempt handoff for ${input.deliveryKey} carries no deadline and could not be anchored — refusing to run an attempt on an unrecorded instant`,
+    );
   }
   return row;
 }
@@ -225,7 +243,7 @@ export async function listHandoffsForRecovery(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, settled_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms
          FROM review_attempt_handoffs
         WHERE state IN ('owed', 'ambiguous') AND updated_ms <= ?
         ORDER BY updated_ms
