@@ -1026,7 +1026,7 @@ async function sendPreparedPublication(
       return;
     }
   }
-  const lease = await claimPublication(db, row.id, HOLDER, now(), row.phase);
+  const lease = await claimPublication(db, row.id, HOLDER, now(), "prepared");
   if (lease === null) {
     if (degradedTarget !== null && degradedTargetLease !== null) {
       await releaseDegradedTarget(db, { ...degradedTarget, lease: degradedTargetLease, nowMs: now(), keep: false });

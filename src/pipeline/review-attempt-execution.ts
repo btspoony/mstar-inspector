@@ -5431,9 +5431,19 @@ async function publishPhase(
   // prepared upsert, validate the response id, persist proof BEFORE KV
   // done. A response/proof loss retains the staged payload for read-only
   // discovery — never a second paid review, never a blind re-send.
-  const lease = await claimPublication(deps.env.DB, stagedId, `consumer:${sandboxId}`, Date.now(), publication.phase);
+  // Only a `prepared` row may be dispatched by this lane. The claim re-checks
+  // that phase inside the statement that would authorise the send, so a row
+  // that moved to `sending`/`unknown`/`confirmed` (another lane's claim, a
+  // completed send) is never sent again from this phase:
+  // `sending`/`unknown` are the discovery lane's, `confirmed` the apply lane's.
+  const lease = await claimPublication(deps.env.DB, stagedId, `consumer:${sandboxId}`, Date.now(), "prepared");
   if (lease === null) {
-    throw new Error("publication journal claim failed — refusing to send without the epoch-fenced lease");
+    deps.log.warn(
+      fields,
+      `publication is no longer dispatchable from this phase (read ${publication.phase}) — nothing sent, handing it to recovery/discovery`,
+    );
+    await check?.terminalize(null, "publication-unknown");
+    return { kind: "ok" };
   }
   sentRecord.publicationId = stagedId;
   let sent: { commentId: number };

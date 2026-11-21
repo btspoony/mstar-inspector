@@ -1595,9 +1595,11 @@ export async function claimDegradedTarget(
 
 /**
  * Hand the target exclusion back under the exact epoch it was granted with.
- * `keep: true` means the DELETE may have landed and its outcome is UNKNOWN: the
- * target becomes unresolved, so no writer (and no new delete) may use it until
- * resolution is proven. `keep: false` is a known outcome — the target is free.
+ * `keep: true` leaves the UNRESOLVED marker set (a DELETE that may have landed):
+ * no writer and no new delete may use the target again — there is no observation
+ * that can prove a late DELETE will not land, so this is a permanent exclusion
+ * (the plan's boundary note). `keep: false` is a known response, which is proof,
+ * and frees the target.
  */
 export async function releaseDegradedTarget(
   db: D1Like,
@@ -1621,36 +1623,6 @@ export async function releaseDegradedTarget(
     )
     .run();
   return released.meta.changes === 1;
-}
-
-/**
- * Record that a fresh COMPLETE observation proved this target's last unresolved
- * DELETE: the comment was still present (the delete did not land) or is gone
- * (it did). Only then may a writer use the target again.
- */
-export async function resolveDegradedTarget(db: D1Like, ref: DegradedTargetRef, nowMs: number): Promise<boolean> {
-  const resolved = await db
-    .prepare(
-      `UPDATE degraded_target_leases
-          SET unresolved_ms = NULL, updated_ms = ?
-        WHERE ${DEGRADED_TARGET_COLUMNS} AND unresolved_ms IS NOT NULL`,
-    )
-    .bind(nowMs, ...degradedTargetBinds(ref))
-    .run();
-  return resolved.meta.changes === 1;
-}
-
-/** Every target in this exact scope whose last DELETE is still unresolved. */
-export async function listUnresolvedDegradedTargets(db: D1Like, scope: Scope): Promise<number[]> {
-  const rows = await db
-    .prepare(
-      `SELECT comment_id FROM degraded_target_leases
-        WHERE bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-          AND unresolved_ms IS NOT NULL`,
-    )
-    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
-    .all<{ comment_id: number }>();
-  return rows.results.map((row) => row.comment_id);
 }
 
 /**

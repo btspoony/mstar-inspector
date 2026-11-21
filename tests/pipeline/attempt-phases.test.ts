@@ -40,7 +40,7 @@ import {
   claimReviewLaunch,
   readReviewLaunch,
 } from "../../src/pipeline/review-attempt";
-import { PUBLICATION_LEASE_MS, claimDegradedTarget, readLineBatchState, recordLineDispatchIntent, readPublication } from "../../src/store/finding-lifecycle";
+import { PUBLICATION_LEASE_MS, claimDegradedTarget, claimPublication, readLineBatchState, recordLineDispatchIntent, readPublication } from "../../src/store/finding-lifecycle";
 import {
   deliveryKeyOf,
   readAttemptHandoff,
@@ -487,6 +487,46 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
     expect(
       await recordLineDispatchIntent(db as never, publicationId, "recovery-again", clock.now + PUBLICATION_LEASE_MS * 4),
     ).toBeNull();
+  });
+});
+
+describe("§7.9a condition 1 — only a `prepared` row may be dispatched", () => {
+  test("a publication another lane already moved to `sending` is not sent by the foreground", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publicationId = collected.collected.publicationId;
+
+    // An earlier lane claimed it and then lapsed: the row is `sending`, the
+    // state the discovery lane owns — not a phase this send may dispatch from.
+    const earlier = await claimPublication(
+      db as never,
+      publicationId,
+      "consumer:earlier",
+      Date.now() - PUBLICATION_LEASE_MS - 1,
+      "prepared",
+    );
+    expect(earlier).not.toBeNull();
+
+    const { deps: publishing } = await makeDeps({ db });
+    expect(await publishAttempt(publishing, ref, publicationId)).toEqual({ kind: "ok" });
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+    const row = db.raw
+      .prepare(`SELECT phase, holder FROM review_publications WHERE id = ?`)
+      .get(publicationId) as { phase: string; holder: string | null };
+    expect(row.phase).toBe("sending");
+    expect(row.holder).toBe("consumer:earlier");
   });
 });
 

@@ -22,10 +22,11 @@ UPDATE review_publications SET line_dispatch_ms = -1;
 --    delete therefore contend on the same row. A DELETE records its intent by
 --    setting `unresolved_ms` in the same statement that acquires the target,
 --    BEFORE the request: while it is set, no writer may reuse the target and no
---    new delete may start until a fresh complete observation proves what
---    happened (a crash or a lapsed lease leaves it set). The row is keyed by
---    the authenticated scope plus the App-owned comment id, with the same
---    epoch/holder protocol as every other lease.
+--    new delete may start. If the DELETE's outcome is never observed, that is
+--    PERMANENT: no observation can prove a late DELETE will not land, and GitHub
+--    has no conditional delete. Only the DELETE's own known response frees the
+--    target. The row is keyed by the authenticated scope plus the App-owned
+--    comment id, with the same epoch/holder protocol as every other lease.
 CREATE TABLE degraded_target_leases (
   bot_id TEXT NOT NULL,
   installation_id INTEGER NOT NULL,

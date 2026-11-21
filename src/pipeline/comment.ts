@@ -90,7 +90,7 @@ import { redactSecrets } from "./redact";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
-import { claimDegradedTarget, hasUnprovenDegradedPublication, listUnresolvedDegradedTargets, releaseDegradedTarget, resolveDegradedTarget, type Lease, type LineIntent, type VerifiedResolution } from "../store/finding-lifecycle";
+import { claimDegradedTarget, hasUnprovenDegradedPublication, releaseDegradedTarget, type Lease, type LineIntent, type VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
 import {
@@ -2006,14 +2006,9 @@ export type PostDegradedInput = {
  */
 export type DegradedCleanupGuard = {
   preserve: (match: { id: number; body: string }) => Promise<boolean>;
-  /** null = a competing writer owns the exact target: skip, do not delete. */
+  /** null = a competing writer owns the exact target (or its last DELETE is
+   *  unresolved — a permanent exclusion): skip, do not delete. */
   claimTarget?: (commentId: number) => Promise<DegradedTargetLock | null>;
-  /**
-   * A complete scan is a fresh observation of every target in this scope: an
-   * unresolved DELETE whose comment is ABSENT is thereby resolved. Called once
-   * with the ids the scan found.
-   */
-  resolveAbsent?: (presentIds: readonly number[]) => Promise<void>;
 };
 
 /** The target exclusion a cleanup holds across one DELETE. The delete's
@@ -2117,11 +2112,9 @@ export async function deleteDegradedCommentWithOctokit(
   }
   const comments = await scanCommentsWithOctokit(octokit, input, "degraded");
   const matches = findDegradedComments(comments);
-  // A target whose last DELETE is unresolved is re-observed here: absent from
-  // this complete scan proves the delete landed, so it stops blocking writers.
-  if (guard?.resolveAbsent !== undefined) {
-    await guard.resolveAbsent(comments.map((comment) => comment.id));
-  }
+  // An unresolved target is NOT re-opened by this scan: "the comment is still
+  // here" cannot prove a late DELETE will not land, and GitHub offers no
+  // conditional delete — see the plan's boundary note. The exclusion stays.
   const outcome: DegradedDeleteOutcome = {
     deleted: 0,
     skipped: 0,
@@ -2963,9 +2956,6 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
             ? {}
             : {
                 claimTarget: async (commentId: number) => {
-                  // The match itself is a fresh observation: the comment exists,
-                  // so an unresolved DELETE did not land.
-                  await resolveDegradedTarget(db, { scope, commentId }, clock());
                   const lease = await claimDegradedTarget(db, {
                     scope,
                     commentId,
@@ -2980,13 +2970,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
                     },
                   };
                 },
-                resolveAbsent: async (presentIds: readonly number[]) => {
-                  for (const commentId of await listUnresolvedDegradedTargets(db, scope)) {
-                    if (!presentIds.includes(commentId)) {
-                      await resolveDegradedTarget(db, { scope, commentId }, clock());
-                    }
-                  }
-                },
+
               }),
         },
       );

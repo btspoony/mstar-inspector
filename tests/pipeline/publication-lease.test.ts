@@ -36,10 +36,8 @@ import {
   claimDegradedTarget,
   claimPublication,
   claimPublicationLease,
-  listUnresolvedDegradedTargets,
   releaseDegradedTarget,
   releasePublicationLease,
-  resolveDegradedTarget,
   stagePublication,
 } from "../../src/store/finding-lifecycle";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
@@ -989,9 +987,12 @@ describe("the degraded-target acquisition uses the row its own statement wrote",
           first: async <T = Record<string, unknown>>() => {
             if (!hookFired && query.includes("FROM degraded_target_leases")) {
               hookFired = true;
+              // The delete's unresolved marker is cleared first: this witness
+              // is about the epoch alone, not about the unresolved exclusion.
               await inner
                 .prepare(
-                  `UPDATE degraded_target_leases SET holder = NULL, lease_until_ms = NULL
+                  `UPDATE degraded_target_leases
+                      SET holder = NULL, lease_until_ms = NULL, unresolved_ms = NULL
                     WHERE holder = ? AND lease_epoch = 1`,
                 )
                 .bind("cleanup")
@@ -1028,6 +1029,82 @@ describe("the degraded-target acquisition uses the row its own statement wrote",
 });
 
 describe("a degraded target whose delete is unresolved blocks every writer", () => {
+  test("the delete records its unresolved intent in the acquiring statement, before dispatch", async () => {
+    const db = await seededDb();
+    const ref = { scope: SCOPE, commentId: 7001 };
+    const cleanup = await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0, deleting: true });
+    if (cleanup === null) throw new Error("fixture: the cleanup claim was refused");
+
+    // The intent is durable from the acquisition onward: a writer is refused
+    // while the DELETE runs and, if the worker died, after the lease lapses.
+    expect(await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 })).toBeNull();
+    expect(
+      await claimDegradedTarget(db, {
+        ...ref,
+        holder: "degraded:writer",
+        nowMs: T0 + PUBLICATION_LEASE_MS * 10,
+      }),
+    ).toBeNull();
+
+    // A known outcome (the DELETE request returned) is proof and frees it.
+    expect(await releaseDegradedTarget(db, { ...ref, lease: cleanup, nowMs: T0, keep: false })).toBe(true);
+    expect(
+      await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 + PUBLICATION_LEASE_MS * 10 + 1 }),
+    ).not.toBeNull();
+  });
+
+  test("a crashed delete is a permanent exclusion — no observation clears it", async () => {
+    const db = await seededDb();
+    const ref = { scope: SCOPE, commentId: 7001 };
+    expect(await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0, deleting: true })).not.toBeNull();
+
+    // A complete, successful scan of the same (still present) marker cannot
+    // prove a late DELETE will not land: the cleanup skips it and the target
+    // stays closed to writers, forever.
+    const marker = `<!-- mstar-inspector:review-degraded:v1 round=1 -->\n**Review degraded: output failed schema validation**`;
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/access_tokens")) {
+        return json(200, {
+          token: "ghs_perm",
+          expires_at: new Date(T0 + 3_600_000).toISOString(),
+          repositories: [{ id: 1, name: "widgets" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+          repository_selection: "selected",
+        });
+      }
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "DELETE") return json(200, {});
+        return json(200, [{ id: 7001, body: marker, user: { type: "Bot" } }]);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+    const commenter = createReviewCommenter(
+      { APP_ID: "1001", PRIVATE_KEY: TEST_PRIVATE_KEY },
+      { db, nowMs: () => T0 + PUBLICATION_LEASE_MS * 10, fetchImpl },
+    );
+    const outcome = await commenter.deleteDegradedComment({
+      appId: APP_ID,
+      installationId: 123,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 42,
+      error: "",
+      rawOutput: "",
+    });
+    expect(outcome.deleted).toBe(0);
+    expect(outcome.skipped).toBe(1);
+    expect(
+      await claimDegradedTarget(db, {
+        ...ref,
+        holder: "degraded:writer",
+        nowMs: T0 + PUBLICATION_LEASE_MS * 20,
+      }),
+    ).toBeNull();
+  });
+
   test("an incomplete scan never resolves an unresolved target", async () => {
     const db = await seededDb();
     const ref = { scope: SCOPE, commentId: 7001 };
@@ -1065,20 +1142,7 @@ describe("a degraded target whose delete is unresolved blocks every writer", () 
       }),
     ).rejects.toThrow(/scan failed/);
 
-    // A walk that did not complete proves nothing about the comment.
-    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([7001]);
-  });
-
-  test("the delete records its unresolved intent in the acquiring statement, before dispatch", async () => {
-    const db = await seededDb();
-    const ref = { scope: SCOPE, commentId: 7001 };
-    const cleanup = await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0, deleting: true });
-    if (cleanup === null) throw new Error("fixture: the cleanup claim was refused");
-
-    // The intent is durable from the acquisition onward: a writer is refused
-    // while the DELETE runs and, if the worker died, after the lease lapses.
-    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([7001]);
-    expect(await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 })).toBeNull();
+    // A walk that did not complete proves nothing; the exclusion stays.
     expect(
       await claimDegradedTarget(db, {
         ...ref,
@@ -1086,34 +1150,5 @@ describe("a degraded target whose delete is unresolved blocks every writer", () 
         nowMs: T0 + PUBLICATION_LEASE_MS * 10,
       }),
     ).toBeNull();
-
-    // A known outcome (the DELETE request returned) resolves it.
-    expect(await releaseDegradedTarget(db, { ...ref, lease: cleanup, nowMs: T0, keep: false })).toBe(true);
-    expect(await listUnresolvedDegradedTargets(db, SCOPE)).toEqual([]);
-    expect(
-      await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 + PUBLICATION_LEASE_MS * 10 + 1 }),
-    ).not.toBeNull();
-  });
-
-  test("a crashed delete stays unresolved until a fresh complete observation proves it", async () => {
-    const db = await seededDb();
-    const ref = { scope: SCOPE, commentId: 7001 };
-    const cleanup = await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0, deleting: true });
-    if (cleanup === null) throw new Error("fixture: the cleanup claim was refused");
-
-    // No release: the process died mid-DELETE. The intent outlives the lease.
-    expect(
-      await claimDegradedTarget(db, {
-        ...ref,
-        holder: "degraded:writer",
-        nowMs: T0 + PUBLICATION_LEASE_MS * 10,
-      }),
-    ).toBeNull();
-
-    // A fresh complete observation (the comment is still present) resolves it.
-    expect(await resolveDegradedTarget(db, ref, T0 + PUBLICATION_LEASE_MS * 10 + 1)).toBe(true);
-    expect(
-      await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 + PUBLICATION_LEASE_MS * 10 + 2 }),
-    ).not.toBeNull();
   });
 });
