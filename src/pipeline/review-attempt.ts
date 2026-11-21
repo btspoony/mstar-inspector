@@ -111,6 +111,19 @@ export class AttemptUnknownError extends Error {
 }
 
 /**
+ * The container refused to start a process because the attempt's absolute
+ * deadline (less the kill grace) was already gone when the request reached it.
+ * NOTHING ran, so this is a CONFIRMED cap stop — never `unknown` (which would
+ * hold the container and capacity) and never a lost reply.
+ */
+export class ExecDeadlineRefusedError extends Error {
+  constructor(readonly remainingMs: number) {
+    super(`the exec deadline was spent before the process started (${remainingMs}ms left)`);
+    this.name = "ExecDeadlineRefusedError";
+  }
+}
+
+/**
  * Destroy the attempt's container ONLY after proving it is still the one this
  * attempt prepared AND that the caller may destroy it (the result is durable,
  * or no paid work started). No marker match and no retention proof destroy
@@ -960,7 +973,9 @@ async function boundedRead(
       "the attempt container could not be proven to be this attempt's (the read itself was lost) — its result is not collected",
     );
   }
-  if (read.kind === "unknown") {
+  // No deadline rides a bounded read, so `deadline-spent` cannot happen here;
+  // if it ever did, nothing was read and the document is not collectable.
+  if (read.kind !== "ran") {
     throw new AttemptUnknownError(
       "the attempt container could not be proven to be this attempt's — its result is not collected",
     );
@@ -1533,7 +1548,7 @@ async function runPreparedCommand(
   marker: string,
   provisioning: "claimed" | "already-claimed",
   command: ShellCommand,
-  opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
+  opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   if (provisioning === "claimed") return sandbox.runCommand(command, opts);
   let read: MarkedRun;
@@ -1553,6 +1568,11 @@ async function runPreparedCommand(
     throw new AttemptUnknownError(
       "the attempt container could not be proven — nothing ran on a replacement",
     );
+  }
+  if (read.kind === "deadline-spent") {
+    // The DO checked the absolute deadline again, immediately before starting
+    // the process, and refused. Nothing ran.
+    throw new ExecDeadlineRefusedError(read.remainingMs);
   }
   // The guarded form answers `{kind:"ran", …}`; callers get the exec result
   // they would have got unguarded, so the discriminant never reaches a durable
@@ -2096,18 +2116,12 @@ export async function runReviewAttempt(input: {
       `attempt ${attemptId}: another entry owns the paid step (${launch.reason}) — refusing a second launch`,
     );
   }
-  // THE exec bound is taken at the LAST possible instant: the claim above is a
-  // D1 write, and its round trip is part of the attempt's clock. A clamped
-  // `deadline − now` (never a negative one) is what the sandbox will kill the
-  // child at, so a hung call stops without any further checkpoint.
-  const runnerTimeout = Math.max(0, deadlineMs - Date.now());
-  if (runnerTimeout === 0) {
-    // We own the row now, so leaving it `launched` would be an `unknown` that
-    // holds the container and capacity forever. The paid call was never sent:
-    // record the confirmed no-result stop (so cleanup may release) and settle
-    // with the typed outcome — never a zero-length exec.
-    await recordReviewFailure(deps.env.DB, attemptId, Date.now());
-    throw new BudgetExhaustedError(
+  // The typed cap stop shared by both pre-start refusals below: no paid child
+  // ran, so the record is a confirmed no-result terminal (cleanup may release)
+  // and the counters are provably 0/0 — never `unknown`, never a zero-length
+  // exec.
+  const capStop = (reason: string): BudgetExhaustedError =>
+    new BudgetExhaustedError(
       {
         kind: "budget-exhausted",
         cause: "consumer-deadline",
@@ -2118,22 +2132,50 @@ export async function runReviewAttempt(input: {
         seatsStopped: 0,
         changedLines: observedChangedLines,
       },
-      "runner declined after the launch claim — the deadline was spent by the claim",
+      reason,
     );
+  // THE exec bound is taken at the LAST possible instant the WORKER can see:
+  // the claim above is a D1 write, and its round trip is part of the attempt's
+  // clock. The container repeats this check after its own queue, marker proof
+  // and RPC (the absolute instant rides the request below), so this refusal is
+  // the cheap pre-RPC one.
+  const runnerTimeout = Math.max(0, deadlineMs - Date.now());
+  if (runnerTimeout === 0) {
+    // We own the row now, so leaving it `launched` would be an `unknown` that
+    // holds the container and capacity forever. The paid call was never sent:
+    // record the confirmed stop and throw it.
+    await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+    throw capStop("runner declined after the launch claim — the deadline was spent by the claim");
   }
   // The runner started HERE: everything after this line is the paid child's
   // window, so a throw before it is not evidence that a child ran.
   progress.runnerStartedAt = Date.now();
   // Guarded: the paid exec is proven and executed in ONE request, so a
-  // replacement container can never receive credentials or run the review.
-  const run = await runPreparedCommand(sandbox, attemptMarker(attemptId), "already-claimed", runnerCmd, {
-    cwd: CLONE_DIR,
-    env: runnerEnv,
-    // The credential payload rides the exec STDIN pipe — present only when
-    // the App actually transported a key (keyless run shape = no stdin).
-    ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
-    timeout: runnerTimeout,
-  });
+  // replacement container can never receive credentials or run the review. The
+  // ABSOLUTE deadline rides that request: the DO reads the remainder right
+  // before starting the process and reserves the kill grace out of it, so the
+  // proof and the RPC cannot let the child run past the frozen instant.
+  let run: { stdout: string; stderr: string; exitCode: number };
+  try {
+    run = await runPreparedCommand(sandbox, attemptMarker(attemptId), "already-claimed", runnerCmd, {
+      cwd: CLONE_DIR,
+      env: runnerEnv,
+      // The credential payload rides the exec STDIN pipe — present only when
+      // the App actually transported a key (keyless run shape = no stdin).
+      ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
+      deadlineEpochMs: deadlineMs,
+    });
+  } catch (err) {
+    if (!(err instanceof ExecDeadlineRefusedError)) throw err;
+    // The container refused BEFORE starting anything: this is the same
+    // confirmed stop as the pre-RPC refusal, not a lost reply. The runner had
+    // not started, so cleanup must not treat it as unproven.
+    progress.runnerStartedAt = undefined;
+    await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+    throw capStop(
+      `runner declined inside the container — the deadline was spent before the exec started (${err.remainingMs}ms left)`,
+    );
+  }
   // The exec answered with an exit status: the paid child's completion is
   // observed, not inferred. A rejection above never reaches this line.
   progress.runnerReturned = true;

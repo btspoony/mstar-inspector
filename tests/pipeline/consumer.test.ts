@@ -223,10 +223,10 @@ function runnerCredentialPools(): Record<string, string[]> | undefined {
   const stdin = (call.opts as { stdin?: string }).stdin;
   return stdin === undefined ? undefined : (JSON.parse(stdin) as { pools: Record<string, string[]> }).pools;
 }
-/** Runner exec call's timeout (the sandbox fake stores opts as unknown). */
-function runnerExecTimeout(): number | undefined {
+/** The runner exec's ABSOLUTE deadline on the wire (the fake stores opts as unknown). */
+function runnerExecDeadline(): number | undefined {
   const call = h.sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
-  return (call.opts as { timeout?: number }).timeout;
+  return (call.opts as { deadlineEpochMs?: number }).deadlineEpochMs;
 }
 
 /** The runner-input write's exec opts; the fake stores `opts` as unknown. */
@@ -597,7 +597,8 @@ describe("createReviewConsumer", () => {
     // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha),
     // the numstat seat-partition universe, and an EMPTY capability-host base —
     // the image declares no provider; the App's own declarations are the surface.
-    expect(JSON.parse(h.sandbox.writtenInputJson!)).toEqual({
+    const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as Record<string, unknown>;
+    expect(runnerInput).toEqual({
       worktreePath: "/workspace/repo",
       reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
       capabilityHosts: [],
@@ -644,14 +645,16 @@ describe("createReviewConsumer", () => {
         OMP_REVIEW_MODEL: "ark/deepseek-v4-flash",
       },
       stdin: encodeCredentialPayload({ ark: ["ark-key"] }),
-      timeout: expect.any(Number),
+      deadlineEpochMs: expect.any(Number),
     });
     // The exec gets what the declared instant still owes, read after the input
     // write: the frozen clock makes that the whole request. The fixture's
     // numstat is 17 work units, so the size-derived request — 500_000 +
     // (600_000 − 500_000) × 17/5_000 = 500_340ms, not the tier maximum — is
     // what the anchor allocates.
-    expect(runnerExecTimeout()).toBe(500_340);
+    // The wire carries the declared instant, and the DO reads the remainder
+    // after its proof: the Worker no longer sends a relative timeout.
+    expect(runnerExecDeadline()).toBe(runnerInput.outerDeadlineEpochMs as number);
     // inside VALID_DIFF's right hunk [18,23]). §7.7 order: the
     // intent-prepared line comments run after the apply; the degraded-comment
     // delete runs last, only after the normal publication proof.
@@ -2245,7 +2248,8 @@ describe("createReviewConsumer", () => {
     // deeper of the two limits — its 646s table maximum, still inside the
     // default 666s pre-runner cutoff.
     expect(execTimeout(h.sandbox.calls[2]!)).toBe(EXEC_TIMEOUT_GIT_MS);
-    expect(runnerExecTimeout()).toBe(646_000);
+    const oversizedInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    expect(runnerExecDeadline()).toBe(oversizedInput.outerDeadlineEpochMs);
     expect(h.logLines.some((l) => l.fields.diff_source === "oversized-local")).toBe(true);
     expect(reviewCount(db)).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
@@ -2291,7 +2295,7 @@ describe("createReviewConsumer", () => {
     expect(execTimeout(numstatCall)).toBe(66_000);
     const inputWrite = h.sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
     expect(execTimeout(inputWrite)).toBe(66_000);
-    expect(runnerExecTimeout()).toBe(66_000);
+    expect(runnerExecDeadline()).toBe(roundStart + 666_000);
     // The runner input carries that SAME derived deadline as an instant: the
     // runner anchors at it, so a shortened exec no longer lets the round plan
     // synthesis at the end of a tier budget it will never be given.
@@ -2348,7 +2352,7 @@ describe("createReviewConsumer", () => {
     // started: the write's own 100s is spent, never re-added to the exec.
     expect(deadline - (roundStart + 500_000)).toBe(166_000);
     expect(deadline - (roundStart + 600_000)).toBe(66_000);
-    expect(runnerExecTimeout()).toBe(66_000);
+    expect(runnerExecDeadline()).toBe(deadline);
     expect(reviewCount(db)).toBe(1);
   });
 
@@ -2391,11 +2395,12 @@ describe("createReviewConsumer", () => {
     });
 
     const writtenInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
-    expect(runnerExecTimeout()).toBe(600_000);
     // The input declares the exec's OWN end, never the later derived deadline a
     // cap-bound exec cannot reach: a seat planned against it is never killed
-    // inside the exec window it runs under.
-    expect(writtenInput.outerDeadlineEpochMs).toBe(execStart + runnerExecTimeout()!);
+    // inside the exec window it runs under. The wire request carries the SAME
+    // absolute instant.
+    expect(runnerExecDeadline()).toBe(execStart + 600_000);
+    expect(writtenInput.outerDeadlineEpochMs).toBe(runnerExecDeadline());
     expect(writtenInput.outerDeadlineEpochMs).toBe(roundStart + 600_000);
     expect(reviewCount(db)).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
@@ -2481,10 +2486,10 @@ describe("createReviewConsumer", () => {
     expect(runnerLine.fields.runner_deadline_ms).toBe(roundStart + 650_000);
     expect(runnerLine.fields.runner_effective_ms).toBe(600_000);
     expect(runnerLine.fields.runner_requested_ms).toBe(600_000);
-    // The exec gets what the ONE deadline still owes after the write spent
-    // its 80s — 20s, never the write's own window added back onto it.
-    expect(runnerExecTimeout()).toBe(deadline - (writeStart + 80_000));
-    expect(runnerExecTimeout()).toBe(20_000);
+    // The exec's wire deadline is the ONE anchored instant; the DO reads what
+    // is left of it after the write's 80s (20s) itself.
+    expect(runnerExecDeadline()).toBe(deadline);
+    expect(deadline - (writeStart + 80_000)).toBe(20_000);
     expect(reviewCount(db)).toBe(1);
   });
 
@@ -2658,7 +2663,7 @@ describe("createReviewConsumer", () => {
     const deadlineMs = line.fields.runner_deadline_ms as number;
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     expect(written.outerDeadlineEpochMs).toBe(deadlineMs);
-    expect(execStart + runnerExecTimeout()!).toBe(deadlineMs);
+    expect(runnerExecDeadline()).toBe(deadlineMs);
     expect(reviewCount(db)).toBe(1);
   });
 
@@ -2678,7 +2683,7 @@ describe("createReviewConsumer", () => {
     expect(line.fields.runner_requested_ms).toBe(600_000);
     expect(line.fields.runner_effective_ms).toBe(600_000);
     expect(line.fields.runner_deadline_ms).toBe(roundStart + 600_000);
-    expect(runnerExecTimeout()).toBe(600_000);
+    expect(runnerExecDeadline()).toBe(roundStart + 600_000);
   });
 
   test("setup that leaves less than the request caps the effective budget at the cutoff", async () => {
@@ -2711,7 +2716,7 @@ describe("createReviewConsumer", () => {
     // the exec's end is still the derived cutoff.
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     expect(written.outerDeadlineEpochMs).toBe(roundStart + 666_000);
-    expect(runnerExecTimeout()).toBe(66_000);
+    expect(runnerExecDeadline()).toBe(roundStart + 666_000);
     expect(reviewCount(db)).toBe(1);
   });
 
@@ -2946,8 +2951,9 @@ describe("createReviewConsumer", () => {
     // Deep's table maximum is the CEILING, not the reservation: the exec gets
     // the smaller of that maximum and what the round deadline still owes
     // (900s − the 234s live post-runner reserve), so an oversized-diff
-    // fallback fits inside the same 900s cap.
-    expect(runnerExecTimeout()).toBe(646_000);
+    // fallback fits inside the same 900s cap. The wire carries that instant.
+    const deepInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    expect(runnerExecDeadline()).toBe(deepInput.outerDeadlineEpochMs);
     // The admission row's TTL follows the same level table (AC-S10-guard):
     // deep is 2458s. Pinned as the table's figure, like the runner budgets
     // below — the arithmetic that produces it is pinned once, by the guard
@@ -2983,8 +2989,10 @@ describe("createReviewConsumer", () => {
 
     // 900s − (90s reads + 12s inline + 2s begin + 120s slack + 30s live
     // terminalize) = 646s, 20s below the default-budget 666s — the operator's
-    // value reaches the derivation, not CHECK_TERMINALIZE_DEFAULT.
-    expect(runnerExecTimeout()).toBe(646_000);
+    // value reaches the derivation, not CHECK_TERMINALIZE_DEFAULT. The wire
+    // carries that absolute instant.
+    const liveInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
+    expect(runnerExecDeadline()).toBe(liveInput.outerDeadlineEpochMs);
     expect(reviewCount(db)).toBe(1);
   });
 
@@ -3331,8 +3339,9 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     // The round runs under a FROZEN clock: the fake spends no wall time, so the
-    // runner exec gets exactly what the derived deadline still owes — the
-    // size-derived 500_340ms request from the fixture's 17 work units.
+    // runner exec's absolute deadline is the size-derived 500_340ms request
+    // from the fixture's 17 work units (its exact value is pinned by the
+    // written input); the wire carries the instant, not the duration.
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
 
     const runnerCall = h.sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
@@ -3344,7 +3353,7 @@ describe("createReviewConsumer", () => {
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
         OMP_REVIEW_MODEL: "ark/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
       },
-      timeout: 500_340,
+      deadlineEpochMs: expect.any(Number),
     });
     expect(JSON.parse(stdin!)).toEqual({
       version: 1,

@@ -55,9 +55,15 @@ The paid exec is started with the remaining time to its anchored instant
 child there. That bound is taken at the LAST possible instant — after the
 one-way launch claim succeeds, because the claim is a D1 round trip inside the
 attempt's clock — and a window the claim spent refuses the exec instead of
-issuing a zero-length one. A returned status (`124` included) is a confirmed
-stop and is recorded as one; a lost reply is `unknown` — no Check conclusion, no
-destruction, no capacity release.
+issuing a zero-length one. The guarded request carries that instant as an
+absolute epoch, never a duration: the container reads the remainder INSIDE the
+DO after its own request queue, marker proof and RPC, and reserves the 5 s
+SIGKILL grace out of it — SIGTERM at `deadline − 5 s`, SIGKILL at the deadline.
+A remainder at or below the grace starts nothing and is the same confirmed cap
+stop. Worker→DO latency therefore cannot let the paid child outlive the
+deadline. A returned status (`124` included) is a confirmed stop and is recorded
+as one; a lost reply is `unknown` — no Check conclusion, no destruction, no
+capacity release.
 
 A handoff row written before the deadline column existed carries
 `deadline_ms = NULL`. It means "not yet anchored": the next admission anchors
@@ -172,7 +178,9 @@ The runner reports, the Worker publishes:
 - `src/pipeline/review-attempt-execution.ts` — derives each phase's windows from that instant and
   writes it as the Check row's `execution_deadline_ms`.
 - `src/pipeline/review-attempt.ts` — takes the exec bound after the launch claim, at the last instant
-  before the send.
+  before the send, and carries it into the container as an absolute epoch.
+- `src/pipeline/sandbox.ts` — reads the absolute remainder inside the DO, immediately before the
+  process starts, and reserves the kill grace out of it.
 - `tests/pipeline/review-budget.test.ts` — the tier-table and allocation cases.
 - `tests/pipeline/hard-stop.test.ts` — the container stop, the lost reply, the resume and the cap's
   read path.

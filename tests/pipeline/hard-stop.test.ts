@@ -191,15 +191,15 @@ describe("the paid exec at the frozen deadline", () => {
       expect(cause).toBeInstanceOf(BudgetExhaustedError);
       expect((cause as BudgetExhaustedError).outcome.cause).toBe("sandbox-kill");
 
-      // The exec carried the absolute remainder as its own bound: a hung child
-      // dies at that instant, with no further checkpoint.
+      // The guarded request carries the ABSOLUTE instant; the DO reads the
+      // remaining window after its proof and kills a hung child there.
       const runnerCall = h.sandbox.calls.find((call) => call.cmd.includes("--input"));
       expect(runnerCall).toBeDefined();
-      const runnerOpts = runnerCall!.opts as { timeout?: number };
-      expect(runnerOpts.timeout).toBe(600_000);
+      const runnerOpts = runnerCall!.opts as { deadlineEpochMs?: number };
+      expect(runnerOpts.deadlineEpochMs).toBe(clock.now + 600_000);
       // The runner input document carries the SAME absolute instant.
       const written: { outerDeadlineEpochMs?: number } = JSON.parse(h.sandbox.writtenInputJson!);
-      expect(written.outerDeadlineEpochMs).toBe(clock.now + 600_000);
+      expect(written.outerDeadlineEpochMs).toBe(runnerOpts.deadlineEpochMs);
 
       // Settled: the durable stop record and the Check conclusion agree.
       const ref2 = ref;
@@ -420,10 +420,10 @@ describe("the launch claim is part of the attempt's clock", () => {
 
       const runnerCall = h.sandbox.calls.find((call) => call.cmd.includes("--input"));
       expect(runnerCall).toBeDefined();
-      const runnerOpts = runnerCall!.opts as { timeout?: number };
-      // The 10s the claim spent came out of the exec's own bound: the clock
-      // already includes it, and the timeout is the remainder at the send.
-      expect(runnerOpts.timeout).toBe(step.prepared.runnerDeadlineMs - clock.now);
+      // The wire carries the anchored instant itself; the DO computes what the
+      // claim's 10s left of it, immediately before the process starts.
+      const runnerOpts = runnerCall!.opts as { deadlineEpochMs?: number };
+      expect(runnerOpts.deadlineEpochMs).toBe(step.prepared.runnerDeadlineMs);
     });
   });
 
@@ -535,6 +535,57 @@ describe("a pre-deadline handoff row is anchored once", () => {
       await consumer(h.makeBatch(payload)).catch(() => {});
       expect(seen).toHaveLength(2);
       expect(seen[1]!.deadlineMs).toBe(seen[0]!.deadlineMs);
+    });
+  });
+});
+
+describe("a container-side deadline refusal is a confirmed stop", () => {
+  test("a request whose proof consumed the window starts nothing and records the cap stop", async () => {
+    const { deps, db } = await makeDeps();
+    // The DO's answer when the absolute deadline (less the kill grace) was
+    // already gone: NOTHING ran.
+    deps.getSandbox = async () => ({
+      runCommand: h.fakeSandbox.runCommand,
+      runMarked: async (marker: string, cmd: string, opts?: unknown) =>
+        cmd.includes("--input")
+          ? ({ kind: "deadline-spent", remainingMs: 0 } as const)
+          : h.fakeSandbox.runMarked(marker, cmd, opts),
+      claimMarker: h.fakeSandbox.claimMarker,
+      destroyMarked: h.fakeSandbox.destroyMarked,
+      destroy: h.fakeSandbox.destroy,
+    });
+
+    await withFrozenClock(async (clock) => {
+      const ref = makeRef(makePayload(), clock.now + CAP_MS);
+      const step = await prepareFor(deps, ref);
+      if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+
+      let thrown: unknown;
+      try {
+        await reviewAttempt(deps, ref, step.prepared);
+      } catch (err) {
+        thrown = err;
+      }
+      const failure = thrown as { cause?: unknown };
+      expect(failure.cause).toBeInstanceOf(BudgetExhaustedError);
+      expect((failure.cause as BudgetExhaustedError).outcome).toMatchObject({
+        kind: "budget-exhausted",
+        cause: "consumer-deadline",
+        budgetWindow: "runner",
+        seatsDispatched: 0,
+        seatsStopped: 0,
+      });
+      // The refused exec never reached the sandbox's recorded call list, and
+      // the claimed row is a durable stop — not an `unknown` that holds the
+      // container forever.
+      expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
+      expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("failed");
+
+      const cleanup = {};
+      expect(await settleAttemptFailure(deps, ref, thrown, cleanup)).toMatchObject({ kind: "budget-exhausted" });
+      expect(failureRows(db)).toHaveLength(1);
+      expect(await cleanupAttempt(deps, ref, cleanup)).toEqual({ retention: "retained" });
+      expect(h.sandbox.destroyCalls).toBe(1);
     });
   });
 });

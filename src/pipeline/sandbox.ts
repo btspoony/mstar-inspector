@@ -90,7 +90,22 @@ export const MAX_EXEC_ENV_VALUE_BYTES = 8 * 1024;
 export { shellCommand, type ShellCommand };
 
 /** One exec's options (command, env and stdin bounds all apply). */
-type CommandOpts = { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string };
+type CommandOpts = {
+  env?: Record<string, string>;
+  cwd?: string;
+  timeout?: number;
+  /**
+   * An ABSOLUTE Unix-ms instant the child must be gone by. When set, `timeout`
+   * is ignored: the remaining window is read INSIDE the DO immediately before
+   * the process starts, so the request queue, the RPC and any marker proof are
+   * all charged to it. A window at or below the kill grace starts nothing.
+   */
+  deadlineEpochMs?: number;
+  stdin?: string;
+};
+
+/** The exec that never started: the absolute deadline (less the kill grace) was already gone. */
+type ExecDeadlineSpent = { kind: "deadline-spent"; remainingMs: number };
 
 /**
  * The result of a marker-guarded operation: either it ran on a container that
@@ -99,7 +114,13 @@ type CommandOpts = { env?: Record<string, string>; cwd?: string; timeout?: numbe
  */
 export type MarkedRun =
   | { kind: "ran"; stdout: string; stderr: string; exitCode: number }
-  | { kind: "unknown" };
+  | { kind: "unknown" }
+  /**
+   * The absolute deadline (less the kill grace) was gone before the child
+   * started: NOTHING ran, so the caller owes a confirmed cap stop — never
+   * `unknown` (which would hold the container and capacity).
+   */
+  | { kind: "deadline-spent"; remainingMs: number };
 
 /** Locked contract (compass contracts B). */
 export type ReviewSandbox = {
@@ -166,6 +187,13 @@ function isRetentionProof(proof: RetentionProof | undefined): proof is Retention
 const LOCKED_AWAIT_MARGIN_MS = 15_000;
 
 const LOCKED_AWAIT_TIMEOUT = Symbol("locked-await-timeout");
+
+/**
+ * GNU `timeout`'s SIGKILL grace (ms): SIGTERM first, SIGKILL this much later.
+ * An absolute deadline reserves it OUT of the remaining window, so the kill
+ * never lands after the deadline.
+ */
+const KILL_GRACE_MS = 5_000;
 
 /** The ONE clamp: a zero/negative/NaN override is not a duration (GNU `timeout 0` disables its bound). */
 function normalizedTimeoutMs(requested: number | undefined): number {
@@ -374,7 +402,13 @@ export class SandboxV1 extends DurableObject {
       }
       return handle;
     });
-    return this.execCommand(container, command, opts, prepared);
+    const result = await this.execCommand(container, command, opts, prepared);
+    if ("kind" in result) {
+      // No caller passes an absolute deadline on the unguarded path; a refusal
+      // here is a programming error, never a startable run.
+      throw new Error("the exec deadline was spent before the process started");
+    }
+    return result;
   }
 
   /**
@@ -399,6 +433,9 @@ export class SandboxV1 extends DurableObject {
         // A timed-out write is not retried and not read back: the marker's
         // presence is unprovable, so the outcome is unknown.
         if (claimed === LOCKED_AWAIT_TIMEOUT) return "unknown";
+        // No deadline rides this path, so a refusal cannot happen; if it did,
+        // nothing was written and the marker is unprovable.
+        if ("kind" in claimed) return "unknown";
         exitCode = claimed.exitCode;
       } catch {
         // The write failed (noclobber refusal, container loss). Only a matching
@@ -427,14 +464,20 @@ export class SandboxV1 extends DurableObject {
       // and a proof that settled later must not race the replacement it may
       // have described.
       if (proof === LOCKED_AWAIT_TIMEOUT || proof !== marker) return { kind: "unknown" };
+      // The host-side await must outlive what the child was granted: with an
+      // absolute deadline that is the window left AFTER this proof, not the
+      // caller's relative `timeout`.
+      const awaitBoundMs =
+        opts?.deadlineEpochMs === undefined
+          ? normalizedTimeoutMs(opts?.timeout)
+          : Math.max(0, opts.deadlineEpochMs - Date.now()) + KILL_GRACE_MS;
       try {
         const ran = await boundedAwait(
           this.execCommand(container, command, opts),
-          normalizedTimeoutMs(opts?.timeout) + LOCKED_AWAIT_MARGIN_MS,
+          awaitBoundMs + LOCKED_AWAIT_MARGIN_MS,
         );
-        return ran === LOCKED_AWAIT_TIMEOUT
-          ? ({ kind: "unknown" } as const)
-          : ({ kind: "ran", ...ran } as const);
+        if (ran === LOCKED_AWAIT_TIMEOUT) return { kind: "unknown" };
+        return "kind" in ran ? ran : ({ kind: "ran", ...ran } as const);
       } catch {
         // The exec reply was lost: whether the command ran is unprovable, so
         // the outcome is `unknown` — never a document read as unreadable.
@@ -482,6 +525,8 @@ export class SandboxV1 extends DurableObject {
   private async readMarker(container: Container): Promise<string | null> {
     try {
       const read = await this.execCommand(container, MARKER_READ_COMMAND, { timeout: MARKER_READ_TIMEOUT_MS });
+      // No deadline rides this path; a refusal would mean nothing was read.
+      if ("kind" in read) return null;
       return read.exitCode === 0 ? read.stdout : null;
     } catch {
       return null;
@@ -524,14 +569,28 @@ export class SandboxV1 extends DurableObject {
     command: ShellCommand,
     opts: CommandOpts | undefined,
     prepared?: { stdin: Uint8Array | undefined },
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  ): Promise<{ stdout: string; stderr: string; exitCode: number } | ExecDeadlineSpent> {
     const stdinPayload = prepared === undefined ? this.assertBounds(command, opts) : prepared.stdin;
+    // The child's own bound. With an absolute deadline the remainder is read
+    // HERE — in the DO, immediately before the process starts — because the
+    // request queue, this RPC and any marker proof already spent it. The kill
+    // grace is reserved OUT of that remainder: SIGTERM lands at
+    // `deadline − grace` and SIGKILL at the deadline, never after it. A
+    // remainder at or below the grace starts NOTHING.
+    let timeoutMs: number;
+    if (opts?.deadlineEpochMs === undefined) {
+      timeoutMs = normalizedTimeoutMs(opts?.timeout);
+    } else {
+      const remainingMs = opts.deadlineEpochMs - Date.now();
+      if (remainingMs <= KILL_GRACE_MS) return { kind: "deadline-spent", remainingMs };
+      timeoutMs = remainingMs - KILL_GRACE_MS;
+    }
     // Clamp before converting: a zero/negative value must never reach the argv
     // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
     // non-finite override (NaN/Infinity) is not a duration at all — default.
-    const timeoutSeconds = normalizedTimeoutMs(opts?.timeout) / 1000;
+    const timeoutSeconds = normalizedTimeoutMs(timeoutMs) / 1000;
     const process = await container.exec(
-      ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
+      ["timeout", `--kill-after=${KILL_GRACE_MS / 1000}`, String(timeoutSeconds), "/bin/sh", "-lc", command],
       {
         cwd: opts?.cwd,
         env: opts?.env,
