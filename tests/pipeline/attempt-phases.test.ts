@@ -61,6 +61,8 @@ const {
 } = await import("../../src/pipeline/review-attempt-execution");
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 const { hydrateAttemptHost, ensureRunnerConfig } = await import("../../src/pipeline/consumer");
+const { PublicationDeadlineSpent } = await import("../../src/pipeline/comment");
+const { RoundBudgetSpent } = await import("../../src/pipeline/review-attempt");
 
 const ATTEMPT_ID = "attempt-4b-0001";
 const SCOPE: Scope = {
@@ -779,6 +781,31 @@ describe("a first publication past the frozen instant", () => {
 
     const send = h.commenterCalls.find((call) => call.op === "post-prepared-degraded");
     expect((send?.args as { notAfterMs?: number } | undefined)?.notAfterMs).toBe(ref.deadlineMs);
+  });
+
+  test("a degraded send refused at the mutation settles as a wall-clock stop, never as a swallowed failure", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = "not a verdict";
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+
+    // The adapter's guard refused at the mutation — nothing left the Worker.
+    h.commenterState.preparedDegradedError = new PublicationDeadlineSpent(
+      "create comment: the attempt's frozen deadline passed 5ms ago — nothing was sent",
+    );
+    const { deps: collecting } = await makeDeps({ db });
+    await expect(collectAttempt(collecting, ref, prepared)).rejects.toMatchObject({
+      cause: expect.any(RoundBudgetSpent),
+    });
+    // A refusal is not an outcome: the collect did not settle as `degraded`.
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(1);
   });
 
   test("the degraded notice takes the same refusal", async () => {

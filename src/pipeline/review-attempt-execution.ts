@@ -2052,9 +2052,14 @@ async function publishDegradedPublication(input: {
       });
     } catch (err) {
       // Refused AT the mutation because the instant had passed: nothing left
-      // the Worker, so this is a wall-clock stop, never the `unknown` of a
-      // possibly-sent request. It propagates so the caller settles it as one.
-      if (err instanceof PublicationDeadlineSpent) throw err;
+      // the Worker, so this is a WALL-CLOCK STOP, never the `unknown` of a
+      // possibly-sent request — and never the generic `failed` below either.
+      // Mapped to the same typed stop the normal publish path raises, so the
+      // caller's settlement takes its budget branch (failure row, Check
+      // conclusion, safe cleanup) instead of a pre-publication failure.
+      if (err instanceof PublicationDeadlineSpent) {
+        throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner");
+      }
       if (err instanceof PreparedSendRejected) {
         // A definitive pre-send rejection (§7.7): NO request left the
         // Worker, so the truthful durable phase is `failed` — never the
@@ -2107,6 +2112,10 @@ async function publishDegradedPublication(input: {
     }
     return { phase: "confirmed", publicationId: staged.id };
   } catch (err) {
+    // The typed wall-clock stop is the ONE error this function does not fold
+    // into a typed outcome: swallowing it here would be the "a refusal is not
+    // an observation" mistake — the stop must reach the settlement as itself.
+    if (err instanceof RoundBudgetSpent) throw err;
     return { phase: "failed", reason: err instanceof Error ? err.message : String(err) };
   }
 }

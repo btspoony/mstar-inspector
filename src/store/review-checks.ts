@@ -185,7 +185,12 @@ export type PublishedReview = { verdict: string; scorePct: number | null };
 /** The §7.9 claim outcome union. */
 export type ClaimAttemptResult =
   | { kind: "claimed"; attempt: CheckAttempt; lease: Lease }
-  | { kind: "busy" | "terminal"; attempt: CheckAttempt };
+  | { kind: "busy" | "terminal"; attempt: CheckAttempt }
+  /**
+   * No row for the key at all. Only reachable for a FROZEN-generation claim
+   * (`expect`), which never inserts: the caller has nothing to settle.
+   */
+  | { kind: "absent" };
 
 /**
  * The transaction clock (spec §7.0). Every §7.9/§7.11.2 signature the contract
@@ -584,6 +589,15 @@ export async function claimAttempt(
      * claim, recovery) — such a row is only ever closed by the recovery lane.
      */
     attachDeliveryId?: string;
+    /**
+     * The FROZEN generation this caller must act on. Supplied by resumed
+     * phases: the call then answers from that key's own row and NEVER runs the
+     * minting INSERT, so a generation that ends between the caller's decision
+     * and this call inserts nothing — there is no insert to lose the race
+     * against. Taking the frozen row is the fenced adoption UPDATE that
+     * follows, not this claim.
+     */
+    expect?: { key: string; generation: number };
   },
 ): Promise<ClaimAttemptResult> {
   if (input.holder.length === 0) {
@@ -603,6 +617,19 @@ export async function claimAttempt(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
+  // A caller acting on a FROZEN generation may never mint. Verification and
+  // claim are one step here because the only claim such a caller can make is
+  // that row ITSELF: this call reads it (open → `busy`, ended or never written
+  // → `absent`) and does not execute the insert below, so the mint cannot fire
+  // for a generation that is not the open one — not even by a race, because
+  // there is no insert in flight.
+  if (input.expect !== undefined) {
+    const active = await db
+      .prepare(`SELECT * FROM review_checks WHERE attempt_key = ? AND ${NONTERMINAL_WHERE} ORDER BY generation DESC LIMIT 1`)
+      .bind(input.expect.key)
+      .first<ReviewCheckRow>();
+    return active === null ? { kind: "absent" } : { kind: "busy", attempt: attemptOf(active) };
+  }
   const attemptId = crypto.randomUUID();
 
   // The claim is the whole race. `INSERT … SELECT` is gated on TWO facts about
