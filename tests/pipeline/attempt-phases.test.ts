@@ -330,7 +330,7 @@ describe("cleanupAttempt", () => {
     const { deps, db } = await makeDeps();
     const ref = makeRef(makePayload());
     // The claim was written AND the paid step was taken: no proof it returned.
-    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now());
+    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null);
     expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
 
     expect(await cleanupAttempt(deps, ref)).toEqual({ retention: "unknown" });
@@ -340,7 +340,7 @@ describe("cleanupAttempt", () => {
   test("a concurrent launch wins the race: the CAS loses and the container survives", async () => {
     const { deps, db } = await makeDeps();
     const ref = makeRef(makePayload());
-    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now());
+    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null);
     // The attempt is still `provisioned` when this cleanup decides to destroy —
     // and a concurrent review takes the paid step in between.
     expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
@@ -366,7 +366,7 @@ describe("cleanupAttempt", () => {
   test("a row another cleanup abandoned is unknown for the second cleanup", async () => {
     const { deps, db } = await makeDeps();
     const ref = makeRef(makePayload());
-    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now());
+    await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null);
     // The first cleanup won the CAS and is still destroying the container.
     expect(await abandonReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toBe(true);
 
@@ -423,7 +423,7 @@ describe("runAdmittedReviewAttempt", () => {
 });
 
 describe("the owed Check mark", () => {
-  test("a refused adoption records NOTHING: it observed no generation", async () => {
+  test("a handle-less publisher still records the obligation, from the frozen key", async () => {
     const { deps, db } = await makeDeps();
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
@@ -440,8 +440,8 @@ describe("the owed Check mark", () => {
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
 
     // A LIVE holder owns the attempt's Check, so the real lifecycle refuses to
-    // adopt it — and no generation is OBSERVED, so no mark is written: an
-    // unowned guess could be cleared by the wrong generation.
+    // adopt it — no handle exists — and the obligation is still recorded, from
+    // the durable publication and the row's FROZEN key.
     const claimed = await claimAttempt(db as never, {
       scope: SCOPE,
       githubAppId: 424242,
@@ -453,6 +453,13 @@ describe("the owed Check mark", () => {
       executionDeadlineMs: Date.now() + 600_000,
     });
     if (claimed.kind !== "claimed") throw new Error(`the test could not create the held row: ${claimed.kind}`);
+    const held = db.raw
+      .prepare("SELECT id, generation, attempt_key FROM review_checks WHERE id = ?")
+      .get(claimed.attempt.identity.attemptId) as {
+      id: string;
+      generation: number;
+      attempt_key: string;
+    };
 
     let begun = 0;
     const publishing = await makeDeps({ db });
@@ -467,7 +474,6 @@ describe("the owed Check mark", () => {
     expect(await publishAttempt(publishing.deps, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
 
     expect(begun).toBe(1);
-    expect(publishing.deps.checkSettlements.size).toBe(0);
     const launch = db.raw
       .prepare("SELECT check_owed_ms, check_key, check_generation FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT_ID) as {
@@ -475,20 +481,65 @@ describe("the owed Check mark", () => {
       check_key: string | null;
       check_generation: number | null;
     };
-    expect(launch.check_owed_ms).toBeNull();
-    expect(launch.check_key).toBeNull();
-    expect(launch.check_generation).toBeNull();
-    // The Check row it could not take is untouched, and the publication is the
-    // durable record the recovery lane concludes from.
+    // The obligation is written from the row's frozen key and the open Check's
+    // generation — not from a handle, and not from a recomputation.
+    expect(launch.check_key).toBe(held.attempt_key);
+    expect(launch.check_generation).toBe(held.generation);
+    expect(launch.check_owed_ms).toBeGreaterThan(Date.now());
+    // The held row itself is untouched: the mark lives on the attempt row.
     const check = db.raw
-      .prepare("SELECT holder, terminal_ms, next_attempt_ms FROM review_checks WHERE holder = ?")
-      .get("consumer:original") as {
-      holder: string | null;
-      terminal_ms: number | null;
-      next_attempt_ms: number | null;
-    };
+      .prepare("SELECT holder, terminal_ms, next_attempt_ms FROM review_checks WHERE id = ?")
+      .get(held.id) as { holder: string | null; terminal_ms: number | null; next_attempt_ms: number | null };
     expect(check).toEqual({ holder: "consumer:original", terminal_ms: null, next_attempt_ms: null });
     expect((await readPublication(db as never, collected.collected.publicationId))?.proof).not.toBeNull();
+  });
+
+  test("the mark uses the ROW's frozen key, never a recomputation", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    await reviewAttempt(deps, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+
+    // A key this attempt could never RE-DERIVE from its payload, frozen on both
+    // rows: if publication recomputed instead of reading, it would find no Check
+    // and write no mark.
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: "consumer:original",
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`the test could not create the held row: ${claimed.kind}`);
+    db.raw
+      .prepare("UPDATE review_checks SET attempt_key = 'frozen-by-hand' WHERE id = ?")
+      .run(claimed.attempt.identity.attemptId);
+    db.raw
+      .prepare("UPDATE review_launches SET attempt_key = 'frozen-by-hand' WHERE attempt_id = ?")
+      .run(ATTEMPT_ID);
+
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
+    expect(await publishAttempt(publishing.deps, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+
+    const launch = db.raw
+      .prepare("SELECT check_owed_ms, check_key FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { check_owed_ms: number | null; check_key: string | null };
+    expect(launch.check_key).toBe("frozen-by-hand");
+    expect(launch.check_owed_ms).not.toBeNull();
   });
 
   test("an adopted Check that stays open records the generation it observed", async () => {

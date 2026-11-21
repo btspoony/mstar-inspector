@@ -112,6 +112,9 @@ import {
   abandonReviewLaunch,
   launchVerdict,
   observeCheckGeneration,
+  readAttemptKey,
+  freezeAttemptKey,
+  checkKeyOf,
   noLaunchState,
   noteCheckOwed,
   runReviewAttempt,
@@ -3055,6 +3058,18 @@ async function settlementFor(
 }
 
 /**
+ * The publication path may use ONLY the key the launch row froze. A row without
+ * one means the attempt never learned its head — nothing can be associated, and
+ * the miss is named rather than papered over with a recomputation.
+ */
+function assertFrozenKey(checkKey: string | null, attemptId: string, headSha: string): void {
+  if (checkKey !== null) return;
+  throw new Error(
+    `attempt ${attemptId}: the launch row carries no frozen attempt_key (head ${headSha}) — refusing to associate a re-derived one`,
+  );
+}
+
+/**
  * Record that this attempt's Check settlement is still owed — ONLY once a
  * publication for it is durable and the Check has not concluded. The key is the
  * Check row's own `attempt_key` (the association is that derived identity, not
@@ -3070,21 +3085,18 @@ async function noteOwedCheck(
 ): Promise<void> {
   const scope = scopeOf(ref.payload);
   if (scope === undefined || deps.checks === undefined) return;
-  const checkKey = attemptKey({
-    appId: scope.appId,
-    installationId: scope.installationId,
-    owner: scope.owner,
-    repo: scope.repo,
-    prNumber: scope.prNumber,
-    headSha,
-    triggeredBy: ref.payload.triggered_by,
-    action: ref.payload.action,
+  // The key comes from the ROW, never from a recomputation: a derived key
+  // recomputed here could differ from the one the launch fence used.
+  const checkKey = await readAttemptKey(deps.env.DB, ref.attemptId);
+  assertFrozenKey(checkKey, ref.attemptId, headSha);
+  if (checkKey === null) return;
+  // No handle is fine: the key is frozen, so the open row for it IS this
+  // attempt's Check. The obligation is derived from the durable publication and
+  // that row — the reconciler is the consumer.
+  const checkGeneration = await observeCheckGeneration(deps.env.DB, {
+    checkKey,
+    ...(checkAttemptId === undefined ? {} : { checkAttemptId }),
   });
-  // NOTHING OBSERVED, NOTHING RECORDED: without a row of its own this attempt
-  // has no generation it can name, and an unowned guess could be cleared by the
-  // wrong generation — worse than a missing mark.
-  if (checkAttemptId === undefined) return;
-  const checkGeneration = await observeCheckGeneration(deps.env.DB, checkAttemptId);
   if (checkGeneration === null) return; // that row already concluded: nothing owed
   const owed = await noteCheckOwed(deps.env.DB, {
     attemptId: ref.attemptId,
@@ -3318,6 +3330,12 @@ async function preparePhase(
   const cmds = prepared.cmds;
   const headSha = prepared.headSha;
   observed.headSha = headSha;
+  // A delivery that carried no head froze no key at creation: freeze it NOW,
+  // once, from the authoritative checkout. Later phases read it from the row.
+  if (checkKeyOf(payload, payload.head_sha) === null) {
+    const checkoutKey = checkKeyOf(payload, headSha);
+    if (checkoutKey !== null) await freezeAttemptKey(deps.env.DB, attemptId, checkoutKey);
+  }
   // The host caches the credential it just minted, so the phases of THIS
   // invocation never re-mint; a resumed host starts empty and mints again.
   deps.credentials.set(attemptId, { token, secretValues: progress.secretValues });

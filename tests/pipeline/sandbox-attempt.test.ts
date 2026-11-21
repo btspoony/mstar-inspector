@@ -306,7 +306,7 @@ describe("collection refuses an unproven container", () => {
 
   test("a missing/different marker yields unknown, never a collected result", async () => {
     const db = createMigratedTestD1();
-    await claimReviewAttempt(db, ATTEMPT_A, Date.now());
+    await claimReviewAttempt(db, ATTEMPT_A, Date.now(), null);
     const sandbox = attemptSandboxDouble({ marked: "unknown" });
     await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toBeInstanceOf(AttemptUnknownError);
 
@@ -316,14 +316,14 @@ describe("collection refuses an unproven container", () => {
 
   test("a rejected guarded read is unknown, not an unreadable document", async () => {
     const db = createMigratedTestD1();
-    await claimReviewAttempt(db, ATTEMPT_A, Date.now());
+    await claimReviewAttempt(db, ATTEMPT_A, Date.now(), null);
     const sandbox = attemptSandboxDouble({ markedRejected: true });
     await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toBeInstanceOf(AttemptUnknownError);
   });
 
   test("a matching live incarnation collects the result documents", async () => {
     const db = createMigratedTestD1();
-    await claimReviewAttempt(db, ATTEMPT_A, Date.now());
+    await claimReviewAttempt(db, ATTEMPT_A, Date.now(), null);
     const sandbox = attemptSandboxDouble({ marked: "ran" });
     const execution = await runReviewAttempt(executionInput(sandbox, db));
 

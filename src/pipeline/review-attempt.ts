@@ -24,7 +24,12 @@ import { redactExactSecrets, redactSecrets } from "./redact";
 import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
 import type { D1Like } from "../store/types";
-import { deferCheckForPendingPublication, deferCheckRecovery, type Lease as CheckLease } from "../store/review-checks";
+import {
+  attemptKey,
+  deferCheckForPendingPublication,
+  deferCheckRecovery,
+  type Lease as CheckLease,
+} from "../store/review-checks";
 import { parseBudgetExhaustedSignal, type BudgetExhaustedOutcome } from "../review/schema";
 import {
   isRecheckStatusReason,
@@ -136,10 +141,18 @@ export async function discardReviewAttempt(
  * never re-claimed, from the second entry on.
  */
 const CLAIM_ATTEMPT_SQL = `
-INSERT INTO review_launches (attempt_id, state, claimed_at_ms)
-VALUES (?, 'provisioned', ?)
+INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key)
+VALUES (?, 'provisioned', ?, ?)
 ON CONFLICT (attempt_id) DO NOTHING
 `;
+
+/** Fill the frozen key ONCE, when a delivery that carried no head learns one. */
+const FREEZE_ATTEMPT_KEY_SQL = `
+UPDATE review_launches SET attempt_key = ?
+WHERE attempt_id = ? AND attempt_key IS NULL
+`;
+
+const READ_ATTEMPT_KEY_SQL = `SELECT attempt_key FROM review_launches WHERE attempt_id = ?`;
 
 /**
  * The paid-step fence, taken in the statement that is ABOUT TO SEND the exec:
@@ -373,9 +386,31 @@ export async function claimReviewAttempt(
   db: D1Like,
   attemptId: string,
   nowMs: number,
+  /** The key frozen at creation; `null` when this delivery carried no head yet. */
+  attemptKey: string | null,
 ): Promise<"claimed" | "already-claimed"> {
-  const written = await db.prepare(CLAIM_ATTEMPT_SQL).bind(attemptId, nowMs).run();
+  const written = await db.prepare(CLAIM_ATTEMPT_SQL).bind(attemptId, nowMs, attemptKey).run();
   return written.meta.changes === 1 ? "claimed" : "already-claimed";
+}
+
+/**
+ * Freeze the attempt's Check key the first time it is knowable (a delivery whose
+ * payload carried no head learns it at the checkout). One conditional write, so
+ * the key is never rewritten: every later phase reads it from this row.
+ */
+export async function freezeAttemptKey(
+  db: D1Like,
+  attemptId: string,
+  attemptKey: string,
+): Promise<boolean> {
+  const written = await db.prepare(FREEZE_ATTEMPT_KEY_SQL).bind(attemptKey, attemptId).run();
+  return written.meta.changes === 1;
+}
+
+/** The FROZEN key for this attempt — the only value later phases may use. */
+export async function readAttemptKey(db: D1Like, attemptId: string): Promise<string | null> {
+  const row = await db.prepare(READ_ATTEMPT_KEY_SQL).bind(attemptId).first<{ attempt_key: string | null }>();
+  return row?.attempt_key ?? null;
 }
 
 /**
@@ -485,12 +520,24 @@ export async function noteCheckOwed(
  */
 export async function observeCheckGeneration(
   db: D1Like,
-  checkAttemptId: string,
+  input: { checkKey: string; checkAttemptId?: string },
 ): Promise<number | null> {
-  const row = await db
-    .prepare(`SELECT generation FROM review_checks WHERE id = ? AND terminal_ms IS NULL`)
-    .bind(checkAttemptId)
-    .first<{ generation: number }>();
+  const row =
+    input.checkAttemptId === undefined
+      ? // No handle: the key was FROZEN at attempt creation, so the open row for
+        // it IS this attempt's Check — not a guess about somebody else's.
+        await db
+          .prepare(
+            `SELECT generation FROM review_checks
+              WHERE attempt_key = ? AND terminal_ms IS NULL
+              ORDER BY generation DESC LIMIT 1`,
+          )
+          .bind(input.checkKey)
+          .first<{ generation: number }>()
+      : await db
+          .prepare(`SELECT generation FROM review_checks WHERE id = ? AND terminal_ms IS NULL`)
+          .bind(input.checkAttemptId)
+          .first<{ generation: number }>();
   return row?.generation ?? null;
 }
 
@@ -593,16 +640,13 @@ export async function deferCheckWithOwed(
             input.nowMs,
           );
   } catch (err) {
-    // The fence faulted after the instant moved: drop the obligation rather than
-    // leave an advanced mark with no check movement behind it.
-    await clearCheckOwed(db, input.checkAttemptId).catch(() => {});
+    // The fence faulted after the instant moved. The obligation is KEPT: it is
+    // the only record that a Check still needs settling, and a transient fault
+    // must not drop it — the next pass retries the defer. No error is swallowed.
     throw err;
   }
-  if (!deferred) {
-    // A lost fence means another holder moved the row: the advanced instant
-    // must not outlive this pass.
-    await clearCheckOwed(db, input.checkAttemptId).catch(() => {});
-  }
+  // A lost fence moved nothing, so the mark stays too: only a conclusion (a
+  // recorded terminal or an honest give-up) may clear it.
   return deferred;
 }
 
@@ -1574,6 +1618,41 @@ export async function mintSandboxReadToken(input: {
 }
 
 /**
+ * The Check attempt key for a delivery: the attempt identity frozen on the
+ * launch row. `null` when the delivery carries no reusable head yet (an
+ * issue-comment delivery), in which case the row's key is frozen at the
+ * checkout instead.
+ */
+export function checkKeyOf(payload: ReviewJobPayload, headSha: string | null): string | null {
+  if (headSha === null) return null;
+  const scope = scopeOfPayload(payload);
+  if (scope === undefined) return null;
+  return attemptKey({
+    appId: scope.appId,
+    installationId: scope.installationId,
+    owner: scope.owner,
+    repo: scope.repo,
+    prNumber: scope.pr_number,
+    headSha,
+    triggeredBy: payload.triggered_by,
+    action: payload.action,
+  });
+}
+
+/** The App/PR identity, derived without dereferencing a legacy `botRef`. */
+function scopeOfPayload(payload: ReviewJobPayload): { appId: string; installationId: number; owner: string; repo: string; pr_number: number } | undefined {
+  const bot = payload.botRef as { appId?: string } | undefined;
+  if (bot?.appId === undefined) return undefined;
+  return {
+    appId: bot.appId,
+    installationId: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+  };
+}
+
+/**
  * Acquire the attempt's container, mint its purpose-scoped read credential,
  * clone the PR head and resolve the AUTHORITATIVE checkout SHA. The caller's
  * failure path reads `progress.failureStage` and `progress.secretValues`, so
@@ -1624,7 +1703,14 @@ export async function prepareReviewAttempt(input: {
   // into a retry.
   let provisioning: "claimed" | "already-claimed";
   try {
-    provisioning = await claimReviewAttempt(deps.env.DB, attemptId, Date.now());
+    provisioning = await claimReviewAttempt(
+      deps.env.DB,
+      attemptId,
+      Date.now(),
+      // FROZEN at creation: the head this delivery was admitted for, so no
+      // later phase has to re-derive a key that could have moved.
+      checkKeyOf(payload, payload.head_sha),
+    );
   } catch (err) {
     const detail = redactExactSecrets(
       redactSecrets(err instanceof Error ? err.message : String(err)),

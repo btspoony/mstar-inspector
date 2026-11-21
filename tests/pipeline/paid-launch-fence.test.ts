@@ -187,7 +187,7 @@ function executionInput(sandbox: SandboxDouble, db: TestD1) {
 
 /** The row an attempt that prepared successfully would already carry. */
 async function claimedAttempt(db: TestD1): Promise<void> {
-  expect(await claimReviewAttempt(db, ATTEMPT, Date.now())).toBe("claimed");
+  expect(await claimReviewAttempt(db, ATTEMPT, Date.now(), null)).toBe("claimed");
 }
 
 function prepareInput(db: TestD1, sandbox: SandboxDouble | null, envDb: D1Like = db) {
@@ -317,8 +317,8 @@ describe("the state machine cannot be walked twice", () => {
   test("claiming, launching and completing each succeed once and refuse the second call", async () => {
     const db = createMigratedTestD1();
 
-    expect(await claimReviewAttempt(db, ATTEMPT, Date.now())).toBe("claimed");
-    expect(await claimReviewAttempt(db, ATTEMPT, Date.now())).toBe("already-claimed");
+    expect(await claimReviewAttempt(db, ATTEMPT, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewAttempt(db, ATTEMPT, Date.now(), null)).toBe("already-claimed");
 
     expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({ ok: true });
     expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({

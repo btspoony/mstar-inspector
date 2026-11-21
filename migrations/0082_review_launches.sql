@@ -40,6 +40,12 @@
 -- not concluded, and cleared only by a conclusion.
 CREATE TABLE review_launches (
   attempt_id TEXT PRIMARY KEY,
+  -- The Check attempt key, FROZEN when the attempt is created (or, for a
+  -- delivery that carried no head, the instant the checkout first knows one).
+  -- Every later phase — publication, settlement, cleanup — READS it from this
+  -- row; none re-derives it. A head supersession is a new attempt with its own
+  -- key, so the association never has to reconcile a key that moved underneath.
+  attempt_key TEXT,
   state TEXT NOT NULL CHECK (state IN ('provisioned', 'launched', 'persisted', 'failed', 'abandoned')),
   claimed_at_ms INTEGER NOT NULL,
   launched_at_ms INTEGER,
