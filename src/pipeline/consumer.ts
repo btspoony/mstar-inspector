@@ -6354,7 +6354,6 @@ async function processMessage(
         checkClaimAttempted = true;
         checkHandle = await beginCheck(lifecycleScope, resolvedGithubAppId, resolvedHeadSha);
       }
-      await terminalizeCheck(null, "budget-exhausted", undefined, budgetOutcome);
       const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${err instanceof Error ? err.message : String(err)}`;
       deps.log.error(
         {
@@ -6383,7 +6382,6 @@ async function processMessage(
           error: redactExactSecrets(redactSecrets(budgetDetail), progress.secretValues),
         });
         // Confirmed by the await above: only a write that RESOLVED is durable.
-        // A no-op Check terminalize is not, so it never counts on its own.
         durableOutcome = true;
       } catch (recordErr) {
         const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
@@ -6392,6 +6390,30 @@ async function processMessage(
           `review_failures insert failed (exhaustion path continues): ${recordDetail}`,
         );
       }
+      if (!durableOutcome) {
+        // No durable record of this stop: the Check is left alive for the
+        // recovery lane (a terminal conclusion here could never be undone) and
+        // the attempt ends unknown — no destruction, no capacity release.
+        containerUnproven = true;
+        deps.log.warn(
+          {
+            ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
+            ...(level === undefined
+              ? {}
+              : {
+                  level,
+                  runner_timeout_ms: runnerTimeoutMs(level),
+                  orchestration: level === "deep" ? "parent" : "bun-fanout",
+                }),
+            ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
+            event: "review_unresolved",
+          },
+          `review unresolved: ${budgetDetail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
+        );
+        return { kind: "unknown" };
+      }
+      // The row is durable: now the Check may carry the stop's conclusion.
+      await terminalizeCheck(null, "budget-exhausted", undefined, budgetOutcome);
       return { kind: "budget-exhausted", outcome: budgetOutcome };
     }
 

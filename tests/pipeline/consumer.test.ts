@@ -1863,11 +1863,26 @@ describe("createReviewConsumer", () => {
     expect(inflightRows(db)).toHaveLength(0);
   });
 
-  test("a budget stop whose failure row rejects destroys nothing and holds capacity", async () => {
+  test("a budget stop whose failure row rejects terminalizes nothing, destroys nothing and holds capacity", async () => {
     h.sandbox.runnerExitCode = 124;
     const db = await createSeededTestD1();
+    let terminalized = 0;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
+      // An attached Check: with no durable row the stop must not conclude it,
+      // because a terminal Check cannot be taken back.
+      checks: {
+        begin: async () => ({
+          attemptId: "attempt-budget-unrecorded",
+          scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        }),
+        terminalize: async () => {
+          terminalized += 1;
+        },
+      },
       failureStore: {
         record: async () => {
           throw new Error("d1 down");
@@ -1877,12 +1892,18 @@ describe("createReviewConsumer", () => {
       },
     });
 
-    await consumer(h.makeBatch(makePayload())); // the stop still acks
+    await consumer(h.makeBatch(makePayload())); // unknown acks
 
+    expect(terminalized).toBe(0);
     expect(failureRows(db)).toHaveLength(0);
     expect(h.sandbox.destroyCalls).toBe(0);
     expect(inflightRows(db)).toHaveLength(1);
-    expect(h.logLines.filter((line) => line.fields.event === "sandbox_teardown_unproven")).toHaveLength(1);
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    // The unknown outcome already marks the container unproven, so the finally
+    // does not even attempt a teardown — the one line that records the attempt
+    // is `review_unresolved`.
+    expect(h.logLines.filter((line) => line.fields.event === "review_unresolved")).toHaveLength(1);
   });
 
   test("the fallback's steps shrink to what the refused capture left of the ONE diff window", async () => {
