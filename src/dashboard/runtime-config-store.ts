@@ -798,6 +798,12 @@ export type ReviewRouteWorkflowGate = {
   /** The refusal rests on unreadable evidence, not a stored `off`. */
   degraded: boolean;
   reason?: "malformed" | "untrusted" | "read-failed";
+  /**
+   * The rejected raw value, quoted, so the refusal line names what the row
+   * actually holds (`"on "` and `"on"` are visibly different). A setting is not
+   * a credential, so this is safe to log.
+   */
+  rejected?: string;
 };
 
 /**
@@ -820,10 +826,20 @@ export async function getReviewRouteWorkflowGate(
     if (row.value === undefined) {
       return { mode: "off", saved: false, degraded: true, reason: "malformed" };
     }
-    const value = typeof row.value === "string" ? row.value.trim() : row.value;
-    if (value === "on") return { mode: "on", saved: true, degraded: false };
-    if (value === "off") return { mode: "off", saved: true, degraded: false };
-    return { mode: "off", saved: false, degraded: true, reason: "untrusted" };
+    // STRICT, deliberately: the value is NOT trimmed. A setting whose meaning
+    // flips on a stray space is exactly the class of bug this iteration
+    // removes, so `"on "`, `" on"`, `"ON"`, `"1"` and `"true"` are all refusals
+    // — and the refused raw value rides the answer so the log names it.
+    const raw = row.value;
+    if (raw === "on") return { mode: "on", saved: true, degraded: false };
+    if (raw === "off") return { mode: "off", saved: true, degraded: false };
+    return {
+      mode: "off",
+      saved: false,
+      degraded: true,
+      reason: "untrusted",
+      rejected: typeof raw === "string" ? JSON.stringify(raw) : String(raw),
+    };
   } catch {
     return { mode: "off", saved: false, degraded: true, reason: "read-failed" };
   }

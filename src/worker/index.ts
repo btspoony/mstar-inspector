@@ -851,6 +851,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         gate_saved: routeGate.saved,
         gate_degraded: routeGate.degraded,
         gate_reason: routeGate.reason ?? null,
+        gate_rejected: routeGate.rejected ?? null,
         installation_id: outcome.payload.installation_id,
         owner: outcome.payload.owner,
         repo: outcome.payload.repo,
@@ -1226,6 +1227,7 @@ export async function runReviewQueueBatch(
       gate_saved: gate.saved,
       gate_degraded: gate.degraded,
       gate_reason: gate.reason ?? null,
+      gate_rejected: gate.rejected ?? null,
       batch_messages: batch.messages.length,
       msg: "review route is off (review.route.workflow) — the batch was acknowledged and no Workflow instance was created",
     });
