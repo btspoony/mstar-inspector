@@ -290,12 +290,11 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
 }
 
 /**
- * A backtick or tilde fence line per CommonMark: any leading indentation, 3+
- * fence chars, then the info string. List-nested content is routinely indented
- * more than three spaces, and GitHub accepts an opener and closer at different
- * indents, so indentation cannot decide whether a line is a fence.
+ * A backtick or tilde fence line per CommonMark: zero to three leading spaces
+ * (four or more is an indented code block), 3+ fence chars, then the info
+ * string.
  */
-const FENCE_LINE = /^( *)(`{3,}|~{3,})(.*)$/;
+const FENCE_LINE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 
 /** Safe non-empty body shown when a finding consists only of dropped suggestion fences. */
 export const SUGGESTION_OMITTED = "(suggestion omitted)";
@@ -366,6 +365,10 @@ export function suggestionFenceSpans(text: string): { start: number; end: number
  * arrives at ANY length (it would swallow the trusted marker appended after the
  * body). The surrounding prose is kept. Shared by the schema clamp and the
  * line-comment renderer so the two cannot drift.
+ *
+ * Deliberate trade: a list fence whose closer is indented past three spaces
+ * reads as unclosed and is dropped wholesale — review content is lost, never a
+ * credential.
  */
 export function dropUnsafeFences(text: string, max: number): {
   text: string;

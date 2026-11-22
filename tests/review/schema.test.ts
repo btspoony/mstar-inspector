@@ -822,11 +822,27 @@ describe("dropRedactedSuggestions", () => {
 });
 
 describe("dropUnsafeFences (any fence, not only suggestions)", () => {
-  test("a list fence with a 3-space opener and 4-space closer stays closed", () => {
+  test("a 4-space closer makes the list fence read as unclosed and drop the rest", () => {
     const body = "1. step\n   ```\n   const x = 1;\n    ```\n2. keep this instruction";
-    // A list's indentation is not part of the fence kind: the block is closed,
-    // so the instruction after it survives.
-    expect(dropUnsafeFences(body, 10_000)).toEqual({ text: body, dropped: false });
+    // Deliberate direction: the 4-space closer is an indented code block in
+    // CommonMark, so the block reads as unclosed and is dropped — content loss,
+    // never a leak.
+    const { text, dropped } = dropUnsafeFences(body, 10_000);
+    expect(dropped).toBe(true);
+    expect(text).toBe("1. step\n");
+    expect(text).not.toContain("keep this instruction");
+  });
+
+  test("a 4-space indented block does not hijack a later suggestion fence", () => {
+    const text = "    ```js\nconst a = 1;\n    ```\n\n```suggestion\nconst x = \"[REDACTED]\";\n```\nafter";
+    // The indented pseudo-fence must not open the state machine: the real
+    // top-level suggestion is the one span recorded.
+    expect(suggestionFenceSpans(text)).toHaveLength(1);
+    const out = dropRedactedSuggestions(text);
+    expect(out).not.toContain("```suggestion");
+    // The indented block and the prose after the suggestion both survive.
+    expect(out).toContain("    ```js");
+    expect(out).toContain("after");
   });
 
   test("a plain fence crossing the budget is dropped whole; the prose after it survives", () => {
