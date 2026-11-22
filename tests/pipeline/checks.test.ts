@@ -3761,9 +3761,33 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
 });
 
 describe("markQueuedBehindInflight — the held-check relabel is bounded", () => {
+  const RELABEL_KEY = { headSha: SHA, triggeredBy: "octocat", action: "review", attachDeliveryId: "delivery-relabel" };
+
+  /**
+   * A released delivery row in exactly the shape the store predicate relabels:
+   * known run id, still `in_progress`, non-terminal, holder handed back.
+   */
+  async function relabelableRow(db: TestD1): Promise<void> {
+    const result = await claimAttempt(db, {
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: RELABEL_KEY.triggeredBy,
+      action: RELABEL_KEY.action,
+      attachDeliveryId: RELABEL_KEY.attachDeliveryId,
+      holder: `delivery:${RELABEL_KEY.attachDeliveryId}`,
+      nowMs: T0,
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    if (result.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${result.kind}`);
+    await attachedRun(db, result.attempt, result.lease, 4242);
+    expect(await releaseCheckClaim(db, result.attempt.identity.attemptId, result.lease, T0)).toBe(true);
+  }
+
   const relabel = (adapter: ReturnType<typeof adapterFor>, warns: string[], updateBudgetMs = 1_000) =>
     adapter.markQueuedBehindInflight!({
       scope: SCOPE,
+      ...RELABEL_KEY,
       checkRunId: 4242,
       summary: "Queued behind the review in flight for this pull request.",
       updateBudgetMs,
@@ -3772,6 +3796,7 @@ describe("markQueuedBehindInflight — the held-check relabel is bounded", () =>
 
   test("a rejected send is ONE warn and false — it never reaches the caller as a throw", async () => {
     const db = await seededDb();
+    await relabelableRow(db);
     const fake = fakeChecks({
       update: () => {
         throw Object.assign(new Error("boom"), { status: 500 });
@@ -3788,6 +3813,7 @@ describe("markQueuedBehindInflight — the held-check relabel is bounded", () =>
 
   test("a send that never answers returns false inside the budget, so the retry is never held", async () => {
     const db = await seededDb();
+    await relabelableRow(db);
     // GitHub accepts the request and never answers it: only the budget ends it.
     const fake = fakeChecks({ update: () => new Promise<CheckRunPayload>(() => {}) });
     const warns: string[] = [];

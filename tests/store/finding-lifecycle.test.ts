@@ -210,7 +210,7 @@ function proof(id: string, pay: PublicationPayload, confirmedMs: number): Public
 /** stage → claim → record proof; returns the live lease. */
 async function stageClaimProve(db: TestD1, id: string, pay: PublicationPayload, nowMs: number): Promise<Lease> {
   await stagePublication(db, { id, payload: pay, nowMs });
-  const lease = await claimPublication(db, id, "consumer", nowMs + 1);
+  const lease = await claimPublication(db, id, "consumer", nowMs + 1, "prepared");
   if (lease === null) throw new Error("test setup: claim failed");
   const recorded = await recordPublicationProof(db, id, lease, proof(id, pay, nowMs + 2));
   if (!recorded) throw new Error("test setup: proof recording failed");
@@ -278,17 +278,17 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
     const db = createSeededTestD1();
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
 
-    const lease1 = await claimPublication(db, "pub-1", "consumer", 2000);
+    const lease1 = await claimPublication(db, "pub-1", "consumer", 2000, "prepared");
     expect(lease1).toEqual({ holder: "consumer", epoch: 1, untilMs: 2000 + PUBLICATION_LEASE_MS });
     // prepared → sending on claim; one attempt counted.
     expect(publicationRow(db, "pub-1").phase).toBe("sending");
     expect(publicationRow(db, "pub-1").attempts).toBe(1);
 
     // Another holder (or the same one) cannot claim a live lease.
-    expect(await claimPublication(db, "pub-1", "recovery", 3000)).toBeNull();
+    expect(await claimPublication(db, "pub-1", "recovery", 3000, "sending")).toBeNull();
 
     // After expiry the recovery lane wins with epoch 2.
-    const lease2 = await claimPublication(db, "pub-1", "recovery", 2000 + PUBLICATION_LEASE_MS + 1);
+    const lease2 = await claimPublication(db, "pub-1", "recovery", 2000 + PUBLICATION_LEASE_MS + 1, "sending");
     expect(lease2).toEqual({ holder: "recovery", epoch: 2, untilMs: 2000 + PUBLICATION_LEASE_MS + 1 + PUBLICATION_LEASE_MS });
     expect(publicationRow(db, "pub-1").attempts).toBe(2);
   });
@@ -297,14 +297,14 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
     const db = createSeededTestD1();
     const lease = await stageClaimProve(db, "pub-1", payload(), 1000);
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
-    expect(await claimPublication(db, "pub-1", "recovery", 3000)).toBeNull();
+    expect(await claimPublication(db, "pub-1", "recovery", 3000, "confirmed")).toBeNull();
   });
 
   test("releaseUnspentPublicationClaim returns a never-dispatched claim to due prepared (P67-QC-018)", async () => {
     const db = createSeededTestD1();
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
 
-    const lease = (await claimPublication(db, "pub-1", "lifecycle-reconcile", 2000)) ?? (() => { throw new Error("setup"); })();
+    const lease = (await claimPublication(db, "pub-1", "lifecycle-reconcile", 2000, "prepared")) ?? (() => { throw new Error("setup"); })();
     // The claim already moved the row and counted one attempt.
     expect(publicationRow(db, "pub-1").phase).toBe("sending");
     expect(publicationRow(db, "pub-1").attempts).toBe(1);
@@ -322,7 +322,7 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
     expect(await listPublicationRecovery(db, 3000, 10)).toHaveLength(1);
 
     // It is a real release, not a terminal mark: the row re-claims normally.
-    const reClaim = await claimPublication(db, "pub-1", "lifecycle-reconcile", 4000);
+    const reClaim = await claimPublication(db, "pub-1", "lifecycle-reconcile", 4000, "prepared");
     expect(reClaim).not.toBeNull();
     expect(publicationRow(db, "pub-1").phase).toBe("sending");
     expect(publicationRow(db, "pub-1").attempts).toBe(1);
@@ -331,7 +331,7 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
   test("releaseUnspentPublicationClaim is fenced: a stale or already-terminal claim is refused", async () => {
     const db = createSeededTestD1();
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
-    const lease = (await claimPublication(db, "pub-1", "lifecycle-reconcile", 2000)) ?? (() => { throw new Error("setup"); })();
+    const lease = (await claimPublication(db, "pub-1", "lifecycle-reconcile", 2000, "prepared")) ?? (() => { throw new Error("setup"); })();
 
     // A foreign holder or a stale epoch cannot unwind someone else's claim.
     expect(await releaseUnspentPublicationClaim(db, "pub-1", { ...lease, holder: "other" }, 3000)).toBe(false);
@@ -348,7 +348,7 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
   test("proof recording fails closed on holder/epoch/publication mismatch", async () => {
     const db = createSeededTestD1();
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
-    const lease = (await claimPublication(db, "pub-1", "consumer", 2000)) ?? (() => { throw new Error("setup"); })();
+    const lease = (await claimPublication(db, "pub-1", "consumer", 2000, "prepared")) ?? (() => { throw new Error("setup"); })();
     const p = proof("pub-1", payload(), 3000);
 
     expect(await recordPublicationProof(db, "pub-1", { holder: "someone-else", epoch: lease.epoch, untilMs: lease.untilMs }, p)).toBe(false);
@@ -468,7 +468,7 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     const db = createSeededTestD1();
     const pay = payload({ lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }) });
     await stagePublication(db, { id: "pub-1", payload: pay, nowMs: 1000 });
-    const lease = await claimPublication(db, "pub-1", "consumer", 2000);
+    const lease = await claimPublication(db, "pub-1", "consumer", 2000, "prepared");
     if (lease === null) throw new Error("setup");
 
     // No proof yet — apply refuses.
@@ -1398,7 +1398,7 @@ describe("definitive pre-send failure is a durable phase (spec §7.7, P67-QC-010
   test("markPublicationFailed sets phase='failed' and retains payload/attempts; recovery stops selecting it", async () => {
     const db = createSeededTestD1();
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
-    const lease = await claimPublication(db, "pub-1", "holder", 2_000);
+    const lease = await claimPublication(db, "pub-1", "holder", 2_000, "prepared");
     if (lease === null) throw new Error("setup: claim failed");
 
     const ok = await markPublicationFailed(db, "pub-1", lease, "definitive rejection before send", 3_000);
@@ -1431,7 +1431,7 @@ describe("definitive pre-send failure is a durable phase (spec §7.7, P67-QC-010
   test("a post-attempt unknown is NOT marked failed — the two states stay distinct", async () => {
     const db = createSeededTestD1();
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
-    const lease = await claimPublication(db, "pub-1", "holder", 2_000);
+    const lease = await claimPublication(db, "pub-1", "holder", 2_000, "prepared");
     if (lease === null) throw new Error("setup: claim failed");
     // already confirmed → not eligible for the failed transition
     const confirmed = await recordPublicationProof(db, "pub-1", lease, {

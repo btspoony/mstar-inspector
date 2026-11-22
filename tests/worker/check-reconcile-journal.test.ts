@@ -708,11 +708,14 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   test("an unreadable journal probe defers inside the window instead of terminalizing", async () => {
     const db = seededDb();
     const { id } = await handedOverAttempt(db);
-    // The journal probe's OWN read fails (it is the only journal query the
-    // probe makes now). "Unknown" is NOT "nothing pending": the publication may
-    // still be in flight, and this attempt is inside its window, so the lane
-    // must wait exactly as it does for a readable journal.
-    const unreadable = withFailingReads(db, /FROM review_publications/);
+    // The journal probe's OWN read fails: every statement that FETCHES journal
+    // rows (`FROM review_publications WHERE ...`). The selector's proven-first
+    // probe is an id existence test (`FROM review_publications pub WHERE
+    // pub.id = ...`) and is deliberately left working — it orders the batch, it
+    // never answers the wait. "Unknown" is NOT "nothing pending": the
+    // publication may still be in flight, and this attempt is inside its
+    // window, so the lane must wait exactly as it does for a readable journal.
+    const unreadable = withFailingReads(db, /FROM review_publications\s+WHERE/);
     const stub = stubFetch();
     const calls = { adopt: 0, begin: 0, complete: 0 };
     const events: Array<Record<string, unknown>> = [];
@@ -748,10 +751,11 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   test("an unreadable journal probe at the deadline still fails closed", async () => {
     const db = seededDb();
     const { id } = await handedOverAttempt(db);
-    // The same unreadable probe as the case above, but the wait is over: the
-    // `now() < execution_deadline_ms` guard, not the probe's answer, is what
-    // decides here — past the deadline the lane must conclude.
-    const unreadable = withFailingReads(db, /FROM review_publications/);
+    // The same unreadable probe read as the case above (a journal-row FETCH,
+    // never the selector's id probe), but the wait is over: the `now() <
+    // execution_deadline_ms` guard, not the probe's answer, is what decides
+    // here — past the deadline the lane must conclude.
+    const unreadable = withFailingReads(db, /FROM review_publications\s+WHERE/);
     const stub = stubFetch();
     const sent: { desired: string | null } = { desired: null };
     let deferred = -1;

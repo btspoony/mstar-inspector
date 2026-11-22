@@ -98,6 +98,117 @@ export function attemptSandboxId(attemptId: string): string {
 }
 
 /**
+ * THE container handle. It exists only after the attempt's provisioning row
+ * does (migration 0090): `claimReviewAttempt` is the one writer that mints the
+ * id and this is the one reader a caller may use, so a start path cannot reach
+ * `ensureRunning` for an attempt the database has not heard of. A caller that
+ * asks for a handle without that row is told so instead of being handed one
+ * (this is the enforcement behind "no row means no container", not a note).
+ */
+export async function reviewAttemptSandbox(
+  deps: {
+    env: { SANDBOX: unknown; DB: D1Like };
+    getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
+  },
+  attemptId: string,
+): Promise<ReviewSandbox> {
+  const activation = await readAttemptActivation(deps.env.DB, attemptId);
+  if (activation === null || !activation.activated) {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: it has not won the activation transition, so no container may be addressed for it`,
+    );
+  }
+  if (activation.revoked) {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: a successor revoked it, so nothing may start for it again`,
+    );
+  }
+  if (activation.sandboxId === null) {
+    throw new AttemptUnknownError(`attempt ${attemptId}: its provisioning row carries no minted container id`);
+  }
+  try {
+    return await deps.getSandbox(deps.env.SANDBOX, activation.sandboxId);
+  } catch (err) {
+    const detail = redactSecrets(err instanceof Error ? err.message : String(err));
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: its container handle could not be resolved (${detail}) — the container's state is unknown`,
+    );
+  }
+}
+
+/** One attempt's activation state, as the provisioning row records it. */
+export type AttemptActivation = {
+  /** The container id the claim minted; null on a row written before it existed. */
+  sandboxId: string | null;
+  /** The guarded transition that precedes every start has been won. */
+  activated: boolean;
+  /** A successor took this attempt's PR: nothing may start again. */
+  revoked: boolean;
+};
+
+/**
+ * The attempt's activation state, or null when it never claimed a provisioning
+ * row. A REJECTED read is not a state: it throws `AttemptUnknownError` at this
+ * one reader, so no caller can mistake a read fault for "not activated" — that
+ * mistake would conclude the Check, destroy the container and release capacity
+ * on evidence nobody observed.
+ */
+export async function readAttemptActivation(db: D1Like, attemptId: string): Promise<AttemptActivation | null> {
+  let row: { sandbox_id: string | null; activated_ms: number | null; revoked_ms: number | null } | null;
+  try {
+    row = await db
+      .prepare(`SELECT sandbox_id, activated_ms, revoked_ms FROM review_launches WHERE attempt_id = ?`)
+      .bind(attemptId)
+      .first<{ sandbox_id: string | null; activated_ms: number | null; revoked_ms: number | null }>();
+  } catch (err) {
+    const detail = redactSecrets(err instanceof Error ? err.message : String(err));
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: its activation could not be read (${detail}) — nothing may be concluded about its container`,
+    );
+  }
+  if (row === null) return null;
+  return { sandboxId: row.sandbox_id, activated: row.activated_ms !== null, revoked: row.revoked_ms !== null };
+}
+
+/**
+ * The successor's claim over an attempt that never activated. ONE guarded
+ * write: it INSERTS the row (which is the claim when there is none) or revokes
+ * one that was never activated, and it refuses a row that activated — that is
+ * the case where only the container itself can say whether anything runs.
+ *
+ * `true` means this caller now holds the fact "no container could ever have
+ * been created for that attempt", which is the ONLY way capacity and the PR
+ * move without observing the container.
+ */
+export async function claimUnactivatedAttempt(db: D1Like, attemptId: string, nowMs: number): Promise<boolean> {
+  const written = await db
+    .prepare(
+      `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms, sandbox_id, revoked_ms)
+       VALUES (?, 'abandoned', ?, ?, ?, ?)
+       ON CONFLICT (attempt_id) DO UPDATE
+          SET revoked_ms = excluded.revoked_ms
+        WHERE review_launches.activated_ms IS NULL AND review_launches.revoked_ms IS NULL`,
+    )
+    .bind(attemptId, nowMs, nowMs, attemptSandboxId(attemptId), nowMs)
+    .run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * Record a revocation that the attempt's OWN container already proved
+ * (`revoke()` answered not-running). The write is not assumed: the caller gets
+ * `true` only when the row now reads revoked, so a failed or lost write keeps
+ * the takeover from proceeding.
+ */
+export async function markAttemptRevoked(db: D1Like, attemptId: string, nowMs: number): Promise<boolean> {
+  await db
+    .prepare(`UPDATE review_launches SET revoked_ms = ? WHERE attempt_id = ? AND revoked_ms IS NULL`)
+    .bind(nowMs, attemptId)
+    .run();
+  return (await readAttemptActivation(db, attemptId))?.revoked === true;
+}
+
+/**
  * The attempt's container could not be proven to be the one this attempt
  * prepared: its marker is missing or different (a replacement incarnation, a
  * lost container, an unreadable filesystem). Nothing was read or destroyed on
@@ -154,10 +265,12 @@ export async function discardReviewAttempt(
  * never re-claimed, from the second entry on.
  */
 const CLAIM_ATTEMPT_SQL = `
-INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation)
-VALUES (?, 'provisioned', ?, ?, ?)
+INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation, sandbox_id, activated_ms)
+VALUES (?, 'provisioned', ?, ?, ?, ?, ?)
 ON CONFLICT (attempt_id) DO NOTHING
 `;
+
+
 
 /**
  * Fill the frozen IDENTITY once — key AND generation — for a delivery that had
@@ -213,8 +326,8 @@ WHERE attempt_id = ? AND state = 'launched'
  * container may be paying and cleanup must report `unknown` instead.
  */
 const ABANDON_LAUNCH_SQL = `
-INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms)
-VALUES (?, 'abandoned', ?, ?)
+INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms, sandbox_id)
+VALUES (?, 'abandoned', ?, ?, ?)
 ON CONFLICT (attempt_id) DO UPDATE
    SET state = 'abandoned', abandoned_at_ms = excluded.abandoned_at_ms
  WHERE review_launches.state = 'provisioned'
@@ -415,7 +528,7 @@ export async function claimReviewAttempt(
 ): Promise<"claimed" | "already-claimed"> {
   const written = await db
     .prepare(CLAIM_ATTEMPT_SQL)
-    .bind(attemptId, nowMs, identity?.key ?? null, identity?.generation ?? null)
+    .bind(attemptId, nowMs, identity?.key ?? null, identity?.generation ?? null, attemptSandboxId(attemptId), nowMs)
     .run();
   return written.meta.changes === 1 ? "claimed" : "already-claimed";
 }
@@ -604,7 +717,10 @@ export async function clearConcludedCheckOwed(db: D1Like): Promise<number> {
  * longer insert a paid row after cleanup decided there was none.
  */
 export async function abandonReviewLaunch(db: D1Like, attemptId: string, nowMs: number): Promise<boolean> {
-  const written = await db.prepare(ABANDON_LAUNCH_SQL).bind(attemptId, nowMs, nowMs).run();
+  const written = await db
+    .prepare(ABANDON_LAUNCH_SQL)
+    .bind(attemptId, nowMs, nowMs, attemptSandboxId(attemptId))
+    .run();
   return written.meta.changes === 1;
 }
 
@@ -1821,7 +1937,7 @@ export async function prepareReviewAttempt(input: {
   }
   if (sandbox === null) {
     progress.failureStage = "sandbox";
-    sandbox = await deps.getSandbox(deps.env.SANDBOX, attemptSandboxId(attemptId));
+    sandbox = await reviewAttemptSandbox(deps, attemptId);
     input.onSandbox(sandbox);
   }
   const marker = attemptMarker(attemptId);

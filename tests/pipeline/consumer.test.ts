@@ -7220,6 +7220,7 @@ type CheckRowShape = {
   next_attempt_ms: number | null;
   last_error: string | null;
   terminal_ms: number | null;
+  terminal_dispatch_ms: number | null;
   terminalize_outcome: string | null;
   terminalize_elapsed_ms: number | null;
   /** The claim's own origin — the `nowMs` the insert was stamped with. */
@@ -10133,7 +10134,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(linked.terminal_ms).toBeNull();
 
     // The publication this attempt was LINKED to goes on to persist its proof.
-    const journalLease = await claimPublication(db, "journal-prepared", "publisher", linked.next_attempt_ms!);
+    const journalLease = await claimPublication(db, "journal-prepared", "publisher", linked.next_attempt_ms!, "prepared");
     expect(journalLease).not.toBeNull();
     expect(
       await recordPublicationProof(db, "journal-prepared", journalLease!, {
@@ -10634,7 +10635,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.next_attempt_ms).toBeNull();
   });
 
-  test("check lifecycle: an abandoned terminal send hands the exhaustion intent to recovery, which sends it", async () => {
+  test("check lifecycle: an abandoned terminal send is reconciled by readback, never re-sent", async () => {
     h.sandbox.runnerExitCode = 124;
     h.sandbox.runnerStdout = "";
     const db = await createSeededTestD1();
@@ -10680,24 +10681,31 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(frozen.recovery_state).toBe("remote-unconfirmed");
     expect(frozen.publication_id).toBeNull();
 
-    // The recovery lane owns the conclusion: at the attempt's own deadline it
-    // sends the SAME frozen intent — no re-derivation and no paid rerun. The
-    // parked transport is cleared first: it was THIS invocation's abandoned
-    // send, not the lane's.
+    // The recovery lane RECONCILES, never re-sends (§7.9a): the abandoned send
+    // may already have landed, so its dispatch intent stands and the pass is
+    // readback-only — no second terminal update leaves, at the deadline or
+    // after it. The parked transport is cleared first: it was THIS
+    // invocation's abandoned send, not the lane's.
     checkRequestOverrides = {};
     seedAppInstallation(db);
     const dueAt = frozen.execution_deadline_ms + 1;
+    const terminalSends = () => checkRequests.filter((request) => "conclusion" in request.params).length;
+    const before = terminalSends();
     const pass = await reconcileReviewChecks({ DB: db as never } as never, {
       now: () => dueAt,
       credentials: async () => ({ kind: "ok" as const, paused: false, adapter: checksAdapterFor(db, () => dueAt) }),
       log: { warn: () => {}, info: () => {} },
     });
-    expect(pass.completed).toBe(1);
-    const sent = checkRequests.filter((request) => "conclusion" in request.params).at(-1)!
-      .params as unknown as ChecksUpdateParams;
-    expect(sent.conclusion).toBe("failure");
-    expect(sent.output.summary).toBe(frozen.desired_summary!);
-    expect(checkRowFor(db, SHA).observed).toBe("failure");
+    expect(pass.completed).toBe(0);
+    expect(terminalSends()).toBe(before);
+    const reconciled = checkRowFor(db, SHA);
+    expect(reconciled.observed).toBe("unknown");
+    expect(reconciled.terminal_dispatch_ms).not.toBeNull();
+    // The unconfirmable dispatch is charged — once per pass, with backoff — so
+    // the ladder can end honestly (`local-error`, remote id kept) instead of
+    // re-reading forever.
+    expect(Number(reconciled.attempts)).toBe(Number(frozen.attempts) + 1);
+    expect(checkRuns.get(frozen.check_run_id!)!.status).toBe("in_progress");
   }, 20_000);
 });
 

@@ -66,6 +66,8 @@ import {
   recordCheckObservation,
   releaseAttachedCheck,
   releaseCheckClaim,
+  clearTerminalDispatch,
+  recordTerminalDispatch,
   rollbackCheckCreateDispatch,
   setCheckCreateState,
   setCheckDesired,
@@ -85,6 +87,7 @@ import {
   markCheckQueuedBehindInflight,
   recordTerminalizeOutcome,
 } from "../store/review-checks";
+import { claimPublicationLease, releasePublicationLease } from "../store/finding-lifecycle";
 import { redactSecrets } from "./redact";
 import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
 import type { BudgetExhaustedOutcome } from "../../packages/shared/src/budget-exhausted-wire";
@@ -358,6 +361,12 @@ export type ChecksAdapter = {
    */
   markQueuedBehindInflight?(input: {
     scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    /** THIS delivery's attach identity — absent means it created no row. */
+    attachDeliveryId?: string;
+    /** The run the caller selected with the same predicate. */
     checkRunId: number;
     summary: string;
     /** The operator-configured bound; omitted → the adapter, then the store's default. */
@@ -536,62 +545,86 @@ async function beginCheckWith(
   if (!hasChecksMethod(client.client, "create")) {
     return refused("Checks surface has no callable create method");
   }
-  // Persist `sending` BEFORE the request leaves (spec §7.9): if the response is
-  // lost, the row must already record that a create was attempted, because that
-  // durable fact is what stops a later `beginCheck` from minting a second run.
-  // Fenced on the live lease, so a lease lost between the guard and here aborts
-  // the send instead of creating an unattributable run.
-  const marked = await setCheckCreateState(deps.db, identity.attemptId, input.lease, "sending", undefined, nowMs);
-  if (!marked) {
-    return refused("could not record the create attempt under this lease");
-  }
-  // Client resolution minted a token and awaited the network; the lease may
-  // have expired meanwhile WITHOUT an epoch takeover. Re-sample the clock and
-  // re-prove the live lease immediately before the request: the earlier
-  // snapshot authorised the decision, not the send itself (spec §7.9).
-  if (!(await stillLive(deps, identity, input.lease))) {
-    // Nothing was invoked, so the `sending` mark above now MISSTATES the row
-    // (`requests: 0`). Undo it under an identity fence — this is exactly the
-    // path where a liveness fence would be false — so the attempt does not sit
-    // in the RL-12 adopt-only state with no request behind it. A lost race
-    // leaves `sending` in place, which stays conservative: recovery then adopts
-    // rather than creating again.
-    await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
-    return refused("lease expired before the create request");
-  }
-  const { scope } = identity;
-  const attempted = await sendRequests(
-    client.client.rest.checks.create({
-      owner: scope.owner,
-      repo: scope.repo,
-      name: CHECK_NAME,
-      head_sha: identity.headSha,
-      external_id: identity.externalId,
-      status: "queued",
-    }),
-  );
-  if ("failure" in attempted.outcome) {
-    if (attempted.sent === 0) {
-      // The transport refused BEFORE dispatch (a typed pre-dispatch marker), so
-      // the `sending` mark above now MISSTATES the row: nothing left the
-      // process. Undo it under the identity fence — this is exactly the path
-      // where a liveness fence would be false — so the attempt does not sit in
-      // the RL-12 adopt-only state with no request behind it. A lost race
-      // leaves `sending` in place, which stays conservative.
-      await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
+  // §7.9: a create IS a GitHub mutation — it mints the run this attempt will
+  // later terminalize — so it takes the publication lease of ITS action
+  // (`check:create`) like every other send. The `create_state = 'not-sent'`
+  // proof above says no run may already exist; the lease says who may create
+  // it now, and a live holder (a send or a recovery of the same create) refuses
+  // this one before the `sending` mark is written.
+  const opened = await openPublicationFence(deps, {
+    attemptId: identity.attemptId,
+    actionKey: PUBLICATION_ACTION_CHECK_CREATE,
+    holder: input.lease.holder,
+  });
+  if ("reason" in opened) return refused(opened.reason);
+  const fence = opened.fence;
+  try {
+    // Persist `sending` BEFORE the request leaves (spec §7.9): if the response is
+    // lost, the row must already record that a create was attempted, because that
+    // durable fact is what stops a later `beginCheck` from minting a second run.
+    // Fenced on the live lease, so a lease lost between the guard and here aborts
+    // the send instead of creating an unattributable run.
+    const marked = await setCheckCreateState(deps.db, identity.attemptId, input.lease, "sending", undefined, nowMs);
+    if (!marked) {
+      return refused("could not record the create attempt under this lease");
     }
-    return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check create") };
+    // Client resolution minted a token and awaited the network; the lease may
+    // have expired meanwhile WITHOUT an epoch takeover. Re-sample the clock and
+    // re-prove the live lease immediately before the request: the earlier
+    // snapshot authorised the decision, not the send itself (spec §7.9).
+    if (!(await stillLive(deps, identity, input.lease))) {
+      // Nothing was invoked, so the `sending` mark above now MISSTATES the row
+      // (`requests: 0`). Undo it under an identity fence — this is exactly the
+      // path where a liveness fence would be false — so the attempt does not sit
+      // in the RL-12 adopt-only state with no request behind it. A lost race
+      // leaves `sending` in place, which stays conservative: recovery then adopts
+      // rather than creating again.
+      await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
+      return refused("lease expired before the create request");
+    }
+    // …and the publication lease of this action, on the same last line.
+    if (!(await fence.verify())) {
+      await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
+      return refused(`publication lease ${fence.actionKey} lapsed before the create request`);
+    }
+    const { scope } = identity;
+    const attempted = await sendRequests(
+      client.client.rest.checks.create({
+        owner: scope.owner,
+        repo: scope.repo,
+        name: CHECK_NAME,
+        head_sha: identity.headSha,
+        external_id: identity.externalId,
+        status: "queued",
+      }),
+    );
+    if ("failure" in attempted.outcome) {
+      if (attempted.sent === 0) {
+        // The transport refused BEFORE dispatch (a typed pre-dispatch marker), so
+        // the `sending` mark above now MISSTATES the row: nothing left the
+        // process. Undo it under the identity fence — this is exactly the path
+        // where a liveness fence would be false — so the attempt does not sit in
+        // the RL-12 adopt-only state with no request behind it. A lost race
+        // leaves `sending` in place, which stays conservative.
+        await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
+      }
+      return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check create") };
+    }
+    const remote = toCheckRemote(attempted.outcome.data);
+    // A malformed or foreign response is still a REQUEST: the run may exist on
+    // GitHub, so recovery must adopt rather than create again.
+    if (remote === null) {
+      return { kind: "unavailable", requests: attempted.sent, reason: "check create returned a malformed payload" };
+    }
+    if (!remoteBelongsTo(remote, identity)) {
+      return { kind: "unavailable", requests: attempted.sent, reason: "check create response does not match this attempt identity" };
+    }
+    return { kind: "ready", remote };
+  } finally {
+    // The create either settled or is handed to recovery; either way this
+    // acquisition is spent and the action must be claimable again.
+    await fence.release();
   }
-  const remote = toCheckRemote(attempted.outcome.data);
-  // A malformed or foreign response is still a REQUEST: the run may exist on
-  // GitHub, so recovery must adopt rather than create again.
-  if (remote === null) {
-    return { kind: "unavailable", requests: attempted.sent, reason: "check create returned a malformed payload" };
-  }
-  if (!remoteBelongsTo(remote, identity)) {
-    return { kind: "unavailable", requests: attempted.sent, reason: "check create response does not match this attempt identity" };
-  }
-  return { kind: "ready", remote };
 }
 
 /**
@@ -668,9 +701,9 @@ async function adoptCheckRunWith(
  * Terminalize an owned run with a frozen conclusion (spec §7.9 "Desired versus
  * observed"): prove persisted ownership of the lease AND of `checkRunId`,
  * require the persisted terminal intent to agree with what is being sent (the
- * store freezes `desired` BEFORE any update), then validate the response's
- * identity and terminal state. Only a validated response lets the caller
- * advance `observed`.
+ * store freezes `desired` BEFORE any update), take the publication lease of
+ * THIS action, then validate the response's identity and terminal state. Only
+ * a validated response lets the caller advance `observed`.
  */
 async function completeCheckWith(
   deps: ChecksDeps,
@@ -697,20 +730,59 @@ async function completeCheckWith(
   // mutates or enlarges the text between freezing the intent and completing the
   // run therefore cannot diverge from what was bounded and stored — and cannot
   // push an oversized/unredacted title into the public Check surface.
-  const frozen = {
-    desired: owned.data.desired as CheckConclusion["desired"],
-    title: owned.data.desiredTitle,
-    summary: owned.data.desiredSummary,
-  };
-  if (frozen.title === null || frozen.summary === null) {
+  const frozenTitle = owned.data.desiredTitle;
+  const frozenSummary = owned.data.desiredSummary;
+  if (frozenTitle === null || frozenSummary === null) {
     return refused("persisted terminal intent carries no frozen title/summary");
   }
+  const frozen = {
+    desired: owned.data.desired as CheckConclusion["desired"],
+    title: frozenTitle,
+    summary: frozenSummary,
+  };
   if (frozen.desired !== input.conclusion.desired) {
     return refused("conclusion does not match the persisted terminal intent");
   }
   if (owned.data.checkRunId !== input.checkRunId) {
     return refused("check run id is not the one this attempt persisted");
   }
+  // §7.9: the PUBLICATION lease of this action, taken before the token mint so
+  // the 120 s window covers the whole bounded send. A live holder — of a send
+  // or of the same action's recovery — refuses this one instead of being
+  // bypassed, and the request below is never issued.
+  const opened = await openPublicationFence(deps, {
+    attemptId: identity.attemptId,
+    actionKey: PUBLICATION_ACTION_CHECK_COMPLETE,
+    holder: input.lease.holder,
+  });
+  if ("reason" in opened) return refused(opened.reason);
+  const fence = opened.fence;
+  try {
+    return await terminalUpdate(deps, fence, identity, input, frozen);
+  } finally {
+    // Settlement or handoff: either way this acquisition is spent, and the
+    // action must be claimable again (recovery reconciles what was sent).
+    await fence.release();
+  }
+}
+
+/**
+ * The terminal update itself, under an acquired publication fence: the request
+ * is issued only after the fence is re-proved on a FRESH clock, because the
+ * client resolution here mints a token and awaits the network.
+ */
+async function terminalUpdate(
+  deps: ChecksDeps,
+  fence: PublicationFence,
+  identity: CheckIdentity,
+  input: {
+    lease: Lease;
+    checkRunId: number;
+    conclusion: CheckConclusion;
+    updateBudgetMs?: number;
+  },
+  frozen: { desired: CheckConclusion["desired"]; title: string; summary: string },
+): Promise<{ kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string; requests: number }> {
   const resolvedClient = await clientFor(deps, identity.scope);
   if ("reason" in resolvedClient) return refused(resolvedClient.reason);
   const client = resolvedClient.client;
@@ -722,6 +794,18 @@ async function completeCheckWith(
   // terminalize a remote run (spec §7.9).
   if (!(await stillLive(deps, identity, input.lease))) {
     return refused("lease expired before the update request");
+  }
+  // …and the same proof for the PUBLICATION lease: a lapsed or superseded one
+  // refuses the send here, on the last line before the request.
+  if (!(await fence.verify())) {
+    return refused(`publication lease ${fence.actionKey} lapsed before the update request`);
+  }
+  // §7.9a: the DISPATCH INTENT is durable before anything leaves. From here the
+  // outcome is unknown, so this action may only be discovered — a lane that
+  // finds the intent set (a lost reply, a fresh recovery claim) must read the
+  // run back instead of sending the same update twice.
+  if (!(await recordTerminalDispatch(deps.db, identity.attemptId, input.lease, deps.nowMs()))) {
+    return refused("a terminal update for this attempt was already dispatched — reconcile it by readback");
   }
   const { scope } = identity;
   // Typed as the TERMINAL pair: status and conclusion are required together, so
@@ -745,6 +829,12 @@ async function completeCheckWith(
     "check update",
   );
   if ("failure" in attempted.outcome) {
+    // A refusal PROVEN zero-dispatched (a typed pre-send marker) means nothing
+    // left the Worker, so the intent above would misstate the row: clear it and
+    // the next pass may send the same frozen intent.
+    if (attempted.sent === 0) {
+      await clearTerminalDispatch(deps.db, identity.attemptId, input.lease, deps.nowMs());
+    }
     return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check update") };
   }
   const remote = toCheckRemote(attempted.outcome.data);
@@ -803,35 +893,52 @@ async function markInProgressWith(
   if (runId === null) return { kind: "settled", promoted: false };
   const { scope } = owned.data.identity;
   const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
-  const send = (async (): Promise<boolean> => {
-    const resolvedClient = await clientFor(deps, scope);
-    if ("reason" in resolvedClient) return false;
-    const client = resolvedClient.client;
-    if (!hasChecksMethod(client, "update")) return false;
-    // Same fresh live-lease proof as the terminal send: token minting can cross
-    // `lease.untilMs`, and an expired holder must not speak for the run.
-    if (!(await stillLive(deps, owned.data.identity, input.lease))) return false;
-    await client.rest.checks.update({
-      owner: scope.owner,
-      repo: scope.repo,
-      check_run_id: runId,
-      status: "in_progress",
-      output: { title: CHECK_NAME, summary: input.summary },
-    });
-    return true;
-  })();
-  const attempted = await sendRequestsWithin(send, budgetMs, "check in-progress");
-  if (!attempted.settled) {
-    // The PATCH may still be in flight: report that honestly so the caller
-    // does not write a terminal state it could be overtaken by.
-    input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
-    return { kind: "abandoned" };
+  // §7.9: this PATCH is a GitHub mutation, so it needs the action's publication
+  // lease, not the attempt's execution lease alone. A refusal is silent, like
+  // every other pre-send refusal on this lane: the run simply is not promoted.
+  const opened = await openPublicationFence(deps, {
+    attemptId: owned.data.identity.attemptId,
+    actionKey: PUBLICATION_ACTION_CHECK_IN_PROGRESS,
+    holder: input.lease.holder,
+  });
+  if ("reason" in opened) return { kind: "settled", promoted: false };
+  const fence = opened.fence;
+  try {
+    const send = (async (): Promise<boolean> => {
+      const resolvedClient = await clientFor(deps, scope);
+      if ("reason" in resolvedClient) return false;
+      const client = resolvedClient.client;
+      if (!hasChecksMethod(client, "update")) return false;
+      // Same fresh live-lease proof as the terminal send: token minting can cross
+      // `lease.untilMs`, and an expired holder must not speak for the run.
+      if (!(await stillLive(deps, owned.data.identity, input.lease))) return false;
+      // …and the publication lease, re-proved on the last line before the PATCH.
+      if (!(await fence.verify())) return false;
+      await client.rest.checks.update({
+        owner: scope.owner,
+        repo: scope.repo,
+        check_run_id: runId,
+        status: "in_progress",
+        output: { title: CHECK_NAME, summary: input.summary },
+      });
+      return true;
+    })();
+    const attempted = await sendRequestsWithin(send, budgetMs, "check in-progress");
+    if (!attempted.settled) {
+      // The PATCH may still be in flight: report that honestly so the caller
+      // does not write a terminal state it could be overtaken by.
+      input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
+      return { kind: "abandoned" };
+    }
+    if (typeof attempted.outcome !== "boolean") {
+      input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
+      return { kind: "settled", promoted: false };
+    }
+    return { kind: "settled", promoted: attempted.outcome };
+  } finally {
+    // Settled or handed off — never left held by a caller that has moved on.
+    await fence.release();
   }
-  if (typeof attempted.outcome !== "boolean") {
-    input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
-    return { kind: "settled", promoted: false };
-  }
-  return { kind: "settled", promoted: attempted.outcome };
 }
 
 /**
@@ -851,6 +958,10 @@ async function markQueuedBehindInflightWith(
   deps: ChecksDeps,
   input: {
     scope: Scope;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    attachDeliveryId?: string;
     checkRunId: number;
     summary: string;
     updateBudgetMs?: number;
@@ -859,19 +970,83 @@ async function markQueuedBehindInflightWith(
 ): Promise<boolean> {
   const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
   const send = (async (): Promise<boolean> => {
+    // Resolve the client FIRST: it is the slow step, and the authority below
+    // must be re-established after it, not before.
     const resolvedClient = await clientFor(deps, input.scope);
     if ("reason" in resolvedClient) return false;
     const client = resolvedClient.client;
     if (!hasChecksMethod(client, "update")) return false;
-    await client.rest.checks.update({
-      owner: input.scope.owner,
-      repo: input.scope.repo,
-      check_run_id: input.checkRunId,
-      output: { title: CHECK_NAME, summary: input.summary },
+    // The authority at the dispatch: the SAME conditional write that selected
+    // this row (`desired = 'in_progress'`, non-terminal, own/released holder)
+    // run again on a fresh clock. A different holder that froze the intent or
+    // terminalized the run meanwhile makes it select nothing, and no PATCH is
+    // issued — the write is conditional on the predicate, not a read beside it.
+    const relabeled = await markCheckQueuedBehindInflight(deps.db, {
+      scope: input.scope,
+      headSha: input.headSha,
+      triggeredBy: input.triggeredBy,
+      action: input.action,
+      attachDeliveryId: input.attachDeliveryId,
+      title: CHECK_NAME,
+      summary: input.summary,
+      nowMs: deps.nowMs(),
     });
-    return true;
+    if (relabeled === null || relabeled.checkRunId !== input.checkRunId) return false;
+    // This PATCH writes the run's OUTPUT — the same surface the terminal send
+    // owns — so it takes that action's publication lease rather than assuming
+    // the row's eligibility is authority. A released Check an adopter may have
+    // claimed is exactly what the local write cannot see; while this lease is
+    // held, no newer Check output can be published underneath the PATCH.
+    const opened = await openPublicationFence(deps, {
+      attemptId: relabeled.id,
+      actionKey: PUBLICATION_ACTION_CHECK_COMPLETE,
+      holder: `check-relabel:${input.attachDeliveryId ?? relabeled.id}`,
+    });
+    if ("reason" in opened) return false;
+    const fence = opened.fence;
+    try {
+      // Re-proved on the last line before the request: the client resolution
+      // and the relabel both awaited past the acquisition.
+      if (!(await fence.verify())) return false;
+      // The ELIGIBILITY is re-read UNDER the lease. The local relabel proved it
+      // before acquisition, so a Check that concluded since would otherwise be
+      // overwritten with queued copy: the terminal send needs this same key, so
+      // while the lease is held nothing newer can be dispatched — and this read
+      // refuses the row that is already settled.
+      const current = await getCheckAttempt(deps.db, relabeled.id);
+      if (
+        current === null ||
+        current.terminalMs !== null ||
+        current.desired !== "in_progress" ||
+        current.checkRunId !== input.checkRunId
+      ) {
+        return false;
+      }
+      // The lease can lapse between that read and the request, and a lapsed
+      // lease is no authority: prove it once more ON the line that dispatches,
+      // the same shape the comment send uses for its last-line proof.
+      if (!(await fence.verify())) return false;
+      await client.rest.checks.update({
+        owner: input.scope.owner,
+        repo: input.scope.repo,
+        check_run_id: input.checkRunId,
+        output: { title: CHECK_NAME, summary: input.summary },
+      });
+      return true;
+    } finally {
+      // A PATCH that never answers never reaches this line, so the lease stays
+      // held to its own expiry and no adopter can publish over it meanwhile.
+      await fence.release();
+    }
   })();
-  const outcome = (await sendRequestsWithin(send, budgetMs, "held check relabel")).outcome;
+  const attempted = await sendRequestsWithin(send, budgetMs, "held check relabel");
+  if (!attempted.settled) {
+    // The PATCH may still be in flight — report that honestly, as the
+    // promotion lane does, instead of a relabel that may be overtaken.
+    input.warn(surfaceFailure(attempted.outcome.failure, "held check relabel"));
+    return false;
+  }
+  const outcome = attempted.outcome;
   if (typeof outcome !== "boolean") {
     input.warn(surfaceFailure(outcome.failure, "held check relabel"));
     return false;
@@ -1071,6 +1246,115 @@ function httpStatus(error: unknown): number | null {
 function safeDetail(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return redactSecrets(message).replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
+// ---------------------------------------------------------------------------
+// §7.9 publication lease — the right to perform ONE GitHub mutation
+// ---------------------------------------------------------------------------
+
+/** The §7.9 action key of the terminal Check update on one attempt. */
+export const PUBLICATION_ACTION_CHECK_COMPLETE = "check:complete";
+/** The §7.9 action key of the `in_progress` promotion on one attempt. */
+export const PUBLICATION_ACTION_CHECK_IN_PROGRESS = "check:in-progress";
+/** The §7.9 action key of the run CREATE on one attempt. */
+export const PUBLICATION_ACTION_CHECK_CREATE = "check:create";
+
+/**
+ * Authority to perform ONE GitHub mutation: the publication-lease row this
+ * sender took for its action (spec §7.9). It is NOT the attempt's execution
+ * lease — that one proves who may drive the attempt, this one proves who may
+ * send right now, and a holder may have either without the other.
+ */
+export type PublicationFence = {
+  actionKey: string;
+  /**
+   * Re-prove the EXACT acquired row on a fresh clock, immediately before the
+   * request. False means this sender no longer has the action: the row lapsed,
+   * or a newer epoch took it — either way nothing may be sent. Never throws:
+   * an unprovable lease is not an authorised send.
+   */
+  verify(): Promise<boolean>;
+  /**
+   * Hand the action back when this acquisition settles (sent, refused or
+   * possibly-sent). Clears holder + expiry under this epoch only, so a late
+   * release cannot clear a newer acquisition. Never throws: an unreleased row
+   * lapses at its own expiry, and the send's own outcome is the truth.
+   */
+  release(): Promise<boolean>;
+};
+
+/**
+ * Take the publication lease of one action for a SEND (spec §7.9): `mode` is
+ * `send`, the key is the mutation (`check:complete`, `comment:<id>`), and a
+ * live holder of the same key — send OR recovery — refuses this acquisition
+ * instead of being bypassed. A store fault is a refusal too: an unreadable
+ * lease is not publication authority.
+ */
+export async function openPublicationFence(
+  deps: { db: D1Like; nowMs: () => number },
+  input: { attemptId: string; actionKey: string; holder: string },
+): Promise<{ fence: PublicationFence } | { reason: string }> {
+  // The key's `attempt_id` is a `review_checks.id`, NEVER a container or
+  // execution identity: a lease taken under anything else can never contend
+  // with this attempt's own sends or with recovery, so the identity is proved
+  // BEFORE the row is written instead of fencing a phantom key.
+  try {
+    if ((await getCheckAttempt(deps.db, input.attemptId)) === null) {
+      return { reason: `${input.actionKey}: ${input.attemptId} is not a Check attempt — no publication authority` };
+    }
+  } catch (error) {
+    return { reason: `publication lease for ${input.actionKey} unreadable: ${safeDetail(error)}` };
+  }
+  let lease: Lease | null;
+  try {
+    lease = await claimPublicationLease(deps.db, {
+      attemptId: input.attemptId,
+      actionKey: input.actionKey,
+      holder: input.holder,
+      mode: "send",
+      nowMs: deps.nowMs(),
+    });
+  } catch (error) {
+    return { reason: `publication lease for ${input.actionKey} unreadable: ${safeDetail(error)}` };
+  }
+  if (lease === null) {
+    return { reason: `publication lease for ${input.actionKey} is held by another holder` };
+  }
+  const held = lease;
+  return {
+    fence: {
+      actionKey: input.actionKey,
+      async verify() {
+        try {
+          const row = await deps.db
+            .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM publication_leases WHERE attempt_id = ? AND action_key = ?`)
+            .bind(input.attemptId, input.actionKey)
+            .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
+          return (
+            row !== null &&
+            row.holder === input.holder &&
+            row.lease_epoch === held.epoch &&
+            row.lease_until_ms === held.untilMs &&
+            deps.nowMs() < held.untilMs
+          );
+        } catch {
+          return false;
+        }
+      },
+      async release() {
+        try {
+          return await releasePublicationLease(deps.db, {
+            attemptId: input.attemptId,
+            actionKey: input.actionKey,
+            lease: held,
+            nowMs: deps.nowMs(),
+          });
+        } catch {
+          return false;
+        }
+      },
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2354,25 +2638,34 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     },
 
     async markQueuedBehindInflight(input) {
-      const nowMs = deps.nowMs();
-      const checkRunId = await markCheckQueuedBehindInflight(deps.db, {
+      // The row is selected here and the SAME conditional write runs again in
+      // the adapter on the dispatching line — the client resolution between them
+      // is an unbounded await, and a relabel must never land on a row another
+      // holder froze or terminalized meanwhile.
+      const selectRelabelable = () =>
+        markCheckQueuedBehindInflight(deps.db, {
+          scope: input.scope,
+          headSha: input.headSha,
+          triggeredBy: input.triggeredBy,
+          action: input.action,
+          attachDeliveryId: input.attachDeliveryId,
+          title: CHECK_NAME,
+          summary: input.summary,
+          nowMs: deps.nowMs(),
+        });
+      const relabeled = await selectRelabelable();
+      // No own attach row (another delivery owns the key), a row that is no
+      // longer running, or no remote run: nothing to label.
+      if (relabeled === null) return false;
+      const adapter = deps.getAdapter(input.scope);
+      if (adapter === null) return false;
+      const sent = await adapter.markQueuedBehindInflight?.({
         scope: input.scope,
         headSha: input.headSha,
         triggeredBy: input.triggeredBy,
         action: input.action,
         attachDeliveryId: input.attachDeliveryId,
-        title: CHECK_NAME,
-        summary: input.summary,
-        nowMs,
-      });
-      // No own attach row (another delivery owns the key), a row that is no
-      // longer running, or no remote run: nothing to label.
-      if (checkRunId === null) return false;
-      const adapter = deps.getAdapter(input.scope);
-      if (adapter === null) return false;
-      const sent = await adapter.markQueuedBehindInflight?.({
-        scope: input.scope,
-        checkRunId,
+        checkRunId: relabeled.checkRunId,
         summary: input.summary,
         updateBudgetMs: input.updateBudgetMs,
         warn: input.warn,
@@ -2495,9 +2788,15 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       });
       if (completed.kind === "completed") {
         // `observed` advances ONLY from this validated response (spec §7.9),
-        // under a fence re-read for this mutation.
+        // under a fence re-read for this mutation. A conclusion derived WITHOUT
+        // a proof leaves the record revisable exactly once when it links the
+        // publication that can still contradict it (`reopenTerminalCorrection`);
+        // the store applies that mark only to a linked row. Every proof-derived
+        // conclusion is final.
         const observedFence = fenceFor(handle.lease);
-        await recordCheckObservation(deps.db, attemptId, observedFence.lease, completed.remote, observedFence.nowMs);
+        await recordCheckObservation(deps.db, attemptId, observedFence.lease, completed.remote, observedFence.nowMs, {
+          conclusionUnproven: proof === null,
+        });
         return;
       }
       // Unavailable/unconfirmed: recovery status, error and backoff only —
@@ -2541,6 +2840,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // predicate is part of the UPDATE, so a concurrent terminalize's
       // proof-derived conclusion and its exact summary survive this write.
       await setCheckFallbackDesired(deps.db, handle.attemptId, fence.lease, conclusion, fence.nowMs);
+      // The dispatch intent is NOT cleared here. The abandoned send may already
+      // have landed, and a give-up is a statement about the WAIT, not about what
+      // GitHub received: recovery reconciles by readback and never re-sends
+      // (§7.9a). A give-up that cleared it would be the resend path the rule
+      // forbids.
       // Released on BOTH branches — an already-frozen intent is sent by
       // recovery exactly as it stands. `requestsSpent: true` keeps the row
       // `remote-unconfirmed`, so recovery ADOPTS the run the interrupted

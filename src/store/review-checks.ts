@@ -1172,6 +1172,56 @@ export async function releaseCheckClaim(
 }
 
 /**
+ * Renew the EXECUTION lease under the same fence the claim established
+ * (spec §7.9). Renewal moves only the lease window — `lease_until_ms` is
+ * re-stamped to a fresh `CHECK_LEASE_MS` window, never shortened, and CAPPED by
+ * the immutable `execution_deadline_ms`, which this statement never writes: a
+ * renewal can never extend the attempt's absolute hard stop. The epoch does not
+ * move either, because renewal is the same holder keeping what it already holds,
+ * not a takeover. The returned lease is the one every later fenced write must
+ * carry (the fence matches the exact triple); `null` means this is no longer
+ * the live lease, and nothing was written.
+ *
+ * Nothing here concerns publication: the publication lease is a different row,
+ * taken and released around one mutation, and neither lease may decide the
+ * other's liveness.
+ */
+export async function renewCheckLease(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<Lease | null> {
+  const renewed = await db
+    .prepare(
+      `UPDATE review_checks
+          SET lease_until_ms = MAX(lease_until_ms, MIN(?, execution_deadline_ms)), updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND lease_until_ms > ? AND ${NONTERMINAL_WHERE}
+        RETURNING holder, lease_epoch, lease_until_ms`,
+    )
+    .bind(nowMs + CHECK_LEASE_MS, nowMs, id, lease.holder, lease.epoch, lease.untilMs, nowMs)
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  // The row THIS statement wrote — no second read can hand back a later
+  // acquisition — and it must still be the fence it was given: the epoch is
+  // unchanged (renewal is not takeover), and the window is either the old one
+  // or one fresh cap, never shorter. Anything else (including zero rows, i.e. a
+  // takeover bumped the epoch or the lease lapsed) is a refusal.
+  const written = renewed.results[0];
+  if (
+    written === undefined ||
+    written.holder !== lease.holder ||
+    written.lease_epoch !== lease.epoch ||
+    written.lease_until_ms === null ||
+    written.lease_until_ms < lease.untilMs ||
+    (written.lease_until_ms !== lease.untilMs && written.lease_until_ms > nowMs + CHECK_LEASE_MS)
+  ) {
+    return null;
+  }
+  return { holder: written.holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
+}
+
+/**
  * Release a successfully ATTACHED attempt with a due time (spec §7.9): the
  * admitted message adopts the row immediately (adoption ignores
  * `next_attempt_ms`), while the recovery lane may take it once the grace has
@@ -1358,6 +1408,66 @@ export async function setCheckCreateState(
 }
 
 /**
+ * Record that a terminal update is ABOUT to be sent (migration 0089, §7.9a).
+ *
+ * Written in the same fenced statement that holds the attempt, immediately
+ * before the request: from this instant the outcome is UNKNOWN, so no lane may
+ * send this action again — a second send could double a request the first one
+ * already landed. Only readback may resolve it. Cleared by a validated response
+ * (`recordCheckObservation`, the dispatch resolved) or by a refusal PROVEN
+ * pre-send (`clearTerminalDispatch`, nothing left the Worker).
+ *
+ * The intent deliberately outlives `terminal_ms`: the late correction re-sends
+ * on a terminal row once — and only once — because its own dispatch resolved
+ * and cleared the mark.
+ */
+export async function recordTerminalDispatch(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET terminal_dispatch_ms = ?, updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND terminal_dispatch_ms IS NULL`,
+    )
+    .bind(nowMs, nowMs, id, lease.holder, lease.epoch, lease.untilMs)
+    .run();
+  return result.meta.changes === 1;
+}
+
+/** Clear the dispatch intent after a refusal PROVEN not to have left the Worker. */
+export async function clearTerminalDispatch(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET terminal_dispatch_ms = NULL, updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND terminal_dispatch_ms IS NOT NULL`,
+    )
+    .bind(nowMs, id, lease.holder, lease.epoch, lease.untilMs)
+    .run();
+  return result.meta.changes === 1;
+}
+
+/** The attempt's dispatch intent, or null when no terminal update was sent. */
+export async function readTerminalDispatch(db: D1Like, id: string): Promise<number | null> {
+  const row = await db
+    .prepare(`SELECT terminal_dispatch_ms FROM review_checks WHERE id = ?`)
+    .bind(id)
+    .first<{ terminal_dispatch_ms: number | null }>();
+  return row?.terminal_dispatch_ms ?? null;
+}
+
+/**
  * Undo a `sending` mark for a create that provably NEVER dispatched (spec §7.9
  * / RL-12 together with the `requests: 0` contract).
  *
@@ -1468,10 +1578,15 @@ export async function setCheckDesired(
     db,
     id,
     lease,
+    // A CHANGED frozen intent supersedes the previous dispatch: the mark it
+    // left described other text, so the corrected conclusion may be sent once
+    // (spec §7.9a's late correction). An unchanged intent keeps the mark, so
+    // re-running it can never send the same update twice.
     `desired = ?, desired_title = ?, desired_summary = ?, terminal_failure_status = ?,
             publication_id = COALESCE(?, publication_id),
+            terminal_dispatch_ms = CASE WHEN desired = ? AND desired_summary = ? THEN terminal_dispatch_ms ELSE NULL END,
             recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
-    [conclusion.desired, title, summary, conclusion.failureStatus ?? null, publicationId],
+    [conclusion.desired, title, summary, conclusion.failureStatus ?? null, publicationId, conclusion.desired, summary],
     nowMs,
   );
 }
@@ -1531,8 +1646,9 @@ export async function setCheckFallbackDesired(
  * hands, or whose intent another lane froze between the read and the write is
  * left alone.
  *
- * Returns the attached run id — the caller then sends exactly one
- * `checks.update` — or null when there was nothing to label.
+ * Returns the relabelled row — its id is the key of the publication lease the
+ * caller must take before the PATCH, and the run id is the target — or null
+ * when there was nothing to label.
  */
 export async function markCheckQueuedBehindInflight(
   db: D1Like,
@@ -1547,7 +1663,7 @@ export async function markCheckQueuedBehindInflight(
     summary: string;
     nowMs: number;
   },
-): Promise<number | null> {
+): Promise<{ id: string; checkRunId: number } | null> {
   if (input.attachDeliveryId === undefined || input.attachDeliveryId.length === 0) return null;
   const key = attemptKey({
     appId: input.scope.appId,
@@ -1577,12 +1693,12 @@ export async function markCheckQueuedBehindInflight(
           AND (holder IS NULL OR holder = 'delivery:' || ?)`;
   const candidate = await db
     .prepare(
-      `SELECT check_run_id FROM review_checks
+      `SELECT id, check_run_id FROM review_checks
          WHERE attempt_key = ? AND attach_delivery_id = ? AND ${relabelable}
          ORDER BY generation DESC LIMIT 1`,
     )
     .bind(key, input.attachDeliveryId, input.attachDeliveryId)
-    .first<{ check_run_id: number }>();
+    .first<{ id: string; check_run_id: number }>();
   if (candidate === null) return null;
   const relabeled = await db
     .prepare(
@@ -1598,7 +1714,7 @@ export async function markCheckQueuedBehindInflight(
       input.attachDeliveryId,
     )
     .run();
-  return relabeled.meta.changes === 1 ? candidate.check_run_id : null;
+  return relabeled.meta.changes === 1 ? { id: candidate.id, checkRunId: candidate.check_run_id } : null;
 }
 
 /**
@@ -1660,6 +1776,16 @@ export async function recordCheckObservation(
   lease: Lease,
   remote: CheckRemote,
   nowMs: CheckClock,
+  /**
+   * The update this response validates carried a conclusion derived WITHOUT a
+   * publication proof. The Check is still terminal — the send landed — but the
+   * record asserts an UNCONFIRMED outcome, which the publication it links may
+   * later contradict (§7.9a). Such a row is closed `remote-unconfirmed`
+   * instead of `done`, which is the durable mark `reopenTerminalCorrection`
+   * consumes exactly once; every other agreeing response closes `done`. A row
+   * with no linked publication is never marked: nothing could ever correct it.
+   */
+  options?: { conclusionUnproven?: boolean },
 ): Promise<boolean> {
   const owned = await getCheckOwnership(db, id, lease, nowMs);
   if (owned === null) return false;
@@ -1680,6 +1806,8 @@ export async function recordCheckObservation(
   if (running && owned.observed !== "unknown") return false;
 
   const observed: CheckObserved = agrees ? (owned.desired as Exclude<CheckDesired, "in_progress">) : "in_progress";
+  const unproven =
+    agrees && options?.conclusionUnproven === true && owned.publicationId !== null;
   return runFenced(
     db,
     id,
@@ -1687,21 +1815,115 @@ export async function recordCheckObservation(
     `observed = ?,
             check_run_id = COALESCE(check_run_id, ?),
             create_state = CASE WHEN check_run_id IS NULL THEN 'known' ELSE create_state END,
-            recovery_state = CASE WHEN ? THEN 'done' ELSE recovery_state END,
+            recovery_state = CASE WHEN ? THEN 'done' WHEN ? THEN 'remote-unconfirmed' ELSE recovery_state END,
             terminal_ms = CASE WHEN ? THEN ? ELSE terminal_ms END,
+            terminal_dispatch_ms = CASE WHEN ? THEN NULL ELSE terminal_dispatch_ms END,
             next_attempt_ms = CASE WHEN ? THEN NULL ELSE next_attempt_ms END,
             last_error = CASE WHEN ? THEN NULL ELSE last_error END`,
     [
       observed,
       remote.id,
-      agrees ? 1 : 0,
+      agrees && !unproven ? 1 : 0,
+      unproven ? 1 : 0,
       agrees ? 1 : 0,
       nowMs ?? lease.untilMs,
+      // The dispatch intent clears only when THIS observation is the terminal
+      // it dispatched: a mere `running` read proves nothing about the request.
+      agrees ? 1 : 0,
       agrees ? 1 : 0,
       agrees ? 1 : 0,
     ],
     nowMs,
   );
+}
+
+/**
+ * The §7.9a correction's PRECONDITION beyond the row's own marker shape — and
+ * the ONE text that decides both "is it correctable now?" (the batch's
+ * ordering class) and "may it be reopened?" (the transition's WHERE clause).
+ * Sharing the fragment is the point: a weaker ordering predicate would put a
+ * record at the head of every batch that the transition refuses every time,
+ * where it could only starve the work it waits on.
+ *
+ * It states, from the row's own columns:
+ *  - the linked publication carries a READABLE proof of itself — exactly what
+ *    the lane's proof read needs to answer `read` (`proof_json` present, valid
+ *    JSON, and its embedded id is that publication);
+ *  - no newer unfinished generation of the same key owns the live Check;
+ *  - the App pair is usable as far as D1 can tell (the §7.6 routing gate the
+ *    lane applies before it reopens anything).
+ *
+ * Placeholder-free by design, so it can be interpolated into a `WHERE` and an
+ * `ORDER BY` alike.
+ */
+const CORRECTABLE_NOW_SQL = `EXISTS (
+            SELECT 1 FROM review_publications pub
+             WHERE pub.id = review_checks.publication_id
+               AND pub.proof_json IS NOT NULL
+               AND json_valid(pub.proof_json)
+               AND json_extract(pub.proof_json, '$.publicationId') = review_checks.publication_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM review_checks n
+             WHERE n.attempt_key = review_checks.attempt_key
+               AND n.${NONTERMINAL_WHERE}
+               AND n.generation > review_checks.generation
+          )
+          AND EXISTS (
+            SELECT 1 FROM bot_installations ai
+              JOIN review_bots ga ON ga.id = ai.bot_id
+             WHERE ai.bot_id = review_checks.bot_id
+               AND ai.installation_id = review_checks.installation_id
+               AND ga.status = 'active' AND ga.deleted_at IS NULL
+          )`;
+
+/**
+ * Reopen a TERMINAL unconfirmed failure for its own publication's confirmed
+ * outcome — the one revision a terminal Check record permits (spec §7.9a: the
+ * record asserts an outcome; evidence that contradicts it means the record is
+ * not proof).
+ *
+ * The row is only reachable through the shape `recordCheckObservation` writes
+ * for a proof-free update (`recovery_state = 'remote-unconfirmed'` while
+ * terminal). Reopening CLEARS that mark in the same statement, so the
+ * revision is available exactly once: the guard is the write's own predicate,
+ * never a read-then-write in the caller. It also clears the finished lease,
+ * because the consumer that terminalized the row is gone and the correction
+ * must be immediately claimable.
+ *
+ * `publicationId` must be the row's OWN link, and that linked row must CARRY a
+ * proof (the same test the store's proof reader applies). The caller reads it
+ * through the link first, so this guard binds the revision to that exact
+ * publication's confirmed outcome (spec §7.9a conditions 1-3): a different
+ * publication's confirmation, an unlinked unconfirmed row, or a link still
+ * without proof all match nothing. `attempts` resets because the revision is a
+ * new obligation carrying new evidence, not another try of the failed one; its
+ * own sends are then bounded by the ordinary recovery cap.
+ *
+ * `false` means the row is no longer that shape — already reopened (a second
+ * caller, or a second confirmation), already corrected, or never marked.
+ */
+export async function reopenTerminalCorrection(
+  db: D1Like,
+  id: string,
+  publicationId: string,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET terminal_ms = NULL, recovery_state = 'pending', attempts = 0,
+              next_attempt_ms = NULL, last_error = NULL, holder = NULL,
+              lease_until_ms = NULL, updated_ms = ?
+        WHERE id = ? AND terminal_ms IS NOT NULL
+          AND recovery_state = 'remote-unconfirmed'
+          AND desired = 'failure' AND observed = 'failure'
+          AND publication_id = ?
+          AND ${CORRECTABLE_NOW_SQL}`,
+    )
+    .bind(nowMs, id, publicationId)
+    .run();
+  return result.meta.changes === 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1991,9 +2213,38 @@ export async function listCheckReconcileBatch(
   const { results } = await db
     .prepare(
       `SELECT * FROM review_checks
-        WHERE ${NONTERMINAL_WHERE}
+        WHERE (
+          ${NONTERMINAL_WHERE}
           AND ${CHECK_DUE_PREDICATE}
-        ORDER BY COALESCE(next_attempt_ms,created_ms),id
+        )
+        -- §7.9a late correction: a Check that already reached its terminal
+        -- record as an UNCONFIRMED failure linked to a staged publication owes
+        -- one revision when that publication confirms. No other terminal row is
+        -- selected, and the mark is retained indefinitely: nothing observable
+        -- ever proves a publication will not confirm, so a time bound here
+        -- would silently make a late confirmation unable to correct the record
+        -- (the same platform limit as I-000670). It costs one indexed proof
+        -- read per pass and no writes.
+        OR (
+          terminal_ms IS NOT NULL
+          AND recovery_state = 'remote-unconfirmed'
+          AND desired = 'failure' AND observed = 'failure'
+          AND publication_id IS NOT NULL
+        )
+        -- PARTITION the batch so a mark that cannot be corrected costs a read
+        -- and never displaces work that can. Class 0 is the transition's OWN
+        -- precondition (CORRECTABLE_NOW_SQL), not an approximation of it:
+        -- a record with a valid proof, no newer open generation and an usable
+        -- pair is actionable NOW and comes first; due rows keep their place;
+        -- every other mark (still awaiting proof, corrupt proof, superseded,
+        -- unusable pair) fills only the remainder.
+        ORDER BY
+          CASE
+            WHEN terminal_ms IS NOT NULL AND ${CORRECTABLE_NOW_SQL} THEN 0
+            WHEN terminal_ms IS NULL THEN 1
+            ELSE 2
+          END,
+          COALESCE(next_attempt_ms,created_ms),id
         LIMIT ?`,
     )
     .bind(maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs, limit)

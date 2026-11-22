@@ -157,6 +157,18 @@ export type ReviewSandbox = {
    * own health-check sandbox). Attempt-owned containers use `destroyMarked`.
    */
   destroy(): Promise<void>;
+  /**
+   * Observe, then revoke: ONE critical section answers whether this attempt's
+   * container is running, and revokes the attempt only when it is NOT.
+   *
+   * `{ revoked: true, running: false }` is the fact a successor may take the
+   * attempt's PR on — nothing can act now, and the durable flag stops every
+   * later start. `{ revoked: false, running: true }` is a live holder: nothing
+   * was revoked and the PR must stay where it is (`revoked: false` is the
+   * promise that no authority was taken away from an attempt that can still
+   * act). Absent means the host cannot observe, which is not a stop either.
+   */
+  revoke?(): Promise<{ revoked: boolean; running: boolean }>;
 };
 
 /**
@@ -272,6 +284,9 @@ const MARKER_CLAIM_COMMAND = shellCommand(
 /** The marker is ~60 bytes; a hung read must not hold an attempt's collection. */
 const MARKER_READ_TIMEOUT_MS = 30_000;
 
+/** The DO's durable revocation flag (see `revoke`); read before any start. */
+const REVOKED_KEY = "attempt-revoked";
+
 /** Container image key in `wrangler.jsonc` → `containers[].images`. */
 const CONTAINER_IMAGE_KEY = "sandbox";
 /**
@@ -350,12 +365,21 @@ export class SandboxV1 extends DurableObject {
    * running. `blockConcurrencyWhile` keeps requests behind the re-arm. The
    * request-path guard re-arms it as well (both are idempotent).
    */
+  /**
+   * A revocation outlives an eviction: a restarted DO that forgot it could
+   * start a container for an attempt a successor already owns.
+   */
+  private revoked = false;
+
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     const container = ctx.container;
     if (container?.running) {
       void ctx.blockConcurrencyWhile(() => container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS));
     }
+    void ctx.blockConcurrencyWhile(async () => {
+      this.revoked = (await ctx.storage.get<boolean>(REVOKED_KEY)) === true;
+    });
   }
 
   /** The container bound to this DO (absent only when the binding is misconfigured). */
@@ -373,6 +397,12 @@ export class SandboxV1 extends DurableObject {
    * `start()` is safe to repeat because a deploy restarts the DO.
    */
   private async ensureRunning(container: Container): Promise<void> {
+    // THE revocation gate: every start-permitted call goes through here, so a
+    // revoked attempt cannot provision a container again — not with a replay,
+    // not after an eviction, not with a command queued before the revocation.
+    if (this.revoked) {
+      throw new Error("this attempt was revoked by the successor that took its PR — nothing may start");
+    }
     if (!container.running) {
       const image = container.images[CONTAINER_IMAGE_KEY];
       if (image === undefined) {
@@ -691,6 +721,27 @@ export class SandboxV1 extends DurableObject {
   /** Terminate the container. Ids are never reused (see getSandbox). */
   async destroy(): Promise<void> {
     return this.exclusive(() => this.container.destroy());
+  }
+
+  /**
+   * The successor's takeover fact (spec §7.9): observe, then revoke — both
+   * inside the ONE critical section that also serialises starts, so a start
+   * either completed before this call (`running: true`, nothing revoked, the
+   * successor refuses) or meets the flag on its way in. The answer never
+   * reports a container this DO did not just prove.
+   */
+  async revoke(): Promise<{ revoked: boolean; running: boolean }> {
+    return this.exclusive(async () => {
+      // Observe FIRST. A live container is reported untouched: revoking it
+      // would take away authority from an attempt that can still act, which is
+      // the one limb the successor rule forbids.
+      if (this.ctx.container?.running === true) return { revoked: false, running: true };
+      if (!this.revoked) {
+        this.revoked = true;
+        await this.ctx.storage.put(REVOKED_KEY, true);
+      }
+      return { revoked: true, running: false };
+    });
   }
 }
 

@@ -67,10 +67,12 @@ import {
   markCheckLocalError,
   readPublicationProof,
   readPublishedReview,
+  readTerminalDispatch,
   recordCheckObservation,
   reenableChecksForApps,
   releaseCheckClaim,
   releaseExpiredCheckClaim,
+  reopenTerminalCorrection,
   setCheckDesired,
   suspendCheckForPause,
   suspendCheckRecovery,
@@ -779,9 +781,68 @@ async function reenableProbe(
 }
 
 /**
+ * §7.9a late correction: a Check that was already published as an unconfirmed
+ * failure is revised once when ITS OWN publication later confirms.
+ *
+ * The ordinary publish path freezes the unconfirmed fallback and links the
+ * staged publication, so the Check reaches GitHub saying the outcome is
+ * unknown. When that publication confirms moments later, the record asserts an
+ * outcome the evidence now contradicts — so the record is not proof and must be
+ * correctable. `reopenTerminalCorrection` is the guarded transition: it only
+ * matches a terminal row still marked as an unconfirmed failure and linked to
+ * THIS publication, and it clears that mark in the same statement, so the
+ * revision happens exactly once.
+ *
+ * The proof is read through the row's OWN link first — a confirmation of any
+ * other publication is not evidence about this row — and a pair that D1 cannot
+ * use never reopens a terminal record (the record waits, unmutated, until the
+ * App is healthy again). The reopened row then takes the ordinary path, which
+ * re-decides the conclusion from the proof and sends it on the same owned run.
+ */
+async function reopenTerminalCheck(
+  env: ScheduledEnv,
+  db: D1Like,
+  now: () => number,
+  budget: RunBudget,
+  transport: CheckTransport,
+  credentials: CheckCredentialFactory,
+  credentialCache: Map<string, Promise<CheckCredentialResolution>>,
+  row: CheckAttempt,
+  log: CheckReconcileLog,
+  summary: CheckReconcileSummary,
+  updateBudgetMs: number | undefined,
+): Promise<void> {
+  const attemptId = row.identity.attemptId;
+  const scope = row.identity.scope;
+  // A marked row always carries its link; without one no publication could ever
+  // confirm what this record asserts.
+  const publicationId = row.publicationId;
+  if (publicationId === null) return;
+  const proofRead = await readProof(db, row.identity, publicationId);
+  // Not confirmed yet: the terminal record stands exactly as published, and
+  // this pass writes nothing at all.
+  if (proofRead.kind !== "read") return;
+  if ((await pairUnusableReason(db, scope)) !== null) return;
+  if (!(await reopenTerminalCorrection(db, attemptId, publicationId, now()))) return;
+  log.info(
+    { event: "ops_check_terminal_correction_reopened", attempt_id: attemptId, publication_id: publicationId },
+    "terminal Check reopened for its own publication's confirmed outcome — one revision",
+  );
+  const reopened = await getCheckAttempt(db, attemptId);
+  if (reopened === null) return;
+  await reconcileCheckAttempt(
+    env, db, now, budget, transport, credentials, credentialCache, reopened, log, summary, updateBudgetMs,
+    true,
+  );
+}
+
+/**
  * One due attempt, §7.11.2 steps 1–5 in order. Ownership is only ever granted
  * by `claimCheckRecovery`; everything after it is fenced on that lease, and
  * every exit leaves the row in a state its next run can continue from.
+ *
+ * A TERMINAL row takes the §7.9a late-correction path instead (see
+ * `reopenTerminalCheck`); every other row is nonterminal by construction.
  *
  * Two exits deliberately give the claim BACK (`releaseCheckClaim`) instead of
  * settling the row as a failed attempt, because in neither case did a recovery
@@ -804,9 +865,21 @@ async function reconcileCheckAttempt(
   log: CheckReconcileLog,
   summary: CheckReconcileSummary,
   updateBudgetMs: number | undefined,
+  /**
+   * This call is the second half of a §7.9a late correction: the terminal row
+   * was just reopened from its OWN confirmed publication, so the proof wait is
+   * skipped. The proof exists, and a newer same-head publication's pending
+   * proof must not defer the revision of this row.
+   */
+  correction = false,
 ): Promise<void> {
   const attemptId = row.identity.attemptId;
   const scope = row.identity.scope;
+
+  if (row.terminalMs !== null) {
+    await reopenTerminalCheck(env, db, now, budget, transport, credentials, credentialCache, row, log, summary, updateBudgetMs);
+    return;
+  }
 
   // §7.11.2 step 2a — the publication-proof WAIT, decided BEFORE any credential
   // work: a row that is only waiting must not mint GitHub requests, and it must
@@ -854,7 +927,7 @@ async function reconcileCheckAttempt(
   // settlement's `neutral` (§7.9): that conclusion is final, nothing can
   // correct it and it owes no publication, so waiting for a proof that will
   // never exist would leave the run open for the whole window.
-  if (beforeDeadline && row.desired !== "neutral") {
+  if (!correction && beforeDeadline && row.desired !== "neutral") {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6, §7.11.2
     // step 2): a row whose App is disabled/deleted or whose installation
     // mapping vanished must take the durable suspension path, never loop with
@@ -973,7 +1046,11 @@ async function reconcileCheckAttempt(
   }
 
   // Intent BEFORE any remote update: the persisted row is the only source the
-  // send reads, so the frozen text cannot be swapped after this point.
+  // send reads, so the frozen text cannot be swapped after this point. The wait
+  // attribution is NOT pinned as this attempt's link (an abandoned attempt
+  // keeps its own `publication_id` NULL); a row that already links its own
+  // publication keeps that link, which is what a proof-free conclusion must
+  // stay correctable from (§7.9a).
   await setCheckDesired(db, attemptId, lease, conclusion, proof?.publicationId ?? null, now());
   const intent = await getCheckOwnership(db, attemptId, lease, now());
   if (intent === null) return;
@@ -1173,7 +1250,7 @@ async function reconcileCheckAttempt(
       // frozen intent: an earlier send LANDED and only its reply was lost.
       // Reading it back is reconciliation — re-sending the same text would
       // spend a request to prove what this read already proved.
-      const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary);
+      const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary, proof === null);
       if (recorded === "mismatch") {
         await settleFailedAttempt(
           db, now, attemptsBefore, row, lease,
@@ -1187,6 +1264,31 @@ async function reconcileCheckAttempt(
     // with the right conclusion but carries no — or different — approved text,
     // so the wording never reached the user. Fall through and send the frozen
     // intent to THAT run; a landed update is never replaced by a new one.
+  }
+
+  // §7.9a: an already-DISPATCHED terminal update is discovery, never permission
+  // to send again. The fetch above is the readback; a run that has not reached
+  // the intended state yet does not prove the earlier request failed to land,
+  // and sending the same update twice is exactly the double it would cause.
+  if ((await readTerminalDispatch(db, attemptId)) !== null) {
+    if (beforeDeadline) {
+      // Its outcome may still arrive: wait without spending an attempt.
+      await releaseCheckClaim(db, attemptId, lease, now());
+      log.info(
+        { event: "ops_check_reconcile_dispatch_pending", detail: `attempt=${attemptId}` },
+        "a terminal update was already dispatched — readback only, no second send",
+      );
+      return;
+    }
+    // Past the deadline nothing more can prove it: charge the attempt so the
+    // ladder ends honestly (local-error with the remote id retained) instead of
+    // re-reading forever.
+    await settleFailedAttempt(
+      db, now, attemptsBefore, row, lease,
+      "a terminal update was dispatched and could not be confirmed by readback — never re-sent",
+      log, summary,
+    );
+    return;
   }
 
   const completed = await resolved.adapter.completeCheck({
@@ -1212,7 +1314,7 @@ async function reconcileCheckAttempt(
     await settleFailedAttempt(db, now, attemptsBefore, row, lease, completed.reason, log, summary);
     return;
   }
-  const recorded = await recordTerminal(db, attemptId, lease, completed.remote, frozen, now, summary);
+  const recorded = await recordTerminal(db, attemptId, lease, completed.remote, frozen, now, summary, proof === null);
   if (recorded === "mismatch") {
     await settleFailedAttempt(
       db, now, attemptsBefore, row, lease,
@@ -1228,6 +1330,11 @@ async function reconcileCheckAttempt(
  * row, so an old-epoch response (the row has moved on) writes nothing.
  * Returns `mismatch` when the payload is a different outcome than intended,
  * `lost` when the fence no longer belongs to this invocation.
+ *
+ * `conclusionUnproven` says this send carried a conclusion decided WITHOUT a
+ * publication proof: the record is then published-but-unconfirmed and stays
+ * correctable once by its own publication's confirmation (§7.9a) — the same
+ * mark the consumer's terminalize records.
  */
 async function recordTerminal(
   db: D1Like,
@@ -1237,6 +1344,7 @@ async function recordTerminal(
   frozen: CheckConclusion,
   now: () => number,
   summary: CheckReconcileSummary,
+  conclusionUnproven: boolean,
 ): Promise<"recorded" | "mismatch" | "lost"> {
   // Delivery needs the frozen conclusion AND the frozen text (spec §7.9): a
   // reply whose output is absent or different proves nothing about what the
@@ -1246,7 +1354,7 @@ async function recordTerminal(
     remote.conclusion === frozen.desired &&
     remote.summary === frozen.summary;
   if (!agrees) return "mismatch";
-  const written = await recordCheckObservation(db, attemptId, lease, remote, now());
+  const written = await recordCheckObservation(db, attemptId, lease, remote, now(), { conclusionUnproven });
   if (!written) return "lost";
   // The Check is concluded: clear the attempt row's owed flag so this lane
   // stops selecting it. Bookkeeping only — the conclusion is already durable,

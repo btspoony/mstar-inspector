@@ -120,8 +120,18 @@ function makeContainer(running = false): MarkerContainer {
   return container;
 }
 
+/** The DO's durable storage, as the revocation flag (migration 0089) reads it. */
+function storageDouble() {
+  const durable = new Map<string, unknown>();
+  return { get: async (key: string) => durable.get(key), put: async (key: string, value: unknown) => void durable.set(key, value) };
+}
+
 function makeDo(container: MarkerContainer) {
-  const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
+  const ctx = {
+    container,
+    storage: storageDouble(),
+    blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
+  };
   return new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
 }
 
@@ -132,7 +142,13 @@ function makeSwappableDo(container: MarkerContainer) {
     blockConcurrencyWhile: (fn) => fn(),
   };
   const sandbox = new SandboxV1(
-    { get container() { return ctx.container; }, blockConcurrencyWhile: ctx.blockConcurrencyWhile } as never,
+    {
+      get container() {
+        return ctx.container;
+      },
+      storage: storageDouble(),
+      blockConcurrencyWhile: ctx.blockConcurrencyWhile,
+    } as never,
     {},
   ) as unknown as ReviewSandbox;
   return { sandbox, ctx };

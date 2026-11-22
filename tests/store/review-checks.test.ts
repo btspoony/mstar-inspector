@@ -1305,7 +1305,7 @@ describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
 
-    expect(await queuedAs(db, "mine")).toBe(4242);
+    expect(await queuedAs(db, "mine")).toEqual({ id, checkRunId: 4242 });
     const row = await rawRow(db, id);
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(row.desired_summary).toBe("Queued behind the review in flight for this pull request.");
@@ -2009,7 +2009,7 @@ async function stageProof(
   headSha = SHA,
 ): Promise<PublicationProof> {
   await stagePublication(db, { id: publicationId, payload: payloadFor(publicationId, kind, prNumber, headSha), nowMs: T0 });
-  const lease = await claimPublication(db, publicationId, `pub-${publicationId}`, T0);
+  const lease = await claimPublication(db, publicationId, `pub-${publicationId}`, T0, "prepared");
   if (lease === null) throw new Error("fixture: publication claim failed");
   const proof: PublicationProof = {
     publicationId,

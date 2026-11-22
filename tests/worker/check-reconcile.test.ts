@@ -36,6 +36,7 @@ import {
   CHECK_ATTACH_GRACE_MS,
   CHECK_ATTACH_WINDOW_MS,
   CHECK_BACKOFF_MS,
+  CHECK_LEASE_MS,
   CHECK_MAX_ATTEMPTS,
   CHECK_NAME,
   CHECK_RECONCILE_LIMIT,
@@ -48,6 +49,7 @@ import {
   listCheckReconcileBatch,
   releaseAttachedCheck,
   releaseCheckClaim,
+  reopenTerminalCorrection,
   retryCheckRecovery,
   setCheckCreateState,
   setCheckDesired,
@@ -57,8 +59,9 @@ import {
   suspendCheckRecovery,
   type CheckAttempt,
   type CheckConclusion,
+  type Lease,
 } from "../../src/store/review-checks";
-import { claimPublication } from "../../src/store/finding-lifecycle";
+import { claimPublication, recordPublicationProof } from "../../src/store/finding-lifecycle";
 import {
   CHECK_RECONCILE_MAX_REQUESTS,
   CHECK_RECONCILE_PER_REQUEST_MS,
@@ -158,6 +161,75 @@ describe("budget and selector constants (spec §7.11.2)", () => {
 // ---------------------------------------------------------------------------
 // Selection
 // ---------------------------------------------------------------------------
+
+/**
+ * The consumer's `terminalize` over a scripted adapter: it records every
+ * terminal conclusion it is asked to send and answers either a VALIDATED
+ * completion (the ordinary success path) or an unavailable send. Its gate is
+ * only what the consumer's own decision reads; the reconcile lane re-reads the
+ * seeded target's gate from D1.
+ */
+function terminalizeHarness(
+  db: TestD1,
+  clock: () => number,
+  sent: CheckConclusion[],
+  send: "completed" | "unavailable" = "completed",
+) {
+  return createCheckLifecycle({
+    db,
+    nowMs: clock,
+    getAdapter: () => ({
+      adoptCheckRun: async () => ({ kind: "absent" }),
+      beginCheck: async () => ({ kind: "unavailable", reason: "no create in this fixture", requests: 0 }),
+      fetchCheckRun: async () => ({ kind: "absent" }),
+      completeCheck: async ({ identity, conclusion }) => {
+        sent.push(conclusion);
+        return send === "completed"
+          // Delivery is the conclusion AND the frozen text (spec §7.9): the
+          // scripted run echoes the text it was asked to store.
+          ? { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) }
+          : { kind: "unavailable", reason: "checks update unavailable", requests: 1 };
+      },
+    }),
+    getCheckGate: async () => ({ minScore: 0, passVerdicts: ["ship it"] }),
+  });
+}
+
+/** The run the attempt already created and proved — the delivery attach's shape. */
+async function attachProvenRun(db: TestD1, attemptId: string, lease: Lease, atMs: number): Promise<void> {
+  await setCheckCreateState(db, attemptId, lease, "sending", undefined, atMs);
+  if (!(await attachCheckRunId(db, attemptId, lease, 4242, atMs))) {
+    throw new Error("fixture: the run id was not attached");
+  }
+}
+
+/**
+ * One Check that reached its TERMINAL record as an unconfirmed failure linked
+ * to a publication still without proof — the shape the proof-free send leaves
+ * behind (the ordinary path `I-000671` reports). Returns the attempt id.
+ */
+async function markedUnconfirmed(db: TestD1, headSha: string, publicationId: string): Promise<string> {
+  const { attempt, lease } = await claim(db, { headSha, executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+  const attemptId = attempt.identity.attemptId;
+  await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+  db.raw
+    .prepare(
+      `INSERT INTO review_publications
+         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+          payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'sending', '{}', NULL, 0, 'pending', ?, ?)`,
+    )
+    .run(
+      publicationId, SCOPE.appId, SCOPE.installationId, SCOPE.owner, SCOPE.repo,
+      SCOPE.prNumber, headSha, CLAIM_AT + 500, CLAIM_AT + 500,
+    );
+  await terminalizeHarness(db, () => CLAIM_AT + 1_000, []).terminalize({
+    handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha, lease },
+    publicationId,
+    outcome: "publication-unknown",
+  });
+  return attemptId;
+}
 
 describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
   test("the reconciler takes it at the attach grace and never creates a second run", async () => {
@@ -644,6 +716,504 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.publication_id).toBe(proof.publicationId);
     // The correction happened on the SAME owned run — no second generation.
     expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first<{ n: number }>()).toEqual({ n: 1 });
+  });
+
+  test("§7.9a: a TERMINAL unconfirmed failure is revised once from its own publication's confirmation", async () => {
+    const db = seededDb();
+    // The consumer holds a LIVE lease on the attached run, and the publication
+    // it was about to send is staged without a proof yet.
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
+    let clock = CLAIM_AT + 1_000;
+    const sent: CheckConclusion[] = [];
+    const lifecycle = terminalizeHarness(db, () => clock, sent);
+
+    // The ORDINARY success path — the terminal update lands, nothing fails.
+    await lifecycle.terminalize({
+      handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+      publicationId: journalId,
+      outcome: "publication-unknown",
+    });
+    let row = await rawRow(db, attemptId);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.desired).toBe("failure");
+    expect(row.desired).toBe("failure");
+    expect(row.desired_summary).toBe(UNCONFIRMED);
+    expect(row.observed).toBe("failure");
+    expect(row.publication_id).toBe(journalId);
+    // Terminal — the published record — but marked as an UNCONFIRMED outcome
+    // whose own publication can still contradict it.
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+
+    // That publication then confirms through the normal proof path.
+    db.raw
+      .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
+      .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 96)), journalId);
+    const confirmedAt = clock + 60_000;
+    const proofLease = await claimPublication(db as never, journalId, "proof-lane", confirmedAt, "sending");
+    if (proofLease === null) throw new Error("fixture: the proof claim was refused");
+    expect(
+      await recordPublicationProof(db as never, journalId, proofLease, {
+        publicationId: journalId,
+        scope: SCOPE,
+        headSha: SHA,
+        kind: "review",
+        round: 3,
+        commentId: 9001,
+        bodySha256: "a".repeat(64),
+        confirmedMs: confirmedAt,
+      }),
+    ).toBe(true);
+
+    clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            // Delivery needs the frozen text too (spec §7.9).
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+
+    // The proof-derived conclusion REPLACED the unconfirmed text, on the same
+    // owned run.
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    expect(pushed[0]!.summary).toContain('verdict "ship it"');
+    expect(pushed[0]!.summary).toContain("score 96");
+    row = await rawRow(db, attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.desired_summary).not.toBe(UNCONFIRMED);
+    expect(row.publication_id).toBe(journalId);
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.recovery_state).toBe("done");
+
+    // EXACTLY once: the mark is consumed, so another pass selects nothing and
+    // the guarded transition refuses the row a second time.
+    const second = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        complete: async () => {
+          throw new Error("a second correction must not be sent");
+        },
+      }),
+    });
+    expect(second.examined).toBe(0);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first<{ n: number }>()).toEqual({ n: 1 });
+  });
+
+  test("§7.9a: a DIFFERENT publication's confirmation never revises a linked terminal record", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
+    const clock = CLAIM_AT + 1_000;
+    const lifecycle = terminalizeHarness(db, () => clock, []);
+    await lifecycle.terminalize({
+      handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+      publicationId: journalId,
+      outcome: "publication-unknown",
+    });
+
+    // ANOTHER publication for the same head — the degraded row — confirms.
+    seedPublication(
+      db,
+      SCOPE,
+      SHA,
+      {
+        publicationId: "publication-other",
+        scope: SCOPE,
+        headSha: SHA,
+        kind: "degraded",
+        round: 2,
+        commentId: 88,
+        bodySha256: "b".repeat(64),
+        confirmedMs: clock + 30_000,
+      },
+      "confirmed",
+      reviewPayload(SCOPE, SHA, "ship it", 96),
+    );
+
+    // Examined (the mark makes it selectable) but NOT revised: the proof is
+    // read through the row's OWN link, which carries none.
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => clock + 60_000,
+        credentials: scriptedCredentials(db, {
+          complete: async () => {
+            throw new Error("a foreign confirmation must not send");
+          },
+        }),
+      });
+      expect(summary.examined).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    // Both the foreign id and the row's own still-unproven link are refused by
+    // the guarded transition itself.
+    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+
+    let row = await rawRow(db, attemptId);
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.desired_summary).toBe(UNCONFIRMED);
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+
+    // Now the row's OWN link confirms. The revision is bound to THAT id alone:
+    // a foreign id is still refused although the row is otherwise eligible, the
+    // own link is accepted, and the consumed mark refuses the second call.
+    const ownProofLease = await claimPublication(db as never, journalId, "proof-lane", clock + 90_000, "sending");
+    if (ownProofLease === null) throw new Error("fixture: the proof claim was refused");
+    expect(
+      await recordPublicationProof(db as never, journalId, ownProofLease, {
+        publicationId: journalId,
+        scope: SCOPE,
+        headSha: SHA,
+        kind: "review",
+        round: 3,
+        commentId: 9001,
+        bodySha256: "a".repeat(64),
+        confirmedMs: clock + 90_000,
+      }),
+    ).toBe(true);
+    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", clock + 120_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 120_000)).toBe(true);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 120_000)).toBe(false);
+    row = await rawRow(db, attemptId);
+    expect(row.terminal_ms).toBeNull();
+    // Reopened, not yet revised: the frozen text still asserts the unconfirmed
+    // outcome until the proof-derived conclusion is sent.
+    expect(row.desired_summary).toBe(UNCONFIRMED);
+  });
+
+  test("§7.9a: an unconfirmed terminal record with NO publication link is never revised", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    const clock = CLAIM_AT + 1_000;
+    const lifecycle = terminalizeHarness(db, () => clock, []);
+    await lifecycle.terminalize({
+      handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+      publicationId: null,
+      outcome: "publication-unknown",
+    });
+
+    // Nothing links the record to a publication, so nothing can contradict it:
+    // it is closed the ordinary way and carries no revisable mark.
+    const row = await rawRow(db, attemptId);
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.publication_id).toBeNull();
+    expect(row.desired_summary).toBe(UNCONFIRMED);
+    expect(row.recovery_state).toBe("done");
+    const summary = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, { complete: async () => { throw new Error("no send expected"); } }),
+    });
+    expect(summary.examined).toBe(0);
+    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", clock + 60_000)).toBe(false);
+  });
+
+  test("§7.9a: the revision is fenced on the TERMINAL record itself", async () => {
+    // Every other condition of the transition is met here — the unconfirmed
+    // marker, the row's own link, that link's proof — so `terminal_ms IS NOT
+    // NULL` is the discriminator. A record that never reached GitHub belongs to
+    // the ordinary recovery lane, never to this revision.
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
+    const clock = CLAIM_AT + 1_000;
+    const lifecycle = terminalizeHarness(db, () => clock, []);
+    await lifecycle.terminalize({
+      handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+      publicationId: journalId,
+      outcome: "publication-unknown",
+    });
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(JSON.stringify({ ...proofFor(attempt.identity), publicationId: journalId }), journalId);
+    // Clear ONLY the terminal mark: the unconfirmed marker, the row's own link
+    // and that link's proof all still hold, so `terminal_ms IS NOT NULL` is the
+    // condition refusing this call.
+    db.raw.prepare(`UPDATE review_checks SET terminal_ms = NULL WHERE id = ?`).run(attemptId);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+  });
+
+  test("§7.9a: a record SUPERSEDED by a newer open generation is never reopened", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
+    const clock = CLAIM_AT + 1_000;
+    const lifecycle = terminalizeHarness(db, () => clock, []);
+    await lifecycle.terminalize({
+      handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+      publicationId: journalId,
+      outcome: "publication-unknown",
+    });
+    // A re-trigger of the same head: a generation that ended without proof is
+    // retryable, so the next one is minted and now owns the live Check.
+    const next = await claim(db, { nowMs: CLAIM_AT + 2_000, executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS + 2_000 });
+    expect(next.attempt.identity.generation).toBe(2);
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(JSON.stringify({ ...proofFor(attempt.identity), publicationId: journalId }), journalId);
+    // Refused: revising the superseded record would re-send an older run and
+    // collide with the one-open-row index the new generation holds.
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    const row = await rawRow(db, attemptId);
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+  });
+
+  test("§7.9a: an unconfirmed failure whose OWN update never landed stays with the ordinary lane", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
+    const clock = CLAIM_AT + 1_000;
+    const lifecycle = terminalizeHarness(db, () => clock, [], "unavailable");
+    await lifecycle.terminalize({
+      handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+      publicationId: journalId,
+      outcome: "publication-unknown",
+    });
+
+    // The record never reached GitHub, so it is NOT terminal: the ordinary
+    // recovery lane owns it, and the terminal-only transition refuses it.
+    const row = await rawRow(db, attemptId);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.desired_summary).toBe(UNCONFIRMED);
+    // Its own link is given the proof, so the ONLY condition refusing the
+    // revision here is that this record never became terminal.
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(JSON.stringify({ ...proofFor(attempt.identity), publicationId: journalId }), journalId);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 1)).toBe(false);
+  });
+
+  test("§7.9a: a mark that never confirms cannot displace one that is ready", async () => {
+    const db = seededDb();
+    const OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98";
+    const DUE_SHA = "0123456789abcdef0123456789abcdef0123456f";
+    // A stale mark (its publication never confirms), a mark that is ready (its
+    // own publication already confirmed) and one ordinary DUE attempt.
+    const staleId = await markedUnconfirmed(db, SHA, "publication-stale");
+    const readyId = await markedUnconfirmed(db, OTHER_SHA, "publication-ready");
+    await claim(db, { headSha: DUE_SHA, executionDeadlineMs: CLAIM_AT + 1_000 });
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(
+        JSON.stringify({
+          publicationId: "publication-ready",
+          scope: SCOPE,
+          headSha: OTHER_SHA,
+          kind: "review",
+          round: 3,
+          commentId: 77,
+          bodySha256: "a".repeat(64),
+          confirmedMs: CLAIM_AT + 2_000,
+        }),
+        "publication-ready",
+      );
+
+    // A bound of two takes the ready mark and the due attempt — never the stale
+    // mark, whose only cost is a read on the passes that still have room.
+    const two = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 2);
+    expect(two.map((row) => row.identity.attemptId)).toEqual([readyId, expect.any(String)]);
+    expect(two.map((row) => row.identity.attemptId)).not.toContain(staleId);
+    // With room for all three, the stale mark is still last.
+    const three = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 3);
+    expect(three).toHaveLength(3);
+    expect(three[0]!.identity.attemptId).toBe(readyId);
+    expect(three[2]!.identity.attemptId).toBe(staleId);
+  });
+
+  test("§7.9a: the ordering class is exactly the transition's precondition", async () => {
+    const db = seededDb();
+    const CORRUPT_SHA = "fedcba9876543210fedcba9876543210fedcba99";
+    // A marked row whose own link carries a valid proof — but a newer unfinished
+    // generation of the same key already owns the live Check, so the transition
+    // refuses it. MINTED FIRST: with the proof in place the key could not claim
+    // the next generation.
+    const blockedId = await markedUnconfirmed(db, SHA, "publication-blocked");
+    const next = await claim(db, { nowMs: CLAIM_AT + 2_000, executionDeadlineMs: CLAIM_AT + 3_000 });
+    expect(next.attempt.identity.generation).toBe(2);
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(
+        JSON.stringify({
+          publicationId: "publication-blocked",
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 3,
+          commentId: 77,
+          bodySha256: "a".repeat(64),
+          confirmedMs: CLAIM_AT + 2_500,
+        }),
+        "publication-blocked",
+      );
+    // A corrupt proof is equally uncorrectable: the reader cannot parse it.
+    const corruptId = await markedUnconfirmed(db, CORRUPT_SHA, "publication-corrupt");
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run("{not json", "publication-corrupt");
+
+    // At LIMIT 1 the due generation is chosen — never a mark the transition
+    // would refuse.
+    const one = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 1);
+    expect(one.map((row) => row.identity.attemptId)).toEqual([next.attempt.identity.attemptId]);
+    // The marks appear only when nothing better is left.
+    const all = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 5);
+    expect(all[0]!.identity.attemptId).toBe(next.attempt.identity.attemptId);
+    expect(all.slice(1).map((row) => row.identity.attemptId).sort()).toEqual([blockedId, corruptId].sort());
+  });
+
+  test("§7.9a: a mark whose App pair is unusable is ordered behind due work", async () => {
+    const db = seededDb();
+    const blockedId = await markedUnconfirmed(db, SHA, "publication-disabled");
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(
+        JSON.stringify({
+          publicationId: "publication-disabled",
+          scope: SCOPE,
+          headSha: SHA,
+          kind: "review",
+          round: 3,
+          commentId: 77,
+          bodySha256: "a".repeat(64),
+          confirmedMs: CLAIM_AT + 2_500,
+        }),
+        "publication-disabled",
+      );
+    // The lane would never reopen a record of an App D1 reports as unusable
+    // (§7.6 pair gate), so the mark belongs behind work that can run.
+    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP);
+    const other = await claim(db, {
+      scope: SCOPE_B,
+      githubAppId: NUMERIC_APP_B,
+      headSha: SHA,
+      executionDeadlineMs: CLAIM_AT + 1_000,
+    });
+    const one = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 1);
+    expect(one.map((row) => row.identity.attemptId)).toEqual([other.attempt.identity.attemptId]);
+    const both = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 2);
+    expect(both.map((row) => row.identity.attemptId)).toEqual([other.attempt.identity.attemptId, blockedId]);
+  });
+
+  test("§7.9a: the recovery lane's own proof-free `expired` carries the same mark", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
+    const clock = CLAIM_AT + 1_000;
+    // The consumer's terminal update never landed: the row is open, linked and
+    // unconfirmed — the state the ORDINARY lane now owns.
+    await terminalizeHarness(db, () => clock, [], "unavailable").terminalize({
+      handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+      publicationId: journalId,
+      outcome: "publication-unknown",
+    });
+
+    // Past the execution deadline with no proof, the lane concludes `expired`
+    // itself. That record asserts an outcome too, so it must be revisable the
+    // same way — not closed `done`.
+    const atDeadline = CLAIM_AT + CHECK_LEASE_MS + 1_000;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => atDeadline,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => {
+            expect(conclusion.desired).toBe("failure");
+            // Delivery needs the frozen text too (spec §7.9).
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    let row = await rawRow(db, attemptId);
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.publication_id).toBe(journalId);
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+
+    // Its own publication then confirms, and the same revision path corrects it.
+    db.raw
+      .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
+      .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 96)), journalId);
+    const confirmedAt = atDeadline + 60_000;
+    const proofLease = await claimPublication(db as never, journalId, "proof-lane", confirmedAt, "sending");
+    if (proofLease === null) throw new Error("fixture: the proof claim was refused");
+    expect(
+      await recordPublicationProof(db as never, journalId, proofLease, {
+        publicationId: journalId,
+        scope: SCOPE,
+        headSha: SHA,
+        kind: "review",
+        round: 3,
+        commentId: 9001,
+        bodySha256: "a".repeat(64),
+        confirmedMs: confirmedAt,
+      }),
+    ).toBe(true);
+    const pushed: CheckConclusion[] = [];
+    const fetchStub2 = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => confirmedAt + 1_000,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            // Delivery needs the frozen text too (spec §7.9).
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub2.restore();
+    }
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    row = await rawRow(db, attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.recovery_state).toBe("done");
   });
 
   test("the gate reads the attempt's OWN publication, not the scope/SHA reviews row", async () => {
@@ -3562,7 +4132,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     // admits the row to the probe, but a proofless row can only answer
     // `pending`: it must defer, never conclude.
     const journalId = seedJournal(db, SCOPE, SHA, "prepared", T0 - 5_000);
-    expect(await claimPublication(db, journalId, "earlier-generation", T0 + 5_000)).not.toBeNull();
+    expect(await claimPublication(db, journalId, "earlier-generation", T0 + 5_000, "prepared")).not.toBeNull();
 
     const stub = stubFetch();
     let factoryCalls = 0;
