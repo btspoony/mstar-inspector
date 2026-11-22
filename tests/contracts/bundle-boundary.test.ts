@@ -1,5 +1,5 @@
 /**
- * Bidirectional bundle boundary (compass D12).
+ * why: Bidirectional bundle boundary (compass D12).
  *
  * Each side's entry is bundled with exactly its own legal runtime deps
  * externalized, so a dependency that belongs to the other side cannot be
@@ -23,12 +23,12 @@ const WORKER_ENTRY = join(REPO_ROOT, "src", "worker", "entry.ts");
 const RUNNER_ENTRY = join(REPO_ROOT, "packages", "runner", "src", "runner.ts");
 
 /**
- * Resolved input paths of one bundle.
+ * note: Resolved input paths of one bundle.
  *
  * shortcut: under `bun test` (Bun 1.4.0) the session's first build of a
  * repo-resident entry fails to resolve a plain relative import
  * (`../version`); the identical second build succeeds. Retry once so a real
- * resolution failure still fails twice; upgrade when Bun fixes it.
+ * resolution failure still fails twice; upgrade: when Bun fixes it.
  */
 async function buildInputs(entry: string, external: string[]): Promise<string[]> {
   const outdir = mkdtempSync(join(tmpdir(), "bundle-boundary-"));
@@ -38,7 +38,7 @@ async function buildInputs(entry: string, external: string[]): Promise<string[]>
     if (!result.success) result = await Bun.build(opts);
     expect(result.success).toBe(true);
     const inputs = Object.keys(result.metafile!.inputs);
-    // An empty graph would make every leak filter below vacuous.
+    // why: An empty graph would make every leak filter below vacuous.
     expect(inputs.length).toBeGreaterThan(0);
     return inputs;
   } finally {
@@ -46,9 +46,9 @@ async function buildInputs(entry: string, external: string[]): Promise<string[]>
   }
 }
 
-// Runner-owned runtime dep, so never reachable from the Worker entry.
+// why: Runner-owned runtime dep, so never reachable from the Worker entry.
 const WORKER_LEAK = "node_modules/@oh-my-pi/";
-// Worker-owned deps, so never reachable from the runner entry.
+// why: Worker-owned deps, so never reachable from the runner entry.
 const RUNNER_LEAKS = ["node_modules/hono", "node_modules/@octokit/"];
 
 describe("bundle boundary", () => {
@@ -62,7 +62,7 @@ describe("bundle boundary", () => {
     expect(inputs.filter((path) => RUNNER_LEAKS.some((leak) => path.includes(leak)))).toEqual([]);
   });
 
-  // Non-vacuity: a passed assertion is worthless if the predicate can never
+  // why: Non-vacuity: a passed assertion is worthless if the predicate can never
   // match. Each predicate is fed a bundle that genuinely resolves into the
   // forbidden subtree.
   test("both predicates flag a real boundary import", async () => {

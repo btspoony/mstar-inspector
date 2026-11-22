@@ -1,5 +1,5 @@
 /**
- * Per-row recheck convergence at scale (spec review-lifecycle §7.3): one bad
+ * why: Per-row recheck convergence at scale (spec review-lifecycle §7.3): one bad
  * quote among 25 rows drops only that row, and a noisy (CRLF / trailing-blank)
  * quote still proves addressed. The per-rule `validateRecheckDoc` contract is
  * owned by tests/contracts/recheck.test.ts and is not restated here.
@@ -104,7 +104,7 @@ describe("validateRecheckDoc — per-row degradation", () => {
   });
 
   test("a whitespace-only quote cannot cite a blank line and close the row", () => {
-    // `" "` normalizes to `""`, which byte-equals this slice's BLANK new-side
+    // why: `" "` normalizes to `""`, which byte-equals this slice's BLANK new-side
     // line 9 — so normalization alone would let an empty citation prove a fix.
     const blankLine: EvidenceSlice = {
       ...HUNK,
@@ -128,7 +128,7 @@ describe("validateRecheckDoc — per-row degradation", () => {
 
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      // The blank citation is dropped; the document and the honest row stand.
+      // note: The blank citation is dropped; the document and the honest row stand.
       expect(outcome.rejected).toHaveLength(1);
       expect(outcome.rejected[0]!.rowId).toBe("row-1");
       expect(outcome.rejected[0]!.error).toContain("nonblank");
@@ -144,9 +144,9 @@ describe("normalizeQuoteText", () => {
   });
 
   test("a lone CR is a line ending, and only ONE trailing newline is dropped", () => {
-    // Old-Mac line endings: one line boundary, never a literal CR left behind.
+    // why: Old-Mac line endings: one line boundary, never a literal CR left behind.
     expect(normalizeQuoteText("a\rb")).toBe("a\nb");
-    // The blank line before EOF is significant and stays.
+    // why: The blank line before EOF is significant and stays.
     expect(normalizeQuoteText("a\n\n")).toBe("a\n");
   });
 });

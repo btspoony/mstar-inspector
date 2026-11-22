@@ -1,5 +1,5 @@
 /**
- * `packages/shared` dependency boundary.
+ * invariant: `packages/shared` dependency boundary.
  *
  * The package is the dependency-free owner of the dual-surface wire
  * contracts: a runtime engine/omp import, any `zod` import, a relative
@@ -14,7 +14,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 const SHARED_SRC = join(import.meta.dir, "..", "..", "packages", "shared", "src");
 const SHARED_MANIFEST = join(SHARED_SRC, "..", "package.json");
 
-/** Every `.ts` file under the package source root, recursively. */
+/** note: Every `.ts` file under the package source root, recursively. */
 function sharedFiles(dir: string = SHARED_SRC): string[] {
   return readdirSync(dir).flatMap((entry) => {
     const full = join(dir, entry);
@@ -25,7 +25,7 @@ function sharedFiles(dir: string = SHARED_SRC): string[] {
 
 type ImportRef = { file: string; specifier: string; typeOnly: boolean };
 
-/** `{ type A, type B }` — every named specifier carries the inline modifier. */
+/** note: `{ type A, type B }` — every named specifier carries the inline modifier. */
 function allSpecifiersTyped(clause: string): boolean {
   const named = clause.match(/\{([\s\S]*)\}/)?.[1];
   const specifiers = named?.split(",").map((specifier) => specifier.trim()).filter(Boolean) ?? [];
@@ -33,7 +33,7 @@ function allSpecifiersTyped(clause: string): boolean {
 }
 
 /**
- * Drop `//` and block comments — the package documents its own type-only
+ * why: Drop `//` and block comments — the package documents its own type-only
  * imports in prose, and a `from "…"` inside that prose is not an import.
  * Scans (not regexes) so a `//` inside a specifier is never mistaken for a
  * comment.
@@ -62,7 +62,7 @@ function stripComments(text: string): string {
 }
 
 /**
- * Import/export specifiers in every spelling the package may use (static
+ * why: Import/export specifiers in every spelling the package may use (static
  * import, re-export, side-effect import, dynamic import, require). Statement
  * clauses stop before a quote or `;`, so the lazy clause never spans a
  * neighbouring statement.
@@ -96,7 +96,7 @@ function offenders(matches: (ref: ImportRef) => boolean): string[] {
     .sort();
 }
 
-/** A resolved relative target that leaves `packages/shared/src`. */
+/** note: A resolved relative target that leaves `packages/shared/src`. */
 function escapesPackage(ref: ImportRef): boolean {
   if (!ref.specifier.startsWith(".")) return false;
   const rel = relative(SHARED_SRC, resolve(dirname(ref.file), ref.specifier));
