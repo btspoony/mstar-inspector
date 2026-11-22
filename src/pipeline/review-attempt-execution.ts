@@ -38,7 +38,7 @@ import {
 import { dropAllSuggestionFences, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
+import { carriesSecretForm, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { type D1ArtifactStore } from "../store/artifact-store";
 import { type FailureStage, type FailureStore } from "../store/failure-store";
 import {
@@ -5237,6 +5237,22 @@ async function collectPhase(
     reportParts: { report, revalidated: buildRevalidatedSection(coverage, closureRows) },
   });
   const bodySha256 = await sha256Hex(preparedBody);
+
+  // SEC-01 publish gate: the body is the last thing before GitHub. The
+  // write-time redaction is the guarantee; this second scan refuses a body the
+  // resumed host's stored payload let through. It only costs a publication,
+  // so every form (verbatim included) is matched.
+  if (progress.secretValues.length === 0) {
+    deps.log.warn(
+      fields,
+      "review publish gate could not run — this host holds no credentials for the attempt (the stored payload was redacted at write time)",
+    );
+  } else if (carriesSecretForm(preparedBody, progress.secretValues)) {
+    deps.log.warn(fields, "review publish gate refused the review — the outgoing body carries a credential echo");
+    await check?.terminalize(null, "pre-publication-failure");
+    await settleAttemptPublication(deps, attemptId, fields, []);
+    return { kind: "settled", outcome: { kind: "ok" } };
+  }
 
   // Seen records for the current findings: the stable finding identity is
   // the fingerprint — an existing lifecycle row (open or CLOSED) with the

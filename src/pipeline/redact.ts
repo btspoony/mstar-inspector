@@ -48,8 +48,9 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
 /** Regex metacharacters, escaped so a credential form matches literally. */
 const REGEX_METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
 
-// why: a value this short cannot be distinguished from ordinary text (`mstar`
-// inside `mstar.review/v1`), so its only safe match is an exact one.
+// why: a short value's RAW form cannot be distinguished from ordinary text
+// (`mstar` inside `mstar.review/v1`), so only its exact leaf is matched. Its
+// encoded forms are specific strings and stay substring-matched below.
 const SUBSTRING_MIN_LENGTH = 8;
 
 /** A retained document whose host-written identity paths are protected. */
@@ -112,6 +113,22 @@ export function secretTransforms(secret: string): SecretTransforms {
   };
 }
 
+/**
+ * Whether `text` carries any form of a credential (SEC-01 publish gate).
+ * Unlike `redactDocument`, the RAW form is matched as a substring too: an
+ * embedded echo is exactly what the gate must refuse, and a false refusal only
+ * costs one publication.
+ */
+export function carriesSecretForm(text: string, secrets: readonly string[]): boolean {
+  for (const secret of secrets) {
+    if (secret === "") continue;
+    for (const form of Object.values(secretTransforms(secret))) {
+      if (form !== "" && text.includes(form)) return true;
+    }
+  }
+  return false;
+}
+
 /** What one document redaction changed. */
 export type RedactionOutcome<T> = {
   value: T;
@@ -124,28 +141,30 @@ type RedactionState = { replaced: number };
 
 /** How each credential form is matched against a leaf. */
 type CredentialMatcher = {
-  /** Forms of long credentials, matched anywhere in a leaf. */
+  /** Forms matched anywhere in a leaf: every form of a long credential, and the encoded forms of a short one. */
   pattern: RegExp | null;
-  /** Short credentials, matched only when the whole leaf is that value. */
+  /** Short credentials' RAW form, matched only when the whole leaf is that value. */
   exact: ReadonlySet<string>;
 };
 
 /**
  * Split the credentials into the two match modes. A value at or above
  * `SUBSTRING_MIN_LENGTH` contributes every form and is matched anywhere; a
- * shorter one is matched only against a leaf that is exactly that value.
+ * shorter one keeps its RAW form exact-leaf only, while its encoded forms join
+ * the substring scan — those are position-specific strings, not ordinary words.
  */
 function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
   const forms = new Set<string>();
   const exact = new Set<string>();
   for (const secret of new Set(secrets)) {
     if (secret === "") continue;
-    if (secret.length < SUBSTRING_MIN_LENGTH) {
-      exact.add(secret);
-      continue;
-    }
+    const short = secret.length < SUBSTRING_MIN_LENGTH;
+    if (short) exact.add(secret);
     for (const form of Object.values(secretTransforms(secret))) {
-      if (form !== "") forms.add(form);
+      // why: url-encoding leaves ordinary short values unchanged; that raw
+      // spelling must not become a substring match.
+      if (form === "" || (short && form === secret)) continue;
+      forms.add(form);
     }
   }
   // A shorter form that is a substring of a longer one must not shred the
@@ -243,7 +262,8 @@ function redactTree(
 
 /**
  * One leaf, in the matcher's two modes: a leaf that IS a short credential is
- * replaced whole; otherwise the long-credential forms are scanned once.
+ * replaced whole; otherwise every substring form is scanned once — all forms
+ * of a long credential, the encoded forms of a short one.
  *
  * Existing markers are BOUNDARIES, not scanned text: the leaf is split on the
  * literal marker, each segment is scanned once, and the markers are rejoined

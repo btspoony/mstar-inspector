@@ -8,6 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   REDACTED,
+  carriesSecretForm,
   redactDocument,
   redactExactSecrets,
   redactReviewOutput,
@@ -303,6 +304,47 @@ describe("redactDocument", () => {
 
     expect(outcome.value.note).toBe("prefix [REDACTED] suffix");
     expect(outcome.replaced).toBe(1);
+  });
+
+  test("a short credential's encoded forms are redacted, its raw form stays exact-leaf", () => {
+    const key = "p/a b";
+    expect(key.length).toBeLessThan(8);
+    const forms = secretTransforms(key);
+    const envelope = JSON.stringify({
+      schema: "mstar.review/v1",
+      summary_md: `base64 ${forms.base64}`,
+      findings: [{ body: `url ${forms.urlEncoded} and hex ${forms.hex}` }],
+      note: `raw ${key}`,
+      exact: key,
+    });
+
+    const outcome = redactDocument(envelope, [key], "run");
+    // Fixture shape is ours: the envelope serialized above.
+    const redacted = JSON.parse(outcome.value) as {
+      schema: string;
+      summary_md: string;
+      findings: { body: string }[];
+      note: string;
+      exact: string;
+    };
+
+    expect(redacted.schema).toBe("mstar.review/v1");
+    expect(redacted.summary_md).toBe("base64 [REDACTED]");
+    expect(redacted.findings[0]?.body).toBe("url [REDACTED] and hex [REDACTED]");
+    // The raw form keeps the exact-leaf rule: embedded text is untouched.
+    expect(redacted.note).toBe(`raw ${key}`);
+    expect(redacted.exact).toBe("[REDACTED]");
+  });
+
+  test("carriesSecretForm sees verbatim and encoded forms anywhere", () => {
+    const key = "p/a b";
+    const forms = secretTransforms(key);
+
+    expect(carriesSecretForm(`x ${key} y`, [key])).toBe(true);
+    expect(carriesSecretForm(`x ${forms.base64} y`, [key])).toBe(true);
+    expect(carriesSecretForm(`x ${forms.urlEncoded} y`, [key])).toBe(true);
+    expect(carriesSecretForm("mstar.review/v1", [key])).toBe(false);
+    expect(carriesSecretForm("plain", ["", key])).toBe(false);
   });
 
   test("a payload with no secret present keeps its exact bytes", () => {
