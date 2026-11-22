@@ -80,7 +80,7 @@ const { PublicationDeadlineSpent, postLineCommentsWithOctokit, postPreparedRevie
 );
 const { RoundBudgetSpent } = await import("../../src/pipeline/review-attempt");
 const { reconcileReviewLifecycle } = await import("../../src/worker/lifecycle-reconcile");
-const { createCheckLifecycle, createChecksAdapter } = await import("../../src/pipeline/checks");
+const { TERMINAL_FAILURE_TEXT, createCheckLifecycle, createChecksAdapter } = await import("../../src/pipeline/checks");
 import type { ChecksOctokit } from "../../src/pipeline/checks";
 
 const ATTEMPT_ID = "attempt-4b-0001";
@@ -654,9 +654,7 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
     };
     expect(row.publication_id).toBe(publicationId);
     expect(row.desired).toBe("failure");
-    expect(row.desired_summary).toBe(
-      "Review attempt could not be confirmed complete; publication status is unknown.",
-    );
+    expect(row.desired_summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.terminal_ms).toBeNull();
 
@@ -703,9 +701,7 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
       terminal_ms: number | null;
     };
     expect(row.publication_id).toBe(publicationId);
-    expect(row.desired_summary).not.toBe(
-      "Review attempt could not be confirmed complete; publication status is unknown.",
-    );
+    expect(row.desired_summary).not.toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(row.desired_summary).toContain(`Review gate could not be evaluated for ${SHA.slice(0, 7)}`);
     expect(row.observed).toBe(row.desired);
     expect(row.terminal_ms).not.toBeNull();
@@ -1618,6 +1614,8 @@ describe("the publication settlement mark", () => {
     const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
     expect(handoff?.settledMs).toEqual(expect.any(Number));
     expect(handoff?.settledEffects).toContain("publication");
+  });
+});
 
 /** A real Check row this attempt owns; its id is the publication lease's key. */
 async function seedCheckRow(db: TestD1) {
@@ -1786,9 +1784,7 @@ describe("§7.9a condition 1 — a refused action lease keeps the publication li
     };
     expect(row.publication_id).toBe(publicationId);
     expect(row.desired).toBe("failure");
-    expect(row.desired_summary).toBe(
-      "Review attempt could not be confirmed complete; publication status is unknown.",
-    );
+    expect(row.desired_summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.terminal_ms).toBeNull();
   });

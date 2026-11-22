@@ -145,7 +145,16 @@ function fakeChecks(identity: CheckIdentity): {
         },
         async update(params) {
           updates.push(params);
-          return { data: runPayload(identity) };
+          // Delivery is the conclusion AND the frozen text (spec §7.9): the
+          // scripted run echoes the text it was sent, as GitHub stores it.
+          const output = "output" in params ? (params.output as { title?: string; summary?: string }) : undefined;
+          const conclusion = "conclusion" in params ? (params.conclusion as string) : undefined;
+          return {
+            data: runPayload(identity, {
+              ...(conclusion === undefined ? {} : { conclusion }),
+              ...(output === undefined ? {} : { output }),
+            }),
+          };
         },
         async get() {
           throw new Error("this lane never reads");

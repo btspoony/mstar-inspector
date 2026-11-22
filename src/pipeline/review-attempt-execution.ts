@@ -2064,17 +2064,17 @@ async function publishDegradedPublication(input: {
   headSha: string;
   /** §7.9a: the attempt this publication is admitted under (launch row id). */
   admittedAttemptId: string;
+  /** The attempt that stages it, so a recovery completing the apply can settle it. */
+  attemptId: string;
   /**
    * The owning Check attempt (§7.9): the degraded comment send takes the
    * publication lease of its action for it. The caller resolves it from the
    * launch row's frozen pair when this host adopted no handle, so absence
    * really means the attempt owns no Check row.
    */
-  attemptId?: string;
+  checkAttemptId?: string;
   redactedError: string;
   redactedStdout: string;
-  /** The attempt that stages it, so a recovery completing the apply can settle it. */
-  attemptId: string;
   /** The attempt's frozen instant, enforced at the mutation (see `guardMutations`). */
   notAfterMs: number;
 }): Promise<DegradedPublicationOutcome> {
@@ -2127,6 +2127,8 @@ async function publishDegradedPublication(input: {
         return {
           phase: "failed",
           reason: `the degraded target ${targetRef.commentId} is held by its cleanup (or its delete is unresolved) — the notice was not staged`,
+          // Nothing of this attempt's was staged, so no row is owed to it.
+          publicationClosed: true,
         };
       }
     }
@@ -2161,7 +2163,7 @@ async function publishDegradedPublication(input: {
         publicationId: staged.id,
         notAfterMs: input.notAfterMs,
         journalClaim: lease,
-        ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
+        ...(input.checkAttemptId === undefined ? {} : { attemptId: input.checkAttemptId }),
       });
     } catch (err) {
       // Refused AT the mutation because the instant had passed: nothing left
@@ -4994,7 +4996,7 @@ async function collectPhase(
       admittedAttemptId: ref.attemptId,
       // A resumed collect may not have adopted the Check row; the frozen
       // association still names it, and the send must take its action lease.
-      ...(degradedCheckAttemptId === undefined ? {} : { attemptId: degradedCheckAttemptId }),
+      ...(degradedCheckAttemptId === undefined ? {} : { checkAttemptId: degradedCheckAttemptId }),
       redactedError,
       redactedStdout,
       attemptId,

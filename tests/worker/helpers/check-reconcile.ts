@@ -9,6 +9,7 @@
  * two copies would be free to drift.
  */
 import { DEFAULT_CHECK_MIN_SCORE } from "../../../src/contracts/review-gate";
+import { TERMINAL_FAILURE_TEXT } from "../../../src/pipeline/checks";
 import type { Scope } from "../../../packages/shared/src/recheck-wire";
 import {
   CHECK_NAME,
@@ -49,8 +50,8 @@ export const SILENT_LOG = { warn: () => {}, info: () => {} };
 /** The cron's queue binding (comment-claim outbox): these suites re-send nothing. */
 export const NOOP_QUEUE = { send: async () => {} } as unknown as ScheduledEnv["REVIEW_QUEUE"];
 
-/** `CHECK_SUMMARIES.unconfirmed` — the give-up fallback the consumer freezes. */
-export const UNCONFIRMED = "Review attempt could not be confirmed complete; publication status is unknown.";
+/** The approved wording for an unconfirmed send — the product constant, never a copy. */
+export const UNCONFIRMED = TERMINAL_FAILURE_TEXT["unknown-failure"];
 
 export function asEnv(db: TestD1): ScheduledEnv {
   return { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };

@@ -185,7 +185,9 @@ function terminalizeHarness(
       completeCheck: async ({ identity, conclusion }) => {
         sent.push(conclusion);
         return send === "completed"
-          ? { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) }
+          // Delivery is the conclusion AND the frozen text (spec §7.9): the
+          // scripted run echoes the text it was asked to store.
+          ? { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) }
           : { kind: "unavailable", reason: "checks update unavailable", requests: 1 };
       },
     }),
@@ -778,7 +780,8 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             pushed.push(conclusion);
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            // Delivery needs the frozen text too (spec §7.9).
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -1153,7 +1156,8 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            // Delivery needs the frozen text too (spec §7.9).
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -1195,7 +1199,8 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             pushed.push(conclusion);
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            // Delivery needs the frozen text too (spec §7.9).
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });

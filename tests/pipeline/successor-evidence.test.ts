@@ -19,7 +19,7 @@ import {
   type AcquireInflightOptions,
   type InflightKey,
 } from "../../src/store/inflight-store";
-import { attachCheckRunId, setCheckCreateState } from "../../src/store/review-checks";
+import { CHECK_NAME, attachCheckRunId, setCheckCreateState, setCheckDesired } from "../../src/store/review-checks";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withFrozenClock } from "../helpers/clock";
 import { VALID_OUTPUT, createSeededTestD1 } from "../helpers/consumer-fixtures";
@@ -334,13 +334,28 @@ describe("§7.9 an already-issued request is reconciled, never resent", () => {
     // the row carries the frozen intent and no observation.
     await setCheckCreateState(db, attemptId, lease, "sending", undefined, CLAIM_AT);
     expect(await attachCheckRunId(db, attemptId, lease, 4242, CLAIM_AT)).toBe(true);
+    // The terminal update WAS issued and its reply was lost: the frozen intent
+    // and its dispatch mark are durable, so the lane may only read back.
+    const frozenText = "the frozen failure text";
+    expect(
+      await setCheckDesired(
+        db,
+        attemptId,
+        lease,
+        { desired: "failure", title: CHECK_NAME, summary: frozenText },
+        null,
+        CLAIM_AT,
+      ),
+    ).toBe(true);
+    expect(await recordTerminalDispatch(db, attemptId, lease, CLAIM_AT)).toBe(true);
 
     const sent: string[] = [];
     const script: AdapterScript = {
-      // The request DID land: GitHub already carries the intended conclusion.
+      // The request DID land: GitHub already carries the intended conclusion
+      // AND the frozen text.
       fetch: async (identity) => ({
         kind: "found",
-        remote: remoteFor(identity, { id: 4242, status: "completed", conclusion: "failure" }),
+        remote: remoteFor(identity, { id: 4242, status: "completed", conclusion: "failure", summary: frozenText }),
       }),
       complete: async () => {
         sent.push("update");

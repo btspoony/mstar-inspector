@@ -80,7 +80,6 @@ import type { ScheduledEnv } from "../../src/worker/env";
 import { createReviewCommenter, PreparedSendRejected } from "../../src/pipeline/comment";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
-import { claimAttempt } from "../../src/store/review-checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { testAppPem } from "../helpers/rsa-key";
 
