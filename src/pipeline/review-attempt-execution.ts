@@ -2709,7 +2709,7 @@ async function preparePhase(
       } else {
         const gate = parseCompareGate(compare.stdout);
         // shortcut: any merge commit in the increment forces a full-diff round,
-        // upgrade when merge-heavy PR branches make re-reviews common.
+        // upgrade: revisit once merge-heavy PR branches make re-reviews common.
         if (gate === null) {
           deps.log.info(
             { ...fields, increment_status: "unusable" },
