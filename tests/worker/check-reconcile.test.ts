@@ -49,6 +49,7 @@ import {
   listCheckReconcileBatch,
   releaseAttachedCheck,
   releaseCheckClaim,
+  recordCheckObservation,
   reopenTerminalCorrection,
   retryCheckRecovery,
   setCheckCreateState,
@@ -1066,21 +1067,25 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     const clock = confirmedAt + 1_000;
     const fetchStub = stubFetch();
     try {
-      // Defer the correction so the row carries the obligation into a later pass.
+      // Defer the correction so the row leaves that pass with the corrected
+      // conclusion frozen and the obligation still owed.
       await run(db, {
         now: () => clock,
         credentials: scriptedCredentials(db, {
           requestsPerCall: CHECK_ROW_MAX_REQUESTS,
           fetch: async (identity) => ({
             kind: "found",
-            remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
           }),
         }),
       });
     } finally {
       fetchStub.restore();
     }
-    expect((await rawRow(db, attemptId)).correction_generation).toBe(1);
+    const owed = await rawRow(db, attemptId);
+    expect(owed.correction_generation).toBe(1);
+    // The row carries the corrected intent a fall-through could send.
+    expect(owed.desired).toBe("success");
 
     // The generation the obligation targeted has moved: it is no longer this
     // row's correction to deliver.
@@ -1089,9 +1094,11 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     const summary = await run(db, {
       now: () => clock + 60_000,
       credentials: scriptedCredentials(db, {
+        // The run is NOT already complete: only the drop-and-stop can keep the
+        // frozen `success` from reaching it.
         fetch: async (identity) => ({
           kind: "found",
-          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+          remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
         }),
         complete: async () => {
           throw new Error("a stale correction must not be sent");
@@ -1099,14 +1106,178 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       }),
     });
     expect(summary.completed).toBe(0);
-    // Dropped, not resurrected.
+    expect(summary.errors).toBe(0);
+    // Dropped and stopped: no send, no attempt spent, no local refusal written.
     const row = await rawRow(db, attemptId);
     expect(row.correction_desired).toBeNull();
     expect(row.correction_generation).toBeNull();
     expect(row.observed).toBe("failure");
-    // Without the owed correction the pass is the ordinary one: the dropped
-    // conclusion is refused locally instead of replacing the run's failure.
-    expect(row.last_error).toContain("remote run concluded failure");
+    expect(row.attempts).toBe(0);
+    expect(row.holder).toBeNull();
+    expect(row.last_error).toBeNull();
+  });
+
+  test("§7.9a: an unreadable gate on a deferred pass keeps the owed correction", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    expect((await rawRow(db, attemptId)).correction_generation).toBe(1);
+
+    // A gate read that FAILS is not changed evidence: the pass must hold the
+    // obligation instead of re-deciding, clearing or self-delivering it.
+    const degraded = withFailingReads(db, /FROM review_targets/);
+    const held = await run(degraded, {
+      now: () => clock + 30_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+        }),
+        complete: async () => {
+          throw new Error("a held correction must not be sent");
+        },
+      }),
+    });
+    expect(held.completed).toBe(0);
+    expect(held.errors).toBe(0);
+    let row = await rawRow(db, attemptId);
+    expect(row.correction_desired).toBe("success");
+    expect(row.correction_generation).toBe(1);
+    expect(row.attempts).toBe(0);
+    expect(row.holder).toBeNull();
+
+    // The next pass reads the gate and delivers the same owed conclusion once.
+    const delivered = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(delivered.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    row = await rawRow(db, attemptId);
+    expect(row.correction_generation).toBeNull();
+    expect(row.observed).toBe("success");
+  });
+
+  test("§7.9a: an unreadable gate never records a correction the row did not earn", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const degraded = withFailingReads(db, /FROM review_targets/);
+    const fetchStub = stubFetch();
+    try {
+      const first = await run(degraded, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(first.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(0);
+    let row = await rawRow(db, attemptId);
+    // The terminal record stands exactly as published: neither reopened nor
+    // carrying an obligation decided from a read that never happened.
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_generation).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+
+    // The next pass reads the gate, records the real correction and sends it.
+    const second = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(second.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    row = await rawRow(db, attemptId);
+    expect(row.observed).toBe("success");
+    expect(row.correction_generation).toBeNull();
+  });
+
+  test("§7.9a: agreeing with an older failure never settles an owed success", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    // Force the row back to the intent the deferred pass never replaced: the
+    // unconfirmed failure that is ALREADY on the run. The owed SUCCESS was
+    // never sent, so agreement with this failure must not settle the debt.
+    db.raw
+      .prepare(`UPDATE review_checks SET desired = 'failure', desired_title = ?, desired_summary = ? WHERE id = ?`)
+      .run(CHECK_NAME, UNCONFIRMED, attemptId);
+    const lease = await claimCheckRecovery(db, attemptId, "correction-guard", clock + 30_000);
+    if (lease === null) throw new Error("fixture: the row was not claimable");
+    const attempt = await getCheckAttempt(db, attemptId);
+    if (attempt === null) throw new Error("fixture: the row vanished");
+    expect(
+      await recordCheckObservation(
+        db,
+        attemptId,
+        lease,
+        remoteFor(attempt.identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        clock + 30_000,
+      ),
+    ).toBe(true);
+    const row = await rawRow(db, attemptId);
+    expect(row.observed).toBe("failure");
+    expect(row.correction_desired).toBe("success");
+    expect(row.correction_generation).toBe(1);
   });
 
   test("§7.9a: a DIFFERENT publication's confirmation never revises a linked terminal record", async () => {

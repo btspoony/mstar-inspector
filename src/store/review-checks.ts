@@ -1828,8 +1828,8 @@ export async function recordCheckObservation(
             terminal_dispatch_ms = CASE WHEN ? THEN NULL ELSE terminal_dispatch_ms END,
             next_attempt_ms = CASE WHEN ? THEN NULL ELSE next_attempt_ms END,
             last_error = CASE WHEN ? THEN NULL ELSE last_error END,
-            correction_desired = CASE WHEN ? THEN NULL ELSE correction_desired END,
-            correction_generation = CASE WHEN ? THEN NULL ELSE correction_generation END`,
+            correction_desired = CASE WHEN ? = 1 AND (correction_desired IS NULL OR (correction_desired = desired AND correction_generation = generation)) THEN NULL ELSE correction_desired END,
+            correction_generation = CASE WHEN ? = 1 AND (correction_desired IS NULL OR (correction_desired = desired AND correction_generation = generation)) THEN NULL ELSE correction_generation END`,
     [
       observed,
       remote.id,
@@ -1842,8 +1842,11 @@ export async function recordCheckObservation(
       agrees ? 1 : 0,
       agrees ? 1 : 0,
       agrees ? 1 : 0,
-      // The owed §7.9a correction is settled by the same validated response
-      // that resolves its send — never by a deferral or a refusal.
+      // An owed §7.9a correction is settled only by a validated response that
+      // DELIVERED it: the frozen intent this row agreed on must be the owed
+      // conclusion, for the owed generation. An agreement with any other
+      // intent (an unreadable read that fell back to the old failure) leaves
+      // the debt standing instead of marking it delivered.
       agrees ? 1 : 0,
       agrees ? 1 : 0,
     ],
