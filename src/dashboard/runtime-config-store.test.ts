@@ -1034,6 +1034,24 @@ describe("workspace check_min_score default", () => {
 });
 
 describe("reconciler settings snapshot", () => {
+  test("previously accepted one-request budgets now fall back with key-only diagnostics", async () => {
+    const db = createMigratedTestD1();
+    for (const key of [
+      "platform.reconcile.check.max_requests",
+      "platform.reconcile.check.row_max_requests",
+      "platform.reconcile.lifecycle.max_requests",
+      "platform.reconcile.lifecycle.thread_operation_requests",
+      "platform.reconcile.lifecycle.publication_lane_max_requests",
+    ]) {
+      db.raw.prepare("INSERT INTO review_runtime_settings (key,value,updated_at) VALUES (?,'1','now')").run(key);
+      expect(await getReconcileSettings(db)).toEqual({
+        values: RECONCILE_DEFAULTS, issue: { kind: "invalid_rows", keys: [key] },
+      });
+      db.raw.prepare("DELETE FROM review_runtime_settings WHERE key=?").run(key);
+    }
+    db.raw.close();
+  });
+
   test("absent rows use unchanged defaults and valid overrides round-trip", async () => {
     const db = createMigratedTestD1();
     expect(await getReconcileSettings(db)).toEqual({ values: RECONCILE_DEFAULTS, issue: null });

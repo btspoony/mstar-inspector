@@ -28,7 +28,7 @@
  *   - tenant/App isolation: only the failing pair is suspended
  *   - a throwing reviewer/dependency can never escape the handler
  */
-import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
+import { RECONCILE_DEFAULTS, RECONCILE_LIMITS, RECONCILE_REQUEST_ESTIMATES } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import { idemKey } from "../../src/contracts/idem";
@@ -3176,6 +3176,80 @@ describe("uncertain-publication discovery through the real capture", () => {
 });
 
 describe("runtime lifecycle selection", () => {
+  function minimumRequestSettings(db: TestD1) {
+    for (const [field, key] of [
+      ["lifecycleMaxRequests", "max_requests"],
+      ["lifecyclePublicationLaneMaxRequests", "publication_lane_max_requests"],
+      ["lifecycleThreadOperationRequests", "thread_operation_requests"],
+    ] as const) db.raw.prepare("INSERT INTO review_runtime_settings (key,value,updated_at) VALUES (?,?,'now')")
+      .run(`platform.reconcile.lifecycle.${key}`, String(RECONCILE_LIMITS[field].min));
+  }
+
+  test("minimum request budgets publish one cold prepared row", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    minimumRequestSettings(db);
+    await seedPrepared(db, "minimum-publication", reviewPayload(SCOPE), 120_000);
+    const { credentials, plan, send } = RECONCILE_REQUEST_ESTIMATES;
+    let dispatched = 0;
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: async ({ transport }) => {
+        dispatched += await meterRequests(transport!, credentials);
+        return okResolution({
+          planReviewUpsert: async () => {
+            dispatched += await meterRequests(transport!, plan);
+            return { action: "create", round: 1 };
+          },
+          postPreparedReview: async () => {
+            const sent = await meterRequests(transport!, send);
+            dispatched += sent;
+            if (sent !== send) throw new Error("send budget refused");
+            return { commentId: 777 };
+          },
+        });
+      },
+    });
+    expect(dispatched).toBe(credentials + plan + send);
+    expect(summary.applied).toBe(1);
+    expect(pubRow(db, "minimum-publication")).toMatchObject({ phase: "applied", recovery_state: "done" });
+  });
+
+  test("minimum request budgets resolve one cold thread row", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    minimumRequestSettings(db);
+    await seedPrepared(db, "minimum-thread", degradedPayload(SCOPE), 0);
+    db.raw.prepare("UPDATE review_publications SET phase='superseded', recovery_state='done' WHERE id='minimum-thread'").run();
+    seedFindingRow(db, "minimum-finding", "minimum-thread", SCOPE, "addressed");
+    seedThreadRow(db, {
+      id: "minimum-association", publicationId: "minimum-thread", findingRowId: "minimum-finding",
+      scope: SCOPE, verified: verifiedFor("minimum-association", "minimum-finding"),
+    });
+    const { credentials, discovery, plan } = RECONCILE_REQUEST_ESTIMATES;
+    let dispatched = 0;
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: async ({ transport }) => {
+        dispatched += await meterRequests(transport!, credentials);
+        return okResolution({
+          resolveFindingThread: async () => {
+            for (const requests of [discovery, discovery, plan, discovery]) {
+              const sent = await meterRequests(transport!, requests);
+              dispatched += sent;
+              if (sent !== requests) return { kind: "retry", reason: "api" };
+            }
+            db.raw.prepare("UPDATE review_threads SET resolution_state='resolved', resolved_ms=? WHERE id='minimum-association'").run(T0);
+            return { kind: "resolved", threadId: "thread-minimum", adopted: false, outdated: false, lateChange: false };
+          },
+        });
+      },
+    });
+    expect(dispatched).toBe(credentials + discovery + discovery + plan + discovery);
+    expect(summary.resolved).toBe(1);
+    expect(threadRow(db, "minimum-association").resolution_state).toBe("resolved");
+  });
+
   test("configured selection limit and attempt cap bound a pass with one snapshot", async () => {
     const db = createMigratedTestD1();
     seedApp(db, APP);

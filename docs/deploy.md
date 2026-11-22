@@ -2788,20 +2788,23 @@ behave.
 
   | API field | Absent-row default | Accepted range |
   |---|---:|---:|
-  | `lifecycleMaxRequests` | 80 | 1–100 |
+  | `lifecycleMaxRequests` | 80 | 9–100 |
   | `lifecycleRunBudgetMs` | 45,000 | 1–60,000 |
   | `lifecyclePerRequestMs` | 5,000 | 1–15,000 |
-  | `lifecycleThreadOperationRequests` | 15 | 1–100 |
-  | `lifecyclePublicationLaneMaxRequests` | 40 | 1–100 |
+  | `lifecycleThreadOperationRequests` | 15 | 7–100 |
+  | `lifecyclePublicationLaneMaxRequests` | 40 | 5–100 |
   | `lifecycleSelectLimit` | 10 | 1–100 |
   | `lifecycleMaxAttempts` | 5 | 1–10 |
-  | `checkMaxRequests` | 100 | 1–100 |
+  | `checkMaxRequests` | 100 | 6–100 |
   | `checkRunBudgetMs` | 60,000 | 1–60,000 |
   | `checkPerRequestMs` | 5,000 | 1–15,000 |
-  | `checkRowMaxRequests` | 6 | 1–100 |
+  | `checkRowMaxRequests` | 6 | 6–100 |
   | `checkSelectLimit` | 25 | 1–100 |
   | `checkMaxAttempts` | 5 | 1–10 |
 
+  Request minima include cold credential resolution and a single-page remote
+  operation: Check adoption/create/fetch/update, publication plan/send, or
+  thread/issue captures and resolution. Pagination can require a larger budget.
   Per-request timeouts must not exceed their run budget. Publication-lane
   and thread-operation request allowances must not exceed lifecycle total
   requests; row requests must not exceed Check total requests. A read failure,

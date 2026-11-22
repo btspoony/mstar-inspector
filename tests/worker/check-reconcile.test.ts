@@ -28,7 +28,7 @@
  *     on the shared cron, `reconcileReviewChecks` on its own every-minute cron,
  *     each stage caught independently
  */
-import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
+import { RECONCILE_DEFAULTS, RECONCILE_LIMITS } from "../../src/contracts/reconcile-settings";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import { bumpCheckOwed, clearConcludedCheckOwed } from "../../src/pipeline/review-attempt";
@@ -5301,6 +5301,44 @@ describe("an owed Check settlement has a reader and a clearer", () => {
 });
 
 describe("runtime reconciler snapshot", () => {
+  test("minimum request budgets complete a cold Check instead of leaving it pending every run", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    for (const [key, value] of [
+      ["platform.reconcile.check.max_requests", RECONCILE_LIMITS.checkMaxRequests.min],
+      ["platform.reconcile.check.row_max_requests", RECONCILE_LIMITS.checkRowMaxRequests.min],
+    ] as const) db.raw.prepare("INSERT INTO review_runtime_settings (key,value,updated_at) VALUES (?,?,'now')").run(key, String(value));
+    let coldPairs = 0;
+    const credentials: CheckCredentialFactory = async (input) => {
+      coldPairs += 1;
+      await input.transport.fetchImpl("https://api.github.com/app");
+      await input.transport.fetchImpl("https://api.github.com/app/installations/123/access_tokens");
+      return scriptedCredentials(db, {
+        ...agreeingScript(db),
+        fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+        complete: async (identity, _id, conclusion) => ({
+          kind: "completed",
+          remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }),
+        }),
+      })(input);
+    };
+    const summaries: CheckReconcileSummary[] = [];
+    const fetch = stubFetch();
+    try {
+      for (const now of [T0, T0 + 60_000]) {
+        summaries.push(await run(db, { now: () => now, credentials }));
+        if (summaries.at(-1)!.completed > 0) break;
+      }
+      const row = await rawRow(db, attempt.identity.attemptId);
+      expect(summaries.some((summary) => summary.completed === 1), JSON.stringify({ summaries, coldPairs, attempts: row.attempts, state: row.recovery_state })).toBe(true);
+      expect(coldPairs).toBe(1);
+      expect(row.recovery_state).toBe("done");
+      expect(row.check_run_id).not.toBeNull();
+    } finally {
+      fetch.restore();
+    }
+  });
+
   test("selection limit and attempt cap apply with exactly one settings read per run", async () => {
     const db = seededDb();
     const first = await claim(db);

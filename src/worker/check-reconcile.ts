@@ -44,7 +44,7 @@
  *   escapes into `scheduled`.
  */
 import { getReconcileSettings } from "../dashboard/runtime-config-store";
-import type { ReconcileValues } from "../contracts/reconcile-settings";
+import { RECONCILE_REQUEST_ESTIMATES, type ReconcileValues } from "../contracts/reconcile-settings";
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import { clearCheckOwed, clearConcludedCheckOwed, deferCheckWithOwed } from "../pipeline/review-attempt";
@@ -126,7 +126,7 @@ export type CheckReconcileSummary = {
  * built, and is never charged (charging an estimate on top of the metered
  * requests would double-count).
  */
-const CREDENTIAL_REQUESTS = 2;
+const CREDENTIAL_REQUESTS = RECONCILE_REQUEST_ESTIMATES.credentials;
 
 /** Lease holder label for Check recovery claims. */
 const HOLDER = "check-reconcile";

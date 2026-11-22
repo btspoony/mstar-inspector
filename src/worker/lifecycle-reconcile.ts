@@ -63,7 +63,7 @@
  * ever throws out of `scheduled`.
  */
 import { getReconcileSettings } from "../dashboard/runtime-config-store";
-import type { ReconcileValues } from "../contracts/reconcile-settings";
+import { RECONCILE_REQUEST_ESTIMATES, type ReconcileValues } from "../contracts/reconcile-settings";
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like, D1StatementLike } from "../store/types";
@@ -129,9 +129,9 @@ export type LifecycleReconcileSummary = {
  * every ACTUAL request (§7.11.1), and charging an estimate on top would
  * double-count a paginating scan.
  */
-const PLAN_REQUESTS = 1;
-const SEND_REQUESTS = 2;
-const DISCOVERY_REQUESTS = 2;
+const PLAN_REQUESTS = RECONCILE_REQUEST_ESTIMATES.plan;
+const SEND_REQUESTS = RECONCILE_REQUEST_ESTIMATES.send;
+const DISCOVERY_REQUESTS = RECONCILE_REQUEST_ESTIMATES.discovery;
 /**
  * The §7.5 live App-identity proof (`GET /app`) issues exactly one request
  * per App pair per run (the resolution is cached). The probe's request is
@@ -145,7 +145,7 @@ const DISCOVERY_REQUESTS = 2;
  * the §7.5 surface itself, §7.11.1): the two gate different operations, and
  * the probe is metered once, at the transport — never double-counted.
  */
-const IDENTITY_REQUESTS = 1;
+const IDENTITY_REQUESTS = RECONCILE_REQUEST_ESTIMATES.identity;
 
 /** Lease holder label for M8 recovery claims. */
 const HOLDER = "lifecycle-reconcile";

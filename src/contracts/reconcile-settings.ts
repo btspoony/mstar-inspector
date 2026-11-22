@@ -34,18 +34,37 @@ const RECONCILE_SELECT_HARD_MAX = 100;
 /** Bound repeated GitHub mutations before operator intervention is required. */
 const RECONCILE_ATTEMPTS_HARD_MAX = 10;
 
+/** Non-mutating preflight estimates; only actual dispatches spend requests. */
+export const RECONCILE_REQUEST_ESTIMATES = {
+  plan: 1,
+  send: 2,
+  discovery: 2,
+  identity: 1,
+  credentials: 2,
+} as const;
+
+const { plan, send, discovery, credentials } = RECONCILE_REQUEST_ESTIMATES;
+/** Cold credentials, adoption/fetch, and create/update must fit one Check row. */
+const CHECK_ROW_MIN_REQUESTS = credentials + discovery + send;
+/** Cold credentials precede the publication plan and guarded send. */
+const PUBLICATION_MIN_REQUESTS = credentials + plan + send;
+/** Stable thread/issue captures, one mutation, and a post-mutation capture. */
+const THREAD_MIN_REQUESTS = discovery + discovery + plan + discovery;
+/** Either remote lane must be able to finish a cold, single-page operation. */
+const LIFECYCLE_MIN_REQUESTS = Math.max(PUBLICATION_MIN_REQUESTS, credentials + THREAD_MIN_REQUESTS);
+
 export const RECONCILE_RULES = {
-  lifecycleMaxRequests: { key: "platform.reconcile.lifecycle.max_requests", fallback: 80, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
+  lifecycleMaxRequests: { key: "platform.reconcile.lifecycle.max_requests", fallback: 80, min: LIFECYCLE_MIN_REQUESTS, max: RECONCILE_REQUEST_HARD_MAX },
   lifecycleRunBudgetMs: { key: "platform.reconcile.lifecycle.run_budget_ms", fallback: 45_000, min: 1, max: RECONCILE_RUN_HARD_MAX_MS },
   lifecyclePerRequestMs: { key: "platform.reconcile.lifecycle.per_request_ms", fallback: 5_000, min: 1, max: RECONCILE_REQUEST_HARD_MAX_MS },
-  lifecycleThreadOperationRequests: { key: "platform.reconcile.lifecycle.thread_operation_requests", fallback: 15, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
-  lifecyclePublicationLaneMaxRequests: { key: "platform.reconcile.lifecycle.publication_lane_max_requests", fallback: 40, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
+  lifecycleThreadOperationRequests: { key: "platform.reconcile.lifecycle.thread_operation_requests", fallback: 15, min: THREAD_MIN_REQUESTS, max: RECONCILE_REQUEST_HARD_MAX },
+  lifecyclePublicationLaneMaxRequests: { key: "platform.reconcile.lifecycle.publication_lane_max_requests", fallback: 40, min: PUBLICATION_MIN_REQUESTS, max: RECONCILE_REQUEST_HARD_MAX },
   lifecycleSelectLimit: { key: "platform.reconcile.lifecycle.select_limit", fallback: 10, min: 1, max: RECONCILE_SELECT_HARD_MAX },
   lifecycleMaxAttempts: { key: "platform.reconcile.lifecycle.max_attempts", fallback: 5, min: 1, max: RECONCILE_ATTEMPTS_HARD_MAX },
-  checkMaxRequests: { key: "platform.reconcile.check.max_requests", fallback: 100, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
+  checkMaxRequests: { key: "platform.reconcile.check.max_requests", fallback: 100, min: CHECK_ROW_MIN_REQUESTS, max: RECONCILE_REQUEST_HARD_MAX },
   checkRunBudgetMs: { key: "platform.reconcile.check.run_budget_ms", fallback: 60_000, min: 1, max: RECONCILE_RUN_HARD_MAX_MS },
   checkPerRequestMs: { key: "platform.reconcile.check.per_request_ms", fallback: 5_000, min: 1, max: RECONCILE_REQUEST_HARD_MAX_MS },
-  checkRowMaxRequests: { key: "platform.reconcile.check.row_max_requests", fallback: 6, min: 1, max: RECONCILE_REQUEST_HARD_MAX },
+  checkRowMaxRequests: { key: "platform.reconcile.check.row_max_requests", fallback: 6, min: CHECK_ROW_MIN_REQUESTS, max: RECONCILE_REQUEST_HARD_MAX },
   checkSelectLimit: { key: "platform.reconcile.check.select_limit", fallback: 25, min: 1, max: RECONCILE_SELECT_HARD_MAX },
   checkMaxAttempts: { key: "platform.reconcile.check.max_attempts", fallback: 5, min: 1, max: RECONCILE_ATTEMPTS_HARD_MAX },
 } satisfies Record<ReconcileField, { key: string; fallback: number; min: number; max: number }>;

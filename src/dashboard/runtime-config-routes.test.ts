@@ -1271,6 +1271,39 @@ describe("workspace default review-gate floor", () => {
 });
 
 describe("PATCH /_internal_admin/api/runtime reconcile", () => {
+  test("rejects request budgets that cannot admit a cold recovery row", async () => {
+    const { db } = fixture();
+    for (const budgets of [
+      { checkMaxRequests: 1, checkRowMaxRequests: 1 },
+      { lifecycleMaxRequests: 1, lifecyclePublicationLaneMaxRequests: 1, lifecycleThreadOperationRequests: 1 },
+    ]) {
+      const response = await runtimeApi(db, {
+        method: "PATCH",
+        body: JSON.stringify({ reconcile: { ...RECONCILE_DEFAULTS, ...budgets } }),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("accepts request minima and refuses each smaller allowance without another audit", async () => {
+    const { db } = fixture();
+    const fields = ["checkMaxRequests", "checkRowMaxRequests", "lifecycleMaxRequests", "lifecyclePublicationLaneMaxRequests", "lifecycleThreadOperationRequests"] as const;
+    const values = { ...RECONCILE_DEFAULTS };
+    for (const field of fields) values[field] = RECONCILE_LIMITS[field].min;
+    const save = (reconcile: typeof values) => runtimeApi(db, { method: "PATCH", body: JSON.stringify({ reconcile }) });
+    expect((await save(values)).status).toBe(200);
+    for (const field of fields) {
+      const response = await save({ ...values, [field]: values[field] - 1 });
+      expect(response.status).toBe(400);
+      expect((await response.json() as { error: string }).error).toContain(`reconcile.${field}`);
+    }
+    expect(auditRows(db)).toHaveLength(1);
+    expect(await (await runtimeApi(db, { method: "GET" })).json()).toHaveProperty("reconcile", {
+      values, limits: RECONCILE_LIMITS, degraded: false,
+    });
+  });
+
   test("saves overrides with an atomic before/after audit and reads them back", async () => {
     const { db } = fixture();
     const values = { ...RECONCILE_DEFAULTS, checkSelectLimit: 1, lifecycleMaxAttempts: 2 };
