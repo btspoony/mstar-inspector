@@ -36,6 +36,7 @@ import {
   setCommentClaimSettings,
   setMaintenance,
   setRecheckAssignmentMaxBytes,
+  setRouteWorkflow,
   setSystemConcurrency,
   useLoaded,
   type AdmissionDropCounts,
@@ -46,6 +47,7 @@ import {
   type MaintenanceConfig,
   type QueueBacklog,
   type RecheckAssignmentConfig,
+  type RouteWorkflowConfig,
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
@@ -65,6 +67,31 @@ function oldestWait(locale: Locale, queue: QueueBacklog | null): string {
   if (queue === null) return t(locale, "admin.runtime.queueUnreadable");
   if (queue.oldestMessageTimestamp === null) return t(locale, "admin.runtime.queueEmpty");
   return formatRelativeTime(queue.oldestMessageTimestamp, locale);
+}
+
+/**
+ * The stored row behind the gate's answer. A hand-edited value the read path
+ * refuses says so with its raw content — the row a page would otherwise echo
+ * as `on` while the gate refuses every delivery.
+ */
+function routeWorkflowStored(locale: Locale, gate: RouteWorkflowConfig): string {
+  if (gate.reason === "untrusted") {
+    return t(locale, "admin.runtime.routeWorkflowStoredUntrusted", { value: gate.rejected ?? "" });
+  }
+  if (gate.degraded) return t(locale, "admin.runtime.routeWorkflowStoredUnreadable");
+  return gate.saved
+    ? t(locale, "admin.runtime.routeWorkflowStoredSaved", { value: gate.mode })
+    : t(locale, "admin.runtime.routeWorkflowStoredAbsent");
+}
+
+/** The gate's own answer — what the queue handler acts on right now. */
+function routeWorkflowEffective(locale: Locale, gate: RouteWorkflowConfig): string {
+  return t(
+    locale,
+    gate.mode === "on"
+      ? "admin.runtime.routeWorkflowEffectiveOn"
+      : "admin.runtime.routeWorkflowEffectiveOff",
+  );
 }
 
 /**
@@ -322,6 +349,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [attemptCapChangedElsewhere, setAttemptCapChangedElsewhere] = useState<number | null>(null);
   /** The window's pending state: `null` = untouched, so the stored one shows. */
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
+  /** The route switch's pending mode: `null` = untouched, so the gate's answer shows. */
+  const [routeWorkflowTarget, setRouteWorkflowTarget] = useState<"on" | "off" | null>(null);
   const [reasonDraft, setReasonDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Every card's save rides its own button: the signal drives the spinner →
@@ -333,6 +362,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const sweepSignal = useSaveSignal();
   const recheckAssignmentSignal = useSaveSignal();
   const attemptCapSignal = useSaveSignal();
+  const routeWorkflowSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
   // the terminalize/update relation included — reads as that field's error
@@ -347,6 +377,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       | "sweep"
       | "recheckAssignment"
       | "attemptCap"
+      | "routeWorkflow"
       | "maintenance";
   } | null>(null);
 
@@ -662,6 +693,61 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   }
 
   /**
+   * Set the route switch. `value` is what the control shows (the gate's own
+   * answer until the operator changes it). The store refuses anything but the
+   * two exact strings; an accepted save whose echo carries no readable gate
+   * answer is confirmed by re-reading the runtime face, and an unreadable
+   * re-read says the outcome is unconfirmed — the request value never stands in
+   * for a mode the gate may not be applying.
+   */
+  async function onSaveRouteWorkflow(value: "on" | "off"): Promise<void> {
+    if (busy) return; // in-flight guard — no double submit
+    setBusy(true);
+    setNotice(null);
+    routeWorkflowSignal.start();
+    try {
+      const saved = await setRouteWorkflow(value);
+      // The write landed (2xx); only a readable gate answer may be rendered.
+      const answer = saved ?? (await readRuntime().catch(() => null))?.routeWorkflow ?? null;
+      if (answer === null) {
+        // Nothing confirmed the write, so the switch goes back to the last
+        // confirmed gate answer — the same value the status line shows. A
+        // control reading `on` beside a status reading `off` is the failure
+        // this card exists to prevent.
+        setRouteWorkflowTarget(null);
+        setNotice({
+          kind: "error",
+          message: t(locale, "admin.runtime.routeWorkflowUnconfirmed"),
+          source: "routeWorkflow",
+        });
+        routeWorkflowSignal.fail();
+        return;
+      }
+      update((data) => ({ ...data, routeWorkflow: answer }));
+      setRouteWorkflowTarget(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.routeWorkflowSaved"),
+        source: "routeWorkflow",
+      });
+      routeWorkflowSignal.succeed();
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.routeWorkflowFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "routeWorkflow",
+      });
+      routeWorkflowSignal.fail();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
    * Close or reopen the platform. `enabled` is the state the operator asked
    * for; the reason rides only a close (the store drops it on reopen, so
    * sending it then would be dead input).
@@ -728,6 +814,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const recheck = data.recheckAssignment;
           // And the platform's one end-to-end attempt cap.
           const attemptCap = data.attemptCap;
+          // And the review route's operating switch (older Worker → no card).
+          const routeWorkflow = data.routeWorkflow;
           // And for the admission-drop counts.
           const drops = data.admissionDrops24h;
           // The live queue gauge; `null` is "not readable", never an empty queue.
@@ -736,6 +824,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const maintenance = data.maintenance;
           // The state the toggle shows: what the operator picked, else stored.
           const maintenanceOn = maintenanceTarget ?? maintenance?.enabled ?? false;
+          // The route control starts at the gate's own answer, so an untrusted
+          // row shows `off` and a save repairs it.
+          const routeWorkflowOn = (routeWorkflowTarget ?? routeWorkflow?.mode ?? "off") === "on";
           return (
           <div className="flex flex-col gap-4">
             {maintenance === null ? null : (
@@ -1020,6 +1111,76 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     )}
                   </>
                 )}
+              </CardContent>
+            </SectionCard>
+            )}
+            {routeWorkflow === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.routeWorkflowTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.routeWorkflowDescription")}
+                </p>
+                {notice?.source === "routeWorkflow" ? (
+                  <CardOutcome notice={notice} status={routeWorkflowSignal.status} />
+                ) : null}
+                {/* The row and the gate's own answer side by side: a stored value
+                    the read path refuses is named as such, never echoed as a
+                    working `on`. */}
+                <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
+                  <div className="flex flex-col gap-1">
+                    <dt className="text-muted-foreground">
+                      {t(locale, "admin.runtime.routeWorkflowStoredLabel")}
+                    </dt>
+                    <dd className="font-medium" data-route-workflow="stored">
+                      {routeWorkflowStored(locale, routeWorkflow)}
+                    </dd>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <dt className="text-muted-foreground">
+                      {t(locale, "admin.runtime.routeWorkflowEffectiveLabel")}
+                    </dt>
+                    <dd className="font-medium" data-route-workflow="effective">
+                      {routeWorkflowEffective(locale, routeWorkflow)}
+                    </dd>
+                  </div>
+                </dl>
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  data-route-workflow="form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void onSaveRouteWorkflow(routeWorkflowOn ? "on" : "off");
+                  }}
+                >
+                  <Toggle
+                    variant="outline"
+                    pressed={routeWorkflowOn}
+                    disabled={busy}
+                    aria-label={t(locale, "admin.flags.stateAria", {
+                      flag: t(locale, "admin.runtime.routeWorkflowTitle"),
+                      state: t(
+                        locale,
+                        routeWorkflowOn ? "admin.flags.stateOn" : "admin.flags.stateOff",
+                      ),
+                    })}
+                    onPressedChange={(next) => setRouteWorkflowTarget(next ? "on" : "off")}
+                  >
+                    {t(locale, routeWorkflowOn ? "admin.flags.stateOn" : "admin.flags.stateOff")}
+                  </Toggle>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={
+                      routeWorkflowSignal.status === "idle" ? undefined : routeWorkflowSignal.status
+                    }
+                  >
+                    {t(locale, "admin.runtime.routeWorkflowSave")}
+                  </Button>
+                  <SaveInFlight show={routeWorkflowSignal.status === "loading"} locale={locale} />
+                </form>
               </CardContent>
             </SectionCard>
             )}

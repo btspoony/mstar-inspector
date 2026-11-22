@@ -707,10 +707,12 @@ Merging this code does not enable the review route, and no deploy flips it. The 
   line (`event: "review_route_gate_closed"`) names the gate, its source and the batch size. A
   refused delivery is never silently re-routed to a path that no longer exists.
 
-The setting is an operating switch, not a product surface: it has no dashboard control. The
-operator flips it — one `review_runtime_settings` row — **after** the nine claims hold and
-`I-000666` closes, which makes enabling a deliberate, auditable act rather than a merge side
-effect.
+The setting is a runtime setting on the operator page: a validated store setter
+(`setReviewRouteWorkflow`, exact `on`/`off` only), an audited admin write route, and a control
+that renders the gate's own answer rather than the row it wrote. A merge never flips it; enabling
+stays an explicit act an operator performs and the audit row records. It ships **after** the
+credential-echo redaction lands, because turning the route on before the retained result is
+redacted would persist a transformed credential echo.
 
 ## Change obligations
 

@@ -87,6 +87,7 @@ import {
   type ReviewOutput,
 } from "../review/schema";
 import { redactSecrets } from "./redact";
+import { isBudgetRefusal } from "../contracts/recovery-budget";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
@@ -2367,6 +2368,26 @@ export function renderLineCommentText(finding: ReviewFinding): string {
 }
 
 /**
+ * Why a read-only discovery readback captured nothing (§7.9a condition 2):
+ * `marker-missing` — no review carries this publication's batch marker;
+ * `ambiguous` — more than one does; `comment-gone` — the batch review is ours
+ * but an intent's comment is not in it; `readback-scope` — a read, or the
+ * authenticated identity a read needs, was unavailable, so nothing could be
+ * observed; `capture-failed` — the ids were observed but could not be
+ * persisted; `budget-refused` — the run's request allowance refused the read
+ * before dispatch, so nothing was observed and no attempt is spent. It is the
+ * last observation the recovery lane can record as the batch's stop reason,
+ * never a guess about what happened on GitHub.
+ */
+export type LineDiscoveryFailure =
+  | "marker-missing"
+  | "ambiguous"
+  | "comment-gone"
+  | "readback-scope"
+  | "capture-failed"
+  | "budget-refused";
+
+/**
  * §7.7 line-comment capture result: the returned review
  * comments mapped back to the posted intents. `posted[].associationId` is
  * the intent's association id (every posted comment carries a trusted
@@ -2381,6 +2402,8 @@ export type PostedLineComments = {
   ambiguous: string[];
   captured: boolean;
   reviewId: number | null;
+  /** Discovery-only: which observation failed (absent when it captured). */
+  failure?: LineDiscoveryFailure;
 };
 
 export type PostPreparedLineCommentsInput = {
@@ -2651,14 +2674,20 @@ export async function recoverLineCommentsWithOctokit(
   input: PostPreparedLineCommentsInput,
   expectedLogin: string | null,
 ): Promise<PostedLineComments> {
-  // Unverified: no identity to prove authorship, or a read failed. Nothing is
-  // captured, so nothing is persisted.
-  const nothing: PostedLineComments = { posted: [], ambiguous: [], captured: false, reviewId: null };
+  // Unverified: nothing could be observed, so nothing is persisted. The
+  // reason is the caller's durable stop evidence, so each exit names its own.
+  const unread = (failure: LineDiscoveryFailure): PostedLineComments => ({
+    posted: [],
+    ambiguous: [],
+    captured: false,
+    reviewId: null,
+    failure,
+  });
   if (input.intents.length === 0) return { posted: [], ambiguous: [], captured: true, reviewId: null };
-  if (expectedLogin === null) return nothing;
+  if (expectedLogin === null) return unread("readback-scope");
   const pulls = octokit.rest?.pulls;
   if (pulls?.listReviews === undefined || pulls.listCommentsForReview === undefined || typeof octokit.paginate !== "function") {
-    return nothing;
+    return unread("readback-scope");
   }
   let reviews: unknown;
   try {
@@ -2670,17 +2699,20 @@ export async function recoverLineCommentsWithOctokit(
       pull_number: input.prNumber,
       per_page: 100,
     });
-  } catch {
-    return nothing;
+  } catch (error) {
+    // A refusal before dispatch observed nothing AND spent no attempt (spec
+    // §7.11.1); the caller must leave the batch exactly where it was.
+    return unread(isBudgetRefusal(error) ? "budget-refused" : "readback-scope");
   }
   // EXACTLY ONE review may claim this publication (and its admitted head): two
   // candidates are ambiguous, and an ambiguous readback captures nothing.
   const candidates = (Array.isArray(reviews) ? reviews : []).filter((candidate: unknown) =>
     isBatchReviewOf(candidate, { publicationId: input.publicationId, headSha: input.headSha, login: expectedLogin }),
   );
-  if (candidates.length !== 1) return nothing;
+  if (candidates.length !== 1) return unread(candidates.length === 0 ? "marker-missing" : "ambiguous");
   const review = candidates[0]!;
   let returned: ReturnType<typeof asComments> | null;
+  let refused = false;
   try {
     // ALL pages of the review's comments, through the paginating route.
     const listed = await octokit.paginate(pulls.listCommentsForReview, {
@@ -2691,14 +2723,18 @@ export async function recoverLineCommentsWithOctokit(
       per_page: 100,
     });
     returned = Array.isArray(listed) ? asComments(listed) : null;
-  } catch {
+  } catch (error) {
+    refused = isBudgetRefusal(error);
     returned = null;
   }
-  if (returned === null) return nothing;
-  return captureLineCommentsOf(input.intents, returned, review.id, {
+  if (returned === null) return unread(refused ? "budget-refused" : "readback-scope");
+  const captured = captureLineCommentsOf(input.intents, returned, review.id, {
     publicationId: input.publicationId,
     login: expectedLogin,
   });
+  // The batch review is ours; an intent's comment is not in it (deleted,
+  // still invisible, or replaced) — that is the durable stop observation.
+  return captured.captured ? captured : { ...captured, failure: "comment-gone" };
 }
 
 /**

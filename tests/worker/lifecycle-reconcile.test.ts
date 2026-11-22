@@ -36,10 +36,18 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
   applyPublishedLifecycle,
   claimPublication,
+  captureLineComments,
   PUBLICATION_LEASE_MS,
   listPublicationRecovery,
+  listLineBatchRecovery,
   listResolutionRecovery,
+  LIFECYCLE_MAX_ATTEMPTS,
   recordPublicationProof,
+  readLineBatchState,
+  recordLineDiscoveryFailure,
+  resetLineDiscoveryFailures,
+  findPublicationJournal,
+  PUBLICATION_PROOF_WAIT_PHASES,
   stagePublication,
   suspendPublicationRecovery,
   suspendResolutionRecovery,
@@ -82,6 +90,7 @@ import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers"
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { testAppPem } from "../helpers/rsa-key";
+import { RecoveryBudgetRefused } from "../../src/contracts/recovery-budget";
 
 const APP = "11111111-2222-3333-4444-555555555555";
 const APP_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -1157,6 +1166,517 @@ describe("§7.9a condition 2 — a pre-intent line batch is discovery-only", () 
       .get("pub-old") as { phase: string; line_dispatch_ms: number | null };
     expect(row.phase).toBe("applied");
     expect(row.line_dispatch_ms).toBe(-1);
+  });
+});
+
+describe("line-batch discovery bound — an unmatchable batch stops starving newer ones", () => {
+  type BatchColumns = {
+    line_dispatch_ms: number | null;
+    line_discovery_attempts: number;
+    line_unresolvable_ms: number | null;
+    line_unresolvable_reason: string | null;
+  };
+
+  function batchColumns(db: TestD1, id: string): BatchColumns {
+    return db.raw
+      .prepare(
+        `SELECT line_dispatch_ms, line_discovery_attempts, line_unresolvable_ms, line_unresolvable_reason
+           FROM review_publications WHERE id = ?`,
+      )
+      .get(id) as BatchColumns;
+  }
+
+  /** An applied publication whose line batch is still uncaptured. */
+  async function seedAppliedLineBatch(
+    db: TestD1,
+    input: {
+      id: string;
+      appliedAgeMs: number;
+      dispatched: boolean;
+      discoveryAttempts?: number;
+      headSha?: string;
+      intentCount?: number;
+    },
+  ): Promise<void> {
+    // The journal is unique per (scope, head, kind): two live batches in one
+    // test need distinct heads or the second staging replays the first row.
+    const headSha = input.headSha ?? SHA;
+    const intents: LineIntent[] = Array.from({ length: input.intentCount ?? 1 }, (_, i) => ({
+      associationId: `assoc-${input.id}${i === 0 ? "" : `-${i}`}`,
+      findingRowId: `finding-${input.id}`,
+      publicationId: input.id,
+      scope: SCOPE,
+      originalSha: headSha,
+      round: 1,
+      path: "src/a.ts",
+      line: 10,
+      body: "fix",
+      bodySha256: "a".repeat(64),
+    }));
+    await seedPrepared(db, input.id, reviewPayload(SCOPE, { headSha, lineIntents: intents }), input.appliedAgeMs + 1);
+    // A dispatched batch is discovery-only; an undispatched one is still sendable.
+    db.raw
+      .prepare(
+        `UPDATE review_publications
+            SET phase = 'applied', applied_ms = ?, recovery_state = 'done',
+                line_dispatch_ms = ?, line_discovery_attempts = ?
+          WHERE id = ?`,
+      )
+      .run(T0 - input.appliedAgeMs, input.dispatched ? T0 - 5_000 : null, input.discoveryAttempts ?? 0, input.id);
+    seedFindingRow(db, `finding-${input.id}`, input.id, SCOPE);
+    for (const intent of intents) {
+      seedThreadRow(db, {
+        id: intent.associationId,
+        publicationId: input.id,
+        findingRowId: intent.findingRowId,
+        scope: SCOPE,
+        verified: verifiedFor(intent.associationId, intent.findingRowId),
+      });
+    }
+  }
+
+  function recordingLog() {
+    const warns: { event: string; detail: string }[] = [];
+    return { warns, log: { warn: (fields: { event: string; detail: string }) => warns.push(fields), info: () => {} } };
+  }
+
+  test("an older unmatchable batch is reported once and a fresh batch is still selected", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    // The stuck batch is older AND one pass short of the bound: this pass is the
+    // one that must make it leave the eligible set.
+    await seedAppliedLineBatch(db, {
+      id: "pub-stuck",
+      appliedAgeMs: 200_000,
+      dispatched: true,
+      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+    });
+    await seedAppliedLineBatch(db, { id: "pub-fresh", appliedAgeMs: 100_000, dispatched: false, headSha: "fedcba9876543210fedcba9876543210fedcba98" });
+
+    const { warns, log } = recordingLog();
+    const calls = { discovered: 0, sent: 0 };
+    const reviewer = async () =>
+      okResolution({
+        recoverLineComments: async () => {
+          calls.discovered += 1;
+          return { posted: [], ambiguous: [], captured: false, reviewId: null, failure: "marker-missing" };
+        },
+        postLineComments: async () => {
+          calls.sent += 1;
+          return {
+            posted: [{ associationId: "assoc-pub-fresh", commentId: 5001, path: "src/a.ts", line: 10 }],
+            ambiguous: [],
+            captured: true,
+            reviewId: 5000,
+          };
+        },
+      });
+
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer, log });
+
+    // The fresh batch was selected in the same pass the older one used up its bound.
+    expect(calls.sent).toBe(1);
+    expect(batchColumns(db, "pub-fresh").line_dispatch_ms).toBe(T0);
+    // The stuck batch left the set with the reason the pass observed, keeping
+    // its row, its count and its reason for the operator.
+    expect(batchColumns(db, "pub-stuck")).toEqual({
+      line_dispatch_ms: T0 - 5_000,
+      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS,
+      line_unresolvable_ms: T0,
+      line_unresolvable_reason: "marker-missing",
+    });
+    const reported = warns.filter((warn) => warn.event === "ops_lifecycle_line_unresolvable");
+    expect(reported).toHaveLength(1);
+    expect(reported[0]!.detail).toContain("publication=pub-stuck");
+    expect(reported[0]!.detail).toContain("reason=marker-missing");
+    // The selector never returns it again (the fresh batch captured its comment).
+    expect(await listLineBatchRecovery(db, T0 + 1, RECONCILE_SELECT_LIMIT)).toEqual([]);
+
+    // A second pass reports nothing new and spends no further discovery.
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 1_000, reviewer, log });
+    expect(warns.filter((warn) => warn.event === "ops_lifecycle_line_unresolvable")).toHaveLength(1);
+    expect(batchColumns(db, "pub-stuck").line_discovery_attempts).toBe(LIFECYCLE_MAX_ATTEMPTS);
+    expect(calls.discovered).toBe(1);
+  });
+
+  test("a batch that succeeds on its second discovery attempt resolves and is not marked unresolvable", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-retry", appliedAgeMs: 100_000, dispatched: false });
+
+    // Pass 1: the send's reply is lost, so the batch becomes discovery-only.
+    const lost = okResolution({
+      postLineComments: async () => {
+        throw new Error("the send's reply was lost");
+      },
+    });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer: async () => lost, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-retry").line_dispatch_ms).toBe(T0);
+
+    // Pass 2: the readback finds the batch — it resolves, nothing is capped.
+    const found = okResolution({
+      recoverLineComments: async () => ({
+        posted: [{ associationId: "assoc-pub-retry", commentId: 6001, path: "src/a.ts", line: 10 }],
+        ambiguous: [],
+        captured: true,
+        reviewId: 6000,
+      }),
+    });
+    // The unknown send still holds its 120s lease: discovery only becomes
+    // selectable once that lease has lapsed.
+    await reconcileReviewLifecycle(asEnv(db), {
+      now: () => T0 + PUBLICATION_LEASE_MS + 1_000,
+      reviewer: async () => found,
+      log: SILENT_LOG,
+    });
+
+    const threads = db.raw
+      .prepare(`SELECT review_id, comment_id FROM review_threads WHERE publication_id = ?`)
+      .all("pub-retry") as Array<{ review_id: number | null; comment_id: number | null }>;
+    expect(threads).toEqual([{ review_id: 6000, comment_id: 6001 }]);
+    expect(batchColumns(db, "pub-retry")).toMatchObject({
+      line_discovery_attempts: 0,
+      line_unresolvable_ms: null,
+      line_unresolvable_reason: null,
+    });
+  });
+
+  test("a pass reaches a fresh batch behind more stuck batches than the selection width", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    // Two more stuck batches than the bounded selection returns in one query,
+    // so a single SELECT would retire ten of them and never see the fresh row.
+    const stuck = RECONCILE_SELECT_LIMIT + 2;
+    for (let i = 0; i < stuck; i += 1) {
+      await seedAppliedLineBatch(db, {
+        id: `pub-stuck-${i}`,
+        appliedAgeMs: 300_000 + i,
+        dispatched: true,
+        discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+        // 40 hex chars, distinct per batch: the journal is unique per head.
+        headSha: i.toString(16).padStart(2, "0").repeat(20),
+      });
+    }
+    await seedAppliedLineBatch(db, {
+      id: "pub-behind",
+      appliedAgeMs: 100_000,
+      dispatched: false,
+      headSha: "feedface".repeat(5),
+    });
+
+    const { warns, log } = recordingLog();
+    const calls = { discovered: 0, sent: 0 };
+    const reviewer = async () =>
+      okResolution({
+        recoverLineComments: async () => {
+          calls.discovered += 1;
+          return { posted: [], ambiguous: [], captured: false, reviewId: null, failure: "marker-missing" };
+        },
+        postLineComments: async () => {
+          calls.sent += 1;
+          return {
+            posted: [{ associationId: "assoc-pub-behind", commentId: 8001, path: "src/a.ts", line: 10 }],
+            ambiguous: [],
+            captured: true,
+            reviewId: 8000,
+          };
+        },
+      });
+
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer, log });
+
+    // Every stuck batch retired AND the row behind them went out in this pass.
+    expect(calls.discovered).toBe(stuck);
+    expect(calls.sent).toBe(1);
+    expect(warns.filter((warn) => warn.event === "ops_lifecycle_line_unresolvable")).toHaveLength(stuck);
+    for (let i = 0; i < stuck; i += 1) {
+      expect(batchColumns(db, `pub-stuck-${i}`)).toEqual({
+        line_dispatch_ms: T0 - 5_000,
+        line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS,
+        line_unresolvable_ms: T0,
+        line_unresolvable_reason: "marker-missing",
+      });
+    }
+    expect(batchColumns(db, "pub-behind").line_dispatch_ms).toBe(T0);
+  });
+
+  test("a successful discovery resets the failed-readback count", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-reset", appliedAgeMs: 100_000, dispatched: true });
+
+    // Pass 1: one readback observed nothing — the count is 1, not yet a cap.
+    const failing = async () =>
+      okResolution({
+        recoverLineComments: async () => ({ posted: [], ambiguous: [], captured: false, reviewId: null, failure: "marker-missing" }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer: failing, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-reset").line_discovery_attempts).toBe(1);
+
+    // Pass 2: the readback finds the batch — the count goes back to zero and
+    // neither marker column was ever written.
+    const succeeding = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [{ associationId: "assoc-pub-reset", commentId: 7001, path: "src/a.ts", line: 10 }],
+          ambiguous: [],
+          captured: true,
+          reviewId: 7000,
+        }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 1_000, reviewer: succeeding, log: SILENT_LOG });
+
+    expect(batchColumns(db, "pub-reset")).toMatchObject({
+      line_discovery_attempts: 0,
+      line_unresolvable_ms: null,
+      line_unresolvable_reason: null,
+    });
+  });
+
+  test("a stale failure cannot mark a batch another pass just completed", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, {
+      id: "pub-raced",
+      appliedAgeMs: 100_000,
+      dispatched: true,
+      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+    });
+
+    // The concurrent recovery task saved the comment first...
+    await captureLineComments(db, "pub-raced", 9000, [{ associationId: "assoc-pub-raced", commentId: 9001 }], T0);
+    // ...so the stale "readback observed nothing" at the bound must be a no-op.
+    expect(await recordLineDiscoveryFailure(db, "pub-raced", "marker-missing", 0, T0)).toBeNull();
+    expect(batchColumns(db, "pub-raced")).toMatchObject({
+      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      line_unresolvable_ms: null,
+      line_unresolvable_reason: null,
+    });
+  });
+
+  test("a stale failure cannot mark a partially captured batch", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, {
+      id: "pub-partial",
+      appliedAgeMs: 100_000,
+      dispatched: true,
+      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      intentCount: 2,
+    });
+
+    // The observation this pass carries: no capture had persisted yet.
+    expect((await readLineBatchState(db, "pub-partial")).captures).toBe(0);
+
+    // A concurrent pass saves ONE of the two comments; the batch stays pending,
+    // so the "any thread still uncaptured" predicate alone would let it retire.
+    await captureLineComments(db, "pub-partial", 9100, [{ associationId: "assoc-pub-partial", commentId: 9101 }], T0);
+    expect(await readLineBatchState(db, "pub-partial")).toMatchObject({ pending: true, captures: 1 });
+
+    // The stale failure at the bound changes nothing: neither the count nor the marker.
+    expect(await recordLineDiscoveryFailure(db, "pub-partial", "comment-gone", 0, T0)).toBeNull();
+    expect(batchColumns(db, "pub-partial")).toMatchObject({
+      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      line_unresolvable_ms: null,
+      line_unresolvable_reason: null,
+    });
+  });
+
+  test("a capture write that fails counts as a failed attempt and does not reset", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-fault", appliedAgeMs: 100_000, dispatched: true, discoveryAttempts: 1 });
+
+    // The remote read succeeds, but persisting the ids fails on that statement.
+    const failingDb = new Proxy(db as unknown as Record<string, unknown>, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop !== "prepare" || typeof value !== "function") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          if (sql.includes("SET review_id")) {
+            // Fails where the capture binds its ids: nothing reaches the batch.
+            return { bind: () => { throw new Error("capture write failed"); } };
+          }
+          return value.call(target, sql);
+        };
+      },
+    });
+    const reviewer = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [{ associationId: "assoc-pub-fault", commentId: 9201, path: "src/a.ts", line: 10 }],
+          ambiguous: [],
+          captured: true,
+          reviewId: 9200,
+        }),
+      });
+
+    await reconcileReviewLifecycle(
+      { DB: failingDb as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE },
+      { now: () => T0, reviewer, log: SILENT_LOG },
+    );
+
+    // Nothing persisted, so the count advances instead of resetting.
+    expect(batchColumns(db, "pub-fault")).toMatchObject({
+      line_discovery_attempts: 2,
+      line_unresolvable_ms: null,
+    });
+  });
+
+  test("a partial capture counts as progress, so the next miss cannot retire the batch", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, {
+      id: "pub-progress",
+      appliedAgeMs: 100_000,
+      dispatched: true,
+      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      intentCount: 2,
+    });
+
+    // Pass 1: the readback finds one of the two comments. That PERSISTED, so the
+    // count starts over even though the batch is not complete.
+    const partial = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [{ associationId: "assoc-pub-progress", commentId: 9301, path: "src/a.ts", line: 10 }],
+          ambiguous: [],
+          captured: false,
+          reviewId: 9300,
+          failure: "comment-gone",
+        }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer: partial, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-progress")).toMatchObject({
+      line_discovery_attempts: 0,
+      line_unresolvable_ms: null,
+    });
+
+    // Pass 2: the last comment is still missing — ONE failed attempt, nowhere
+    // near the bound the batch had already reached before its partial capture.
+    const miss = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [],
+          ambiguous: [],
+          captured: false,
+          reviewId: 9300,
+          failure: "comment-gone",
+        }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 1_000, reviewer: miss, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-progress")).toMatchObject({
+      line_discovery_attempts: 1,
+      line_unresolvable_ms: null,
+      line_unresolvable_reason: null,
+    });
+
+    // Still eligible, with the one remaining thread recoverable by a later pass.
+    expect(await listLineBatchRecovery(db, T0 + 2_000, RECONCILE_SELECT_LIMIT)).toHaveLength(1);
+    const pending = db.raw
+      .prepare(`SELECT id FROM review_threads WHERE publication_id = ? AND review_id IS NULL`)
+      .all("pub-progress") as Array<{ id: string }>;
+    expect(pending).toEqual([{ id: "assoc-pub-progress-1" }]);
+  });
+
+  test("re-listing an already captured id is not progress", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-rewrite", appliedAgeMs: 100_000, dispatched: true, intentCount: 2 });
+
+    // Pass 1 captures the first comment: a NEW id, so the count stays at zero.
+    const reader = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [{ associationId: "assoc-pub-rewrite", commentId: 9401, path: "src/a.ts", line: 10 }],
+          ambiguous: [],
+          captured: false,
+          reviewId: 9400,
+          failure: "comment-gone",
+        }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer: reader, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-rewrite").line_discovery_attempts).toBe(0);
+
+    // Pass 2 lists the SAME id again (a rewrite, not a capture) and still
+    // misses the second comment: that pass saved nothing and counts.
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 1_000, reviewer: reader, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-rewrite")).toMatchObject({
+      line_discovery_attempts: 1,
+      line_unresolvable_ms: null,
+    });
+  });
+
+  test("the count and the reset never stamp updated_ms, so a same-head row stays unattributed", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-old", appliedAgeMs: 100_000, dispatched: true, discoveryAttempts: 1 });
+    const writtenAt = (
+      db.raw.prepare(`SELECT updated_ms FROM review_publications WHERE id = ?`).get("pub-old") as { updated_ms: number }
+    ).updated_ms;
+    // A newer generation admitted after that last write, same scope and head.
+    const admittedMs = T0;
+
+    expect((await recordLineDiscoveryFailure(db, "pub-old", "marker-missing", 0, T0))?.attempts).toBe(2);
+    await resetLineDiscoveryFailures(db, "pub-old");
+
+    const after = db.raw
+      .prepare(`SELECT updated_ms, line_discovery_attempts FROM review_publications WHERE id = ?`)
+      .get("pub-old") as { updated_ms: number; line_discovery_attempts: number };
+    expect(after).toEqual({ updated_ms: writtenAt, line_discovery_attempts: 0 });
+
+    // The Check wait's probe reports the newest row written at/after admission;
+    // bookkeeping must not hand this old row's proof to the new attempt.
+    expect(
+      await findPublicationJournal(db, {
+        scope: SCOPE,
+        headSha: SHA,
+        phases: PUBLICATION_PROOF_WAIT_PHASES,
+        order: "newest",
+        writtenAtOrAfterMs: admittedMs,
+      }),
+    ).toBeNull();
+  });
+
+  test("a budget refusal is not a discovery attempt", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-budget", appliedAgeMs: 100_000, dispatched: true, discoveryAttempts: 3 });
+
+    // Returned refusal: the read never dispatched, so nothing was observed.
+    const refused = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [],
+          ambiguous: [],
+          captured: false,
+          reviewId: null,
+          failure: "budget-refused",
+        }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer: refused, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-budget")).toMatchObject({
+      line_discovery_attempts: 3,
+      line_unresolvable_ms: null,
+      line_unresolvable_reason: null,
+    });
+
+    // Thrown refusal (Octokit re-wraps the transport error in `cause`).
+    const thrown = async () =>
+      okResolution({
+        recoverLineComments: async () => {
+          throw Object.assign(new Error("Request failed"), {
+            cause: new RecoveryBudgetRefused("recovery request budget exhausted"),
+          });
+        },
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 2_000, reviewer: thrown, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-budget").line_discovery_attempts).toBe(3);
+
+    // The work stays due: the row is still selected.
+    expect(await listLineBatchRecovery(db, T0 + 3_000, RECONCILE_SELECT_LIMIT)).toHaveLength(1);
   });
 });
 

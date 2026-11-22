@@ -25,9 +25,11 @@ import {
   filterLineCommentFindings,
   parseDiffHunkRanges,
   postLineCommentsWithOctokit,
+  recoverLineCommentsWithOctokit,
   renderLineCommentText,
   type PostOctokit,
 } from "../../src/pipeline/comment";
+import { RecoveryBudgetRefused } from "../../src/contracts/recovery-budget";
 import { buildLineCommentBody } from "../../src/pipeline/review-threads";
 import { FINDING_BODY_MAX, type ReviewFinding } from "../../src/review/schema";
 
@@ -732,5 +734,60 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
     await postLineCommentsWithOctokit(octokit, { ...input, intents: [{ ...intents[0]!, lineStart: 21, line: 21 }] });
     const [comment] = calls.createReviewParams!.comments as Record<string, unknown>[];
     expect(comment === undefined ? null : "start_line" in comment).toBe(false);
+  });
+});
+
+describe("recoverLineCommentsWithOctokit (read-only discovery readback, §7.9a condition 2)", () => {
+  const publicationId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const input = {
+    installationId: 1,
+    owner: "acme",
+    repo: "widgets",
+    prNumber: 42,
+    headSha: SHA,
+    round: 2,
+    publicationId,
+    intents: [
+      {
+        associationId: "11111111-2222-4333-8444-555555555555",
+        findingRowId: "22222222-3333-4444-8555-666666666666",
+        publicationId,
+        scope: { appId: "app", installationId: 1, owner: "acme", repo: "widgets", prNumber: 42 },
+        originalSha: SHA,
+        round: 2,
+        path: "src/auth.ts",
+        line: 21,
+        body: "body",
+        bodySha256: "digest-1",
+      },
+    ],
+  };
+
+  function octokitFailingWith(error: unknown): PostOctokit {
+    return {
+      paginate: mock(async () => {
+        throw error;
+      }),
+      rest: {
+        pulls: {
+          listReviews: mock(async () => ({ data: [] })),
+          listCommentsForReview: mock(async () => ({ data: [] })),
+        },
+      },
+    } as unknown as PostOctokit;
+  }
+
+  test("a request-budget refusal reports its own reason, not a read failure", async () => {
+    // Octokit rewraps transport rejections, parking the refusal on `cause`.
+    const refusal = Object.assign(new Error("Request failed"), {
+      cause: new RecoveryBudgetRefused("recovery request budget exhausted"),
+    });
+    const result = await recoverLineCommentsWithOctokit(octokitFailingWith(refusal), input, "acme[bot]");
+    expect(result).toMatchObject({ captured: false, posted: [], failure: "budget-refused" });
+  });
+
+  test("an ordinary failed read stays a readback-scope", async () => {
+    const result = await recoverLineCommentsWithOctokit(octokitFailingWith(new Error("502")), input, "acme[bot]");
+    expect(result.failure).toBe("readback-scope");
   });
 });

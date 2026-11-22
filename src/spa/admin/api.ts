@@ -164,6 +164,23 @@ export type AttemptCapConfig = {
 };
 
 /**
+ * The review route's operating switch as the operator API reports it: the
+ * gate's own answer (`mode`) plus what the stored row holds behind it. A
+ * hand-edited row the read path refuses answers `off` with `degraded: true`,
+ * `reason: "untrusted"` and the raw value in `rejected`.
+ */
+export type RouteWorkflowConfig = {
+  mode: "on" | "off";
+  /** A stored row produced `mode` (`false` for the absent-row default). */
+  saved: boolean;
+  /** The answer rests on unreadable evidence, not a stored `off`. */
+  degraded: boolean;
+  reason: string | null;
+  /** The rejected raw value, quoted; `null` unless the row is untrusted. */
+  rejected: string | null;
+};
+
+/**
  * The maintenance window (D20): whether the platform is closed, the Operator's
  * reason and when it closed. `reason` / `since` are `null` whenever the window
  * is open — the store deletes both on disable, so a closed platform never
@@ -224,6 +241,12 @@ export type RuntimeConfig = {
    * Its `saved` flag is what separates a stored value from the default.
    */
   attemptCap: AttemptCapConfig | null;
+  /**
+   * The review route's operating switch; `null` under the same older-Worker
+   * rule. Its `saved` / `rejected` fields are what let the card name the stored
+   * row behind the gate's answer.
+   */
+  routeWorkflow: RouteWorkflowConfig | null;
   /** The maintenance window; `null` under the same older-Worker rule. */
   maintenance: MaintenanceConfig | null;
   /** The 24h admission-drop counts; `null` under the same older-Worker rule. */
@@ -315,6 +338,41 @@ function parseAttemptCap(row: Json): AttemptCapConfig | null {
   };
 }
 
+/**
+ * One gate answer as the store writes it: the read group and the save echo.
+ * `null` for a foreign shape — the caller decides whether that is a broken
+ * read or an unconfirmed write.
+ */
+function routeWorkflowGate(raw: unknown): RouteWorkflowConfig | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const gate = raw as Json;
+  if (
+    (gate.mode !== "on" && gate.mode !== "off") ||
+    typeof gate.saved !== "boolean" ||
+    typeof gate.degraded !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    mode: gate.mode,
+    saved: gate.saved,
+    degraded: gate.degraded,
+    // Additive: an absent reason / rejected belongs to a trustworthy answer.
+    reason: typeof gate.reason === "string" ? gate.reason : null,
+    rejected: typeof gate.rejected === "string" ? gate.rejected : null,
+  };
+}
+
+/** The route switch's gate answer; absent (older Worker) answers `null`. */
+function parseRouteWorkflow(row: Json): RouteWorkflowConfig | null {
+  const raw = row.routeWorkflow;
+  if (raw === undefined) return null;
+  const gate = routeWorkflowGate(raw);
+  // A present but foreign group is a broken read, not absence.
+  if (gate === null) throw new Error("admin API: routeWorkflow is not a gate answer");
+  return gate;
+}
+
 /** The maintenance window; absent (older Worker) answers `null`. */
 function parseMaintenance(row: Json): MaintenanceConfig | null {
   const raw = row.maintenance;
@@ -377,6 +435,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     sweep: parseSweep(body),
     recheckAssignment: parseRecheckAssignment(body),
     attemptCap: parseAttemptCap(body),
+    routeWorkflow: parseRouteWorkflow(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
@@ -618,6 +677,25 @@ export async function setAttemptCap(capMs: number, stored: AttemptCapConfig): Pr
     }
   }
   return { ...stored, capMs, saved: true, degraded: false };
+}
+
+/**
+ * Save the route switch, answering the gate read-back the server returned —
+ * the mode the queue handler will act on, not this page's assumption. `null`
+ * means the write landed but its echo carried no readable gate answer: the
+ * request value is NOT substituted for it, because a page that shows `on`
+ * while the gate reads `off` is the failure this control exists to prevent.
+ * The caller re-reads the store and renders that answer.
+ */
+export async function setRouteWorkflow(
+  value: "on" | "off",
+): Promise<RouteWorkflowConfig | null> {
+  const answer = await write("PATCH", "/runtime", { routeWorkflow: { value } });
+  const saved =
+    typeof answer === "object" && answer !== null ? (answer as Json).routeWorkflow : undefined;
+  return typeof saved === "object" && saved !== null
+    ? routeWorkflowGate((saved as Json).effective)
+    : null;
 }
 
 /**

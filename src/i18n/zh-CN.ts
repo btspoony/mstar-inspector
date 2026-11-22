@@ -1307,6 +1307,29 @@ export const zhCN: Dictionary = {
       /** 已存储的上限无法读取时不会准入任何审查。 */
       attemptCapUnreadable:
         "无法读取已存储的审查最长时长，因此在重新可读或保存新值之前，不会准入任何新审查。",
+      /** 审查路由开关——决定是否放行投递。 */
+      routeWorkflowTitle: "审查路由",
+      routeWorkflowDescription:
+        "队列中的审查投递是否创建 Workflow 实例。关闭时拒绝所有投递；改动从下一批开始生效。",
+      routeWorkflowStoredLabel: "存储的值",
+      routeWorkflowEffectiveLabel: "当前生效",
+      /** {value} = 已存储的 on / off。 */
+      routeWorkflowStoredSaved: "{value} — 已保存",
+      /** 行缺失：读取路径对空行的回答。 */
+      routeWorkflowStoredAbsent: "off — 未保存任何值",
+      /** {value} = 被拒绝的原始行值（带引号）——手工改坏的值。 */
+      routeWorkflowStoredUntrusted: "off — 不可信（存储值 {value}）",
+      /** 存储行完全无法读取。 */
+      routeWorkflowStoredUnreadable: "off — 无法读取",
+      routeWorkflowEffectiveOn: "on — 投递会创建 Workflow 实例",
+      routeWorkflowEffectiveOff: "off — 拒绝投递，不创建任何实例",
+      routeWorkflowSave: "保存",
+      routeWorkflowSaved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      routeWorkflowFailed: "修改审查路由失败。",
+      /** 保存已落库，但响应回显与重读都未能确认模式。 */
+      routeWorkflowUnconfirmed:
+        "无法确认保存结果：响应中没有可读的闸门回答，且重新读取失败，因此存储的模式未知。请重新加载页面读取。",
       /** 流水线在最近 24 小时记录的准入拒绝。 */
       admissionDropsTitle: "准入拒绝（最近 24 小时）",
       admissionDropsDescription:
