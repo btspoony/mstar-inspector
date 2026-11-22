@@ -260,18 +260,18 @@ export const zhCN: Dictionary = {
     /** note: 应用列表（添加对话框的数据源）读取失败，列表本身读取成功。 */
     appsReadFailed: "无法读取本工作区的应用 — 暂时无法添加仓库。",
   },
-  /** 机器人自身拥有的配置，由 App 详情页的“应用设置”标签组合在身份头下。target 级文案沿用 `settings.*`。 */
+  /** note: 机器人自身拥有的配置，由 App 详情页的“应用设置”标签组合在身份头下。target 级文案沿用 `settings.*`。 */
   botSettings: {
     scopeOwned: "自有",
     scopeShared: "共享",
-    /** `can_manage` 为 false 时显示（共享机器人，或非管理员）。 */
+    /** note: `can_manage` 为 false 时显示（共享机器人，或非管理员）。 */
     readOnly: "此页配置为只读。共享机器人只由其所属工作区配置。",
     health: "凭据健康",
     healthCopy: "GitHub 发到该机器人 webhook 的投递，以及被拒绝的投递。",
     sandboxCopy: "该机器人的每次评审所用的运行时沙箱。",
     providersNone: "还没有提供方密钥或自定义提供方。",
     chainsCopy: "该机器人的评审用来选择模型的模型链。",
-    /** 共享开关。仅官方工作区的管理员渲染。 */
+    /** note: 共享开关。仅官方工作区的管理员渲染。 */
     shareTitle: "共享此机器人",
     shareCopy: "允许其他工作区在自己的仓库上使用此机器人；它的凭据与模型链仍在本工作区配置。",
     shareAction: "共享",
@@ -282,24 +282,24 @@ export const zhCN: Dictionary = {
     confirmShareBody: "共享后，其他工作区可为自己的仓库创建 target 并触发审查，按该机器人的套餐计费。",
     confirmUnshareTitle: "取消共享 {name}？",
     confirmUnshareBody: "其他工作区在此机器人上的 target 会变为 Blocked 并停止审查，直到重新共享。",
-    // 共享路由的两个可恢复拒绝。
+    // note: 共享路由的两个可恢复拒绝。
     shareOutsideOfficial: "此机器人所属工作区已不是平台的官方工作区，无法共享。需先由平台操作员指定。",
     shareForbidden: "只有本工作区的所有者或管理员可以共享它的机器人。",
   },
-  /** Per-App 拉取请求标签页：App 收到的所有 PR 台账。详情以 owner/repo/number 寻址（同一 App 可能在多个仓库见到同一个编号），并以 `pr=owner/repo/number` 挂在 URL 上。 */
+  /** note: Per-App 拉取请求标签页：App 收到的所有 PR 台账。详情以 owner/repo/number 寻址（同一 App 可能在多个仓库见到同一个编号），并以 `pr=owner/repo/number` 挂在 URL 上。 */
   pullRequests: {
     backToList: "返回列表",
-    /** 台账上方的工具行（仅列表面）。 */
+    /** note: 台账上方的工具行（仅列表面）。 */
     filterRepo: "仓库",
     filterRepoAll: "全部仓库",
     refreshAria: "刷新拉取请求列表",
-    /** 列表表格列——只含行自身的事实。 */
+    /** note: 列表表格列——只含行自身的事实。 */
     columnPr: "拉取请求",
     columnState: "状态",
     columnVerdict: "最新结论",
     columnLastSeen: "最近出现",
     columnFailures: "失败",
-    /** 组合式空态——无动作变体（PR 由 webhook 产生）。 */
+    /** note: 组合式空态——无动作变体（PR 由 webhook 产生）。 */
     emptyTitle: "还没有拉取请求",
     emptyDescription: "你的 GitHub App 收到的每个拉取请求都会显示在这里。",
     state: {
@@ -307,83 +307,83 @@ export const zhCN: Dictionary = {
       closed: "已关闭",
       merged: "已合并",
     },
-    /** 详情头部行：`{owner}/{repo} #{number}`。 */
+    /** note: 详情头部行：`{owner}/{repo} #{number}`。 */
     prNumber: "{owner}/{repo} #{number}",
-    /** 头部行的可访问名称：该 PR 的 GitHub 地址。 */
+    /** note: 头部行的可访问名称：该 PR 的 GitHub 地址。 */
     openOnGithub: "在 GitHub 打开 {owner}/{repo}#{number}",
-    /** 侧栏仓库值的可访问名称：该仓库的 GitHub 地址。 */
+    /** note: 侧栏仓库值的可访问名称：该仓库的 GitHub 地址。 */
     openRepoOnGithub: "在 GitHub 打开 {owner}/{repo}",
-    /** 审查行提交链接的可访问名称：短 SHA 打开的提交。 */
+    /** note: 审查行提交链接的可访问名称：短 SHA 打开的提交。 */
     openCommitOnGithub: "在 GitHub 打开提交 {sha}",
-    /** 短 SHA 徽标的悬浮提示。 */
+    /** note: 短 SHA 徽标的悬浮提示。 */
     headSha: "头部 SHA",
     reviews: "审查",
     noReviews: "此拉取请求还没有审查。",
     reviewMeta: "{model} · {provider}",
-    /** 审查行的轮次序号；发现行复用同一文案标明首次报告该发现的轮次。 */
+    /** note: 审查行的轮次序号；发现行复用同一文案标明首次报告该发现的轮次。 */
     reviewRound: "第 {round} 轮",
-    /** 单轮审查耗时：不足一分钟按秒显示，否则按分秒显示。 */
+    /** note: 单轮审查耗时：不足一分钟按秒显示，否则按分秒显示。 */
     reviewDurationSeconds: "{seconds} 秒",
     reviewDurationMinutes: "{minutes} 分 {seconds} 秒",
-    /** 耗时 span 的 tooltip（与 head-sha chip 同）：说明这个数值是本轮耗时。 */
+    /** note: 耗时 span 的 tooltip（与 head-sha chip 同）：说明这个数值是本轮耗时。 */
     reviewDurationLabel: "本轮运行耗时",
     failures: "失败",
     noFailures: "此拉取请求没有失败记录。",
     findings: "发现",
     noFindings: "此拉取请求没有发现问题。",
-    /** 筛选后的发现窗口没有匹配项：文案点名当前严重程度，而不是整个 PR
+    /** note: 筛选后的发现窗口没有匹配项：文案点名当前严重程度，而不是整个 PR
         （头部计数仍表明该 PR 有发现）。 */
     noFindingsForSeverity: "没有严重程度为“{severity}”的发现。",
-    /** 详情头部的元信息行。 */
+    /** note: 详情头部的元信息行。 */
     firstSeen: "首次出现",
     lastSeen: "最近出现",
     latestReview: "最新审查",
-    /** 尚无审查时，结论指标的读屏文本。 */
+    /** note: 尚无审查时，结论指标的读屏文本。 */
     noVerdict: "暂无结论",
-    /** D11 的“正在审查”标记：存在活的审查锁，携带该次尝试的头部 SHA；
+    /** note: D11 的“正在审查”标记：存在活的审查锁，携带该次尝试的头部 SHA；
         评论触发没有 SHA 时则携带获取时间。 */
     reviewingHead: "正在审查 · {head}",
     reviewingSince: "正在审查 · {time}",
-    /** inflight 读取失败：既不是审查中，也不是确定的空闲。 */
+    /** note: inflight 读取失败：既不是审查中，也不是确定的空闲。 */
     reviewingUnknown: "审查状态未知",
     reviewingUnknownHint: "无法读取审查状态。",
-    /** 三个记录类别上的分段胶囊。 */
+    /** note: 三个记录类别上的分段胶囊。 */
     recordsLabel: "拉取请求记录",
-    /** 类别触发按钮的可访问名称：标签与它绘制的计数。 */
+    /** note: 类别触发按钮的可访问名称：标签与它绘制的计数。 */
     familyTabName: "{label}（{count}）",
-    /** 发现指标旁的备注，与计数同行渲染。 */
+    /** note: 发现指标旁的备注，与计数同行渲染。 */
     mustFixNote: "{count} 项必须修复",
-    /** 发现筛选的标签与“不筛选”选项。 */
+    /** note: 发现筛选的标签与“不筛选”选项。 */
     filterSeverity: "严重程度",
     filterAll: "全部",
-    /** 记录列表下方的分页：上一页/下一页与相对总数的已加载区间。 */
+    /** note: 记录列表下方的分页：上一页/下一页与相对总数的已加载区间。 */
     pagePrev: "上一页",
     pageNext: "下一页",
     pageRange: "{from}–{to} / {total}",
-    /** 分页区间旁：本页解析被拒绝的行数，它们仍计入总数，任何窗口都取不到。 */
+    /** note: 分页区间旁：本页解析被拒绝的行数，它们仍计入总数，任何窗口都取不到。 */
     pageDropped: "{count} 行无法显示",
-    /** 严重度分组的计数：分组来自已加载的一页，而标签页的计数是全 PR 总数。 */
+    /** note: 严重度分组的计数：分组来自已加载的一页，而标签页的计数是全 PR 总数。 */
     groupPageCount: "本页 {count}",
-    /** 严重度分组标题，按渲染顺序。 */
+    /** note: 严重度分组标题，按渲染顺序。 */
     severityMustFix: "必须修复",
     severityShouldFix: "建议修复",
     severityMayFix: "可修复",
     severityNit: "可忽略",
     severityOther: "其他",
-    /** 每条发现正文有一个折叠控件。 */
+    /** note: 每条发现正文有一个折叠控件。 */
     expand: "展开",
     collapse: "收起",
-    /** 折叠控件的无障碍名称：动作、记录与位置。 */
+    /** note: 折叠控件的无障碍名称：动作、记录与位置。 */
     foldLabel: "{action} — {record} · #{position}",
-    /** 无标识文本的记录只用位置命名。 */
+    /** note: 无标识文本的记录只用位置命名。 */
     foldLabelBare: "{action} — #{position}",
-    /** 失败块其余输出的折叠（首行已作为诊断显示）与复制动作。 */
+    /** note: 失败块其余输出的折叠（首行已作为诊断显示）与复制动作。 */
     failureRemainingOutput: "其余输出",
     copyError: "复制错误",
-    /** 复制动作的瞬时结果，在按钮上显示约两秒。 */
+    /** note: 复制动作的瞬时结果，在按钮上显示约两秒。 */
     copyCopied: "已复制",
     copyFailed: "复制失败",
-    /** 侧栏：拉取请求事实与合并后的活动时间线。 */
+    /** note: 侧栏：拉取请求事实与合并后的活动时间线。 */
     asideFacts: "拉取请求",
     asideActivity: "活动",
     factRepo: "仓库",
@@ -391,16 +391,16 @@ export const zhCN: Dictionary = {
     factState: "状态",
     factHead: "提交",
     timelineReview: "审查 · {verdict}",
-    /** 载荷未记录结论的审查：整行仍渲染，不留下悬空的分隔符。 */
+    /** note: 载荷未记录结论的审查：整行仍渲染，不留下悬空的分隔符。 */
     timelineReviewNoVerdict: "审查 · 暂无结论",
     timelineFailure: "审查失败 · {stage}",
-    /** 载荷未记录阶段的失败：整行仍渲染，不留下悬空的分隔符。 */
+    /** note: 载荷未记录阶段的失败：整行仍渲染，不留下悬空的分隔符。 */
     timelineFailureNoStage: "审查失败",
     timelineFirstSeen: "PR 出现",
-    /** 上限截断时，末尾说明还有多少条更早的事件未显示（count 为 1 时同样通顺）。 */
+    /** note: 上限截断时，末尾说明还有多少条更早的事件未显示（count 为 1 时同样通顺）。 */
     timelineHidden: "更早事件未显示：{count} 条",
   },
-  /** Per-App 洞察标签页。7/30/90 窗口分段与仓库筛选语义保持不变。 */
+  /** note: Per-App 洞察标签页。7/30/90 窗口分段与仓库筛选语义保持不变。 */
   insights: {
     heading: "审查健康",
     window: "窗口：{label}",
@@ -424,26 +424,26 @@ export const zhCN: Dictionary = {
     seriesReviews: "审查",
     seriesFindings: "发现",
     trendSummary: "窗口内共 {reviews} · {findings}",
-    /** 组合式零审查空态——无动作变体（审查由已安装的 App 产生）。 */
+    /** note: 组合式零审查空态——无动作变体（审查由已安装的 App 产生）。 */
     emptyTitle: "还没有审查",
     emptyDescription: "已安装的 GitHub App 完成审查后，这里会逐渐积累数据。",
   },
   apps: {
     heading: "应用",
-    /** 页头带的一行说明（同 en.ts 字段）。 */
+    /** note: 页头带的一行说明（同 en.ts 字段）。 */
     headingDescription: "每个应用是一个 GitHub App；安装范围在应用详情里查看。",
     create: "创建 GitHub App",
-    /** 指标带：仅由 `AppsPayload` 可证的四个数字（见 en.ts 同名字段）。 */
+    /** note: 指标带：仅由 `AppsPayload` 可证的四个数字（见 en.ts 同名字段）。 */
     metricApps: "应用",
     metricEnabled: "已启用",
     metricReviewOff: "审查关闭",
     metricRejected24h: "24h 拒收",
-    /** Create 控件不可用的原因（见 en.ts 同名字段）。 */
+    /** note: Create 控件不可用的原因（见 en.ts 同名字段）。 */
     createUnavailable: {
       role: "只有工作区所有者或管理员可以在此创建 App。",
       workspace: "请先进入某个工作区 — 此部署有多个工作区，App 需要归属其中一个。",
     },
-    /** 组合式空态（EmptyState 标题 + 描述）。 */
+    /** note: 组合式空态（EmptyState 标题 + 描述）。 */
     emptyTitle: "还没有 App",
     emptyDescription: "使用「创建 GitHub App」连接第一个。",
     appId: "App id {id}",
@@ -477,7 +477,7 @@ export const zhCN: Dictionary = {
     tableHealth: "健康",
     tableCreator: "创建者",
     openAria: "打开 {name} 详情",
-    /** 创建选择器（见 en.ts 同名字段）。 */
+    /** note: 创建选择器（见 en.ts 同名字段）。 */
     createDialog: {
       title: "创建审查目标",
       description: "使用平台已共享的 App，或连接你自己的 GitHub App。",
@@ -531,28 +531,28 @@ export const zhCN: Dictionary = {
     confirmRevokeBody: "{login} 将无法接受此邀请。之后可以重新邀请。",
     revoke: "撤销",
     you: "你",
-    /** 工作区角色词表（`workspace_members.role`），含 owner。 */
+    /** note: 工作区角色词表（`workspace_members.role`），含 owner。 */
     role: {
       owner: "所有者",
       admin: "管理员",
       member: "成员",
     },
-    /** 组合式空态——无动作变体（上方邀请表单即路径）。 */
+    /** note: 组合式空态——无动作变体（上方邀请表单即路径）。 */
     emptyTitle: "还没有成员",
     emptyDescription: "使用上方表单邀请第一位成员。",
     emptyDescriptionMember: "本工作区目前没有其他成员。",
   },
   /**
-   * 工作区创建 —— 尚未加入任何工作区的登录用户的落地页：
+   * note: 工作区创建 —— 尚未加入任何工作区的登录用户的落地页：
    * 登录不会自动加入工作区，除了接受邀请，这里是进入首个工作区的唯一路径。
    */
   workspace: {
     settingsHeading: "工作区设置",
     setupHeading: "创建工作区",
     setupDescription: "你还不属于任何工作区。创建后你将成为它的所有者，之后可以邀请队友。",
-    /** 切换器菜单里的创建弹窗：已有工作区的成员也可用，因此不复述「还没有工作区」。 */
+    /** note: 切换器菜单里的创建弹窗：已有工作区的成员也可用，因此不复述「还没有工作区」。 */
     createDialogDescription: "为它命名，你将成为其所有者——之后可以邀请队友。",
-    /** `self-hosted` 空实例提示：本次登录创建了部署的第一个账号。 */
+    /** note: `self-hosted` 空实例提示：本次登录创建了部署的第一个账号。 */
     emptyInstance: "本实例还没有任何账号。你的登录现在已是本实例的第一个账号——创建一个工作区即可开始。",
     nameLabel: "工作区名称",
     namePlaceholder: "例如 Acme",
@@ -560,27 +560,27 @@ export const zhCN: Dictionary = {
     nameRequired: "请输入工作区名称。",
     nameTooLong: "最多 {max} 个字符。",
     createFailed: "创建工作区失败，请重试。",
-    /** 创建界面上的待处理邀请——受邀者的接受入口（MF-2）。 */
+    /** note: 创建界面上的待处理邀请——受邀者的接受入口（MF-2）。 */
     invitesHeading: "你收到了邀请",
     invitesDescription: "接受邀请即可加入对应工作区，也可以在下方创建自己的工作区。",
     inviteAccept: "接受",
-    /** {role} = 受邀的工作区角色；{expires} = 相对的到期时间。 */
+    /** note: {role} = 受邀的工作区角色；{expires} = 相对的到期时间。 */
     inviteMeta: "以 {role} 身份被邀请——{expires} 到期",
     inviteExpired: "该邀请已过期。",
     inviteGone: "该邀请已失效——可能已被撤回。",
     inviteAcceptFailed: "接受邀请失败，请重试。",
-    /** `/dashboard/<ref>/settings` 的管理者门禁——普通成员看到此文案。 */
+    /** note: `/dashboard/<ref>/settings` 的管理者门禁——普通成员看到此文案。 */
     settingsOwnerOnly: "只有工作区所有者和管理员可以修改这些设置。",
-    /** 两个标签页：只读的花费，以及管理者可写的设置。 */
+    /** note: 两个标签页：只读的花费，以及管理者可写的设置。 */
     tabQuota: "额度",
     tabConfiguration: "配置",
     /**
-     * 只读的用量卡片（spec bot-scope-and-claiming § Review usage）：本月（UTC）、
+     * note: 只读的用量卡片（spec bot-scope-and-claiming § Review usage）：本月（UTC）、
      * 两个计数，以及共享机器人一行的状态。两个不可用状态文案不同——一个由读者
      * 自己的套餐决定，另一个要等平台运营者。
      */
     usageHeading: "审查用量",
-    /** {month} = UTC 月份，例如 2026-11。 */
+    /** note: {month} = UTC 月份，例如 2026-11。 */
     usageWindow: "审查 · {month}（UTC）",
     usageSharedReviews: "共享机器人审查",
     usageOwnReviews: "自有机器人审查",
@@ -593,39 +593,39 @@ export const zhCN: Dictionary = {
     usageNotDesignatedHint:
       "此平台尚未指定共享机器人。共享机器人由平台运营者指定；在此之前，由你自有的 GitHub App 审查你的拉取请求。",
     /**
-     * 发布审查计数之上的额度区块。服务端给的是整数 RP，卡片按当月判定 profile
+     * note: 发布审查计数之上的额度区块。服务端给的是整数 RP，卡片按当月判定 profile
      * 的 `rp_per_credit` 换算并保留两位小数——运营者只会看到「额度」这一个单位。
      * 单位写在标签里，数值只有一对数字——绝不写成「12 额度」。
      */
     quotaHeading: "额度用量",
-    /** {month} = UTC 月份，例如 2026-11。卡片唯一的月份标签。 */
+    /** note: {month} = UTC 月份，例如 2026-11。卡片唯一的月份标签。 */
     quotaWindow: "本月 · {month}（UTC）",
     quotaCreditsLabel: "额度",
-    /** {used} / {limit}，以额度计，两位小数。 */
+    /** note: {used} / {limit}，以额度计，两位小数。 */
     quotaCredits: "{used} / {limit}",
-    /** `monthly_rp` 为 NULL：绝不显示 0，也不留空上限。 */
+    /** note: `monthly_rp` 为 NULL：绝不显示 0，也不留空上限。 */
     quotaNoLimit: "当前套餐无月度上限",
     quotaSplitLabel: "去向（额度）",
     quotaSharedBot: "共享机器人",
     quotaByok: "自有密钥（BYOK）",
-    /** {version} = 当月判定的版本（"v2"）；{date} = 其起始日，YYYY-MM-DD。 */
+    /** note: {version} = 当月判定的版本（"v2"）；{date} = 其起始日，YYYY-MM-DD。 */
     quotaVersion: "额度版本 {version}（自 {date} 起）",
-    /** 两个计数的说明：卡片上每个数字各自读的是哪个计数。 */
+    /** note: 两个计数的说明：卡片上每个数字各自读的是哪个计数。 */
     quotaBasis:
       "额度计的是已开始的审查，与成员页统计的尝试次数同一口径；下文的审查次数是已发布的审查。",
     /**
-     * 达到或超出上限时上方的 used/limit 仍然保留，这条横幅说明后果与重置时间。
+     * note: 达到或超出上限时上方的 used/limit 仍然保留，这条横幅说明后果与重置时间。
      * {month} = YYYY-MM；{reset} = 下个 UTC 月的第一个瞬间（YYYY-MM-DD）。
      */
     quotaOverCeiling:
       "此工作区已用尽 {month} 的月度额度。新审查将被拒绝，直到 {reset}——若平台运营者更早把此工作区调到更大的套餐则会更早恢复；已经开始运行的审查仍会完成。",
-    /** 所有者的名称卡片——顶部切换器显示的名称。 */
+    /** note: 所有者的名称卡片——顶部切换器显示的名称。 */
     nameHeading: "工作区名称",
     nameDescription: "顶部工作区切换器显示的名称。此工作区的网址是其 id，不会改变。",
     nameSave: "保存名称",
     nameSaved: "工作区名称已更新。",
     nameFailed: "修改工作区名称失败，请重试。",
-    /** 所有者/管理员可见的“新 App 默认审查门禁”卡片。 */
+    /** note: 所有者/管理员可见的“新 App 默认审查门禁”卡片。 */
     checkMinScoreHeading: "审查门禁默认值",
     checkMinScoreDescription:
       "新接入 App 的分数下限起始值。已有 App 保留各自的分数下限，请在该 App 的设置页修改。",
@@ -633,9 +633,9 @@ export const zhCN: Dictionary = {
     checkMinScoreSave: "保存默认值",
     checkMinScoreSaved: "审查门禁默认值已更新。",
     checkMinScoreFailed: "无法修改审查门禁默认值——请重试。",
-    /** {min}/{max} = 可接受的范围。 */
+    /** note: {min}/{max} = 可接受的范围。 */
     checkMinScoreRange: "接受 {min}–{max}。",
-    /** {min}/{max} = 可接受的范围；显示的数字是兜底值。 */
+    /** note: {min}/{max} = 可接受的范围；显示的数字是兜底值。 */
     checkMinScoreUnreadable:
       "无法读取已存储的默认值，因此新 App 将使用平台默认值。保存 {min}–{max} 之间的值会设置本工作区的默认值，重新读取可刷新；若刷新后仍提示，请联系平台运维。",
     concurrencyHeading: "审查并发",
@@ -644,14 +644,14 @@ export const zhCN: Dictionary = {
     concurrencySave: "保存并发数",
     concurrencySaved: "审查并发数已更新。",
     concurrencyFailed: "修改审查并发数失败，请重试。",
-    /** {min}/{max} = 此工作区自己的范围。 */
+    /** note: {min}/{max} = 此工作区自己的范围。 */
     concurrencyRange: "可设置 {min}–{max}。",
-    /** {min}/{max} = 此工作区自身范围；显示的数字只是兜底值。 */
+    /** note: {min}/{max} = 此工作区自身范围；显示的数字只是兜底值。 */
     concurrencyUnreadable:
       "无法读取已存储的审查并发数，因此审查可能仍逐个运行。显示的数字只是兜底值。保存 {min}–{max} 之间的值会设置本工作区的值，重新读取可刷新；若刷新后仍提示，请联系平台运维。",
   },
   /**
-   * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
+   * note: 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
    * 通知说明谁在查看、原因与到期时间——不提供任何操作，因为租户既不能结束
    * 也不能修改一份授权。
    */
@@ -664,7 +664,7 @@ export const zhCN: Dictionary = {
     grantLine: "{login} 拥有支持访问权限，到期时间 {expires} —— {reason}",
     tableLogin: "GitHub 登录名",
     tableRole: "角色",
-    /** 租户口径的常驻通知；不可关闭，不带任何操作。 */
+    /** note: 租户口径的常驻通知；不可关闭，不带任何操作。 */
     noticeHeading: "支持访问已生效",
     noticeLine: "{login} 可查看此工作区的成员，直至 {expires} —— {reason}",
     noticeError: "无法检查支持访问状态。",
@@ -710,7 +710,7 @@ export const zhCN: Dictionary = {
     installationsState: "状态（仅在线）",
     installationsLive: "在线",
     noInstallations: "还没有安装。",
-    /** App 详情页指标带中 provider 密钥数的标签。 */
+    /** note: App 详情页指标带中 provider 密钥数的标签。 */
     metricKeys: "密钥",
     addToChain: "加入模型链",
     noAutoDiscovery: "此 provider 不列出模型 — 请从其他已验证 provider 中选择。",
@@ -729,7 +729,7 @@ export const zhCN: Dictionary = {
     membership: {
       not_in_verified_models: "选择器 {selector} 不在此 App 的已验证模型中。",
     },
-    // 设置 POST 400 的机器可读文案（与 en.ts settings.error 一一对应）。
+    // note: 设置 POST 400 的机器可读文案（与 en.ts settings.error 一一对应）。
     error: {
       providerRequired: "请为密钥选择一个 provider。",
       providerUnknown: "{provider} 不是受支持的 provider — 请从列表中选择。",
@@ -796,7 +796,7 @@ export const zhCN: Dictionary = {
         "{owner} 不是有效的 GitHub 登录名 — 请使用 1–39 个字母、数字或连字符。未存储任何内容。",
       fieldDuplicated: "{field} 字段被提交了多次 — 请以单个值重新提交表单。未保存任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
-      /** 对 `shared` 机器人发起的机器人级写入：该页只读。 */
+      /** note: 对 `shared` 机器人发起的机器人级写入：该页只读。 */
       botReadOnly: "该机器人已共享——其配置在此只读。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
       concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
@@ -813,7 +813,7 @@ export const zhCN: Dictionary = {
     opsDeliveryCopy: "停用后，每次投递都以 404 应答，因此不会进行任何审查；重新启用后此 App 重新开始审查。",
     opsDeleteTitle: "删除此 App",
     opsDeleteCopy: "软删除 — App 从此列表移除，其所有安装都会被关闭。",
-    // 评审触发模式（spec review-trigger-policy §2/§3）：分段标签本地化；
+    // note: 评审触发模式（spec review-trigger-policy §2/§3）：分段标签本地化；
     // 线上取值（open / every_push / manual）与提及字符串保持原样。
     triggerMode: "审查触发",
     triggerModeOpen: "首次打开",
@@ -822,9 +822,9 @@ export const zhCN: Dictionary = {
 
     triggerModeMention: "PR 作者或仓库所有者：在 PR 评论中 @ 它即可（重新）启动审查：",
     triggerModeMentionAria: "机器人提及：{mention}",
-    // 目标自有的草稿准入开关（0070，D12）：按仓库配置，没有工作区默认。
+    // note: 目标自有的草稿准入开关（0070，D12）：按仓库配置，没有工作区默认。
     reviewDrafts: "审查草稿 PR",
-    // 评审深度（migration 0047）：App 深度选择器的四个面孔。线上取值保持
+    // note: 评审深度（migration 0047）：App 深度选择器的四个面孔。线上取值保持
     // quick/default/deep（另有 inherit 面孔自有哨兵值），仅标签本地化。
     reviewDepth: "评审深度",
     reviewDepthCopy: "控制此 App 每次评审的深入程度。快速成本最低，深入最彻底。",
@@ -858,7 +858,7 @@ export const zhCN: Dictionary = {
       },
       tier: { builtin: "内置", template: "模板", custom: "自定义" },
       summary: "{total} 个密钥 · {ok} 已验证 · {reachable} 端点可达 · {failed} 验证失败 · {unverified} 未验证",
-      /** 中文无单复数；与 summary 同形（type parity 要求两个键都在）。 */
+      /** note: 中文无单复数；与 summary 同形（type parity 要求两个键都在）。 */
       summaryOne: "{total} 个密钥 · {ok} 已验证 · {reachable} 端点可达 · {failed} 验证失败 · {unverified} 未验证",
       verifiedAt: "{time} 验证通过",
       modelCount: "{count} 个模型",
@@ -922,7 +922,7 @@ export const zhCN: Dictionary = {
       expand: "展开",
       collapse: "收起",
       empty: "还没有密钥 — 添加第一个密钥后即可在模型链中使用。",
-      // 仅控制台分支：内置 id 已被存储层保留，用户自填的端点只能落在自
+      // note: 仅控制台分支：内置 id 已被存储层保留，用户自填的端点只能落在自
       // 己的 id 上；文案不得声称控制台是唯一途径。
       customEndpoint: "配置自定义端点",
       customEndpointCopy:
@@ -930,7 +930,7 @@ export const zhCN: Dictionary = {
       customIdRequired: "{provider} 已被占用 — 请为此声明填写新的 id。",
       submitFailed: "该请求未到达服务端即失败 — 未存储任何内容。",
       /**
-       * 密钥添加时响应体自身无法解释的拒绝，按状态各一条。解析顺序是
+       * note: 密钥添加时响应体自身无法解释的拒绝，按状态各一条。解析顺序是
        * 状态优先、响应体其次：状态决定归属，带 key 的 JSON 体优先，
        * 其次是可识别的纯文本体；无法读取的响应体才回落到该状态自己的文案。
        * 上面的 submitFailed 仍是「请求未到达服务端」的唯一文案。
@@ -946,7 +946,7 @@ export const zhCN: Dictionary = {
       addKeyUnreadable:
         "服务端返回了本页面无法读取的响应 — 未存储任何内容。若持续发生，请向平台运维索取 Worker 日志。",
       /**
-       * 每密钥用量探测：密钥行的操作按钮、其在该行下方展开的面板，以及四种形态
+       * note: 每密钥用量探测：密钥行的操作按钮、其在该行下方展开的面板，以及四种形态
        * — ok（窗口条 / 余额）、unauthorized、absent、error。线上的诊断
        * reason 从不原样渲染。
        */
@@ -959,11 +959,11 @@ export const zhCN: Dictionary = {
         windowRemaining: "剩余 {percent}%",
         resets: "{time} 重置",
         balanceRemaining: "剩余 {amount} {unit}",
-        /** On-demand credits shown beside the pool in the same cell: bought once, never reset. */
+        /** invariant: On-demand credits shown beside the pool in the same cell: bought once, never reset. */
         extraRemaining: "另有 {amount} {unit} 加购",
-        /** 多个密钥共享同一个账户级额度池，而非每密钥独立额度。 */
+        /** note: 多个密钥共享同一个账户级额度池，而非每密钥独立额度。 */
         shared: "账户级共享",
-        /** 每行标签：取自规范化 limit id 最后一个 ":" 后的语义段。 */
+        /** note: 每行标签：取自规范化 limit id 最后一个 ":" 后的语义段。 */
         window: {
           session: "会话",
           week: "每周",
@@ -972,7 +972,7 @@ export const zhCN: Dictionary = {
           balance: "余额",
         },
         /**
-         * 未知语义段的兜底标签 — id 段从不直接渲染（可能是提供方的桶名），
+         * note: 未知语义段的兜底标签 — id 段从不直接渲染（可能是提供方的桶名），
          * 未知行改用带序号的通用标签。
          */
         limit: {
@@ -1022,7 +1022,7 @@ export const zhCN: Dictionary = {
     confirmRemoveCustomTitle: "移除 provider {provider}？",
     confirmRemoveCustomBody:
       "该 provider 及其密钥池中的全部密钥都将被移除。若只想腾出一个槽位，请移除该密钥所在的行。引用其模型的链在保存时会校验失败。",
-    /** 评审触发——属于「目标」：一次投递何时开始评审。机器人的沙箱镜像现在位于机器人设置页。 */
+    /** note: 评审触发——属于「目标」：一次投递何时开始评审。机器人的沙箱镜像现在位于机器人设置页。 */
     reviewTrigger: "评审触发",
     reviewTriggerCopy: "评审的启动方式：拉取请求打开时、每次推送时，或仅当有人在评论中提及机器人时。",
     runtimeHarness: "运行时 harness",
@@ -1030,27 +1030,27 @@ export const zhCN: Dictionary = {
       "执行此 App 审查的沙盒镜像中挂载的 {id} 运行时 harness。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
     runtimeHarnessValue: "此 App 的审查运行在 {id} 运行时 harness 上。",
     saveRuntimeHarness: "保存运行时 harness",
-    // GitHub 身份卡。{name}/{id}/{time} 为同步的资料名、数字 App id
+    // note: GitHub 身份卡。{name}/{id}/{time} 为同步的资料名、数字 App id
     // 与相对同步时间（formatRelativeTime 输出）— 服务端字段可空、逐项降级，
     // 每个键仅在其值存在时渲染。
     appInfo: "GitHub App",
     appInfoCopy: "此 App 在 GitHub 上的身份。资料字段在访问设置页时从该 App 的 GitHub 设置页缓存；点击名称可前往 GitHub 管理。",
     appInfoAppId: "App ID：{id}",
-    // 本地行 id——webhook URL 的第二段，与 GitHub App id 并列显示，
+    // note: 本地行 id——webhook URL 的第二段，与 GitHub App id 并列显示，
     // 使 URL 的两段都可直接从卡片读出。
     appInfoLocalId: "本地 App ID：{id}",
-    // 仅管理面：webhook 重指向所需的绝对投递 URL。部署文档让运维来此卡查看。
+    // note: 仅管理面：webhook 重指向所需的绝对投递 URL。部署文档让运维来此卡查看。
     appInfoDeliveryUrl: "Webhook URL：",
     appInfoViewOnGithub: "在 GitHub 上查看 {name}",
-    // (AD-623) 管理面标签——名称链接指向该 App 的 GitHub 设置页，
+    // note: (AD-623) 管理面标签——名称链接指向该 App 的 GitHub 设置页，
     // 可及名用「管理」而非「查看」。成员面沿用 appInfoViewOnGithub。
     appInfoManageOnGithub: "在 GitHub 上管理 {name}",
     appInfoSynced: "同步于 {time}",
-    // (D5) 仅管理面的强制刷新：绕过 24h TTL 重新拉取缓存的 GitHub 资料；
+    // note: (D5) 仅管理面的强制刷新：绕过 24h TTL 重新拉取缓存的 GitHub 资料；
     // 成功提示确认缓存已重载。
     appInfoRefresh: "从 GitHub 刷新",
     appInfoRefreshDone: "已从 GitHub 刷新身份。",
-    // 已安装标签页：可分享的 GitHub 安装入口。
+    // note: 已安装标签页：可分享的 GitHub 安装入口。
     install: "安装",
     installCopy: "把此链接交给任意 GitHub 账号，即可在该账号上安装此 App。",
     installLink: "打开安装页面",
@@ -1059,12 +1059,12 @@ export const zhCN: Dictionary = {
     installBoundAccount: "已绑定的安装账号：{account}",
     installBoundNoAccount: "已绑定安装 {id}；GitHub 尚未上报其账号。",
     installRemoved: "GitHub 已不存在此安装，审查已暂停。重新安装后，本 target 会恢复审查。",
-    // 已安装标签页：机器人已有、但尚未绑定到任何目标的安装。绑定其中之一即可在仪表盘内一步完成，无需再走 GitHub 的安装流程。
+    // note: 已安装标签页：机器人已有、但尚未绑定到任何目标的安装。绑定其中之一即可在仪表盘内一步完成，无需再走 GitHub 的安装流程。
     installPending: "等待绑定",
     installPendingUnknownAccount: "安装 {id}（GitHub 尚未报告其账号）",
     installPendingBind: "绑定到本目标",
     installBindFailed: "安装绑定失败。请刷新本页后重试。",
-    // 设置标签页：Check 所报告的审查门禁（迁移 0045）。
+    // note: 设置标签页：Check 所报告的审查门禁（迁移 0045）。
     reviewGate: "审查门禁",
     reviewGateCopy: "仅当结论属于以下之一且分数达到下限时，Check 才通过。",
     reviewGateScore: "最低分数（0–100）",
@@ -1089,7 +1089,7 @@ export const zhCN: Dictionary = {
       ready: "GitHub App {appName}（id {id}）已准备好连接。",
       registeredAs: "它将为此部署注册为：",
       slugWebhook: "Slug {slug} · webhook URL {webhookUrl}",
-      // 首次元数据同步前 GitHub 的 slug 未知；数字 App id 是诚实的替代值，并如实标注。
+      // note: 首次元数据同步前 GitHub 的 slug 未知；数字 App id 是诚实的替代值，并如实标注。
       appIdWebhook: "App ID {id} · webhook URL {webhookUrl}",
       note: "连接后，此 App 的 pull_request 和 issue_comment webhook 将投递到此 Worker。审查按 App 控制 — 暂停某个 App 即可停止其审查。",
       create: "创建 App",
@@ -1100,7 +1100,7 @@ export const zhCN: Dictionary = {
       heading: "GitHub App 已连接",
       connected: "GitHub App {appName}（id {id}）已连接到此部署。",
       slug: "Slug：{slug}",
-      // slug 为 NULL 时页面展示的是数字 App id，标签如实说明。
+      // note: slug 为 NULL 时页面展示的是数字 App id，标签如实说明。
       appId: "App ID：{id}",
       webhookUrl: "Webhook URL：{webhookUrl}",
       nextStep: "下一步：打开设置并配置 provider — 验证 provider key 并选择模型后，此 App 的审查才会开始。",
@@ -1141,22 +1141,22 @@ export const zhCN: Dictionary = {
     },
   },
   /**
-   * 平台控制台（`/_internal_admin`）—— 运维界面。与工作区外壳共用同一个
+   * note: 平台控制台（`/_internal_admin`）—— 运维界面。与工作区外壳共用同一个
    * locale cookie 实现双语：`main.tsx` 读取 `boot.locale`，每个页面组件接收
    * locale prop，页面文案通过 `t(locale, …)` 解析。这些键面向运维，绝不复用
    * 面向租户的 `support.*` 文案。
    */
   admin: {
-    /** 文档 `<title>` —— 由 `serveDocument` 在服务端替换。 */
+    /** note: 文档 `<title>` —— 由 `serveDocument` 在服务端替换。 */
     documentTitle: "Morning Star — 平台运营",
     header: {
       title: "平台运营",
-      /** boot 未携带登录名时显示在标题下方。 */
+      /** note: boot 未携带登录名时显示在标题下方。 */
       signedOut: "已退出登录",
-      /** 返回运维自己的工作区外壳。 */
+      /** note: 返回运维自己的工作区外壳。 */
       dashboardLink: "工作区控制台",
     },
-    /** 控制台导航标签 —— `pages.ts` 通过 `labelKey` 路由。 */
+    /** note: 控制台导航标签 —— `pages.ts` 通过 `labelKey` 路由。 */
     nav: {
       flags: "服务器开关",
       runtime: "运行时参数",
@@ -1169,12 +1169,12 @@ export const zhCN: Dictionary = {
       dataUpgrades: "数据升级",
     },
     /**
-     * 控制台写入被服务器拒绝：页面的通用失败文案为主，服务器自身的
+     * note: 控制台写入被服务器拒绝：页面的通用失败文案为主，服务器自身的
      * `{error}` 文本作为次要细节附带展示（PageNotice 的单条 message
      * 字符串同时承载两者）。
      */
     refusalDetail: "服务器返回：{detail}",
-    /** 服务器开关页。 */
+    /** note: 服务器开关页。 */
     flags: {
       description: "平台级开关。更改对下一个请求生效，并追加一条审计记录。",
       loadFailed: "无法加载服务器开关。",
@@ -1183,28 +1183,28 @@ export const zhCN: Dictionary = {
       flagColumn: "开关",
       effectColumn: "关闭时的影响",
       stateColumn: "状态",
-      /** 两个语言环境都渲染为 ON/OFF（compass D9）。 */
+      /** note: 两个语言环境都渲染为 ON/OFF（compass D9）。 */
       stateOn: "ON",
       stateOff: "OFF",
-      /** review_global 键下方的说明（spec §3.1）。 */
+      /** note: review_global 键下方的说明（spec §3.1）。 */
       reviewGlobalNote: "已排队的任务不会被取消。",
       noDocumentedEffect: "没有记录在案的影响。",
-      /** 每个开关关闭时影响什么，按开关键索引。 */
+      /** note: 每个开关关闭时影响什么，按开关键索引。 */
       effectReviewGlobal: "不再排队新的审查。每个 App 的暂停开关不受影响。",
       effectSignupOpen: "未知的 GitHub 登录无法首次登录，已有账号不受影响。",
       effectWorkspaceCreationOpen: "任何工作区都无法创建，运维自己的也不例外。",
-      /** 写入确认对话框 — {flag}、{from}、{to}（ON/OFF）为插值。 */
+      /** note: 写入确认对话框 — {flag}、{from}、{to}（ON/OFF）为插值。 */
       confirmTitle: "将 {flag} 从 {from} 切换为 {to}？",
       confirmButton: "确认",
       cancelButton: "取消",
-      /** 写入成功后行内显示的简短确认。 */
+      /** note: 写入成功后行内显示的简短确认。 */
       saved: "已保存。",
-      /** 写入失败且错误无法识别时的兜底文案。 */
+      /** note: 写入失败且错误无法识别时的兜底文案。 */
       toggleFailed: "无法更改 {flag}。",
-      /** 开关的可访问名称：“{flag} {state}”，state 为 ON/OFF。 */
+      /** note: 开关的可访问名称：“{flag} {state}”，state 为 ON/OFF。 */
       stateAria: "{flag} {state}",
     },
-    /** 运行时参数页（迭代规格 §1.1）。 */
+    /** note: 运行时参数页（迭代规格 §1.1）。 */
     runtime: {
       description: "非机密的运行时参数。更改会在下一次审查生效，并追加一条审计记录。",
       loadFailed: "无法加载运行时参数。",
@@ -1213,11 +1213,11 @@ export const zhCN: Dictionary = {
       concurrencyLabel: "并发审查数",
       concurrencySave: "保存",
       concurrencySaved: "已保存。",
-      /** 写入失败且错误不可识别时的兜底文案。 */
+      /** note: 写入失败且错误不可识别时的兜底文案。 */
       concurrencyFailed: "修改系统并发数失败。",
-      /** {value} = 当前存储的上限（或文档默认值）。 */
+      /** note: {value} = 当前存储的上限（或文档默认值）。 */
       concurrencyCurrent: "下一次审查生效值：{value}。",
-      /** 已存储的上限无法读取——数字只是兜底值，不是已存储的设置。 */
+      /** note: 已存储的上限无法读取——数字只是兜底值，不是已存储的设置。 */
       concurrencyUnreadable:
         "无法读取已存储的系统并发数，因此每个工作区都在逐个运行审查。输入范围内的值可保存为新的并发数，重新读取会重新检查该行。",
       checkTitle: "检查预算",
@@ -1227,11 +1227,11 @@ export const zhCN: Dictionary = {
       updateLabel: "Check update（毫秒）",
       checkSave: "保存",
       checkSaved: "已保存。",
-      /** 写入失败且错误无法识别时的兜底文案。 */
+      /** note: 写入失败且错误无法识别时的兜底文案。 */
       checkFailed: "修改检查预算失败。",
-      /** {terminalize}/{update} = 当前存储的预算（或文档默认值）。 */
+      /** note: {terminalize}/{update} = 当前存储的预算（或文档默认值）。 */
       checkCurrent: "下一次审查生效值：terminalize {terminalize} 毫秒，update {update} 毫秒。",
-      /** 两个已存储的预算都无法读取——数字只是文档默认值。 */
+      /** note: 两个已存储的预算都无法读取——数字只是文档默认值。 */
       checkUnreadable:
         "无法读取已存储的检查预算，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
       claimTitle: "评论触发恢复",
@@ -1242,11 +1242,11 @@ export const zhCN: Dictionary = {
       outboxLabel: "每批重发数",
       claimSave: "保存",
       claimSaved: "已保存。",
-      /** 写入失败且错误无法识别时的兜底文案。 */
+      /** note: 写入失败且错误无法识别时的兜底文案。 */
       claimFailed: "修改评论触发恢复设置失败。",
-      /** {retry}/{attempts}/{outbox} = 当前存储的设置（或文档默认值）。 */
+      /** note: {retry}/{attempts}/{outbox} = 当前存储的设置（或文档默认值）。 */
       claimCurrent: "下一次扫描生效值：{retry} 毫秒后重试，最多 {attempts} 次，每次最多 {outbox} 条。",
-      /** 所有已存储设置都无法读取——数字只是文档默认值。 */
+      /** note: 所有已存储设置都无法读取——数字只是文档默认值。 */
       claimUnreadable:
         "无法读取已存储的评论触发恢复设置，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
       sweepTitle: "定时故障巡检",
@@ -1265,30 +1265,30 @@ export const zhCN: Dictionary = {
       sweepFailed: "无法保存巡检设置。",
       sweepUnreadable:
         "部分巡检设置无法读取，已暂停 Webhook 投递记录清理。请重试读取，或填写并保存全部六项设置以恢复清理。",
-      /** 历史发现重审席位的提问预算。 */
+      /** note: 历史发现重审席位的提问预算。 */
       recheckTitle: "重审提问预算",
       recheckDescription:
         "历史发现重审席位单轮可索要的上下文大小（UTF-8 字节）。所有历史发现与讨论始终保留，证据切片在此预算内按序保留。",
       recheckLabel: "提问预算（字节）",
       recheckSave: "保存",
       recheckSaved: "已保存。",
-      /** 写入失败且错误无法识别时的兜底文案。 */
+      /** note: 写入失败且错误无法识别时的兜底文案。 */
       recheckFailed: "修改重审提问预算失败。",
-      /** {value} = 当前存储的预算（或文档默认值）。 */
+      /** note: {value} = 当前存储的预算（或文档默认值）。 */
       recheckCurrent: "下一轮评审生效：{value} 字节。",
-      /** 已存储的预算无法读取——显示的数值是文档默认值。 */
+      /** note: 已存储的预算无法读取——显示的数值是文档默认值。 */
       recheckUnreadable:
         "无法读取已存储的重审提问预算，因此正在使用文档默认值。输入范围内的数值可保存为新值，重新读取会重新检查该行。",
-      /** 流水线在最近 24 小时记录的准入拒绝。 */
+      /** note: 流水线在最近 24 小时记录的准入拒绝。 */
       admissionDropsTitle: "准入拒绝（最近 24 小时）",
       admissionDropsDescription:
         "流水线拒绝准入的审查数量，按原因统计。被拒绝的审查从未开始；计数读取流水线已写入的失败记录。",
-      /** 拒绝准入的原因：PR 锁、容量上限或存储故障。 */
+      /** note: 拒绝准入的原因：PR 锁、容量上限或存储故障。 */
       admissionDropsPrHeld: "PR 正在审查",
       admissionDropsSystemCap: "系统上限",
       admissionDropsWorkspaceCap: "工作区上限",
       admissionDropsError: "存储错误",
-      /** 维护窗口：运维对它的唯一写入面。 */
+      /** note: 维护窗口：运维对它的唯一写入面。 */
       maintenanceTitle: "维护模式",
       maintenanceDescription:
         "开启后，控制台返回 503，Webhook 返回 503 以便 GitHub 重试，队列中的审查会被丢弃。健康检查与本控制台保持可用。",
@@ -1299,25 +1299,25 @@ export const zhCN: Dictionary = {
       maintenanceOn: "关闭平台",
       maintenanceOff: "恢复平台",
       maintenanceSaved: "已保存。",
-      /** 写入失败且错误无法识别时的兜底文案。 */
+      /** note: 写入失败且错误无法识别时的兜底文案。 */
       maintenanceFailed: "修改维护模式失败。",
-      /** 窗口开启时间，渲染为相对时间。 */
+      /** note: 窗口开启时间，渲染为相对时间。 */
       maintenanceSinceLabel: "关闭于",
-      /** 实时队列积压，以及最近 24 小时的 GitHub 次级限流次数。 */
+      /** note: 实时队列积压，以及最近 24 小时的 GitHub 次级限流次数。 */
       queueTitle: "队列积压与 GitHub 限流",
       queueDescription:
         "审查队列的实时积压，以及流水线在最近 24 小时记录的 GitHub 次级限流拒绝。“不可读”表示无法取得该计数，并不表示队列为空。",
       queueBacklogLabel: "积压深度",
       queueOldestLabel: "最旧消息",
       queueUnreadable: "不可读",
-      /** 没有消息在排队，因此计数没有最旧时间戳。 */
+      /** note: 没有消息在排队，因此计数没有最旧时间戳。 */
       queueEmpty: "空队列",
       githubRateLimitedLabel: "GitHub 次级限流（24 小时）",
-      // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
+      // note: 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",
     },
-    /** 工作区页。 */
+    /** note: 工作区页。 */
     workspaces: {
       description: "所有在线工作区。更改套餐不会移除成员；降级只阻止新的邀请。",
       loadFailed: "无法加载工作区列表。",
@@ -1326,22 +1326,22 @@ export const zhCN: Dictionary = {
       workspaceColumn: "工作区",
       ownerColumn: "所有者",
       membersColumn: "成员",
-      /** {count} = 待处理邀请数（仅大于 0 时渲染）。 */
+      /** note: {count} = 待处理邀请数（仅大于 0 时渲染）。 */
       pendingInvites: "{count} 个待处理邀请",
       seatsColumn: "席位",
       planColumn: "套餐",
       createdColumn: "创建时间",
-      /** 套餐写入失败且错误无法识别时的兜底文案。 */
+      /** note: 套餐写入失败且错误无法识别时的兜底文案。 */
       planChangeFailed: "无法更改 {name} 的套餐。",
-      /** 套餐选择器的可访问名称。 */
+      /** note: 套餐选择器的可访问名称。 */
       planAria: "{name} 的套餐",
-      /** 套餐选择器中的目录标签，按线上套餐 id 索引。 */
+      /** note: 套餐选择器中的目录标签，按线上套餐 id 索引。 */
       planFree: "免费版",
       planPro: "专业版",
       planUnlimited: "无限版",
-      /** 打开 slug 对话框的行操作。 */
+      /** note: 打开 slug 对话框的行操作。 */
       slugAction: "编辑 slug",
-      /** 行操作的可访问名称。 */
+      /** note: 行操作的可访问名称。 */
       slugAria: "编辑 {name} 的 slug",
       slugDialogTitle: "工作区 URL slug",
       slugDialogDescription:
@@ -1349,10 +1349,10 @@ export const zhCN: Dictionary = {
       slugLabel: "Slug",
       slugSave: "保存 slug",
       cancelAction: "取消",
-      /** slug 写入失败且错误无法识别时的兜底文案。 */
+      /** note: slug 写入失败且错误无法识别时的兜底文案。 */
       slugChangeFailed: "无法更改 {name} 的 slug。",
       /**
-       * 表格上方的官方工作区卡片：唯一可以把 bot 标记为共享的租户。
+       * note: 表格上方的官方工作区卡片：唯一可以把 bot 标记为共享的租户。
        * 清除是独立操作（不是保存空值），且不撤销已授予的共享。
        */
       officialTitle: "官方工作区",
@@ -1361,17 +1361,17 @@ export const zhCN: Dictionary = {
       officialCurrent: "当前：",
       officialNone: "未指定",
       officialSelectLabel: "工作区",
-      /** 选择器的可访问名称；可见标签已在其上方。 */
+      /** note: 选择器的可访问名称；可见标签已在其上方。 */
       officialSelectAria: "官方工作区",
       officialSave: "保存",
       officialClear: "清除",
       officialSaved: "已保存官方工作区。",
       officialCleared: "已清除官方工作区。已共享的仍可撤销。",
-      /** 两种写入失败且错误无法识别时的兜底文案。 */
+      /** note: 两种写入失败且错误无法识别时的兜底文案。 */
       officialSaveFailed: "无法更改官方工作区。",
       officialLoadFailed: "无法加载官方工作区。",
     },
-    /** 机器人页：每个在线 bot、其所属工作区与共享范围。 */
+    /** note: 机器人页：每个在线 bot、其所属工作区与共享范围。 */
     bots: {
       description:
         "所有在线审查机器人及其所属工作区与范围。只有在官方工作区里的 bot 才能被平台共享。",
@@ -1379,10 +1379,10 @@ export const zhCN: Dictionary = {
       emptyTitle: "没有机器人",
       emptyDescription: "此部署还没有任何在线审查机器人。",
       botColumn: "机器人",
-      /** 机器人单元格的第二行：它运行的 GitHub App。 */
+      /** note: 机器人单元格的第二行：它运行的 GitHub App。 */
       appMeta: "app {id}",
       workspaceColumn: "工作区",
-      /** bot 所属工作区为何重要：共享需要官方工作区。 */
+      /** note: bot 所属工作区为何重要：共享需要官方工作区。 */
       workspaceOfficial: "官方",
       scopeColumn: "范围",
       sharedColumn: "共享时间",
@@ -1390,25 +1390,25 @@ export const zhCN: Dictionary = {
       targetsColumn: "活 target",
       shareAction: "共享",
       unshareAction: "取消共享",
-      /** bot 所属工作区不是官方工作区时，操作按钮的标签。 */
+      /** note: bot 所属工作区不是官方工作区时，操作按钮的标签。 */
       shareUnavailable: "共享不可用",
       notOfficialReason: "只有官方工作区里的机器人可以被共享。",
-      /** 共享确认 —— {name} 为 bot 名称。 */
+      /** note: 共享确认 —— {name} 为 bot 名称。 */
       shareConfirmTitle: "将 {name} 共享给整个平台？",
       shareConsequence:
         "其他工作区随后可以在自己的仓库上运行此机器人，按其自身套餐计费。凭据与模型链仍在本工作区配置。",
-      /** 取消共享确认 —— 运营者必须先读到的后果。 */
+      /** note: 取消共享确认 —— 运营者必须先读到的后果。 */
       unshareConfirmTitle: "停止共享 {name}？",
       unshareConsequence:
         "其他工作区里的 target 会变为 Blocked（不可审），直到重新共享。本工作区仍可配置此机器人。",
       confirmAction: "确认",
       cancelAction: "取消",
-      /** 范围写入失败且错误无法识别时的兜底文案。 */
+      /** note: 范围写入失败且错误无法识别时的兜底文案。 */
       scopeChangeFailed: "无法更改 {name} 的共享状态。",
     },
-    /** 审查用量页（spec bot-scope-and-claiming § Review usage）。 */
+    /** note: 审查用量页（spec bot-scope-and-claiming § Review usage）。 */
     usage: {
-      /** {month} = 本次读取对应的 UTC 月份，例如 2026-11。 */
+      /** note: {month} = 本次读取对应的 UTC 月份，例如 2026-11。 */
       window: "每个工作区的审查 · {month}（UTC）",
       loadFailed: "无法加载审查用量。",
       workspaceColumn: "工作区",
@@ -1416,7 +1416,7 @@ export const zhCN: Dictionary = {
       ownColumn: "自有机器人",
     },
     /**
-     * 额度版本页：只增不改的 profile 表格、新建表单，以及发布前必须完成的
+     * note: 额度版本页：只增不改的 profile 表格、新建表单，以及发布前必须完成的
      * 影响预览。「版本」是运营者对 profile 的说法，保留在这部分文案里。
      */
     quotaVersions: {
@@ -1425,19 +1425,19 @@ export const zhCN: Dictionary = {
       versionColumn: "版本",
       intervalColumn: "区间",
       statusColumn: "状态",
-      /** 判定本月的版本：其 `effective_from` 覆盖了本月 1 日。 */
+      /** note: 判定本月的版本：其 `effective_from` 覆盖了本月 1 日。 */
       statusCurrent: "当前",
-      /** 区间起点晚于本月 1 日的版本。 */
+      /** note: 区间起点晚于本月 1 日的版本。 */
       statusScheduled: "已排定",
       statusHistorical: "历史",
       formTitle: "新建额度版本",
       formCopy: "新版本会复制当前数值。发布即追加——既有版本永不被修改。",
-      /** 只读：下一个序号（如 v3）。绝不是表单输入。 */
+      /** note: 只读：下一个序号（如 v3）。绝不是表单输入。 */
       fieldVersion: "版本",
       fieldEffectiveFrom: "生效时间",
       effectiveFromHint:
         "月中批准的版本从次月 1 日起判定额度——当月仍沿用覆盖其 1 日的版本，因此新数值不会在月中把工作区推出额度。",
-      /** {date} = 此版本第一个判定的 1 日，显示在字段下方。 */
+      /** note: {date} = 此版本第一个判定的 1 日，显示在字段下方。 */
       effectiveFromJudges: "自 {date} 起判定额度。",
       fieldNotes: "变更原因",
       notesPlaceholder: "例如：为覆盖深度审查上调 pro 上限",
@@ -1447,25 +1447,25 @@ export const zhCN: Dictionary = {
       fieldSourceByok: "BYOK 倍率",
       fieldSourceShared: "共享机器人倍率",
       fieldRpPerCredit: "每额度 RP",
-      /** {plan} = 套餐目录中的名称。 */
+      /** note: {plan} = 套餐目录中的名称。 */
       fieldMonthlyRp: "每月 RP · {plan}",
       monthlyRpHint: "留空表示不设月度上限。",
       publish: "创建版本",
-      /** {count} 个超出，{total} 个工作区参与比较。绝不出现带分母的 0。 */
+      /** note: {count} 个超出，{total} 个工作区参与比较。绝不出现带分母的 0。 */
       previewCount: "按今日用量，{total} 个工作区中有 {count} 个会超出月度上限。",
       previewNone: "按今日用量，没有工作区会超出月度上限。",
-      /** {date} = 此版本第一个判定的 1 日。 */
+      /** note: {date} = 此版本第一个判定的 1 日。 */
       previewStartsOn: "此版本自 {date} 起判定额度；当月沿用覆盖其 1 日的版本。",
       uncoveredPlans:
         "版本 {version} 没有为 {plans} 设置月度上限，因此这些套餐上的审查会在开始前被拒绝。创建一个覆盖所有套餐的版本即可恢复。",
       previewRequired: "发布前请先检查影响。",
       previewLoadFailed: "无法计算影响——在加载完成前不可发布。",
       previewAction: "检查影响",
-      /** {version} = 服务器刚写入的序号。 */
+      /** note: {version} = 服务器刚写入的序号。 */
       published: "已创建版本 {version}。",
       publishFailed: "无法创建额度版本。",
     },
-    /** 用户页。 */
+    /** note: 用户页。 */
     users: {
       description:
         "此平台上的所有账号。只读：运营身份来自白名单，支持访问来自授权列表。",
@@ -1477,26 +1477,26 @@ export const zhCN: Dictionary = {
       workspacesColumn: "工作区",
       identityColumn: "身份",
       identityOperator: "运营",
-      /** {count} = 该登录名下的有效授权数。 */
+      /** note: {count} = 该登录名下的有效授权数。 */
       identitySupport: "支持（{count}）",
       identityUser: "用户",
     },
     /**
-     * 客户端表格搜索（工作区、用户）：一个输入框过滤已加载的行；
+     * note: 客户端表格搜索（工作区、用户）：一个输入框过滤已加载的行；
      * 计数器显示“已显示 / 总数”。
      */
     search: {
       placeholder: "搜索",
-      /** {shown} = 匹配行数，{total} = 已加载行数。 */
+      /** note: {shown} = 匹配行数，{total} = 已加载行数。 */
       counter: "{shown} / {total}",
       emptyTitle: "无匹配结果",
       emptyDescription: "没有符合当前搜索的行。",
     },
-    /** 支持授权页 —— 列表表头与创建表单。 */
+    /** note: 支持授权页 —— 列表表头与创建表单。 */
     supportGrants: {
       description: "限时的跨工作区访问。创建和撤销授权各追加一条审计记录。",
       loadFailed: "无法加载支持授权。",
-      /** 写入失败且错误无法识别时的兜底文案。 */
+      /** note: 写入失败且错误无法识别时的兜底文案。 */
       createFailed: "无法创建支持授权。",
       revokeFailed: "无法撤销支持授权。",
       newWindowTitle: "新建支持窗口",
@@ -1516,7 +1516,7 @@ export const zhCN: Dictionary = {
       emptyTitle: "没有开放的支持窗口",
       emptyDescription: "当前没有任何运营持有跨工作区访问。",
     },
-    /** 数据升级页：注册项、状态与分批执行。维护横幅复用运行时页的窗口文案。 */
+    /** note: 数据升级页：注册项、状态与分批执行。维护横幅复用运行时页的窗口文案。 */
     dataUpgrades: {
       description:
         "大规模数据迁移，每批一个事务。进行中的批次不会被中断，停止操作在其完成后生效。",
@@ -1536,12 +1536,12 @@ export const zhCN: Dictionary = {
       statusCompleted: "已完成",
       statusFailed: "已失败",
       downtimeBadge: "需要停机",
-      /** 折叠后的已完成行：处理行数与最近运行时间。 */
+      /** note: 折叠后的已完成行：处理行数与最近运行时间。 */
       completedSummary: "{count} 行 · 最近运行 {time}",
       showDetails: "展开详情",
       hideDetails: "收起详情",
       processedLabel: "已处理行数",
-      /** 一列：最近一次运行自己的完成时间；运行中退回进行中的声明时间。 */
+      /** note: 一列：最近一次运行自己的完成时间；运行中退回进行中的声明时间。 */
       lastRunLabel: "最近运行",
       preflightLabel: "预检计数",
       preflightAction: "预检",
@@ -1549,12 +1549,12 @@ export const zhCN: Dictionary = {
       continueAction: "继续",
       verifyAction: "校验",
       stopAction: "停止",
-      /** 进行中的运行唯一的出口：状态行回到待开始。 */
+      /** note: 进行中的运行唯一的出口：状态行回到待开始。 */
       resetAction: "回到待开始",
-      /** 失败项唯一的恢复动作，以及它不会撤销什么。 */
+      /** note: 失败项唯一的恢复动作，以及它不会撤销什么。 */
       restartAction: "重新开始升级",
       restartConsequence: "已迁移的行不会回滚。",
-      /** 预检计数全为零：再跑也不会移动任何行。 */
+      /** note: 预检计数全为零：再跑也不会移动任何行。 */
       nothingToMigrate: "无可迁移数据 — 此升级已无待处理内容。",
       preflightFailed: "无法为 {title} 执行预检。",
       stepFailed: "{title} 的批次被拒绝。",
