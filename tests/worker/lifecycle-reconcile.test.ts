@@ -1,5 +1,4 @@
-/**
- * M8 recovery reconciler tests (spec review-lifecycle
+/** note: M8 recovery reconciler tests (spec review-lifecycle
  * §7.11/§7.11.1) — src/worker/lifecycle-reconcile.ts over the REAL migration
  * DDL (bun:sqlite D1 double, tests/store/helpers.ts) with the reviewer
  * surface injected (no GitHub, no credentials in tests).
@@ -88,12 +87,12 @@ const SCOPE_C: Scope = { appId: APP_C, installationId: 789, owner: "acme", repo:
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const T0 = 1_000_000;
 
-/** Base64 of exactly 32 bytes — the secretbox master-key requirement. */
+/** invariant: Base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
 
 const SILENT_LOG = { warn: () => {}, info: () => {} };
 
-/** The cron's queue binding (comment-claim outbox): these suites re-send nothing. */
+/** invariant: The cron's queue binding (comment-claim outbox): these suites re-send nothing. */
 const NOOP_QUEUE = { send: async () => {} } as unknown as ScheduledEnv["REVIEW_QUEUE"];
 
 function asEnv(db: TestD1): ScheduledEnv {
@@ -106,7 +105,7 @@ async function reconcile(db: TestD1, deps: Omit<LifecycleReconcileDeps, "log"> =
   return reconcileReviewLifecycle(asEnv(db), { ...deps, log: SILENT_LOG });
 }
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
@@ -254,7 +253,7 @@ function proofOf(id: string, pay: PublicationPayload, confirmedMs: number): Publ
   };
 }
 
-/** Stage → claim → record proof → expire the lease (the crashed-window shape). */
+/** note: Stage → claim → record proof → expire the lease (the crashed-window shape). */
 async function seedConfirmedCrashed(db: TestD1, id: string, pay: PublicationPayload, nowMs = T0): Promise<void> {
   await stagePublication(db, { id, payload: pay, nowMs });
   const lease = await claimPublication(db, id, "consumer", nowMs + 1);
@@ -264,7 +263,7 @@ async function seedConfirmedCrashed(db: TestD1, id: string, pay: PublicationPayl
   db.raw.prepare(`UPDATE review_publications SET lease_until_ms = ? WHERE id = ?`).run(nowMs - 1, id);
 }
 
-/** Seed a prepared (never sent) publication row staged `ageMs` ago. */
+/** invariant: Seed a prepared (never sent) publication row staged `ageMs` ago. */
 async function seedPrepared(db: TestD1, id: string, pay: PublicationPayload, ageMs: number): Promise<void> {
   await stagePublication(db, { id, payload: pay, nowMs: T0 - ageMs });
 }
@@ -373,8 +372,7 @@ function verifiedFor(associationId: string, findingRowId: string): VerifiedResol
   };
 }
 
-/**
- * A resolvable "ok" reviewer resolution: the default surface throws for every
+/** note: A resolvable "ok" reviewer resolution: the default surface throws for every
  * operation the test did not explicitly override, so an unexpected GitHub call
  * is a loud test failure rather than a silent pass.
  */
@@ -407,8 +405,7 @@ function okResolution(
   };
 }
 
-/**
- * Reviewer factory whose routing is recorded; every GitHub call throws
+/** note: Reviewer factory whose routing is recorded; every GitHub call throws
  * unless overridden — "not expected" in lanes the test does not exercise.
  */
 function okReviewer(
@@ -421,8 +418,7 @@ function okReviewer(
   };
 }
 
-/**
- * Issue `count` REAL requests through the run transport with the global fetch
+/** note: Issue `count` REAL requests through the run transport with the global fetch
  * neutralized, and report how many were actually dispatched. Tests use this to
  * make an injected reviewer faithful to the §7.5 surface (which really issues
  * GitHub requests) without touching the network — the transport's own metering
@@ -440,7 +436,7 @@ async function meterRequests(transport: ReconcileTransport, count: number): Prom
       try {
         await transport.fetchImpl(`https://api.github.com/x?n=${i}`);
       } catch {
-        break; // budget refusal is a legitimate outcome; report what was sent
+        break; // note: budget refusal is a legitimate outcome; report what was sent
       }
     }
   } finally {
@@ -461,7 +457,7 @@ function threadRow(db: TestD1, id: string): { resolution_state: string; attempts
     .get(id) as never;
 }
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -492,7 +488,7 @@ describe("publication lane — confirmed apply", () => {
     });
 
     expect(summary.applied).toBe(1);
-    expect(reviewerCalls).toBe(0); // local apply never touches GitHub
+    expect(reviewerCalls).toBe(0); // invariant: local apply never touches GitHub
     const reviews = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number };
     expect(reviews.n).toBe(1);
@@ -508,7 +504,7 @@ describe("publication lane — confirmed apply", () => {
     const first = await reconcile(db, { now: () => T0 + 1_000, reviewer: okReviewer() });
     expect(first.applied).toBe(1);
 
-    // Simulate a crash between store.put and the applied mark: reset the
+    // note: Simulate a crash between store.put and the applied mark: reset the
     // applied row to confirmed/pending, then reconcile again. The artifact is
     // composed on EVERY attempt (both ids derive from the apply key), so its
     // review INSERT runs and writes nothing — `ON CONFLICT DO NOTHING` — and
@@ -536,7 +532,7 @@ describe("publication lane — confirmed apply", () => {
     );
 
     expect(second.applied).toBe(1);
-    // The statement is attempted and is an idempotent no-op (the row exists).
+    // note: The statement is attempted and is an idempotent no-op (the row exists).
     expect(inserts).toHaveLength(1);
     const reviews = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number };
@@ -571,7 +567,7 @@ describe("publication lane — prepared send", () => {
     const summary = await reconcile(db, {
       now: () => T0,
       reviewer: okReviewer({
-        planReviewUpsert: async () => ({ action: "update", commentId: 9, round: 2 }), // PR shows round 1 already published by a NEWER publication
+        planReviewUpsert: async () => ({ action: "update", commentId: 9, round: 2 }), // note: PR shows round 1 already published by a NEWER publication
       }),
     });
 
@@ -588,7 +584,7 @@ describe("publication lane — prepared send", () => {
     const summary = await reconcile(db, {
       now: () => T0,
       reviewer: okReviewer({
-        planReviewUpsert: async () => ({ action: "update", commentId: 9, round: 2 }), // current parsed round 1 < prepared round 2
+        planReviewUpsert: async () => ({ action: "update", commentId: 9, round: 2 }), // note: current parsed round 1 < prepared round 2
         postPreparedReview: async (input) => {
           sent.push({ publicationId: input.publicationId, round: input.round, body: input.body });
           return { commentId: 555 };
@@ -618,7 +614,7 @@ describe("publication lane — prepared send", () => {
       },
     });
 
-    // Pair-level credential health is checked (routing precedes the phase
+    // safety: Pair-level credential health is checked (routing precedes the phase
     // work), but the age gate skips the send — no attempt, still due.
     expect(summary.examined).toBe(1);
     expect(routed).toBe(1);
@@ -640,7 +636,7 @@ describe("thread lane — retry, backoff, give-up (real §7.5 surface)", () => {
       verified: verifiedFor("assoc-1", "finding-row-1"),
     });
 
-    // The REAL §7.5 surface with unavailable identity: the resolve fails
+    // note: The REAL §7.5 surface with unavailable identity: the resolve fails
     // closed as retry:api and consumes one attempt through its own claim.
     const clock = { now: T0 };
     const threads = createReviewThreads({
@@ -664,7 +660,7 @@ describe("thread lane — retry, backoff, give-up (real §7.5 surface)", () => {
         expect(summary.errors).toBe(1);
         expect(row.resolution_state).toBe("retry");
         expect(row.attempts).toBe(round + 1);
-        // jump past this round's backoff for the next pass
+        // note: jump past this round's backoff for the next pass
         clock.now += (backoffsSeen[backoffsSeen.length - 1] ?? 0) + 1_000;
       } else {
         expect(row.attempts).toBe(5);
@@ -676,7 +672,7 @@ describe("thread lane — retry, backoff, give-up (real §7.5 surface)", () => {
     }
     expect(backoffsSeen).toEqual([60_000, 120_000, 240_000, 480_000]);
     expect(lastAttempts).toBe(5);
-    // The row is retained (never deleted).
+    // invariant: The row is retained (never deleted).
     const count = db.raw.query("SELECT COUNT(*) AS n FROM review_threads WHERE id = 'assoc-1'").get() as { n: number };
     expect(count.n).toBe(1);
   });
@@ -705,7 +701,7 @@ describe("thread lane — retry, backoff, give-up (real §7.5 surface)", () => {
     expect(summary.errors).toBe(0);
     const row = threadRow(db, "assoc-1");
     expect(row.resolution_state).toBe("needs-recheck");
-    // No longer selectable by the recovery reader.
+    // note: No longer selectable by the recovery reader.
     const pending = await listResolutionRecovery(db, T0 + 1_000_000, 10);
     expect(pending.map((r) => r.associationId)).not.toContain("assoc-1");
   });
@@ -741,7 +737,7 @@ describe("credential routing — suspension and re-enable (spec §7.6/§7.11.1)"
     const db = createMigratedTestD1();
     const APP_C = "cccccccc-dddd-eeee-ffff-000000000001";
     const SCOPE_C: Scope = { appId: APP_C, installationId: 789, owner: "third", repo: "tools", prNumber: 9 };
-    seedApp(db, APP, { install: false }); // missing bot_installations mapping
+    seedApp(db, APP, { install: false }); // note: missing bot_installations mapping
     seedApp(db, APP_B, { githubAppId: 1002, status: "disabled", installationId: SCOPE_B.installationId });
     seedApp(db, APP_C, { githubAppId: 1003, deletedAt: new Date().toISOString(), installationId: SCOPE_C.installationId });
     await seedPrepared(db, "pub-a", degradedPayload(SCOPE), 120_000);
@@ -756,9 +752,9 @@ describe("credential routing — suspension and re-enable (spec §7.6/§7.11.1)"
       verified: verifiedFor("assoc-a", "finding-row-1"),
     });
 
-    const summary = await reconcile(db, { now: () => T0 }); // production routing — no credentials in tests
+    const summary = await reconcile(db, { now: () => T0 }); // safety: production routing — no credentials in tests
 
-    expect(summary.suspended).toBe(4); // pub-a + pub-b + pub-c + assoc-a
+    expect(summary.suspended).toBe(4); // note: pub-a + pub-b + pub-c + assoc-a
     expect(summary.applied).toBe(0);
     expect(pubRow(db, "pub-a")).toMatchObject({ recovery_state: "suspended", attempts: 0 });
     expect(pubRow(db, "pub-b")).toMatchObject({ recovery_state: "suspended", attempts: 0 });
@@ -773,11 +769,11 @@ describe("credential routing — suspension and re-enable (spec §7.6/§7.11.1)"
     const db = createMigratedTestD1();
     seedApp(db, APP, { status: "disabled" });
     await seedPrepared(db, "pub-a", degradedPayload(SCOPE), 120_000);
-    await reconcile(db, { now: () => T0 }); // production routing: disabled → suspended
+    await reconcile(db, { now: () => T0 }); // note: production routing: disabled → suspended
     expect(pubRow(db, "pub-a").recovery_state).toBe("suspended");
 
     db.raw.prepare(`UPDATE review_bots SET status = 'active' WHERE id = ?`).run(APP);
-    // The re-enable probe is D1-only; the injected reviewer keeps the
+    // invariant: The re-enable probe is D1-only; the injected reviewer keeps the
     // resumed pair off the suspension path for this pass.
     await reconcile(db, { now: () => T0 + 1_000, reviewer: okReviewer() });
 
@@ -928,12 +924,12 @@ describe("frozen paused policy (spec §7.6)", () => {
       ),
     });
 
-    // Local apply of the already-confirmed publication continues…
+    // note: Local apply of the already-confirmed publication continues…
     expect(summary.applied).toBe(1);
     expect(pubRow(db, "pub-confirmed")).toMatchObject({ phase: "applied" });
-    // …previously-authorized resolution retry continues…
+    // note: …previously-authorized resolution retry continues…
     expect(summary.resolved).toBe(1);
-    // …but NO new primary publication is prepared for sending.
+    // note: …but NO new primary publication is prepared for sending.
     expect(pubRow(db, "pub-prepared")).toMatchObject({ phase: "prepared", recovery_state: "pending", attempts: 0 });
     const postCalls = db.raw.query("SELECT COUNT(*) AS n FROM review_publications WHERE phase = 'sending'").get() as { n: number };
     expect(postCalls.n).toBe(0);
@@ -944,7 +940,7 @@ describe("budgets (spec §7.11.1)", () => {
   test("deadline exhaustion stops the thread lane without spending an attempt", async () => {
     const db = createMigratedTestD1();
     seedApp(db, APP);
-    // FK anchor for the thread row, staged TERMINAL so the publication lane
+    // why: FK anchor for the thread row, staged TERMINAL so the publication lane
     // stays empty and the clock sequence isolates the thread-lane budget.
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 0);
     db.raw.prepare(`UPDATE review_publications SET phase = 'superseded', recovery_state = 'done' WHERE id = 'pub-1'`).run();
@@ -973,7 +969,7 @@ describe("budgets (spec §7.11.1)", () => {
       }),
     });
 
-    expect(resolved).toBe(0); // the §7.5 surface was never entered — no claim, no attempt
+    expect(resolved).toBe(0); // invariant: the §7.5 surface was never entered — no claim, no attempt
     expect(summary.examined).toBe(0);
     expect(threadRow(db, "assoc-1")).toMatchObject({ resolution_state: "pending", attempts: 0, lease_until_ms: null });
   });
@@ -985,7 +981,7 @@ describe("tenant/App isolation", () => {
     seedApp(db, APP);
     seedApp(db, APP_B, { githubAppId: 1002, install: false, installationId: SCOPE_B.installationId });
     await seedConfirmedCrashed(db, "pub-a", reviewPayload(SCOPE));
-    await seedPrepared(db, "pub-b", degradedPayload(SCOPE_B), 120_000); // needs GitHub → suspends with the pair
+    await seedPrepared(db, "pub-b", degradedPayload(SCOPE_B), 120_000); // note: needs GitHub → suspends with the pair
     seedFindingRow(db, "finding-row-1", "pub-a", SCOPE, "addressed");
     seedThreadRow(db, {
       id: "assoc-a",
@@ -1016,7 +1012,7 @@ describe("tenant/App isolation", () => {
     );
     const summary = await reconcile(db, {
       now: () => T0,
-      // Pair B's installation mapping is missing (simulating the broken
+      // note: Pair B's installation mapping is missing (simulating the broken
       // D1-routing outcome); pair A is served.
       reviewer: async (input) => {
         routed.push(`${input.appId}:${input.installationId}`);
@@ -1025,13 +1021,13 @@ describe("tenant/App isolation", () => {
       },
     });
 
-    expect(summary.applied).toBe(1); // pub-a
-    expect(summary.resolved).toBe(1); // assoc-a (state persistence is the §7.5 surface's own contract)
-    expect(summary.suspended).toBe(2); // pub-b + assoc-b
+    expect(summary.applied).toBe(1); // note: pub-a
+    expect(summary.resolved).toBe(1); // note: assoc-a (state persistence is the §7.5 surface's own contract)
+    expect(summary.suspended).toBe(2); // note: pub-b + assoc-b
     expect(pubRow(db, "pub-a")).toMatchObject({ phase: "applied" });
     expect(pubRow(db, "pub-b")).toMatchObject({ recovery_state: "suspended" });
     expect(threadRow(db, "assoc-b").resolution_state).toBe("suspended");
-    expect(resolvedScopes).toEqual([SCOPE]); // exact scope binding, no cross-App work
+    expect(resolvedScopes).toEqual([SCOPE]); // note: exact scope binding, no cross-App work
     expect(routed).toContain(`${APP}:123`);
     expect(routed).toContain(`${APP_B}:456`);
   });
@@ -1050,7 +1046,7 @@ describe("throw-proof wrapper (spec §7.11)", () => {
       },
     });
 
-    // The wrapper folded the failure into a typed suspension, not a throw.
+    // note: The wrapper folded the failure into a typed suspension, not a throw.
     expect(summary.suspended).toBeGreaterThanOrEqual(1);
     expect(pubRow(db, "pub-1").recovery_state).toBe("suspended");
   });
@@ -1070,7 +1066,7 @@ describe("throw-proof wrapper (spec §7.11)", () => {
 });
 
 describe("enforced per-request transport bound (spec §7.11.1)", () => {
-  /** Drive one pass and capture the run transport the factory receives. */
+  /** note: Drive one pass and capture the run transport the factory receives. */
   async function captureTransport(db: TestD1, clock: { now: number }): Promise<{
     transport: ReconcileTransport;
     boundedMs: () => number;
@@ -1094,19 +1090,19 @@ describe("enforced per-request transport bound (spec §7.11.1)", () => {
     const clock = { now: T0 };
     const { transport } = await captureTransport(db, clock);
 
-    // Deadline = T0 + 45s (fixed at run start). With plenty of run left the
+    // note: Deadline = T0 + 45s (fixed at run start). With plenty of run left the
     // per-request bound is the 5s cap...
     expect(transport.boundMs()).toBe(RECONCILE_PER_REQUEST_MS);
-    // ...and late in the run it collapses to the remaining time — this is the
+    // note: ...and late in the run it collapses to the remaining time — this is the
     // clamp the review found missing (§7.11.1: "additionally capped by
     // remaining run deadline").
     clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 30;
     expect(transport.boundMs()).toBe(30);
-    // Never zero/negative: a request already past the deadline gets 1ms.
+    // invariant: Never zero/negative: a request already past the deadline gets 1ms.
     clock.now = T0 + RECONCILE_RUN_BUDGET_MS + 10_000;
     expect(transport.boundMs()).toBe(1);
 
-    // The clamp is ENFORCED on the wire, not merely computed: a hung upstream
+    // note: The clamp is ENFORCED on the wire, not merely computed: a hung upstream
     // rejects inside the bound because the seam passes an aborting signal.
     const realFetch = globalThis.fetch;
     try {
@@ -1119,13 +1115,13 @@ describe("enforced per-request transport bound (spec §7.11.1)", () => {
           }
           signal.addEventListener("abort", () => reject(signal.reason));
         })) as unknown as typeof fetch;
-      clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 40; // 40ms of run left
+      clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 40; // note: 40ms of run left
       const started = performance.now();
       await expect(transport.fetchImpl("https://api.github.com/app")).rejects.toMatchObject({
         name: "TimeoutError",
       });
       const elapsed = performance.now() - started;
-      expect(elapsed).toBeLessThan(1_000); // far below the 5s cap — the remaining time bound it
+      expect(elapsed).toBeLessThan(1_000); // note: far below the 5s cap — the remaining time bound it
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1148,10 +1144,10 @@ describe("enforced per-request transport bound (spec §7.11.1)", () => {
 
       const caller = AbortSignal.timeout(60_000);
       await transport.fetchImpl("https://api.github.com/app", { signal: caller });
-      expect(seen).not.toBe(caller); // combined, not substituted
+      expect(seen).not.toBe(caller); // note: combined, not substituted
       expect(seen?.aborted).toBe(false);
 
-      // The COMBINED signal still honours the caller's abort.
+      // note: The COMBINED signal still honours the caller's abort.
       const aborting = new AbortController();
       const promise = transport.fetchImpl("https://api.github.com/app", { signal: aborting.signal });
       aborting.abort(new Error("caller cancelled"));
@@ -1167,13 +1163,13 @@ describe("thread lane request budget (spec §7.11.1)", () => {
   test("the resolution lane admits on its per-operation envelope, and every ACTUAL request is metered", async () => {
     const db = createMigratedTestD1();
     seedApp(db, APP);
-    // Terminal publication as the FK anchor: the publication lane stays empty
+    // invariant: Terminal publication as the FK anchor: the publication lane stays empty
     // so the whole 80-request budget belongs to the thread lane.
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 0);
     db.raw
       .prepare(`UPDATE review_publications SET phase = 'superseded', recovery_state = 'done' WHERE id = 'pub-1'`)
       .run();
-    // TEN due rows — the §7.11.1 selection LIMIT. The ≤15-request envelope is
+    // note: TEN due rows — the §7.11.1 selection LIMIT. The ≤15-request envelope is
     // the admission ESTIMATE: only floor(80 / 15) = 5 may even start, and the
     // requests each operation really issues are charged at the transport.
     for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
@@ -1189,7 +1185,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
       });
     }
 
-    // Each entered operation issues a REAL request burst through the run
+    // note: Each entered operation issues a REAL request burst through the run
     // transport, exactly as the §7.5 surface does — this is what the meter has
     // to see. 25 requests per operation means the whole-run cap is reached
     // after three operations, and the fourth is refused ADMISSION before any
@@ -1205,7 +1201,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
         transport = input.transport;
         const runTransport = input.transport!;
         return okResolution({
-          // Faithful to the real §7.5 surface: entering T2 CONSUMES the claim
+          // note: Faithful to the real §7.5 surface: entering T2 CONSUMES the claim
           // (attempt counted, lease taken) AND issues real requests.
           resolveFindingThread: async (input2) => {
             resolved += 1;
@@ -1223,22 +1219,22 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     });
 
     expect(RECONCILE_MAX_REQUESTS).toBe(80);
-    // 25 + 25 + 25 = 75 actual requests by three operations; 75 + 15 > 80, so
+    // note: 25 + 25 + 25 = 75 actual requests by three operations; 75 + 15 > 80, so
     // the fourth is never admitted. Actual requests stay under the cap.
     expect(resolved).toBe(3);
     expect(requests).toBe(75);
     expect(requests).toBeLessThanOrEqual(RECONCILE_MAX_REQUESTS);
     expect(summary.examined).toBe(3);
 
-    // Budget exhaustion stops the lane BEFORE any claim/attempt mutation for
+    // invariant: Budget exhaustion stops the lane BEFORE any claim/attempt mutation for
     // the rows it never reached (§7.11.1: exhaustion is not a failed attempt).
     const untouched = db.raw
       .query(`SELECT COUNT(*) AS n FROM review_threads WHERE attempts = 0 AND lease_until_ms IS NULL AND resolution_state = 'pending'`)
       .get() as { n: number };
-    expect(untouched.n).toBe(RECONCILE_SELECT_LIMIT - 3); // 7 rows never entered T2
+    expect(untouched.n).toBe(RECONCILE_SELECT_LIMIT - 3); // invariant: 7 rows never entered T2
     expect(transport).toBeDefined();
 
-    // The meter is the TRANSPORT: the remaining allowance is exactly
+    // invariant: The meter is the TRANSPORT: the remaining allowance is exactly
     // 80 - 75 = 5, and the 6th request is refused BEFORE any dispatch.
     const realFetch = globalThis.fetch;
     const alreadySpent = requests;
@@ -1253,7 +1249,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
       }
       expect(dispatched).toBe(RECONCILE_MAX_REQUESTS - alreadySpent);
       await expect(transport!.fetchImpl("https://api.github.com/x")).rejects.toThrow(/budget exhausted/);
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS - alreadySpent); // never dispatched
+      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS - alreadySpent); // invariant: never dispatched
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1262,7 +1258,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
   test("publication-lane spend is shared with the thread lane, shrinking how many rows may enter", async () => {
     const db = createMigratedTestD1();
     seedApp(db, APP);
-    // A prepared publication needing GitHub issues its real plan + send
+    // note: A prepared publication needing GitHub issues its real plan + send
     // requests through the SAME run transport, so its spend genuinely reduces
     // what the thread lane may admit — there is no separate allowance.
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE, { round: 1 }), 120_000);
@@ -1288,7 +1284,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
       reviewer: async (input) => {
         const runTransport = input.transport!;
         return okResolution({
-          // 1 (plan) + 39 (send) real requests = the publication lane's full
+          // note: 1 (plan) + 39 (send) real requests = the publication lane's full
           // half share (40) — exactly the §7.11.1 "publication lane gets at
           // most half the run budget before the thread lane" rule.
           planReviewUpsert: async () => {
@@ -1299,7 +1295,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
             publicationRequests += await meterRequests(runTransport, 39);
             return { posted: true, commentId: 777 };
           },
-          // Each thread operation also issues real requests (a §7.5 resolve
+          // note: Each thread operation also issues real requests (a §7.5 resolve
           // walks several endpoints), so the lane must live inside what the
           // publication lane left of the SHARED cap.
           resolveFindingThread: async () => {
@@ -1311,10 +1307,10 @@ describe("thread lane request budget (spec §7.11.1)", () => {
       },
     });
 
-    // The lane cap is a real bound on ACTUAL requests: the publication lane
+    // note: The lane cap is a real bound on ACTUAL requests: the publication lane
     // stops dispatching at 40 even though its estimate was tiny.
     expect(publicationRequests).toBe(RECONCILE_PUBLICATION_LANE_MAX_REQUESTS);
-    // The thread lane then shares that same run allowance: every operation that
+    // note: The thread lane then shares that same run allowance: every operation that
     // entered really issued its requests, and together the two lanes stop at
     // exactly the whole-run cap — admission alone never lets the run overshoot.
     expect(threadRequests).toBe(RECONCILE_MAX_REQUESTS - RECONCILE_PUBLICATION_LANE_MAX_REQUESTS);
@@ -1359,7 +1355,7 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
         return new Response("{}", { status: 200 });
       }) as unknown as typeof fetch;
 
-      // A single logical operation that internally paginates 40 pages: every
+      // note: A single logical operation that internally paginates 40 pages: every
       // page is a REAL request and must consume the cap one by one. Under the
       // old per-operation reservation this whole burst was charged as one or
       // two requests, which is exactly why the bound did not hold.
@@ -1407,7 +1403,7 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
         throw new Error("transport exploded");
       }) as unknown as typeof fetch;
 
-      // A request that fails AFTER leaving the Worker still consumed the run's
+      // invariant: A request that fails AFTER leaving the Worker still consumed the run's
       // allowance: repeated failures must not be able to issue unaccounted
       // requests past the cap.
       let refused = 0;
@@ -1445,7 +1441,7 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
     await reconcileReviewLifecycle(asEnv(db), {
       log: SILENT_LOG,
       now: () => T0,
-      // A healthy pair: the point of this test is the METERING refusal, so the
+      // note: A healthy pair: the point of this test is the METERING refusal, so the
       // row must stay selectable (not suspended by a credential problem).
       reviewer: async (input) => {
         transport = input.transport;
@@ -1466,12 +1462,12 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
       }
       dispatched = 0;
       await expect(transport!.fetchImpl("https://api.github.com/x")).rejects.toThrow(/budget exhausted/);
-      expect(dispatched).toBe(0); // refused before any dispatch
+      expect(dispatched).toBe(0); // invariant: refused before any dispatch
     } finally {
       globalThis.fetch = realFetch;
     }
 
-    // The pending row was never mutated by the metering refusal: it stays due
+    // invariant: The pending row was never mutated by the metering refusal: it stays due
     // and selectable, so the work is durable rather than lost.
     expect(threadRow(db, "assoc-1")).toMatchObject({
       resolution_state: "pending",
@@ -1484,7 +1480,7 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
 describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1)", () => {
   test("the production factory suspends the exact pair on a live identity mismatch, mutating nothing", async () => {
     const db = createMigratedTestD1();
-    // Real encrypted PEM: the probe must actually sign a JWT and reach the
+    // invariant: Real encrypted PEM: the probe must actually sign a JWT and reach the
     // transport, otherwise the mismatch is never classifiable.
     await seedRealApp(db, APP, 1001);
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
@@ -1503,7 +1499,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
       globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
         const url = String(input);
         requests.push({ url, method: init?.method ?? "GET" });
-        // The live App answers with a DIFFERENT numeric id than the routed
+        // note: The live App answers with a DIFFERENT numeric id than the routed
         // github_app_id — a rotated/substituted credential pair.
         return new Response(JSON.stringify({ id: 9999, slug: "someone-else" }), {
           status: 200,
@@ -1516,18 +1512,18 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
         { log: SILENT_LOG, now: () => T0 },
       );
 
-      // Durable suspension of BOTH lanes' rows for the exact pair.
+      // note: Durable suspension of BOTH lanes' rows for the exact pair.
       expect(summary.suspended).toBe(2);
       expect(summary.applied).toBe(0);
       expect(pubRow(db, "pub-1")).toMatchObject({ recovery_state: "suspended", attempts: 0 });
       const thread = threadRow(db, "assoc-1");
       expect(thread.resolution_state).toBe("suspended");
       expect(thread.attempts).toBe(0);
-      // The reason names the identity mismatch so an operator can tell it
+      // note: The reason names the identity mismatch so an operator can tell it
       // apart from a disabled/deleted App.
       expect(thread.last_error).toContain("live App identity does not match");
 
-      // NO remote mutation: the only request issued was the read-only probe,
+      // invariant: NO remote mutation: the only request issued was the read-only probe,
       // and no publication send was attempted.
       expect(requests).toEqual([{ url: "https://api.github.com/app", method: "GET" }]);
     } finally {
@@ -1564,7 +1560,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
             { status: 200, headers: { "content-type": "application/json" } },
           );
         }
-        // Degraded marker scan (paginated list) — empty page ⇒ create plan.
+        // note: Degraded marker scan (paginated list) — empty page ⇒ create plan.
         if (url.includes("/issues/42/comments")) {
           return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
         }
@@ -1583,7 +1579,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
       );
 
       expect(summary.suspended).toBe(0);
-      expect(summary.applied).toBe(1); // the send went through: identity proved
+      expect(summary.applied).toBe(1); // note: the send went through: identity proved
       expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied" });
     } finally {
       globalThis.fetch = realFetch;
@@ -1608,7 +1604,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
     try {
       globalThis.fetch = (async (input: unknown) => {
         requests.push(String(input));
-        // The live App keeps answering with a DIFFERENT numeric id — the
+        // note: The live App keeps answering with a DIFFERENT numeric id — the
         // credentials were never corrected.
         return new Response(JSON.stringify({ id: 9999, slug: "someone-else" }), {
           status: 200,
@@ -1627,7 +1623,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
       const identityProbesAfterFirst = requests.filter((u) => u.endsWith("/app")).length;
       expect(identityProbesAfterFirst).toBe(1);
 
-      // Second and third passes: the credentials are byte-identical, so the
+      // safety: Second and third passes: the credentials are byte-identical, so the
       // mismatch is still proven — no re-enable, and critically NO further
       // identity probe (no churn, no remote work under unchanged credentials).
       requests.length = 0;
@@ -1635,12 +1631,12 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
       const third = await reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => T0 + 120_000 });
       expect(second.suspended).toBe(0);
       expect(third.suspended).toBe(0);
-      expect(requests).toEqual([]); // zero requests: nothing was probed or mutated
+      expect(requests).toEqual([]); // invariant: zero requests: nothing was probed or mutated
       expect(pubRow(db, "pub-1")).toMatchObject({ recovery_state: "suspended", attempts: 0 });
       expect(threadRow(db, "assoc-1").resolution_state).toBe("suspended");
       expect(threadRow(db, "assoc-1").last_error).toContain("live App identity does not match");
 
-      // The operator corrects the credentials: the envelope changes, so the
+      // safety: The operator corrects the credentials: the envelope changes, so the
       // pair is re-probed and, once the live identity matches, resumes.
       const correctedPem = await testAppPem();
       const corrected = await createSecretbox(TEST_ENCRYPTION_KEY).encryptSecret(
@@ -1657,7 +1653,7 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
       }) as unknown as typeof fetch;
 
       const resumed = await reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => T0 + 180_000 });
-      // The proof succeeded, so the pair left suspension — and the identity
+      // why: The proof succeeded, so the pair left suspension — and the identity
       // probe is exactly what authorized it.
       expect(requests.some((u) => u.endsWith("/app"))).toBe(true);
       expect(pubRow(db, "pub-1").recovery_state).not.toBe("suspended");
@@ -1671,12 +1667,12 @@ describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1
     const db = createMigratedTestD1();
     seedApp(db, APP, { status: "disabled" });
     await seedPrepared(db, "pub-a", degradedPayload(SCOPE), 120_000);
-    await reconcile(db, { now: () => T0 }); // production routing: disabled → suspended
+    await reconcile(db, { now: () => T0 }); // note: production routing: disabled → suspended
     expect(pubRow(db, "pub-a").recovery_state).toBe("suspended");
     expect(pubRow(db, "pub-a").last_error).toContain("suspend:disabled:");
 
     db.raw.prepare(`UPDATE review_bots SET status = 'active' WHERE id = ?`).run(APP);
-    // The status-only resume still applies: no credential identity question
+    // safety: The status-only resume still applies: no credential identity question
     // was ever at issue for a disabled App.
     await reconcile(db, { now: () => T0 + 1_000, reviewer: okReviewer() });
     expect(pubRow(db, "pub-a")).toMatchObject({ recovery_state: "pending", phase: "prepared" });
@@ -1693,7 +1689,7 @@ describe("definitive pre-send rejection → durable failed phase (spec §7.7, P6
       now: () => T0,
       reviewer: okReviewer({
         planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "update", commentId: 7, round: 2 }),
-        // The worker throws exactly what the commenter throws for a definitive
+        // invariant: The worker throws exactly what the commenter throws for a definitive
         // pre-send refusal (a foreign bot marker appeared after the plan).
         postPreparedDegraded: async () => {
           throw new PreparedSendRejected(
@@ -1703,7 +1699,7 @@ describe("definitive pre-send rejection → durable failed phase (spec §7.7, P6
       }),
     });
 
-    // Truthful durable state: `failed` (a request never left the Worker),
+    // invariant: Truthful durable state: `failed` (a request never left the Worker),
     // NOT `unknown` (which is reserved for post-attempt ambiguity).
     expect(pubRow(db, "pub-1")).toMatchObject({
       phase: "failed",
@@ -1712,16 +1708,16 @@ describe("definitive pre-send rejection → durable failed phase (spec §7.7, P6
     });
     expect(pubRow(db, "pub-1").last_error).toContain("refusing to create a second publication");
     expect(summary.errors).toBe(1);
-    expect(summary.unknown).toBe(0); // the misclassification this fixes
+    expect(summary.unknown).toBe(0); // note: the misclassification this fixes
 
-    // Payload and digest are retained for operator inspection.
+    // note: Payload and digest are retained for operator inspection.
     const payload = db.raw
       .query(`SELECT payload_json, proof_json FROM review_publications WHERE id = 'pub-1'`)
       .get() as { payload_json: string; proof_json: string | null };
     expect(JSON.parse(payload.payload_json).body).toBe("degraded body");
-    expect(payload.proof_json).toBeNull(); // no proof claim for a not-sent publication
+    expect(payload.proof_json).toBeNull(); // note: no proof claim for a not-sent publication
 
-    // Recovery never re-sends a failed row: a later pass examines it and
+    // invariant: Recovery never re-sends a failed row: a later pass examines it and
     // leaves it exactly as it is.
     let reSendAttempted = false;
     await reconcile(db, {
@@ -1747,7 +1743,7 @@ describe("definitive pre-send rejection → durable failed phase (spec §7.7, P6
       now: () => T0,
       reviewer: okReviewer({
         planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "update", commentId: 7, round: 2 }),
-        // A transport throw at the send is post-attempt uncertainty (§7.9).
+        // note: A transport throw at the send is post-attempt uncertainty (§7.9).
         postPreparedDegraded: async () => {
           throw new Error("socket hang up after the request left the Worker");
         },
@@ -1761,8 +1757,7 @@ describe("definitive pre-send rejection → durable failed phase (spec §7.7, P6
 });
 
 describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () => {
-  /**
-   * Issue `count` requests through the REAL run transport with the global
+  /** note: Issue `count` requests through the REAL run transport with the global
    * fetch neutralized. Unlike `meterRequests`, this deliberately does NOT
    * swallow the refusal: the transport's own throw propagates to the caller,
    * which is exactly how the §7.5 surface experiences an exhausted allowance.
@@ -1784,7 +1779,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
     seedApp(db, APP);
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
 
-    // The publication lane's own admission passes (its estimate fits), so the
+    // note: The publication lane's own admission passes (its estimate fits), so the
     // row IS claimed; the allowance then runs out INSIDE the send — the
     // reachable arithmetic case this check pins.
     const summary = await reconcile(db, {
@@ -1801,7 +1796,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
       },
     });
 
-    // The publication was NEVER dispatched, so its durable state must stay
+    // invariant: The publication was NEVER dispatched, so its durable state must stay
     // sendable: `prepared` — not the post-attempt `unknown` that read-only
     // discovery would then own forever — due, unleased, with the claim's
     // attempt returned.
@@ -1813,12 +1808,12 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
     });
     expect(summary.unknown).toBe(0);
 
-    // "No attempt spent" is what keeps the row immediately selectable: M8
+    // note: "No attempt spent" is what keeps the row immediately selectable: M8
     // re-selects it on the very next pass with its full attempt budget.
     const dueAgain = await listPublicationRecovery(db, T0, RECONCILE_SELECT_LIMIT);
     expect(dueAgain.map((r) => r.id)).toContain("pub-1");
 
-    // And the next run really does send it, proving the refusal deferred the
+    // note: And the next run really does send it, proving the refusal deferred the
     // publication rather than abandoning it.
     let sent = 0;
     await reconcile(db, {
@@ -1835,7 +1830,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
   });
 
   test("the refusal is recognized through the cause chain a real transport rejection carries", async () => {
-    // Octokit does not let a custom transport error reach the lane intact:
+    // note: Octokit does not let a custom transport error reach the lane intact:
     // `@octokit/request`'s fetchWrapper re-wraps every non-abort rejection in
     // a RequestError with the original parked on `cause`. If classification
     // only unwrapped a bare throw, a real pre-dispatch refusal would read as
@@ -1868,7 +1863,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
   });
 
   test("a post-attempt failure at the same boundary still becomes unknown (the distinction is not a blanket excuse)", async () => {
-    // Same lane, same claim, same throw site — but the error is not the
+    // note: Same lane, same claim, same throw site — but the error is not the
     // budget refusal, so the send MAY have landed and `unknown` remains the
     // honest phase. This is the guard against over-broad classification.
     const db = createMigratedTestD1();
@@ -1880,7 +1875,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
       reviewer: okReviewer({
         planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
         postPreparedDegraded: async () => {
-          // Mentions the budget, but is NOT the typed refusal: identity, never
+          // invariant: Mentions the budget, but is NOT the typed refusal: identity, never
           // message text, decides.
           throw new Error("request failed while reporting: recovery request budget exhausted");
         },
@@ -1892,8 +1887,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
   });
 });
 
-/**
- * Issue-only discussion seen by the discovery lane: `author` posted `body`,
+/** note: Issue-only discussion seen by the discovery lane: `author` posted `body`,
  * and `viewerDidAuthor` says whether THIS installation token wrote it.
  */
 function issueOnlyDiscussion(author: string, body: string, ownAuthor = true) {
@@ -1925,7 +1919,7 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
     const db = createMigratedTestD1();
     seedApp(db, APP);
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
-    // Force the row into the uncertain state discovery owns.
+    // note: Force the row into the uncertain state discovery owns.
     db.raw.prepare(`UPDATE review_publications SET phase = 'sending', attempts = 1 WHERE id = 'pub-1'`).run();
 
     const body = "degraded body";
@@ -1939,7 +1933,7 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
                 source: "issue",
                 associationId: null,
                 id: "51",
-                // A DIFFERENT App's bot, with a byte-identical body — the
+                // note: A DIFFERENT App's bot, with a byte-identical body — the
                 // generic `[bot]` suffix would have accepted this.
                 author: "other-app[bot]",
                 ownAuthor: false,
@@ -1959,7 +1953,7 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
       ),
     });
 
-    // A foreign App's identical body is NOT proof: the row stays unknown.
+    // invariant: A foreign App's identical body is NOT proof: the row stays unknown.
     expect(pubRow(db, "pub-1").phase).toBe("unknown");
     expect(summary.applied).toBe(0);
     const unproven = db.raw
@@ -1967,7 +1961,7 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
       .get() as { proof_json: string | null };
     expect(unproven.proof_json).toBeNull();
 
-    // The SAME body by OUR authenticated login is proof and applies — in the
+    // note: The SAME body by OUR authenticated login is proof and applies — in the
     // bare shape GraphQL `author.login` returns.
     await reconcile(db, {
       now: () => T0 + 600_000,
@@ -1990,11 +1984,11 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
       }),
     });
 
-    // The body (marker included) is copyable content, not authorship evidence:
+    // note: The body (marker included) is copyable content, not authorship evidence:
     // the bare login is the App's slug, so only the authenticated provenance
     // can tell this comment apart from our own.
     expect(pubRow(db, "pub-1").phase).toBe("unknown");
-    expect(pubRow(db, "pub-1").attempts).toBe(2); // the miss spent exactly one
+    expect(pubRow(db, "pub-1").attempts).toBe(2); // invariant: the miss spent exactly one
     expect(summary.applied).toBe(0);
     expect(summary.unknown).toBe(1);
     const unproven = db.raw
@@ -2020,8 +2014,7 @@ describe("uncertain-publication discovery ownership (spec §7.5/§7.7, P67-QC-01
 });
 
 
-/**
- * `listDiscussion` backed by the REAL §7.8 capture over a GraphQL transport
+/** note: `listDiscussion` backed by the REAL §7.8 capture over a GraphQL transport
  * double: whether discovery can see a comment is decided by the capture switch
  * the reconciler asks for, not by the fixture.
  */
@@ -2075,7 +2068,7 @@ describe("uncertain-publication discovery through the real capture", () => {
       ),
     });
 
-    // The comment existed all along; the capture was hiding it from the walk:
+    // note: The comment existed all along; the capture was hiding it from the walk:
     // the proof lands, the lifecycle applies, and no backoff is scheduled.
     expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied", recovery_state: "done", last_error: null });
     expect(summary.applied).toBe(1);

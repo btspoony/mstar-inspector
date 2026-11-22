@@ -1,5 +1,4 @@
-/**
- * Per-App webhook routing tests (spec § Multi-App 契约).
+/** note: Per-App webhook routing tests (spec § Multi-App 契约).
  *
  * `POST /webhook/:workspaceId/:appId` — the ONLY HTTP review entry
  * (the legacy bare `/webhook` face is retired):
@@ -46,60 +45,56 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
-/** base64 of exactly 32 bytes (the secretbox master-key requirement). */
+/** invariant: base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
-/** One seeded review target — the review configuration a delivery reads. */
+/** note: One seeded review target — the review configuration a delivery reads. */
 type TargetSeed = {
-  /**
-   * GitHub's numeric `repository.id`. OMITTED → `null`, the historical shape
+  /** note: GitHub's numeric `repository.id`. OMITTED → `null`, the historical shape
    * resolved (and claimed) by owner/name; the id-path cases seed one.
    */
   repoId?: number | null;
-  /** Display caches; OMITTED → the fixture repository's names. */
+  /** note: Display caches; OMITTED → the fixture repository's names. */
   repoOwner?: string;
   repoName?: string;
-  /** OMITTED → the DDL DEFAULT 'every_push'. */
+  /** note: OMITTED → the DDL DEFAULT 'every_push'. */
   mode?: "open" | "every_push" | "manual";
-  /** OMITTED → the DDL DEFAULT 1 (the business pause off). */
+  /** note: OMITTED → the DDL DEFAULT 1 (the business pause off). */
   reviewEnabled?: 0 | 1;
-  /** OMITTED → the DDL DEFAULT 1 (drafts are reviewed). 0 holds them back. */
+  /** note: OMITTED → the DDL DEFAULT 1 (drafts are reviewed). 0 holds them back. */
   reviewDrafts?: 0 | 1;
 };
 
-/** The repository every delivery in this suite comes from. */
+/** note: The repository every delivery in this suite comes from. */
 const FIXTURE_REPO = { owner: "test-owner", name: "test-repo" };
 
 type SeedOptions = {
   slug: string;
-  /** Plaintext webhook secret encrypted into the row (with the row-id AAD). */
+  /** safety: Plaintext webhook secret encrypted into the row (with the row-id AAD). */
   secret: string;
   githubAppId?: number;
-  /** Tamper anchor: encrypt the webhook secret under a WRONG row AAD. */
+  /** safety: Tamper anchor: encrypt the webhook secret under a WRONG row AAD. */
   wrongAad?: boolean;
-  /**
-   * Cached GitHub slug overrides the local path (which doubles as the slug
+  /** note: Cached GitHub slug overrides the local path (which doubles as the slug
    * here); `null` seeds a row that predates its first metadata sync.
    */
   githubSlug?: string | null;
-  /**
-   * The bot's scope (migration 0058). OMITTED → the DDL default `owned`.
+  /** note: The bot's scope (migration 0058). OMITTED → the DDL default `owned`.
    */
   scope?: "owned" | "shared";
-  /**
-   * The bot's targets. OMITTED → ONE target for the fixture repository with
+  /** note: The bot's targets. OMITTED → ONE target for the fixture repository with
    * the DDL defaults (enabled, `every_push`) — the shape the create path
    * writes.
    */
   targets?: TargetSeed[];
 };
 
-/** Raw-insert an active, non-deleted review_bots row with real envelopes. */
+/** note: Raw-insert an active, non-deleted review_bots row with real envelopes. */
 async function seedApp(
   db: TestD1,
   opts: SeedOptions,
 ): Promise<{ id: string; slug: string; targetId: string; targetIds: string[] }> {
-  // The row id is the webhook URL's app segment, so this fixture uses the
+  // why: The row id is the webhook URL's app segment, so this fixture uses the
   // slug as the id (one value, two roles — the production shape's identity).
   const id = opts.slug;
   const box = createSecretbox(TEST_KEY);
@@ -107,7 +102,7 @@ async function seedApp(
   const webhookSecretEnc = await box.encryptSecret(opts.secret, aad);
   const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
   const appCount = (db.raw.query("SELECT COUNT(*) AS n FROM review_bots").get() as { n: number }).n;
-  // `slug` is GitHub's own slug here (the bot mention target); the webhook
+  // note: `slug` is GitHub's own slug here (the bot mention target); the webhook
   // route keys on the row id + workspace instead.
   db.raw
     .prepare(
@@ -125,13 +120,13 @@ async function seedApp(
       webhookSecretEnc,
       opts.scope ?? "owned",
     );
-  // Production shape: createApp writes the App and its workspace mapping in
+  // note: Production shape: createApp writes the App and its workspace mapping in
   // one batch, so every execution-facing read (which joins bot_workspaces)
   // resolves it.
   db.raw
     .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
     .run(id);
-  // …and its targets: the webhook resolves ONE of these per delivery, and
+  // note: …and its targets: the webhook resolves ONE of these per delivery, and
   // every review setting below the route reads comes from it.
   const targetIds = (opts.targets ?? [{}]).map((target, index) => {
     const targetId = `target-${id}-${index}`;
@@ -158,7 +153,7 @@ async function seedApp(
   return { id, slug: opts.slug, targetId: targetIds[0]!, targetIds };
 }
 
-/** Queue stub capturing every enqueued payload. */
+/** note: Queue stub capturing every enqueued payload. */
 function makeQueue() {
   const sent: ReviewJobPayload[] = [];
   const queue = {
@@ -169,7 +164,7 @@ function makeQueue() {
   return { queue, sent };
 }
 
-/** In-memory KV stub (idempotency pre-check + claim). */
+/** note: In-memory KV stub (idempotency pre-check + claim). */
 function makeKv() {
   const store = new Map<string, string>();
   return {
@@ -183,7 +178,7 @@ function makeKv() {
   };
 }
 
-// `Env` itself declares `DB` (optional, fail-closed when
+// note: `Env` itself declares `DB` (optional, fail-closed when
 // unbound) — the T2 local `Env & Pick<PipelineEnv, "DB">` intersection is
 // retired on both the route and here.
 type RouteEnv = Env;
@@ -196,7 +191,7 @@ function makeEnv(db: TestD1, overrides: Partial<RouteEnv> = {}): RouteEnv {
     REVIEW_QUEUE: queue as never,
     DB: db as never,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
-    // Self-hosted: the shared-bot capability is unconditional in this mode,
+    // note: Self-hosted: the shared-bot capability is unconditional in this mode,
     // so these routing cases carry no plan fixture of their own.
     DEPLOYMENT_MODE: "self-hosted",
     ...overrides,
@@ -207,29 +202,28 @@ async function postWebhook(path: string, body: string, headers: Record<string, s
   return worker.fetch(new Request(`https://worker.local${path}`, { method: "POST", headers, body }), env);
 }
 
-/** Sign a body the way GitHub does (the sha256=… header value). */
+/** note: Sign a body the way GitHub does (the sha256=… header value). */
 async function signatureFor(secret: string, body: string): Promise<string> {
   return new Webhooks({ secret }).sign(body);
 }
 
-/** Full GitHub webhook headers for a signed delivery. */
+/** note: Full GitHub webhook headers for a signed delivery. */
 async function sigHeaders(secret: string, body: string, event = "pull_request"): Promise<Record<string, string>> {
   return { "x-hub-signature-256": await signatureFor(secret, body), "x-github-event": event };
 }
 
-/** Close the global enqueue face: `review_global = 0` (migration 0033). */
+/** note: Close the global enqueue face: `review_global = 0` (migration 0033). */
 function setReviewGlobalOff(db: TestD1): void {
   db.raw
     .prepare("INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES ('review_global', 0, datetime('now'), 'fixture')")
     .run();
 }
 
-/** Statement predicates for `failingDb` (the two injected failure faces). */
+/** note: Statement predicates for `failingDb` (the two injected failure faces). */
 const installUpsert = (query: string): boolean => query.includes("INSERT INTO bot_installations");
 const flagRead = (query: string): boolean => query.includes("FROM server_flags");
 
-/**
- * D1 double that fails the statements matching `match`. Every other statement
+/** note: D1 double that fails the statements matching `match`. Every other statement
  * (webhook-path lookup, delivery record, ledger, touch) stays healthy.
  *
  * `match` is a substring test: `INSERT INTO bot_installations` exercises the
@@ -248,7 +242,7 @@ function failingDb(db: TestD1, match: (query: string) => boolean): TestD1 {
   } as unknown as TestD1;
 }
 
-/** Swap `console.warn` for a mock until `stop()` restores it. */
+/** note: Swap `console.warn` for a mock until `stop()` restores it. */
 function captureWarn(): { warn: ReturnType<typeof mock<(msg: unknown) => void>>; stop: () => void } {
   const warn = mock((_msg: unknown) => {});
   const origWarn = console.warn;
@@ -265,10 +259,10 @@ const PR_PAYLOAD = {
   action: "opened",
   number: 42,
   installation: { id: 123 },
-  // `state` is what the PR ledger (0039) requires of the payload: a
+  // note: `state` is what the PR ledger (0039) requires of the payload: a
   // production `pull_request` delivery always carries it.
   pull_request: { number: 42, state: "open", head: { sha: "abc123" }, user: { login: "alice" } },
-  // The fixture repository every seeded target holds (`FIXTURE_REPO`).
+  // note: The fixture repository every seeded target holds (`FIXTURE_REPO`).
   repository: { name: "test-repo", owner: { login: "test-owner" } },
 };
 
@@ -290,7 +284,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    // The delivery identity is generated BEFORE the attach and always rides the
+    // invariant: The delivery identity is generated BEFORE the attach and always rides the
     // message — here the attach itself fails (the fixture key is not a real
     // PEM), so an id that depended on the attach succeeding would be missing.
     const { attachDeliveryId, ...queued } = sent[0]!;
@@ -306,7 +300,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       targetId: appRow.targetId,
     });
     expect(attachDeliveryId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-    // The same delivery lands its PR-ledger row (migration 0039): the fixture
+    // note: The same delivery lands its PR-ledger row (migration 0039): the fixture
     // carries the table, so a missing/failed write here is a real regression
     // rather than the "no such table" warn branch this suite used to take.
     const ledger = db.raw
@@ -319,11 +313,11 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
 
   test("saas: a plan without the shared bot skips the delivery — 200, outcome skipped, no send, one entitlement failure", async () => {
     const db = createMigratedTestD1();
-    // A SHARED bot: that is the feature's subject. The target resolves by the
+    // note: A SHARED bot: that is the feature's subject. The target resolves by the
     // delivery's repository (migration 0067), which the fixture target holds.
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared" });
     const { queue, sent } = makeQueue();
-    // The production `saas` shape: the capability is read from the resolved
+    // note: The production `saas` shape: the capability is read from the resolved
     // plan, and this workspace holds no subscription row → the seeded `free`
     // plan, which does not include the shared bot.
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
@@ -336,19 +330,19 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       env,
     );
 
-    // Verified, admitted by both switches, then refused: GitHub sees a healthy
+    // note: Verified, admitted by both switches, then refused: GitHub sees a healthy
     // 2xx and retries nothing, and no consumer ever starts.
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
 
-    // The delivery row distinguishes a refusal from a pause or a plain ignore.
+    // note: The delivery row distinguishes a refusal from a pause or a plain ignore.
     const delivery = db.raw
       .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
       .get(appRow.id) as { outcome: string };
     expect(delivery.outcome).toBe("skipped");
 
-    // One terminal failure row in the PAGED vocabulary, carrying the same
+    // note: One terminal failure row in the PAGED vocabulary, carrying the same
     // sentence the delivery's Check does.
     const failures = db.raw
       .query("SELECT stage, target_id, error FROM review_failures ORDER BY rowid")
@@ -362,7 +356,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   test("saas: an UNREADABLE gate is a recorded skip, not a 500 — the failure names the cause", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // A plan with no ceiling row in the judging profile: the configuration
+    // note: A plan with no ceiling row in the judging profile: the configuration
     // defect `resolveMonthlyQuota` throws on by design. Before the guard this
     // was a permanent 500 for every webhook of that plan.
     db.raw.prepare(`DELETE FROM quota_profile_plans WHERE plan_id = 'free'`).run();
@@ -377,7 +371,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       env,
     );
 
-    // Fail-closed but not failing: GitHub must not retry, and no review starts.
+    // invariant: Fail-closed but not failing: GitHub must not retry, and no review starts.
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
@@ -387,10 +381,10 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(failures).toHaveLength(1);
     expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
     expect(failures[0]!.target_id).toBe(appRow.targetId);
-    // NOT the capability sentence: the author's plan was never judged.
+    // invariant: NOT the capability sentence: the author's plan was never judged.
     expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(ENTITLEMENT_UNREADABLE_SKIP_REASON));
     expect(failures[0]!.error).not.toContain("does not include the shared bot");
-    // The bookkeeping the guard exists to protect still ran.
+    // note: The bookkeeping the guard exists to protect still ran.
     const delivery = db.raw
       .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
       .get(appRow.id) as { outcome: string };
@@ -425,7 +419,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
 
   test("saas: a Free workspace's OWN bot is not the shared bot — the delivery enqueues normally", async () => {
     const db = createMigratedTestD1();
-    // The bot the workspace owns (DDL default scope, mapped to `default`): the
+    // note: The bot the workspace owns (DDL default scope, mapped to `default`): the
     // capability gate is about the SHARED bot and must not touch this path.
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -442,7 +436,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(res.status).toBe(200);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.targetId).toBe(appRow.targetId);
-    // Neither an entitlement failure nor a skipped delivery row: the workspace
+    // note: Neither an entitlement failure nor a skipped delivery row: the workspace
     // resolved the free plan, which is irrelevant for its own bot.
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
     const delivery = db.raw
@@ -475,7 +469,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const row = db.raw
       .query("SELECT head_at FROM pull_requests WHERE bot_id = ?")
       .get(appRow.id) as { head_at: string | null };
-    // Both sides must carry the SAME non-empty stamp — equality alone would
+    // invariant: Both sides must carry the SAME non-empty stamp — equality alone would
     // also pass if the route dropped the stamp everywhere — and the fixture's
     // +02:00 stamp pins the normalization the payload and the row share.
     expect({ queued: head_at, ledger: row.head_at }).toEqual({
@@ -488,7 +482,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const sent: ReviewJobPayload[] = [];
-    // The attach is ordered before the send (spec §7.9): the queue stub reads
+    // invariant: The attach is ordered before the send (spec §7.9): the queue stub reads
     // the registry at send time, so a row that exists there proves the order.
     let rowsAtSend = -1;
     const queue = {
@@ -513,20 +507,20 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       stop();
     }
 
-    // A refused attach (this fixture's "private key" is not a real PEM, so the
+    // note: A refused attach (this fixture's "private key" is not a real PEM, so the
     // create is refused) must never change the answer or cost the enqueue.
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    // The attach ran first: the attempt row already existed when the job was
+    // note: The attach ran first: the attempt row already existed when the job was
     // sent, so an admitted message can adopt it instead of racing its creator.
     expect(rowsAtSend).toBe(1);
-    // A real failure is not silent (the busy/terminal skip is, and this is not
+    // note: A real failure is not silent (the busy/terminal skip is, and this is not
     // one): exactly the one structured warn the contract promises.
     const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logged).toContain("check_attach_failed");
 
-    // The row is left with NO holder — released for the consumer to adopt, or
+    // note: The row is left with NO holder — released for the consumer to adopt, or
     // for the reconciler once its window expires.
     const rows = db.raw
       .query("SELECT head_sha, holder, lease_until_ms, check_run_id FROM review_checks")
@@ -546,7 +540,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    // Y's secret against X's slug, and X's secret against Y's slug — both
+    // safety: Y's secret against X's slug, and X's secret against Y's slug — both
     // fail verification (each route decrypts only ITS OWN App's secret).
     const resXY = await postWebhook(
       `/webhook/default/${appX.slug}`,
@@ -566,7 +560,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(sent).toHaveLength(0);
   });
 
-  // (F9/F10 strength pin): an invalid signature is the REJECTED
+  // note: (F9/F10 strength pin): an invalid signature is the REJECTED
   // classification end to end — 401 on the wire, zero enqueue, and the
   // post-classify delivery row is `rejected` with the classifier's status,
   // never `ok` (AL-20-1: rejected rows are the fail-closed evidence the
@@ -655,7 +649,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
 
-    // Header-only oversized request: rejected before the body is buffered.
+    // invariant: Header-only oversized request: rejected before the body is buffered.
     const res = await postWebhook(
       "/webhook/default/app-x",
       "",
@@ -667,7 +661,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(sent).toHaveLength(0);
   });
 
-  // 61-R1: the cap is byte-authoritative on the streamed body. The
+  // note: 61-R1: the cap is byte-authoritative on the streamed body. The
   // truthful-header fast path above stays; these pin the streamed read — a
   // missing or lying header can never buffer past WEBHOOK_BODY_LIMIT, and an
   // at-limit body still passes (the streamed-decoded rawBody is
@@ -679,7 +673,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const oversized = "a".repeat(WEBHOOK_BODY_LIMIT + 1);
 
-    // Gate attribution: the detail pins the HEADER fast path (not the
+    // note: Gate attribution: the detail pins the HEADER fast path (not the
     // streamed read below) — without it a 413 alone cannot tell the two
     // gates apart.
     const warn = mock((_msg: unknown) => {});
@@ -716,7 +710,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const oversized = "a".repeat(WEBHOOK_BODY_LIMIT + 1);
 
-    // Gate attribution: the header (10) is under the limit, so the fast path
+    // why: Gate attribution: the header (10) is under the limit, so the fast path
     // cannot fire — the `read_bytes>` detail pins the STREAMED gate as the
     // one that rejected (byte count, not the header).
     const warn = mock((_msg: unknown) => {});
@@ -751,7 +745,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    // A stream body carries no content-length (the runtime cannot know it).
+    // note: A stream body carries no content-length (the runtime cannot know it).
     // Two limit/2 chunks + 1 byte: the byte count crosses the cap only on
     // the third chunk — multi-chunk accumulation, a single byte over.
     const half = new Uint8Array(WEBHOOK_BODY_LIMIT / 2).fill(97);
@@ -783,7 +777,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(sent).toHaveLength(0);
     const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
     expect(line).toBeDefined();
-    // Gate attribution: no content-length header → the STREAMED gate fired;
+    // note: Gate attribution: no content-length header → the STREAMED gate fired;
     // the detail distinguishes it from the header fast path.
     const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
     expect(fields).toMatchObject({
@@ -798,7 +792,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    // Pad the valid PR payload to EXACTLY the cap: the streamed read accepts
+    // invariant: Pad the valid PR payload to EXACTLY the cap: the streamed read accepts
     // limit bytes, and the signature only verifies if the decode was
     // byte-identical to the buffered read (UTF-8 decode invariant).
     const base = JSON.stringify({ ...PR_PAYLOAD, pad: "" });
@@ -813,7 +807,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(sent[0]).toMatchObject({ pr_number: 42, botRef: { appId: appRow.id }, targetId: appRow.targetId });
   });
 
-  // At-limit pin with MULTI-BYTE content: `body.length` counts UTF-16
+  // note: At-limit pin with MULTI-BYTE content: `body.length` counts UTF-16
   // units, so an all-ASCII at-limit body proves nothing about byte
   // accounting — this body pads with 3-byte chars and computes the byte
   // length explicitly (Buffer.byteLength), landing EXACTLY on
@@ -830,7 +824,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const pad = "漢".repeat(Math.floor(padBytes / 3)) + "x".repeat(padBytes % 3);
     const body = JSON.stringify({ ...PR_PAYLOAD, pad });
     expect(Buffer.byteLength(body)).toBe(WEBHOOK_BODY_LIMIT);
-    expect(body.length).toBeLessThan(WEBHOOK_BODY_LIMIT); // the UTF-16 trap is real
+    expect(body.length).toBeLessThan(WEBHOOK_BODY_LIMIT); // note: the UTF-16 trap is real
 
     const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
@@ -977,7 +971,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     );
 
     expect(prRes.status).toBe(200);
-    expect(sent).toHaveLength(0); // manual mode: the auto face never fires
+    expect(sent).toHaveLength(0); // invariant: manual mode: the auto face never fires
 
     const mentionBody = JSON.stringify({
       action: "created",
@@ -995,7 +989,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     );
 
     expect(mentionRes.status).toBe(200);
-    expect(sent).toHaveLength(1); // the mention face works in every mode
+    expect(sent).toHaveLength(1); // note: the mention face works in every mode
     expect(sent[0]).toMatchObject({
       pr_number: 7,
       head_sha: null,
@@ -1010,7 +1004,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const DRAFT_SHA = "abc123";
     const idemOf = (sha: string) => `idem:123:test-owner/test-repo:42:${sha}`;
 
-    /** One pull_request delivery of a draft PR, on the fixture repository. */
+    /** note: One pull_request delivery of a draft PR, on the fixture repository. */
     const delivery = (action: string, opts: { sha?: string } = {}) => ({
       ...PR_PAYLOAD,
       action,
@@ -1028,7 +1022,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     }
 
     test("switch off: a draft synchronize writes no job, no Check, no failure row and no KV claim", async () => {
-      // The switch is the target's (D12); this is the whole delivery face with
+      // note: The switch is the target's (D12); this is the whole delivery face with
       // it off. Every side effect the gate must NOT produce is asserted here,
       // including the idempotency claim — an ignore claims nothing, so a later
       // ready delivery for this head is not mistaken for a queued one.
@@ -1046,7 +1040,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       expect(store.size).toBe(0);
       expect(db.raw.query("SELECT COUNT(*) AS n FROM review_checks").get()).toEqual({ n: 0 });
       expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
-      // Ordinary bookkeeping still runs: the delivery row records the ignore
+      // note: Ordinary bookkeeping still runs: the delivery row records the ignore
       // (never `skipped`, the refusal vocabulary).
       const recorded = db.raw
         .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
@@ -1061,7 +1055,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       const { queue, sent } = makeQueue();
       const env = makeEnv(db, { REVIEW_QUEUE: queue as never, IDEMPOTENCY_KV: kv as never });
 
-      // The ignored draft synchronize left no claim, so ready is the head's
+      // note: The ignored draft synchronize left no claim, so ready is the head's
       // first admitted delivery: exactly one job, one Check, one claim.
       expect(await (await post(env, delivery("synchronize"))).text()).toBe("ignored");
       const ready = await post(env, delivery("ready_for_review"));
@@ -1072,19 +1066,19 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       expect(store.get(idemOf(DRAFT_SHA))).toBe("1");
       expect(db.raw.query("SELECT COUNT(*) AS n FROM review_checks").get()).toEqual({ n: 1 });
 
-      // GitHub's redelivery of the same ready delivery: the live claim keeps it
+      // note: GitHub's redelivery of the same ready delivery: the live claim keeps it
       // out — sequential KV suppression, not an exactly-once promise.
       expect(await (await post(env, delivery("ready_for_review"))).text()).toBe("accepted");
       expect(sent).toHaveLength(1);
 
-      // A new head is a different key and therefore a new job.
+      // note: A new head is a different key and therefore a new job.
       expect(await (await post(env, delivery("ready_for_review", { sha: "def456" }))).text()).toBe("accepted");
       expect(sent).toHaveLength(2);
       expect(sent[1]).toMatchObject({ head_sha: "def456" });
     });
 
     test("switch off: a 'done' claim for the same head suppresses the ready delivery", async () => {
-      // The other enqueued claim value: this head was already reviewed, so the
+      // note: The other enqueued claim value: this head was already reviewed, so the
       // consumer's done state is reused instead of requesting a second review.
       const db = createMigratedTestD1();
       await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewDrafts: 0 }] });
@@ -1101,7 +1095,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     });
 
     test("switch off: a faulting KV admits the ready delivery — the D1/consumer guard is the backstop", async () => {
-      // A KV read fault is a conservative pass (never a silent skip): the head
+      // invariant: A KV read fault is a conservative pass (never a silent skip): the head
       // may enqueue twice, and the consumer's durable dedup is what prevents a
       // second completed review. Exactly-once enqueue is NOT promised.
       const db = createMigratedTestD1();
@@ -1123,7 +1117,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     });
 
     test("switch on: the same draft synchronize enqueues — the switch decides, not the action", async () => {
-      // The default (and an explicitly re-enabled) target reviews drafts, so
+      // note: The default (and an explicitly re-enabled) target reviews drafts, so
       // this delivery is the control the switch-off assertions are read against.
       const db = createMigratedTestD1();
       await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewDrafts: 1 }] });
@@ -1140,7 +1134,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("an unsynced App (github_slug NULL) logs mention_unresolved for a mention, still enqueues nothing", async () => {
-    // Upgrade surface: migration 0036 adds github_slug with no backfill, so
+    // note: Upgrade surface: migration 0036 adds github_slug with no backfill, so
     // every pre-existing row answers to no mention until its first metadata
     // sync. A `manual`-mode App has the mention as its ONLY trigger, which is
     // exactly the silent regression this warn makes observable. The delivery
@@ -1192,7 +1186,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     });
     expect(fields.detail).toContain("workspace_id=default");
     expect(fields.detail).toContain("app_id=app-x");
-    // The delivery row still records the unchanged vocabulary.
+    // invariant: The delivery row still records the unchanged vocabulary.
     const deliveries = db.raw
       .query("SELECT outcome FROM webhook_deliveries")
       .all() as Array<{ outcome: string }>;
@@ -1200,7 +1194,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("a comment with no bot mention on an unsynced App stays a silent ignore (no mention_unresolved)", async () => {
-    // The warn is reserved for a mention that WOULD have matched: an ordinary
+    // why: The warn is reserved for a mention that WOULD have matched: an ordinary
     // comment on a never-synced App is the pre-existing, correct ignore.
     const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
@@ -1213,7 +1207,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     try {
       for (const [label, payload] of [
         ["no mention at all", { comment: { body: "looks good to me" } }],
-        // A mention on an event the classifier never reaches the mention check
+        // invariant: A mention on an event the classifier never reaches the mention check
         // for (`edited` is not whitelisted) must not warn either.
         ["mention on an edited comment", { action: "edited", comment: { body: "@app-x look again" } }],
       ] as const) {
@@ -1243,7 +1237,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("a mention on a [bot]-authored PR on an unsynced App stays silent (no mention_unresolved)", async () => {
-    // The author guard runs before the mention grammar, so the classifier
+    // why: The author guard runs before the mention grammar, so the classifier
     // reports the author reason and the route's warn gate cannot fire.
     const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
@@ -1279,7 +1273,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("a mention on a plain issue (no PR thread) stays silent (no mention_unresolved)", async () => {
-    // The not-a-PR gate precedes the mention grammar: an unsynced App's slug
+    // note: The not-a-PR gate precedes the mention grammar: an unsynced App's slug
     // is never consulted, so the warn cannot fire on a non-PR thread.
     const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
@@ -1315,7 +1309,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("a sibling App's mention does not trigger this App (GitHub-slug-keyed matching)", async () => {
-    // Negative control for the `mention_unresolved` warn: THIS App IS synced, so
+    // note: Negative control for the `mention_unresolved` warn: THIS App IS synced, so
     // a mention aimed at `@app-y` is an ordinary ignore — and must stay silent.
     // Fails if the `appSlug === ""` conjunct is dropped from that gate.
     const db = createMigratedTestD1();
@@ -1365,14 +1359,14 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
-    expect(sent).toHaveLength(1); // the retry hit the claimed idempotency key
+    expect(sent).toHaveLength(1); // note: the retry hit the claimed idempotency key
     const key = `idem:123:test-owner/test-repo:42:abc123`;
     expect(store.get(key)).toBe("1");
   });
 });
 
 describe("tenant attribution on the webhook read face", () => {
-  /** Drop the seed's mapping: what a pre-0026 row looks like before backfill. */
+  /** invariant: Drop the seed's mapping: what a pre-0026 row looks like before backfill. */
   function dropWorkspaceMapping(db: TestD1, appId: string): void {
     db.raw.prepare("DELETE FROM bot_workspaces WHERE bot_id = ?").run(appId);
   }
@@ -1382,7 +1376,7 @@ describe("tenant attribution on the webhook read face", () => {
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     dropWorkspaceMapping(db, appRow.id);
     const { queue, sent } = makeQueue();
-    // No DASHBOARD_ENCRYPTION_KEY: a decrypt attempt would 500, so a 404 also
+    // why: No DASHBOARD_ENCRYPTION_KEY: a decrypt attempt would 500, so a 404 also
     // proves the route never reached decryptSecret.
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DASHBOARD_ENCRYPTION_KEY: undefined });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -1438,7 +1432,7 @@ describe("installations upsert wiring", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.bot_id).toBe(appRow.id);
     expect(rows[0]!.installation_id).toBe(123);
-    expect(rows[0]!.account_login).toBe("test-owner"); // the delivery's repository owner = installing account
+    expect(rows[0]!.account_login).toBe("test-owner"); // note: the delivery's repository owner = installing account
     expect(typeof rows[0]!.seen_at).toBe("string");
   });
 
@@ -1455,7 +1449,7 @@ describe("installations upsert wiring", () => {
       { "x-hub-signature-256": await signatureFor("secret-x", body1), "x-github-event": "pull_request" },
       env,
     );
-    // Backdate + stamp a login no install event ever wrote: the second
+    // note: Backdate + stamp a login no install event ever wrote: the second
     // delivery must UPDATE this row (seen_at refresh) but NOT replace the
     // login — its repository owner is an inference, and an inference only
     // fills an empty column.
@@ -1463,7 +1457,7 @@ describe("installations upsert wiring", () => {
       .prepare("UPDATE bot_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
       .run();
 
-    // Different PR/sha → a different idempotency key, so delivery 2 enqueues
+    // note: Different PR/sha → a different idempotency key, so delivery 2 enqueues
     // (and therefore reaches the touch) instead of being KV-skipped.
     const body2 = JSON.stringify({ ...PR_PAYLOAD, number: 43, pull_request: { number: 43, head: { sha: "def456" }, user: { login: "alice" } } });
     const res2 = await postWebhook(
@@ -1478,14 +1472,14 @@ describe("installations upsert wiring", () => {
     const rows = db.raw
       .query("SELECT installation_id, account_login, seen_at FROM bot_installations")
       .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
-    expect(rows).toHaveLength(1); // upsert — no duplicate row
+    expect(rows).toHaveLength(1); // note: upsert — no duplicate row
     expect(rows[0]!.installation_id).toBe(123);
-    expect(rows[0]!.account_login).toBe("alice"); // survives the review delivery
-    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // refreshed by the touch
+    expect(rows[0]!.account_login).toBe("alice"); // invariant: survives the review delivery
+    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // note: refreshed by the touch
   });
 
   test("a review delivery carrying installation.account still only fills an empty login", async () => {
-    // The route-level half of the authority rule: a `pull_request` payload's
+    // note: The route-level half of the authority rule: a `pull_request` payload's
     // own `installation.account` is still classified INFERRED
     // (`accountAuthoritative: false`), so it never replaces a stored login —
     // only an `installation.*` event may. Store-level directions are pinned in
@@ -1513,8 +1507,8 @@ describe("installations upsert wiring", () => {
       .query("SELECT account_login, seen_at FROM bot_installations")
       .all() as Array<{ account_login: string | null; seen_at: string }>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.account_login).toBe("alice"); // authoritative value never inferred
-    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // still touched
+    expect(rows[0]!.account_login).toBe("alice"); // invariant: authoritative value never inferred
+    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // note: still touched
   });
 
   test("KV-skipped duplicate delivery (identical body) still refreshes seen_at (QC F-006: upsert on ANY webhook)", async () => {
@@ -1528,13 +1522,13 @@ describe("installations upsert wiring", () => {
     const headers = { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" };
     const first = await postWebhook("/webhook/default/app-x", body, headers, env);
     expect(first.status).toBe(200);
-    // Backdate + stamp a stored login: the duplicate delivery must refresh
+    // invariant: Backdate + stamp a stored login: the duplicate delivery must refresh
     // seen_at without replacing it — a review delivery only infers the login.
     db.raw
       .prepare("UPDATE bot_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
       .run();
 
-    // GitHub redelivers the IDENTICAL signed body → the idempotency key is
+    // note: GitHub redelivers the IDENTICAL signed body → the idempotency key is
     // already claimed and handleReviewJob skips the enqueue — but the install
     // upsert runs before the enqueue, so seen_at is still refreshed (spec:
     // upsert on ANY webhook carrying installation_id; a duplicate delivery is
@@ -1542,47 +1536,47 @@ describe("installations upsert wiring", () => {
     const second = await postWebhook("/webhook/default/app-x", body, headers, env);
 
     expect(second.status).toBe(200);
-    expect(sent).toHaveLength(1); // the duplicate was KV-skipped, NOT re-enqueued
+    expect(sent).toHaveLength(1); // note: the duplicate was KV-skipped, NOT re-enqueued
     expect(store.get(`idem:123:test-owner/test-repo:42:abc123`)).toBe("1");
     const rows = db.raw
       .query("SELECT installation_id, account_login, seen_at FROM bot_installations")
       .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
-    expect(rows).toHaveLength(1); // upsert — no duplicate row
-    expect(rows[0]!.account_login).toBe("alice"); // survives — the inference never overwrites
-    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // refreshed despite the KV skip
+    expect(rows).toHaveLength(1); // note: upsert — no duplicate row
+    expect(rows[0]!.account_login).toBe("alice"); // invariant: survives — the inference never overwrites
+    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // note: refreshed despite the KV skip
   });
 
   test("a later delivery that omits the login preserves the stored one (COALESCE bare touch)", async () => {
     const db = createMigratedTestD1();
-    // The target resolves by the delivery's repository, so it is seeded under
+    // why: The target resolves by the delivery's repository, so it is seeded under
     // the payload's owner/name.
     await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ repoOwner: "alice" }] });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
 
-    // Delivery 1 carries the login (repository owner alice) — the row stores it.
+    // note: Delivery 1 carries the login (repository owner alice) — the row stores it.
     const prBody = JSON.stringify({
       ...PR_PAYLOAD,
       repository: { name: "test-repo", owner: { login: "alice" } },
     });
     await postWebhook("/webhook/default/app-x", prBody, await sigHeaders("secret-x", prBody), env);
-    // Backdate so the next write is provable; the login is what must survive.
+    // why: Backdate so the next write is provable; the login is what must survive.
     db.raw.prepare("UPDATE bot_installations SET seen_at = '2000-01-01 00:00:00'").run();
 
-    // Delivery 2 is a bare touch: an install event with no `account`, so the
+    // note: Delivery 2 is a bare touch: an install event with no `account`, so the
     // classifier hands the route a null login and the store must keep alice.
     const bareBody = JSON.stringify({ action: "created", installation: { id: 123 } });
     const bare = await postWebhook("/webhook/default/app-x", bareBody, await sigHeaders("secret-x", bareBody, "installation"), env);
 
     expect(bare.status).toBe(200);
-    expect(sent).toHaveLength(1); // the install delivery never enqueues
+    expect(sent).toHaveLength(1); // invariant: the install delivery never enqueues
     const rows = db.raw
       .query("SELECT installation_id, account_login, seen_at FROM bot_installations")
       .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.installation_id).toBe(123);
-    expect(rows[0]!.account_login).toBe("alice"); // preserved — the bare touch carries no login
-    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // still refreshed
+    expect(rows[0]!.account_login).toBe("alice"); // invariant: preserved — the bare touch carries no login
+    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // note: still refreshed
   });
 
   test("the installation's own account is persisted, not the inferred repository owner", async () => {
@@ -1590,7 +1584,7 @@ describe("installations upsert wiring", () => {
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    // The delivery states BOTH identities and they disagree: installation
+    // note: The delivery states BOTH identities and they disagree: installation
     // account `octo-org`, repository owner `test-owner`.
     const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 123, account: { login: "octo-org" } } });
 
@@ -1602,7 +1596,7 @@ describe("installations upsert wiring", () => {
       .query("SELECT bot_id, account_login FROM bot_installations")
       .all() as Array<{ bot_id: string; account_login: string | null }>;
     expect(rows).toEqual([{ bot_id: appRow.id, account_login: "octo-org" }]);
-    // The queue message keeps the repository owner: the account never enters
+    // invariant: The queue message keeps the repository owner: the account never enters
     // the payload, it is bookkeeping only.
     expect(sent[0]!.owner).toBe("test-owner");
   });
@@ -1619,7 +1613,7 @@ describe("installations upsert wiring", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
-    expect(sent).toHaveLength(0); // paused → zero enqueue
+    expect(sent).toHaveLength(0); // invariant: paused → zero enqueue
     const rows = db.raw
       .query("SELECT bot_id, account_login FROM bot_installations")
       .all() as Array<{ bot_id: string; account_login: string | null }>;
@@ -1638,7 +1632,7 @@ describe("installations upsert wiring", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
-    expect(sent).toHaveLength(0); // flag off → zero enqueue
+    expect(sent).toHaveLength(0); // invariant: flag off → zero enqueue
     const rows = db.raw
       .query("SELECT bot_id, account_login FROM bot_installations")
       .all() as Array<{ bot_id: string; account_login: string | null }>;
@@ -1649,7 +1643,7 @@ describe("installations upsert wiring", () => {
     const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    // Only the installation upsert fails: the slug lookup / decrypt / delivery
+    // invariant: Only the installation upsert fails: the slug lookup / decrypt / delivery
     // record stay healthy, so the delivery exercises exactly that path.
     const failing = failingDb(db, installUpsert);
     const env = makeEnv(failing, { REVIEW_QUEUE: queue as never });
@@ -1670,16 +1664,15 @@ describe("installations upsert wiring", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1); // the review job was enqueued anyway
+    expect(sent).toHaveLength(1); // note: the review job was enqueued anyway
     const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logged).toContain("installation_upsert_failed");
-    // The failed bookkeeping write left no row.
+    // note: The failed bookkeeping write left no row.
     expect((db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number }).n).toBe(0);
   });
 });
 
-/**
- * `installation.*` deliveries: the only path that observes a fresh install
+/** note: `installation.*` deliveries: the only path that observes a fresh install
  * before any review traffic, so it is what fills `account_login` in the
  * settings table. Not review work — no enqueue, no pause/flag gate.
  */
@@ -1724,14 +1717,14 @@ describe("installation event path", () => {
 
       expect(res.status).toBe(200);
       expect(await res.text()).toBe("accepted");
-      expect(sent).toHaveLength(0); // an install is never review work
+      expect(sent).toHaveLength(0); // invariant: an install is never review work
       expect(installationRows(db)).toEqual([
         { bot_id: appRow.id, installation_id: 555, account_login: "octo-org" },
       ]);
       expect(deliveryRows(db, appRow.id)).toEqual([
         { event_name: "installation", outcome: "ignored", status_code: null },
       ]);
-      // A verified install delivery is a verified delivery: the same L5 touch
+      // note: A verified install delivery is a verified delivery: the same L5 touch
       // every non-reject outcome gets (lock L5 — "last verified delivery").
       const ops = db.raw
         .query("SELECT last_webhook_at FROM review_bots WHERE id = ?")
@@ -1743,7 +1736,7 @@ describe("installation event path", () => {
   test("an install event OVERWRITES a stored login — the route passes the authoritative source", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // A login the review path inferred earlier: an install event states the
+    // note: A login the review path inferred earlier: an install event states the
     // installation's own account, so it must replace this value. The two
     // upsert statements differ ONLY by which side wins (apps-store
     // UPSERT_INSTALLATION_SQL), so this case fails when the route drops
@@ -1792,14 +1785,14 @@ describe("installation event path", () => {
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
     expect(installationRows(db)).toHaveLength(1);
-    // Recorded as an install, never as a paused review delivery.
+    // invariant: Recorded as an install, never as a paused review delivery.
     expect(deliveryRows(db, appRow.id)[0]!.outcome).toBe("ignored");
   });
 
   test("global review_global flag OFF still records the installation — the flag gates enqueue only", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // Same D1 table `tests/worker/admin-flags.test.ts` uses: an ABSENT row
+    // note: Same D1 table `tests/worker/admin-flags.test.ts` uses: an ABSENT row
     // reads as enabled, so this row is what closes the global enqueue face.
     setReviewGlobalOff(db);
     const { queue, sent } = makeQueue();
@@ -1825,7 +1818,7 @@ describe("installation event path", () => {
   test("installation.deleted → 200 accepted, the (app, installation) row is stamped removed, zero enqueue", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // The installation existed locally before GitHub reported its removal.
+    // invariant: The installation existed locally before GitHub reported its removal.
     db.raw
       .prepare(
         "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('seed-1', ?, 555, 'octo-org', datetime('now'))",
@@ -1844,8 +1837,8 @@ describe("installation event path", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(0); // an uninstall is never review work
-    // The row SURVIVES (the historical joins keep resolving) and carries the
+    expect(sent).toHaveLength(0); // invariant: an uninstall is never review work
+    // invariant: The row SURVIVES (the historical joins keep resolving) and carries the
     // stamp that hides it from the install-health read face.
     const rows = db.raw
       .query("SELECT installation_id, account_login, removed_at FROM bot_installations")
@@ -1958,7 +1951,7 @@ describe("installation event path", () => {
     const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    // Only the installation upsert fails: the slug lookup / decrypt / delivery
+    // invariant: Only the installation upsert fails: the slug lookup / decrypt / delivery
     // record stay healthy, so the delivery exercises exactly that path.
     const failing = failingDb(db, installUpsert);
     const env = makeEnv(failing, { REVIEW_QUEUE: queue as never });
@@ -1974,16 +1967,16 @@ describe("installation event path", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(0); // an install is never review work
+    expect(sent).toHaveLength(0); // invariant: an install is never review work
     const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logged).toContain("installation_upsert_failed");
-    // The failed bookkeeping write left no row.
+    // note: The failed bookkeeping write left no row.
     expect((db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number }).n).toBe(0);
   });
 });
 
 describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => {
-  /** Read the App row's ops columns back raw. */
+  /** note: Read the App row's ops columns back raw. */
   function appOps(
     db: TestD1,
     id: string,
@@ -2005,7 +1998,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(appOps(db, appRow.id).review_enabled).toBe(1); // the 0008 resume default
+    expect(appOps(db, appRow.id).review_enabled).toBe(1); // note: the 0008 resume default
     expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
   });
 
@@ -2029,11 +2022,11 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
-    expect(sent).toHaveLength(0); // zero enqueue — paused ≠ disabled
-    // The touch is decoupled from the review switch (L5: paused still counts
+    expect(sent).toHaveLength(0); // invariant: zero enqueue — paused ≠ disabled
+    // note: The touch is decoupled from the review switch (L5: paused still counts
     // as a verified 2xx delivery).
     expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
-    // AL-23-2: the pause rides the structured INFO channel (warn→info —
+    // note: AL-23-2: the pause rides the structured INFO channel (warn→info —
     // paused is a legitimate ops state answering 2xx), filterable by event.
     const line = info.mock.calls.map((call) => String(call[0])).find((s) => s.includes("review_paused"));
     expect(line).toBeDefined();
@@ -2053,8 +2046,8 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
-    expect(sent).toHaveLength(0); // zero enqueue — the global kill switch
-    // The App's own switch is ON, so only the global flag can explain the
+    expect(sent).toHaveLength(0); // invariant: zero enqueue — the global kill switch
+    // invariant: The App's own switch is ON, so only the global flag can explain the
     // outcome: `ok` means "job enqueued", and nothing was.
     expect(appOps(db, appRow.id).review_enabled).toBe(1);
     const rows = db.raw
@@ -2064,7 +2057,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("ignore delivery never depends on the review_global flag → 2xx ignored + delivery row recorded", async () => {
-    // Job-scoped flag read: only a `job` can enqueue, so an `ignore` never
+    // invariant: Job-scoped flag read: only a `job` can enqueue, so an `ignore` never
     // consults `review_global`. A route that started reading it here would
     // turn this 2xx into a 500, so make the table genuinely unreadable for
     // this request: the response, the delivery row and the ledger row then
@@ -2074,7 +2067,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     db.raw.exec("DROP TABLE server_flags");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    // `closed` is not a whitelisted pull_request action → classify → ignore.
+    // note: `closed` is not a whitelisted pull_request action → classify → ignore.
     const body = JSON.stringify({ ...PR_PAYLOAD, action: "closed" });
 
     const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
@@ -2086,7 +2079,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
       .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
-    // The PR ledger is written BEFORE the ignore return, so an ignored
+    // invariant: The PR ledger is written BEFORE the ignore return, so an ignored
     // delivery still lands its row.
     const ledger = db.raw
       .query("SELECT pr_number, state FROM pull_requests WHERE bot_id = ?")
@@ -2108,12 +2101,12 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
-    expect(sent).toHaveLength(0); // the classifier skip reaches the queue
+    expect(sent).toHaveLength(0); // note: the classifier skip reaches the queue
     const rows = db.raw
       .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
-    // The PR ledger is written before the ignore return: a bot-authored PR
+    // invariant: The PR ledger is written before the ignore return: a bot-authored PR
     // must still reach it, or the per-App PR surface goes blind for them.
     const ledger = db.raw
       .query("SELECT pr_number, state FROM pull_requests WHERE bot_id = ?")
@@ -2147,7 +2140,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("flag read failure on a `job` delivery → 2xx ignored, ZERO enqueue, `paused`, all diagnostics kept", async () => {
-    // The read sits before the delivery row, the PR ledger and the
+    // invariant: The read sits before the delivery row, the PR ledger and the
     // last_webhook_at touch, so an unguarded failure would 500 an
     // already-verified job and drop all three. The read is best-effort and
     // fails CLOSED: a broken read counts as "reviews disabled", so nothing
@@ -2171,13 +2164,13 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
-    // Delivery row: `paused` (the fail-closed flag blocked the enqueue), never
+    // invariant: Delivery row: `paused` (the fail-closed flag blocked the enqueue), never
     // `ok` — `ok` would claim a job ran while the kill switch was closed.
     const deliveries = db.raw
       .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(deliveries).toEqual([{ event_name: "pull_request", outcome: "paused", status_code: null }]);
-    // The three diagnostics of an already-verified delivery all still land.
+    // note: The three diagnostics of an already-verified delivery all still land.
     const ledger = db.raw
       .query("SELECT pr_number, state FROM pull_requests WHERE bot_id = ?")
       .all(appRow.id) as Array<{ pr_number: number; state: string }>;
@@ -2219,7 +2212,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(res.status).toBe(401);
     expect(sent).toHaveLength(0);
     expect(appOps(db, appRow.id).last_webhook_at).toBeNull();
-    // A rejected delivery validates nothing past the signature, so it writes
+    // why: A rejected delivery validates nothing past the signature, so it writes
     // no PR ledger row either.
     expect(db.raw.query("SELECT pr_number FROM pull_requests WHERE bot_id = ?").all(appRow.id)).toEqual([]);
   });
@@ -2252,7 +2245,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   test("touchLastWebhook writes ONLY last_webhook_at — updated_at stays the operator timestamp (L5)", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // Backdate BOTH columns: only last_webhook_at may move.
+    // invariant: Backdate BOTH columns: only last_webhook_at may move.
     db.raw
       .prepare("UPDATE review_bots SET updated_at = '2000-01-01 00:00:00', last_webhook_at = '2000-01-01 00:00:00' WHERE id = ?")
       .run(appRow.id);
@@ -2260,8 +2253,8 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     await createReviewBotsStore(db).touchLastWebhook(appRow.id);
 
     const ops = appOps(db, appRow.id);
-    expect(ops.last_webhook_at).not.toBe("2000-01-01 00:00:00"); // touched
-    expect(ops.updated_at).toBe("2000-01-01 00:00:00"); // untouched
+    expect(ops.last_webhook_at).not.toBe("2000-01-01 00:00:00"); // note: touched
+    expect(ops.updated_at).toBe("2000-01-01 00:00:00"); // invariant: untouched
   });
 
   test("setReviewEnabled toggles review_enabled, writes updated_at, and refuses soft-deleted rows (setAppStatus precedent)", async () => {
@@ -2270,23 +2263,23 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     const store = createReviewBotsStore(db);
     db.raw.prepare("UPDATE review_bots SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(appRow.id);
 
-    // Pause: returns changed, writes both columns (an operator mutation).
+    // note: Pause: returns changed, writes both columns (an operator mutation).
     expect(await store.setReviewEnabled(appRow.id, false)).toBe(true);
     let ops = appOps(db, appRow.id);
     expect(ops.review_enabled).toBe(0);
     expect(ops.updated_at).not.toBe("2000-01-01 00:00:00");
 
-    // Resume.
+    // note: Resume.
     expect(await store.setReviewEnabled(appRow.id, true)).toBe(true);
     expect(appOps(db, appRow.id).review_enabled).toBe(1);
 
-    // Soft-deleted rows are refused: no write, false (a deleted app can
+    // note: Soft-deleted rows are refused: no write, false (a deleted app can
     // never be re-activated — or paused).
     await store.softDeleteApp(appRow.id);
     expect(await store.setReviewEnabled(appRow.id, false)).toBe(false);
     expect(appOps(db, appRow.id).review_enabled).toBe(1);
 
-    // Unknown id → false, no write.
+    // note: Unknown id → false, no write.
     expect(await store.setReviewEnabled("no-such-app", false)).toBe(false);
   });
 
@@ -2298,13 +2291,13 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     await store.upsertInstallation({ appId: appRow.id, installationId: 1, accountLogin: "old" });
     await store.upsertInstallation({ appId: appRow.id, installationId: 2, accountLogin: "recent" });
     await store.upsertInstallation({ appId: sibling.id, installationId: 3, accountLogin: "other-app" });
-    // Backdate installation 1 so the order is observable.
+    // why: Backdate installation 1 so the order is observable.
     db.raw.prepare("UPDATE bot_installations SET seen_at = '2000-01-01 00:00:00' WHERE installation_id = 1").run();
 
     const rows = await store.listInstallations(appRow.id);
 
-    expect(rows).toHaveLength(2); // the sibling App's row is never included
-    expect(rows[0]).toMatchObject({ installation_id: 2, account_login: "recent" }); // newest seen first
+    expect(rows).toHaveLength(2); // invariant: the sibling App's row is never included
+    expect(rows[0]).toMatchObject({ installation_id: 2, account_login: "recent" }); // note: newest seen first
     expect(rows[1]).toMatchObject({ installation_id: 1, account_login: "old" });
     expect(typeof rows[0]!.seen_at).toBe("string");
     expect(await store.listInstallations("no-such-app")).toEqual([]);
@@ -2317,21 +2310,21 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-v1" });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    // 1. First delivery memoizes the verifier under the row id (secret-v1).
+    // safety: 1. First delivery memoizes the verifier under the row id (secret-v1).
     const firstQueue = makeQueue();
     const firstEnv = makeEnv(db, { REVIEW_QUEUE: firstQueue.queue as never });
     const first = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-v1", body), firstEnv);
     expect(first.status).toBe(200);
     expect(firstQueue.sent).toHaveLength(1);
 
-    // 2. Rotate: a NEW envelope for a NEW secret on the SAME row (the
+    // safety: 2. Rotate: a NEW envelope for a NEW secret on the SAME row (the
     //    dashboard re-save path; AES-GCM random IV → a fresh envelope).
     const box = createSecretbox(TEST_KEY);
     db.raw
       .prepare("UPDATE review_bots SET webhook_secret_enc = ? WHERE id = ?")
       .run(await box.encryptSecret("secret-v2", `github_apps.webhook_secret_enc:${appRow.id}`), appRow.id);
 
-    // The NEW secret verifies — the cached entry's secret mismatched, so the
+    // safety: The NEW secret verifies — the cached entry's secret mismatched, so the
     // verifier was rebuilt + replaced under the same row-id cacheKey.
     const secondQueue = makeQueue();
     const secondEnv = makeEnv(db, { REVIEW_QUEUE: secondQueue.queue as never });
@@ -2339,7 +2332,7 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
     expect(second.status).toBe(200);
     expect(secondQueue.sent).toHaveLength(1);
 
-    // 3. The OLD secret no longer verifies — the replaced entry is gone
+    // safety: 3. The OLD secret no longer verifies — the replaced entry is gone
     //    exactly (rotation evicts the old secret's verifier).
     const staleQueue = makeQueue();
     const staleEnv = makeEnv(db, { REVIEW_QUEUE: staleQueue.queue as never });
@@ -2351,26 +2344,26 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
 });
 
 describe("target resolution (webhook → review_targets by repository)", () => {
-  /** This bot's delivery rows, in insert order. */
+  /** note: This bot's delivery rows, in insert order. */
   function deliveries(db: TestD1, botId: string): Array<{ event_name: string | null; outcome: string }> {
     return db.raw
       .query("SELECT event_name, outcome FROM webhook_deliveries WHERE bot_id = ?")
       .all(botId) as Array<{ event_name: string | null; outcome: string }>;
   }
 
-  /** How many PR-ledger rows this bot owns. */
+  /** note: How many PR-ledger rows this bot owns. */
   function ledgerCount(db: TestD1, botId: string): number {
     return (db.raw.query("SELECT COUNT(*) AS n FROM pull_requests WHERE bot_id = ?").get(botId) as { n: number }).n;
   }
 
-  /** The bot's `last_webhook_at` — a verified delivery touches it, a refusal does not. */
+  /** note: The bot's `last_webhook_at` — a verified delivery touches it, a refusal does not. */
   function lastWebhookAt(db: TestD1, botId: string): string | null {
     return (db.raw.query("SELECT last_webhook_at FROM review_bots WHERE id = ?").get(botId) as {
       last_webhook_at: string | null;
     }).last_webhook_at;
   }
 
-  /** The delivery body for one repository under one installation. */
+  /** note: The delivery body for one repository under one installation. */
   function bodyFor(repository: { id: number; owner: string; name: string }, action = "opened"): string {
     return JSON.stringify({
       ...PR_PAYLOAD,
@@ -2381,7 +2374,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
 
   test("a delivery resolves the target of its own repository, not another one of the bot", async () => {
     const db = createMigratedTestD1();
-    // Two repositories under ONE installation: the id decides the target, so
+    // note: Two repositories under ONE installation: the id decides the target, so
     // the `open`-mode one refuses a push while the `every_push` one accepts it.
     const appRow = await seedApp(db, {
       slug: "app-x",
@@ -2398,7 +2391,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
     const ignored = await postWebhook("/webhook/default/app-x", openBody, await sigHeaders("secret-x", openBody), env);
     expect(ignored.status).toBe(200);
     expect(await ignored.text()).toBe("ignored");
-    expect(sent).toHaveLength(0); // `open` mode never auto-reviews a push
+    expect(sent).toHaveLength(0); // invariant: `open` mode never auto-reviews a push
 
     const pushBody = bodyFor({ id: 222, owner: "acme", name: "push-repo" }, "synchronize");
     const accepted = await postWebhook("/webhook/default/app-x", pushBody, await sigHeaders("secret-x", pushBody), env);
@@ -2448,7 +2441,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
 
     expect(await res.text()).toBe("accepted");
     expect(sent[0]!.targetId).toBe(appRow.targetId);
-    // One target, and the caches follow the payload's new spelling.
+    // note: One target, and the caches follow the payload's new spelling.
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets WHERE bot_id = ?").get(appRow.id)).toEqual({ n: 1 });
     expect(
       db.raw.query("SELECT repo_owner, repo_name FROM review_targets WHERE id = ?").get(appRow.targetId),
@@ -2470,11 +2463,11 @@ describe("target resolution (webhook → review_targets by repository)", () => {
       stop();
     }
 
-    expect(res.status).toBe(200); // GitHub must not retry an unconfigured delivery
+    expect(res.status).toBe(200); // invariant: GitHub must not retry an unconfigured delivery
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     expect(deliveries(db, appRow.id)).toEqual([{ event_name: "pull_request", outcome: "ignored" }]);
-    expect(ledgerCount(db, appRow.id)).toBe(0); // the ledger belongs to a configuration
+    expect(ledgerCount(db, appRow.id)).toBe(0); // note: the ledger belongs to a configuration
     expect(lastWebhookAt(db, appRow.id)).not.toBeNull();
     const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("no_target_for_repo"));
     expect(line).toBeDefined();
@@ -2506,7 +2499,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
 
   test("a first delivery onto a historical (NULL repo_id) row CLAIMS the id", async () => {
     const db = createMigratedTestD1();
-    // The migrated shape (D15): owner/name known, `repo_id` NULL. The first
+    // note: The migrated shape (D15): owner/name known, `repo_id` NULL. The first
     // delivery that states an id fills it — the only runtime claim site.
     const appRow = await seedApp(db, {
       slug: "app-x",
@@ -2535,7 +2528,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
     });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    // The same repository the target names, stated WITHOUT the numeric id.
+    // note: The same repository the target names, stated WITHOUT the numeric id.
     const body = JSON.stringify({
       ...PR_PAYLOAD,
       repository: { name: "widgets", owner: { login: "acme" } },
@@ -2553,7 +2546,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
   test("the target's business pause suppresses the enqueue without reading the global flag", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewEnabled: 0 }] });
-    // `paused` already decides the outcome, so the job-scoped `review_global`
+    // why: `paused` already decides the outcome, so the job-scoped `review_global`
     // read is skipped — the unreadable table proves it (a read here would log
     // its own failure warn while the outcome stayed `paused`).
     db.raw.exec("DROP TABLE server_flags");
@@ -2575,7 +2568,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
     expect(deliveries(db, appRow.id)).toEqual([{ event_name: "pull_request", outcome: "paused" }]);
     expect(lastWebhookAt(db, appRow.id)).not.toBeNull();
     expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain("review_global_read_failed");
-    // The bot's own operational pause is a separate flag and stays clear.
+    // invariant: The bot's own operational pause is a separate flag and stays clear.
     const bot = db.raw.query("SELECT review_enabled FROM review_bots WHERE id = ?").get(appRow.id) as {
       review_enabled: number;
     };
@@ -2583,8 +2576,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
   });
 });
 
-/**
- * Install bookkeeping is the BOT's (migration 0067 / D19): an installation
+/** note: Install bookkeeping is the BOT's (migration 0067 / D19): an installation
  * belongs to the App, and a delivery writes `bot_installations` only. No
  * webhook path can bind a target, and no target holds an installation.
  */
@@ -2624,7 +2616,7 @@ describe("webhook install bookkeeping", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
-    // This is the ONLY table an installation delivery writes.
+    // invariant: This is the ONLY table an installation delivery writes.
     expect(installationRows(db)).toEqual([
       { bot_id: app.id, installation_id: 4242, account_login: "acme", removed_at: null },
     ]);
@@ -2653,8 +2645,7 @@ describe("webhook install bookkeeping", () => {
   });
 });
 
-/**
- * The refusal's Check settlement is CHAINED onto the attach, not raced with it.
+/** note: The refusal's Check settlement is CHAINED onto the attach, not raced with it.
  * The webhook stops waiting at the inline budget and the invocation keeps the
  * attach running, so a settlement started inline would find no settleable row
  * (the claim needs a known create state and a run id) and the recovery lane
@@ -2672,7 +2663,7 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
 
     const settled = settleRefusedAfterAttach({ attach, settle, warn });
 
-    // The inline wait already expired: the attach is still running, so the
+    // note: The inline wait already expired: the attach is still running, so the
     // settlement must not have started.
     expect(settle).toHaveBeenCalledTimes(0);
     expect(warn).toHaveBeenCalledTimes(0);
@@ -2714,7 +2705,7 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
       prNumber: 42,
     };
     const HEAD = "0123456789abcdef0123456789abcdef01234567";
-    // The head's publication already CONFIRMED and passed (85 ≥ the App gate's
+    // note: The head's publication already CONFIRMED and passed (85 ≥ the App gate's
     // default floor of 80, verdict "ship it"); there is no `reviews` row.
     db.raw
       .prepare(
@@ -2740,7 +2731,7 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
           confirmedMs: 1000,
         }),
       );
-    // The delivery's own attach (a create only). The scripted surface counts
+    // invariant: The delivery's own attach (a create only). The scripted surface counts
     // any UPDATE, which the refusal lane must never issue: its adapter is null.
     let updateCalls = 0;
     const octokit: ChecksOctokit = {
@@ -2797,7 +2788,7 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
       reason: "review admission refused: pr-held",
     });
 
-    // The head's own confirmed proof, judged against the App's REAL gate: a
+    // note: The head's own confirmed proof, judged against the App's REAL gate: a
     // success — not a deferral a reconciler would later freeze as failure.
     expect(settled).toBe(true);
     const row = db.raw.query("SELECT * FROM review_checks WHERE head_sha = ?").get(HEAD) as {
@@ -2807,7 +2798,7 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
       holder: string | null;
     };
     expect(row.desired).toBe("success");
-    // Store-only: nothing was sent, so the reconciler owns the single update.
+    // why: Store-only: nothing was sent, so the reconciler owns the single update.
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
     expect(row.holder).toBeNull();
@@ -2815,8 +2806,7 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
   });
 });
 
-/**
- * The monthly RP ceiling, on the enqueue face. The verdict is computed from the
+/** note: The monthly RP ceiling, on the enqueue face. The verdict is computed from the
  * SAME inputs the consumer meters with (the target's depth, the bot's scope),
  * read against `usage_events` for the UTC calendar month, and the ceiling comes
  * from the profile covering that month's first day (D5).
@@ -2826,10 +2816,10 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
  * these tests pin.
  */
 describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
-  /** The current UTC month's bounds, from the same helper the route uses. */
+  /** note: The current UTC month's bounds, from the same helper the route uses. */
   const month = quotaMonth(new Date());
 
-  /** A seeded `pro` subscription: 20000 RP/month, and the shared bot allowed. */
+  /** note: A seeded `pro` subscription: 20000 RP/month, and the shared bot allowed. */
   function seedPro(db: TestD1): void {
     db.raw
       .prepare(
@@ -2839,7 +2829,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
       .run();
   }
 
-  /** Meter `rp` into the current month, at a review id of its own. */
+  /** note: Meter `rp` into the current month, at a review id of its own. */
   function seedUsage(db: TestD1, reviewId: string, rp: number, occurredAt = new Date().toISOString()): void {
     db.raw
       .prepare(
@@ -2849,13 +2839,13 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
       .run(reviewId, `token-${reviewId}`, occurredAt, rp);
   }
 
-  /** Lower the profile ceiling so a case need not spend 20000 RP to reach it. */
+  /** note: Lower the profile ceiling so a case need not spend 20000 RP to reach it. */
   function setCeiling(db: TestD1, monthlyRp: number | null): void {
     db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = ? WHERE profile_id = 'quota-v1' AND plan_id = 'pro'").run(monthlyRp);
   }
 
   test("a review that exactly fills the month's remaining headroom is admitted; one RP over refuses it", async () => {
-    // Deep + BYOK is the cheapest cell in the table (6 RP): a pro ceiling of 20
+    // note: Deep + BYOK is the cheapest cell in the table (6 RP): a pro ceiling of 20
     // leaves room for exactly three, so 14 used + 6 = 20 (allowed) and 15 + 6 =
     // 21 (refused) pin the boundary without a huge fixture.
     for (const [usedRp, expected] of [
@@ -2866,7 +2856,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
       seedPro(db);
       setCeiling(db, 20);
       const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-      // The App's own depth is deep, so the cost is `rpFor("deep", "byok")` = 6.
+      // why: The App's own depth is deep, so the cost is `rpFor("deep", "byok")` = 6.
       db.raw.prepare("UPDATE review_targets SET review_level = 'deep' WHERE id = ?").run(appRow.targetId);
       seedUsage(db, "prior", usedRp);
       const { queue, sent } = makeQueue();
@@ -2885,7 +2875,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
         expect(sent).toHaveLength(1);
         expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
       } else {
-        // The refusal spends nothing: no send, no claim, and one `quota` row.
+        // invariant: The refusal spends nothing: no send, no claim, and one `quota` row.
         expect(sent).toHaveLength(0);
         expect(db.raw.query("SELECT COUNT(*) AS n FROM comment_trigger_claims").get()).toEqual({ n: 0 });
         expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events WHERE review_id <> 'prior'").get()).toEqual({ n: 0 });
@@ -2896,7 +2886,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
         expect(failures[0]!.stage).toBe(QUOTA_STAGE);
         expect(failures[0]!.target_id).toBe(appRow.targetId);
         expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_SKIP_REASON));
-        // The delivery row distinguishes the refusal from a pause or an ignore.
+        // note: The delivery row distinguishes the refusal from a pause or an ignore.
         const delivery = db.raw
           .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
           .get(appRow.id) as { outcome: string };
@@ -2910,7 +2900,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     seedPro(db);
     setCeiling(db, null);
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // A month already far past every finite ceiling.
+    // note: A month already far past every finite ceiling.
     seedUsage(db, "prior", 1_000_000);
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
@@ -2934,7 +2924,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     setCeiling(db, 6);
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     db.raw.prepare("UPDATE review_targets SET review_level = 'deep' WHERE id = ?").run(appRow.targetId);
-    // Written the way a row that predates migration 0064 reads.
+    // note: Written the way a row that predates migration 0064 reads.
     db.raw
       .prepare(
         `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
@@ -2953,7 +2943,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     );
 
     expect(res.status).toBe(200);
-    // 0 used + 6 cost = 6, exactly the ceiling: admitted.
+    // invariant: 0 used + 6 cost = 6, exactly the ceiling: admitted.
     expect(sent).toHaveLength(1);
   });
 
@@ -2963,7 +2953,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     setCeiling(db, 6);
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     db.raw.prepare("UPDATE review_targets SET review_level = 'deep' WHERE id = ?").run(appRow.targetId);
-    // The instant just before this month's first day.
+    // invariant: The instant just before this month's first day.
     const before = new Date(Date.parse(month.startIso) - 1).toISOString();
     seedUsage(db, "last-month", 1000, before);
     const { queue, sent } = makeQueue();
@@ -2983,9 +2973,9 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
 
   test("a delivery that would fail both gates records exactly one failure, of the entitlement stage", async () => {
     const db = createMigratedTestD1();
-    // The workspace holds NO subscription → the seeded `free` plan, which lacks
+    // note: The workspace holds NO subscription → the seeded `free` plan, which lacks
     // the shared bot AND whose 2000 RP ceiling is already spent.
-    setCeiling(db, null); // the free plan keeps its seeded ceiling
+    setCeiling(db, null); // note: the free plan keeps its seeded ceiling
     db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = 1 WHERE profile_id = 'quota-v1' AND plan_id = 'free'").run();
     seedUsage(db, "prior", 1000);
     await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared" });
@@ -3006,7 +2996,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
       .query("SELECT stage FROM review_failures ORDER BY rowid")
       .all() as Array<{ stage: string }>;
     expect(failures).toHaveLength(1);
-    // Capability first: the author is told the cause that binds, not the one a
+    // note: Capability first: the author is told the cause that binds, not the one a
     // top-up could not fix (D9).
     expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
   });
@@ -3017,7 +3007,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     seedUsage(db, "prior", 1_000_000);
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    // `makeEnv` already defaults to self-hosted; the ceiling fixture is what
+    // note: `makeEnv` already defaults to self-hosted; the ceiling fixture is what
     // would refuse if the mode were ignored.
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
