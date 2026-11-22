@@ -26,7 +26,8 @@ import { describe, expect, test } from "bun:test";
 import {
   clampFindingSizes,
   dropAllSuggestionFences,
-  dropSuggestionFences,
+  dropRedactedSuggestions,
+  dropUnsafeFences,
   FINDING_BODY_MAX,
   FINDING_TITLE_MAX,
   capFindings,
@@ -719,9 +720,9 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
 
   test("a closed fence ending exactly at the budget with no truncation is kept verbatim", () => {
     const fence = "```suggestion\nconst x = 1;\n```";
-    const text = "P".repeat(FINDING_BODY_MAX - fence.length) + fence;
+    const text = "P".repeat(FINDING_BODY_MAX - fence.length - 1) + "\n" + fence;
     expect(text.length).toBe(FINDING_BODY_MAX);
-    expect(dropSuggestionFences(text, FINDING_BODY_MAX)).toEqual({ text, dropped: false });
+    expect(dropUnsafeFences(text, FINDING_BODY_MAX)).toEqual({ text, dropped: false });
   });
 });
 
@@ -795,5 +796,93 @@ describe("suggestionFenceSpans (CommonMark fence grammar, QC R2)", () => {
   test("an ordinary ```js fence still opens a block", () => {
     const text = "```js\nconst a = 1;\n```\n```suggestion\nconst x = 1;\n```";
     expect(blocks(text)).toEqual([{ block: "```suggestion\nconst x = 1;\n```", closed: true }]);
+  });
+});
+
+describe("dropRedactedSuggestions", () => {
+  test("a suggestion whose patch carries the marker is removed with its prose kept", () => {
+    const text = "before\n```suggestion\nconst x = \"[REDACTED]\";\n```\nafter";
+    expect(dropRedactedSuggestions(text)).toBe("before\nafter");
+  });
+
+  test("a clean suggestion is untouched", () => {
+    const clean = "```suggestion\nconst x = 1;\n```";
+    expect(dropRedactedSuggestions(clean)).toBe(clean);
+  });
+
+  test("a CRLF suggestion carrying the marker is removed too", () => {
+    const text = "before\r\n```suggestion\r\nconst x = \"[REDACTED]\";\r\n```\r\nafter";
+    expect(dropRedactedSuggestions(text)).toBe("before\r\nafter");
+  });
+
+  test("a body that was only the redacted suggestion keeps a safe omission notice", () => {
+    const text = "```suggestion\nconst x = \"[REDACTED]\";\n```";
+    expect(dropRedactedSuggestions(text)).toBe("(suggestion omitted)");
+  });
+});
+
+describe("dropUnsafeFences (any fence, not only suggestions)", () => {
+  test("a 3-space opener and 4-space closer inside a list close the same fence", () => {
+    const body = "1. step\n   ```\n   const x = 1;\n    ```\n2. keep this instruction";
+    // Inside `1. ` the content column is 3: the closer's one extra space is
+    // still the same fence, so the block and the next instruction survive.
+    expect(dropUnsafeFences(body, 10_000)).toEqual({ text: body, dropped: false });
+  });
+
+  test("a redacted suggestion inside a list is still removed", () => {
+    const body = "1. step\n   ```suggestion\n   const x = \"[REDACTED]\";\n    ```\n2. keep this instruction";
+    expect(suggestionFenceSpans(body)).toHaveLength(1);
+    expect(dropRedactedSuggestions(body)).toBe("1. step\n2. keep this instruction");
+  });
+
+  test("an unclosed fence still drops wholesale", () => {
+    const body = "before\n```suggestion\nconst x = 1;";
+    expect(dropUnsafeFences(body, 10_000)).toEqual({ text: "before\n", dropped: true });
+  });
+
+  test("a closing fence below the list content column also ends the list item", () => {
+    const body = "1. step\n   ```\n   code\n```\n    ```js\n    indented code\nkeep this";
+    // The 0-indent closer ends the list item: the following 4-space line is an
+    // indented code block, not a second fence, so nothing after it is dropped.
+    expect(dropUnsafeFences(body, 10_000)).toEqual({ text: body, dropped: false });
+  });
+
+  test("a fence body's list text does not create a frame for a later suggestion", () => {
+    const text = "```\n1. item\n```\n\n```suggestion\nconst x = \"[REDACTED]\";\n```\nafter";
+    // The `1. item` line is CODE inside the first fence: no list frame exists
+    // when the later suggestion is measured or removed.
+    expect(suggestionFenceSpans(text)).toHaveLength(1);
+    const out = dropRedactedSuggestions(text);
+    expect(out).not.toContain("```suggestion");
+    expect(out).toContain("1. item"); // the code content itself survives
+    expect(out).toContain("after");
+  });
+
+  test("a 4-space indented block does not hijack a later suggestion fence", () => {
+    const text = "    ```js\nconst a = 1;\n    ```\n\n```suggestion\nconst x = \"[REDACTED]\";\n```\nafter";
+    // The indented pseudo-fence must not open the state machine: the real
+    // top-level suggestion is the one span recorded.
+    expect(suggestionFenceSpans(text)).toHaveLength(1);
+    const out = dropRedactedSuggestions(text);
+    expect(out).not.toContain("```suggestion");
+    // The indented block and the prose after the suggestion both survive.
+    expect(out).toContain("    ```js");
+    expect(out).toContain("after");
+  });
+
+  test("a plain fence crossing the budget is dropped whole; the prose after it survives", () => {
+    const pad = "P".repeat(20) + "\n";
+    const fence = "```\nconst x = 1;\n```";
+    const tail = "\nkeep";
+    const body = `${pad}${fence}${tail}`;
+    const max = pad.length + 5; // lands inside the plain fence
+
+    const { text, dropped } = dropUnsafeFences(body, max);
+    expect(dropped).toBe(true);
+    expect(text).toBe(`${pad}keep`);
+    // The explanation below the block is preserved, and no truncated fence rides out.
+    expect(text).toContain("keep");
+    expect(text).not.toContain("```");
+    expect(text.length).toBeLessThanOrEqual(max);
   });
 });

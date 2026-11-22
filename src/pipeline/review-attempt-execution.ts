@@ -1,5 +1,5 @@
 /**
- * note: Review attempt execution — the five phases of one admitted review attempt.
+ * Review attempt execution — the five phases of one admitted review attempt.
  *
  * Layering: `consumer` (admission, dedupe, skip settlement) → this module
  * (prepare → review → collect → publish, plus failure settlement and cleanup)
@@ -35,10 +35,10 @@ import {
   putAbandonClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
-import { dropAllSuggestionFences, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
+import { dropAllSuggestionFences, dropRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
+import { carriesSecretForm, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { type D1ArtifactStore } from "../store/artifact-store";
 import { type FailureStage, type FailureStore } from "../store/failure-store";
 import {
@@ -46,12 +46,12 @@ import {
   recordUsageEvent,
   type UsageSource,
 } from "../store/usage-store";
-// why: The cost model the ledger charges: `rpFor` from the profile judging this
+// The cost model the ledger charges: `rpFor` from the profile judging this
 // month (D5), so a started review is priced by the same configuration the
 // enqueue's ceiling check read.
 import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
-// note: The hand-off's two fenced writes live in the Check registry (§7.9/§7.11.2):
+// The hand-off's two fenced writes live in the Check registry (§7.9/§7.11.2):
 // linking the publication the probe found, and releasing the claim to recovery.
 import {
   CHECK_BACKOFF_MS,
@@ -68,8 +68,10 @@ import {
   setCheckDesired,
 } from "../store/review-checks";
 import {
+  beginAttemptSettlement,
   deliveryKeyOf,
   readAttemptCheckKey,
+  readAttemptHandoff,
   recordSuccessorIntent,
   settleAttemptIfDischarged,
   settlementStatementIfDischarged,
@@ -188,20 +190,20 @@ import {
   type ReviewCommenter,
   type UpsertPlan,
 } from "./comment";
-// safety: Per-App credential resolution (lock L4): the consumer is a
+// Per-App credential resolution (lock L4): the consumer is a
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // review_bots row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
 import { createTargetsStore } from "../dashboard/targets-store";
-// invariant: The operator default review depth (migration 0047 pairing): read ONLY when
+// The operator default review depth (migration 0047 pairing): read ONLY when
 // the target row's `review_level` is NULL, through the same runtime-config leaf
 // the admission settings use.
 import { getRecheckAssignmentMaxBytes } from "../dashboard/runtime-config-store";
-// note: Per-App AI-config resolution: the same sanctioned reader
+// Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads bot_provider_keys / bot_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
 import { type CustomProviderConsumerConfig } from "../dashboard/app-config-store";
-// note: §7.10 Check seam implementation: `checks.ts` owns the
+// §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
 import {
   CHECK_SUMMARIES,
@@ -211,7 +213,7 @@ import {
   type CheckPromotion,
   type CheckTerminalOutcome,
 } from "./checks";
-// invariant: Review admission (review-concurrency §1.2): one `review_inflight` row is the
+// Review admission (review-concurrency §1.2): one `review_inflight` row is the
 // per-PR lock and the capacity reservation; the cap comes from the pipeline's
 // single runtime-config reader (never a dashboard route import).
 import { releaseInflight, type InflightKey, type InflightRefusal } from "../store/inflight-store";
@@ -221,7 +223,7 @@ import {
   CHECK_UPDATE_DEFAULT,
   type CheckBudgets,
 } from "./check-budgets-reader";
-// note: The attempt budget: the reserve ledger and the single runner-budget
+// The attempt budget: the reserve ledger and the single runner-budget
 // derivation. The Check store imports the same module, so neither side owns a
 // second copy of the arithmetic.
 import {
@@ -240,9 +242,9 @@ import {
 export type PipelineEnv = {
   DB: D1Database;
   IDEMPOTENCY_KV: KVNamespace;
-  SANDBOX: unknown; // note: binding shape = DurableObjectNamespace<SandboxV1> (pinned; the adapter casts)
+  SANDBOX: unknown; // binding shape = DurableObjectNamespace<SandboxV1> (pinned; the adapter casts)
   /**
-   * safety: Envelope master key for the per-App credential resolution (lock L4):
+   * Envelope master key for the per-App credential resolution (lock L4):
    * base64 of exactly 32 bytes (the same DASHBOARD_ENCRYPTION_KEY
    * Worker secret the dashboard write face uses, src/dashboard/secretbox.ts).
    * Missing / malformed → SecretboxKeyError → per-App resolution fails
@@ -251,7 +253,7 @@ export type PipelineEnv = {
    */
   DASHBOARD_ENCRYPTION_KEY?: string;
   /**
-   * safety: AL-24-5 (zero global fallback): provider keys and the model chain NEVER
+   * AL-24-5 (zero global fallback): provider keys and the model chain NEVER
    * come from the Worker env — OMP_MODEL_KEY / OMP_REVIEW_MODEL / the 18
    * per-provider key fields were retired. Every key and the chain resolve
    * from the App's own per-App config (resolveAppConfig keys map +
@@ -302,16 +304,16 @@ export type DiffCaptureDeclineReason =
   | "guard-rejected"
   | "transport";
 
-/** note: Where the fallback stopped, and the exec result the step ended with. */
+/** Where the fallback stopped, and the exec result the step ended with. */
 type DiffCaptureDecline = {
   reason: DiffCaptureDeclineReason;
   /**
-   * invariant: The step the attempt stopped at; `admission` only for the round-budget
+   * The step the attempt stopped at; `admission` only for the round-budget
    * refusal, which has no step. A guard refusal names the step whose command
    * was never built.
    */
   step: string;
-  /** note: The step's exec result; absent when no exec ran (budget / timeout / guard). */
+  /** The step's exec result; absent when no exec ran (budget / timeout / guard). */
   run?: { stdout: string; stderr: string; exitCode: number };
 };
 
@@ -321,7 +323,7 @@ type DiffCaptureDecline = {
  * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
   /**
-   * invariant: `pull_request` / `issue_comment` — the trigger that produced the job
+   * `pull_request` / `issue_comment` — the trigger that produced the job
    * (spec review-trigger-policy §3: the comment trigger is the bot mention;
    * the retired command's label went with it).
    * `review_paused` (architect lock L4 — union widened ADDITIVELY):
@@ -391,67 +393,67 @@ export type ConsumerLogFields = {
   pr_number: number;
   head_sha: string | null;
   sandbox_id?: string;
-  /** invariant: review_bots.id the job resolves to (per-bot jobs only). */
+  /** review_bots.id the job resolves to (per-bot jobs only). */
   app_id?: string;
-  /** invariant: review_targets.id the job's configuration came from (per-bot jobs only). */
+  /** review_targets.id the job's configuration came from (per-bot jobs only). */
   target_id?: string;
   /**
-   * invariant: The queue binding the deferred batch arrived on (`maintenance_defer` only —
+   * The queue binding the deferred batch arrived on (`maintenance_defer` only —
    * the window names the queue it deferred, not just the PR).
    */
   queue?: string;
-  /** invariant: Deliveries the deferred batch carried (`maintenance_defer` only). */
+  /** Deliveries the deferred batch carried (`maintenance_defer` only). */
   batch_size?: number;
   idempotency_key?: string;
   /**
-   * invariant: review_checks.id — the Check attempt row a line is about, and the only
+   * review_checks.id — the Check attempt row a line is about, and the only
    * join key a give-up line carries: that row owns the remote run id.
    */
   attempt_id?: string;
   /**
-   * invariant: The attempt whose admission row an expired successor refused
+   * The attempt whose admission row an expired successor refused
    * (`review_succession_refused` only): the PR stays held by that attempt.
    */
   prior_attempt_id?: string;
-  /** invariant: Which legal fact the successor lacked (`review_succession_refused` only). */
+  /** Which legal fact the successor lacked (`review_succession_refused` only). */
   succession?: "no-container" | "revoked" | "running" | "unavailable";
   /**
-   * why: Why the consumer stopped waiting on the Check hook (§7.10 give-up) — the
+   * Why the consumer stopped waiting on the Check hook (§7.10 give-up) — the
    * free-form detail, distinct from `reason`'s closed admission vocabulary.
    */
   check_reason?: string;
-  /** invariant: Whether a refused settlement adoption could name a live row to hand over. */
+  /** Whether a refused settlement adoption could name a live row to hand over. */
   check_recovery_owed?: boolean;
   /**
-   * why: The metered ledger identity (`usage_events.review_id`) and its workspace.
+   * The metered ledger identity (`usage_events.review_id`) and its workspace.
    * Carried on the usage-write failure lines so a dropped attempt can be
    * reconciled from logs as well as from the `usage` failure row.
    */
   review_id?: string;
   workspace_id?: string;
-  /** invariant: The degraded concurrency read's cap (always the conservative 1 when degraded). */
+  /** The degraded concurrency read's cap (always the conservative 1 when degraded). */
   effective?: number;
-  /** note: The degraded recheck ask-budget read's value (the runner's documented default). */
+  /** The degraded recheck ask-budget read's value (the runner's documented default). */
   max_bytes?: number;
   /**
-   * note: The `review_recheck_no_fit` pair: the operator's ask budget for that round
+   * The `review_recheck_no_fit` pair: the operator's ask budget for that round
    * and the bytes the SMALLEST document it could build still needs (the ask's
    * prose, one finding's fixed fields and the discussion — no body, no
    * catalog). Together they say whether the budget or the ask is the limit.
    */
   assignment_max_bytes?: number;
   required_bytes?: number;
-  /** note: Selected-row count on a round-level line (`review_recheck_no_fit`). */
+  /** Selected-row count on a round-level line (`review_recheck_no_fit`). */
   selected?: number;
   /**
-   * why: Why a degraded settings read answered conservatively — the runtime-config
+   * Why a degraded settings read answered conservatively — the runtime-config
    * store's cause (`read-failed` / `malformed` / `untrusted`), relayed by the
    * concurrency and check-budget readers. Its own key because `reason` here is
    * the closed admission vocabulary.
    */
   degraded_reason?: DegradedReason;
   /**
-   * invariant: Review admission (§1.3): WHY the in-flight guard held this message —
+   * Review admission (§1.3): WHY the in-flight guard held this message —
    * `pr-held` (this PR already has a live review), `system-cap` /
    * `workspace-cap` (that capacity bound was reached), or `error` (the
    * storage decision failed and fail-closed refused). Set on the guard-held
@@ -462,51 +464,51 @@ export type ConsumerLogFields = {
    */
   reason?: InflightRefusal | "superseded";
   /**
-   * invariant: On a `superseded` line only: the ledger's newer `head_at` that overtook
+   * On a `superseded` line only: the ledger's newer `head_at` that overtook
    * this delivery, so an operator can explain the missing review without a
    * second query.
    */
   superseded_by_head_at?: string;
-  /** invariant: The system-wide cap the refusal was measured against (the admission-time read). */
+  /** The system-wide cap the refusal was measured against (the admission-time read). */
   system_cap?: number;
-  /** why: The workspace's own cap at that same decision — both ride the line so an
+  /** The workspace's own cap at that same decision — both ride the line so an
    * operator can tell a busy tenant from a full deployment. */
   workspace_cap?: number;
   /**
-   * invariant: Only on an `error` refusal: the storage cause. A dead D1 binding and a
+   * Only on an `error` refusal: the storage cause. A dead D1 binding and a
    * capacity released between the two admission statements share the refusal
    * code, and this string is what tells them apart on the log line and in the
    * terminal drop's `review_failures` row.
    */
   error_cause?: string;
-  /** note: Whether a failed usage insert landed: true, false (verified absent), or unreadable. */
+  /** Whether a failed usage insert landed: true, false (verified absent), or unreadable. */
   usage_applied?: boolean | "unknown";
-  /** note: Review depth resolved for this message (the App row, else the operator default). */
+  /** Review depth resolved for this message (the App row, else the operator default). */
   level?: ReviewLevel;
-  /** note: Runner wall-clock ceiling for `level` (ms) — runnerTimeoutMs(level). */
+  /** Runner wall-clock ceiling for `level` (ms) — runnerTimeoutMs(level). */
   runner_timeout_ms?: number;
-  /** note: The tier request the anchor planned (ms) — the derivation's requested budget. */
+  /** The tier request the anchor planned (ms) — the derivation's requested budget. */
   runner_requested_ms?: number;
-  /** note: `min(request, cutoff - anchor)` (ms): what the exec actually received. */
+  /** `min(request, cutoff - anchor)` (ms): what the exec actually received. */
   runner_effective_ms?: number;
-  /** note: The absolute pre-runner cutoff the effective value was capped against. */
+  /** The absolute pre-runner cutoff the effective value was capped against. */
   runner_cutoff_ms?: number;
-  /** note: The absolute instant the input write, the wire deadline and the exec all end at. */
+  /** The absolute instant the input write, the wire deadline and the exec all end at. */
   runner_deadline_ms?: number;
-  /** note: The diff-size estimate the request was sized from (null: size unknown → tier max). */
+  /** The diff-size estimate the request was sized from (null: size unknown → tier max). */
   runner_work_units?: number | null;
-  /** note: Runner exec elapsed wall-clock (ms) — set on runner-attempt log lines. */
+  /** Runner exec elapsed wall-clock (ms) — set on runner-attempt log lines. */
   elapsed_ms?: number;
-  /** note: Runner orchestration: deep = parent session; quick/default = Bun fan-out. */
+  /** Runner orchestration: deep = parent session; quick/default = Bun fan-out. */
   orchestration?: "bun-fanout" | "parent";
   /**
-   * safety: Per-App key assembly (per-App messages only): the provider id
+   * Per-App key assembly (per-App messages only): the provider id
    * (a PROVIDERS key) the key_source field refers to. An id, never a
    * credential — key material is NEVER logged.
    */
   provider?: string;
   /**
-   * note: Which source supplied `provider`'s key for the runner env: the App's own
+   * Which source supplied `provider`'s key for the runner env: the App's own
    * per-App BYOK config ("app") or a custom-provider declaration keyed by
    * provider id ("custom" — AL-23-1). AL-24-5: the former
    * "global" source was retired with the zero-global-fallback cutover —
@@ -514,21 +516,21 @@ export type ConsumerLogFields = {
    */
   key_source?: "app" | "custom";
   /**
-   * invariant: The runner env's config source for a per-App message: ALWAYS "app" —
+   * The runner env's config source for a per-App message: ALWAYS "app" —
    * keys and the model chain come only from the App's own config
    * (AL-24-5 zero global fallback; the "fallback" variant was retired with
    * the global env surface).
    */
   config_source?: "app";
   /**
-   * invariant: AL-3: the line-comments createReview FAILED after the
+   * AL-3: the line-comments createReview FAILED after the
    * overall comment landed (residual 422 position validation or any other
    * Octokit error) — the review degraded to overall-comment-only for this
    * round. The overall comment + D1 row + KV done are unaffected.
    */
   line_comments_fallback?: boolean;
   /**
-   * invariant: Bugbot round-2 fix: the degraded-comment cleanup outcome on the success
+   * Bugbot round-2 fix: the degraded-comment cleanup outcome on the success
    * path — how many stale bot-authored `review-degraded:v1` comments were
    * deleted vs skipped (403/404 foreign/already-gone, or any other
    * per-match error). Counts, never content; the error messages ride the
@@ -537,13 +539,13 @@ export type ConsumerLogFields = {
   degraded_delete_deleted?: number;
   degraded_delete_skipped?: number;
   /**
-   * invariant: S-3 / qc3 F-003: the previous-round fingerprint query
+   * S-3 / qc3 F-003: the previous-round fingerprint query
    * THREW — repeat dedup degraded to first-round semantics (empty set).
    * Set only on the dedup-failure warn; an empty previous round is silent.
    */
   dedup?: "degraded";
   /**
-   * safety: Recheck round attribution (§7.8): the seat's own status outcome
+   * Recheck round attribution (§7.8): the seat's own status outcome
    * (`ok` / `skipped` / `failed`, or `absent` when no status document was
    * written), its reason, the redacted error, the rows the gate rejected and
    * the rows the document actually assessed. Present on the round's single
@@ -554,14 +556,14 @@ export type ConsumerLogFields = {
   recheck_error?: string | null;
   rejected?: number;
   /**
-   * why: Unnamed gate drops the status claimed beyond the rows that could
+   * Unnamed gate drops the status claimed beyond the rows that could
    * legitimately have produced them (sent, unanswered, unnamed). Ignored, and
    * counted here so a seat-authored overcount is visible rather than silent.
    */
   rejected_unnamed_ignored?: number;
   assessed?: number;
   /**
-   * invariant: Set on the diff-capture warn, naming WHY the captured text cannot prove a
+   * Set on the diff-capture warn, naming WHY the captured text cannot prove a
    * row: `empty` (the exec exited 0 and delivered nothing while the same
    * round's numstat shows a diff — a capture failure), `overflow` (the diff
    * exists but is over DIFF_PREFETCH_MAX_BYTES) or `unreadable` (the sandbox
@@ -571,14 +573,14 @@ export type ConsumerLogFields = {
    */
   diff_capture?: "empty" | "overflow" | "unreadable";
   /**
-   * invariant: Set on the oversized-diff line: `gh pr diff` refused the PR (GitHub's
+   * Set on the oversized-diff line: `gh pr diff` refused the PR (GitHub's
    * 20,000-line API ceiling) and the captured diff came from the clone's
    * merge-base..head diff instead. The capture then takes the ordinary
    * bounded-read path, so `diff_capture` keeps its failure-only meaning.
    */
   diff_source?: "oversized-local";
   /**
-   * safety: Set on the fallback's ONE decline warn: why the oversized-diff capture
+   * Set on the fallback's ONE decline warn: why the oversized-diff capture
    * produced nothing, and the step it stopped at. `budget` / `step-timeout`
    * declined before that step's exec ran, `guard-rejected` is a hostile
    * ref/sha refused before it reached a shell string, `merge-base-unreadable`
@@ -591,7 +593,7 @@ export type ConsumerLogFields = {
   diff_fallback?: DiffCaptureDeclineReason;
   diff_fallback_step?: string;
   /**
-   * invariant: Increment-round diagnostics: the compare gate's answer when the round
+   * Increment-round diagnostics: the compare gate's answer when the round
    * reviewed the full diff — the verdict (`ahead` is the only one that CAN
    * start an increment round), `unusable` (exit 0 without a readable gate
    * answer) or `ahead-merge` (an ahead range carrying a merge commit or a
@@ -601,12 +603,12 @@ export type ConsumerLogFields = {
   increment_status?: string;
   increment_since?: string;
   /**
-   * invariant: Set when the increment base read itself failed (a D1/schema fault): the
+   * Set when the increment base read itself failed (a D1/schema fault): the
    * round keeps the full-diff fallback, and this is the only trace of it.
    */
   increment_base?: "lookup-failed";
   /**
-   * why: Why the increment capture could not be trusted — `empty` (exit 0, nothing
+   * Why the increment capture could not be trusted — `empty` (exit 0, nothing
    * delivered), `unreadable` (no flag line) or `too_large` (the compare API
    * refused the base...head diff, GitHub's 20,000-line ceiling). Its own field,
    * so a full-diff capture failure and an increment capture failure never read
@@ -615,7 +617,7 @@ export type ConsumerLogFields = {
    */
   increment_capture?: "empty" | "unreadable" | "too_large";
   /**
-   * why: Why the report seat's PR-context capture yielded nothing: `pr-view` (the
+   * Why the report seat's PR-context capture yielded nothing: `pr-view` (the
    * `gh pr view` exec failed), `pr-view-json` (its reply was not the JSON shape
    * asked for), `issue-view` (one referenced issue could not be read),
    * `issue-view-json` (an issue reply was not that shape) or `budget` (the round
@@ -626,7 +628,7 @@ export type ConsumerLogFields = {
   report_context?: ReportContextFailure;
   report_context_issue?: number;
   /**
-   * why: Why the seat's report document yielded no sections (the `none` headings):
+   * Why the seat's report document yielded no sections (the `none` headings):
    * one named cause per rejected read, so a missing narrative is attributable
    * instead of silently absent. `absent` means the read itself proved the seat
    * wrote no document; `unreadable` is a broken read of it, so the two never
@@ -635,7 +637,7 @@ export type ConsumerLogFields = {
    * in `report_doc_head_sha` (a validated sha, never free text).
    */
   /**
-   * invariant: The runner's applied-model document read: `absent` is the ordinary
+   * The runner's applied-model document read: `absent` is the ordinary
    * no-model-served shape; the rest name a fault that left `reviews.provider`
    * unrecorded (never replaced by the chain head).
    */
@@ -643,10 +645,10 @@ export type ConsumerLogFields = {
   report_doc?: "absent" | "unreadable" | "overflow" | "empty" | "invalid-json" | "invalid-document" | "stale-head";
   report_doc_error?: string;
   report_doc_head_sha?: string;
-  /** note: The resolved `budget-exhausted` record, on the one `review failed` line the stop emits. */
+  /** The resolved `budget-exhausted` record, on the one `review failed` line the stop emits. */
   budget_outcome?: BudgetExhaustedOutcome;
   /**
-   * safety: A sandbox kill's redacted provider stderr tail: untrusted text that rides
+   * A sandbox kill's redacted provider stderr tail: untrusted text that rides
    * ONE log line so the durable row can carry only trusted budget fields.
    */
   stderr_tail?: string;
@@ -683,13 +685,13 @@ export type ConsumerLog = {
 export type ProcessOutcome =
   | { kind: "ok" }
   /**
-   * invariant: The admitted attempt was handed to its Workflow instance. The delivery's
+   * The admitted attempt was handed to its Workflow instance. The delivery's
    * work is over here: the instance owns every later settlement, so the queue
    * acks and never redelivers into a second attempt.
    */
   | { kind: "routed" }
   /**
-   * invariant: `heldHeadSha` is the commit the live row was taken for (`null` when the
+   * `heldHeadSha` is the commit the live row was taken for (`null` when the
    * refusal was a cap/storage one, so no row holds this PR): the terminal ack
    * records the drop unless the live review covers this message's own sha.
    */
@@ -699,7 +701,7 @@ export type ProcessOutcome =
       heldHeadSha: string | null;
       commentClaimConsumed: boolean;
       /**
-       * invariant: The App's resolved review depth, carried from the same row read that
+       * The App's resolved review depth, carried from the same row read that
        * admitted this message: the retry schedule must follow the App, and the
        * ack path runs AFTER processMessage returns — never a second lookup.
        */
@@ -708,7 +710,7 @@ export type ProcessOutcome =
   | { kind: "paused" }
   | { kind: "degraded" }
   /**
-   * safety: The ledger already holds a NEWER commit for this PR (`pull_requests`
+   * The ledger already holds a NEWER commit for this PR (`pull_requests`
    * migration 0044): this delivery is acked after per-App credential
    * resolution (the paused gate needs it) and before admission, sandbox, Check
    * or publication — no retry, no DLQ, no failure row. The next delivery for
@@ -716,14 +718,14 @@ export type ProcessOutcome =
    */
   | { kind: "superseded" }
   /**
-   * note: The wall clock ended the attempt: a `budget-exhausted:` failure row and
+   * The wall clock ended the attempt: a `budget-exhausted:` failure row and
    * a Check `failure` already landed inside `processMessage`; the message is
    * acked directly — terminal, so no paid queue retry and no DLQ entry. The
    * typed record rides for the report.
    */
   | { kind: "budget-exhausted"; outcome: BudgetExhaustedOutcome }
   /**
-   * invariant: The attempt's container could not be proven to be the one it prepared, so
+   * The attempt's container could not be proven to be the one it prepared, so
    * its result was not collected. No result was claimed from it, nothing was
    * failed, destroyed or reclaimed: the Check stays `in_progress`, the admission
    * row holds until its TTL and the container is left alone (it may carry the
@@ -742,7 +744,7 @@ export type ProcessOutcome =
  */
 export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_cap" | "workspace_cap">> &
   Pick<ConsumerLogFields, "error_cause"> & {
-    /** invariant: Narrowed: the guard outcomes never carry the `superseded` skip value. */
+    /** Narrowed: the guard outcomes never carry the `superseded` skip value. */
     reason: InflightRefusal;
   };
 
@@ -772,7 +774,7 @@ export async function settleSkippedRow(
   attachedHeadSha: string | null | undefined,
   reason: string,
   /**
-   * invariant: `announceNoOp` names a no-op settlement (the moved-head path, whose only
+   * `announceNoOp` names a no-op settlement (the moved-head path, whose only
    * other line says why); `paused` marks a skip the App's pause caused, which
    * the Check settles under the approved `paused` category.
    */
@@ -782,7 +784,7 @@ export async function settleSkippedRow(
     deps.checks?.settleSkipped === undefined ||
     attachedHeadSha === null ||
     attachedHeadSha === undefined ||
-    // note: No attach identity means the delivery attached no run at all (a mention
+    // No attach identity means the delivery attached no run at all (a mention
     // with no SHA the webhook could attach for): the lifecycle would answer
     // `false` silently.
     payload.attachDeliveryId === undefined
@@ -807,7 +809,7 @@ export async function settleSkippedRow(
       headSha: attachedHeadSha,
       triggeredBy: payload.triggered_by,
       action: payload.action,
-      // note: THIS delivery's attach identity: a message whose attach found the key
+      // THIS delivery's attach identity: a message whose attach found the key
       // owned (or whose inline budget expired) carries none, so it settles
       // nothing rather than taking another delivery's run (§7.9).
       attachDeliveryId: payload.attachDeliveryId,
@@ -825,7 +827,7 @@ export async function settleSkippedRow(
 }
 
 /**
- * invariant: Apply the ONE settlement rule for this attempt and report a fault without
+ * Apply the ONE settlement rule for this attempt and report a fault without
  * failing the review: an attempt whose mark could not be written stays
  * unsettled, which is exactly what the operator's report will say.
  */
@@ -880,7 +882,7 @@ export type CheckLifecycleHooks = {
     action: string;
     executionDeadlineMs: number;
     /**
-     * invariant: The per-invocation abandonment latch for THIS call: the
+     * The per-invocation abandonment latch for THIS call: the
      * consumer trips it when its §7.10 budget elapses, and a lifecycle that
      * reads it stops attaching on behalf of a caller that is gone. Optional and
      * additive — an implementation may ignore it, and the field is never shared
@@ -889,7 +891,7 @@ export type CheckLifecycleHooks = {
     latch?: CheckBeginLatch;
   }): Promise<CheckHandle | null>;
   /**
-   * invariant: §7.9 status truthfulness (optional, additive): the run was created
+   * §7.9 status truthfulness (optional, additive): the run was created
    * `queued` at delivery acceptance, so the review's own begin is what makes
    * the public status `in_progress`. A settled answer means the send is over
    * (landed or cleanly refused); `abandoned` means its budget ended the wait
@@ -899,28 +901,28 @@ export type CheckLifecycleHooks = {
    */
   markInProgress?(input: {
     handle: CheckHandle;
-    /** note: The one text the promoted run carries. */
+    /** The one text the promoted run carries. */
     summary: string;
-    /** note: `review.check.update_timeout_ms` — its own bound, not the begin hook's. */
+    /** `review.check.update_timeout_ms` — its own bound, not the begin hook's. */
     updateBudgetMs: number;
-    /** note: One warn when the best-effort send failed or ran out of budget. */
+    /** One warn when the best-effort send failed or ran out of budget. */
     warn: (detail: string) => void;
   }): Promise<CheckPromotion>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
     outcome: CheckTerminalOutcome;
     /**
-     * safety: The reviewed head an EMPTY increment inherits: the Check carries that
+     * The reviewed head an EMPTY increment inherits: the Check carries that
      * head's result against the current gate instead of a free-standing
      * `neutral`; an unreadable baseline fails closed. Omitted → nothing to
      * inherit.
      */
     inheritedHeadSha?: string;
-    /** invariant: Required with `outcome: "budget-exhausted"`: this attempt's typed stop record — the frozen Check summary's budget facts. */
+    /** Required with `outcome: "budget-exhausted"`: this attempt's typed stop record — the frozen Check summary's budget facts. */
     budgetExhaustion?: BudgetExhaustedOutcome;
-    /** note: The operator-configured bound on the terminal `checks.update` (spec §7.10). */
+    /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
     updateBudgetMs: number }): Promise<void>;
   /**
-   * invariant: §7.10 give-up handoff (optional, additive): the consumer stopped waiting
+   * §7.10 give-up handoff (optional, additive): the consumer stopped waiting
    * on `terminalize` — its budget elapsed, the hook threw, or the checkout
    * contradicted the claim. The lifecycle freezes a terminal intent ONLY when
    * none is frozen (the predicate is in the UPDATE, so a concurrent
@@ -942,17 +944,17 @@ export type CheckLifecycleHooks = {
   abandonTerminalize?(input: {
     handle: CheckHandle;
     reason: string;
-    /** note: The terminal knowledge this hand-off carries; omitted → `unconfirmed`. */
+    /** The terminal knowledge this hand-off carries; omitted → `unconfirmed`. */
     outcome?: CheckTerminalOutcome;
-    /** invariant: Required with `outcome: "budget-exhausted"`: the same record the terminal path carries. */
+    /** Required with `outcome: "budget-exhausted"`: the same record the terminal path carries. */
     budgetExhaustion?: BudgetExhaustedOutcome;
-    /** note: Set with `outcome: "skipped"`: the head whose result the run inherits. */
+    /** Set with `outcome: "skipped"`: the head whose result the run inherits. */
     inheritedHeadSha?: string;
-    /** note: Delay this row's first recovery attempt past an abandoned send's lifetime. */
+    /** Delay this row's first recovery attempt past an abandoned send's lifetime. */
     firstRecoveryDelayMs?: number;
   }): Promise<boolean>;
   /**
-   * invariant: §7.9 skip settlement (optional, additive): the delivery ACKs before (or
+   * §7.9 skip settlement (optional, additive): the delivery ACKs before (or
    * without) a handle — an idempotency hit, a publication-journal hand-off, an
    * in-flight guard rejection, a paused App — so its attached run has nobody to
    * terminalize it. The lifecycle takes that row and concludes it from the
@@ -965,15 +967,15 @@ export type CheckLifecycleHooks = {
     headSha: string;
     triggeredBy: string;
     action: string;
-    /** note: THIS delivery's attach identity — absent means it created no row. */
+    /** THIS delivery's attach identity — absent means it created no row. */
     attachDeliveryId?: string;
     reason: string;
-    /** invariant: One warn when the proof cannot be parsed (fallback) or read (nothing settled). */
+    /** One warn when the proof cannot be parsed (fallback) or read (nothing settled). */
     warn?: (detail: string) => void;
     updateBudgetMs?: number;
   }): Promise<boolean>;
   /**
-   * invariant: §7.10 held-Check visibility (optional, additive): the in-flight guard
+   * §7.10 held-Check visibility (optional, additive): the in-flight guard
    * refused this delivery while its Check was already attached. The run is
    * created `queued` at delivery acceptance, so the relabel adds which live
    * review holds the slot — the status stays `queued` and only the text moves.
@@ -987,15 +989,15 @@ export type CheckLifecycleHooks = {
     action: string;
     attachDeliveryId?: string;
     summary: string;
-    /** note: `review.check.update_timeout_ms` — the relabel sits before this path's retry. */
+    /** `review.check.update_timeout_ms` — the relabel sits before this path's retry. */
     updateBudgetMs: number;
-    /** note: One warn when the best-effort send failed or ran out of budget. */
+    /** One warn when the best-effort send failed or ran out of budget. */
     warn: (detail: string) => void;
   }): Promise<boolean>;
 };
 
 /**
- * invariant: §7.3 catalog budget: "Diff capture plus catalog is bounded to 256 KiB; at
+ * §7.3 catalog budget: "Diff capture plus catalog is bounded to 256 KiB; at
  * most 4 slices per target, 80 lines/8 KiB per slice." Oversized evidence is
  * excluded (no eligible slice), never silently truncated.
  */
@@ -1003,13 +1005,13 @@ const RECHECK_CATALOG_MAX_BYTES = 262_144;
 const RECHECK_SLICE_MAX_LINES = 80;
 const RECHECK_SLICE_MAX_BYTES = 8 * 1024;
 const RECHECK_SLICES_PER_TARGET = 4;
-/** note: §7.3 input cap: oversized whole targets are excluded with coverage. */
+/** §7.3 input cap: oversized whole targets are excluded with coverage. */
 const RECHECK_INPUT_MAX_BYTES = 512 * 1024;
-/** note: The wire schema this consumer serializes (measured and written as one). */
+/** The wire schema this consumer serializes (measured and written as one). */
 const RECHECK_INPUT_SCHEMA = "mstar.recheck-input/v1";
 
 /**
- * invariant: Await a promise with the relevant §7.10 hook budget as a hard consumer-side
+ * Await a promise with the relevant §7.10 hook budget as a hard consumer-side
  * bound. The bound is on the CONSUMER's wait, not on the hook's work: a hook
  * that settles late keeps running detached — this guard creates no AbortSignal
  * (the locked seam exposes none), so a late create can still complete durably
@@ -1035,7 +1037,7 @@ async function withHookTimeout<T>(
       resolve(fallback);
     }, budgetMs);
   });
-  // invariant: A hook rejecting AFTER its timeout won the race must not surface as an
+  // A hook rejecting AFTER its timeout won the race must not surface as an
   // unhandled rejection — the failure is already treated as the fallback.
   promise.catch(() => {});
   try {
@@ -1045,13 +1047,13 @@ async function withHookTimeout<T>(
   }
 }
 
-/** note: One JSON.stringify size in UTF-8 bytes (bounded-input accounting). */
+/** One JSON.stringify size in UTF-8 bytes (bounded-input accounting). */
 function jsonByteLength(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length;
 }
 
 /**
- * invariant: `body` cut to at most `length` code units and marked truncated — the same
+ * `body` cut to at most `length` code units and marked truncated — the same
  * marker a clamped discussion item carries, so the seat reads a short body and
  * never mistakes it for the whole concern. A surrogate pair is never split: a
  * lone half would serialize as a replacement escape and change the bytes the
@@ -1059,7 +1061,7 @@ function jsonByteLength(value: unknown): number {
  */
 function truncatedBody(body: string, length: number): string {
   const cut = Math.max(0, Math.min(length, body.length));
-  // invariant: Nothing was cut: a body that fits whole must never claim it was shortened.
+  // Nothing was cut: a body that fits whole must never claim it was shortened.
   if (cut >= body.length) return body;
   const end = cut > 0 && /[\uD800-\uDBFF]/.test(body[cut - 1]!) ? cut - 1 : cut;
   return body.slice(0, end) + BODY_TRUNCATED_SUFFIX;
@@ -1078,14 +1080,14 @@ export async function journalHandoffRow(
   scope: Scope,
   headSha: string,
 ): Promise<{ id: string; phase: PublicationRow["phase"] } | null> {
-  // invariant: The predicate is SHARED with the Check recovery lane's wait-for-proof probe
+  // The predicate is SHARED with the Check recovery lane's wait-for-proof probe
   // (`findPublicationJournal`); only the phase set differs, because a delivery
   // also hands off a `confirmed` row whose proof is about to be applied.
   return findPublicationJournal(db, { scope, headSha, phases: PUBLICATION_HANDOFF_PHASES });
 }
 
 /**
- * invariant: §7.7 step 3: apply this scope's pending CONFIRMED journals in original
+ * §7.7 step 3: apply this scope's pending CONFIRMED journals in original
  * publication order (oldest first) before the lifecycle assessment — an
  * older assessment must never lose to a newer unapplied recurrence. Each
  * row: conditional claim (epoch-fenced) → proof-gated idempotent apply. Any
@@ -1112,7 +1114,7 @@ async function applyPendingLifecycleJournals(
     let applied = false;
     try {
       const at = Date.now();
-      // why: The apply COMPLETES the attempt that staged this journal, so its
+      // The apply COMPLETES the attempt that staged this journal, so its
       // settlement rides the same transaction — but the rule reads the
       // attempt's durable obligations BEFORE the batch and emits a
       // self-checking statement for it.
@@ -1197,7 +1199,7 @@ export function extractIssueRefs(prBody: string): number[] {
   return [...seen];
 }
 
-/** safety: Bound untrusted text by characters, marking the cut. */
+/** Bound untrusted text by characters, marking the cut. */
 function clampContextText(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n[... truncated ...]`;
 }
@@ -1225,7 +1227,7 @@ export const PR_CONTEXT_EXEC_TIMEOUT_MS = 30_000;
 export const PR_CONTEXT_WORST_CASE_MS = (1 + PR_CONTEXT_MAX_ISSUES) * PR_CONTEXT_EXEC_TIMEOUT_MS;
 
 /**
- * invariant: Capture the PR context the report seat reads: the PR description, then up
+ * Capture the PR context the report seat reads: the PR description, then up
  * to `PR_CONTEXT_MAX_ISSUES` issues it closes/references. Every value is
  * clamped — this is attacker-controlled prose that rides into a prompt.
  *
@@ -1258,13 +1260,13 @@ async function capturePrContext(
       `report context ${cause}${issue === undefined ? "" : ` (issue #${issue})`} — report sections degrade to none`,
     );
   };
-  // invariant: What the DERIVED deadline still owes one read; null once it is spent, so a
+  // What the DERIVED deadline still owes one read; null once it is spent, so a
   // read never starts on a fresh window.
   const readBudget = (): number | null => {
     const left = Math.min(PR_CONTEXT_EXEC_TIMEOUT_MS, runnerDeadlineMs - Date.now());
     return left > 0 ? left : null;
   };
-  // invariant: The capture is spent BEFORE the paid run, and the post-runner bounded reads
+  // The capture is spent BEFORE the paid run, and the post-runner bounded reads
   // share the same derived deadline, so both worst cases must still fit ahead
   // of it — a capture that consumed the whole remainder would starve them.
   const remainingMs = runnerDeadlineMs - Date.now();
@@ -1300,7 +1302,7 @@ async function capturePrContext(
     return undefined;
   }
   const issues: PrContext["issues"] = [];
-  // invariant: One gh read may burn its whole window, so the remaining time also bounds
+  // One gh read may burn its whole window, so the remaining time also bounds
   // how many issue reads start: never more than the deadline can still fund.
   const maxIssueReads = Math.min(
     PR_CONTEXT_MAX_ISSUES,
@@ -1342,7 +1344,7 @@ async function capturePrContext(
 }
 
 /**
- * why: One hunk line: `old`/`new` are its own file line numbers (null when the
+ * One hunk line: `old`/`new` are its own file line numbers (null when the
  * side has no counterpart), `oldBefore`/`newBefore` the counters BEFORE the
  * line was consumed, and `text` the line content without the diff marker.
  * A sub-window of an oversized hunk states its start lines from these
@@ -1350,7 +1352,7 @@ async function capturePrContext(
  */
 type HunkLine = { old: number | null; new: number | null; oldBefore: number; newBefore: number; text: string };
 
-/** note: A parsed unified-diff hunk with its old/new line arrays (evidence raw material). */
+/** A parsed unified-diff hunk with its old/new line arrays (evidence raw material). */
 type ParsedDiffHunk = {
   oldStart: number;
   oldLines: string[];
@@ -1362,7 +1364,7 @@ type ParsedDiffHunk = {
 type ParsedDiffFile = {
   path: string;
   oldPath: string | null;
-  /** note: Deleted file (`+++ /dev/null`): absent at HEAD. */
+  /** Deleted file (`+++ /dev/null`): absent at HEAD. */
   deleted: boolean;
   oldBlobOid: string | null;
   headBlobOid: string | null;
@@ -1370,7 +1372,7 @@ type ParsedDiffFile = {
 };
 
 /**
- * invariant: Parse a unified diff into per-file hunks (worker-controlled §7.3 trusted
+ * Parse a unified diff into per-file hunks (worker-controlled §7.3 trusted
  * capture raw material — never model output). Handles renames (b-side new
  * path), deleted files (`+++ /dev/null`), new files, multiple hunks per
  * file, abbreviated `index <old>..<head>` blob oids, and skips binary files
@@ -1382,7 +1384,7 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
   let hunk: ParsedDiffHunk | null = null;
   let remainingOld = 0;
   let remainingNew = 0;
-  // note: Running file line numbers for the hunk being read (the header's starts).
+  // Running file line numbers for the hunk being read (the header's starts).
   let oldNo = 0;
   let newNo = 0;
   for (const line of diffText.split("\n")) {
@@ -1408,7 +1410,7 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
         newNo += 1;
         remainingNew -= 1;
       }
-      // note: "\" ("\ No newline at end of file") consumes neither tally.
+      // "\" ("\ No newline at end of file") consumes neither tally.
       if (remainingOld <= 0 && remainingNew <= 0) hunk = null;
       continue;
     }
@@ -1463,7 +1465,7 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
 }
 
 /**
- * invariant: Build the §7.3 trusted evidence catalog for the selected targets from the
+ * Build the §7.3 trusted evidence catalog for the selected targets from the
  * worker-captured diff: per target at most `RECHECK_SLICES_PER_TARGET`
  * slices from its file (nearest the original concern's line first), each
  * bounded to 80 lines / 8 KiB per side, whole catalog bounded to 256 KiB.
@@ -1508,7 +1510,7 @@ function buildEvidenceCatalog(
   const sizeOf = (slice: EvidenceSlice): number => jsonByteLength(slice);
 
   /**
-   * invariant: One candidate slice body. `oldStart`/`newStart` come straight from the
+   * One candidate slice body. `oldStart`/`newStart` come straight from the
    * hunk's own per-line counters, so a window's arithmetic stays exact against
    * the hunk header (the file lines it names are the lines it carries), and
    * `addedNewLines` carries the new-side numbers the hunk ADDED — the material
@@ -1539,7 +1541,7 @@ function buildEvidenceCatalog(
     };
   };
 
-  /** note: A hunk as ONE draft when it fits, else consecutive ≤80-line windows. */
+  /** A hunk as ONE draft when it fits, else consecutive ≤80-line windows. */
   const draftsOf = (file: ParsedDiffFile, hunk: ParsedDiffHunk): Draft[] => {
     const fits =
       hunk.oldLines.length <= RECHECK_SLICE_MAX_LINES && hunk.newLines.length <= RECHECK_SLICE_MAX_LINES;
@@ -1559,7 +1561,7 @@ function buildEvidenceCatalog(
         },
       ];
     }
-    // why: An oversized DELETED file stays excluded: absence is proven by the whole
+    // An oversized DELETED file stays excluded: absence is proven by the whole
     // file, so a fragment of it would be a weaker claim, not a local one.
     if (file.deleted) return [];
     const drafts: Draft[] = [];
@@ -1570,7 +1572,7 @@ function buildEvidenceCatalog(
   };
 
   /**
-   * invariant: One catalog entry, or WHY it could not be added: `size` is a slice that
+   * One catalog entry, or WHY it could not be added: `size` is a slice that
    * cannot be trusted within the per-slice bound (no eligible slice exists
    * for this draft), `catalog` is a well-formed slice the catalog byte budget
    * no longer fits (a budget exclusion, not a missing proof). The caller's id
@@ -1603,7 +1605,7 @@ function buildEvidenceCatalog(
   for (const target of targets) {
     const filePath = target.original.filePath;
     if (filePath === null) {
-      excludedTargets.add(target.rowId); // note: repo-level concern: no diff slice can prove it
+      excludedTargets.add(target.rowId); // repo-level concern: no diff slice can prove it
       continue;
     }
     const matching = files.filter((f) => f.path === filePath || f.oldPath === filePath);
@@ -1627,7 +1629,7 @@ function buildEvidenceCatalog(
       const shared = sliceIdByKey.get(key);
       if (shared !== undefined) {
         referenced.push(shared);
-        included += 1; // note: the hunk is already in the catalog — targets share slices
+        included += 1; // the hunk is already in the catalog — targets share slices
         continue;
       }
       const built = addSlice(draft, `ev-${slices.length + 1}`);
@@ -1643,7 +1645,7 @@ function buildEvidenceCatalog(
       included += 1;
     }
     if (included === 0) {
-      // invariant: A row whose slices exist but lost the catalog byte budget is a budget
+      // A row whose slices exist but lost the catalog byte budget is a budget
       // exclusion, never "no evidence".
       if (catalogDenied) catalogBudgetExcluded.add(target.rowId);
       else excludedTargets.add(target.rowId);
@@ -1653,7 +1655,7 @@ function buildEvidenceCatalog(
 }
 
 /**
- * note: Project a current envelope finding onto the §7.3 OriginalFinding wire
+ * Project a current envelope finding onto the §7.3 OriginalFinding wire
  * (the durable original concern shape lifecycle rows store).
  */
 function projectOriginalFinding(finding: ReviewFinding): OriginalFindingProjection {
@@ -1669,11 +1671,11 @@ function projectOriginalFinding(finding: ReviewFinding): OriginalFindingProjecti
   };
 }
 
-/** why: Local alias so the projection needs no runtime import of the contract type. */
+/** Local alias so the projection needs no runtime import of the contract type. */
 type OriginalFindingProjection = RecheckTarget["original"];
 
 /**
- * invariant: §7.4 reconciliation: validate the recheck document
+ * §7.4 reconciliation: validate the recheck document
  * against the trusted input AND the final current findings, applying the
  * CONSERVATIVE precedence —
  *   - same-round recurrence (same fingerprint, or exact normalized original
@@ -1715,22 +1717,22 @@ type OriginalFindingProjection = RecheckTarget["original"];
 function reconcileRecheckRound(input: {
   targets: RecheckTarget[];
   doc: RecheckDoc | null;
-  /** why: The seat's own status document — the reason a round produced no document row. */
+  /** The seat's own status document — the reason a round produced no document row. */
   status: RecheckStatus | null;
   discussion: Discussion;
   output: ReviewOutput;
-  /** note: Stale lifecycle state (failed pending-journal apply or capture): no closure. */
+  /** Stale lifecycle state (failed pending-journal apply or capture): no closure. */
   staleContext: boolean;
-  /** invariant: Selected rows the trusted catalog could not prove: never sent, never assessable. */
+  /** Selected rows the trusted catalog could not prove: never sent, never assessable. */
   catalogExcluded: ReadonlySet<string>;
-  /** invariant: Selected rows whose slices the catalog byte budget dropped: never sent either. */
+  /** Selected rows whose slices the catalog byte budget dropped: never sent either. */
   catalogBudgetExcluded: ReadonlySet<string>;
-  /** note: Selected rows excluded from the recheck input by the §7.3 size budget. */
+  /** Selected rows excluded from the recheck input by the §7.3 size budget. */
   budgetExcluded: ReadonlySet<string>;
-  /** why: Rows the gate dropped from an otherwise accepted document (row content errors). */
+  /** Rows the gate dropped from an otherwise accepted document (row content errors). */
   rejectedRowIds: ReadonlySet<string>;
   /**
-   * note: Gate-dropped rows that carried no usable rowId, so they name no target.
+   * Gate-dropped rows that carried no usable rowId, so they name no target.
    * They are attributed by position among the SENT-and-unanswered rows.
    */
   anonymousRejectedRows: number;
@@ -1738,24 +1740,24 @@ function reconcileRecheckRound(input: {
   assessments: Assessment[];
   outcomeByRowId: Map<string, Assessment>;
   resolutions: { associationId: string; verified: VerifiedResolution }[];
-  /** note: Rows carrying a real seat answer — the published coverage/tally count. */
+  /** Rows carrying a real seat answer — the published coverage/tally count. */
   assessedCount: number;
   /**
-   * why: Unanswered rows whose outcome is `invalid-output` — the same term the
+   * Unanswered rows whose outcome is `invalid-output` — the same term the
    * closure table renders for them: gate-rejected rows, rows sent into a round
    * whose document was absent/invalid, and empty-result rounds. Attempted, so
    * the lifecycle clock moved, but no answer survived.
    */
   invalidOutputCount: number;
   /**
-   * invariant: Unanswered rows that were never attempted (`budget` / `no-evidence` /
+   * Unanswered rows that were never attempted (`budget` / `no-evidence` /
    * `omitted` / `context-incomplete`). Together with the two counts above this
    * accounts for every selected row exactly once:
    * `assessed + invalid-output + omitted === selected`.
    */
   unansweredCount: number;
   /**
-   * note: Unnamed gate drops actually attributed — `min(claimed, pool)`. The caller
+   * Unnamed gate drops actually attributed — `min(claimed, pool)`. The caller
    * logs `anonymousRejectedRows - anonymousRejectedCount` as the ignored excess
    * of a seat-authored count that outran the rows it could legitimately claim.
    */
@@ -1790,7 +1792,7 @@ function reconcileRecheckRound(input: {
   );
   const answeredRowIds = new Set((doc?.results ?? []).map((row) => row.rowId));
 
-  // invariant: A gate rejection with no usable rowId names no target, so the only honest
+  // A gate rejection with no usable rowId names no target, so the only honest
   // mapping is POSITION among the rows that were sent and left unanswered: the
   // seat emitted N results we cannot identify, so the first N such rows are
   // the attempted-and-bad ones. Never-sent rows (catalog exclusion, catalog or
@@ -1815,7 +1817,7 @@ function reconcileRecheckRound(input: {
     anonymouslyRejected.add(target.rowId);
   }
 
-  // invariant: An `empty-result` round is the all-rows-rejected case without a gate drop:
+  // An `empty-result` round is the all-rows-rejected case without a gate drop:
   // the seat returned a valid document with zero results for a non-empty
   // target list, so every row it SENT came back unusable. Those rows were
   // ATTEMPTED, never "never ran" — the per-target exclusion branches below
@@ -1824,7 +1826,7 @@ function reconcileRecheckRound(input: {
 
   for (const target of targets) {
     const docResult = doc?.results.find((r) => r.rowId === target.rowId) ?? undefined;
-    // invariant: Never-sent rows: the catalog could not prove them, the catalog byte
+    // Never-sent rows: the catalog could not prove them, the catalog byte
     // budget dropped their slices, or the §7.3 size budget excluded them.
     // They keep BOTH their own reason and their own rotation clock — a seat
     // that never received the row cannot have answered it.
@@ -1835,31 +1837,31 @@ function reconcileRecheckRound(input: {
     const rejected =
       rejectedRowIds.has(target.rowId) ||
       anonymouslyRejected.has(target.rowId) ||
-      // invariant: Only a row that actually rode the wire can be blamed for the empty
+      // Only a row that actually rode the wire can be blamed for the empty
       // result; `neverSent` keeps every excluded row out of the attempt set.
       (emptyResultRound && docResult === undefined && !neverSent);
     let assessment: Assessment;
     if (staleContext) {
-      // note: Stale lifecycle state (pending-journal apply or capture failed):
+      // Stale lifecycle state (pending-journal apply or capture failed):
       // nothing may close this round, assessed or not.
       assessment = forceUnverifiable(target.rowId, "context-incomplete");
     } else if (catalogExcluded.has(target.rowId)) {
-      // invariant: The trusted catalog could not prove this row from the captured diff,
+      // The trusted catalog could not prove this row from the captured diff,
       // so it never rode the wire — `no-evidence`, never a blamed seat and
       // never the size `budget` (the row was unprovable, not oversized).
       assessment = forceUnverifiable(target.rowId, "no-evidence");
     } else if (catalogBudgetExcluded.has(target.rowId)) {
-      // invariant: Slices for this row exist, but the §7.3 catalog byte budget ran out
+      // Slices for this row exist, but the §7.3 catalog byte budget ran out
       // before they were added — ALSO never sent, yet a budget exclusion:
       // `no-evidence` would claim nothing could prove a provable row.
       assessment = forceUnverifiable(target.rowId, "budget");
     } else if (rejected) {
-      // invariant: The seat answered this row but the gate dropped it (shape / enum /
+      // The seat answered this row but the gate dropped it (shape / enum /
       // evidence error) — the row WAS attempted, so it is invalid output,
       // never "omitted" (never ran) or "budget" (never sent).
       assessment = forceUnverifiable(target.rowId, "invalid-output");
     } else if (docResult === undefined) {
-      // invariant: Omitted selected row: no recheck ran for it. Honest conservative
+      // Omitted selected row: no recheck ran for it. Honest conservative
       // accounting by WHY — the §7.3 size budget excluded it from the input
       // (so it was never sent), the seat's own budget skip, invalid/absent
       // document, or omitted from an otherwise valid document. Never
@@ -1878,7 +1880,7 @@ function reconcileRecheckRound(input: {
       assessment = forceUnverifiable(target.rowId, reason);
     } else {
       assessment = { ...docResult };
-      // note: Conservative precedence vs the SAME round's current findings.
+      // Conservative precedence vs the SAME round's current findings.
       const original = target.original;
       const projected = {
         file_path: original.filePath,
@@ -1892,11 +1894,11 @@ function reconcileRecheckRound(input: {
       const fingerprint = computeFindingFingerprint(projected);
       const composite = computeFindingFingerprint({ ...projected, fingerprint_hint: null });
       if (currentFingerprints.has(fingerprint) || currentComposites.has(composite)) {
-        // invariant: Same-round recurrence (exact or normalized-original match) wins
+        // Same-round recurrence (exact or normalized-original match) wins
         // over recheck closure — never false `addressed`.
         assessment = forceUnverifiable(target.rowId, "conflict");
       } else {
-        // note: Validate model-reported related indexes against the FINAL
+        // Validate model-reported related indexes against the FINAL
         // envelope; any related unresolved concern wins over addressed.
         const inRange = assessment.relatedCurrentFindingIndexes.every((i) => i < output.findings.length);
         if (!inRange) {
@@ -1910,13 +1912,13 @@ function reconcileRecheckRound(input: {
       }
     }
     outcomeByRowId.set(target.rowId, assessment);
-    // invariant: ATTEMPTED rows — answered, or answered and dropped by the gate — are the
+    // ATTEMPTED rows — answered, or answered and dropped by the gate — are the
     // ones whose rotation clock moves. A row with no document row was never
     // accounted by the seat, so it stays un-assessed (§7.2 fair rotation).
     if (docResult !== undefined || rejected) assessments.push(assessment);
   }
 
-  // invariant: Resolution eligibility (§7.4/§7.5): addressed verdicts only, with the
+  // Resolution eligibility (§7.4/§7.5): addressed verdicts only, with the
   // snapshot fences actually captured this round. The ISSUE side needs its
   // FETCH and its MODEL view complete plus a digest: a model that never saw
   // part of the human discussion could miss a rebuttal or a still-open
@@ -1954,7 +1956,7 @@ function reconcileRecheckRound(input: {
     }
   }
 
-  // invariant: Coverage counts REAL seat answers, not the lifecycle clock: a
+  // Coverage counts REAL seat answers, not the lifecycle clock: a
   // gate-rejected row advances `last_assessed_ms` but was never assessed.
   // Every selected row lands in exactly one of these three terms, and the
   // published line states the identity `assessed + invalid-output + omitted =
@@ -1975,14 +1977,14 @@ function reconcileRecheckRound(input: {
     resolutions,
     assessedCount,
     invalidOutputCount,
-    // invariant: Neither a surviving answer nor a gate rejection: `assessments.length` is
+    // Neither a surviving answer nor a gate rejection: `assessments.length` is
     // the lifecycle clock (attempted rows), so it cannot stand in for this.
     unansweredCount: targets.length - assessedCount - invalidOutputCount,
     anonymousRejectedCount,
   };
 }
 
-/** note: The empty discussion for rounds with no open rows (nothing to capture). */
+/** The empty discussion for rounds with no open rows (nothing to capture). */
 function emptyDiscussion(nowMs: number): Discussion {
   return {
     items: [],
@@ -1995,7 +1997,7 @@ function emptyDiscussion(nowMs: number): Discussion {
 }
 
 /**
- * invariant: The round's context coverage (§7.4): complete only when the issue capture
+ * The round's context coverage (§7.4): complete only when the issue capture
  * AND every captured thread snapshot (fetch AND model coverage) are
  * complete — a truncated or unavailable capture never labels a round
  * complete.
@@ -2012,7 +2014,7 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 }
 
 /**
- * invariant: The degraded publication outcome (§7.7 degraded payload). `confirmed` =
+ * The degraded publication outcome (§7.7 degraded payload). `confirmed` =
  * proof persisted (the Check hook reads it and concludes `failure` — a
  * degraded publication cannot prove the review gate was met);
  * `unknown` = a send was attempted but the proof could not be persisted
@@ -2022,11 +2024,11 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 type DegradedPublicationOutcome =
   | { phase: "confirmed"; publicationId: string }
   | { phase: "unknown"; publicationId: string }
-  /** invariant: `publicationClosed`: the journal reached `failed` (or never existed), so nothing is owed. */
+  /** `publicationClosed`: the journal reached `failed` (or never existed), so nothing is owed. */
   | { phase: "failed"; reason: string; publicationClosed: boolean };
 
 /**
- * invariant: The frozen instant fences a FIRST publication: at or past the attempt's
+ * The frozen instant fences a FIRST publication: at or past the attempt's
  * deadline no first result may be sent (plan: the cap "prevents starting new
  * review work or a first result publication at or after expiry"). Both
  * first-send call sites use it — the normal `publish` phase and the degraded
@@ -2048,7 +2050,7 @@ function refusePublicationPastDeadline(deadlineMs: number): void {
 }
 
 /**
- * invariant: Publish the parse-degrade notice through the §7.7 journal (plan: stage →
+ * Publish the parse-degrade notice through the §7.7 journal (plan: stage →
  * claim → send the EXACT prepared body → proof → applied mark). The
  * degraded payload has `artifact: null`, `lifecycle: null`, empty line
  * intents and the bounded final degraded body — no normal review or
@@ -2062,12 +2064,12 @@ async function publishDegradedPublication(input: {
   commenter: ReviewCommenter;
   scope: Scope;
   headSha: string;
-  /** note: §7.9a: the attempt this publication is admitted under (launch row id). */
+  /** §7.9a: the attempt this publication is admitted under (launch row id). */
   admittedAttemptId: string;
-  /** why: The attempt that stages it, so a recovery completing the apply can settle it. */
+  /** The attempt that stages it, so a recovery completing the apply can settle it. */
   attemptId: string;
   /**
-   * note: The owning Check attempt (§7.9): the degraded comment send takes the
+   * The owning Check attempt (§7.9): the degraded comment send takes the
    * publication lease of its action for it. The caller resolves it from the
    * launch row's frozen pair when this host adopted no handle, so absence
    * really means the attempt owns no Check row.
@@ -2075,7 +2077,7 @@ async function publishDegradedPublication(input: {
   checkAttemptId?: string;
   redactedError: string;
   redactedStdout: string;
-  /** note: The attempt's frozen instant, enforced at the mutation (see `guardMutations`). */
+  /** The attempt's frozen instant, enforced at the mutation (see `guardMutations`). */
   notAfterMs: number;
 }): Promise<DegradedPublicationOutcome> {
   const { commenter } = input;
@@ -2085,7 +2087,7 @@ async function publishDegradedPublication(input: {
     repo: input.scope.repo,
     prNumber: input.scope.prNumber,
   };
-  // invariant: §7.9a condition 3: an UPDATE reuses the comment a cleanup may be deleting.
+  // §7.9a condition 3: an UPDATE reuses the comment a cleanup may be deleting.
   // The target exclusion is taken BEFORE staging and held through the send, so
   // a newer staged body and an in-flight delete cannot win separately.
   let targetRef: { commentId: number } | null = null;
@@ -2127,13 +2129,13 @@ async function publishDegradedPublication(input: {
         return {
           phase: "failed",
           reason: `the degraded target ${targetRef.commentId} is held by its cleanup (or its delete is unresolved) — the notice was not staged`,
-          // note: Nothing of this attempt's was staged, so no row is owed to it.
+          // Nothing of this attempt's was staged, so no row is owed to it.
           publicationClosed: true,
         };
       }
     }
     const staged = await stagePublication(input.db, { id: publicationId, payload, nowMs: Date.now() });
-    // invariant: §7.7: an insert conflict returns the EXISTING immutable payload — never
+    // §7.7: an insert conflict returns the EXISTING immutable payload — never
     // overwrite a prepared/confirmed publication with a second model result.
     // Same guard as the review chain: send the STORED payload's identity, or
     // refuse to send at all. Here the caller has no journal payload to fall
@@ -2142,13 +2144,13 @@ async function publishDegradedPublication(input: {
       return {
         phase: "failed",
         reason: `publication journal conflict (existing row ${staged.id}, phase ${staged.phase}) — the immutable payload wins; not sending a second degraded notice`,
-        // note: No row of THIS attempt's is owed; the existing row belongs to another.
+        // No row of THIS attempt's is owed; the existing row belongs to another.
         publicationClosed: true,
       };
     }
     const lease = await claimPublication(input.db, staged.id, `consumer-degraded:${staged.id}`, Date.now(), "prepared");
     if (lease === null) {
-      // note: Our staged row stays `prepared`: recovery still owns it.
+      // Our staged row stays `prepared`: recovery still owns it.
       return { phase: "failed", reason: "publication journal claim failed — degraded notice not sent", publicationClosed: false };
     }
     let sent: { posted: boolean; commentId: number | null };
@@ -2166,7 +2168,7 @@ async function publishDegradedPublication(input: {
         ...(input.checkAttemptId === undefined ? {} : { attemptId: input.checkAttemptId }),
       });
     } catch (err) {
-      // invariant: Refused AT the mutation because the instant had passed: nothing left
+      // Refused AT the mutation because the instant had passed: nothing left
       // the Worker, so this is a WALL-CLOCK STOP, never the `unknown` of a
       // possibly-sent request — and never the generic `failed` below either.
       // Mapped to the same typed stop the normal publish path raises, so the
@@ -2176,18 +2178,18 @@ async function publishDegradedPublication(input: {
         throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner");
       }
       if (err instanceof PublicationAuthorityUnavailable) {
-        // invariant: The lane holding this action's lease is the sender; this one is not.
+        // The lane holding this action's lease is the sender; this one is not.
         // Hand the row back and let recovery reconcile, never a false failure.
         try {
           await releaseUnspentPublicationClaim(input.db, staged.id, lease, Date.now());
         } catch {
-          // note: A D1 failure of the release does not change the fact: nothing was
+          // A D1 failure of the release does not change the fact: nothing was
           // sent here; the row keeps its truthful state for the next owner.
         }
         return { phase: "unknown", publicationId: staged.id };
       }
       if (err instanceof PreparedSendRejected) {
-        // invariant: The complete payload and its digest stay retained for operator
+        // The complete payload and its digest stay retained for operator
         // inspection; the row is never re-sent. Only a mark that actually
         // landed closes the attempt's publication lane.
         let publicationClosed = false;
@@ -2198,7 +2200,7 @@ async function publishDegradedPublication(input: {
         }
         return { phase: "failed", reason: err.message, publicationClosed };
       }
-      // invariant: A throw AT the send is post-attempt uncertainty: whether GitHub
+      // A throw AT the send is post-attempt uncertainty: whether GitHub
       // received it is unknown (§7.9 — only a definitive rejection is "not
       // published"). The staged row stays sending for read-only discovery;
       // the Check fallback classification is publication-unknown.
@@ -2210,7 +2212,7 @@ async function publishDegradedPublication(input: {
       headSha: input.headSha,
       kind: "degraded" as const,
       round: plan.round,
-      // invariant: 0 = posted but the response carried no id — the typed sentinel for
+      // 0 = posted but the response carried no id — the typed sentinel for
       // "sent, id uncaptured" (never a fabricated GitHub id); §7.5 marker
       // discovery can still bind the exact comment later.
       commentId: sent.commentId ?? 0,
@@ -2229,7 +2231,7 @@ async function publishDegradedPublication(input: {
     let applied = false;
     try {
       const at = Date.now();
-      // invariant: Same rule as the normal publish: the settlement record rides the apply
+      // Same rule as the normal publish: the settlement record rides the apply
       // transaction, so an applied degraded notice cannot go unrecorded.
       const settlement = await settlementStatementIfDischarged(
         input.db,
@@ -2247,11 +2249,11 @@ async function publishDegradedPublication(input: {
     }
     return { phase: "confirmed", publicationId: staged.id };
   } catch (err) {
-    // invariant: The typed wall-clock stop is the ONE error this function does not fold
+    // The typed wall-clock stop is the ONE error this function does not fold
     // into a typed outcome: swallowing it here would be the "a refusal is not
     // an observation" mistake — the stop must reach the settlement as itself.
     if (err instanceof RoundBudgetSpent) throw err;
-    // note: A staging/unknown fault may have left a row behind: the lane stays open.
+    // A staging/unknown fault may have left a row behind: the lane stays open.
     return { phase: "failed", reason: err instanceof Error ? err.message : String(err), publicationClosed: false };
   } finally {
     if (targetRef !== null && targetLease !== null) {
@@ -2270,20 +2272,20 @@ export type ProcessDeps = {
   env: PipelineEnv;
   store: D1ArtifactStore;
   /**
-   * note: The `review_targets` store, built ONCE per consumer (and injectable in
+   * The `review_targets` store, built ONCE per consumer (and injectable in
    * tests) like the bot store: every message resolves its target through it,
    * and rebuilding the narrow face per message would be pure overhead.
    */
   targets: ReturnType<typeof createTargetsStore>;
   /**
-   * invariant: review_failures leaf (AL-1 + AL-6): the parse-fail
+   * review_failures leaf (AL-1 + AL-6): the parse-fail
    * degrade branch and the infra-failure catch record through it. Both call
    * sites are best-effort (try/catch at the call site — an insert failure
    * never masks the ack or the rethrow).
    */
   failureStore: FailureStore;
   /**
-   * safety: Per-App commenter instance cache keyed by appId (lock L4; the
+   * Per-App commenter instance cache keyed by appId (lock L4; the
    * credential-fingerprint hardening, architect lock L1). Entry = `{ commenter, fingerprint }` where the
    * fingerprint is the EXACT string pair `github_app_id` +
    * `private_key_enc` (the envelope as stored) from the per-message row the
@@ -2302,7 +2304,7 @@ export type ProcessDeps = {
    */
   appCommenters: Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>;
   /**
-   * safety: Per-App commenter factory — `createReviewCommenter` in production (the
+   * Per-App commenter factory — `createReviewCommenter` in production (the
    * ONLY createAppAuth construction point stays src/pipeline/comment.ts,
    * lock L4); tests inject a spy to assert the exact credentials each App
    * instance is built from.
@@ -2311,7 +2313,7 @@ export type ProcessDeps = {
   log: ConsumerLog;
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
   /**
-   * why: Optional Check lifecycle seam (§7.10): ABSENT → no Checks, M8
+   * Optional Check lifecycle seam (§7.10): ABSENT → no Checks, M8
    * fully operational. `createReviewConsumer` injects the checks.ts
    * implementation by default; the field stays optional so the seam's
    * absent-dependency contract holds. Hook exceptions/timeouts are caught by
@@ -2322,14 +2324,14 @@ export type ProcessDeps = {
    */
   checks?: CheckLifecycleHooks;
   /**
-   * why: The invocation's lifetime hook (`ctx.waitUntil` in the queue handler):
+   * The invocation's lifetime hook (`ctx.waitUntil` in the queue handler):
    * the terminalize promise is handed to it, so a hook that outlives the
    * consumer still finishes instead of dying with the isolate. Absent in
    * tests that do not watch the detached promise.
    */
   background?: CheckBackgroundSink;
   /**
-   * invariant: The PR head watermark read (migration 0044) — `createReviewBotsStore(env.DB)
+   * The PR head watermark read (migration 0044) — `createReviewBotsStore(env.DB)
    * .selectPrHead` in production, built ONCE per consumer (and injectable in
    * tests), never per message. The supersede decision needs one point read per
    * stamped delivery, so rebuilding the store for it would be pure overhead.
@@ -2341,14 +2343,14 @@ export type ProcessDeps = {
     prNumber: number;
   }) => Promise<{ headSha: string | null; headAt: string | null } | null>;
   /**
-   * invariant: The incremental round's base lookup. A seam because the failure path is
+   * The incremental round's base lookup. A seam because the failure path is
    * the contract under test: the round must survive ANY throw from it with the
    * full-diff fallback, and injecting that throw through the DB would need the
    * query text.
    */
   findIncrementBase: (db: PipelineEnv["DB"], scope: Scope) => Promise<string | null>;
   /**
-   * invariant: TEST SEAM ONLY: an explicit attempt cap (ms) that overrides the operator
+   * TEST SEAM ONLY: an explicit attempt cap (ms) that overrides the operator
    * settings read at admission, so a suite can put the attempt's frozen
    * deadline where it wants it. Production leaves it undefined — the cap comes
    * from `review_runtime_settings`, and the deadline is then stored on the
@@ -2356,7 +2358,7 @@ export type ProcessDeps = {
    */
   attemptCapMs?: number;
   /**
-   * safety: The App's resolved runner config per App id — the HOST channel a phase
+   * The App's resolved runner config per App id — the HOST channel a phase
    * re-derives its live objects from (the adapter is in `appCommenters`, the
    * keys here, the container through `getSandbox`). A resumed step's host
    * resolves the credential again and registers it before calling the phase;
@@ -2364,14 +2366,14 @@ export type ProcessDeps = {
    */
   runnerConfigs: Map<string, RunnerConfig>;
   /**
-   * note: The §7.10 Check settlements this invocation created, by attempt id: the
+   * The §7.10 Check settlements this invocation created, by attempt id: the
    * live handle on rows whose writes are D1-fenced. A resumed invocation that
    * did not claim has none, so it terminalizes nothing and leaves the run to
    * the reconciler — the documented abandoned-attempt outcome.
    */
   checkSettlements: Map<string, CheckSettlement>;
   /**
-   * safety: The attempt's re-derived session credential, cached on the host channel so
+   * The attempt's re-derived session credential, cached on the host channel so
    * the inline route mints once: `prepare` registers the token it minted, the
    * paid step replaces the entry with the session's full exact-value set, and a
    * RESUMED host (empty map) mints and derives again. No token ever crosses a
@@ -2402,16 +2404,16 @@ export function payloadIdentityFields(payload: ReviewJobPayload): ConsumerLogFie
 export function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
   return {
     ...payloadIdentityFields(payload),
-    // safety: Every job carries the bot id reference in every structured log line
+    // Every job carries the bot id reference in every structured log line
     // (an id, never a credential — lock L4; `botRef` is required).
     app_id: payload.botRef.appId,
-    // why: …and the target, so a line that attributes a review names both rows.
+    // …and the target, so a line that attributes a review names both rows.
     target_id: payload.targetId,
   };
 }
 
 /**
- * safety: A git stage's failure detail (diff / increment diff / numstat). stderr is the
+ * A git stage's failure detail (diff / increment diff / numstat). stderr is the
  * ONLY diagnosis a non-zero exit carries — an oversized diff fails `gh pr diff`
  * with HTTP 406 on stderr and 0B of stdout — so a redacted tail rides the
  * message that reaches the durable review_failures row. `stdout` is measured in
@@ -2425,13 +2427,13 @@ function gitStageFailureDetail(
   secretValues: readonly string[],
 ): string {
   const base = `${stage} failed: exit ${run.exitCode}, stdout ${new TextEncoder().encode(run.stdout).length}B`;
-  // safety: Redaction BEFORE the cut: a secret sliced in half would survive it.
+  // Redaction BEFORE the cut: a secret sliced in half would survive it.
   const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
   return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
 }
 
 /**
- * safety: Capture a PR diff GitHub refuses to serve: `gh pr diff` 406s once the PR
+ * Capture a PR diff GitHub refuses to serve: `gh pr diff` 406s once the PR
  * passes its 20,000-line API ceiling, so the same unified diff comes from the
  * clone instead — base ref → merge base → depth-1 fetch of that merge base →
  * `git diff <merge-base> <head>` into DIFF_PATH, read back through the SAME
@@ -2468,12 +2470,12 @@ async function oversizedDiffCapture(
   if (runnerDeadlineMs - Date.now() <= EXEC_TIMEOUT_GIT_MS) {
     return { reason: "budget", step: "admission" };
   }
-  // note: What is left of the shared diff window, capped per step; null once spent.
+  // What is left of the shared diff window, capped per step; null once spent.
   const stepTimeout = (): number | null => {
     const left = Math.min(PR_CONTEXT_EXEC_TIMEOUT_MS, diffCaptureDeadlineMs - Date.now());
     return left > 0 ? left : null;
   };
-  /** invariant: A guard refuses a hostile ref/sha BEFORE any exec — no shell string, no transport. */
+  /** A guard refuses a hostile ref/sha BEFORE any exec — no shell string, no transport. */
   const buildCommand = (step: string, make: () => ShellCommand): ShellCommand | DiffCaptureDecline => {
     try {
       return make();
@@ -2499,7 +2501,7 @@ async function oversizedDiffCapture(
     const merge = await sandbox.runCommand(mergeCmd, { env: { GH_TOKEN: token }, timeout: left });
     const mergeBaseSha = merge.stdout.trim();
     if (merge.exitCode !== 0 || mergeBaseSha === "") return { reason: "merge-base-empty", step, run: merge };
-    // invariant: An exit-0 answer that is not a COMPLETE object id is an UNUSABLE answer,
+    // An exit-0 answer that is not a COMPLETE object id is an UNUSABLE answer,
     // never a hostile ref: `gh api --jq` prints `null` for an absent field, and
     // a truncated or proxied reply prints anything. The shell allowlist would
     // accept a truncated 7-char reply, so it cannot make this call.
@@ -2521,7 +2523,7 @@ async function oversizedDiffCapture(
     const local = await sandbox.runCommand(diffCmd, { timeout: left });
     return local.exitCode === 0 ? { run: local } : { reason: "local-diff-exit", step, run: local };
   } catch {
-    // note: A sandbox transport fault leaves the original diff failure as the cause.
+    // A sandbox transport fault leaves the original diff failure as the cause.
     return { reason: "transport", step };
   }
 }
@@ -2572,7 +2574,7 @@ export async function bindUnboundThreads(
   try {
     const read = await deps.DB
       .prepare(
-        // invariant: `updated_ms` is the rotation cursor: a row this pass could not bind
+        // `updated_ms` is the rotation cursor: a row this pass could not bind
         // is stamped with the pass time below, so it moves behind the rows the
         // cap never reached instead of being retried as the oldest head.
         `SELECT id, intent_json FROM review_threads
@@ -2585,13 +2587,13 @@ export async function bindUnboundThreads(
       .all<{ id: string; intent_json: string }>();
     rows = read.results;
   } catch (err) {
-    // note: Context binding is best-effort: a failed read leaves the associations to
+    // Context binding is best-effort: a failed read leaves the associations to
     // a later round instead of failing a round that could still run.
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(deps.fields, `unbound thread read failed — binding left to a later round: ${detail}`);
     return result;
   }
-  // invariant: Best-effort rotation stamp: a row this pass could not bind moves to the
+  // Best-effort rotation stamp: a row this pass could not bind moves to the
   // back of the next pass's queue, so a permanently undiscoverable head can
   // never consume the budget of the rows behind it.
   const stampRotation = async (rowId: string): Promise<void> => {
@@ -2644,32 +2646,32 @@ export async function bindUnboundThreads(
  * from the queue message and the admission row it already read.
  */
 export type AttemptRef = {
-  /** note: The attempt identity: the container name, the launch fence and the marker derive from it. */
+  /** The attempt identity: the container name, the launch fence and the marker derive from it. */
   attemptId: string;
   payload: ReviewJobPayload;
   level: ReviewLevel;
-  /** note: The instant this delivery's admission entry began — the preparation anchor. */
+  /** The instant this delivery's admission entry began — the preparation anchor. */
   roundStartedAt: number;
   /**
-   * note: The attempt's ONE absolute hard stop (`queue send + operator cap`), frozen
+   * The attempt's ONE absolute hard stop (`queue send + operator cap`), frozen
    * when the attempt was first admitted and replayed by every later delivery.
    * Every step and the container read THIS instant; none re-derives it.
    */
   deadlineMs: number;
-  /** safety: The App's numeric GitHub id (the credential row's identity). */
+  /** The App's numeric GitHub id (the credential row's identity). */
   githubAppId: number;
-  /** note: The workspace the usage ledger charges. */
+  /** The workspace the usage ledger charges. */
   usageWorkspaceId: string;
-  /** safety: Which credential paid for the round: the shared pool or the App's own key. */
+  /** Which credential paid for the round: the shared pool or the App's own key. */
   usageSource: UsageSource;
-  /** note: The per-delivery Check budgets read at admission. */
+  /** The per-delivery Check budgets read at admission. */
   checkBudgets: CheckBudgets | null;
-  /** note: The head the admission-time Check claim is over; `null` when none was made. */
+  /** The head the admission-time Check claim is over; `null` when none was made. */
   checkClaimSha: string | null;
-  /** note: The live admission row this attempt owns — its cleanup releases it. */
+  /** The live admission row this attempt owns — its cleanup releases it. */
   inflight: { key: InflightKey; attemptId: string; ttlSeconds: number };
   /**
-   * note: The queue delivery number of the message that admitted this attempt. It no
+   * The queue delivery number of the message that admitted this attempt. It no
    * longer gates the failed-claim stamp (the Workflow instance is the terminal
    * owner); it identifies the delivery in diagnostics.
    */
@@ -2701,11 +2703,11 @@ export type FailureFacts = {
   secretValues: string[];
   runnerStartedAt: number | undefined;
   runnerReturned: boolean;
-  /** note: The anchored allocation this invocation froze, when it got that far. */
+  /** The anchored allocation this invocation froze, when it got that far. */
   runnerEffectiveBudgetMs: number | undefined;
-  /** note: The selected numstat's line count (the budget outcome's own counter). */
+  /** The selected numstat's line count (the budget outcome's own counter). */
   changedLines: number | null;
-  /** note: Set once the prepared publication send was ATTEMPTED (post-send uncertainty). */
+  /** Set once the prepared publication send was ATTEMPTED (post-send uncertainty). */
   sendAttemptPublicationId: string | null;
 };
 
@@ -2731,17 +2733,17 @@ export class AttemptPhaseError extends Error {
 export type CheckSettlement = {
   handle: CheckHandle | null;
   claimAttempted: boolean;
-  /** note: The round's derived log fields, when the phase that claimed them has them. */
+  /** The round's derived log fields, when the phase that claimed them has them. */
   fields?: ConsumerLogFields;
   /**
-   * invariant: The attempt whose promotion was ABANDONED: its update budget ended the
+   * The attempt whose promotion was ABANDONED: its update budget ended the
    * wait while the PATCH may still be in flight, so this attempt must not write
    * the terminal state itself. Cleared by every new begin.
    */
   promotionAbandoned: string | null;
   terminalized: boolean;
   /**
-   * invariant: `expect` is the frozen Check identity (key + generation) a RESUMED phase
+   * `expect` is the frozen Check identity (key + generation) a RESUMED phase
    * must act on; the claim refuses any other generation. A fresh review omits
    * it — its own claim IS the identity.
    */
@@ -2766,12 +2768,12 @@ export type CheckSettlement = {
 
 export type CheckSettlementInput = {
   deps: ProcessDeps;
-  /** note: The delivery's identity, for the log lines the settlement emits. */
+  /** The delivery's identity, for the log lines the settlement emits. */
   payload: ReviewJobPayload;
   attemptId: string;
   checkBudgets: CheckBudgets | null;
   /**
-   * invariant: The attempt's frozen absolute deadline. A claim or adoption writes it as the
+   * The attempt's frozen absolute deadline. A claim or adoption writes it as the
    * Check row's `execution_deadline_ms`, so the reconciler reads the SAME
    * instant the execution fence does — never a fresh `now + window`.
    */
@@ -2781,7 +2783,7 @@ export type CheckSettlementInput = {
 /** A phase's early settlement: the attempt owes nothing more. */
 export type SettledAttempt = { kind: "settled"; outcome: ProcessOutcome };
 
-/** note: The App/PR identity, derived from the payload without dereferencing a legacy `botRef`. */
+/** The App/PR identity, derived from the payload without dereferencing a legacy `botRef`. */
 function scopeOf(payload: ReviewJobPayload): Scope | undefined {
   const bot = payload.botRef as { appId?: string } | undefined;
   if (bot?.appId === undefined) return undefined;
@@ -2802,13 +2804,13 @@ function scopeOf(payload: ReviewJobPayload): Scope | undefined {
  */
 export type PreparedAttempt = {
   headSha: string;
-  /** note: The absolute instant every later step bills: the anchored exec deadline. */
+  /** The absolute instant every later step bills: the anchored exec deadline. */
   runnerDeadlineMs: number;
-  /** note: The frozen allocation the exec was anchored with (requested, then clamped). */
+  /** The frozen allocation the exec was anchored with (requested, then clamped). */
   runnerRequestedMs: number;
   runnerEffectiveMs: number;
   /**
-   * why: The budget quartet the round logs on every line from the anchor on, so a
+   * The budget quartet the round logs on every line from the anchor on, so a
    * resumed phase logs the SAME numbers instead of re-deriving them.
    */
   budget: {
@@ -2818,7 +2820,7 @@ export type PreparedAttempt = {
     deadline_ms: number;
     work_units: number | null;
   };
-  /** invariant: The App's model selector chain (never its keys), for the artifact record. */
+  /** The App's model selector chain (never its keys), for the artifact record. */
   modelChain: string | undefined;
   observedChangedLines: number | null;
   reconFacts: string[];
@@ -2864,9 +2866,9 @@ export type CleanupOutcome = { retention: "no-paid-work" | "retained" | "unknown
 export function createCheckSettlement(input: CheckSettlementInput): CheckSettlement {
   const { deps, payload, attemptId, checkBudgets, deadlineMs } = input;
   const sandboxId = attemptSandboxId(attemptId);
-  /** note: The base log identity every line carries (the delivery's own facts). */
+  /** The base log identity every line carries (the delivery's own facts). */
   const baseLog = (): ConsumerLogFields => toBaseFields(payload);
-  /** note: The round's log fields when the caller already derived them, else the base. */
+  /** The round's log fields when the caller already derived them, else the base. */
   const roundLog = (): ConsumerLogFields => settlement.fields ?? baseLog();
   const abandonCheck = (
     handle: CheckHandle,
@@ -2874,7 +2876,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
     options?: { outcome?: CheckTerminalOutcome; inheritedHeadSha?: string; budgetExhaustion?: BudgetExhaustedOutcome },
   ): Promise<boolean> => {
     const abandon = deps.checks?.abandonTerminalize;
-    // invariant: No give-up seam (test doubles only; production always supplies it):
+    // No give-up seam (test doubles only; production always supplies it):
     // nothing can prove this attempt released, so report the handoff as failed.
     if (abandon === undefined) return Promise.resolve(false);
     const line = {
@@ -2883,7 +2885,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
       attempt_id: handle.attemptId,
       check_reason: reason,
     };
-    // invariant: Two budgets of margin past the abandoned send itself (the promotion runs
+    // Two budgets of margin past the abandoned send itself (the promotion runs
     // on the operator's update budget), never shorter than the shared rung.
     const firstRecoveryDelayMs =
       settlement.promotionAbandoned === handle.attemptId
@@ -2908,7 +2910,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
           );
           return true;
         }
-        // invariant: The fenced release wrote NOTHING: the attempt is no longer ours to
+        // The fenced release wrote NOTHING: the attempt is no longer ours to
         // hand over (recovery already claimed it, its lease expired, or it
         // already ended). That is a legitimate no-op — never a fault.
         deps.log.warn(
@@ -2937,20 +2939,20 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
     inheritedHeadSha?: string,
     budgetExhaustion?: BudgetExhaustedOutcome,
   ): Promise<void> => {
-    // invariant: The per-attempt read always precedes every terminal path; the fallback
+    // The per-attempt read always precedes every terminal path; the fallback
     // keeps a future caller bounded by the store's documented defaults.
     const budgets = checkBudgets ?? {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
       updateMs: CHECK_UPDATE_DEFAULT,
       degraded: false,
     };
-    // invariant: Set when this attempt stops waiting on the hook: only past that point is
+    // Set when this attempt stops waiting on the hook: only past that point is
     // a later rejection detached, so only then does the sink report it.
     let abandoned = false;
-    // note: The give-up handoff the overrun callback starts: awaited below when no
+    // The give-up handoff the overrun callback starts: awaited below when no
     // invocation context can own it (spec §7.10's no-context fallback).
     let giveUpRelease: Promise<boolean> | undefined;
-    // invariant: Elapsed time is the diagnostic that separates "the hook never ran" from
+    // Elapsed time is the diagnostic that separates "the hook never ran" from
     // "it ran and timed out"; recorded on the attempt (migration 0052) because
     // the log lines below are not queryable after the fact.
     const startedMs = Date.now();
@@ -2959,7 +2961,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
         () => {},
       );
     /**
-     * invariant: The overrun callback cannot await, and it must not add a second
+     * The overrun callback cannot await, and it must not add a second
      * `waitUntil` entry: the invocation already holds the abandon release,
      * whose D1 round-trip keeps the isolate alive long enough for this one-line
      * diagnostic write to land. Losing it costs a diagnostic row, never a Check.
@@ -2968,7 +2970,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
       void record(outcome);
     };
     if (settlement.promotionAbandoned === handle.attemptId) {
-      // invariant: The promotion's PATCH may still be on the wire (its bound only stopped
+      // The promotion's PATCH may still be on the wire (its bound only stopped
       // the wait). A terminal write from THIS attempt could be overtaken by
       // it and the finished run reopened — and a reopened run is no longer due
       // for recovery (`terminal_ms` is set), so it would read `in_progress`
@@ -2985,7 +2987,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
         },
       );
       if (deps.background === undefined) await release;
-      // invariant: This exit hands the attempt over without ever calling the hook. Record
+      // This exit hands the attempt over without ever calling the hook. Record
       // it with a NULL elapsed so `handed-off` never reads as a fast success:
       // the column exists to separate "never ran" from "ran and timed out". The
       // store turns `completed` into `handed-off` for a row whose observation
@@ -3002,12 +3004,12 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
         ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
         updateBudgetMs: budgets.updateMs,
       });
-      // note: The invocation owns the promise: if the budget below expires, the hook
+      // The invocation owns the promise: if the budget below expires, the hook
       // still finishes after this attempt returns. A rejection landing after
       // that point has no inline waiter left to report it.
       deps.background?.waitUntil(
         terminalize.catch((err: unknown) => {
-          if (!abandoned) return; // note: the inline await below already reports it
+          if (!abandoned) return; // the inline await below already reports it
           const detail = err instanceof Error ? err.message : String(err);
           deps.log.warn(
             {
@@ -3036,12 +3038,12 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
               ? "check terminalize hook exceeded its budget (detached; no invocation context to finish it)"
               : "check terminalize hook exceeded its budget (left to the invocation context)",
           );
-          // why: Released at the instant we give up: the attempt would otherwise
+          // Released at the instant we give up: the attempt would otherwise
           // hold its lease until the immutable execution deadline, which is
           // what made the Check terminalize up to 15 minutes late. The promise
           // is awaited right below when no invocation context can own it.
           giveUpRelease = abandonCheck(handle, `terminalize budget exceeded (${budgets.terminalizeMs}ms)`, {
-            // why: A wall-clock stop's frozen intent is decidable from the outcome
+            // A wall-clock stop's frozen intent is decidable from the outcome
             // alone, so the hand-off carries it; every other outcome keeps the
             // generic unconfirmed fallback the recovery lane corrects.
             ...(outcome === "budget-exhausted" ? { outcome, budgetExhaustion } : {}),
@@ -3049,7 +3051,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
           recordDetached("budget-exceeded");
         },
       );
-      // invariant: The overrun path has the same no-context fallback as the throw path:
+      // The overrun path has the same no-context fallback as the throw path:
       // one fenced D1 write, never a remote send, so the lease is released
       // before this attempt returns even without `waitUntil`.
       if (giveUpRelease !== undefined && deps.background === undefined) await giveUpRelease;
@@ -3065,14 +3067,14 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
         },
         `check terminalize hook failed (isolated): ${detail}`,
       );
-      // invariant: The hook never sent a conclusion, so this exit is NOT a completed
+      // The hook never sent a conclusion, so this exit is NOT a completed
       // send. Recorded while the row still has no outcome, so a failed hook
       // stays distinguishable from one that ran and landed.
       await record("hook-failed");
       const release = abandonCheck(handle, `terminalize hook threw: ${detail}`, {
         ...(outcome === "budget-exhausted" ? { outcome, budgetExhaustion } : {}),
       });
-      // invariant: Awaited only when no invocation context can own it (one fenced write).
+      // Awaited only when no invocation context can own it (one fenced write).
       if (deps.background === undefined) await release;
     }
   };
@@ -3089,7 +3091,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
   };
 
   /**
-   * invariant: The run is created `queued` at delivery acceptance (spec §7.9), so the
+   * The run is created `queued` at delivery acceptance (spec §7.9), so the
    * review's own begin is what makes the public status truthful. Promoted
    * here under the operator's update budget — NEVER the begin hook's 2 s,
    * which bounds a different step — and this wait is bounded too, but the
@@ -3124,14 +3126,14 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
             warn,
           })
           .catch((err: unknown): CheckPromotion => {
-            // note: A rejection that lands after this layer stopped waiting still
+            // A rejection that lands after this layer stopped waiting still
             // gets its warn instead of becoming an unhandled rejection.
             warn(`check in-progress promotion failed (the review is unaffected): ${err instanceof Error ? err.message : String(err)}`);
             return { kind: "settled", promoted: false };
           }),
         budgetMs,
       );
-      // invariant: This layer stopped waiting: the adapter may still be mid-send, so the
+      // This layer stopped waiting: the adapter may still be mid-send, so the
       // only safe reading is "abandoned" (its own warn carries the cause).
       if (waited === null) return "abandoned";
       return waited.value.kind;
@@ -3143,7 +3145,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
   };
 
   /**
-   * invariant: The §7.10 begin hook over one SHA, isolated exactly as before: its own
+   * The §7.10 begin hook over one SHA, isolated exactly as before: its own
    * latch (never shared or reset), the 2 s consumer bound, and a throw that
    * only warns — a Check never prevents the review.
    */
@@ -3154,16 +3156,16 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
     expect?: AttemptIdentity,
   ): Promise<CheckHandle | null> => {
     if (deps.checks === undefined) return null;
-    // invariant: Every begin owns the flag: it must always describe the handle we return.
+    // Every begin owns the flag: it must always describe the handle we return.
     settlement.promotionAbandoned = null;
-    // invariant: One latch per `begin` call, created HERE and never stored anywhere: a
+    // One latch per `begin` call, created HERE and never stored anywhere: a
     // later message cannot clear or reuse it, so a detached begin from this
     // message stays abandoned for its whole lifetime (QC1-001 replacement
     // race).
     const beginLatch = createCheckBeginLatch();
     let handle: CheckHandle | null;
     try {
-      // invariant: The check row's execution deadline IS the attempt's frozen hard stop
+      // The check row's execution deadline IS the attempt's frozen hard stop
       // (adoption narrows the attach window to this same instant), so the
       // reconciler and the execution fence agree without a re-read. A LIVE
       // attempt's instant is passed VERBATIM — even one that has less than a
@@ -3192,9 +3194,9 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
           ...(expect === undefined ? {} : { expect }),
         }),
         null,
-        // note: The begin hook keeps §7.10's 2 s: it runs before model work.
+        // The begin hook keeps §7.10's 2 s: it runs before model work.
         CHECK_HOOK_TIMEOUT_MS,
-        // note: The attempt gave up waiting: a lifecycle that reads this call's
+        // The attempt gave up waiting: a lifecycle that reads this call's
         // latch stops attaching state on behalf of this abandoned invocation
         // and leaves the created run with a terminal obligation (§7.10's
         // budget is a consumer bound, not a licence to create an attempt
@@ -3211,7 +3213,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
       );
       return null;
     }
-    // invariant: A handle means THIS review is starting, so the run may say so — and if
+    // A handle means THIS review is starting, so the run may say so — and if
     // that send was abandoned rather than settled, this attempt must not
     // terminalize the run itself (the promotion may still land).
     settlement.handle = handle;
@@ -3233,7 +3235,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
   return settlement;
 }
 
-/** note: The AL-6/SEC-01 facts carrier a phase starts from. */
+/** The AL-6/SEC-01 facts carrier a phase starts from. */
 function beginProgress(): ReviewAttemptProgress {
   return {
     failureStage: "pipeline",
@@ -3243,7 +3245,7 @@ function beginProgress(): ReviewAttemptProgress {
   };
 }
 
-/** invariant: The App adapter this delivery's host resolved — never a phase input. */
+/** The App adapter this delivery's host resolved — never a phase input. */
 function requireCommenter(deps: ProcessDeps, payload: ReviewJobPayload): ReviewCommenter {
   const entry = deps.appCommenters.get(payload.botRef.appId);
   if (entry === undefined) {
@@ -3254,7 +3256,7 @@ function requireCommenter(deps: ProcessDeps, payload: ReviewJobPayload): ReviewC
   return entry.commenter;
 }
 
-/** note: The App's resolved runner config this delivery's host registered. */
+/** The App's resolved runner config this delivery's host registered. */
 function requireRunnerConfig(deps: ProcessDeps, payload: ReviewJobPayload): RunnerConfig {
   const config = deps.runnerConfigs.get(payload.botRef.appId);
   if (config === undefined) {
@@ -3265,13 +3267,13 @@ function requireRunnerConfig(deps: ProcessDeps, payload: ReviewJobPayload): Runn
   return config;
 }
 
-/** note: The §7.10 settlement this invocation created, when it created one. */
+/** The §7.10 settlement this invocation created, when it created one. */
 function maybeSettlement(deps: ProcessDeps, attemptId: string): CheckSettlement | undefined {
   return deps.checkSettlements.get(attemptId);
 }
 
 /**
- * invariant: Fill in a wall-clock stop's category on a Check this invocation can no longer
+ * Fill in a wall-clock stop's category on a Check this invocation can no longer
  * fence. A spent attempt deadline takes away the right to WRITE (its lease
  * triple is dead), never the fact: the attempt ended at the cap or spent its
  * tier window, and the run must say which.
@@ -3307,7 +3309,7 @@ async function freezeKnownStop(
       null,
       now,
     );
-    // why: Given straight back: a frozen intent needs no due time, so the minute
+    // Given straight back: a frozen intent needs no due time, so the minute
     // lane is due at once.
     await releaseCheckClaim(deps.env.DB, attemptId, lease, Date.now());
     deps.log.info(
@@ -3326,7 +3328,7 @@ async function freezeKnownStop(
 }
 
 /**
- * invariant: The settlement a LATER phase terminalizes through, re-adopted when this host
+ * The settlement a LATER phase terminalizes through, re-adopted when this host
  * did not prepare. An empty cache must not mean "leave the Check in progress
  * forever after a successful publication": the settlement is re-created and
  * adopted through the same claim path `prepare` used (the lifecycle attaches to
@@ -3351,9 +3353,9 @@ async function settlementFor(
     deadlineMs: ref.deadlineMs,
   });
   settlement.fields = attemptFields(ref.payload, ref.level, ref.attemptId, headSha);
-  // invariant: Adoption IS a claim attempt: the fallback path must not claim twice.
+  // Adoption IS a claim attempt: the fallback path must not claim twice.
   settlement.claimAttempted = true;
-  // invariant: ADOPTION USES THE FROZEN PAIR, never "the latest open generation of this
+  // ADOPTION USES THE FROZEN PAIR, never "the latest open generation of this
   // key": the launch row recorded which generation this attempt owns when it
   // was created, and a newer one belongs to another attempt. NO PAIR, NO CLAIM:
   // passing `undefined` would select the unrestricted fresh-claim path, which
@@ -3370,7 +3372,7 @@ async function settlementFor(
   }
   const handle = await settlement.begin(scope, ref.githubAppId, headSha, identity);
   if (handle === null) {
-    // invariant: No adoption: a live holder owns the row (the real lifecycle refuses to
+    // No adoption: a live holder owns the row (the real lifecycle refuses to
     // take it) or nothing was adoptable. Cache NOTHING — a settlement without
     // a handle is worse than none — and record the obligation on the ATTEMPT
     // row, never on the Check row: that row's lease, suspension and error
@@ -3388,7 +3390,7 @@ async function settlementFor(
 }
 
 /**
- * invariant: The Check row THIS attempt owns, read from the identity its launch row froze
+ * The Check row THIS attempt owns, read from the identity its launch row froze
  * — the same pair the reconciler reads, never the newest generation of a key.
  *
  * A resumed publisher can have another holder on the row, so adoption is
@@ -3423,7 +3425,7 @@ async function ownedCheckAttemptId(deps: ProcessDeps, attemptId: string): Promis
  }
 
  /**
-  * invariant: The publication path may use ONLY the identity the launch row froze. A row
+  * The publication path may use ONLY the identity the launch row froze. A row
   * without one means the attempt never learned its head — nothing can be
   * associated, and the miss is named rather than papered over with a guess.
   */
@@ -3435,7 +3437,7 @@ function assertFrozenIdentity(identity: AttemptIdentity | null, attemptId: strin
 }
 
 /**
- * invariant: Settle a MOVED HEAD: this attempt concludes its Check as skipped, writes the
+ * Settle a MOVED HEAD: this attempt concludes its Check as skipped, writes the
  * skip row, and throws so the delivery retries under a fresh attempt id. It
  * never reviews the observed head under the previous identity.
  */
@@ -3447,7 +3449,7 @@ async function settleMovedHead(
   frozenKey: string,
   observedKey: string,
 ): Promise<never> {
-  // invariant: THE OUTBOX ROW PRECEDES THE SETTLEMENT. This attempt is about to conclude
+  // THE OUTBOX ROW PRECEDES THE SETTLEMENT. This attempt is about to conclude
   // its Check as skipped, and once that is done nothing else records the head
   // that displaced it — an interruption below would leave a head with no review
   // and no record of what was owed. The intent is written first (idempotent, so
@@ -3463,7 +3465,7 @@ async function settleMovedHead(
     });
   }
   await check.terminalize(null, "skipped", headSha);
-  // invariant: A skip-settlement fault must not mask the moved head: the attempt is over
+  // A skip-settlement fault must not mask the moved head: the attempt is over
   // either way, and the error below is what starts the new one.
   await settleSkippedRow(deps, ref.payload, headSha, "the head moved between admission and the checkout", { announceNoOp: true }).catch(
     () => {},
@@ -3476,7 +3478,7 @@ async function settleMovedHead(
 }
 
 /**
- * invariant: Record that this attempt's Check settlement is still owed — ONLY once a
+ * Record that this attempt's Check settlement is still owed — ONLY once a
  * publication for it is durable and the Check has not concluded. The key is the
  * Check row's own `attempt_key` (the association is that derived identity, not
  * two random UUIDs) and the due instant is the recovery lane's first backoff
@@ -3486,17 +3488,17 @@ async function noteOwedCheck(
   deps: ProcessDeps,
   ref: AttemptRef,
   headSha: string,
-  /** note: The Check row THIS attempt held, when its settlement had one. */
+  /** The Check row THIS attempt held, when its settlement had one. */
   checkAttemptId?: string,
 ): Promise<void> {
   const scope = scopeOf(ref.payload);
   if (scope === undefined || deps.checks === undefined) return;
-  // invariant: The identity comes from the ROW — key AND generation, both frozen at
+  // The identity comes from the ROW — key AND generation, both frozen at
   // creation. Neither is re-derived and neither is looked up: with the key
   // frozen, a later generation can only be another attempt's row.
   const identity = await readAttemptIdentity(deps.env.DB, ref.attemptId);
   if (identity === null) {
-    // note: No frozen identity means no Check was ever associated with this attempt,
+    // No frozen identity means no Check was ever associated with this attempt,
     // so there is nothing to owe. A REAL Check row behind the handle with no
     // frozen identity is the genuine inconsistency — the assertion names it
     // instead of deriving one (a stub handle has no row and is simply nothing).
@@ -3505,7 +3507,7 @@ async function noteOwedCheck(
     }
     return;
   }
-  // note: No handle is fine: the obligation is derived from the durable publication
+  // No handle is fine: the obligation is derived from the durable publication
   // and the frozen identity, and the reconciler is the consumer.
   const owed = await noteCheckOwed(deps.env.DB, {
     attemptId: ref.attemptId,
@@ -3513,14 +3515,14 @@ async function noteOwedCheck(
     checkGeneration: identity.generation,
     dueMs: Date.now() + CHECK_BACKOFF_MS[0]!,
   });
-  if (!owed) return; // note: the Check is settled (or has no open row): nothing is owed
+  if (!owed) return; // the Check is settled (or has no open row): nothing is owed
   deps.log.warn(
     { ...attemptFields(ref.payload, ref.level, ref.attemptId, headSha), event: "check_settlement_owed" },
     "check settlement owed — the attempt row carries the obligation for the recovery lane",
   );
 }
 
-/** note: The round's structured log fields, derived from data alone. */
+/** The round's structured log fields, derived from data alone. */
 function attemptFields(
   payload: ReviewJobPayload,
   level: ReviewLevel,
@@ -3558,7 +3560,7 @@ function attemptFields(
   };
 }
 
-/** note: A phase failure carrying the facts as data, with the cause intact. */
+/** A phase failure carrying the facts as data, with the cause intact. */
 function phaseFailure(
   phase: FailureFacts["phase"],
   err: unknown,
@@ -3568,7 +3570,7 @@ function phaseFailure(
 }
 
 /**
- * invariant: The launch row's own state — the durable outcome a phase reports. Only a
+ * The launch row's own state — the durable outcome a phase reports. Only a
  * `persisted` row carries one; every other state (a container cleanup owns, a
  * paid call with no durable outcome, a failed one, an unclaimed attempt) is
  * `unknown` for this reader, and nothing may be published from it.
@@ -3592,7 +3594,7 @@ async function readPersistedLaunch(deps: ProcessDeps, attemptId: string): Promis
   }
 }
 
-/** note: The paid result, read from the launch row rather than a predecessor's return value. */
+/** The paid result, read from the launch row rather than a predecessor's return value. */
 async function readPaidExecution(deps: ProcessDeps, attemptId: string): Promise<ReviewAttemptExecution> {
   const verdict = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
   switch (verdict.kind) {
@@ -3671,14 +3673,14 @@ async function preparePhase(
   let lifecycleScope: Scope | undefined;
   let roundBudget: ReviewBudget | null = null;
   let observedChangedLines: number | null = null;
-  // invariant: F-001 (QC wave-1): toBaseFields derefs payload.botRef.appId, so an
+  // F-001 (QC wave-1): toBaseFields derefs payload.botRef.appId, so an
   // in-flight pre-deploy message (no `botRef` — AL-24-4 accepts the
   // TypeError) must throw INSIDE the try: it then flows through the
   // established structured channel (review failed: log + AL-6
   // review_failures row + rethrow). Pure relocation — no runtime guard
   // (AL-24-4 forbids one).
   baseFields = toBaseFields(payload);
-  // note: §7.10 Check lane scope — the same App/PR identity the publication journal
+  // §7.10 Check lane scope — the same App/PR identity the publication journal
   // and the attempt key use, derivable from the payload alone.
   lifecycleScope = {
     appId: payload.botRef.appId,
@@ -3688,12 +3690,12 @@ async function preparePhase(
     prNumber: payload.pr_number,
   };
   if (ref.checkClaimSha !== null) {
-    // why: The claim the consumer decided the head of: it runs here, before any
+    // The claim the consumer decided the head of: it runs here, before any
     // provisioning, so the settlement that terminalizes it lives beside it.
     check.claimAttempted = true;
     await check.begin(lifecycleScope, githubAppId, ref.checkClaimSha);
   }
-  // safety: The identity is NOT frozen here: the checkout may contradict the admitted
+  // The identity is NOT frozen here: the checkout may contradict the admitted
   // claim, and the Check lane then re-claims at the authoritative head. The
   // identity frozen is the one the LIVE claim owns, below.
   // 1-3. Container + purpose-scoped credential + authoritative checkout:
@@ -3715,7 +3717,7 @@ async function preparePhase(
   const cmds = prepared.cmds;
   const headSha = prepared.headSha;
   observed.headSha = headSha;
-  // safety: A MOVED HEAD never continues on the old identity. The identity frozen below
+  // A MOVED HEAD never continues on the old identity. The identity frozen below
   // is the one the LIVE claim owns — the claim the checkout settled on, after
   // any supersede — so a frozen key that disagrees with it can only mean another
   // caller froze a DIFFERENT head, and that attempt settles as skipped.
@@ -3732,11 +3734,11 @@ async function preparePhase(
   };
   fields = {
     ...baseFields,
-    // note: d5-budget L5: the level's clock rides every structured log from here
+    // d5-budget L5: the level's clock rides every structured log from here
     // on (same ConsumerLogFields channel — no new sink).
     level,
     runner_timeout_ms: runnerTimeoutMs(level),
-    // invariant: deep = parent session; quick/default = Bun seat fan-out. Never a
+    // deep = parent session; quick/default = Bun seat fan-out. Never a
     // fabricated seat_count for deep (spec § Queue visibility).
     orchestration: level === "deep" ? "parent" : "bun-fanout",
     head_sha: headSha,
@@ -3745,7 +3747,7 @@ async function preparePhase(
   };
   check.fields = fields;
 
-  // invariant: §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
+  // §7.7 step 4 / §7.9: resolve a CONTRADICTED claim against the
   // authoritative checkout HERE — before any dedup/journal early exit, so a
   // delivery whose claimed SHA was disproved can never close the wrong head's
   // run as `skipped`. (A message that had no knowable SHA at admission is a
@@ -3761,7 +3763,7 @@ async function preparePhase(
       fields,
       `check attempt superseded: claimed ${supersededHandle.headSha.slice(0, 7)}, checked out ${headSha.slice(0, 7)}`,
     );
-    // invariant: Freeze the contradicted attempt's `superseded` intent and release it —
+    // Freeze the contradicted attempt's `superseded` intent and release it —
     // TWO fenced D1 writes (intent + release), no remote request. Its remote
     // send belongs to the minute recovery cron, so the new head's review
     // never waits on the Check hook.
@@ -3771,7 +3773,7 @@ async function preparePhase(
       { outcome: "superseded" },
     );
     if (!supersededClaimReleased) {
-      // invariant: The handoff failed, so the old attempt may still hold this
+      // The handoff failed, so the old attempt may still hold this
       // consumer's lease: claiming the new head anyway would put two live
       // consumer-owned claims on one invocation. A Check fault never blocks
       // the review — this message reviews the checked-out commit with NO
@@ -3783,19 +3785,19 @@ async function preparePhase(
     }
   }
 
-  // invariant: 4. Dedup (§7.7 step 2, first half): already completed for this
+  // 4. Dedup (§7.7 step 2, first half): already completed for this
   // checked-out sha → ack (no post, no insert). KV done-state first (B3),
   // then D1. Keyed off the checkout, so a force-push between delivery and
   // processing is never mis-deduped against the stale payload sha.
   const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
   if (done) {
     deps.log.info(fields, "KV idempotency hit — ack");
-    // invariant: A handle exists only when the claim's SHA WAS the checkout (a
+    // A handle exists only when the claim's SHA WAS the checkout (a
     // concurrent duplicate): that run must be closed, carrying THIS head's
     // existing result (inherited like an empty increment), never a `neutral`
     // that would mask a failing gate.
     await check?.terminalize(null, "skipped", headSha);
-    // invariant: §7.9: with no handle (the adoption refused) the attached run would
+    // §7.9: with no handle (the adoption refused) the attached run would
     // otherwise wait out the attach window and close red. The settlement is
     // keyed on the PAYLOAD SHA — what the attach used — not this checkout SHA.
     await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
@@ -3808,7 +3810,7 @@ async function preparePhase(
     await settleSkippedRow(deps, payload, payload.head_sha, "already reviewed for this head");
     return { kind: "settled", outcome: { kind: "ok" } };
   }
-  // invariant: §7.7 step 2 (second half) — the publication journal: an existing
+  // §7.7 step 2 (second half) — the publication journal: an existing
   // prepared/sending/unknown/confirmed row for this exact scope/SHA hands
   // off to recovery and ACKs without another paid review. Pending recovery
   // is never deleted by a same-SHA mention re-run.
@@ -3818,7 +3820,7 @@ async function preparePhase(
       fields,
       `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
     );
-    // safety: A `prepared` row hands delivery to the recovery lane; it does NOT
+    // A `prepared` row hands delivery to the recovery lane; it does NOT
     // claim the review is visible — the publication still owes its send, and
     // recovery owns it. Nothing here waits for it or asserts it.
     // Deliberately NOT terminalized: this attempt published nothing, and the
@@ -3885,14 +3887,14 @@ async function preparePhase(
         );
       }
     } else {
-      // why: §7.9: no handle was adopted for this hand-off, so the delivery's own
+      // §7.9: no handle was adopted for this hand-off, so the delivery's own
       // attached run has nobody to close it — settlement carries the head's
       // own gate result (or `neutral` when it has none).
       await settleSkippedRow(deps, payload, payload.head_sha, "a publication for this head already exists");
     }
     return { kind: "settled", outcome: { kind: "ok" } };
   }
-  // invariant: §7.7 step 4: claim the CHECKED-OUT head — only on a dedup AND journal
+  // §7.7 step 4: claim the CHECKED-OUT head — only on a dedup AND journal
   // miss. The admission claim named the payload sha (or the watermark), which
   // this checkout just disproved; a head already reviewed or already
   // published never reaches here.
@@ -3900,7 +3902,7 @@ async function preparePhase(
     await check.begin(lifecycleScope, githubAppId, headSha);
   }
 
-  // invariant: 4b. Usage ledger (migration 0031): one row per STARTED execution. Both
+  // 4b. Usage ledger (migration 0031): one row per STARTED execution. Both
   // dedup reads and the journal handoff above have missed, so a duplicate
   // delivery of a completed review never reaches this insert; a genuine
   // re-execution after a runner failure mints the next `seq` for the same
@@ -3909,7 +3911,7 @@ async function preparePhase(
   // identity (`reviewId` + `workspaceId`) so the dropped attempt can be
   // reconciled. The review continues either way.
   const reviewId = idemKey({
-    // invariant: The metered identity is the PAYLOAD identity (plan § Consumer write
+    // The metered identity is the PAYLOAD identity (plan § Consumer write
     // point 3): the authoritative checkout sha refines the review row only,
     // so a force-push between delivery and retry cannot split one review
     // into two ledger identities. A comment-mention job has no payload sha
@@ -3918,7 +3920,7 @@ async function preparePhase(
     ...key,
     head_sha: payload.head_sha || "no-sha",
   });
-  // safety: The charge (D2, D5, D7): this execution's own resolved strength against
+  // The charge (D2, D5, D7): this execution's own resolved strength against
   // the source its bot scope selects, priced by the profile judging THIS UTC
   // month's first day — the same profile the enqueue's ceiling read, so the
   // rows and the ceiling can never be denominated differently. Recomputed
@@ -3936,7 +3938,7 @@ async function preparePhase(
   // failure row below is how a charge that could not be computed is
   // reconciled instead.
   const usageNow = new Date();
-  // invariant: Named once so the price and its source cannot disagree: `rpFor` reads the
+  // Named once so the price and its source cannot disagree: `rpFor` reads the
   // same value in the same expression.
   // Minted BEFORE the profile read: the failure row and the read-back must
   // name THIS attempt even when the charge never got computed. The row input
@@ -3944,7 +3946,7 @@ async function preparePhase(
   const executionToken = crypto.randomUUID();
   const usageOccurredAt = usageNow.toISOString();
   try {
-    // invariant: No retry: a replay of the SAME token is already idempotent (the unique
+    // No retry: a replay of the SAME token is already idempotent (the unique
     // index rejects it), and a retry that minted a NEW token would be a
     // different execution by definition — a second count for one attempt. A
     // dropped row stays reconcilable through the `usage` failure row below.
@@ -3958,7 +3960,7 @@ async function preparePhase(
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    // invariant: A pre-commit failure and an ambiguous one (the write landed, the driver
+    // A pre-commit failure and an ambiguous one (the write landed, the driver
     // threw) reach this catch identically. The token read-back separates them
     // and reports THREE states: `true` — this execution's row is present, so
     // the failure is noise; `false` — the read succeeded and found nothing,
@@ -3978,7 +3980,7 @@ async function preparePhase(
       { ...fields, review_id: reviewId, workspace_id: usageWorkspaceId, usage_applied: applied },
       `usage_events row not written (review continues): ${detail}`,
     );
-    // note: The failure row is best-effort too — its own guard keeps a recording
+    // The failure row is best-effort too — its own guard keeps a recording
     // failure from reaching the pipeline.
     try {
       await deps.failureStore.record({
@@ -3989,7 +3991,7 @@ async function preparePhase(
         pr_number: payload.pr_number,
         head_sha: headSha,
         stage: "usage",
-        // invariant: The identity a backfill would write, and the source its price
+        // The identity a backfill would write, and the source its price
         // comes from: `usageWorkspaceId` IS the charged workspace (the
         // target's), never the bot's.
         error: `usage_events row not written: ${detail} ${JSON.stringify({
@@ -4006,7 +4008,7 @@ async function preparePhase(
     }
   }
 
-  // invariant: 5. §7.7 step 3 — lifecycle context: apply this scope's pending
+  // 5. §7.7 step 3 — lifecycle context: apply this scope's pending
   // CONFIRMED journals in original publication order (an older assessment
   // never loses to a newer unapplied recurrence), then capture targets,
   // trusted diff evidence and discussions. Any capture/apply failure is
@@ -4037,7 +4039,7 @@ async function preparePhase(
     deps.log.warn(fields, `lifecycle target capture failed — context-unavailable: ${detail}`);
   }
 
-  // invariant: Incremental round selection: when this PR has a previously REVIEWED head,
+  // Incremental round selection: when this PR has a previously REVIEWED head,
   // ask GitHub whether it is an ancestor of this one AND whether the range is
   // this branch's own work. Only that combination is an honest increment
   // (base...head is then exactly the work since the last review);
@@ -4069,10 +4071,8 @@ async function preparePhase(
         );
       } else {
         const gate = parseCompareGate(compare.stdout);
-        // shortcut: any merge commit in the increment forces a full-diff round —
-        // bound: one full-diff round per delivery whose compare names a merge
-        // commit; upgrade: review only the post-merge range, once merge-heavy
-        // PR branches make these rounds common.
+        // shortcut: any merge commit in the increment forces a full-diff round,
+        // upgrade when merge-heavy PR branches make re-reviews common.
         if (gate === null) {
           deps.log.info(
             { ...fields, increment_status: "unusable" },
@@ -4098,7 +4098,7 @@ async function preparePhase(
     }
   }
 
-  // invariant: Diff (GH_TOKEN via exec env only — never in the command). The command
+  // Diff (GH_TOKEN via exec env only — never in the command). The command
   // writes the file for numstat AND streams a BOUNDED copy back: that stdout
   // is the WORKER-CONTROLLED §7.3 trusted capture the evidence catalog
   // slices and the line-intent hunk prefilter both derive from. The bounded
@@ -4126,7 +4126,7 @@ async function preparePhase(
   // from this ONE derived deadline, and a spent deadline declines explicitly
   // — no step starts on a fresh 120s window once the fallback was admitted.
   const terminalizeBudgetMs = ref.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT;
-  // invariant: ONE derivation for the whole attempt: the FROZEN deadline (queue send +
+  // ONE derivation for the whole attempt: the FROZEN deadline (queue send +
   // operator cap, recorded at admission — never a fresh cap read here), the
   // live terminalize budget and the tier decide the reserve, the absolute
   // pre-runner cutoff and every window other owners bill from it. A replayed
@@ -4147,7 +4147,7 @@ async function preparePhase(
   });
   let diffStdout = diff.stdout;
   if (diff.exitCode !== 0) {
-    // invariant: Only GitHub's oversized-diff refusal has a local substitute; an auth or
+    // Only GitHub's oversized-diff refusal has a local substitute; an auth or
     // network failure keeps today's rethrow (a fallback would mask the cause).
     // The fallback shares this round's clock and the diff stage's window, and
     // declines when either the derived runner deadline or that window is spent.
@@ -4165,7 +4165,7 @@ async function preparePhase(
       throw new Error(gitStageFailureDetail("diff", diff, progress.secretValues));
     }
     if ("reason" in captured) {
-      // safety: ONE warn per attempt, and never silence: the step that ended it, that
+      // ONE warn per attempt, and never silence: the step that ended it, that
       // step's exit code and a redacted stderr tail (redaction BEFORE the tail
       // cut, exactly as the stage detail does). The durable failure keeps the
       // ORIGINAL 406 and gains the reason, so "not attempted (budget)",
@@ -4181,7 +4181,7 @@ async function preparePhase(
           (tail === "" ? ", stderr empty" : `, stderr tail: ${tail}`),
       );
       if (captured.reason === "budget") {
-        // note: The derived deadline, not a code fault, declined the fallback —
+        // The derived deadline, not a code fault, declined the fallback —
         // resolve it into the same `budget-exhausted` outcome the runner
         // window produces (the record keeps the git-stage cause verbatim).
         throw new RoundBudgetSpent(
@@ -4199,7 +4199,7 @@ async function preparePhase(
   }
   const diffRead = parseBoundedRead(diffStdout);
   const diffText = diffRead.text ?? "";
-  // invariant: The diff FILE's state, from the SAME round's bounded read of that file —
+  // The diff FILE's state, from the SAME round's bounded read of that file —
   // the one evidence that separates an EMPTY file (nothing to review) from a
   // capture that never delivered one. `git apply --numstat` rejects an empty
   // file as unusable input, so the numstat exit below is classified against
@@ -4207,7 +4207,7 @@ async function preparePhase(
   let diffFileState: "empty" | "captured" | "overflow" | "unreadable" =
     diffRead.failure ?? (diffRead.text === "" ? "empty" : "captured");
 
-  // invariant: Increment capture (numstat partition only): base...head replaces the
+  // Increment capture (numstat partition only): base...head replaces the
   // file AFTER the full diff text is already in memory, so the evidence
   // catalog above keeps proving prior findings against the whole PR.
   // A non-zero exit has two documented outcomes: a too-large refusal (the
@@ -4230,7 +4230,7 @@ async function preparePhase(
       },
     );
     if (increment.exitCode !== 0) {
-      // invariant: The compare API refuses an oversized base...head diff with the same
+      // The compare API refuses an oversized base...head diff with the same
       // 20,000-line ceiling `gh pr diff` answers, and that refusal has a
       // documented outcome: the round reviews the full diff it already
       // captured (the refused capture never replaced that file). The `since`
@@ -4263,7 +4263,7 @@ async function preparePhase(
     }
   }
 
-  // invariant: Trusted evidence catalog (§7.3) for the selected targets, pinned to
+  // Trusted evidence catalog (§7.3) for the selected targets, pinned to
   // the authoritative checkout SHA. A target the captured diff cannot prove
   // is EXCLUDED from the recheck input: without catalog evidence the seat
   // could only guess, so sending it would invite a misattributed verdict.
@@ -4279,7 +4279,7 @@ async function preparePhase(
   const catalogExcluded: ReadonlySet<string> = catalog.excludedTargets;
   const catalogBudgetExcluded: ReadonlySet<string> = catalog.catalogBudgetExcluded;
 
-  // invariant: §7.5 discovery BEFORE the §7.8 capture: an association whose remote
+  // §7.5 discovery BEFORE the §7.8 capture: an association whose remote
   // thread was never bound cannot enter the discussion, and the recheck's
   // resolution fences only ever verify a thread the seat actually saw — so
   // binding it first is what lets this round resolve it at all. Bounded: any
@@ -4289,7 +4289,7 @@ async function preparePhase(
     deps.log.warn(fields, `${bound.skipped} association(s) left unbound for a later round`);
   }
 
-  // invariant: Bounded discussion capture (§7.8) for the selected targets' known
+  // Bounded discussion capture (§7.8) for the selected targets' known
   // threads. API failure is unavailable — never empty/complete.
   let discussion = emptyDiscussion(captureMs);
   if (targets.length > 0) {
@@ -4311,7 +4311,7 @@ async function preparePhase(
         threads: threadRows.results.map((row) => ({ associationId: row.id, threadId: row.thread_id })),
         nowMs: captureMs,
       });
-      // safety: §7.8: the model-context bounds and untrusted-text neutralization are
+      // §7.8: the model-context bounds and untrusted-text neutralization are
       // NOT cosmetic — this bounded view is what rides the wire, so the seat
       // never sees a raw captured body, and the pass is what marks the thread
       // snapshots (and a cap-truncated issue capture) whose items were
@@ -4332,20 +4332,20 @@ async function preparePhase(
     }
   }
 
-  // invariant: The typed recheck input (§7.3): omitted ENTIRELY when no open rows
+  // The typed recheck input (§7.3): omitted ENTIRELY when no open rows
   // exist — the runner input stays byte-identical on a first round. Only
   // rows the trusted catalog can prove ride the wire, and only the slices
   // those rows reference: a never-sent row leaves no orphan evidence, and
   // no slice it owns consumes the byte budget.
   let recheckInput: RecheckInput | undefined;
   const budgetExcluded = new Set<string>();
-  // invariant: What the seat is actually handed. Narrowed to the sent rows'
+  // What the seat is actually handed. Narrowed to the sent rows'
   // associations once they are known: a thread of a row this round could not
   // fit was not seen by the seat, so it must never be offered for resolution.
   let askedDiscussion = discussion;
   let recheckAssignmentMaxBytes: number | undefined;
   if (targets.length > 0 && !captureFailed) {
-    // invariant: §7.8: the seat's ask budget is an operator setting, read ONCE per
+    // §7.8: the seat's ask budget is an operator setting, read ONCE per
     // message and only when a recheck round will actually be asked, so a
     // delivery with no open rows pays nothing. It rides the runner input as
     // its own top-level field — the `mstar.recheck-input/v1` document stays
@@ -4354,7 +4354,7 @@ async function preparePhase(
     // budget could not reach are accounted `budget` rather than skipped by a
     // seat that never ran.
     const budget = await getRecheckAssignmentMaxBytes(deps.env.DB);
-    // note: A degraded read answers the documented default and owes the operator
+    // A degraded read answers the documented default and owes the operator
     // one structured warn (the level/concurrency readers' contract). It is
     // reported even when nothing fits below: the budget decided that.
     if (budget.degraded) {
@@ -4367,7 +4367,7 @@ async function preparePhase(
         "recheck assignment budget read degraded — using the documented default",
       );
     }
-    // invariant: The one byte cap a row must fit: the §7.3 wire cap, or the room the
+    // The one byte cap a row must fit: the §7.3 wire cap, or the room the
     // assignment budget leaves once its own prose is paid.
     const documentMaxBytes = Math.min(
       RECHECK_INPUT_MAX_BYTES,
@@ -4376,7 +4376,7 @@ async function preparePhase(
     const candidates = targets.filter(
       (target) => !catalogExcluded.has(target.rowId) && !catalogBudgetExcluded.has(target.rowId),
     );
-    // invariant: Each row is measured against the evidence of the rows ALREADY
+    // Each row is measured against the evidence of the rows ALREADY
     // accepted, never against slices a pending row might still bring: a row
     // that does not fit is dropped and contributes nothing, so a later row
     // is measured against the set that will really ride — it cannot lose its
@@ -4389,7 +4389,7 @@ async function preparePhase(
     for (const target of candidates) {
       const withRow = new Set([...referenced, ...(catalog.sliceIdsByRowId.get(target.rowId) ?? [])]);
       const nextEvidence = catalog.slices.filter((slice) => withRow.has(slice.id));
-      // invariant: The cap is measured on the SERIALIZED input — schema, headSha,
+      // The cap is measured on the SERIALIZED input — schema, headSha,
       // evidence, discussion, array brackets and separators included — so
       // the accepted document is exactly what the cap counts. The discussion
       // measured here is the whole capture: narrowing it to the sent rows can
@@ -4406,7 +4406,7 @@ async function preparePhase(
       evidence = nextEvidence;
       for (const id of withRow) referenced.add(id);
     }
-    // invariant: The rotation HEAD is the one row the fit must never drop for want of
+    // The rotation HEAD is the one row the fit must never drop for want of
     // room. A row it omits never advances the clock, so the same row comes
     // back first on every round and is dropped again — permanently
     // `budget`, the deadlock this fitting removes. So whenever the head did
@@ -4417,7 +4417,7 @@ async function preparePhase(
     // exactly as captured: the same finding row, never a rewritten one.
     const head = candidates[0];
     if (head !== undefined && !included.some((target) => target.rowId === head.rowId)) {
-      // why: Measured against the WHOLE discussion: the head is not included yet,
+      // Measured against the WHOLE discussion: the head is not included yet,
       // so the narrowed view would also drop its own threads. Probes are the
       // serialized document itself, so a multi-byte body is bounded by real
       // UTF-8 bytes, and the binary search is logarithmic in body length.
@@ -4433,7 +4433,7 @@ async function preparePhase(
         ...head,
         original: { ...head.original, body: truncatedBody(head.original.body, length) },
       });
-      /** note: The head bounded into `slices` beside `targets`, or null when not even an empty body fits. */
+      /** The head bounded into `slices` beside `targets`, or null when not even an empty body fits. */
       const rescue = (targets: RecheckTarget[], slices: EvidenceSlice[]): RecheckTarget | null => {
         if (bytesOf(targets, slices, withBody(0)) > documentMaxBytes) return null;
         let low = 0;
@@ -4446,11 +4446,11 @@ async function preparePhase(
         return withBody(low);
       };
       const own = new Set(catalog.sliceIdsByRowId.get(head.rowId) ?? []);
-      // invariant: The head's own catalog, and the union a shared document needs — never
+      // The head's own catalog, and the union a shared document needs — never
       // a slice of a row that ends up unsent (that would be orphan evidence).
       const headSlices = catalog.slices.filter((slice) => own.has(slice.id));
       const withOwn = catalog.slices.filter((slice) => own.has(slice.id) || referenced.has(slice.id));
-      // invariant: Room for the rows that fit comes first; the head gives up its catalog
+      // Room for the rows that fit comes first; the head gives up its catalog
       // before those rows give up their place. A head that cannot share the
       // budget at all still rides alone — its clock moves, and the rows it
       // displaced keep their own place for the next round.
@@ -4469,7 +4469,7 @@ async function preparePhase(
       for (const attempt of attempts) {
         const bounded = rescue(attempt.targets, attempt.slices);
         if (bounded === null) continue;
-        // note: Array order does not change a serialized document's byte count, so
+        // Array order does not change a serialized document's byte count, so
         // the head goes back where the rotation had it: first.
         included.splice(0, included.length, ...attempt.targets);
         included.unshift(bounded);
@@ -4480,7 +4480,7 @@ async function preparePhase(
     const sentIds = new Set(included.map((target) => target.rowId));
     for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);
     if (included.length === 0) {
-      // invariant: Nothing can be asked: even the head's fixed fields plus the discussion
+      // Nothing can be asked: even the head's fixed fields plus the discussion
       // overrun the budget, so no body length and no catalog can rescue it.
       // Name both figures so the operator can tell a budget that is too small
       // from an ask that grew, and never report it as a seat skip — no seat was
@@ -4506,7 +4506,7 @@ async function preparePhase(
         `recheck ask cannot fit the assignment budget — the smallest document this round can ask (prose + one finding's fixed fields + discussion) needs ${requiredBytes} bytes, the budget is ${budget.maxBytes}; nothing was sent, so every row keeps its budget reason and its rotation clock (raise review.recheck.assignment_max_bytes to let the round run)`,
       );
     }
-    // invariant: The seat's view of the discussion: issue items and their coverage and
+    // The seat's view of the discussion: issue items and their coverage and
     // digest are the round's context and stay, while a thread is offered only
     // for a row that rides — a resolve verifies a thread the seat saw.
     const sentAssociations = new Set(included.flatMap((target) => target.associationIds));
@@ -4531,11 +4531,11 @@ async function preparePhase(
     }
   }
 
-  // invariant: 6. §7.7 step 4 — the Check claim was made at ADMISSION. What remains is
+  // 6. §7.7 step 4 — the Check claim was made at ADMISSION. What remains is
   // the FALLBACK (no SHA was knowable there) and the SUPERSEDE check: the
   // authoritative checkout is the only SHA the review itself will use.
 
-  // invariant: 6. §7.7 step 4 — the fallback claim for a message whose SHA was not
+  // 6. §7.7 step 4 — the fallback claim for a message whose SHA was not
   // knowable at admission (a comment trigger with no readable head
   // watermark): it lands here, after dedup/journal handed their duplicates
   // off, BEFORE model work. Absent `checks` dep = no Checks; hook failure is
@@ -4546,7 +4546,7 @@ async function preparePhase(
   }
 
 
-  // note: IDENTITY, frozen once, from the claim this attempt actually owns (the
+  // IDENTITY, frozen once, from the claim this attempt actually owns (the
   // admitted one, or the authoritative re-claim the checkout forced). Every
   // later phase reads it from the row; a concurrent freeze of a DIFFERENT head
   // wins the CAS and this attempt settles as skipped instead of continuing.
@@ -4554,8 +4554,8 @@ async function preparePhase(
   const liveIdentity =
     check.handle !== null
       ? await readCheckIdentity(deps.env.DB, check.handle.attemptId)
-      : // invariant: No handle (a refused claim): the identity is still the admitted claim's
-        // note: open row for that key — a property of the ATTEMPT, not of the handle.
+      : // No handle (a refused claim): the identity is still the admitted claim's
+        // open row for that key — a property of the ATTEMPT, not of the handle.
         admittedKey === null
         ? null
         : await readOpenCheckIdentityForKey(deps.env.DB, admittedKey);
@@ -4574,13 +4574,13 @@ async function preparePhase(
         );
       }
     } else if (frozenNow.key !== liveIdentity.key || frozenNow.generation !== liveIdentity.generation) {
-      // note: WHOLE identity: an identical (key, generation) pair is our own and
+      // WHOLE identity: an identical (key, generation) pair is our own and
       // proceeds; anything else is a foreign freeze and skips.
       await settleMovedHead(deps, ref, check, headSha, frozenNow.key, liveIdentity.key);
     }
   }
 
-  // why: 6. Numstat of the PR diff — `git apply --numstat` reads the unified
+  // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
   // diff without applying it. The lines ("<add>\t<del>\t<path>") are the
   // runner's seat-partition universe (reconFacts convention). On an
   // incremental round the file holds base...head, so the seats partition the
@@ -4589,7 +4589,7 @@ async function preparePhase(
   const numstat = await sandbox.runCommand(cmds.numstat, {
     timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat", "preparation"),
   });
-  // invariant: A non-zero exit is the FILE's answer about itself: an empty file is what
+  // A non-zero exit is the FILE's answer about itself: an empty file is what
   // `git apply` rejects as unusable input (exit 128, "unrecognized input"),
   // so the same round's read of that file classifies the exit. Any other
   // failure keeps its own detail — git stderr plus the diff-path state — so
@@ -4603,7 +4603,7 @@ async function preparePhase(
     .map((line) => line.trimEnd())
     .filter((line) => line !== "");
 
-  // invariant: An empty diff FILE is nothing to review — `git apply --numstat` exits
+  // An empty diff FILE is nothing to review — `git apply --numstat` exits
   // non-zero on it precisely because it holds no patch — so the round acks
   // instead of failing the sandbox stage: no publication, no review row.
   // The numstat's own stdout must be empty too: lines there would prove the
@@ -4639,7 +4639,7 @@ async function preparePhase(
     );
   }
 
-  // invariant: A non-delivered diff capture is ambiguous, and only THIS round's
+  // A non-delivered diff capture is ambiguous, and only THIS round's
   // numstat — the diff FILE `git apply` read, not the bounded stdout — can
   // resolve the EMPTY case. Non-empty numstat means the redirect wrote a diff
   // the read did not deliver: a CAPTURE FAILURE, so the round is
@@ -4664,7 +4664,7 @@ async function preparePhase(
     );
   }
 
-  // invariant: 7. Runner input JSON (reconFacts): `<owner>/<repo>#<pr>` and
+  // 7. Runner input JSON (reconFacts): `<owner>/<repo>#<pr>` and
   // `head <sha>` fold into the envelope target INSIDE the runtime — the
   // AUTHORITATIVE checkout sha is used so the ArtifactStore.put target
   // cross-check agrees with the idempotency key — plus the numstat
@@ -4677,7 +4677,7 @@ async function preparePhase(
     ...(sinceSha !== null ? [`since ${sinceSha}`] : []),
     ...numstatLines,
   ];
-  // invariant: The App's per-role model overrides ride as an OPTIONAL
+  // The App's per-role model overrides ride as an OPTIONAL
   // input field, included ONLY when a role map resolved above — no-map
   // messages serialize byte-identically to the pre-overrides payload
   // (the runner-side guard + type extension ride alongside).
@@ -4706,7 +4706,7 @@ async function preparePhase(
     runnerDeadlineMs,
   );
 
-  // invariant: Anchor the derived budget HERE, just before the input write: the one
+  // Anchor the derived budget HERE, just before the input write: the one
   // tier clamp the whole pipeline applies (`anchorRunnerBudget`), and the
   // write, the wire value and the exec timeout all spend its absolute end.
   // Its refusals — an oversized request, a spent cutoff — throw before any
@@ -4720,7 +4720,7 @@ async function preparePhase(
   // NaN, which the anchor's entry check rejects the same way an explicit
   // bad request is — no second refusal path, no silent fallback.
   const diffSize = parseNumstatSize(numstat.stdout, diffFileState === "empty");
-  // invariant: The outcome's own counter: the selected numstat's textual line count —
+  // The outcome's own counter: the selected numstat's textual line count —
   // a null size is the recorded unknown, never invented.
   observedChangedLines = diffSize?.changedLines ?? null;
   const sizeRequest = requestRunnerBudget(level, diffSize);
@@ -4742,7 +4742,7 @@ async function preparePhase(
       "preparation",
     );
   }
-  // note: The allocation is immutable from here on: the typed record's runner
+  // The allocation is immutable from here on: the typed record's runner
   // budget is this frozen effective duration.
   observed.runnerEffectiveBudgetMs = anchor.effectiveBudgetMs;
   fields = {
@@ -4751,7 +4751,7 @@ async function preparePhase(
     runner_effective_ms: anchor.effectiveBudgetMs,
     runner_cutoff_ms: roundBudget.runnerCutoffMs,
     runner_deadline_ms: anchor.execDeadlineMs,
-    // why: The estimate the request was sized from — one work unit per changed
+    // The estimate the request was sized from — one work unit per changed
     // line, minimum one per file; `null` records an unknown size, so an
     // investigation can tell a tier-max request from a sized one.
     runner_work_units: sizeRequest.kind === "requested" ? sizeRequest.workUnits : null,
@@ -4807,7 +4807,7 @@ export async function reviewAttempt(
   const { payload, attemptId, level } = ref;
   const runner = requireRunnerConfig(deps, payload);
   const progress = beginProgress();
-  // invariant: The live objects are this phase's own. The container is resolved by attempt
+  // The live objects are this phase's own. The container is resolved by attempt
   // id (which never starts one) and every PAID action runs through the guarded
   // form inside `runReviewAttempt`: ONE request proves the attempt's marker and
   // executes, so there is no proof-then-act window to race.
@@ -4841,7 +4841,7 @@ export async function reviewAttempt(
       progress,
       attemptId,
     });
-    // safety: The session's full exact-value set, for the phases that redact its
+    // The session's full exact-value set, for the phases that redact its
     // output without having run it (and for a resumed collect, which has no
     // progress of its own).
     deps.credentials.set(attemptId, { token, secretValues: progress.secretValues });
@@ -4889,6 +4889,94 @@ export async function collectAttempt(
   }
 }
 
+/**
+ * The model-controlled strings of a review output — the same fields write-time
+ * redaction covers. The rendered body also carries host template (markers,
+ * commit SHA, schema tags), which must never enter the gate.
+ */
+function modelTexts(
+  output: ReviewOutput,
+  report: ReviewAttemptExecution["report"],
+  priorTitles: readonly string[],
+): string[] {
+  const texts: string[] = [];
+  texts.push(...priorTitles);
+  if (output.summary_md !== undefined) texts.push(output.summary_md);
+  if (output.incomplete !== undefined) texts.push(output.incomplete.reason, ...output.incomplete.unscanned);
+  if (output.tally !== undefined) {
+    texts.push(output.tally.chatHeader);
+    if (output.tally.incomplete !== undefined) {
+      texts.push(output.tally.incomplete.reason, ...output.tally.incomplete.unscanned);
+    }
+  }
+  for (const finding of output.findings) {
+    texts.push(finding.title, finding.body);
+    if (finding.category !== undefined) texts.push(finding.category);
+    if (finding.file_path != null) texts.push(finding.file_path);
+    if (finding.fingerprint_hint !== undefined) texts.push(finding.fingerprint_hint);
+  }
+  if (report !== null) {
+    texts.push(report.overview, report.linkedIssueAc, report.verified, report.rejected, report.planToFix);
+  }
+  return texts.filter((text) => text !== "");
+}
+
+/**
+ * SEC-01 publish gate: return the refusal outcome for the first text that
+ * carries a credential form. A refusal settles through the ATTEMPT'S FAILURE
+ * path (failure row + failed claim + Check conclusion) — the review genuinely
+ * did not deliver, and a publication-only settlement would have nothing to
+ * close. A resumed host with no credentials warns once and lets the caller
+ * continue: the stored payload was already redacted by the host that wrote it.
+ */
+async function refusesCredentialEcho(
+  deps: ProcessDeps,
+  ref: AttemptRef,
+  prepared: PreparedAttempt,
+  progress: ReviewAttemptProgress,
+  texts: readonly string[],
+  fields: ConsumerLogFields,
+): Promise<"clear" | "settled" | "unknown"> {
+  if (progress.secretValues.length === 0) {
+    deps.log.warn(
+      fields,
+      "review publish gate could not run — this host holds no credentials for the attempt (the stored payload was redacted at write time)",
+    );
+    return "clear";
+  }
+  if (!texts.some((text) => carriesSecretForm(text, progress.secretValues))) return "clear";
+  const refusal = new Error("publish gate refused the review — the outgoing body carries a credential echo");
+  const wrapped = phaseFailure("collect", refusal, {
+    stage: "pipeline",
+    headSha: prepared.headSha,
+    secretValues: progress.secretValues,
+    runnerStartedAt: undefined,
+    runnerReturned: true,
+    runnerEffectiveBudgetMs: prepared.runnerEffectiveMs,
+    changedLines: prepared.observedChangedLines,
+    sendAttemptPublicationId: null,
+  });
+  // Mark the handoff as settling BEFORE the settlement, exactly like the
+  // workflow's catch: an `unknown` outcome must stay selectable by the
+  // reconciler's incomplete-settlement sweep.
+  const deliveryKey = deliveryKeyOf(ref.payload);
+  if ((await readAttemptHandoff(deps.env.DB, deliveryKey)) !== null) {
+    await beginAttemptSettlement(deps.env.DB, deliveryKey, Date.now());
+  }
+  let settlement: ProcessOutcome | null = null;
+  try {
+    settlement = await settleAttemptFailure(deps, ref, wrapped, { headSha: prepared.headSha });
+  } catch (err) {
+    // The failure settlement rethrows its cause after every effect is durable;
+    // this gate has already refused to publish, so that signal ends here.
+    if (err !== refusal) throw err;
+  }
+  // A returned settlement is the failure path saying it could NOT prove the
+  // outcome (unreadable launch row, or no durable failure row): never certify
+  // that as a settled collect.
+  return settlement?.kind === "unknown" ? "unknown" : "settled";
+}
+
 async function collectPhase(
   deps: ProcessDeps,
   ref: AttemptRef,
@@ -4925,11 +5013,11 @@ async function collectPhase(
     pr_number: payload.pr_number,
     head_sha: headSha,
   };
-  // note: The context sets ride as arrays on the handoff (JSON) and become sets here.
+  // The context sets ride as arrays on the handoff (JSON) and become sets here.
   const catalogExcluded: ReadonlySet<string> = new Set(prepared.catalogExcluded);
   const catalogBudgetExcluded: ReadonlySet<string> = new Set(prepared.catalogBudgetExcluded);
   const budgetExcluded = new Set(prepared.budgetExcluded);
-  // safety: SEC-01, bounded by the plan: exact-value redaction is a SAME-HOST guarantee.
+  // SEC-01, bounded by the plan: exact-value redaction is a SAME-HOST guarantee.
   // This host holds the session's ACTUAL values only when it ran the paid step;
   // a resumed host has none, and it must not substitute values it mints now (a
   // different token, rotated provider keys) and present them as exact. It
@@ -4937,13 +5025,13 @@ async function collectPhase(
   // exact coverage. Persisting the secrets to make the resumed set exact would
   // put credentials in D1, which is worse than the gap.
   progress.secretValues = deps.credentials.get(attemptId)?.secretValues ?? [];
-  // invariant: The paid result is the LAUNCH ROW's, never a predecessor's return value.
+  // The paid result is the LAUNCH ROW's, never a predecessor's return value.
   const execution = await readPaidExecution(deps, attemptId);
   const { run, recheck, report, appliedProvider } = execution;
   const recheckDoc = recheck?.doc ?? null;
   const rejectedRowIds = recheck?.rejected ?? new Set<string>();
   const anonymousRejectedRows = recheck?.anonymousRejectedRows ?? 0;
-  // invariant: 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
+  // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
   // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
   // parseReviewOutput is a pure function of run.stdout —
   // the same stdout fails identically on a retry (a deterministic
@@ -4953,7 +5041,7 @@ async function collectPhase(
   // structured log line only) → the `degraded` outcome the queue handler
   const parsed = parseReviewOutput(run.stdout);
   if (!parsed.ok) {
-    // safety: SEC-01 exact-value defense: the session's ACTUAL secret values
+    // SEC-01 exact-value defense: the session's ACTUAL secret values
     // (runner env provider keys + the minted installation token) are
     // exact-redacted from the parse error and the raw stdout BEFORE they
     // reach the durable failure row or the public degraded comment — a
@@ -4969,7 +5057,7 @@ async function collectPhase(
         pr_number: payload.pr_number,
         head_sha: headSha,
         stage: "parse",
-        // safety: qc3 F-001 / qc2 F-001: the zod/engine error can echo a
+        // qc3 F-001 / qc2 F-001: the zod/engine error can echo a
         // model-emitted secret-shaped value (`verdict "ghp_…" is not one
         // of …`) — redactSecrets BEFORE the durable D1 row, same face as
         // buildDegradedBody's public-comment choke point. SEC-01 adds the
@@ -4980,7 +5068,21 @@ async function collectPhase(
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(fields, `review_failures insert failed (degrade continues): ${detail}`);
     }
-    // invariant: §7.7 degraded publication (plan: stage → claim → send the exact
+    // The degraded body embeds the raw stdout and the parse error: gate the
+    // same credential forms — each text on its own, so a short encoding that
+    // IS the whole stdout still exact-matches — before anything is staged.
+    const degradedGate = await refusesCredentialEcho(
+      deps,
+      ref,
+      prepared,
+      progress,
+      [redactedStdout, redactedError],
+      fields,
+    );
+    if (degradedGate !== "clear") {
+      return { kind: "settled", outcome: { kind: degradedGate === "unknown" ? "unknown" : "ok" } };
+    }
+    // §7.7 degraded publication (plan: stage → claim → send the exact
     // prepared body → proof → applied mark). The same resolved commenter
     // instance as the token mint above (lock L4). Best-effort with typed
     // outcomes — the message acks regardless (deterministic model-output
@@ -4996,7 +5098,7 @@ async function collectPhase(
       scope: lifecycleScope,
       headSha,
       admittedAttemptId: ref.attemptId,
-      // invariant: A resumed collect may not have adopted the Check row; the frozen
+      // A resumed collect may not have adopted the Check row; the frozen
       // association still names it, and the send must take its action lease.
       ...(degradedCheckAttemptId === undefined ? {} : { checkAttemptId: degradedCheckAttemptId }),
       redactedError,
@@ -5006,7 +5108,7 @@ async function collectPhase(
     });
     if (degradedOutcome.phase === "failed") {
       await check?.terminalize(null, "degraded-not-posted");
-      // invariant: Only a journal that actually closed discharges the publication lane;
+      // Only a journal that actually closed discharges the publication lane;
       // a refusal/throw of the close leaves it recoverable and unsettled.
       await settleAttemptPublication(
         deps,
@@ -5016,21 +5118,21 @@ async function collectPhase(
       );
     } else {
       await check?.terminalize(degradedOutcome.publicationId, "publication-unknown");
-      // note: A durable degraded publication is the proof the Check concludes from:
+      // A durable degraded publication is the proof the Check concludes from:
       // the obligation is recorded from that fact, and the Check row decides
       // whether it is still open.
       if (degradedOutcome.phase === "confirmed") {
         await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
         await settleAttemptPublication(deps, attemptId, fields, ["publication"]);
       }
-      // invariant: `unknown` stays unsettled: read-only discovery still owes the send.
+      // `unknown` stays unsettled: read-only discovery still owes the send.
     }
     deps.log.warn(
       fields,
       `review degraded: output failed schema validation (${redactedError}) — degraded publication ${degradedOutcome.phase}` +
         `${degradedOutcome.phase === "failed" ? ` (${degradedOutcome.reason})` : ""}; acked, no retry/DLQ`,
     );
-    // invariant: A degraded notice is not a review: stamp the payload sha (the same
+    // A degraded notice is not a review: stamp the payload sha (the same
     // key the worker claimed) so neither reader keeps accepting the "1".
     // Best-effort — a KV fault only leaves the stale claim behind.
     if (payload.head_sha) {
@@ -5055,7 +5157,7 @@ async function collectPhase(
     return { kind: "settled", outcome: { kind: "degraded" } };
   }
 
-  // safety: 10. SEC-02 + B4 + size-budget choke point: redact secret-shaped spans
+  // 10. SEC-02 + B4 + size-budget choke point: redact secret-shaped spans
   // (PEM, tokens, keys, long hex — F-001: every model-controlled field),
   // clamp per-finding title/body to their budgets (qc2 F-003), then cap
   // findings to the Top-50 by merge class BEFORE anything can reach the
@@ -5064,11 +5166,38 @@ async function collectPhase(
   // the exact-value second pass (the session's ACTUAL secret values) on
   // top of the shape-based redaction — a credential that evades every
   // pattern is still removed before the post or the put.
-  const capped = capFindings(
-    clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), progress.secretValues)),
-  );
+  const redacted = redactReviewOutputExact(redactReviewOutput(parsed.output), progress.secretValues);
+  // A redaction inside a suggestion fence must not stay a one-click apply, and
+  // the removed patch must not consume the body budget before the clamp: drop
+  // the fence FIRST, then clamp what actually publishes.
+  const suggestionsDropped: ReviewOutput = {
+    ...redacted,
+    findings: redacted.findings.map((finding) => ({
+      ...finding,
+      body: dropRedactedSuggestions(finding.body),
+    })),
+  };
+  const capped = capFindings(clampFindingSizes(suggestionsDropped));
   const output = capped.output;
-  // invariant: 11. §7.7 step 6 — validation + conservative reconciliation + closure
+  // SEC-01 publish gate: scan the MODEL fields before any renderer runs. Host
+  // template (markers, commit SHA, schema tags) is not model output, so a key
+  // whose encoding collides with it can never refuse a clean review.
+  const publishGate = await refusesCredentialEcho(
+    deps,
+    ref,
+    prepared,
+    progress,
+    modelTexts(
+      output,
+      report,
+      targets.map((target) => target.original.title),
+    ),
+    fields,
+  );
+  if (publishGate !== "clear") {
+    return { kind: "settled", outcome: { kind: publishGate === "unknown" ? "unknown" : "ok" } };
+  }
+  // 11. §7.7 step 6 — validation + conservative reconciliation + closure
   // assembly + final body. The recheck document is reconciled against the
   // SAME round's final capped findings (§7.4 conservative precedence:
   // same-round recurrence and related unresolved concerns force
@@ -5079,7 +5208,7 @@ async function collectPhase(
     targets,
     doc: recheckDoc,
     status: recheck?.status ?? null,
-    // invariant: The seat's own view: a thread of a row this round could not fit was
+    // The seat's own view: a thread of a row this round could not fit was
     // never handed over, so it cannot authorize a resolve either.
     discussion: askedDiscussion,
     output,
@@ -5090,7 +5219,7 @@ async function collectPhase(
     rejectedRowIds,
     anonymousRejectedRows,
   });
-  // note: §7.8 attribution: ONE line per recheck round carrying the seat's own
+  // §7.8 attribution: ONE line per recheck round carrying the seat's own
   // status next to this round's accounting. A lost round therefore leaves a
   // D1 failure row and this line even when the container's stderr is gone.
   // Emitted whenever rows were selected: a round the §7.3 size budget emptied
@@ -5098,12 +5227,12 @@ async function collectPhase(
   if (targets.length > 0) {
     const status = recheck?.status ?? null;
     const recheckOutcome = status?.outcome ?? "absent";
-    // invariant: The runner cancels an unfinished seat when the main review settles
+    // The runner cancels an unfinished seat when the main review settles
     // (spec §7.8): the round answered nothing because it was STOPPED, not
     // because it ran and lost. That is neither a failure row nor an
     // `invalid-output` for a row the seat never answered.
     const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
-    // why: The status document belongs to the SEAT; a round whose document was
+    // The status document belongs to the SEAT; a round whose document was
     // lost has its real cause on the read side (absent / overflow /
     // validation failure), so that cause LEADS the detail instead of the
     // seat's `ok: null: null`, which says nothing about what went wrong.
@@ -5121,7 +5250,7 @@ async function collectPhase(
       {
         ...fields,
         recheck_outcome: recheckOutcome,
-        // safety: Same wrapper as `error`: a seat-authored `reason` can echo a
+        // Same wrapper as `error`: a seat-authored `reason` can echo a
         // credential exactly like `error` can.
         recheck_reason: status?.reason === null || status?.reason === undefined
           ? null
@@ -5129,15 +5258,15 @@ async function collectPhase(
         recheck_error: status?.error === null || status?.error === undefined
           ? null
           : redactExactSecrets(redactSecrets(status.error), progress.secretValues),
-        // invariant: Named drops + the unnamed ones actually attributed (no usable
+        // Named drops + the unnamed ones actually attributed (no usable
         // rowId, so mapped by position): the count reports what happened,
         // not only what could be named.
         rejected: rejectedRowIds.size + reconciled.anonymousRejectedCount,
-        // why: A seat-authored `rejected_unnamed` is unbounded; any claim beyond
+        // A seat-authored `rejected_unnamed` is unbounded; any claim beyond
         // the sent-and-unanswered pool is excess that can claim no row. It is
         // dropped, and reported here so the silence has a number.
         rejected_unnamed_ignored: anonymousRejectedRows - reconciled.anonymousRejectedCount,
-        // invariant: Real seat answers (the published coverage count), never the
+        // Real seat answers (the published coverage count), never the
         // lifecycle clock — a gate-rejected row advances `last_assessed_ms`
         // without ever having been assessed.
         assessed: reconciled.assessedCount,
@@ -5152,7 +5281,7 @@ async function collectPhase(
           ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
           : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
     );
-    // why: Shipped failure rule: a round that SENT rows records one row when its
+    // Shipped failure rule: a round that SENT rows records one row when its
     // document is absent or the seat reported `failed` — a seat budget skip
     // records one too, because that round ran and answered nothing. A round
     // the runner cancelled by design, and a round that sent nothing at all
@@ -5164,7 +5293,7 @@ async function collectPhase(
       !roundCancelled &&
       (recheckDoc === null || recheckOutcome === "failed")
     ) {
-      // invariant: Best-effort: the insert must never mask the round (AL-6 pattern).
+      // Best-effort: the insert must never mask the round (AL-6 pattern).
       try {
         await deps.failureStore.record({
           target_id: payload.targetId,
@@ -5182,7 +5311,7 @@ async function collectPhase(
       }
     }
   }
-  // invariant: The ROUND's coverage reads the whole capture, never the narrowed wire
+  // The ROUND's coverage reads the whole capture, never the narrowed wire
   // view: an unsent row's truncated thread still leaves this round's context
   // short, and publication must not claim more than capture could read.
   const contextCoverage: Coverage = staleContext
@@ -5205,12 +5334,12 @@ async function collectPhase(
       disposition: outcome.disposition,
       reason: outcome.reason,
       evidenceKind: outcome.evidence?.kind ?? null,
-      // note: A pending resolve renders not-yet-resolved, not a prediction —
+      // A pending resolve renders not-yet-resolved, not a prediction —
       // remote outcomes appear in the NEXT round's single upsert (§7.10).
       thread: target.associationIds.some((id) => queuedAssociations.has(id)) ? "not yet resolved" : "-",
     };
   });
-  // note: The §7.10 facts (coverage line, display cap, thread state) render ONCE,
+  // The §7.10 facts (coverage line, display cap, thread state) render ONCE,
   // in the body's revalidated section — there is no second rendering.
   // 12. §7.7 step 7 — calculate round/target from the App's current single
   // comment (pre-staging read), assemble the FINAL body, and stage the
@@ -5232,7 +5361,7 @@ async function collectPhase(
     headSha,
     publicationMarker,
     ...(sinceSha !== null ? { sinceSha } : {}),
-    // note: The revalidated table is rendered mechanically from the closure rows
+    // The revalidated table is rendered mechanically from the closure rows
     // and carries the round's full prior-findings set; the report may be null
     // (no prContext / seat failure), in which case every heading still
     // renders with `none`.
@@ -5240,7 +5369,7 @@ async function collectPhase(
   });
   const bodySha256 = await sha256Hex(preparedBody);
 
-  // why: Seen records for the current findings: the stable finding identity is
+  // Seen records for the current findings: the stable finding identity is
   // the fingerprint — an existing lifecycle row (open or CLOSED) with the
   // same finding_id REUSES its row id so the apply's upsert reopens it
   // (§7.2 recurrence) instead of minting a duplicate.
@@ -5275,7 +5404,7 @@ async function collectPhase(
     return { rowId, findingId, original: projectOriginalFinding(finding) };
   });
 
-  // note: Line intents for the line-commentable findings (hunk prefilter over
+  // Line intents for the line-commentable findings (hunk prefilter over
   // the SAME worker-captured diff as the evidence catalog): preallocated
   // opaque UUIDs, trusted marker bodies, digest computed at staging.
   const qualifying = filterLineCommentFindings(
@@ -5285,8 +5414,8 @@ async function collectPhase(
   const lineIntents: LineIntent[] = [];
   for (const { finding, lineStart } of qualifying) {
     const rowId = seenRowIdByFindingId.get(computeFindingFingerprint(finding));
-    if (rowId === undefined) continue; // invariant: unreachable — seen covers every finding
-    // invariant: A range the wire cannot publish (cross-hunk, or a start that is not a
+    if (rowId === undefined) continue; // unreachable — seen covers every finding
+    // A range the wire cannot publish (cross-hunk, or a start that is not a
     // real range) falls back to the single-line anchor at line_end; the body
     // must not keep an applyable multi-line replacement for the dropped range.
     const rangeDemoted =
@@ -5312,7 +5441,7 @@ async function collectPhase(
   }
 
   const lifecycleRound: LifecycleRound = {
-    // invariant: The clock moves for every selected row EXCEPT the rows the FIT omitted
+    // The clock moves for every selected row EXCEPT the rows the FIT omitted
     // for room. A row the catalog could not prove, or one a capture failure
     // never offered, is re-proved by a later round's diff — parking it at the
     // rotation head would keep it inside the 25-row cap forever. A fit-omitted
@@ -5345,12 +5474,12 @@ async function collectPhase(
       targetId: payload.targetId,
       model: chainHeadSelector(prepared.modelChain),
       provider: appliedProvider,
-      // invariant: A stale-context round (its pending lifecycle journal failed to
+      // A stale-context round (its pending lifecycle journal failed to
       // apply OR its capture failed) still publishes, but its row must
       // never be an incremental base: the flag rides the staged artifact
       // so the put that writes it (here or on recovery) persists it.
       contextIncomplete: staleContext,
-      // why: The round's own wall clock: the same `roundStartedAt` every budget
+      // The round's own wall clock: the same `roundStartedAt` every budget
       // check reads, so the stored duration is the run's, not a second clock.
       durationMs: Date.now() - roundStartedAt,
     },
@@ -5359,7 +5488,7 @@ async function collectPhase(
     admittedAttemptId: ref.attemptId,
   };
   const staged = await stagePublication(deps.env.DB, { id: publicationId, payload: payloadDoc, nowMs: Date.now() });
-  // invariant: An insert conflict returns the EXISTING immutable payload — a
+  // An insert conflict returns the EXISTING immutable payload — a
   // prepared/confirmed publication is never overwritten with a second
   // model result (spec §7.7). The existing row owns this scope+SHA: hand
   // it to recovery instead of sending OUR newer body over it.
@@ -5408,7 +5537,7 @@ export async function publishAttempt(
 }
 
 /**
- * invariant: Read-only completion of an ALREADY-DISPATCHED line batch (spec §7.9a
+ * Read-only completion of an ALREADY-DISPATCHED line batch (spec §7.9a
  * condition 2): capture the ids when the batch is visible remotely and never
  * send. A failed read leaves the durable intent in place — the work stays
  * discovery, never permission for another create.
@@ -5447,7 +5576,7 @@ async function publishPhase(
   const { payload, attemptId, level } = ref;
   const commenter = requireCommenter(deps, payload);
   const sandboxId = attemptSandboxId(attemptId);
-  // invariant: The JOURNAL ROW is the authority: a restart after staging publishes
+  // The JOURNAL ROW is the authority: a restart after staging publishes
   // exactly what was staged — its body, digest, target comment, round, line
   // intents and lifecycle — never an in-memory copy.
   const publication = await readPublication(deps.env.DB, publicationId);
@@ -5471,20 +5600,20 @@ async function publishPhase(
     head_sha: headSha,
   };
   const fields = attemptFields(payload, level, attemptId, headSha);
-  // invariant: A resumed publication must still conclude the attempt's Check: the
+  // A resumed publication must still conclude the attempt's Check: the
   // settlement is adopted from the D1 attempt row when this host has none.
   const check = await settlementFor(deps, ref, headSha);
-  // invariant: The authority of BOTH sends below is the Check row this attempt owns — the
+  // The authority of BOTH sends below is the Check row this attempt owns — the
   // adopted handle's when this host has one, else the frozen association. A
   // refused adoption is not a no-Check lane, and only a rejected association
   // read (unknown) stops the send before anything is claimed.
   const checkAttemptId = check?.handle?.attemptId ?? (await ownedCheckAttemptId(deps, ref.attemptId));
   const stagedId = publicationId;
-  // invariant: The frozen instant fences the FIRST send BEFORE the journal is claimed, so
+  // The frozen instant fences the FIRST send BEFORE the journal is claimed, so
   // a refused publication leaves no `sending` row behind for a reconciler to
   // read as an attempted send.
   refusePublicationPastDeadline(ref.deadlineMs);
-  // invariant: 13. §7.7 step 8 — epoch-fenced claim, phase sending, publish the EXACT
+  // 13. §7.7 step 8 — epoch-fenced claim, phase sending, publish the EXACT
   // prepared upsert, validate the response id, persist proof BEFORE KV
   // done. A response/proof loss retains the staged payload for read-only
   // discovery — never a second paid review, never a blind re-send.
@@ -5499,7 +5628,7 @@ async function publishPhase(
       fields,
       `publication is no longer dispatchable from this phase (read ${publication.phase}) — nothing sent, handing it to recovery/discovery`,
     );
-    // invariant: The staged id is the fact this lane holds: passing it links the Check's
+    // The staged id is the fact this lane holds: passing it links the Check's
     // frozen failure to its own publication, so a later confirmation can be
     // read through the proof path instead of leaving an unlinked verdict that
     // can never be corrected.
@@ -5520,7 +5649,7 @@ async function publishPhase(
       body: preparedBody,
       publicationId: stagedId,
       notAfterMs: ref.deadlineMs,
-      // invariant: The LEASE key is a `review_checks.id`, never `ref.attemptId` (the
+      // The LEASE key is a `review_checks.id`, never `ref.attemptId` (the
       // container identity): the send must contend for this attempt's own
       // Check sends and with recovery, which key on the Check row. With no
       // Check row at all (an App without a Checks surface) the journal claim
@@ -5529,7 +5658,7 @@ async function publishPhase(
       ...(checkAttemptId === undefined ? {} : { attemptId: checkAttemptId }),
     });
   } catch (err) {
-    // invariant: The adapter refused at the mutation because the instant had passed:
+    // The adapter refused at the mutation because the instant had passed:
     // nothing was sent, so the attempt settles as a confirmed wall-clock stop
     // (the same rule the early refusal takes) rather than as a send with an
     // unknown outcome, and the staged row stays `prepared` for discovery.
@@ -5537,7 +5666,7 @@ async function publishPhase(
       throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner");
     }
     if (err instanceof PublicationAuthorityUnavailable) {
-      // invariant: Another lane holds this action's publication lease, so it is the
+      // Another lane holds this action's publication lease, so it is the
       // sender and this one is not: send nothing and commit no outcome — a
       // `failed` mark would assert a definitive failure we never observed.
       // Return the unspent claim and hand the Check to recovery.
@@ -5548,14 +5677,14 @@ async function publishPhase(
         deps.log.warn(fields, `unspent publication claim could not be returned: ${detail}`);
       }
       deps.log.warn(fields, `publication handed to the lane holding its action — ${err.message}`);
-      // invariant: Same rule as the refused claim above: the staged id is the link a later
+      // Same rule as the refused claim above: the staged id is the link a later
       // confirmation of THIS publication needs to correct this Check, so a
       // refused authority never drops it.
       await check?.terminalize(stagedId, "publication-unknown");
       return { kind: "ok" };
     }
     if (err instanceof PreparedSendRejected) {
-      // invariant: Definitive pre-send rejection (§7.7): no request left the Worker.
+      // Definitive pre-send rejection (§7.7): no request left the Worker.
       // `failed` is the truthful durable phase (never the post-attempt
       // `unknown`); payload/digest/attempts are retained and recovery
       // never re-sends. The Check conclusion is the honest
@@ -5599,7 +5728,7 @@ async function publishPhase(
     deps.log.warn(fields, `publication proof write threw: ${detail}`);
   }
   if (!proofOk) {
-    // invariant: The honest unknown-publication window: the send happened but the
+    // The honest unknown-publication window: the send happened but the
     // proof is not durable — no KV done, no local rows, no claim of
     // publication. The staged payload stays for M8 read-only discovery.
     deps.log.warn(
@@ -5607,12 +5736,12 @@ async function publishPhase(
       "publication proof could not be persisted after the send — retaining staged/sending for read-only discovery; no local completion is claimed",
     );
     await check?.terminalize(stagedId, "publication-unknown");
-    // invariant: NOT settled: the staged/sending row is the recovery evidence for a send
+    // NOT settled: the staged/sending row is the recovery evidence for a send
     // whose proof never landed, so this attempt's publication work is still
     // owed. A settlement mark here would truncate the operator's third bucket.
     return { kind: "ok" };
   }
-  // invariant: 13a. KV done-state fence (BUG-01): follows durable confirmation (the
+  // 13a. KV done-state fence (BUG-01): follows durable confirmation (the
   // persisted proof) — a crash in the steps below redelivers into the
   // journal handoff ack, never a duplicate paid review.
   try {
@@ -5624,7 +5753,7 @@ async function publishPhase(
     deps.log.warn(fields, `KV completion write failed: ${detail}`);
   }
 
-  // invariant: 14. §7.7 step 9 — with positive persisted proof only: the artifact
+  // 14. §7.7 step 9 — with positive persisted proof only: the artifact
   // store.put + ONE idempotent lifecycle batch (inside
   // applyPublishedLifecycle, ending with the applied mark under the
   // lease). Local write failures do not undo the publication and never
@@ -5632,7 +5761,7 @@ async function publishPhase(
   let applied = false;
   try {
     const at = Date.now();
-    // invariant: The settlement rides the apply's own transaction: the applied mark and
+    // The settlement rides the apply's own transaction: the applied mark and
     // the attempt's settlement record cannot separate. A settlement the plan
     // cannot even build aborts the apply — the journal stays recoverable
     // instead of becoming applied-but-unmeasured.
@@ -5654,12 +5783,12 @@ async function publishPhase(
       "review published and confirmed but the lifecycle apply did not complete — publication stays confirmed for M8 recovery; acking to avoid a duplicate comment",
     );
     await check?.terminalize(stagedId, "publication-unknown");
-    // why: NOT settled: the confirmed publication's lifecycle apply is still due for
+    // NOT settled: the confirmed publication's lifecycle apply is still due for
     // M8 recovery, so the publication lane has not closed.
     return { kind: "ok" };
   }
 
-  // invariant: 15. §7.7 step 10 — post/capture the intent-prepared COMMENT-only line
+  // 15. §7.7 step 10 — post/capture the intent-prepared COMMENT-only line
   // review AFTER the result/lifecycle apply; persist the exact returned
   // review/comment ids against the associations. NEVER throwing: a remote
   // line failure is an explicit fallback log (the intents stay staged and
@@ -5676,7 +5805,7 @@ async function publishPhase(
       publicationId: stagedId,
       intents: lineIntents,
     };
-    // invariant: §7.9a condition 2: the applied mark cleared the journal claim, so the
+    // §7.9a condition 2: the applied mark cleared the journal claim, so the
     // batch takes a FRESH claim — and records its DISPATCH INTENT in the same
     // conditional transition. Exactly one lane ever reaches the send; every
     // other lane, and every retry, is discovery.
@@ -5715,14 +5844,14 @@ async function publishPhase(
         await discoverLineBatch(deps, commenter, lineInput, fields);
       }
     } else {
-      // invariant: The intent survives a returned request (the batch landed, or may
+      // The intent survives a returned request (the batch landed, or may
       // have); only a DEFINITIVE pre-send refusal clears it. An unresolved
       // send keeps both, so the next lane discovers instead of sending.
       let outcome: "sent" | "refused" | "unknown" = "unknown";
       try {
         const postedLine = await commenter.postLineComments({
           ...lineInput,
-          // note: `review_checks.id`, not the container identity (see the marker
+          // `review_checks.id`, not the container identity (see the marker
           // send); the fresh journal claim is the no-Check lane's authority.
           journalClaim: lineLease,
           ...(lineAttemptId === undefined ? {} : { attemptId: lineAttemptId }),
@@ -5741,7 +5870,7 @@ async function publishPhase(
           );
         }
       } catch (err) {
-        // invariant: A definitive pre-send refusal left nothing at GitHub: the intent is
+        // A definitive pre-send refusal left nothing at GitHub: the intent is
         // unspent. Anything else may have landed — keep it.
         outcome = err instanceof PreparedSendRejected || err instanceof PublicationDeadlineSpent ? "refused" : "unknown";
         const detail = err instanceof Error ? err.message : String(err);
@@ -5765,7 +5894,7 @@ async function publishPhase(
     }
   }
 
-  // invariant: 16. §7.7 step 11 — resolution LAST: persist the verified snapshot and
+  // 16. §7.7 step 11 — resolution LAST: persist the verified snapshot and
   // enqueue the pending row BEFORE the single inline attempt (a crash
   // before the first attempt stays discoverable by M8), then discover +
   // resolve. Never throws out of the message; never reruns the model.
@@ -5793,7 +5922,7 @@ async function publishPhase(
       try {
         const enqueued = await deps.env.DB
           .prepare(
-            // invariant: A CURRENT round supplies fresh verified_json — that is a
+            // A CURRENT round supplies fresh verified_json — that is a
             // genuinely NEW assessment, so the retry budget and any stale
             // give-up/backoff state reset with it (§7.11.1: "resets
             // attempts only for a genuinely new assessment"). Without this
@@ -5808,8 +5937,8 @@ async function publishPhase(
           )
           .bind(JSON.stringify(resolution.verified), Date.now(), resolution.associationId)
           .run();
-        if (enqueued.meta.changes === 0) continue; // note: superseded — nothing to resolve
-        // note: The row is durably queued from here on, so any entry this lane
+        if (enqueued.meta.changes === 0) continue; // superseded — nothing to resolve
+        // The row is durably queued from here on, so any entry this lane
         // declines to start is picked up by M8 without spending an attempt.
         if (inlineResolveAttempts >= INLINE_RESOLVE_MAX_ENTRIES || inlineResolveBudgetMs <= 0) {
           deps.log.warn(
@@ -5826,7 +5955,7 @@ async function publishPhase(
           );
           continue;
         }
-        // note: Admission for the entry about to start: it may spend up to the
+        // Admission for the entry about to start: it may spend up to the
         // same per-operation request envelope M8 uses, bounded by the
         // remaining inline deadline.
         inlineResolveAttempts += 1;
@@ -5877,7 +6006,7 @@ async function publishPhase(
     }
   }
 
-  // invariant: 17. Degraded-comment lifecycle (Bugbot finding): the successful
+  // 17. Degraded-comment lifecycle (Bugbot finding): the successful
   // review supersedes any earlier degradation — best-effort cleanup AFTER
   // the normal publication proof, never deleting unconfirmed evidence.
   // §7.7 step 11 gate: while ANY degraded journal row for this scope is
@@ -5910,7 +6039,7 @@ async function publishPhase(
           }`,
         );
       }
-      // invariant: A throttled sweep is a CONTINUATION event, not a failure of this
+      // A throttled sweep is a CONTINUATION event, not a failure of this
       // review: ONE row per non-zero kind under the non-failure `rate-limit`
       // stage (excluded from every failure count) so the throttle is not
       // silently dropped. Each row carries its own kind's prefix, so a
@@ -5945,16 +6074,16 @@ async function publishPhase(
     deps.log.warn(fields, `stale degraded comment delete failed (review stands): ${detail}`);
   }
 
-  // invariant: 18. §7.7 step 12 — the Check terminal decision reads the persisted
+  // 18. §7.7 step 12 — the Check terminal decision reads the persisted
   // proof for this publication (a degraded publication derives `failure`
   // from it, never a pass; the inline outcome value is only the honest
   // fallback when the proof is unreadable).
   await check?.terminalize(stagedId, "publication-unknown");
-  // invariant: Written from the DURABLE facts — a publication is confirmed, and the Check
+  // Written from the DURABLE facts — a publication is confirmed, and the Check
   // row itself decides whether it is still open — never from whether this host
   // happened to cache a handle. A settled Check makes the note a no-op.
   await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
-  // note: The rule decides completeness from durable facts: an open Check leaves the
+  // The rule decides completeness from durable facts: an open Check leaves the
   // attempt unsettled even though the publication is applied.
   await settleAttemptPublication(deps, attemptId, fields, ["publication"]);
   return { kind: "ok" };
@@ -5971,18 +6100,18 @@ export async function settleAttemptFailure(
   deps: ProcessDeps,
   ref: AttemptRef,
   thrown: unknown,
-  /** note: The facts this settlement hands cleanup (a durable proof, or an unknown verdict). */
+  /** The facts this settlement hands cleanup (a durable proof, or an unknown verdict). */
   cleanup: CleanupInput,
 ): Promise<ProcessOutcome> {
   const { payload, level, attemptId, githubAppId } = ref;
-  // invariant: The phase's facts arrive as data; the cause keeps its type for the branches
+  // The phase's facts arrive as data; the cause keeps its type for the branches
   // below, so a wrapped rejection is settled exactly as the raw one was.
   const failure = thrown instanceof AttemptPhaseError ? thrown : undefined;
   const facts = failure?.facts;
   const err = failure?.cause ?? thrown;
   const detail = err instanceof Error ? err.message : String(err);
   /**
-   * invariant: The settlement rule owns completeness; this only reports the effects that
+   * The settlement rule owns completeness; this only reports the effects that
    * actually landed and a fault. The rule reads the attempt's durable
    * obligations (outcome lane, Check conclusion, failed-claim stamp) and sets
    * `settled_ms` only when they are all discharged — a step finishing never
@@ -5999,12 +6128,12 @@ export async function settleAttemptFailure(
       );
     }
   };
-  // note: A moved head is a SKIP, not a failure: the attempt already concluded its
+  // A moved head is a SKIP, not a failure: the attempt already concluded its
   // Check as skipped and wrote its skip row, so it acks here — no failure row,
   // no pre-publication settlement, no retry. (Quiet instead of rethrowing: the
   // queue's next delivery would mint a fresh attempt id and could pay twice.)
   if (err instanceof MovedHeadError) {
-    // note: The moved head's own settlement (skip row + Check conclusion + outbox
+    // The moved head's own settlement (skip row + Check conclusion + outbox
     // row) ran before this settlement was called, so there is nothing left to
     // finish and the mark can say so.
     await markSettled(["skip"]);
@@ -6019,7 +6148,7 @@ export async function settleAttemptFailure(
   const sandboxId = attemptSandboxId(attemptId);
   const headSha = facts?.headSha ?? null;
   if (cleanup.headSha === undefined) cleanup.headSha = headSha;
-  // invariant: The paid exec STARTED and its return was never observed: the child may
+  // The paid exec STARTED and its return was never observed: the child may
   // still be running, so nothing may authorise destruction. This only REMOVES
   // authorisation — the durable records remain the gate that grants it.
   if (facts !== undefined && facts.runnerStartedAt !== undefined && !facts.runnerReturned) {
@@ -6041,11 +6170,11 @@ export async function settleAttemptFailure(
     level,
   });
   const check = maybeSettlement(deps, attemptId);
-  // invariant: A container may exist only when the provisioning claim was written; that
+  // A container may exist only when the provisioning claim was written; that
   // row is the durable fact the "nothing to reclaim" decision reads.
   const launch = await readReviewLaunch(deps.env.DB, attemptId);
   const sandboxMayExist = launch !== null;
-  // invariant: THE DURABLE ROW OUTRANKS THIS HOST'S BELIEF (plan Task 4b): `launched` with
+  // THE DURABLE ROW OUTRANKS THIS HOST'S BELIEF (plan Task 4b): `launched` with
   // no stored outcome means the paid call's fate is unknown, whatever the
   // failing phase seems to have seen. A step-level rejection — a Workflow
   // timeout waiting for the paid reply or for a post-run read — carries no
@@ -6073,7 +6202,7 @@ export async function settleAttemptFailure(
     return { kind: "unknown" };
   }
   let durableOutcome = false;
-  // invariant: § Exhaustion (the ONE typed terminal outcome outside the verdict
+  // § Exhaustion (the ONE typed terminal outcome outside the verdict
   // envelope): every wall-clock stop funnels here — the runner's own
   // exit-0 signal, the sandbox exec killed at the anchored deadline, and
   // the consumer's derived-deadline refusals, all already resolved to (or
@@ -6093,7 +6222,7 @@ export async function settleAttemptFailure(
         : {
             kind: "budget-exhausted",
             cause: "consumer-deadline",
-            // invariant: Every derived-deadline refusal sits past level resolution
+            // Every derived-deadline refusal sits past level resolution
             // and budget derivation — the `!`s encode that ordering fact,
             // never a guess.
             tier: level!,
@@ -6102,13 +6231,13 @@ export async function settleAttemptFailure(
               err.window === "runner"
                 ? (facts?.runnerEffectiveBudgetMs ?? roundBudget.preparationBudgetMs)
                 : roundBudget.preparationBudgetMs,
-            // note: A consumer decline fires before the runner exec starts:
+            // A consumer decline fires before the runner exec starts:
             // provably no seat was dispatched or stopped.
             seatsDispatched: 0,
             seatsStopped: 0,
             changedLines: observedChangedLines,
           };
-    // invariant: A stop that fired BEFORE the fallback claim (the diff stage, its
+    // A stop that fired BEFORE the fallback claim (the diff stage, its
     // oversized substitute, or the numstat that follows) can reach here with
     // no Check at all: an issue-comment delivery carries no payload SHA and
     // may have no readable head watermark, so the admission-time claim was
@@ -6159,7 +6288,7 @@ export async function settleAttemptFailure(
         stage: progress.failureStage,
         error: redactExactSecrets(redactSecrets(budgetDetail), progress.secretValues),
       });
-      // invariant: Confirmed by the await above: only a write that RESOLVED is durable.
+      // Confirmed by the await above: only a write that RESOLVED is durable.
       durableOutcome = true;
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
@@ -6169,7 +6298,7 @@ export async function settleAttemptFailure(
       );
     }
     if (!durableOutcome) {
-      // invariant: No durable record of this stop: the Check is left alive for the
+      // No durable record of this stop: the Check is left alive for the
       // recovery lane (a terminal conclusion here could never be undone) and
       // the attempt ends unknown — no destruction, no capacity release.
       deps.log.warn(
@@ -6190,30 +6319,30 @@ export async function settleAttemptFailure(
         cleanup.unproven = true;
         return { kind: "unknown" };
       }
-      // invariant: The row is durable — and it was durable BEFORE this transition, which
+      // The row is durable — and it was durable BEFORE this transition, which
       // is the whole point: a phase that observed the paid call return (a
       // nonzero status, the exec killed at the deadline, the runner's own
       // exhaustion signal) makes the attempt's OTHER terminal fact durable
       // here, after the failure row, never before it. A stop whose exec never
       // started already moved the row itself (it alone could prove that).
       if (paidStateObserved) await recordReviewFailure(deps.env.DB, attemptId, Date.now());
-      // note: The row is durable: now the Check may carry the stop's conclusion.
+      // The row is durable: now the Check may carry the stop's conclusion.
     await check?.terminalize(null, "budget-exhausted", undefined, budgetOutcome);
-    // invariant: A spent deadline took away this invocation's right to write (its lease
+    // A spent deadline took away this invocation's right to write (its lease
     // triple is dead), never the fact: the Check may still be waiting with the
     // category unknown. Fill it here, under the recovery lease the minute lane
     // would take, so the reconciler DELIVERS the stop's own wording. The id is
     // the CHECK attempt's (`handle`), never the Workflow attempt id above.
     const checkAttemptId = check?.handle?.attemptId;
     if (checkAttemptId !== undefined) await freezeKnownStop(deps, payload, checkAttemptId, budgetOutcome);
-    // note: The row is durable here (the !durableOutcome case returned `unknown`
+    // The row is durable here (the !durableOutcome case returned `unknown`
     // above) and the Check conclusion just landed; the rule decides whether
     // that closes the attempt.
     await markSettled(["failure-row"]);
     return { kind: "budget-exhausted", outcome: budgetOutcome };
   }
 
-  // note: An unproven container is NOT a failure: a missing/different marker (or a
+  // An unproven container is NOT a failure: a missing/different marker (or a
   // lost read) says nothing about whether the review ran. No Check change, no
   // failure row, no failed-claim stamp, no destroy, no capacity release, and
   // no retry — a second delivery would provision a second container and pay
@@ -6238,13 +6367,13 @@ export async function settleAttemptFailure(
       cleanup.unproven = true;
       return { kind: "unknown" };
     }
-    // invariant: Structured failure log carrying the idempotency key + sandbox id
+    // Structured failure log carrying the idempotency key + sandbox id
   // (the failure log must carry the idempotency key: 失败路径错误日志含幂等键), then
   // rethrow so the worker retries and eventually DLQs.
   deps.log.error(
     {
       ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
-      // invariant: d5-budget AC-S10-logs: the failure line carries the level's budget
+      // d5-budget AC-S10-logs: the failure line carries the level's budget
       // once known (post-step-3 `fields` already has it; this spread covers
       // the pre-checkout fallback) and the runner's elapsed wall-clock once
       // it started. elapsed never aborts — the sandbox exec timeout is the
@@ -6261,7 +6390,7 @@ export async function settleAttemptFailure(
     `review failed: ${detail}`,
   );
 
-  // safety: AL-6: best-effort review_failures row BEFORE the
+  // AL-6: best-effort review_failures row BEFORE the
   // rethrow — an unresolved attempt otherwise leaves zero D1 trace (the audit
   // blind spot). `stage` = the coarse phase in flight (failureStage); rows are
   // per-attempt events, so a re-executed settlement can append one duplicate
@@ -6282,13 +6411,13 @@ export async function settleAttemptFailure(
       owner: payload.owner,
       repo: payload.repo,
       pr_number: payload.pr_number,
-      // invariant: The authoritative sha once the checkout resolved it; before that
+      // The authoritative sha once the checkout resolved it; before that
       // the payload sha, else "" (= never resolved).
       head_sha: fields?.head_sha ?? payload.head_sha ?? "",
       stage: progress.failureStage,
       error: redactExactSecrets(redactSecrets(persistedDetail), progress.secretValues),
     });
-    // note: Confirmed by the await above: a resolved write is the attempt's durable
+    // Confirmed by the await above: a resolved write is the attempt's durable
     // terminal no-result outcome. A rejection leaves the latch false.
     durableOutcome = true;
   } catch (recordErr) {
@@ -6299,7 +6428,7 @@ export async function settleAttemptFailure(
     );
   }
   if (!durableOutcome && sandboxMayExist) {
-    // safety: A container exists and nothing durable came of this attempt: no row
+    // A container exists and nothing durable came of this attempt: no row
     // landed, so no terminal outcome can be claimed. It ends `unknown` — no
     // destruction, no capacity release, no Check conclusion — instead of a
     // failure nobody can read back later. (A failure BEFORE any container —
@@ -6323,13 +6452,13 @@ export async function settleAttemptFailure(
       cleanup.unproven = true;
       return { kind: "unknown" };
     }
-    // invariant: A returned status is a terminal fact only together with the failure row
+    // A returned status is a terminal fact only together with the failure row
     // written above: the row moves to `failed` AFTER that write, so cleanup
     // can never read "terminal" without something durable to read it against.
     if (paidStateObserved && durableOutcome) {
       await recordReviewFailure(deps.env.DB, attemptId, Date.now());
     }
-  // invariant: §7.7 step 12 on the failure path: a Check begun at step 4 must
+  // §7.7 step 12 on the failure path: a Check begun at step 4 must
   // terminalize even when the pipeline throws. After a send ATTEMPT the
   // publication status is unknown (the request may have landed); before
   // any send the honest outcome is pre-publication-failure. Isolated —
@@ -6340,7 +6469,7 @@ export async function settleAttemptFailure(
     await check?.terminalize(null, "pre-publication-failure");
   }
 
-  // invariant: The Workflow instance is the attempt's TERMINAL owner: on this route there
+  // The Workflow instance is the attempt's TERMINAL owner: on this route there
   // is no further queue delivery ladder to wait out, so a settled failure
   // stamps the commit's claim `failed` (the worker's claim TTL) immediately —
   // neither the worker's pre-check nor the supersede skip may keep treating the
@@ -6375,7 +6504,7 @@ export async function settleAttemptFailure(
       );
     }
   }
-  // invariant: The effects that ACTUALLY landed. The rule owns the required set: it adds
+  // The effects that ACTUALLY landed. The rule owns the required set: it adds
   // a Check conclusion only when the row is terminal, requires the
   // failed-claim stamp when the delivery names a commit, and never certifies a
   // missing effect.
@@ -6393,11 +6522,11 @@ export async function settleAttemptFailure(
  */
 export type CleanupInput = {
   /**
-   * invariant: The failure path established the container's state is unknown: it can only
+   * The failure path established the container's state is unknown: it can only
    * REMOVE authorisation, never add it.
    */
   unproven?: boolean;
-  /** why: The checkout sha, when this invocation knew it, so the teardown line keeps the round's identity. */
+  /** The checkout sha, when this invocation knew it, so the teardown line keeps the round's identity. */
   headSha?: string | null;
 };
 
@@ -6410,7 +6539,7 @@ export async function cleanupAttempt(
   const sandboxId = attemptSandboxId(attemptId);
   const fields = attemptFields(payload, ref.level, attemptId, input.headSha ?? null);
   const baseFields: ConsumerLogFields | undefined = undefined;
-  // invariant: THE RETENTION CONTRACT, read from the attempt row and nothing else (plan
+  // THE RETENTION CONTRACT, read from the attempt row and nothing else (plan
   // Task 4b's table, one row per state):
   //   absent                    → no-paid-work (never claimed)
   //   provisioned               → no-paid-work (container may exist, the paid
@@ -6437,7 +6566,7 @@ export async function cleanupAttempt(
   let retention: RetentionProof | undefined;
   let containerMayExist = claimed;
   if (claimed) {
-    // invariant: This caller WON the row: the container, if any, is ours to destroy. A row
+    // This caller WON the row: the container, if any, is ours to destroy. A row
     // the claim itself INSERTED was never activated, and the activation is the
     // precondition of every container handle (migrations 0090/0091) — so there
     // is nothing to destroy and the sandbox is not even addressed.
@@ -6448,25 +6577,25 @@ export async function cleanupAttempt(
     switch (verdict.kind) {
       case "never-claimed":
       case "never-paid":
-        // invariant: The claim was lost or faulted, so this caller does not own the
+        // The claim was lost or faulted, so this caller does not own the
         // attempt: hold, and never fall back to `no-paid-work`.
         containerMayExist = false;
         retention = undefined;
         break;
       case "persisted":
       case "paid-failed":
-        // invariant: Terminal states cannot move to `launched`, so no claim is needed.
+        // Terminal states cannot move to `launched`, so no claim is needed.
         containerMayExist = true;
         retention = { kind: "retained" };
         break;
       case "owned-by-cleanup":
-        // invariant: ANOTHER cleanup owns this container: return unknown and touch
+        // ANOTHER cleanup owns this container: return unknown and touch
         // neither the container nor capacity — never `no-paid-work`.
         containerMayExist = false;
         retention = undefined;
         break;
       case "unrecognised":
-        // invariant: A row this build cannot interpret is never permission: hold.
+        // A row this build cannot interpret is never permission: hold.
         containerMayExist = true;
         retention = undefined;
         break;
@@ -6479,7 +6608,7 @@ export async function cleanupAttempt(
     }
   }
   let containerUnproven = retention === undefined || input.unproven === true;
-  // invariant: Destroy FIRST, then release the admission row. Releasing first would let
+  // Destroy FIRST, then release the admission row. Releasing first would let
   // the next attempt for this PR acquire the slot and start its container
   // while this one is still alive, so live containers could exceed
   // min(system, workspace) by the destroy latency. Both blocks warn only.
@@ -6496,11 +6625,11 @@ export async function cleanupAttempt(
     );
   } else if (containerMayExist) {
     try {
-      // note: The handle is re-derived by attempt id — a resumed invocation has no
+      // The handle is re-derived by attempt id — a resumed invocation has no
       // previous one — and the marker gate inside `destroyMarked` decides
       // whether this really is the attempt's container.
       const sandbox = await reviewAttemptSandbox(deps, attemptId);
-      // invariant: Proven sameness, not a name: a container this attempt cannot prove
+      // Proven sameness, not a name: a container this attempt cannot prove
       // it prepared is left alone (its result may be the only copy) and the
       // teardown is reported as unknown.
       if ((await discardReviewAttempt(sandbox, attemptId, retention!)) !== "destroyed") {
@@ -6515,7 +6644,7 @@ export async function cleanupAttempt(
         );
       }
     } catch (err) {
-      // invariant: A LOST proof is the same fact as a refused one: the container's
+      // A LOST proof is the same fact as a refused one: the container's
       // state is unknown, so capacity must not be handed to a new attempt.
       containerUnproven = true;
       const detail = err instanceof Error ? err.message : String(err);
@@ -6529,7 +6658,7 @@ export async function cleanupAttempt(
       );
     }
   }
-  // invariant: Release the admission row once the review settled (posted, KV done,
+  // Release the admission row once the review settled (posted, KV done,
   // put attempted) OR failed — either way the next attempt may proceed.
   // Scoped to THIS attempt's id, so an older attempt can never delete a row
   // a newer one reclaimed after expiry; a release failure only warns (the

@@ -45,9 +45,10 @@ import {
   type PrIncomplete,
 } from "@mstar-harness/engine";
 import { isReviewBudgetExhaustedSignal, type ReviewBudgetExhaustedSignal } from "../../packages/shared/src/budget-exhausted-wire";
+import { REDACTED } from "../../packages/shared/src/secret-shapes";
 import { z } from "zod";
 
-// why: The budget-exhausted outcome vocabulary lives in the shared wire module
+// The budget-exhausted outcome vocabulary lives in the shared wire module
 // (packages/shared/src/budget-exhausted-wire.ts) — re-exported here so the
 // Worker's publication surfaces import the vocabulary from the same file as
 // the envelope schema it sits outside of.
@@ -61,11 +62,11 @@ export type ReviewOutput = MstarReviewV1;
 
 const verdictSchema = z.enum(PR_VERDICTS);
 
-/** note: Engine `isSingleLineFact` mirror: non-blank and free of CR/LF. */
+/** Engine `isSingleLineFact` mirror: non-blank and free of CR/LF. */
 const isSingleLineFact = (value: string): boolean => value.trim() !== "" && !/[\r\n]/.test(value);
 
 /**
- * note: Mirror of the engine `PrIncomplete` shape — the fact that makes the
+ * Mirror of the engine `PrIncomplete` shape — the fact that makes the
  * `incomplete` verdict meaningful: `reason` is the declared cause, `unscanned`
  * the scope the run never reached (empty = nothing left unscanned). The
  * `PrIncomplete` annotation keeps this runtime schema bound to the engine
@@ -92,7 +93,7 @@ const findingSchema = z.object({
 const FINDING_KEYS = new Set(Object.keys(findingSchema.shape));
 
 /**
- * why: First `findings[i].<key>` outside the finding schema, or null. The engine
+ * First `findings[i].<key>` outside the finding schema, or null. The engine
  * 4.1.2 unknown-key gate covers the envelope and the tally but not findings;
  * this keeps an unknown finding key from being dropped silently.
  */
@@ -108,19 +109,19 @@ function findUnknownFindingKey(doc: unknown): string | null {
   return null;
 }
 
-/** note: Mirror of the engine `PrTallyResult` shape (what `computePrTally` produces). */
+/** Mirror of the engine `PrTallyResult` shape (what `computePrTally` produces). */
 const tallySchema = z.object({
   verdict: verdictSchema,
   scorePct: z.number().int().min(0).max(100),
   tally: z.object({
     mustFix: z.number().int().min(0),
     shouldFix: z.number().int().min(0),
-    /** note: Absent on envelopes written before engine 4.2; readers treat it as 0. */
+    /** Absent on envelopes written before engine 4.2; readers treat it as 0. */
     mayFix: z.number().int().min(0).optional(),
     nit: z.number().int().min(0),
   }),
   chatHeader: z.string(),
-  /** note: Echo of the envelope's incomplete fact (engine `PrTallyResult.incomplete`). */
+  /** Echo of the envelope's incomplete fact (engine `PrTallyResult.incomplete`). */
   incomplete: incompleteSchema.optional(),
 });
 
@@ -142,14 +143,14 @@ const outputSchema: z.ZodType<ReviewOutput> = z
     incomplete: incompleteSchema.optional(),
   })
   .superRefine((output, ctx) => {
-    // invariant: Consistency rule (engine-locked): a provided tally must agree with the
+    // Consistency rule (engine-locked): a provided tally must agree with the
     // top-level verdict (validateMstarReviewV1 review.verdict-tally-mismatch).
     if (output.tally !== undefined && output.tally.verdict !== output.verdict) {
       ctx.addIssue({ code: "custom", message: "tally.verdict must equal the top-level verdict" });
     }
     const top = output.incomplete;
     const echo = output.tally?.incomplete;
-    // invariant: Tally-level presence rule (engine-locked, checkProvidedTallyShape): a
+    // Tally-level presence rule (engine-locked, checkProvidedTallyShape): a
     // provided tally's echo is required exactly by the `incomplete` tally
     // verdict (review.missing-incomplete / review.incomplete-unexpected).
     if (output.tally !== undefined) {
@@ -167,7 +168,7 @@ const outputSchema: z.ZodType<ReviewOutput> = z
         });
       }
     }
-    // invariant: Envelope-level presence rule (engine-locked): the incomplete fact is
+    // Envelope-level presence rule (engine-locked): the incomplete fact is
     // required exactly by the `incomplete` verdict and rejected for every other
     // verdict (review.missing-incomplete / review.incomplete-unexpected).
     if (output.verdict === "incomplete") {
@@ -183,7 +184,7 @@ const outputSchema: z.ZodType<ReviewOutput> = z
         message: `incomplete is carried only by the "incomplete" verdict - verdict is "${output.verdict}"`,
       });
     }
-    // invariant: The tally echoes the envelope fact when both carry it; the two must agree
+    // The tally echoes the envelope fact when both carry it; the two must agree
     // (review.incomplete-tally-mismatch).
     if (
       top !== undefined &&
@@ -246,7 +247,7 @@ export function capFindings(
 export const FINDING_TITLE_MAX = 200;
 export const FINDING_BODY_MAX = 2000;
 /**
- * why: S-1 / qc2 F-002: `fingerprint_hint` is clamped at the SAME choke
+ * S-1 / qc2 F-002: `fingerprint_hint` is clamped at the SAME choke
  * point with FINDING_TITLE_MAX semantics — the hint feeds the D1
  * `findings.fingerprint` index column verbatim, so an unbounded hint would
  * blow the column budget. Over-budget hints are truncated like titles; a
@@ -262,7 +263,7 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
   const oversized = output.findings.some(
     (finding) =>
       finding.title.length > FINDING_TITLE_MAX ||
-      // why: Covers an over-budget body, an unclosed suggestion fence (unsafe at ANY
+      // Covers an over-budget body, an unclosed suggestion fence (unsafe at ANY
       // length: it would swallow the trusted marker appended after the body),
       // and a body left EMPTY after unpublishable fences are dropped.
       clampFindingBody(finding.body) !== finding.body ||
@@ -288,32 +289,78 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
   };
 }
 
-/** note: A backtick or tilde fence line per CommonMark: up to 3 leading spaces, 3+ fence chars, then the info string. */
+/**
+ * A backtick or tilde fence line per CommonMark: zero to three leading spaces
+ * (four or more is an indented code block), 3+ fence chars, then the info
+ * string. The input is already normalized to the fence's effective indent.
+ */
 const FENCE_LINE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+
+/** A line's leading spaces. Tabs do not count: FENCE_LINE only consumes spaces. */
+function leadingSpaces(line: string): number {
+  let count = 0;
+  while (count < line.length && line.charAt(count) === " ") count += 1;
+  return count;
+}
+
+/** A list item line: its indent and marker. Its content starts one column after the marker. */
+const LIST_ITEM_LINE = /^(\s*)(\d+\.|[-*+])\s/;
 
 /** Safe non-empty body shown when a finding consists only of dropped suggestion fences. */
 export const SUGGESTION_OMITTED = "(suggestion omitted)";
 
+type FenceSpan = { start: number; end: number; closed: boolean; suggestion: boolean };
+
 /**
- * Fenced `suggestion` blocks as [start, end) offsets, plus whether the closing
- * fence arrived. ALL fenced blocks are tracked (backtick and tilde, CommonMark
- * open/close rules), so a literal ```suggestion line inside an ordinary
- * ```js / ```markdown / ~~~ fence is CONTENT, not a suggestion. A block
- * counts as a suggestion only at the top level with an info string whose first
- * token is exactly `suggestion` — `suggestions` / `suggestion-example` do not
- * open — and only a same-char run at least as long as the opening one with NO
- * info string closes it (an inner ```js line does not). An unclosed block
- * runs to the end of the text.
+ * Top-level fenced blocks as [start, end) offsets, plus whether the closing
+ * fence arrived and whether the block is a `suggestion`. ALL fences are tracked
+ * (backtick and tilde, CommonMark open/close rules), so a literal
+ * ```suggestion line inside an ordinary ```js / ```markdown / ~~~ fence is
+ * CONTENT, not a suggestion. A block counts as a suggestion only at the top
+ * level with an info string whose first token is exactly `suggestion` —
+ * `suggestions` / `suggestion-example` do not open — and only a same-char run
+ * at least as long as the opening one with NO info string closes it (an inner
+ * ```js line does not). An unclosed block runs to the end of the text. A CRLF
+ * line has its carriage return stripped before matching, so it is still a
+ * fence.
+ *
+ * Indentation is measured from the INNERMOST OPEN LIST's content column, not
+ * the document: inside `1. ` a 3-space opener and a 4-space closer are the same
+ * fence (GitHub renders both inside the item). A list closes when a non-blank
+ * line is indented less than its content column. With no list open the plain
+ * document rule applies, so a 4-space `    ```js` is still an indented code
+ * block and never opens the state machine.
  */
-export function suggestionFenceSpans(text: string): { start: number; end: number; closed: boolean }[] {
-  const spans: { start: number; end: number; closed: boolean }[] = [];
+function fencedBlockSpans(text: string): FenceSpan[] {
+  const spans: FenceSpan[] = [];
   let open: { start: number; ticks: number; char: string; suggestion: boolean } | null = null;
   let offset = 0;
+  const lists: { contentColumn: number }[] = [];
   for (;;) {
     const newline = text.indexOf("\n", offset);
     const lineEnd = newline === -1 ? text.length : newline;
-    const fence = FENCE_LINE.exec(text.slice(offset, lineEnd));
-    // note: CommonMark: a backtick fence's info string may not contain a backtick, so
+    const rawLine = text.slice(offset, lineEnd);
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const indent = leadingSpaces(line);
+    // Fence CONTENT is code, never markup: a `1. item` inside a fence must not
+    // push a list frame that a later suggestion would be measured against.
+    if (open === null) {
+      const item = LIST_ITEM_LINE.exec(line);
+      if (item !== null) {
+        const itemIndent = item[1]!.length;
+        // A sibling at the same indent leaves the innermost frame; a deeper line
+        // starts a nested list whose content column is relative to its marker.
+        while (lists.length > 0 && itemIndent < lists[lists.length - 1]!.contentColumn) lists.pop();
+        lists.push({ contentColumn: itemIndent + item[2]!.length + 1 });
+      } else if (line.trim() !== "") {
+        while (lists.length > 0 && indent < lists[lists.length - 1]!.contentColumn) lists.pop();
+      }
+    }
+    const frame = lists[lists.length - 1];
+    const inList = frame !== undefined && indent >= frame.contentColumn;
+    const candidate = inList ? line.slice(frame.contentColumn) : line;
+    const fence = FENCE_LINE.exec(candidate);
+    // CommonMark: a backtick fence's info string may not contain a backtick, so
     // a line like ```oldCall()``` is inline code - it neither opens nor closes.
     const isFence = fence !== null && !(fence[2]![0] === "`" && (fence[3] ?? "").includes("`"));
     if (isFence) {
@@ -321,42 +368,58 @@ export function suggestionFenceSpans(text: string): { start: number; end: number
       const char = fence[2]![0]!;
       const info = (fence[3] ?? "").trim();
       if (open === null) {
-        // why: Any fence opens a block; only a top-level suggestion opener counts.
+        // Any fence opens a block; only a top-level suggestion opener counts.
         open = { start: offset, ticks, char, suggestion: info.split(/\s+/)[0] === "suggestion" };
       } else if (char === open.char && info === "" && ticks >= open.ticks) {
-        if (open.suggestion) {
-          spans.push({ start: open.start, end: newline === -1 ? text.length : lineEnd + 1, closed: true });
-        }
+        spans.push({
+          start: open.start,
+          end: newline === -1 ? text.length : lineEnd + 1,
+          closed: true,
+          suggestion: open.suggestion,
+        });
         open = null;
+        // The closing line is markup: a closer below the list's content column
+        // also ends that list item, so the stack must not outlive the block.
+        while (lists.length > 0 && indent < lists[lists.length - 1]!.contentColumn) lists.pop();
       }
     }
     if (newline === -1) break;
     offset = lineEnd + 1;
   }
-  if (open !== null && open.suggestion) spans.push({ start: open.start, end: text.length, closed: false });
+  if (open !== null) spans.push({ start: open.start, end: text.length, closed: false, suggestion: open.suggestion });
   return spans;
 }
 
+/** Fenced `suggestion` blocks only (the drop/neutralize callers). */
+export function suggestionFenceSpans(text: string): { start: number; end: number; closed: boolean }[] {
+  return fencedBlockSpans(text)
+    .filter((span) => span.suggestion)
+    .map(({ start, end, closed }) => ({ start, end, closed }));
+}
+
 /**
- * Drop whole fenced `suggestion` blocks that cannot be published safely: one
- * the `max` boundary would cut in half (so no partial fence survives a later
- * truncation), and one whose closing fence never arrives at ANY length (it
- * would swallow the trusted marker appended after the body). The surrounding
- * prose is kept. Shared by the schema clamp and the line-comment renderer so
- * the two cannot drift.
+ * Drop whole fenced blocks (suggestion OR an ordinary/neutralized one) that
+ * cannot be published safely: one the `max` boundary would cut in half (so no
+ * partial fence survives a later truncation), and one whose closing fence never
+ * arrives at ANY length (it would swallow the trusted marker appended after the
+ * body). The surrounding prose is kept. Shared by the schema clamp and the
+ * line-comment renderer so the two cannot drift.
+ *
+ * An unclosed block is dropped wholesale: when the structure is ambiguous the
+ * safe direction is content loss, never a credential.
  */
-export function dropSuggestionFences(text: string, max: number): {
+export function dropUnsafeFences(text: string, max: number): {
   text: string;
   dropped: boolean;
 } {
   let out = text;
   let dropped = false;
   for (;;) {
-    // why: A boundary that lands on the end of the closing fence (max === end) still
+    // A boundary that lands on the end of the closing fence (max === end) still
     // cuts that fence once the trailing ellipsis is appended, so it crosses too —
     // but ONLY when truncation actually happens (out.length > max); a fence
     // ending exactly at max with no truncation is published verbatim.
-    const fence = suggestionFenceSpans(out).find(
+    const fence = fencedBlockSpans(out).find(
       ({ start, end, closed }) => !closed || (out.length > max && start < max && max <= end),
     );
     if (fence === undefined) return { text: out, dropped };
@@ -379,35 +442,57 @@ export function dropAllSuggestionFences(text: string): string {
   return out.trim() === "" ? SUGGESTION_OMITTED : out;
 }
 
-/** note: Clamp a finding body: drop unpublishable fences, then clamp with an ellipsis. */
+/**
+ * Drop every fenced `suggestion` block whose body carries the redaction marker:
+ * GitHub must never offer a one-click apply of `[REDACTED]`. The surrounding
+ * prose is kept, or the safe omission notice when nothing survives.
+ */
+export function dropRedactedSuggestions(text: string): string {
+  const spans = suggestionFenceSpans(text);
+  if (spans.length === 0) return text;
+  let out = "";
+  let cursor = 0;
+  let dropped = false;
+  for (const { start, end } of spans) {
+    if (!text.slice(start, end).includes(REDACTED)) continue;
+    out += text.slice(cursor, start);
+    cursor = end;
+    dropped = true;
+  }
+  if (!dropped) return text;
+  out += text.slice(cursor);
+  return out.trim() === "" ? SUGGESTION_OMITTED : out;
+}
+
+/** Clamp a finding body: drop unpublishable fences, then clamp with an ellipsis. */
 function clampFindingBody(body: string): string {
-  let { text } = dropSuggestionFences(body, FINDING_BODY_MAX);
-  // why: A body that was ONLY suggestion fences would fail the non-blank schema and
+  let { text } = dropUnsafeFences(body, FINDING_BODY_MAX);
+  // A body that was ONLY suggestion fences would fail the non-blank schema and
   // lose persistence + line comments; keep a non-empty safe fallback instead.
   if (text.trim() === "") text = SUGGESTION_OMITTED;
   return text.length <= FINDING_BODY_MAX ? text : text.slice(0, FINDING_BODY_MAX - 1) + "…";
 }
 
-/** note: Extract the first ```json fenced block, or null. */
+/** Extract the first ```json fenced block, or null. */
 function extractJsonFence(text: string): string | null {
   const match = text.match(/```json\s*([\s\S]*?)```/);
   return match ? match[1]!.trim() : null;
 }
 
-/** note: Extract the first bare ``` fenced block (no language tag), or null. */
+/** Extract the first bare ``` fenced block (no language tag), or null. */
 function extractBareFence(text: string): string | null {
   const match = text.match(/```(?![A-Za-z0-9])\s*([\s\S]*?)```/);
   return match ? match[1]!.trim() : null;
 }
 
-/** note: Extract the first ```json / bare ``` fenced block, or null. */
+/** Extract the first ```json / bare ``` fenced block, or null. */
 function extractFenced(text: string): string | null {
   const json = extractJsonFence(text);
   if (json !== null) return json;
   return extractBareFence(text);
 }
 
-/** note: Extract the first `{` … last `}` span, or null. */
+/** Extract the first `{` … last `}` span, or null. */
 function extractBraces(text: string): string | null {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -457,7 +542,7 @@ export function parseReviewOutput(
     } catch {
       continue;
     }
-    // invariant: A stray M1 `severity` key must fail with its specific vocab code, never
+    // A stray M1 `severity` key must fail with its specific vocab code, never
     // fall through to zod or the engine's generic unknown-key report. The
     // engine gate fails findings[].severity itself; the top-level key is
     // checked here first so it keeps `review.inspector-vocab` too.
@@ -478,7 +563,7 @@ export function parseReviewOutput(
         error: gate.violations.map((v) => `${v.code}: ${v.message}`).join("; "),
       };
     }
-    // why: Runs after the engine gate so findings[].severity keeps its specific
+    // Runs after the engine gate so findings[].severity keeps its specific
     // `review.inspector-vocab` code rather than the generic unknown-key one.
     const unknownFindingKey = findUnknownFindingKey(parsed);
     if (unknownFindingKey !== null) {
