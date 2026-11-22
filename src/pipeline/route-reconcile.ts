@@ -80,8 +80,11 @@ async function landSettlementEffects(
   detail: string,
   nowMs: number,
 ): Promise<void> {
+  // The pass that LANDS the record owns the head-wide claim; an overlapping pass
+  // that lost the insert race owns nothing and must not touch it.
+  let owned = false;
   if (!landed.has("failure-row")) {
-    await landFailureEffect(
+    const recorded = await landFailureEffect(
       env.DB,
       {
         attemptId: handoff.attemptId,
@@ -99,13 +102,13 @@ async function landSettlementEffects(
       },
       nowMs,
     );
+    owned = recorded.owned;
     landed.add("failure-row");
   }
   if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
-    // Only a settlement that is STILL OWED may touch the head-wide key (an
-    // overlapping pass must not overwrite a fresh delivery's claim), and only a
-    // PROVEN write — or a proven `done` — is the stamped effect: an unreadable
-    // claim stays owed, so the head remains re-triggerable.
+    // Ownership, not a stale snapshot, decides whether the head-wide key may move;
+    // and only a PROVEN write — or a proven `done` — is the stamped effect: an
+    // unreadable claim stays owed, so the head remains re-triggerable.
     const stamped = await stampOwedSettlementClaim(env.DB, env.IDEMPOTENCY_KV, {
       attemptId: handoff.attemptId,
       key: idemKey({
@@ -116,6 +119,7 @@ async function landSettlementEffects(
         head_sha: handoff.payload.head_sha,
       }),
       ttlSeconds: IDEMPOTENCY_SECONDS,
+      owned,
     });
     if (stamped === "written" || stamped === "done") landed.add("claim-stamp");
   }

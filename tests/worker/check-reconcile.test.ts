@@ -676,6 +676,84 @@ describe("a launch whose paid result is durable but whose Check is still open (I
     expect(row.next_attempt_ms).toEqual(expect.any(Number));
   });
 
+  test("F-N1: a dispatched update is read back without spending an attempt", async () => {
+    const db = seededDb();
+    // note: Pass 1 dispatches the terminal update and its reply carries no readable
+    // text, so the row stays owed with a durable dispatch marker. Pass 2 then reads a
+    // CONCLUDED run at the intended conclusion with stale text: it must wait for the
+    // dispatched reply without rewriting the run and without spending an attempt.
+    const { attempt } = await claim(db, { nowMs: T0 - 240_000, executionDeadlineMs: T0 + 900_000 });
+    seedPersistedLaunch(db, attempt);
+    db.raw
+      .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`)
+      .run(attempt.identity.attemptId);
+    const proof = proofFor(attempt.identity, "review");
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85), T0 - 100_000);
+    linkPublication(db, attempt.identity.attemptId, proof.publicationId);
+    let rewrites = 0;
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => ({
+            kind: "completed",
+            remote: remoteFor(identity, {
+              id: 4242,
+              status: "completed",
+              conclusion: "success",
+              summary: null,
+            }),
+          }),
+        }),
+      });
+      const afterFirst = await rawRow(db, attempt.identity.attemptId);
+      expect(afterFirst.attempts).toBe(1);
+      expect(afterFirst.terminal_ms).toBeNull();
+      // note: What the real Checks adapter leaves behind a dispatched update: the durable
+      // marker (the scripted double does not write it), under the row's own lease.
+      const fixtureLease = { holder: "fixture-dispatch", epoch: Number(afterFirst.lease_epoch), untilMs: T0 + 1_000 };
+      db.raw
+        .prepare(`UPDATE review_checks SET holder = ?, lease_until_ms = ? WHERE id = ?`)
+        .run(fixtureLease.holder, fixtureLease.untilMs, attempt.identity.attemptId);
+      expect(
+        await recordTerminalDispatch(db, attempt.identity.attemptId, fixtureLease, T0 + 1_000),
+      ).toBe(true);
+      db.raw
+        .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`)
+        .run(attempt.identity.attemptId);
+      expect((await rawRow(db, attempt.identity.attemptId)).terminal_dispatch_ms).not.toBeNull();
+
+      const second = await run(db, {
+        now: () => T0 + 61_000,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: 4242, status: "completed", conclusion: "success", summary: "the run's own earlier text" }),
+          }),
+          complete: async () => {
+            rewrites += 1;
+            throw new Error("readback only — never rewritten");
+          },
+        }),
+      });
+      expect(rewrites).toBe(0);
+      expect(second.gaveUp).toBe(0);
+      expect(second.unconfirmed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    // note: No attempt spent by the readback pass, nothing terminal, still owed.
+    expect(row.attempts).toBe(1);
+    expect(row.terminal_ms).toBeNull();
+  });
+
   test("F-D: an in-progress remote run still concludes as before", async () => {
     const db = seededDb();
     const { attempt } = await claim(db, { nowMs: T0 - 240_000, executionDeadlineMs: T0 + 900_000 });

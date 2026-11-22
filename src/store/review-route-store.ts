@@ -438,36 +438,52 @@ export async function settlementStatementForEffects(
  * (a crash, a KV fault, a second pass) can ever see one without the other; the
  * insert's deterministic attempt-scoped id makes a concurrent pass a no-op.
  *
- * Returns `false` when the attempt has no handoff row to mark: nothing is
- * written, because a row the settle-once rule cannot see is not a fact.
+ * `landed` is the OWNERSHIP proof the caller needs for the head-wide claim: the
+ * insert reports whether THIS pass wrote the row (`meta.changes`), so an
+ * overlapping pass that lost the race knows it owns nothing. `false` when the
+ * attempt has no handoff row to mark — nothing is written, because a row the
+ * settle-once rule cannot see is not a fact.
  */
 export async function landFailureEffect(
   db: D1Like,
   input: AttemptSettlementInput & { failure: ReviewFailureInput },
   nowMs: number,
-): Promise<boolean> {
+): Promise<{ landed: boolean; owned: boolean }> {
   const landed = input.landed.includes("failure-row") ? [...input.landed] : [...input.landed, "failure-row"];
   const mark = await settlementStatementForEffects(db, { attemptId: input.attemptId, landed }, nowMs);
-  if (mark === null) return false;
-  await db.batch([settlementFailureRowStatement(db, input.failure, input.attemptId), mark]);
-  return true;
+  if (mark === null) return { landed: false, owned: false };
+  const [insert] = await db.batch([settlementFailureRowStatement(db, input.failure, input.attemptId), mark]);
+  return { landed: true, owned: (insert?.meta.changes ?? 0) === 1 };
 }
 
 /**
- * Stamp the head's abandoned claim ONLY while this attempt's settlement is still
- * owed. A pass keeps the handoff it selected in memory, and by the time it writes
- * the settlement may be complete AND a fresh delivery may have re-claimed the
- * head: a stale pass must then write nothing at all. `null` means nothing was
- * written (settled, or no handoff row). The write's own proof is the caller's to
+ * Stamp the head's abandoned claim — the head-wide key — only under a proof of
+ * ownership, because KV has no compare-and-set and the value cannot tell one
+ * delivery's `1` from another's:
+ *
+ * - the pass that LANDED this attempt's failure row owns the stamp (it is the
+ *   one that must stop the stale sentinel from suppressing a re-trigger);
+ * - a later pass may repair a stamp that never landed (`claim-stamp` absent) while
+ *   the settlement is still owed, which is the unreadable-read retry;
+ * - every other pass writes NOTHING: its settlement may already be complete, or a
+ *   fresh delivery may have re-claimed the head, and the head-wide key is not
+ *   its to touch. The row's failure record stands regardless.
+ *
+ * `null` means nothing was written. The write's own proof is the caller's to
  * judge (`written`/`done` are facts, `unreadable` is still owed).
  */
 export async function stampOwedSettlementClaim(
   db: D1Like,
   kv: KVNamespace,
-  input: { attemptId: string; key: string; ttlSeconds: number },
+  input: { attemptId: string; key: string; ttlSeconds: number; owned: boolean },
 ): Promise<AbandonClaimWrite | null> {
   const handoff = await readAttemptHandoffByAttempt(db, input.attemptId);
   if (handoff === null || handoff.settledMs !== null) return null;
+  // The repair path: a settlement that is still owed, whose stamp never landed.
+  // An open Check keeps a COMPLETED stamp's settlement unsettled, so the effect
+  // itself — not `settled_ms` — decides whether the head-wide key is still owed.
+  const stamped = (handoff.settledEffects ?? []).includes("claim-stamp");
+  if (!input.owned && stamped) return null;
   return putAbandonClaim(kv, input.key, IDEM_FAILED, input.ttlSeconds);
 }
 
@@ -632,15 +648,17 @@ export async function listIncompleteSettlements(
  *
  * `state = 'created'` keeps the instances that never got one in the re-enqueue
  * family's hands; `settling_ms IS NULL` keeps a settlement that already started
- * in `listIncompleteSettlements`. The journal anti-join is keyed on the
+ * in `listIncompleteSettlements`. The journal anti-join is keyed FIRST on the
  * PRODUCER's own identity (`payload.admittedAttemptId`, else `payload.attemptId`
- * — the fields `collect` freezes into the staged payload) instead of
- * scope/head, because one row exists per scope/head/kind and a PRIOR
+ * — the fields `collect` freezes into the staged payload), which is
+ * head-independent: a headless delivery resolves its checkout head and stages
+ * that body, and a resolved head that differs from the payload's is still this
+ * attempt's publication. One row exists per scope/head/kind, so a PRIOR
  * generation's terminal `failed`/`degraded` journal must not suppress this
  * attempt's failure record. Rows written before the identity existed carry
  * neither field: those keep the old conservative scope/head rule (no migration
- * invents an identity). A HEADLESS delivery (`head_sha: null`) has no journal
- * key at all and always qualifies — its failure is recorded with the empty-head
+ * invents an identity), and a headless delivery can never match that arm. A
+ * headless launch with NO journal of its own is recorded with the empty-head
  * convention and without a claim write.
  */
 export async function listUnpublishedLaunchSettlements(
@@ -656,27 +674,33 @@ export async function listUnpublishedLaunchSettlements(
         WHERE h.settled_ms IS NULL AND h.settling_ms IS NULL AND h.state = 'created'
           AND l.state = 'persisted'
           AND h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?
-          AND (
-            json_extract(h.payload_json, '$.head_sha') IS NULL
-            OR NOT EXISTS (
-              SELECT 1 FROM review_publications p
-               WHERE p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
-                 AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
-                 AND p.owner = json_extract(h.payload_json, '$.owner')
-                 AND p.repo = json_extract(h.payload_json, '$.repo')
-                 AND p.pr_number = json_extract(h.payload_json, '$.pr_number')
-                 AND p.head_sha = json_extract(h.payload_json, '$.head_sha')
-                 AND (
-                   COALESCE(
-                     json_extract(p.payload_json, '$.admittedAttemptId'),
-                     json_extract(p.payload_json, '$.attemptId')
-                   ) IS NULL
-                   OR COALESCE(
-                     json_extract(p.payload_json, '$.admittedAttemptId'),
-                     json_extract(p.payload_json, '$.attemptId')
-                   ) = h.attempt_id
-                 )
-            )
+          AND NOT EXISTS (
+            SELECT 1 FROM review_publications p
+             WHERE (
+               -- OWNERSHIP FIRST, head-independent: a journal this attempt staged is
+               -- its own body (a headless delivery's checkout head, or a resolved head
+               -- that differs from the payload) and the publication lane owns it.
+               COALESCE(
+                 json_extract(p.payload_json, '$.admittedAttemptId'),
+                 json_extract(p.payload_json, '$.attemptId')
+               ) = h.attempt_id
+             )
+             OR (
+               -- Legacy rows carry no identity: keep the old conservative scope/head
+               -- rule. A headless delivery has no head to match, so it never lands
+               -- here (no migration invents an identity).
+               COALESCE(
+                 json_extract(p.payload_json, '$.admittedAttemptId'),
+                 json_extract(p.payload_json, '$.attemptId')
+               ) IS NULL
+               AND json_extract(h.payload_json, '$.head_sha') IS NOT NULL
+               AND p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
+               AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
+               AND p.owner = json_extract(h.payload_json, '$.owner')
+               AND p.repo = json_extract(h.payload_json, '$.repo')
+               AND p.pr_number = json_extract(h.payload_json, '$.pr_number')
+               AND p.head_sha = json_extract(h.payload_json, '$.head_sha')
+             )
           )
         ORDER BY h.deadline_ms, h.delivery_key
         LIMIT ?`,

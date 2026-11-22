@@ -1398,6 +1398,17 @@ async function reconcileCheckAttempt(
     // carries this row's OWN unconfirmed record and the proof's conclusion must
     // reach it.
     if (!isCorrection) {
+      // A terminal update this lane already dispatched is READ BACK, never re-sent
+      // and never charged while its reply may still arrive: the concluded run keeps
+      // its own text, and the row waits without spending an attempt.
+      if ((await readTerminalDispatch(db, attemptId)) !== null && beforeDeadline) {
+        await releaseCheckClaim(db, attemptId, lease, now());
+        log.info(
+          { event: "ops_check_reconcile_dispatch_pending", detail: `attempt=${attemptId}` },
+          "a terminal update was already dispatched — concluded-run readback only, no second send",
+        );
+        return;
+      }
       await settleFailedAttempt(
         db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
         `remote run is already concluded ${fetched.remote.conclusion ?? "null"} with different text — an already-concluded Check is never rewritten`,

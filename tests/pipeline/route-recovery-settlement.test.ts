@@ -26,7 +26,12 @@ import { createConsumerHarness, failureRows, makePayload } from "../helpers/cons
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore, type FailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
-import { deliveryKeyOf, markAttemptSettled, reserveAttemptHandoff } from "../../src/store/review-route-store";
+import {
+  deliveryKeyOf,
+  markAttemptSettled,
+  reserveAttemptHandoff,
+  stampOwedSettlementClaim,
+} from "../../src/store/review-route-store";
 import { idemKey } from "../../src/contracts/idem";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import { claimAttempt } from "../../src/store/review-checks";
@@ -1214,6 +1219,128 @@ describe("the publication-failure settlement under QC scrutiny", () => {
     expect(claims.get(claimKey)).toBe("1");
     expect(failureRows(db)).toHaveLength(1);
     expect(settlement(db).settled_ms).toEqual(expect.any(Number));
+  });
+
+  test("F-B2: only the pass that landed the record may abandon the head", async () => {
+    // note: The write boundary — not a stale snapshot — decides. KV has no
+    // compare-and-set, so a non-owner pass writes NOTHING: the head may already have
+    // been re-claimed by a fresh delivery.
+    const settled = await createSeededTestD1();
+    const settledPayload = makePayload();
+    await seed(settled, settledPayload);
+    const claimKey = idemKey({
+      installation_id: settledPayload.installation_id,
+      owner: settledPayload.owner,
+      repo: settledPayload.repo,
+      pr_number: settledPayload.pr_number,
+      head_sha: settledPayload.head_sha!,
+    });
+    // note: A settled, and a fresh webhook then wrote the queued sentinel.
+    await markAttemptSettled(
+      settled as never,
+      deliveryKeyOf(settledPayload),
+      ["claim-stamp", "failure-row"],
+      ["claim-stamp", "failure-row"],
+      NOW,
+    );
+    const settledKv = claimKv();
+    settledKv.claims.set(claimKey, "1");
+    expect(
+      await stampOwedSettlementClaim(settled as never, settledKv.kv as never, {
+        attemptId: "attempt-qc",
+        key: claimKey,
+        ttlSeconds: 1_800,
+        owned: false,
+      }),
+    ).toBeNull();
+    expect(settledKv.claims.get(claimKey)).toBe("1");
+
+    // note: An OPEN Check keeps a row with both facts UNSETTLED — the landed stamp is
+    // still not a reason to move the head-wide key again.
+    const open = await createSeededTestD1();
+    const openPayload = makePayload();
+    await seed(open, openPayload);
+    open.raw
+      .prepare(`UPDATE review_attempt_handoffs SET settled_effects = ? WHERE attempt_id = ?`)
+      .run(JSON.stringify(["claim-stamp", "failure-row"]), "attempt-qc");
+    const openKv = claimKv();
+    openKv.claims.set(claimKey, "1");
+    expect(
+      await stampOwedSettlementClaim(open as never, openKv.kv as never, {
+        attemptId: "attempt-qc",
+        key: claimKey,
+        ttlSeconds: 1_800,
+        owned: false,
+      }),
+    ).toBeNull();
+    expect(openKv.claims.get(claimKey)).toBe("1");
+
+    // note: The repair path (the failed read's retry): the stamp never landed and the
+    // settlement is still owed — an unowned pass may finish exactly that.
+    const repair = await createSeededTestD1();
+    const repairPayload = makePayload();
+    await seed(repair, repairPayload);
+    repair.raw
+      .prepare(`UPDATE review_attempt_handoffs SET settled_effects = ? WHERE attempt_id = ?`)
+      .run(JSON.stringify(["failure-row"]), "attempt-qc");
+    const repairKv = claimKv();
+    repairKv.claims.set(
+      idemKey({
+        installation_id: repairPayload.installation_id,
+        owner: repairPayload.owner,
+        repo: repairPayload.repo,
+        pr_number: repairPayload.pr_number,
+        head_sha: repairPayload.head_sha!,
+      }),
+      "1",
+    );
+    expect(
+      await stampOwedSettlementClaim(repair as never, repairKv.kv as never, {
+        attemptId: "attempt-qc",
+        key: idemKey({
+          installation_id: repairPayload.installation_id,
+          owner: repairPayload.owner,
+          repo: repairPayload.repo,
+          pr_number: repairPayload.pr_number,
+          head_sha: repairPayload.head_sha!,
+        }),
+        ttlSeconds: 1_800,
+        owned: false,
+      }),
+    ).toBe("written");
+  });
+
+  test("F-C2: a headless attempt's OWN staged journal keeps the publication ownership", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null });
+    await seed(db, payload);
+    // note: The attempt resolved its checkout head and staged its own body there: the
+    // publication lane owns it, whatever the payload's head is (or is not).
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('pub-own', ?, ?, ?, ?, ?, ?, 'review', 'prepared', ?, NULL, 0, 'pending', ?, ?)`,
+      )
+      .run(
+        payload.botRef!.appId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        "fedcba9876543210fedcba9876543210fedcba98",
+        JSON.stringify({ admittedAttemptId: "attempt-qc" }),
+        NOW - 800_000,
+        NOW - 800_000,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(settlement(db).settled_ms).toBeNull();
   });
 
   test("F-C: a prior generation's terminal journal never suppresses this attempt's failure", async () => {
