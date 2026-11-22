@@ -193,16 +193,20 @@ function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
  * `redactDocument`.
  *
  * Deliberately stricter than the publish gate's matcher: the gate REFUSES model
- * output, so it matches a short raw value only as a whole leaf to avoid false
- * positives. A ledger write has the opposite cost — over-redaction is cheap, a
- * durable leak is not — so a raw value is removed wherever it appears, at any
- * length, and every encoded form (`credentialMatcher`) is removed on top.
+ * output, so it matches a short raw value — and an encoding under its
+ * six-character substring floor — only as a whole leaf, to avoid false
+ * positives. A ledger write has the opposite cost: over-redaction is cheap, a
+ * durable leak is not. So EVERY form is removed wherever it appears — the long
+ * forms (`credentialMatcher`'s patterns) first, then the whole-leaf-only ones as
+ * substrings longest-first, then every raw value at any length.
  */
 export function redactLedgerText(text: string, secrets: readonly string[]): string {
-  const redacted = redactExactSecrets(text, secrets);
   const matcher = credentialMatcher(secrets);
-  if (matcher.pattern === null) return redacted;
-  return redactText(redacted, matcher, { replaced: 0 });
+  let out = redactText(text, matcher, { replaced: 0 });
+  for (const form of [...matcher.exact].sort((left, right) => right.length - left.length)) {
+    out = out.split(form).join(REDACTED);
+  }
+  return redactExactSecrets(out, secrets);
 }
 
 /**

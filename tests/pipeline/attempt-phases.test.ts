@@ -2662,6 +2662,51 @@ describe("the SEC-01 publish gate", () => {
     }
   });
 
+  test("a short encoded credential form embedded in the seat's text is redacted", async () => {
+    // note: An encoding under the gate's six-character substring floor is whole-leaf
+    // for the GATE; the ledger removes it wherever it appears.
+    const shortKey = "xy";
+    const shortEncoded = Buffer.from(shortKey, "utf8").toString("base64");
+    expect(shortEncoded).toBe("eHk=");
+    const longKey = "sk-paid-session-1";
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb);
+      h.sandbox.recheckFileContent = "";
+      h.sandbox.recheckStatusContent = JSON.stringify({
+        schema: "mstar.recheck-status/v1",
+        headSha: SHA,
+        outcome: "failed",
+        reason: "seat-failed",
+        rejected: 0,
+        rejected_row_ids: [],
+        error: `seat dump ${shortEncoded} end`,
+      });
+    });
+    await sealStoredGateSecrets(db, [shortKey, longKey]);
+    stubStoredEcho(db, Buffer.from(longKey, "utf8").toString("base64"));
+    expect(prepared.recheckInput).toBeDefined();
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    // Refused, and the round is still accounted.
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
+    const attributed = h.logLines.find((line) => line.fields.recheck_outcome !== undefined)!;
+    const rows = db.raw.prepare("SELECT stage, error FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      stage: string;
+      error: string;
+    }[];
+    const recheckRow = rows.find((row) => row.stage === "recheck");
+    expect(recheckRow).toBeDefined();
+
+    // Neither the short raw key nor its encoding survives in either artifact.
+    for (const text of [String(attributed.fields.recheck_error), String(recheckRow!.error)]) {
+      expect(text).not.toContain(shortEncoded);
+      expect(text).not.toContain(shortKey);
+      expect(text).toContain("[REDACTED]");
+    }
+  });
+
   test("a refused review with no sealed set withholds the recheck status text", async () => {
     // note: Without the exact set nothing can be certified, so the seat's text is not
     // emitted at all — the round is still accounted by its counts.
