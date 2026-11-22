@@ -597,32 +597,24 @@ export type ProviderTier = "builtin" | "template";
 
 /** One selectable protocol of a mixed-protocol provider. */
 export type ProviderProtocolOption = {
-  /** note: Custom-provider API protocol this option materializes. */
   api: string;
-  /** note: The endpoint this protocol serves on — the size gate matches THIS url. */
   baseUrl: string | null;
-  /** note: This protocol's own model vocabulary (prefill; clipped to 128 at save). */
   models: readonly string[];
 };
 
 export type ProviderCatalogEntry = {
-  /** note: Human-readable provider label (picker/table). */
   label: string;
-  /** note: builtin = allowlisted BYOK provider (pool-transported); template = metadata + prefill only. */
   tier: ProviderTier;
   envName: string | null;
   baseUrl: string | null;
   api: string | null;
-  /** note: Representative model ids (display/prefill metadata). */
   models: readonly string[];
-  /** note: Provider docs URL. */
   doc: string | null;
   protocols?: readonly ProviderProtocolOption[];
 };
 
 export type ProviderInfo = {
   envName: string;
-  /** note: Human-readable provider label for the picker/table. */
   label: string;
 };
 

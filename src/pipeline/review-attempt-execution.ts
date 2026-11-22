@@ -166,7 +166,7 @@ import {
   type UpsertPlan,
 } from "./comment";
 import { createTargetsStore } from "../dashboard/targets-store";
-import { getRecheckAssignmentMaxBytes } from "../dashboard/runtime-config-store";
+import { getRecheckAssignmentMaxBytes, getReconcileSettings } from "../dashboard/runtime-config-store";
 import { type CustomProviderConsumerConfig } from "../dashboard/app-config-store";
 import {
   CHECK_SUMMARIES,
@@ -2171,7 +2171,14 @@ async function freezeKnownStop(
   try {
     const attempt = await getCheckAttempt(deps.env.DB, attemptId);
     if (attempt === null || attempt.desired !== "in_progress") return;
-    const lease = await claimCheckRecovery(deps.env.DB, attemptId, `stop:${crypto.randomUUID()}`, now);
+    const settings = await getReconcileSettings(deps.env.DB);
+    if (settings.issue) {
+      deps.log.warn(
+        line,
+        `check stop settings unavailable — using defaults: ${JSON.stringify(settings.issue)}`,
+      );
+    }
+    const lease = await claimCheckRecovery(deps.env.DB, attemptId, `stop:${crypto.randomUUID()}`, now, settings.values.checkMaxAttempts);
     if (lease === null) return;
     const frozen = await setCheckDesired(
       deps.env.DB,

@@ -1,4 +1,4 @@
-// Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over) see tests/spa/tokens.test.ts.
+// shortcut: Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over); removal tracked in tests/spa/tokens.test.ts.
 import * as React from "react"
 import { XIcon } from "lucide-react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
@@ -60,16 +60,6 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          // rounded-lg resolves to the container tier via the bridge remap;
-          // elevation is the tinted --shadow-pop token. Truth note (QC round
-          // 1 F-006): the data-[state] animate-in/out + fade/zoom classes are
-          // NO-OPS — Tailwind 4 core ships no such utilities and the
-          // tw-animate-css dependency is deliberately not added — so the
-          // dialog enters/exits instantly and duration-(--duration-slow)
-          // currently rides nothing. The motion pass decides the real
-          // entrance (zero-dep keyframes consuming --duration-slow with a
-          // prefers-reduced-motion guard); the classes stay as upstream
-          // copy-in shape until then.
           "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-(--spacing-4) rounded-lg border border-(--border-default) bg-background p-(--spacing-6) shadow-(--shadow-pop) duration-(--duration-slow) outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
           className
         )}

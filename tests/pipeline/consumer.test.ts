@@ -1,4 +1,5 @@
 
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -6916,7 +6917,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const attemptId = handle!.attemptId;
 
     clock = handle!.lease.untilMs + 1;
-    const reacquired = await claimCheckRecovery(db, attemptId, "reconciler", clock);
+    const reacquired = await claimCheckRecovery(db, attemptId, "reconciler", clock, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(reacquired).toEqual({ holder: "reconciler", epoch: 2, untilMs: clock + CHECK_RECOVERY_LEASE_MS });
 
     await hooks.terminalize({ handle: handle!, publicationId: null, outcome: "publication-unknown" });
@@ -7112,12 +7113,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.next_attempt_ms).toBeGreaterThan(checkState.clockMs);
     expect(released.desired).toBe("in_progress");
 
-    const beforeDue = await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms! - 1);
+    const beforeDue = await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms! - 1, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(beforeDue).toBeNull();
     expect(checkRowFor(db, SHA).holder).toBeNull();
 
-    expect(await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms! - 1)).toBeNull();
-    const reacquired = await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms!);
+    expect(await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms! - 1, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
+    const reacquired = await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms!, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(reacquired).not.toBeNull();
     await hooks.terminalize({
       handle: {
@@ -7217,8 +7218,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBe(checkState.clockMs + 60_000);
-    expect(await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms! - 1)).toBeNull();
-    const claim = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
+    expect(await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms! - 1, RECONCILE_DEFAULTS.checkMaxAttempts)).toBeNull();
+    const claim = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(claim?.holder).toBe("reconciler");
   });
 
@@ -7262,7 +7263,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.terminal_ms).toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.recovery_state).toBe("pending");
-    const reacquired = await claimCheckRecovery(db, row.id, "reconciler", checkState.clockMs);
+    const reacquired = await claimCheckRecovery(db, row.id, "reconciler", checkState.clockMs, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(reacquired).toEqual({
       holder: "reconciler",
       epoch: 2,
@@ -7389,7 +7390,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
 
-    const early = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
+    const early = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(early).not.toBeNull();
     expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
     expect(checkRequests.filter((r) => r.op === "create")).toHaveLength(1);
@@ -8772,7 +8773,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.terminal_ms).toBeNull();
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
 
-    expect(await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms!)).not.toBeNull();
+    expect(await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms!, RECONCILE_DEFAULTS.checkMaxAttempts)).not.toBeNull();
     const owned = checkRowFor(db, SHA);
     expect(await hooks.abandonTerminalize({ handle: handle!, reason: "second give-up" })).toBe(false);
     expect(checkRowFor(db, SHA)).toEqual(owned);

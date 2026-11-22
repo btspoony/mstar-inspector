@@ -1,8 +1,8 @@
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import {
   CHECK_BACKOFF_MS,
   CHECK_NAME,
-  CHECK_RECONCILE_LIMIT,
   deferCheckRecovery,
   listCheckReconcileBatch,
   setCheckDesired,
@@ -786,7 +786,7 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
   test("more wait-terminal rows than the batch bound cannot starve a publishable attempt", async () => {
     const db = seededDb();
     const deadIds: string[] = [];
-    for (let index = 0; index < CHECK_RECONCILE_LIMIT + 1; index += 1) {
+    for (let index = 0; index < RECONCILE_DEFAULTS.checkSelectLimit + 1; index += 1) {
       const { attempt, lease } = await claim(db, {
         headSha: `${index.toString(16).padStart(2, "0")}${"0".repeat(38)}`,
         nowMs: T0,
@@ -833,10 +833,10 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
         now: () => T0 + 120_000,
         credentials: scriptedCredentials(db, countingScript({ adopt: 0, begin: 0, complete: 0 })),
       });
-      expect(first.examined).toBe(CHECK_RECONCILE_LIMIT);
+      expect(first.examined).toBe(RECONCILE_DEFAULTS.checkSelectLimit);
       expect(first.completed).toBe(0);
 
-      const nextIds = (await listCheckReconcileBatch(db, T0 + 120_000)).map((row) => row.identity.attemptId);
+      const nextIds = (await listCheckReconcileBatch(db, T0 + 120_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((row) => row.identity.attemptId);
       expect(nextIds).toHaveLength(2);
       expect(nextIds).toContain(publishableId);
 

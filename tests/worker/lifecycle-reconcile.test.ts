@@ -1,3 +1,4 @@
+import { RECONCILE_DEFAULTS, RECONCILE_LIMITS, RECONCILE_REQUEST_ESTIMATES } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import { idemKey } from "../../src/contracts/idem";
@@ -10,7 +11,6 @@ import {
   listPublicationRecovery,
   listLineBatchRecovery,
   listResolutionRecovery,
-  LIFECYCLE_MAX_ATTEMPTS,
   recordPublicationProof,
   readLineBatchState,
   recordLineDiscoveryFailure,
@@ -40,12 +40,6 @@ import {
 import { listDiscussionWithOctokit } from "../../src/pipeline/discussion-context";
 import {
   reconcileReviewLifecycle,
-  RECONCILE_MAX_REQUESTS,
-  RECONCILE_PER_REQUEST_MS,
-  RECONCILE_PUBLICATION_LANE_MAX_REQUESTS,
-  RECONCILE_RUN_BUDGET_MS,
-  RECONCILE_SELECT_LIMIT,
-  RECONCILE_THREAD_OPERATION_REQUESTS,
   type LifecycleReconcileDeps,
   type ReconcileReviewer,
   type ReconcileTransport,
@@ -429,17 +423,6 @@ function threadRow(db: TestD1, id: string): { resolution_state: string; attempts
     .get(id) as never;
 }
 
-
-describe("reconcileReviewLifecycle — constants (spec §7.11.1)", () => {
-  test("pins the budget constants", () => {
-    expect(RECONCILE_MAX_REQUESTS).toBe(80);
-    expect(RECONCILE_RUN_BUDGET_MS).toBe(45_000);
-    expect(RECONCILE_PER_REQUEST_MS).toBe(5_000);
-    expect(RECONCILE_THREAD_OPERATION_REQUESTS).toBe(15);
-    expect(RECONCILE_PUBLICATION_LANE_MAX_REQUESTS).toBe(40);
-    expect(RECONCILE_SELECT_LIMIT).toBe(10);
-  });
-});
 
 describe("publication lane — confirmed apply", () => {
   test("applies a confirmed publication after a crashed window, purely locally", async () => {
@@ -1123,7 +1106,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       id: "pub-stuck",
       appliedAgeMs: 200_000,
       dispatched: true,
-      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
     });
     await seedAppliedLineBatch(db, { id: "pub-fresh", appliedAgeMs: 100_000, dispatched: false, headSha: "fedcba9876543210fedcba9876543210fedcba98" });
 
@@ -1152,7 +1135,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     expect(batchColumns(db, "pub-fresh").line_dispatch_ms).toBe(T0);
     expect(batchColumns(db, "pub-stuck")).toEqual({
       line_dispatch_ms: T0 - 5_000,
-      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS,
+      line_discovery_attempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts,
       line_unresolvable_ms: T0,
       line_unresolvable_reason: "marker-missing",
     });
@@ -1160,12 +1143,52 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     expect(reported).toHaveLength(1);
     expect(reported[0]!.detail).toContain("publication=pub-stuck");
     expect(reported[0]!.detail).toContain("reason=marker-missing");
-    expect(await listLineBatchRecovery(db, T0 + 1, RECONCILE_SELECT_LIMIT)).toEqual([]);
+    expect(await listLineBatchRecovery(db, T0 + 1, RECONCILE_DEFAULTS.lifecycleSelectLimit)).toEqual([]);
 
     await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 1_000, reviewer, log });
     expect(warns.filter((warn) => warn.event === "ops_lifecycle_line_unresolvable")).toHaveLength(1);
-    expect(batchColumns(db, "pub-stuck").line_discovery_attempts).toBe(LIFECYCLE_MAX_ATTEMPTS);
+    expect(batchColumns(db, "pub-stuck").line_discovery_attempts).toBe(RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(calls.discovered).toBe(1);
+  });
+
+  test("line recovery uses the snapshot batch size and discovery cap without losing fairness", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    db.raw.prepare("INSERT INTO review_runtime_settings (key,value,updated_at) VALUES (?,?,'now')")
+      .run("platform.reconcile.lifecycle.select_limit", "1");
+    db.raw.prepare("INSERT INTO review_runtime_settings (key,value,updated_at) VALUES (?,?,'now')")
+      .run("platform.reconcile.lifecycle.max_attempts", "2");
+    await seedAppliedLineBatch(db, { id: "pub-stuck", appliedAgeMs: 200_000, dispatched: true, discoveryAttempts: 1 });
+    await seedAppliedLineBatch(db, { id: "pub-fresh", appliedAgeMs: 100_000, dispatched: false, headSha: "fedcba9876543210fedcba9876543210fedcba98" });
+    const limits: unknown[] = [];
+    const prepare = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = prepare(sql);
+      if (sql.includes("SELECT * FROM review_publications p") && sql.includes("line_unresolvable_ms IS NULL")) {
+        const bind = statement.bind.bind(statement);
+        statement.bind = (...args: unknown[]) => {
+          limits.push(args.at(-1));
+          return bind(...args);
+        };
+      }
+      return statement;
+    };
+    await reconcileReviewLifecycle(asEnv(db), {
+      now: () => T0,
+      reviewer: async () => okResolution({
+        recoverLineComments: async () => ({ posted: [], ambiguous: [], captured: false, reviewId: null, failure: "marker-missing" }),
+        postLineComments: async () => ({
+          posted: [{ associationId: "assoc-pub-fresh", commentId: 5001, path: "src/a.ts", line: 10 }],
+          ambiguous: [], captured: true, reviewId: 5000,
+        }),
+      }),
+    });
+    expect(limits.length).toBeGreaterThan(1);
+    expect(limits.every((limit) => limit === 1)).toBe(true);
+    expect(batchColumns(db, "pub-stuck").line_discovery_attempts).toBe(2);
+    expect(batchColumns(db, "pub-stuck").line_unresolvable_ms).toBe(T0);
+    expect(batchColumns(db, "pub-fresh").line_dispatch_ms).toBe(T0);
+    expect(await listLineBatchRecovery(db, T0 + 1, 1)).toEqual([]);
   });
 
   test("a batch that succeeds on its second discovery attempt resolves and is not marked unresolvable", async () => {
@@ -1209,13 +1232,13 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
   test("a pass reaches a fresh batch behind more stuck batches than the selection width", async () => {
     const db = createMigratedTestD1();
     seedApp(db, APP);
-    const stuck = RECONCILE_SELECT_LIMIT + 2;
+    const stuck = RECONCILE_DEFAULTS.lifecycleSelectLimit + 2;
     for (let i = 0; i < stuck; i += 1) {
       await seedAppliedLineBatch(db, {
         id: `pub-stuck-${i}`,
         appliedAgeMs: 300_000 + i,
         dispatched: true,
-        discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+        discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
         headSha: i.toString(16).padStart(2, "0").repeat(20),
       });
     }
@@ -1253,7 +1276,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     for (let i = 0; i < stuck; i += 1) {
       expect(batchColumns(db, `pub-stuck-${i}`)).toEqual({
         line_dispatch_ms: T0 - 5_000,
-        line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS,
+        line_discovery_attempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts,
         line_unresolvable_ms: T0,
         line_unresolvable_reason: "marker-missing",
       });
@@ -1298,13 +1321,13 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       id: "pub-raced",
       appliedAgeMs: 100_000,
       dispatched: true,
-      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
     });
 
     await captureLineComments(db, "pub-raced", 9000, [{ associationId: "assoc-pub-raced", commentId: 9001 }], T0);
-    expect(await recordLineDiscoveryFailure(db, "pub-raced", "marker-missing", 0, T0)).toBeNull();
+    expect(await recordLineDiscoveryFailure(db, "pub-raced", "marker-missing", 0, T0, RECONCILE_DEFAULTS.lifecycleMaxAttempts)).toBeNull();
     expect(batchColumns(db, "pub-raced")).toMatchObject({
-      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      line_discovery_attempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
       line_unresolvable_ms: null,
       line_unresolvable_reason: null,
     });
@@ -1317,7 +1340,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       id: "pub-partial",
       appliedAgeMs: 100_000,
       dispatched: true,
-      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
       intentCount: 2,
     });
 
@@ -1326,9 +1349,9 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     await captureLineComments(db, "pub-partial", 9100, [{ associationId: "assoc-pub-partial", commentId: 9101 }], T0);
     expect(await readLineBatchState(db, "pub-partial")).toMatchObject({ pending: true, captures: 1 });
 
-    expect(await recordLineDiscoveryFailure(db, "pub-partial", "comment-gone", 0, T0)).toBeNull();
+    expect(await recordLineDiscoveryFailure(db, "pub-partial", "comment-gone", 0, T0, RECONCILE_DEFAULTS.lifecycleMaxAttempts)).toBeNull();
     expect(batchColumns(db, "pub-partial")).toMatchObject({
-      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      line_discovery_attempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
       line_unresolvable_ms: null,
       line_unresolvable_reason: null,
     });
@@ -1381,7 +1404,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       id: "pub-progress",
       appliedAgeMs: 100_000,
       dispatched: true,
-      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      discoveryAttempts: RECONCILE_DEFAULTS.lifecycleMaxAttempts - 1,
       intentCount: 2,
     });
 
@@ -1418,7 +1441,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       line_unresolvable_reason: null,
     });
 
-    expect(await listLineBatchRecovery(db, T0 + 2_000, RECONCILE_SELECT_LIMIT)).toHaveLength(1);
+    expect(await listLineBatchRecovery(db, T0 + 2_000, RECONCILE_DEFAULTS.lifecycleSelectLimit)).toHaveLength(1);
     const pending = db.raw
       .prepare(`SELECT id FROM review_threads WHERE publication_id = ? AND review_id IS NULL`)
       .all("pub-progress") as Array<{ id: string }>;
@@ -1459,7 +1482,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     ).updated_ms;
     const admittedMs = T0;
 
-    expect((await recordLineDiscoveryFailure(db, "pub-old", "marker-missing", 0, T0))?.attempts).toBe(2);
+    expect((await recordLineDiscoveryFailure(db, "pub-old", "marker-missing", 0, T0, RECONCILE_DEFAULTS.lifecycleMaxAttempts))?.attempts).toBe(2);
     await resetLineDiscoveryFailures(db, "pub-old");
 
     const after = db.raw
@@ -1511,7 +1534,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 2_000, reviewer: thrown, log: SILENT_LOG });
     expect(batchColumns(db, "pub-budget").line_discovery_attempts).toBe(3);
 
-    expect(await listLineBatchRecovery(db, T0 + 3_000, RECONCILE_SELECT_LIMIT)).toHaveLength(1);
+    expect(await listLineBatchRecovery(db, T0 + 3_000, RECONCILE_DEFAULTS.lifecycleSelectLimit)).toHaveLength(1);
   });
 });
 
@@ -1590,7 +1613,7 @@ describe("thread lane — retry, backoff, give-up (real §7.5 surface)", () => {
     expect(summary.errors).toBe(0);
     const row = threadRow(db, "assoc-1");
     expect(row.resolution_state).toBe("needs-recheck");
-    const pending = await listResolutionRecovery(db, T0 + 1_000_000, 10);
+    const pending = await listResolutionRecovery(db, T0 + 1_000_000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(pending.map((r) => r.associationId)).not.toContain("assoc-1");
   });
 
@@ -1674,10 +1697,10 @@ describe("suspended-pair scan fairness", () => {
     const fingerprint = await sha256Hex("enc-pem");
     const kinds = ["disabled", "missing", "deleted", "identity-mismatch"] as const;
     const repairedAssociationId = "22222222-3333-4444-5555-666666666666";
-    for (let i = 0; i < RECONCILE_SELECT_LIMIT + 2; i += 1) {
+    for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleSelectLimit + 2; i += 1) {
       const appId = `scan-${String(i).padStart(3, "0")}`;
       const scope = { ...SCOPE, appId };
-      const repaired = i === RECONCILE_SELECT_LIMIT + 1;
+      const repaired = i === RECONCILE_DEFAULTS.lifecycleSelectLimit + 1;
       const suspensionKind = repaired ? "disabled" : kinds[i % kinds.length]!;
       seedApp(db, appId, {
         githubAppId: 2000 + i,
@@ -1699,7 +1722,7 @@ describe("suspended-pair scan fairness", () => {
       }
     }
 
-    const repairedId = RECONCILE_SELECT_LIMIT + 1;
+    const repairedId = RECONCILE_DEFAULTS.lifecycleSelectLimit + 1;
     let now = T0;
     let reviewer = okReviewer();
     if (lane === "thread") {
@@ -1765,7 +1788,7 @@ describe("suspended-pair scan fairness", () => {
 
   test("a throwing identity probe does not pin the next scan to that pair", async () => {
     const db = createMigratedTestD1();
-    for (let i = 0; i <= RECONCILE_SELECT_LIMIT; i += 1) {
+    for (let i = 0; i <= RECONCILE_DEFAULTS.lifecycleSelectLimit; i += 1) {
       const appId = `scan-${String(i).padStart(3, "0")}`;
       const scope = { ...SCOPE, appId };
       seedApp(db, appId, { githubAppId: 3000 + i });
@@ -1775,7 +1798,7 @@ describe("suspended-pair scan fairness", () => {
     await reconcile(db, { now: () => T0, reviewer: async () => { throw new Error("probe failed"); } });
     expect(pubRow(db, "pub-0").recovery_state).toBe("suspended");
     await reconcile(db, { now: () => T0 + 1, reviewer: okReviewer() });
-    expect(pubRow(db, `pub-${RECONCILE_SELECT_LIMIT}`).recovery_state).toBe("pending");
+    expect(pubRow(db, `pub-${RECONCILE_DEFAULTS.lifecycleSelectLimit}`).recovery_state).toBe("pending");
     db.raw.close();
   });
 });
@@ -1836,7 +1859,7 @@ describe("budgets (spec §7.11.1)", () => {
 
     let call = 0;
     const now = () => {
-      const value = call++ < 1 ? T0 : T0 + RECONCILE_RUN_BUDGET_MS + 1_000;
+      const value = call++ < 1 ? T0 : T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs + 1_000;
       return value;
     };
     let resolved = 0;
@@ -1967,10 +1990,10 @@ describe("enforced per-request transport bound (spec §7.11.1)", () => {
     const clock = { now: T0 };
     const { transport } = await captureTransport(db, clock);
 
-    expect(transport.boundMs()).toBe(RECONCILE_PER_REQUEST_MS);
-    clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 30;
+    expect(transport.boundMs()).toBe(RECONCILE_DEFAULTS.lifecyclePerRequestMs);
+    clock.now = T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs - 30;
     expect(transport.boundMs()).toBe(30);
-    clock.now = T0 + RECONCILE_RUN_BUDGET_MS + 10_000;
+    clock.now = T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs + 10_000;
     expect(transport.boundMs()).toBe(1);
 
     const realFetch = globalThis.fetch;
@@ -1984,7 +2007,7 @@ describe("enforced per-request transport bound (spec §7.11.1)", () => {
           }
           signal.addEventListener("abort", () => reject(signal.reason));
         })) as unknown as typeof fetch;
-      clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 40;
+      clock.now = T0 + RECONCILE_DEFAULTS.lifecycleRunBudgetMs - 40;
       const started = performance.now();
       await expect(transport.fetchImpl("https://api.github.com/app")).rejects.toMatchObject({
         name: "TimeoutError",
@@ -2035,7 +2058,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     db.raw
       .prepare(`UPDATE review_publications SET phase = 'superseded', recovery_state = 'done' WHERE id = 'pub-1'`)
       .run();
-    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+    for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleSelectLimit; i += 1) {
       const rowId = `finding-row-${i}`;
       const assocId = `assoc-${i}`;
       seedFindingRow(db, rowId, "pub-1", SCOPE, "addressed");
@@ -2073,17 +2096,15 @@ describe("thread lane request budget (spec §7.11.1)", () => {
         });
       },
     });
-
-    expect(RECONCILE_MAX_REQUESTS).toBe(80);
     expect(resolved).toBe(3);
     expect(requests).toBe(75);
-    expect(requests).toBeLessThanOrEqual(RECONCILE_MAX_REQUESTS);
+    expect(requests).toBeLessThanOrEqual(RECONCILE_DEFAULTS.lifecycleMaxRequests);
     expect(summary.examined).toBe(3);
 
     const untouched = db.raw
       .query(`SELECT COUNT(*) AS n FROM review_threads WHERE attempts = 0 AND lease_until_ms IS NULL AND resolution_state = 'pending'`)
       .get() as { n: number };
-    expect(untouched.n).toBe(RECONCILE_SELECT_LIMIT - 3);
+    expect(untouched.n).toBe(RECONCILE_DEFAULTS.lifecycleSelectLimit - 3);
     expect(transport).toBeDefined();
 
     const realFetch = globalThis.fetch;
@@ -2094,12 +2115,12 @@ describe("thread lane request budget (spec §7.11.1)", () => {
         dispatched += 1;
         return new Response("{}", { status: 200 });
       }) as unknown as typeof fetch;
-      for (let i = 0; i < RECONCILE_MAX_REQUESTS - alreadySpent; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleMaxRequests - alreadySpent; i += 1) {
         await transport!.fetchImpl("https://api.github.com/x");
       }
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS - alreadySpent);
+      expect(dispatched).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests - alreadySpent);
       await expect(transport!.fetchImpl("https://api.github.com/x")).rejects.toThrow(/budget exhausted/);
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS - alreadySpent);
+      expect(dispatched).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests - alreadySpent);
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -2109,7 +2130,7 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     const db = createMigratedTestD1();
     seedApp(db, APP);
     await seedPrepared(db, "pub-1", degradedPayload(SCOPE, { round: 1 }), 120_000);
-    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+    for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleSelectLimit; i += 1) {
       const rowId = `finding-row-${i}`;
       const assocId = `assoc-${i}`;
       seedFindingRow(db, rowId, "pub-1", SCOPE, "addressed");
@@ -2148,9 +2169,9 @@ describe("thread lane request budget (spec §7.11.1)", () => {
       },
     });
 
-    expect(publicationRequests).toBe(RECONCILE_PUBLICATION_LANE_MAX_REQUESTS);
-    expect(threadRequests).toBe(RECONCILE_MAX_REQUESTS - RECONCILE_PUBLICATION_LANE_MAX_REQUESTS);
-    expect(publicationRequests + threadRequests).toBe(RECONCILE_MAX_REQUESTS);
+    expect(publicationRequests).toBe(RECONCILE_DEFAULTS.lifecyclePublicationLaneMaxRequests);
+    expect(threadRequests).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests - RECONCILE_DEFAULTS.lifecyclePublicationLaneMaxRequests);
+    expect(publicationRequests + threadRequests).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests);
     expect(entered).toBeGreaterThan(0);
   });
 });
@@ -2236,14 +2257,14 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
       }) as unknown as typeof fetch;
 
       let refused = 0;
-      for (let i = 0; i < RECONCILE_MAX_REQUESTS + 20; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleMaxRequests + 20; i += 1) {
         try {
           await transport!.fetchImpl("https://api.github.com/x");
         } catch (err) {
           if (err instanceof Error && /budget exhausted/.test(err.message)) refused += 1;
         }
       }
-      expect(dispatched).toBe(RECONCILE_MAX_REQUESTS);
+      expect(dispatched).toBe(RECONCILE_DEFAULTS.lifecycleMaxRequests);
       expect(refused).toBe(20);
     } finally {
       globalThis.fetch = realFetch;
@@ -2284,7 +2305,7 @@ describe("actual-request metering at the transport (spec §7.11.1 ≤80, P67-QC-
         return new Response("{}", { status: 200 });
       }) as unknown as typeof fetch;
 
-      for (let i = 0; i < RECONCILE_MAX_REQUESTS; i += 1) {
+      for (let i = 0; i < RECONCILE_DEFAULTS.lifecycleMaxRequests; i += 1) {
         await transport!.fetchImpl("https://api.github.com/x");
       }
       dispatched = 0;
@@ -2577,7 +2598,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
         return okResolution({
           planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
           postPreparedDegraded: async () => {
-            await spendThrough(runTransport, RECONCILE_MAX_REQUESTS + 1);
+            await spendThrough(runTransport, RECONCILE_DEFAULTS.lifecycleMaxRequests + 1);
             return { posted: true, commentId: 777 };
           },
         });
@@ -2592,7 +2613,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
     });
     expect(summary.unknown).toBe(0);
 
-    const dueAgain = await listPublicationRecovery(db, T0, RECONCILE_SELECT_LIMIT);
+    const dueAgain = await listPublicationRecovery(db, T0, RECONCILE_DEFAULTS.lifecycleSelectLimit, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(dueAgain.map((r) => r.id)).toContain("pub-1");
 
     let sent = 0;
@@ -2622,7 +2643,7 @@ describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () 
           planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
           postPreparedDegraded: async () => {
             try {
-              await spendThrough(runTransport, RECONCILE_MAX_REQUESTS + 1);
+              await spendThrough(runTransport, RECONCILE_DEFAULTS.lifecycleMaxRequests + 1);
             } catch (refusal) {
               throw new Error("Request failed", { cause: refusal });
             }
@@ -2848,5 +2869,150 @@ describe("uncertain-publication discovery through the real capture", () => {
       .query(`SELECT proof_json FROM review_publications WHERE id = 'pub-1'`)
       .get() as { proof_json: string | null };
     expect(unproven.proof_json).toBeNull();
+  });
+});
+
+describe("runtime lifecycle selection", () => {
+  function minimumRequestSettings(db: TestD1) {
+    for (const [field, key] of [
+      ["lifecycleMaxRequests", "max_requests"],
+      ["lifecyclePublicationLaneMaxRequests", "publication_lane_max_requests"],
+      ["lifecycleThreadOperationRequests", "thread_operation_requests"],
+    ] as const) db.raw.prepare("INSERT INTO review_runtime_settings (key,value,updated_at) VALUES (?,?,'now')")
+      .run(`platform.reconcile.lifecycle.${key}`, String(RECONCILE_LIMITS[field].min));
+  }
+
+  test("minimum request budgets publish one cold prepared row", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    minimumRequestSettings(db);
+    await seedPrepared(db, "minimum-publication", reviewPayload(SCOPE), 120_000);
+    const { credentials, plan, send } = RECONCILE_REQUEST_ESTIMATES;
+    let dispatched = 0;
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: async ({ transport }) => {
+        dispatched += await meterRequests(transport!, credentials);
+        return okResolution({
+          planReviewUpsert: async () => {
+            dispatched += await meterRequests(transport!, plan);
+            return { action: "create", round: 1 };
+          },
+          postPreparedReview: async () => {
+            const sent = await meterRequests(transport!, send);
+            dispatched += sent;
+            if (sent !== send) throw new Error("send budget refused");
+            return { commentId: 777 };
+          },
+        });
+      },
+    });
+    expect(dispatched).toBe(credentials + plan + send);
+    expect(summary.applied).toBe(1);
+    expect(pubRow(db, "minimum-publication")).toMatchObject({ phase: "applied", recovery_state: "done" });
+  });
+
+  test("minimum request budgets resolve one cold thread row", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    minimumRequestSettings(db);
+    await seedPrepared(db, "minimum-thread", degradedPayload(SCOPE), 0);
+    db.raw.prepare("UPDATE review_publications SET phase='superseded', recovery_state='done' WHERE id='minimum-thread'").run();
+    seedFindingRow(db, "minimum-finding", "minimum-thread", SCOPE, "addressed");
+    seedThreadRow(db, {
+      id: "minimum-association", publicationId: "minimum-thread", findingRowId: "minimum-finding",
+      scope: SCOPE, verified: verifiedFor("minimum-association", "minimum-finding"),
+    });
+    const { credentials, discovery, plan } = RECONCILE_REQUEST_ESTIMATES;
+    let dispatched = 0;
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: async ({ transport }) => {
+        dispatched += await meterRequests(transport!, credentials);
+        return okResolution({
+          resolveFindingThread: async () => {
+            for (const requests of [discovery, discovery, plan, discovery]) {
+              const sent = await meterRequests(transport!, requests);
+              dispatched += sent;
+              if (sent !== requests) return { kind: "retry", reason: "api" };
+            }
+            return { kind: "resolved", threadId: "thread-minimum", adopted: false, outdated: false, lateChange: false };
+          },
+        });
+      },
+    });
+    expect(dispatched).toBe(credentials + discovery + discovery + plan + discovery);
+    expect(summary.resolved).toBe(1);
+  });
+
+  test("minimum budgets leave cold credential headroom for a different thread pair", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    seedApp(db, APP_B, { githubAppId: 1002, installationId: SCOPE_B.installationId });
+    minimumRequestSettings(db);
+    await seedPrepared(db, "headroom-publication", reviewPayload(SCOPE), 120_000);
+    await seedPrepared(db, "headroom-thread", degradedPayload(SCOPE_B), 0);
+    db.raw.prepare("UPDATE review_publications SET phase='superseded', recovery_state='done' WHERE id='headroom-thread'").run();
+    seedFindingRow(db, "headroom-finding", "headroom-thread", SCOPE_B, "addressed");
+    seedThreadRow(db, {
+      id: "headroom-association", publicationId: "headroom-thread", findingRowId: "headroom-finding",
+      scope: SCOPE_B, verified: verifiedFor("headroom-association", "headroom-finding"),
+    });
+    const { credentials, discovery, plan, send } = RECONCILE_REQUEST_ESTIMATES;
+    let publicationRequests = 0;
+    let threadRequests = 0;
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: async ({ appId, transport }) => {
+        const cold = await meterRequests(transport!, credentials);
+        if (appId === APP) publicationRequests += cold;
+        else threadRequests += cold;
+        return okResolution({
+          planReviewUpsert: async () => {
+            publicationRequests += await meterRequests(transport!, plan);
+            return { action: "create", round: 1 };
+          },
+          postPreparedReview: async () => {
+            const sent = await meterRequests(transport!, send);
+            publicationRequests += sent;
+            if (sent !== send) throw new Error("send budget refused");
+            return { commentId: 777 };
+          },
+          resolveFindingThread: async () => {
+            for (const requests of [discovery, discovery, plan, discovery]) {
+              const sent = await meterRequests(transport!, requests);
+              threadRequests += sent;
+              if (sent !== requests) return { kind: "retry", reason: "api" };
+            }
+            return { kind: "resolved", threadId: "thread-headroom", adopted: false, outdated: false, lateChange: false };
+          },
+        });
+      },
+    });
+    expect(publicationRequests).toBe(RECONCILE_LIMITS.lifecyclePublicationLaneMaxRequests.min);
+    expect(summary, JSON.stringify({ summary, publicationRequests, threadRequests })).toMatchObject({ applied: 1, resolved: 1, errors: 0 });
+    expect(threadRequests).toBe(credentials + discovery + discovery + plan + discovery);
+    expect(threadRow(db, "headroom-association").resolution_state).not.toBe("local-error");
+  });
+
+  test("configured selection limit and attempt cap bound a pass with one snapshot", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    for (let index = 0; index < 3; index += 1) await seedConfirmedCrashed(db, `runtime-${index}`, reviewPayload({ ...SCOPE, prNumber: 200 + index }));
+    db.raw.prepare("UPDATE review_publications SET attempts = 2 WHERE id = 'runtime-0'").run();
+    db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.lifecycle.select_limit", "1", "now");
+    db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.lifecycle.max_attempts", "2", "now");
+    let reads = 0;
+    const original = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = original(sql);
+      if (sql.includes("review_runtime_settings WHERE key IN")) reads += 1;
+      return statement;
+    };
+    const result = await reconcile(db, { now: () => T0 });
+    expect(result.examined).toBe(1);
+    expect(reads).toBe(1);
+    expect(pubRow(db, "runtime-0").phase).toBe("confirmed");
+    db.raw.close();
   });
 });

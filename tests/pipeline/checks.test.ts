@@ -1,3 +1,4 @@
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import {
   adoptReleasedCheckAttempt,
@@ -3035,7 +3036,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     expect(row.lease_until_ms).toBeNull();
     expect(row.next_attempt_ms).toBeNull();
     expect(row.terminal_ms).toBeNull();
-    expect((await listCheckReconcileBatch(db, T0)).map((candidate) => candidate.identity.attemptId)).toEqual([attemptId]);
+    expect((await listCheckReconcileBatch(db, T0, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((candidate) => candidate.identity.attemptId)).toEqual([attemptId]);
   });
   test("a retry after a neutral settlement claims a new generation and its own run", async () => {
     const db = await seededDb();

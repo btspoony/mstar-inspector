@@ -1,3 +1,4 @@
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import {
@@ -201,7 +202,7 @@ describe("stagePublication (spec §7.7 staging)", () => {
     expect(row.nextAttemptMs).toBeNull();
     expect(row.payload).toEqual(pay);
 
-    const recovery = await listPublicationRecovery(db, 2000, 10);
+    const recovery = await listPublicationRecovery(db, 2000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(recovery.map((r) => r.id)).toEqual(["pub-1"]);
   });
 
@@ -272,7 +273,7 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
     expect(released.holder).toBeNull();
     expect(released.lease_until_ms).toBeNull();
     expect(released.next_attempt_ms).toBeNull();
-    expect(await listPublicationRecovery(db, 3000, 10)).toHaveLength(1);
+    expect(await listPublicationRecovery(db, 3000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts)).toHaveLength(1);
 
     const reClaim = await claimPublication(db, "pub-1", "lifecycle-reconcile", 4000, "prepared");
     expect(reClaim).not.toBeNull();
@@ -399,7 +400,7 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     expect(thread.superseded_by_publication_id).toBeNull();
     expect(JSON.parse(thread.intent_json).associationId).toBe("assoc-1");
 
-    expect(await listPublicationRecovery(db, 3000, 10)).toEqual([]);
+    expect(await listPublicationRecovery(db, 3000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts)).toEqual([]);
   });
 
   test("apply is proof-gated and lease-gated", async () => {
@@ -739,7 +740,7 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
     expect(newThread.superseded_by_publication_id).toBeNull();
     expect(newThread.round).toBe(2);
 
-    expect(await listResolutionRecovery(db, 12_000, 10)).toEqual([]);
+    expect(await listResolutionRecovery(db, 12_000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts)).toEqual([]);
   });
 
   test("identity drift is a row-keyed unverifiable annotation — the row stays open", async () => {
@@ -1060,7 +1061,7 @@ describe("resolution queue selection (spec §7.11.1)", () => {
     await seedThread(db, "t-future", { created_ms: 7000, next_attempt_ms: 200_000 });
     await seedThread(db, "t-retry", { created_ms: 8000, resolution_state: "retry" });
 
-    const queue = await listResolutionRecovery(db, 10_000, 10);
+    const queue = await listResolutionRecovery(db, 10_000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(queue).toEqual([
       { associationId: "t-due", scope: SCOPE },
       { associationId: "t-retry", scope: SCOPE },
@@ -1070,7 +1071,7 @@ describe("resolution queue selection (spec §7.11.1)", () => {
   test("expired leases re-enter the queue; scopes are bound per row", async () => {
     const db = createSeededTestD1();
     await seedThread(db, "t-expired", { holder: "m8", lease_until_ms: 5000 });
-    const queue = await listResolutionRecovery(db, 6000, 10);
+    const queue = await listResolutionRecovery(db, 6000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(queue.map((q) => q.associationId)).toEqual(["t-expired"]);
     expect(queue[0]!.scope).toEqual(SCOPE);
   });
@@ -1262,7 +1263,7 @@ describe("definitive pre-send failure is a durable phase (spec §7.7, P67-QC-010
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
 
-    const selected = await listPublicationRecovery(db, 10_000, 10);
+    const selected = await listPublicationRecovery(db, 10_000, 10, RECONCILE_DEFAULTS.lifecycleMaxAttempts);
     expect(selected.map((r) => r.phase)).toEqual(["failed"]);
   });
 

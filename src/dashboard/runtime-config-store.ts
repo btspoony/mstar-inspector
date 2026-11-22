@@ -6,6 +6,10 @@ import {
 import type { DashboardD1 } from "./users";
 import { SWEEP_FIELDS, type SweepField, type SweepLimits, type SweepValues } from "../contracts/sweep-settings";
 import { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
+import { RECONCILE_FIELDS, RECONCILE_RULES, RECONCILE_DEFAULTS, invalidReconcileRelations, type ReconcileField, type ReconcileValues } from "../contracts/reconcile-settings";
+import { CHECK_UPDATE_MIN } from "../contracts/check-budgets";
+
+export { CHECK_UPDATE_MIN } from "../contracts/check-budgets";
 
 /** PK of the system row in `review_runtime_settings`. */
 export const SYSTEM_CONCURRENCY_KEY = "review.concurrency.system";
@@ -36,7 +40,6 @@ export const CHECK_UPDATE_DEFAULT = 5_000;
 export const CHECK_TERMINALIZE_MIN = 1_000;
 export const CHECK_TERMINALIZE_MAX = 30_000;
 /** Range of a stored update budget. */
-export const CHECK_UPDATE_MIN = 500;
 export const CHECK_UPDATE_MAX = 15_000;
 const CHECK_BUDGETS_TARGET = "review.check.budgets";
 
@@ -1004,6 +1007,67 @@ export async function setDefaultReviewLevel(
     db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_LEVEL_KEY, value, now, actor),
   ]);
   return value;
+}
+
+const RECONCILE_KEYS = RECONCILE_FIELDS.map((field) => RECONCILE_RULES[field].key);
+
+type ReconcileSettingsIssue = { kind: "read_failed" } | { kind: "invalid_rows"; keys: string[] };
+
+export async function getReconcileSettings(db: DashboardD1): Promise<{ values: ReconcileValues; issue: ReconcileSettingsIssue | null }> {
+  try {
+    const { results } = await db.prepare(`SELECT key, value FROM review_runtime_settings WHERE key IN (${RECONCILE_KEYS.map(() => "?").join(", ")})`)
+      .bind(...RECONCILE_KEYS).all<{ key: string; value: unknown }>();
+    const rows = new Map(results.map(({ key, value }) => [key, value]));
+    const values = { ...RECONCILE_DEFAULTS };
+    const invalid: ReconcileField[] = [];
+    for (const field of RECONCILE_FIELDS) {
+      const { key, min, max } = RECONCILE_RULES[field];
+      if (!rows.has(key)) continue;
+      const parsed = parseInRange(rows.get(key), min, max);
+      if (parsed === undefined || Number.isNaN(parsed)) invalid.push(field);
+      else values[field] = parsed;
+    }
+    invalid.push(...invalidReconcileRelations(values));
+    if (invalid.length > 0) {
+      return { values: { ...RECONCILE_DEFAULTS }, issue: { kind: "invalid_rows", keys: [...new Set(invalid.map((field) => RECONCILE_RULES[field].key))] } };
+    }
+    return { values, issue: null };
+  } catch {
+    return { values: { ...RECONCILE_DEFAULTS }, issue: { kind: "read_failed" } };
+  }
+}
+
+const RECONCILE_BEFORE_SQL = RECONCILE_FIELDS.map((field, index) => {
+  const { min, max } = RECONCILE_RULES[field];
+  return `'${field}', ${storedBudgetSql(`?${index + 5}`, "NULL", min, max)}`;
+}).join(", ");
+
+const RECONCILE_AUDIT_SQL = `INSERT INTO platform_audit_events
+  (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'platform.reconcile.set', 'runtime', 'platform.reconcile',
+    json_object('before', json_object(${RECONCILE_BEFORE_SQL}), 'after', json(?3)), ?4)`;
+
+export async function setReconcileSettings(db: DashboardD1, input: unknown, actor: string): Promise<ReconcileValues> {
+  const source = input !== null && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const values = {} as ReconcileValues;
+  for (const field of RECONCILE_FIELDS) {
+    const { min, max } = RECONCILE_RULES[field];
+    const value = source[field];
+    if (!isIntegerIn(value, min, max)) {
+      throw new RuntimeConfigError("invalid_value", `reconcile.${field} must be an integer in ${min}..${max}; correct the field in Admin > Runtime and save again`);
+    }
+    values[field] = value;
+  }
+  const invalid = invalidReconcileRelations(values);
+  if (invalid.length > 0) {
+    throw new RuntimeConfigError("invalid_value", `reconcile budgets must satisfy per-request <= run budget, publication lane + thread operation (including cold credentials for a different App pair) <= lifecycle total requests, row <= Check total requests; correct ${invalid.join(", ")} in Admin > Runtime and save again`);
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db.prepare(RECONCILE_AUDIT_SQL).bind(crypto.randomUUID(), actor, JSON.stringify(values), now, ...RECONCILE_KEYS),
+    ...RECONCILE_FIELDS.map((field) => db.prepare(SYSTEM_UPSERT_SQL).bind(RECONCILE_RULES[field].key, String(values[field]), now, actor)),
+  ]);
+  return values;
 }
 
 const SWEEP_RULES = {

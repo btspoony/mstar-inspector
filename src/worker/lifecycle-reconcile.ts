@@ -1,4 +1,5 @@
-
+import { getReconcileSettings } from "../dashboard/runtime-config-store";
+import { RECONCILE_REQUEST_ESTIMATES, type ReconcileValues } from "../contracts/reconcile-settings";
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like, D1StatementLike } from "../store/types";
@@ -17,7 +18,6 @@ import {
   listResolutionRecovery,
   listSuspendedLifecycleApps,
   LIFECYCLE_BACKOFF_MS,
-  LIFECYCLE_MAX_ATTEMPTS,
   markPublicationFailed,
   markPublicationLocalError,
   markPublicationUnknown,
@@ -54,22 +54,10 @@ export type LifecycleReconcileSummary = {
   errors: number;
 };
 
-/** Whole-run GitHub request budget (§7.11.1: "≤80 requests/45s"). */
-export const RECONCILE_MAX_REQUESTS = 80;
-/** Whole-run wall-clock budget in ms (§7.11.1). */
-export const RECONCILE_RUN_BUDGET_MS = 45_000;
-/** Per-request cap (§7.11.1: "each request ≤5s"). */
-export const RECONCILE_PER_REQUEST_MS = 5_000;
-/** Per-thread-operation request cap (§7.11.1: "≤15 GitHub requests"). */
-export const RECONCILE_THREAD_OPERATION_REQUESTS = 15;
-/** The publication lane gets at most half the run budget before the thread lane. */
-export const RECONCILE_PUBLICATION_LANE_MAX_REQUESTS = 40;
-/** Bounded selection per lane (§7.11.1: LIMIT 10). */
-export const RECONCILE_SELECT_LIMIT = 10;
-const PLAN_REQUESTS = 1;
-const SEND_REQUESTS = 2;
-const DISCOVERY_REQUESTS = 2;
-const IDENTITY_REQUESTS = 1;
+const PLAN_REQUESTS = RECONCILE_REQUEST_ESTIMATES.plan;
+const SEND_REQUESTS = RECONCILE_REQUEST_ESTIMATES.send;
+const DISCOVERY_REQUESTS = RECONCILE_REQUEST_ESTIMATES.discovery;
+const IDENTITY_REQUESTS = RECONCILE_REQUEST_ESTIMATES.identity;
 
 const HOLDER = "lifecycle-reconcile";
 
@@ -231,14 +219,15 @@ export type LifecycleReconcileDeps = {
 
 
 type RunBudget = {
+  settings: ReconcileValues;
   spent: number;
   deadline: number;
   laneCap: number;
 };
 
 function canSpend(budget: RunBudget, nowMs: number, cost: number, laneScoped: boolean): boolean {
-  if (budget.spent + cost > RECONCILE_MAX_REQUESTS) return false;
-  if (laneScoped && budget.spent + cost > RECONCILE_PUBLICATION_LANE_MAX_REQUESTS) return false;
+  if (budget.spent + cost > budget.settings.lifecycleMaxRequests) return false;
+  if (laneScoped && budget.spent + cost > budget.settings.lifecyclePublicationLaneMaxRequests) return false;
   if (budget.spent + cost > budget.laneCap) return false;
   if (nowMs >= budget.deadline) return false;
   return true;
@@ -249,14 +238,14 @@ function reserve(budget: RunBudget, cost: number): void {
 }
 
 function buildTransport(budget: RunBudget, now: () => number): ReconcileTransport {
-  const boundMs = (): number => Math.max(1, Math.min(RECONCILE_PER_REQUEST_MS, budget.deadline - now()));
+  const boundMs = (): number => Math.max(1, Math.min(budget.settings.lifecyclePerRequestMs, budget.deadline - now()));
   return {
     boundMs,
     fetchImpl: (input, init) => {
       if (!canSpend(budget, now(), 1, false)) {
         return Promise.reject(
           new RecoveryBudgetRefused(
-            `recovery request budget exhausted (spent=${budget.spent}/${RECONCILE_MAX_REQUESTS}, deadline=${budget.deadline}) — request not dispatched; work stays due`,
+            `recovery request budget exhausted (spent=${budget.spent}/${budget.settings.lifecycleMaxRequests}, deadline=${budget.deadline}) — request not dispatched; work stays due`,
           ),
         );
       }
@@ -300,13 +289,15 @@ export async function reconcileReviewLifecycle(
       );
       return summary;
     }
+    const settings = await getReconcileSettings(db);
+    if (settings.issue) log.warn({ event: "ops_lifecycle_reconcile_settings_degraded", detail: JSON.stringify(settings.issue) }, "lifecycle reconcile settings unavailable — using defaults");
     const now = deps.now ?? (() => Date.now());
-    const budget: RunBudget = { spent: 0, deadline: now() + RECONCILE_RUN_BUDGET_MS, laneCap: RECONCILE_MAX_REQUESTS };
+    const budget: RunBudget = { settings: settings.values, spent: 0, deadline: now() + settings.values.lifecycleRunBudgetMs, laneCap: settings.values.lifecycleMaxRequests };
     const reviewerFactory = deps.reviewer ?? productionReviewerFactory;
     const transport = buildTransport(budget, now);
     const reviewerCache = new Map<string, Promise<ReviewerResolution>>();
 
-    const suspendedPairs = await listSuspendedLifecycleApps(db, RECONCILE_SELECT_LIMIT);
+    const suspendedPairs = await listSuspendedLifecycleApps(db, budget.settings.lifecycleSelectLimit);
     for (const pair of suspendedPairs) {
       try {
         const row = await routingRow(db, pair.appId, pair.installationId);
@@ -349,12 +340,12 @@ export async function reconcileReviewLifecycle(
       }
     }
 
-    budget.laneCap = RECONCILE_PUBLICATION_LANE_MAX_REQUESTS;
+    budget.laneCap = budget.settings.lifecyclePublicationLaneMaxRequests;
     await reconcilePublications(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
     await reconcileLineBatches(db, now, budget, reviewerFactory, env, transport, reviewerCache, log, summary);
 
-    budget.laneCap = RECONCILE_MAX_REQUESTS;
+    budget.laneCap = budget.settings.lifecycleMaxRequests;
     await reconcileResolutions(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
     log.info({ event: "ops_lifecycle_reconcile", ...summary }, "lifecycle reconcile pass complete");
@@ -440,12 +431,12 @@ async function reconcilePublications(
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
-  const rows = await listPublicationRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+  const rows = await listPublicationRecovery(db, now(), budget.settings.lifecycleSelectLimit, budget.settings.lifecycleMaxAttempts);
   for (const row of rows) {
     summary.examined += 1;
     if (row.phase === "failed" || row.phase === "applied" || row.phase === "superseded") continue;
     if (row.phase === "confirmed") {
-      await applyConfirmedPublication(db, now, row, summary);
+      await applyConfirmedPublication(db, now, budget, row, summary);
       continue;
     }
     const scope = row.payload.scope;
@@ -482,6 +473,7 @@ async function settlementTailStatements(
 async function applyConfirmedPublication(
   db: D1Like,
   now: () => number,
+  budget: RunBudget,
   row: PublicationRow,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
@@ -495,9 +487,9 @@ async function applyConfirmedPublication(
       summary.applied += 1;
       return;
     }
-    await settleFailedPublicationAttempt(db, now, row, lease, "apply rejected (lease/proof/payload gate)", summary, false);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "apply rejected (lease/proof/payload gate)", summary, false);
   } catch (error) {
-    await settleFailedPublicationAttempt(db, now, row, lease, error instanceof Error ? error.message : String(error), summary, false);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, error instanceof Error ? error.message : String(error), summary, false);
   }
 }
 
@@ -514,7 +506,7 @@ async function reconcileLineBatches(
 ): Promise<void> {
   const handled = new Set<string>();
   for (;;) {
-    const rows = await listLineBatchRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+    const rows = await listLineBatchRecovery(db, now(), budget.settings.lifecycleSelectLimit);
     let retired = 0;
     for (const row of rows) {
       if (handled.has(row.id)) continue;
@@ -538,7 +530,7 @@ async function reconcileLineBatches(
             );
             continue;
           }
-          if (await noteLineDiscoveryFailure(db, row, "readback-scope", state.captures, now(), log)) retired += 1;
+          if (await noteLineDiscoveryFailure(db, row, "readback-scope", state.captures, now(), budget.settings.lifecycleMaxAttempts, log)) retired += 1;
           log.warn(
             { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
             "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
@@ -559,7 +551,7 @@ async function reconcileLineBatches(
         } else if (recovered.failure !== "budget-refused") {
           const reason: LineDiscoveryFailure =
             recovered.captured || recovered.failure === undefined ? "capture-failed" : recovered.failure;
-          if (await noteLineDiscoveryFailure(db, row, reason, state.captures, now(), log)) retired += 1;
+          if (await noteLineDiscoveryFailure(db, row, reason, state.captures, now(), budget.settings.lifecycleMaxAttempts, log)) retired += 1;
         }
         log.info(
           { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },
@@ -618,9 +610,10 @@ async function noteLineDiscoveryFailure(
   reason: LineDiscoveryFailure,
   observedCaptures: number,
   nowMs: number,
+  maxAttempts: number,
   log: ReconcileLog,
 ): Promise<boolean> {
-  const settled = await recordLineDiscoveryFailure(db, row.id, reason, observedCaptures, nowMs);
+  const settled = await recordLineDiscoveryFailure(db, row.id, reason, observedCaptures, nowMs, maxAttempts);
   if (settled === null || !settled.unresolvable) return false;
   log.warn(
     {
@@ -775,7 +768,7 @@ async function sendPreparedPublication(
       confirmedMs: now(),
     });
     if (!recorded) {
-      await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the confirmation", summary, true);
+      await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "proof persistence rejected the confirmation", summary, true);
       return;
     }
     const at = now();
@@ -785,7 +778,7 @@ async function sendPreparedPublication(
       summary.applied += 1;
       return;
     }
-    await settleFailedPublicationAttempt(db, now, row, lease, "post-proof apply did not complete", summary, false);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "post-proof apply did not complete", summary, false);
   } catch (error) {
     if (error instanceof PublicationAuthorityUnavailable) {
       const restored = await releaseUnspentPublicationClaim(db, row.id, lease, now());
@@ -830,7 +823,7 @@ async function sendPreparedPublication(
       );
       return;
     }
-    await settleFailedPublicationAttempt(db, now, row, lease, error instanceof Error ? error.message : String(error), summary, true);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, error instanceof Error ? error.message : String(error), summary, true);
   } finally {
     if (degradedTarget !== null && degradedTargetLease !== null) {
       await releaseDegradedTarget(db, { ...degradedTarget, lease: degradedTargetLease, nowMs: now(), keep: false });
@@ -863,12 +856,12 @@ async function discoverUncertainPublication(
       (item) => item.source === "issue" && item.ownAuthor === true && item.body === row.payload.body,
     );
     if (hit === undefined) {
-      await settleFailedPublicationAttempt(db, now, row, lease, "read-only discovery found no exact publication match", summary, true);
+      await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "read-only discovery found no exact publication match", summary, true);
       return;
     }
     const commentId = Number(hit.id);
     if (!Number.isSafeInteger(commentId) || commentId <= 0) {
-      await settleFailedPublicationAttempt(db, now, row, lease, "discovered publication carries an unusable comment id", summary, true);
+      await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "discovered publication carries an unusable comment id", summary, true);
       return;
     }
     const recorded = await recordPublicationProof(db, row.id, lease, {
@@ -882,7 +875,7 @@ async function discoverUncertainPublication(
       confirmedMs: now(),
     });
     if (!recorded) {
-      await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the discovered publication", summary, true);
+      await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "proof persistence rejected the discovered publication", summary, true);
       return;
     }
     const at = now();
@@ -892,15 +885,16 @@ async function discoverUncertainPublication(
       summary.applied += 1;
       return;
     }
-    await settleFailedPublicationAttempt(db, now, row, lease, "post-proof apply did not complete", summary, false);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "post-proof apply did not complete", summary, false);
   } catch (error) {
-    await settleFailedPublicationAttempt(db, now, row, lease, error instanceof Error ? error.message : String(error), summary, true);
+    await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, error instanceof Error ? error.message : String(error), summary, true);
   }
 }
 
 async function settleFailedPublicationAttempt(
   db: D1Like,
   now: () => number,
+  maxAttempts: number,
   row: PublicationRow,
   lease: Lease,
   reason: string,
@@ -908,7 +902,7 @@ async function settleFailedPublicationAttempt(
   uncertain: boolean,
 ): Promise<void> {
   const attemptsAfter = row.attempts + 1;
-  if (attemptsAfter >= LIFECYCLE_MAX_ATTEMPTS) {
+  if (attemptsAfter >= maxAttempts) {
     await markPublicationLocalError(db, row.id, lease, giveUpLine(row.payload.scope, row.id, attemptsAfter, reason), now());
     summary.errors += 1;
     return;
@@ -933,9 +927,9 @@ async function reconcileResolutions(
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
-  const rows = await listResolutionRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+  const rows = await listResolutionRecovery(db, now(), budget.settings.lifecycleSelectLimit, budget.settings.lifecycleMaxAttempts);
   for (const { associationId, scope } of rows) {
-    if (!canSpend(budget, now(), RECONCILE_THREAD_OPERATION_REQUESTS, false)) return;
+    if (!canSpend(budget, now(), budget.settings.lifecycleThreadOperationRequests, false)) return;
     summary.examined += 1;
     const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue;
@@ -962,11 +956,11 @@ async function reconcileResolutions(
           summary.unknown += 1;
           break;
         case "retry":
-          await settleFailedResolveAttempt(db, now, associationId, work, outcome.reason, summary);
+          await settleFailedResolveAttempt(db, now, budget.settings.lifecycleMaxAttempts, associationId, work, outcome.reason, summary);
           break;
       }
     } catch (error) {
-      await settleFailedResolveAttempt(db, now, associationId, work, error instanceof Error ? error.message : String(error), summary);
+      await settleFailedResolveAttempt(db, now, budget.settings.lifecycleMaxAttempts, associationId, work, error instanceof Error ? error.message : String(error), summary);
     }
   }
 }
@@ -974,13 +968,14 @@ async function reconcileResolutions(
 async function settleFailedResolveAttempt(
   db: D1Like,
   now: () => number,
+  maxAttempts: number,
   associationId: string,
   work: { scope: Scope; attempts: number },
   reason: string,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
   const attemptsAfter = work.attempts + 1;
-  if (attemptsAfter >= LIFECYCLE_MAX_ATTEMPTS) {
+  if (attemptsAfter >= maxAttempts) {
     await markResolutionLocalError(db, associationId, giveUpLine(work.scope, associationId, attemptsAfter, reason), now());
     summary.errors += 1;
     return;
