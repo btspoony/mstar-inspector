@@ -26,6 +26,7 @@ import {
   VALID_DIFF,
   VALID_OUTPUT,
   createSeededTestD1,
+  RUNNER_CMDS,
   registerGitOpsCommands,
   seedOpenTarget,
   seedPriorPublication,
@@ -2321,6 +2322,26 @@ describe("the SEC-01 publish gate", () => {
       .run(JSON.stringify(execution), ATTEMPT_ID);
   }
 
+  /** Rewrite the persisted paid result's stdout wholesale (an unparseable body). */
+  function stubStoredStdout(db: TestD1, stdout: string): void {
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    execution.run.stdout = stdout;
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+  }
+
+  /** The attempt's `recheck` shipped-failure rows. */
+  function recheckRows(db: TestD1): Array<{ id: string; error: string }> {
+    return db.raw.prepare("SELECT id, error FROM review_failures WHERE head_sha = ? AND stage = 'recheck'").all(SHA) as Array<{
+      id: string;
+      error: string;
+    }>;
+  }
+
   test("a resumed collect refuses the paid session's key echo after the config rotated", async () => {
     const paidKey = "sk-paid-session-1";
     const echo = Buffer.from(paidKey, "utf8").toString("base64");
@@ -2352,7 +2373,7 @@ describe("the SEC-01 publish gate", () => {
     const token = "ghs_installation_token";
     const echo = Buffer.from(token, "utf8").toString("base64");
     const { db, resumed, ref, prepared, session } = await paidThenResumed(echo);
-    expect(session[0]).toBe(token);
+    expect(session).toContain(token);
 
     expect(await collectAttempt(resumed, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
 
@@ -2430,6 +2451,191 @@ describe("the SEC-01 publish gate", () => {
     expect(resumed.credentials.size).toBe(0);
   });
 
+  test("an unreadable launch fence on a persisted replay is unknown, not a failure", async () => {
+    // note: The leading paid-result probe carries the paid-entry ladder's semantics:
+    // a store fault means the fence is UNOBSERVABLE, so the attempt is left
+    // unresolved — a failure row plus a claim stamp on an already-paid review is
+    // unrecoverable, and the next read may well succeed.
+    const { db, resumed, ref, steps } = await paidWorkflowThenResumed("plain text");
+    const replay = new Map([...steps].filter(([name]) => name === "prepare"));
+    let faults = 0;
+    const faulting = new Proxy(db as object, {
+      get(target, prop) {
+        if (prop !== "prepare") return Reflect.get(target, prop);
+        return (sql: string) => {
+          if (faults === 0 && sql.includes("SELECT state, claimed_at_ms")) {
+            faults += 1;
+            throw new Error("launch fence read lost");
+          }
+          return (target as { prepare: (statement: string) => unknown }).prepare(sql);
+        };
+      },
+    });
+    resumed.env = { ...resumed.env, DB: faulting as never };
+
+    await runReviewAttemptWorkflow(resumed, ref, stepStore(replay), async () => {});
+
+    expect(faults).toBe(1);
+    // Unresolved: nothing concluded, nothing stamped, nothing published.
+    expect(h.logLines.some((line) => line.msg.includes("review unresolved"))).toBe(true);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+  });
+
+  test("a refused degraded review still accounts its shipped recheck round", async () => {
+    // note: The paid run captured the recheck round independently of the main
+    // stdout's validity: a DEGRADED refusal owes the same two ledger artifacts.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb);
+      h.sandbox.recheckFileContent = "";
+      h.sandbox.recheckStatusContent = JSON.stringify({
+        schema: "mstar.recheck-status/v1",
+        headSha: SHA,
+        outcome: "failed",
+        reason: "seat-failed",
+        rejected: 0,
+        rejected_row_ids: [],
+        error: "session aborted",
+      });
+    });
+    await sealStoredGateSecrets(db, [paidKey]);
+    stubStoredStdout(db, `not a review ${echo}`);
+    expect(prepared.recheckInput).toBeDefined();
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
+    // Both artifacts, from the retained round facts.
+    expect(h.logLines.filter((line) => line.fields.recheck_outcome !== undefined)).toHaveLength(1);
+    expect(recheckRows(db)).toHaveLength(1);
+  });
+
+  test("a recheck row fault keeps the refusal unsettled until a retry writes it", async () => {
+    // note: The shipped row is REQUIRED by the refusal: an insert fault must not
+    // leave a settled attempt with an incomplete ledger.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb);
+      h.sandbox.recheckFileContent = "";
+      h.sandbox.recheckStatusContent = JSON.stringify({
+        schema: "mstar.recheck-status/v1",
+        headSha: SHA,
+        outcome: "failed",
+        reason: "seat-failed",
+        rejected: 0,
+        rejected_row_ids: [],
+        error: "session aborted",
+      });
+    });
+    await sealStoredGateSecrets(db, [paidKey]);
+    stubStoredEcho(db, echo);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(ref.payload),
+      attemptId: ATTEMPT_ID,
+      payload: ref.payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    let faults = 0;
+    const faulting = new Proxy(db as object, {
+      get(target, prop) {
+        if (prop !== "prepare") return Reflect.get(target, prop);
+        return (sql: string) => {
+          if (faults === 0 && sql.includes("INSERT INTO review_failures")) {
+            faults += 1;
+            throw new Error("recheck row insert lost");
+          }
+          return (target as { prepare: (statement: string) => unknown }).prepare(sql);
+        };
+      },
+    });
+    deps.env = { ...deps.env, DB: faulting as never };
+
+    await expect(collectAttempt(deps, ref, prepared)).rejects.toThrow("recheck row insert lost");
+    expect(faults).toBe(1);
+    // Nothing settled, nothing recorded: the collect retries.
+    expect(recheckRows(db)).toHaveLength(0);
+    const unsettled = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(unsettled.settled_ms).toBeNull();
+
+    // The retry writes the missing row, then the settlement completes.
+    deps.env = { ...deps.env, DB: db as never };
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+    expect(recheckRows(db)).toHaveLength(1);
+    const settled = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(settled.settled_ms).not.toBeNull();
+  });
+
+  test("a collect retry accounts the shipped recheck round once", async () => {
+    // note: Attempt-keyed identity: a replay of the same refused round contributes
+    // ONE durable record and ONE attribution line.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb);
+      h.sandbox.recheckFileContent = "";
+      h.sandbox.recheckStatusContent = JSON.stringify({
+        schema: "mstar.recheck-status/v1",
+        headSha: SHA,
+        outcome: "failed",
+        reason: "seat-failed",
+        rejected: 0,
+        rejected_row_ids: [],
+        error: "session aborted",
+      });
+    });
+    await sealStoredGateSecrets(db, [paidKey]);
+    stubStoredEcho(db, echo);
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    expect(h.logLines.filter((line) => line.fields.recheck_outcome !== undefined)).toHaveLength(1);
+    expect(recheckRows(db)).toHaveLength(1);
+  });
+
+  test("a degraded parse diagnostic follows the ledger policy", async () => {
+    // note: The stored/logged diagnostic is model-controlled text (unknown keys ride
+    // the engine error), so it is redacted with the sealed set — not merely
+    // shape+raw — before it reaches the row or the log.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    await sealStoredGateSecrets(db, [paidKey]);
+    stubStoredStdout(db, JSON.stringify({ ...VALID_OUTPUT, [echo]: true }));
+
+    // The degraded body itself carries the form, so the gate refuses it — the parse
+    // row was already written, which is exactly why it must be clean.
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    const rows = db.raw.prepare("SELECT stage, error FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      stage: string;
+      error: string;
+    }[];
+    const parseRow = rows.find((row) => row.stage === "parse");
+    expect(parseRow).toBeDefined();
+    expect(String(parseRow!.error)).not.toContain(echo);
+    expect(String(parseRow!.error)).toContain("[REDACTED]");
+    // Nothing this collect logged carries it either (the diagnostic rides the
+    // degraded publication line on a body the gate clears).
+    for (const line of h.logLines) expect(line.msg).not.toContain(echo);
+  });
+
   test("a persisted launch is collected even when the App config no longer resolves", async () => {
     // note: The review step's output was never recorded (it died after the paid
     // result became durable), so the platform re-runs that step against an
@@ -2466,6 +2672,10 @@ describe("the SEC-01 publish gate", () => {
       /DASHBOARD_ENCRYPTION_KEY is not valid base64/,
     );
 
+    // The runner was never paid: the seal precedes the exec, so a sealing fault
+    // costs nothing and cannot leave a paid result behind (the boundary the
+    // paid-launch fence cases count).
+    expect(h.sandbox.calls.filter((call) => RUNNER_CMDS.has(call.cmd))).toHaveLength(0);
     const failures = db.raw.prepare("SELECT error FROM review_failures WHERE head_sha = ?").all(SHA) as {
       error: string;
     }[];
@@ -2678,7 +2888,6 @@ describe("the SEC-01 publish gate", () => {
     // for the GATE; the ledger removes it wherever it appears.
     const shortKey = "xy";
     const shortEncoded = Buffer.from(shortKey, "utf8").toString("base64");
-    expect(shortEncoded).toBe("eHk=");
     const longKey = "sk-paid-session-1";
     const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
       await seedPriorPublication(seedDb);

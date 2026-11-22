@@ -26,6 +26,7 @@ import {
   prepareAttempt,
   publishAttempt,
   reviewAttempt,
+  readDurablePaid,
   settleAttemptFailure,
   settleSkippedRow,
   payloadIdentityFields,
@@ -33,7 +34,7 @@ import {
   type CleanupInput,
   type ProcessDeps,
 } from "../pipeline/review-attempt-execution";
-import { MovedHeadError, launchVerdict, readReviewLaunch } from "../pipeline/review-attempt";
+import { MovedHeadError } from "../pipeline/review-attempt";
 import { POST_RUNNER_READ_BUDGET_MS } from "../review-budget";
 import {
   beginAttemptSettlement,
@@ -104,7 +105,9 @@ export async function runReviewAttemptWorkflow(
       // already-paid result depend on configuration that may have been removed,
       // and a resolution fault would settle the attempt as a failure.
       async () => {
-        if (!(await paidResultDurable(deps, ref))) await ensureRunnerConfig(ref.payload, deps);
+        if ((await readDurablePaid(deps, ref.attemptId)).persistedAtMs === null) {
+          await ensureRunnerConfig(ref.payload, deps);
+        }
         return reviewAttempt(deps, ref, prepared.prepared);
       },
     );
@@ -181,15 +184,6 @@ export class ReviewWorkflow extends WorkflowEntrypoint<ReviewWorkflowEnv, Attemp
 async function ensureHostChannel(deps: ProcessDeps, ref: AttemptRef): Promise<"ready" | "paused"> {
   if (deps.appCommenters.has(ref.payload.botRef.appId)) return "ready";
   return hydrateAttemptHost(ref.payload, deps);
-}
-
-/**
- * Whether this attempt's paid result is already durable — the fence every later
- * phase resumes from. Read before any config resolution, so a replay never
- * depends on the App's current configuration.
- */
-async function paidResultDurable(deps: ProcessDeps, ref: AttemptRef): Promise<boolean> {
-  return launchVerdict(await readReviewLaunch(deps.env.DB, ref.attemptId)).kind === "persisted";
 }
 
 /** The phase wrapper's cause, when the cause is a moved head. */

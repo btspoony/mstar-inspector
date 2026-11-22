@@ -4,12 +4,15 @@
 -- `review_launches.gate_secrets_enc:<attempt_id>`) in the SAME statement that
 -- records the paid result.
 --
--- The publish gate of a RESUMED collect scans for these values; re-deriving
--- them from the App config would scan for whatever the config holds LATER, so a
--- rotated or removed key's echo would pass. Only that gate opens the envelope:
--- it never reaches the runner, a log line or any other consumer.
+-- The publish gate of a RESUMED collect scans for these values — and for these
+-- only: there is no fallback, and re-deriving them from the App config would
+-- scan for whatever the config holds LATER, so a rotated or removed key's echo
+-- would pass. Only that gate opens the envelope: it never reaches the runner, a
+-- log line or any other consumer.
 --
--- NULL for attempts paid before this migration (and when sealing was
--- impossible): their collect re-derives the set from the App config and refuses
--- to publish when it can establish neither.
+-- Sealing happens BEFORE the paid work: a seal fault (an unusable encryption
+-- key, a store fault) fails the paid step, so no attempt is ever recorded as
+-- paid without its seal. A NULL value therefore means only "paid before this
+-- migration"; such an attempt is REFUSED at collect as a real failure
+-- ("this attempt predates the sealed credential set"), never published.
 ALTER TABLE review_launches ADD COLUMN gate_secrets_enc TEXT;
