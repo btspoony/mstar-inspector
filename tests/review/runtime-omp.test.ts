@@ -1,5 +1,5 @@
 /**
- * Unit tests for the omp AgentRuntime adapter.
+ * why: Unit tests for the omp AgentRuntime adapter.
  *
  * Both omp SDK surfaces are mocked (same technique as the former
  * session.test.ts): the root entry (createAgentSession / SessionManager /
@@ -69,7 +69,7 @@ import { RECHECK_STATUS_ERROR_MAX_CHARS, type RecheckDoc, type RecheckInput } fr
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
 /**
- * Real temp dir standing in for the PR clone: installSeatAgent performs real
+ * note: Real temp dir standing in for the PR clone: installSeatAgent performs real
  * writes under <worktree>/.omp/agents/, and the cwd regression assertions
  * compare against this exact path.
  */
@@ -79,9 +79,9 @@ afterAll(() => {
   rmSync(TEST_WORKTREE, { recursive: true, force: true });
 });
 
-/** Captured createAgentSession options (one entry per runReview call). */
+/** note: Captured createAgentSession options (one entry per runReview call). */
 const createdOptions: Record<string, unknown>[] = [];
-/** Scripted per-seat settlements in dispatch order; `aborted` models a seat a cap stopped. */
+/** note: Scripted per-seat settlements in dispatch order; `aborted` models a seat a cap stopped. */
 let seatResults: Array<{
   error?: string;
   status?: string;
@@ -89,86 +89,86 @@ let seatResults: Array<{
   stderr?: string;
   aborted?: boolean;
   abortReason?: string;
-  /** When set, the seat's PROMISE rejects with this message — no settled result at all. */
+  /** note: When set, the seat's PROMISE rejects with this message — no settled result at all. */
   reject?: string;
-  /** When set, the seat rejects with a NON-Error value — the shape that has no `.message`. */
+  /** note: When set, the seat rejects with a NON-Error value — the shape that has no `.message`. */
   rejectWith?: unknown;
-  /** When set, the seat parks until ITS OWN abort signal fires, then rejects like the SDK. */
+  /** note: When set, the seat parks until ITS OWN abort signal fires, then rejects like the SDK. */
   awaitAbort?: boolean;
 }> = [];
-/** Definition content snapshotted from the PR-clone cwd at session creation. */
+/** note: Definition content snapshotted from the PR-clone cwd at session creation. */
 let installedSeatAgent: string | null = null;
-/** Agents-dir listing snapshotted from the PR-clone cwd at session creation. */
+/** note: Agents-dir listing snapshotted from the PR-clone cwd at session creation. */
 let installedAgentFiles: string[] | null = null;
-/** Per-file contents of the installed deep seat definitions, snapshotted at session creation. */
+/** note: Per-file contents of the installed deep seat definitions, snapshotted at session creation. */
 let installedSeatDefs: Record<string, string> | null = null;
-/** GH_TOKEN/GITHUB_TOKEN seen in process.env at session creation (must be stripped on deep). */
+/** safety: GH_TOKEN/GITHUB_TOKEN seen in process.env at session creation (must be stripped on deep). */
 let ghTokenAtCreation: string | undefined;
 let githubTokenAtCreation: string | undefined;
-/** Count of fake session.dispose() calls since the last createAgentSession. */
+/** note: Count of fake session.dispose() calls since the last createAgentSession. */
 let disposeCalls = 0;
-/** Captured runStructuredSubagent requests, in dispatch order. */
+/** note: Captured runStructuredSubagent requests, in dispatch order. */
 const subagentRequests: Record<string, unknown>[] = [];
-/** Reserved identity id per seat dispatch, in dispatch order (`undefined` = none passed). */
+/** note: Reserved identity id per seat dispatch, in dispatch order (`undefined` = none passed). */
 const reservedSeatIds: Array<string | undefined> = [];
-/** Captured parent-session prompt texts (deep path, in call order). */
+/** note: Captured parent-session prompt texts (deep path, in call order). */
 const promptTexts: string[] = [];
-/** Structured yield payloads / errors the fake parent emits to its subscriber during prompt. */
+/** note: Structured yield payloads / errors the fake parent emits to its subscriber during prompt. */
 let parentYields: unknown[] = [];
 let parentYieldErrors: string[] = [];
-/** Yield attempts the SDK rejects (tool_execution_end with isError) before a later success. */
+/** note: Yield attempts the SDK rejects (tool_execution_end with isError) before a later success. */
 let parentRejectedYields: unknown[] = [];
-/** When set, the fake prompt throws this message AFTER emitting the queued yields. */
+/** note: When set, the fake prompt throws this message AFTER emitting the queued yields. */
 let parentPromptThrow: string | null = null;
-/** When set, the fake parent turn ends with this `agent_end` payload (the SDK's gathered transcript). */
+/** note: When set, the fake parent turn ends with this `agent_end` payload (the SDK's gathered transcript). */
 let parentAgentEnd: unknown[] | null = null;
-/** When set, the fake turn parks on this `agent_pause` and resumes on a later tick. */
+/** note: When set, the fake turn parks on this `agent_pause` and resumes on a later tick. */
 let parentParkedEnd: unknown[] | null = null;
-/** Yields the resumed continuation emits, in order, once the parked prompt has settled. */
+/** note: Yields the resumed continuation emits, in order, once the parked prompt has settled. */
 let parentResumeYields: unknown[] = [];
-/** The terminal end the resumed continuation emits; `null` = nothing more arrives (it never terminates). */
+/** note: The terminal end the resumed continuation emits; `null` = nothing more arrives (it never terminates). */
 let parentResumeEnd: unknown[] | null = null;
-/** Session disposals seen when the resumed continuation fired (0 = the parking pause did not tear the session down). */
+/** note: Session disposals seen when the resumed continuation fired (0 = the parking pause did not tear the session down). */
 let disposeCallsAtResume: number | null = null;
-/** Test barrier: called as soon as the fake emits the parked `agent_pause`. */
+/** note: Test barrier: called as soon as the fake emits the parked `agent_pause`. */
 let parentParkedEndObserved: (() => void) | null = null;
-/** Session event listeners registered by the runtime (one per deep run). */
+/** note: Session event listeners registered by the runtime (one per deep run). */
 const yieldListeners: Array<(event: unknown) => void> = [];
 
-/** The parent session's registry id (the deep path addresses the turn by it). */
+/** note: The parent session's registry id (the deep path addresses the turn by it). */
 const PARENT_SESSION_ID = "review-parent";
 
 /**
- * Nudges the runtime delivered, in call order: the target id, the delivery
+ * note: Nudges the runtime delivered, in call order: the target id, the delivery
  * strength, and the text. Recorded by the fake seat sessions and the fake
  * parent session — the delivery sequence IS the supervision contract.
  */
 const nudgeCalls: Array<{ id: string; deliverAs: string; text: string }> = [];
 
-/** Fake live refs the supervision path resolves a seat's session through, by reserved id. */
+/** note: Fake live refs the supervision path resolves a seat's session through, by reserved id. */
 const registryRefs = new Map<string, { id: string; status: string; session: unknown }>();
 
-/** Whether the fake parent session reports a turn in flight (`isStreaming`). */
+/** note: Whether the fake parent session reports a turn in flight (`isStreaming`). */
 let parentStreaming = true;
-/** Called when the parent turn is entered; lets a test drive the clock mid-turn. */
+/** note: Called when the parent turn is entered; lets a test drive the clock mid-turn. */
 let parentPromptStarted: (() => void) | null = null;
-/** When set, the parent turn blocks on it until the test releases the turn. */
+/** note: When set, the parent turn blocks on it until the test releases the turn. */
 let parentPromptRelease: Promise<void> | null = null;
-/** When true, every fan-out seat stays running until the test releases it. */
+/** note: When true, every fan-out seat stays running until the test releases it. */
 let holdSeats = false;
-/** Release resolvers of the held fan-out seats, in dispatch order. */
+/** note: Release resolvers of the held fan-out seats, in dispatch order. */
 let seatReleases: Array<() => void> = [];
-/** Called once per fan-out dispatch (test barrier: "this seat is running"). */
+/** note: Called once per fan-out dispatch (test barrier: "this seat is running"). */
 let seatDispatchQueue: Array<() => void> = [];
 
-/** The abort calls the fake parent session recorded ({ reason } per SDK shape). */
+/** note: The abort calls the fake parent session recorded ({ reason } per SDK shape). */
 const parentAbortReasons: Array<{ reason?: string }> = [];
-/** When true, the parent prompt suppresses its yields/end — the turn was aborted. */
+/** note: When true, the parent prompt suppresses its yields/end — the turn was aborted. */
 let parentTurnAborted = false;
-/** Resolves the turn gate the prompt awaits; abort resolves it like the SDK's abort. */
+/** note: Resolves the turn gate the prompt awaits; abort resolves it like the SDK's abort. */
 let resolveParentTurn: (() => void) | null = null;
 
-/** A promise a test resolves on its own schedule (turn gates, dispatch barriers). */
+/** note: A promise a test resolves on its own schedule (turn gates, dispatch barriers). */
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -177,7 +177,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
-/** A fake live seat session: it records the nudges the runtime delivers to it. */
+/** note: A fake live seat session: it records the nudges the runtime delivers to it. */
 function fakeSeatSession(id: string): { isStreaming: boolean } & Record<string, unknown> {
   return {
     isStreaming: true,
@@ -191,7 +191,7 @@ function fakeSeatSession(id: string): { isStreaming: boolean } & Record<string, 
   };
 }
 
-/** Address `id` through the fake registry as a seat that is currently running. */
+/** note: Address `id` through the fake registry as a seat that is currently running. */
 function registerSeat(id: string): { isStreaming: boolean } & Record<string, unknown> {
   const session = fakeSeatSession(id);
   registryRefs.set(id, { id, status: "running", session });
@@ -199,17 +199,17 @@ function registerSeat(id: string): { isStreaming: boolean } & Record<string, unk
 }
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
-  // Additive: the registry is process-global, so the stub must keep the root's
+  // why: Additive: the registry is process-global, so the stub must keep the root's
   // other exports (`AuthStorage`, …) for every sibling file that imports them.
   ...realSdkRoot,
   createAgentSession: mock(async (options: Record<string, unknown>) => {
     createdOptions.push(options);
     disposeCalls = 0;
-    // The seat agent definition is installed into the PR-clone cwd BEFORE
+    // why: The seat agent definition is installed into the PR-clone cwd BEFORE
     // session creation — snapshot it here, the runtime removes it afterwards.
     const installed = join(options.cwd as string, ".omp", "agents", "mstar-review-seat.md");
     installedSeatAgent = existsSync(installed) ? readFileSync(installed, "utf8") : null;
-    // Same creation-time snapshots for the deep path: the installed seat
+    // note: Same creation-time snapshots for the deep path: the installed seat
     // definitions (name → content, for the SDK parseAgent assertion) and the
     // GitHub-token strip window.
     const agentsDir = join(options.cwd as string, ".omp", "agents");
@@ -226,13 +226,13 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     return {
       session: {
         getAgentId: mock(() => PARENT_SESSION_ID),
-        // The session manager this session was created with — the identity a
+        // invariant: The session manager this session was created with — the identity a
         // seat's ToolSession must NOT share with the deep parent's stream.
         sessionManager: options.sessionManager,
         dispose: mock(async () => {
           disposeCalls += 1;
         }),
-        // Nudge surface the supervision path uses on the deep parent: recorded
+        // note: Nudge surface the supervision path uses on the deep parent: recorded
         // exactly as the runtime delivers it, and honest about whether a turn is
         // actually in flight.
         get isStreaming() {
@@ -245,7 +245,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
           yieldListeners.push(listener);
           return () => {};
         }),
-        // The SDK's abort: records the reason and ends the in-flight turn
+        // note: The SDK's abort: records the reason and ends the in-flight turn
         // where it stands — the prompt's gate resolves and its queued
         // emissions stay suppressed.
         abort: mock(async (options?: { reason?: string }) => {
@@ -254,7 +254,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
           resolveParentTurn?.();
         }),
         prompt: mock(async (text: string, options?: { streamingBehavior?: string }) => {
-          // A supervision delivery states its streaming behaviour; it injects
+          // note: A supervision delivery states its streaming behaviour; it injects
           // into the live turn instead of starting one, so it must not touch
           // the turn gate below.
           if (options?.streamingBehavior !== undefined) {
@@ -262,28 +262,28 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
             return true;
           }
           promptTexts.push(text);
-          // The turn is live: a test can now drive the clock and later release
+          // note: The turn is live: a test can now drive the clock and later release
           // it through its own gate (this run's abort resolves the turn gate).
           parentPromptStarted?.();
-          // The turn gate: a test's own release OR this run's abort gate —
+          // note: The turn gate: a test's own release OR this run's abort gate —
           // `abort()` resolves it like the SDK's abort resolves the turn.
           // With neither, the gate resolves once the prompt is entered so
           // the scripted emissions below run in order, as they did before.
           const turnGate = deferred();
           resolveParentTurn = turnGate.resolve;
-          // The turn waits on whichever gate lands first — a test's own
+          // note: The turn waits on whichever gate lands first — a test's own
           // release OR this run's abort (the SDK's abort ends the turn in
           // place). With neither, the microtask settles the gate so the
           // scripted emissions below run in order, as they did before.
           if (parentPromptRelease === null) queueMicrotask(turnGate.resolve);
           await Promise.race([parentPromptRelease ?? turnGate.promise, turnGate.promise]);
-          // An aborted turn emits nothing more: the SDK ends it where it
+          // why: An aborted turn emits nothing more: the SDK ends it where it
           // stopped, so no queued yields or agent_end run after the abort.
           if (parentTurnAborted) {
             parentStreaming = false;
             return true;
           }
-          // The parent turn emits each queued yield to the listener the
+          // note: The parent turn emits each queued yield to the listener the
           // runtime registered before prompting — as tool_execution_end
           // events (the shape the runtime captures): rejected attempts first
           // (isError), then successes (details.status "success"), then
@@ -316,7 +316,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
               result: { content: [], details: { data: undefined, status: "aborted", error } },
             });
           });
-          // The SDK's scheduling pause: the session is parked on a delivery it
+          // note: The SDK's scheduling pause: the session is parked on a delivery it
           // already queued (a steer, a follow-up, a background wake), so it
           // emits `agent_pause` now and runs the continuation after this
           // prompt unwinds — a later tick, never inline.
@@ -327,12 +327,12 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
               yielded: true,
               awaiting: false,
             });
-            // The parked end is delivered; the continuation below rides a later
+            // note: The parked end is delivered; the continuation below rides a later
             // tick, so a test can gate on the pause having arrived.
             parentParkedEndObserved?.();
             const resumedYields = parentResumeYields;
             const resumedEnd = parentResumeEnd;
-            // Deferred past the prompt's OWN settlement — no duration, just the
+            // note: Deferred past the prompt's OWN settlement — no duration, just the
             // event-loop boundary after the runtime has processed the parked
             // end — because the SDK's drain runs the continuation only once the
             // owning prompt has unwound. Each event that continuation emits
@@ -366,7 +366,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
             };
             deliverResumed(0);
           }
-          // The run's own end, as the SDK emits it: the gathered transcript
+          // note: The run's own end, as the SDK emits it: the gathered transcript
           // rides the deferred `agent_end` frame, delivered after every tool
           // execution and before the prompt settles (the session flushes it
           // while the owning prompt unwinds).
@@ -394,7 +394,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     skills: [{ name: "mstar-audit" }, { name: "other-skill" }],
     warnings: [],
   })),
-  // The registry the quick/default supervisor resolves a running seat's live
+  // note: The registry the quick/default supervisor resolves a running seat's live
   // session through, by the id the dispatch reserved for that seat.
   AgentRegistry: {
     global: mock(() => ({
@@ -403,29 +403,29 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   },
 }));
 
-// Additive: Bun's module-mock registry is process-global, so the stub must not
+// why: Additive: Bun's module-mock registry is process-global, so the stub must not
 // drop the SDK's other exports — a replacement that did broke every sibling
 // file importing them.
 mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
   ...realStructuredSubagent,
   runStructuredSubagent: mock(async (request: Record<string, unknown>) => {
     subagentRequests.push(request);
-    // The dispatch's reserved identity id — what the SDK registers the seat
+    // note: The dispatch's reserved identity id — what the SDK registers the seat
     // under and what the supervisor addresses the running seat by. One named
     // cast at this mock boundary: the record is a plain object bag, and the
     // SDK contract here is `identity?: { id?: string }`.
     const identity = request.identity as { id?: string } | undefined;
     reservedSeatIds.push(identity?.id);
     seatDispatchQueue.shift()?.();
-    // Bound at DISPATCH, never after a test release: a held seat must own the
+    // why: Bound at DISPATCH, never after a test release: a held seat must own the
     // scripted result for ITS dispatch position, not the one left over when a
     // later seat is released first.
     const plan = seatResults.shift() ?? {};
     if (holdSeats) {
-      // The seat stays running until the test releases it (dispatch order).
+      // note: The seat stays running until the test releases it (dispatch order).
       await new Promise<void>((resolve) => seatReleases.push(resolve));
     }
-    // A seat the caller cancels: it stays pending until ITS OWN signal fires,
+    // note: A seat the caller cancels: it stays pending until ITS OWN signal fires,
     // then rejects the way the SDK does. This is the path the runner takes
     // when a review fails or the outer deadline leaves no room while the
     // recheck seat still runs.
@@ -441,10 +441,10 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
         );
       });
     }
-    // A seat whose promise REJECTS rather than settles: the SDK threw, or our
+    // note: A seat whose promise REJECTS rather than settles: the SDK threw, or our
     // own code did. It produces no seat outcome at all.
     if (plan.reject !== undefined) throw new Error(plan.reject);
-    // A non-Error rejection: the shape with no `.message` to read.
+    // note: A non-Error rejection: the shape with no `.message` to read.
     if ("rejectWith" in plan) throw plan.rejectWith;
     const status = plan.status ?? "valid";
     return {
@@ -456,7 +456,7 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
         output: "",
         stderr: plan.stderr ?? "",
         error: plan.error,
-        // The SDK's settled abort surface: a cap stop and a provider/session
+        // note: The SDK's settled abort surface: a cap stop and a provider/session
         // abort both set `aborted`, and only the reason separates them.
         aborted: plan.aborted,
         abortReason: plan.abortReason,
@@ -474,7 +474,7 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
   }),
 }));
 
-// Dynamic import is REQUIRED here: mock.module must be registered before the
+// why: Dynamic import is REQUIRED here: mock.module must be registered before the
 // module under test evaluates its omp SDK imports, and static imports hoist
 // above the mock calls. (Bun mock.module + module-loading test boundary.)
 //
@@ -497,13 +497,13 @@ const { ompAgentRuntime, superviseSeats, SUMMARY_MD_BUDGET, SEAT_GAP_MAX_CHARS }
     level: ReviewLevel;
     done: Promise<void>;
   }) => Promise<void>;
-  /** The body budget the coverage notes are fitted into. */
+  /** note: The body budget the coverage notes are fitted into. */
   SUMMARY_MD_BUDGET: number;
-  /** The per-note character cap. */
+  /** note: The per-note character cap. */
   SEAT_GAP_MAX_CHARS: number;
 };
 
-/** A valid strict seat payload the engine vocab accepts. */
+/** note: A valid strict seat payload the engine vocab accepts. */
 function seatPayload(overrides: Record<string, unknown> = {}): unknown {
   return {
     findings: [
@@ -520,7 +520,7 @@ function seatPayload(overrides: Record<string, unknown> = {}): unknown {
   };
 }
 
-/** A complete mstar.review/v1 envelope a deep parent would yield. */
+/** note: A complete mstar.review/v1 envelope a deep parent would yield. */
 function deepEnvelope(): unknown {
   return {
     schema: "mstar.review/v1",
@@ -540,7 +540,7 @@ function deepEnvelope(): unknown {
 }
 
 /**
- * One assistant message of a gathered `agent_end` payload — the SDK transcript
+ * note: One assistant message of a gathered `agent_end` payload — the SDK transcript
  * shape the stopped-run synthesis reads: its text parts are the content the
  * turn had gathered, and `errorMessage` is the stop the SDK recorded when it
  * reported one (a deadline or an aborted call).
@@ -555,7 +555,7 @@ function stoppedTurn(text: string, errorMessage?: string): unknown {
 }
 
 /**
- * The assistant entry a turn ends on when its last step was a tool call: no
+ * note: The assistant entry a turn ends on when its last step was a tool call: no
  * text part at all, and the stop — when there is one — on this entry.
  */
 function toolOnlyTurn(errorMessage?: string): unknown {
@@ -567,10 +567,10 @@ function toolOnlyTurn(errorMessage?: string): unknown {
   };
 }
 
-/** The reviewed head every run input below declares (`head <sha>` recon fact). */
+/** note: The reviewed head every run input below declares (`head <sha>` recon fact). */
 const HEAD_SHA = "abc1234567890abcdef1234567890abcdef12";
 
-/** reconFacts with numstat lines spanning two top-level dirs. */
+/** note: reconFacts with numstat lines spanning two top-level dirs. */
 const TWO_CLUSTER_FACTS = [
   "acme/widgets#7",
   `head ${HEAD_SHA}`,
@@ -579,11 +579,11 @@ const TWO_CLUSTER_FACTS = [
   "8\t1\tlib/c.ts",
 ];
 
-/** The synthesized per-review models dir (REQUIRED on every run). */
+/** note: The synthesized per-review models dir (REQUIRED on every run). */
 const AGENT_DIR = "/tmp/omp-agent-test";
 
 /**
- * The run's in-memory credential store. The omp SDK root is mocked in this
+ * note: The run's in-memory credential store. The omp SDK root is mocked in this
  * file, so `AuthStorage` is not importable here; the runtime only hands the
  * instance through to `createAgentSession`, so an identity sentinel is the
  * exact contract under test (the SDK's own type is nominal — a structural stub
@@ -600,7 +600,7 @@ const BASE_INPUT = {
   authStorage: TEST_AUTH_STORAGE,
 };
 
-/** The deep-tier input: same clone/facts/models, level deep. */
+/** note: The deep-tier input: same clone/facts/models, level deep. */
 const DEEP_INPUT = { ...BASE_INPUT, level: "deep" as const };
 
 afterEach(() => {
@@ -637,10 +637,10 @@ afterEach(() => {
   holdSeats = false;
   seatReleases = [];
   seatDispatchQueue = [];
-  // Supervision tests install fake timers; every other test runs on the real clock.
+  // note: Supervision tests install fake timers; every other test runs on the real clock.
   jest.useRealTimers();
   delete process.env.OMP_REVIEW_MODEL;
-  // The anchored outer deadline is process-global: a spent anchor would
+  // why: The anchored outer deadline is process-global: a spent anchor would
   // decline the NEXT test's deep dispatch at the boundary check.
   resetRecheckAnchor();
 });
@@ -652,7 +652,7 @@ describe("ompAgentRuntime.runReview — parent session", () => {
 
     expect(createdOptions).toHaveLength(1);
     const options = createdOptions[0]!;
-    // toEqual (not toMatchObject): dotted keys are literal here — bun's
+    // why: toEqual (not toMatchObject): dotted keys are literal here — bun's
     // toMatchObject interprets them as paths.
     expect(options.settings).toEqual({
       kind: "isolated",
@@ -663,7 +663,7 @@ describe("ompAgentRuntime.runReview — parent session", () => {
       },
     });
     expect(options.restrictToolNames).toBe(true);
-    // quick/default keep the Bun fan-out tool set: no `task`, no yield schema.
+    // note: quick/default keep the Bun fan-out tool set: no `task`, no yield schema.
     expect(options.toolNames).toEqual(["read", "grep", "glob"]);
     expect(options.requireYieldTool).toBe(false);
     expect(options.outputSchema).toBeUndefined();
@@ -677,14 +677,14 @@ describe("ompAgentRuntime.runReview — parent session", () => {
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     await ompAgentRuntime.runReview(BASE_INPUT);
 
-    // Parent session cwd…
+    // note: Parent session cwd…
     expect(createdOptions[0]!.cwd).toBe(TEST_WORKTREE);
-    // …and the ToolSession handed to every seat reports the same cwd — SDK
+    // note: …and the ToolSession handed to every seat reports the same cwd — SDK
     // buildExecutorOptions derives each seat's tool cwd from session.cwd, so
     // relative read/grep/glob paths resolve against the PR clone.
     expect(subagentRequests).toHaveLength(2);
     for (const request of subagentRequests) {
-      // Our own shim proxy erases to unknown in the mock record; the SDK
+      // note: Our own shim proxy erases to unknown in the mock record; the SDK
       // reads members by property access (the get trap), so probe the same
       // way — `in` would hit the default has trap and miss the shim.
       const seatSession = request.session as { cwd: unknown };
@@ -697,7 +697,7 @@ describe("ompAgentRuntime.runReview — parent session", () => {
     seatResults = [{ data: seatPayload() }];
     await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
 
-    // A conflicting env value must NOT leak into the session (split-brain
+    // why: A conflicting env value must NOT leak into the session (split-brain
     // guard): the runner parses OMP_REVIEW_MODEL once, into modelSelectors.
     const options = createdOptions[0]!;
     expect(options.modelPattern).toBe(BASE_INPUT.modelSelectors[0]);
@@ -713,7 +713,7 @@ describe("ompAgentRuntime.runReview — parent session", () => {
 
   test("empty modelSelectors fails loud instead of inventing a provider", async () => {
     seatResults = [{ data: seatPayload() }];
-    // There is no in-image default selector anymore: an empty chain is a
+    // why: There is no in-image default selector anymore: an empty chain is a
     // caller bug, not a reason to run a provider the product never declared.
     await expect(
       ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", modelSelectors: [] }),
@@ -726,13 +726,13 @@ describe("ompAgentRuntime.runReview — parent session", () => {
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     await ompAgentRuntime.runReview(BASE_INPUT);
 
-    // The definition was snapshotted from the clone at session creation (the
+    // note: The definition was snapshotted from the clone at session creation (the
     // runtime removes it again when the run resolves).
     expect(installedSeatAgent).toBe(readFileSync(join(import.meta.dir, "../../packages/runner/src/seat-agent.md"), "utf8"));
     expect(installedSeatAgent).toContain("name: mstar-review-seat");
     expect(installedSeatAgent).toContain("tools: [read, grep, glob]");
     expect(installedSeatAgent).not.toMatch(/^spawns:/m);
-    // The clone is caller-owned: only the installed definition is cleaned up;
+    // invariant: The clone is caller-owned: only the installed definition is cleaned up;
     // the worktree itself must survive.
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
     expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);
@@ -742,7 +742,7 @@ describe("ompAgentRuntime.runReview — parent session", () => {
 });
 
 /**
- * The minute figures a rendered seat prompt states, with the direction the
+ * note: The minute figures a rendered seat prompt states, with the direction the
  * engine attached to each. Reads the number, the minute unit and the direction
  * word only — no sentence shape, punctuation or dispatch phrasing is pinned, so
  * harmless engine rewording cannot fail the suite.
@@ -755,7 +755,7 @@ function statedMinutes(prompt: string): Array<{ minutes: number; over: boolean }
 }
 
 /**
- * The signed shared-clock remainder a prompt states: the minute figure that is
+ * note: The signed shared-clock remainder a prompt states: the minute figure that is
  * neither the tier cap nor positive-time-left. Throws when the prompt states no
  * such figure — a fresh full-cap allowance states the cap as its own remainder
  * and lands here.
@@ -783,11 +783,11 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
       expect(request.enableLsp).toBe(false);
       expect(request.enableIrc).toBe(false);
     }
-    // Domains per the deterministic partition rule (src + lib clusters).
+    // note: Domains per the deterministic partition rule (src + lib clusters).
     const assignments = subagentRequests.map((request) => request.assignment as string);
     expect(assignments[0]).toContain("changeset-1-src");
     expect(assignments[1]).toContain("changeset-2-lib");
-    // Each dispatch reserves its registry id up front — the same
+    // why: Each dispatch reserves its registry id up front — the same
     // `<domain>-<seat>` slug the prompt mandates — so the supervisor can
     // address THAT seat by id while it runs, instead of racing the SDK for an
     // id it never reports back.
@@ -801,16 +801,16 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     const first = subagentRequests[0]!.assignment as string;
     expect(first).toContain(TEST_WORKTREE);
     expect(first).toContain(`${PLUGIN_ROOT_FIXTURE}/skills/mstar-audit`);
-    // Per-seat recon facts: shared facts + the seat's file scope.
+    // note: Per-seat recon facts: shared facts + the seat's file scope.
     expect(first).toContain("acme/widgets#7");
     expect(first).toContain("src/a.ts");
-    // The shared tier wording comes from the engine (tier: default here).
+    // note: The shared tier wording comes from the engine (tier: default here).
     expect(first.toLowerCase()).toContain("merge class");
   });
 
   test("each dispatch states the SHARED remainder — never a fresh full allowance", async () => {
     const cap = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes;
-    /** Dispatch at a controlled elapsed interval; returns that run's rendered assignment. */
+    /** note: Dispatch at a controlled elapsed interval; returns that run's rendered assignment. */
     const dispatch = async (elapsedMinutes: number): Promise<string> => {
       anchorRecheckDeadline(Date.now() - elapsedMinutes * 60_000, "default");
       seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
@@ -819,23 +819,23 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
       return subagentRequests[before]!.assignment as string;
     };
 
-    // The inspected string is the REAL engine seat prompt (the SDK is mocked,
+    // why: The inspected string is the REAL engine seat prompt (the SDK is mocked,
     // the engine is not): these minute figures can only come from its rendered
     // budget head.
     const fourIn = await dispatch(4);
     expect(fourIn).toContain(String(PR_REVIEW_TIER_BUDGETS.default.fileOpenCap));
-    // Known nonzero elapsed interval: the head states the whole-review cap AND
+    // note: Known nonzero elapsed interval: the head states the whole-review cap AND
     // a remainder of cap minus that interval. A fresh per-seat allowance would
     // state the cap as its own remainder, so no `cap - 4` would appear.
     expect(statedMinutes(fourIn)).toContainEqual({ minutes: cap, over: false });
     expect(statedRemainder(fourIn, cap)).toBe(cap - 4);
 
-    // A LATER dispatch states a strictly smaller remainder.
+    // note: A LATER dispatch states a strictly smaller remainder.
     const sevenIn = await dispatch(7);
     expect(statedRemainder(sevenIn, cap)).toBe(cap - 7);
     expect(statedRemainder(sevenIn, cap)).toBeLessThan(statedRemainder(fourIn, cap));
 
-    // Past the cap the stated remainder flips direction: an overrun, not time
+    // note: Past the cap the stated remainder flips direction: an overrun, not time
     // left — and it keeps the signed magnitude.
     const overCap = await dispatch(cap + 3);
     expect(statedMinutes(overCap)).toContainEqual({ minutes: 3, over: true });
@@ -859,13 +859,13 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
   });
 
   test("propagates SDK execution failures while the wave still has a review to publish", async () => {
-    // One seat delivers, one carries an SDK error: the failure stays fatal —
+    // invariant: One seat delivers, one carries an SDK error: the failure stays fatal —
     // a wave with a review to publish must not lose a seat to a coverage note.
     seatResults = [{ error: "provider boom" }, { data: seatPayload() }];
     await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(
       /review seat 0 .*failed: provider boom/,
     );
-    // The parent session is still disposed.
+    // invariant: The parent session is still disposed.
     expect(disposeCalls).toBe(1);
   });
 
@@ -873,11 +873,11 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     seatResults = [{ status: "invalid", data: { findings: [{ mergeClass: "critical" }] } }];
     const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
 
-    // The payload the schema refused never merges, and the wave is not claimed
+    // why: The payload the schema refused never merges, and the wave is not claimed
     // as settled: the reader gets the uncovered scope, not a clean grade.
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.findings).toEqual([]);
-    // The lost seat's own message rides the declared reason.
+    // note: The lost seat's own message rides the declared reason.
     expect(envelope.incomplete?.reason).toMatch(
       /^no dispatched seat produced a usable payload: .+/,
     );
@@ -895,10 +895,10 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
 });
 
 describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)", () => {
-  /** The tier's soft cap in ms — the engine's figure, never a re-typed minute count. */
+  /** note: The tier's soft cap in ms — the engine's figure, never a re-typed minute count. */
   const softCapMs = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
   /**
-   * FROZEN PIN, deliberately a literal rather than a read of the source
+   * note: FROZEN PIN, deliberately a literal rather than a read of the source
    * constant: the reserved tail is a contract value — the hard cap must stay
    * clear of the outer exec guard so the runner can still merge, synthesize and
    * validate after the last seat stops. Reading it back from the module would
@@ -911,7 +911,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
     jest.useFakeTimers();
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
 
-    // The outer guard still an hour ahead: the DOUBLED soft cap is the tighter
+    // note: The outer guard still an hour ahead: the DOUBLED soft cap is the tighter
     // term, so the cap is exactly that figure — while the shared soft remainder
     // (a convergence target, counting that same hour) is nothing like it.
     anchorRecheckDeadline(Date.now() + 3_600_000, "default");
@@ -919,9 +919,9 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
 
     const cap = subagentRequests[0]!.maxRuntimeMs as number;
     expect(cap).toBe(softCapMs * 2);
-    expect(cap).toBe(subagentRequests[1]!.maxRuntimeMs as number); // one figure for the wave
+    expect(cap).toBe(subagentRequests[1]!.maxRuntimeMs as number); // note: one figure for the wave
 
-    // A fresh anchor: the OUTER budget is now the tighter term, and the cap is
+    // note: A fresh anchor: the OUTER budget is now the tighter term, and the cap is
     // that budget less the reserved tail — still not the remaining soft time.
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     anchorRecheckDeadline(Date.now(), "default");
@@ -935,12 +935,12 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
   });
 
   test("a spent outer budget still bounds the seat — never the SDK's 0 = no cap", async () => {
-    // Anchored past the outer exec guard: there is no outer budget left at all.
+    // note: Anchored past the outer exec guard: there is no outer budget left at all.
     anchorRecheckDeadline(Date.now() - 700_000, "default");
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     await ompAgentRuntime.runReview(BASE_INPUT);
 
-    // The closure above yields a negative budget; handing the SDK `0` (its
+    // why: The closure above yields a negative budget; handing the SDK `0` (its
     // documented "no wall-clock limit") would remove the bound instead of
     // enforcing it, so the cap floors at 1ms.
     expect(subagentRequests[0]!.maxRuntimeMs as number).toBe(1);
@@ -951,7 +951,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
     const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
 
     expect(envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
-    // No seat narrative and no gap: the key stays absent rather than becoming
+    // why: No seat narrative and no gap: the key stays absent rather than becoming
     // an empty or fabricated summary.
     expect(envelope).not.toHaveProperty("summary_md");
   });
@@ -963,7 +963,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
     ];
     const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
 
-    // One of two dispatched seats hit the wall clock: a budget fact, not a
+    // note: One of two dispatched seats hit the wall clock: a budget fact, not a
     // verdict — the sibling's collected findings stay unpublished by
     // construction (publication is the Worker's call on this fact).
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
@@ -998,7 +998,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
   });
 
   test("an abort the runtime limit did not cause stays fatal — the flag alone is not coverage", async () => {
-    // A provider/session abort with no valid output: `aborted` is set, but no
+    // note: A provider/session abort with no valid output: `aborted` is set, but no
     // cap stopped this seat, so it must reject exactly as before.
     seatResults = [
       { status: "absent", aborted: true, abortReason: "Provider stream closed unexpectedly" },
@@ -1015,7 +1015,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
   });
 
   test("an SDK error without a cap stays fatal while the wave still has usable output", async () => {
-    // No cap accounts for this seat's shortfall, so nothing explains it: a wave
+    // invariant: No cap accounts for this seat's shortfall, so nothing explains it: a wave
     // that DOES have a review to publish must not lose a seat to a coverage note.
     seatResults = [{ error: "provider exploded" }, { data: seatPayload() }];
 
@@ -1023,7 +1023,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
   });
 
   test("a payload the strict schema rejected without a cap stays fatal — invalid is not absent", async () => {
-    // A payload the seat SENT and the schema refused is not the same as no
+    // why: A payload the seat SENT and the schema refused is not the same as no
     // payload at all: without a cap it stays fatal, and its findings never merge.
     seatResults = [
       {
@@ -1038,18 +1038,18 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
 });
 
 /**
- * A wave that lost a seat is not settled: it is delivered carrying the engine's
+ * note: A wave that lost a seat is not settled: it is delivered carrying the engine's
  * `incomplete` fact (single-line cause + the unscanned seat scopes) instead of
  * throwing, while a wave that lost no seat is untouched. The engine is the
  * oracle on both ends — `validateMstarReviewV1` for the synthesized envelope's
  * contract, `synthesizeReview` for the envelope a clean wave must produce.
  */
 describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, other losses stay incomplete", () => {
-  /** The SDK's own reason for a wall-clock stop, verbatim as its resolver emits it. */
+  /** note: The SDK's own reason for a wall-clock stop, verbatim as its resolver emits it. */
   const CAP_REASON = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
 
   test("a wave the cap stopped with no usable output reports the signal, every dispatched seat counted", async () => {
-    // Its single seat stopped at the wall clock before producing anything: a
+    // note: Its single seat stopped at the wall clock before producing anything: a
     // budget fact — never a zero-finding verdict over a review that never ran.
     seatResults = [{ status: "absent", aborted: true, abortReason: CAP_REASON }];
 
@@ -1074,7 +1074,7 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
   });
 
   test("a wave that produced nothing usable without any cap is delivered incomplete, every seat listed", async () => {
-    // Both seats came back empty and NO cap fired: the wave has nothing to
+    // why: Both seats came back empty and NO cap fired: the wave has nothing to
     // publish a verdict from, so it is stopped rather than failed — and the fact
     // says which, without claiming a cap nobody reported.
     seatResults = [{ status: "absent" }, { status: "absent" }];
@@ -1084,7 +1084,7 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.findings).toEqual([]);
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    // The lost seat's own message rides the declared reason.
+    // note: The lost seat's own message rides the declared reason.
     expect(envelope.incomplete?.reason).toMatch(
       /^no dispatched seat produced a usable payload: .+/,
     );
@@ -1095,7 +1095,7 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
   });
 
   test("a whole wave of SDK errors with no usable output is delivered incomplete too", async () => {
-    // The rule keys on the wave's usable output, not on which failure kind
+    // invariant: The rule keys on the wave's usable output, not on which failure kind
     // produced the shortfall: a single seat that errored left nothing to review.
     seatResults = [{ error: "provider boom" }];
 
@@ -1103,7 +1103,7 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
 
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.findings).toEqual([]);
-    // The lost seat's own message rides the declared reason.
+    // note: The lost seat's own message rides the declared reason.
     expect(envelope.incomplete?.reason).toMatch(
       /^no dispatched seat produced a usable payload: .+/,
     );
@@ -1111,7 +1111,7 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
   });
 
   test("every seat promise rejected: the wave is incomplete and lists every dispatched seat", async () => {
-    // Neither seat settled at all. The wave has nothing to publish, so it must
+    // note: Neither seat settled at all. The wave has nothing to publish, so it must
     // still declare the incompleteness — and its disclosure must not shrink to
     // "nothing left unscanned" just because no outcome object exists to read.
     seatResults = [{ reject: "provider boom" }, { reject: "provider boom" }];
@@ -1121,7 +1121,7 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.findings).toEqual([]);
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    // A rejection carries the only diagnosis a seat that never settled has, so
+    // why: A rejection carries the only diagnosis a seat that never settled has, so
     // the declared reason names it rather than restating the symptom.
     expect(envelope.incomplete?.reason).toMatch(
       /^no dispatched seat produced a usable payload: provider boom$/,
@@ -1133,21 +1133,21 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
   });
 
   test("a seat promise rejected with null keeps its cause as a fact, not an empty string", async () => {
-    // A nullish rejection reason is still the recorded cause of a lost seat —
+    // invariant: A nullish rejection reason is still the recorded cause of a lost seat —
     // the declaration must carry it rather than print nothing beside the seat.
     seatResults = [{ rejectWith: null }, { reject: "provider boom" }];
 
     const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
 
     expect(envelope.verdict).toBe("incomplete");
-    // The first rejection's recorded value rides the declared reason: `null`,
+    // note: The first rejection's recorded value rides the declared reason: `null`,
     // never a causeless `…a usable payload`.
     expect(envelope.incomplete?.reason).toBe("no dispatched seat produced a usable payload: null");
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
   });
 
   test("a cap that fired over an SDK error is still a budget stop, not a failure", async () => {
-    // The cap accounts for the shortfall, so the seat is a stopped seat — and a
+    // why: The cap accounts for the shortfall, so the seat is a stopped seat — and a
     // stopped seat is a budget stop, whatever else its settled result carried.
     seatResults = [
       { status: "absent", aborted: true, abortReason: CAP_REASON, error: CAP_REASON },
@@ -1194,7 +1194,7 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
 
     const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
 
-    // A wall-clock stop is a budget fact about the RUN, so there is no partial
+    // why: A wall-clock stop is a budget fact about the RUN, so there is no partial
     // verdict to read: the sibling's collected findings never reach an
     // envelope on this path.
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
@@ -1207,7 +1207,7 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
 
     const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
 
-    // Byte-identical to what the collected findings synthesize to: neither the
+    // invariant: Byte-identical to what the collected findings synthesize to: neither the
     // fact nor a coverage note is added speculatively to a completed wave.
     expect(envelope.incomplete).toBeUndefined();
     expect(envelope).toEqual(
@@ -1229,11 +1229,11 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
 });
 
 describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () => {
-  /** The SDK's own reason for a wall-clock stop, verbatim as its resolver emits it. */
+  /** note: The SDK's own reason for a wall-clock stop, verbatim as its resolver emits it. */
   const CAP_REASON = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
 
   test("the signal reports ONLY the seat counts the runner observed", async () => {
-    // Whatever a capped wave collected stays unpublished: the stop carries the
+    // invariant: Whatever a capped wave collected stays unpublished: the stop carries the
     // counts and nothing else — no verdict, no findings, no fabricated cause.
     seatResults = [
       {
@@ -1267,7 +1267,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
   });
 
   test("a wave mixing a cap stop with a cap-free loss is a budget stop, counting only the capped seat", async () => {
-    // The deadline evidence explains only the capped seat — but one observed
+    // why: The deadline evidence explains only the capped seat — but one observed
     // cap stop IS budget evidence for the run: the wave publishes the signal
     // over the cap-free loss, never an `incomplete` that hides the clock fact.
     // The sibling's loss evidence cannot ride the closed signal, so it goes
@@ -1290,17 +1290,17 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
 
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
     expect(stop.seatsDispatched).toBe(2);
-    // Only the seat the cap stopped counts: the cap-free loss is not
+    // invariant: Only the seat the cap stopped counts: the cap-free loss is not
     // deadline evidence and never inflates the observed stop count.
     expect(stop.seatsStopped).toBe(1);
-    // One redacted stderr line per non-cap sibling loss, seat named.
+    // note: One redacted stderr line per non-cap sibling loss, seat named.
     const lost = errorCalls.map((call) => String(call[0])).filter((line) => line.includes("lost beside a cap stop"));
     expect(lost).toHaveLength(1);
     expect(lost[0]).toContain("changeset-2-lib");
   });
 
   test("a cap stop outranks a sibling's non-cap error even while the wave holds usable output", async () => {
-    // The capped seat delivered a valid payload before the wall clock fired
+    // why: The capped seat delivered a valid payload before the wall clock fired
     // (its output stays), its sibling failed outright — the usable-payload
     // branch would rethrow that failure and mask the stop. The clock evidence
     // wins: the run reports the budget signal instead, and the sibling's
@@ -1330,7 +1330,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
   });
 
   test("a cap stop outranks a seat promise that rejected outright", async () => {
-    // The rejected seat produced no outcome object at all, but the cap that
+    // why: The rejected seat produced no outcome object at all, but the cap that
     // stopped its sibling still stopped the review: budget signal, not the
     // non-cap loss path. Its rejection reason is still reported on stderr —
     // a promise that never settled is the only place that diagnosis lives.
@@ -1352,7 +1352,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
     expect(stop.seatsDispatched).toBe(2);
     expect(stop.seatsStopped).toBe(1);
-    // The rejected seat's own cause rides its stderr line.
+    // note: The rejected seat's own cause rides its stderr line.
     const lost = errorCalls.map((call) => String(call[0])).filter((line) => line.includes("lost beside a cap stop"));
     expect(lost).toHaveLength(1);
     expect(lost[0]).toContain("changeset-2-lib");
@@ -1360,7 +1360,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
   });
 
   test("a null rejection reason rides the sibling-loss line, not an empty detail", async () => {
-    // A seat promise that rejected with `null` still names its recorded cause
+    // invariant: A seat promise that rejected with `null` still names its recorded cause
     // beside the cap stop — the bounded detail is `null`, never absent.
     seatResults = [
       { status: "absent", aborted: true, abortReason: CAP_REASON },
@@ -1385,7 +1385,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
   });
 
   test("a stopped deep turn still lands incomplete — no runner deadline evidence", async () => {
-    // Covered by the deep section's own tests: a turn that ENDED without a
+    // note: Covered by the deep section's own tests: a turn that ENDED without a
     // yield synthesizes incomplete. This seat asserts the mirror: an end the
     // SDK reported is NOT a runner wall-clock stop, so it never signals.
     parentAgentEnd = [{ role: "assistant", content: [{ type: "text", text: "partial notes" }] }];
@@ -1398,23 +1398,23 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
   });
 
   test("a deep turn the runner's own deadline stops throws the signal", async () => {
-    // The runner deadline lands mid-turn: the same wall-clock evidence a
+    // why: The runner deadline lands mid-turn: the same wall-clock evidence a
     // seat cap is, so the deep parent signals exactly like a capped seat —
     // 1 dispatched seat, 1 stopped.
     anchorRecheckDeadline(Date.now() - 60_000, "deep", Date.now() + 50);
-    // The turn is held open: the 50ms deadline, not a settled prompt, is what
+    // note: The turn is held open: the 50ms deadline, not a settled prompt, is what
     // ends it — the abort wins the gate race.
     parentPromptRelease = new Promise(() => {});
 
     await expect(ompAgentRuntime.runReview({ ...DEEP_INPUT })).rejects.toBeInstanceOf(
       RunnerBudgetExhausted,
     );
-    // The deadline abort is what stopped the turn: the session saw it.
+    // invariant: The deadline abort is what stopped the turn: the session saw it.
     expect(parentAbortReasons).toEqual([{ reason: "runner deadline reached" }]);
   });
 
   test("a yield before the runner deadline does not outrank the stop that ends the turn", async () => {
-    // The yield lands while the turn is still live; the runner deadline then
+    // note: The yield lands while the turn is still live; the runner deadline then
     // aborts the turn where it stands. The stop is the turn's outcome — the
     // payload it emitted earlier is never accepted as the review verdict.
     anchorRecheckDeadline(Date.now() - 60_000, "deep", Date.now() + 50);
@@ -1427,7 +1427,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
         result: { content: [], details: { data: deepEnvelope(), status: "success", type: undefined } },
       });
     };
-    // Held open like the no-yield stop above: only the deadline ends it.
+    // note: Held open like the no-yield stop above: only the deadline ends it.
     parentPromptRelease = new Promise(() => {});
 
     const stop = (await ompAgentRuntime.runReview({ ...DEEP_INPUT }).catch((error: unknown) => error)) as RunnerBudgetExhausted;
@@ -1439,7 +1439,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
   });
 
   test("a parked turn that yielded before the pause still signals when its deadline stops the continuation", async () => {
-    // The turn yielded, then parked waiting for a continuation that never
+    // note: The turn yielded, then parked waiting for a continuation that never
     // delivers. A parked end is never final, so the bounded wait still runs —
     // and its expiry is the run's own deadline evidence: a budget stop, not
     // the earlier yield.
@@ -1453,14 +1453,14 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
     expect(stop.seatsDispatched).toBe(1);
     expect(stop.seatsStopped).toBe(1);
-    // The stop the session saw is the runner's own deadline abort, never a
+    // invariant: The stop the session saw is the runner's own deadline abort, never a
     // parked continuation finishing on its own.
     expect(parentAbortReasons.length).toBeGreaterThan(0);
     expect(parentAbortReasons.every((call) => call.reason === "runner deadline reached")).toBe(true);
   });
 
   test("an assignment read that blocks past the deadline declines the turn — 0/0 seats, never a dispatched 1/1", async () => {
-    // The deadline fires while the command file is still being read: the deep
+    // note: The deadline fires while the command file is still being read: the deep
     // parent was never prompted, so the signal counts 0 of 0 — a seat stop
     // must never be reported for a seat that was never dispatched.
     const pluginRoot = mkdtempSync(join(tmpdir(), "mstar-harness-slow-"));
@@ -1468,7 +1468,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     const commandPath = join(pluginRoot, "commands", "amazing-pr-review.md");
     rmSync(commandPath);
     Bun.spawnSync(["mkfifo", commandPath]);
-    // The read blocks until the delayed writer opens the fifo — well past the
+    // note: The read blocks until the delayed writer opens the fifo — well past the
     // 50ms deadline below, then the read still completes.
     const writer = Bun.spawn(
       ["sh", "-c", `sleep 0.15; printf 'fixture command' > ${commandPath}`],
@@ -1483,7 +1483,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
       expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
       expect(stop.seatsDispatched).toBe(0);
       expect(stop.seatsStopped).toBe(0);
-      // No prompt and no abort ever reached the session: nothing was dispatched.
+      // invariant: No prompt and no abort ever reached the session: nothing was dispatched.
       expect(promptTexts).toHaveLength(0);
       expect(parentAbortReasons).toHaveLength(0);
     } finally {
@@ -1495,7 +1495,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
   });
 
   test("a read that resolves after the deadline declined the turn still counts 0/0", async () => {
-    // The outer deadline is already spent when the assignment read resolves:
+    // note: The outer deadline is already spent when the assignment read resolves:
     // the dispatch boundary declines the prompt instead of starting a 1ms
     // turn the timer would kill — and the signal reports what really ran.
     anchorRecheckDeadline(Date.now() - 60_000, "deep", Date.now() - 1);
@@ -1518,14 +1518,14 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
       modelOverrides: { "mstar-review-seat": "ark/deepseek-v4-flash:high" },
     });
 
-    // L2: the override is applied at the seatModels synthesis — it REPLACES
+    // note: L2: the override is applied at the seatModels synthesis — it REPLACES
     // the global chain as the explicit `model` param, sole verbatim entry
     // (no merge, `:thinking` suffix rides along).
     expect(subagentRequests).toHaveLength(2);
     for (const request of subagentRequests) {
       expect(request.model).toEqual(["ark/deepseek-v4-flash:high"]);
     }
-    // The settings key is a DEAD surface for quick/default (an explicit
+    // why: The settings key is a DEAD surface for quick/default (an explicit
     // request model beats task.agentModelOverrides in the SDK resolution
     // order) — the session settings must never carry it.
     expect(createdOptions[0]!.settings).toEqual({
@@ -1546,7 +1546,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
       modelOverrides: { "mstar-review-seat": "ark/override-model" },
     });
 
-    // The parent keeps the global chain (primary model + retry fallback) —
+    // invariant: The parent keeps the global chain (primary model + retry fallback) —
     // only the seat's explicit model is overridden.
     expect(createdOptions[0]!.modelPattern).toBe(BASE_INPUT.modelSelectors[0]);
     expect((createdOptions[0]!.settings as { overrides: Record<string, unknown> }).overrides[
@@ -1556,7 +1556,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
 
   test("quick/default: a seat override cannot stand in for a missing global chain", async () => {
     seatResults = [{ data: seatPayload() }];
-    // The parent session needs a model too; an override only replaces one
+    // note: The parent session needs a model too; an override only replaces one
     // seat's model, so an empty chain still fails before any session exists.
     await expect(
       ompAgentRuntime.runReview({
@@ -1573,7 +1573,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     await ompAgentRuntime.runReview({
       ...BASE_INPUT,
-      // An unmapped-for-this-path agent name is inert; a blank
+      // note: An unmapped-for-this-path agent name is inert; a blank
       // mstar-review-seat value ≡ no override (L2).
       modelOverrides: { "code-reviewer": "ark/other:high", "mstar-review-seat": "   " },
     });
@@ -1607,7 +1607,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
     };
     await ompAgentRuntime.runReview({ ...DEEP_INPUT, modelOverrides: overrides });
 
-    // L2: the deep task-tool dispatch passes NO explicit model, so the SDK
+    // note: L2: the deep task-tool dispatch passes NO explicit model, so the SDK
     // preflight resolves each spawned seat from this settings record per
     // agent name — the record carries EXACTLY the mapped names (unmapped
     // seats stay keyless → parent active model, today's behavior). The
@@ -1621,7 +1621,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
         "task.agentModelOverrides": overrides,
       },
     });
-    // The deep-only deltas and the parent's own model chain are unchanged.
+    // invariant: The deep-only deltas and the parent's own model chain are unchanged.
     expect(createdOptions[0]!.modelPattern).toBe(DEEP_INPUT.modelSelectors[0]);
     expect(createdOptions[0]!.toolNames).toEqual(["read", "grep", "glob", "task"]);
     expect(createdOptions[0]!.requireYieldTool).toBe(true);
@@ -1634,7 +1634,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
 
     createdOptions.length = 0;
     await ompAgentRuntime.runReview({ ...DEEP_INPUT, modelOverrides: {} });
-    // Byte-compat gate: no `task.agentModelOverrides` key appears — the
+    // invariant: Byte-compat gate: no `task.agentModelOverrides` key appears — the
     // serialized options are identical to the no-map run.
     expect(JSON.stringify(createdOptions[0])).toBe(baseline);
   });
@@ -1657,7 +1657,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides", () => {
     const mappedOverrides = (createdOptions[0]!.settings as { overrides: Record<string, unknown> })
       .overrides;
 
-    // Exactly ONE added key, appended last; every other entry identical
+    // invariant: Exactly ONE added key, appended last; every other entry identical
     // (serialized equality against base + the one entry).
     expect(Object.keys(mappedOverrides)).toEqual([...Object.keys(baseOverrides), "task.agentModelOverrides"]);
     expect(JSON.stringify(mappedOverrides)).toBe(
@@ -1673,7 +1673,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     expect(promptTexts).toHaveLength(1);
     expect(subagentRequests).toHaveLength(0);
-    // The assignment carries the review tree and the recon facts.
+    // note: The assignment carries the review tree and the recon facts.
     expect(promptTexts[0]).toContain(TEST_WORKTREE);
     expect(promptTexts[0]).toContain("acme/widgets#7");
     expect(envelope.schema).toBe("mstar.review/v1");
@@ -1683,27 +1683,27 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   test("the parent session is dispatched with the shared budget head before the role context", async () => {
     const cap = PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes;
     const elapsedMinutes = 5;
-    // Controlled clock: a known nonzero elapsed interval, so the dispatched
+    // note: Controlled clock: a known nonzero elapsed interval, so the dispatched
     // remainder provably differs from the full tier cap.
     anchorRecheckDeadline(Date.now() - elapsedMinutes * 60_000, "deep");
     parentYields = [deepEnvelope()];
     await ompAgentRuntime.runReview(DEEP_INPUT);
 
     const prompt = promptTexts[0]!;
-    // The head opens the assignment — before the role context (the worktree
+    // note: The head opens the assignment — before the role context (the worktree
     // landmark the runtime also puts in this prompt).
     const head = prompt.slice(0, prompt.indexOf(TEST_WORKTREE));
     expect(head.length).toBeGreaterThan(0);
-    // It carries the tier, the whole-review cap and the SHARED remainder
+    // note: It carries the tier, the whole-review cap and the SHARED remainder
     // (cap minus elapsed, computed here — a fresh allowance would be `cap`).
     expect(head).toContain("deep");
     expect(head).toContain(`${cap} min`);
     expect(head).toContain(`${cap - elapsedMinutes} min`);
     expect(head).not.toContain(`${cap} min left`);
-    // ...plus a convergence instruction: stop and return what exists.
+    // note: ...plus a convergence instruction: stop and return what exists.
     expect(head).toMatch(/summari[sz]e/i);
     expect(head).toMatch(/return/i);
-    // The parent owns supervising its own `task` seats (the caller cannot
+    // why: The parent owns supervising its own `task` seats (the caller cannot
     // address them) with this same clock.
     expect(head).toMatch(/supervis/i);
   });
@@ -1716,7 +1716,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     const options = createdOptions[0]!;
     expect(options.cwd).toBe(TEST_WORKTREE);
     expect(options.restrictToolNames).toBe(true);
-    // deep-only: the SDK built-in `task` tool joins the read-only whitelist.
+    // note: deep-only: the SDK built-in `task` tool joins the read-only whitelist.
     expect(options.toolNames).toEqual(["read", "grep", "glob", "task"]);
     expect(options.outputSchema).toBeDefined();
     expect(options.outputSchemaMode).toBe("strict");
@@ -1744,7 +1744,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("a schema-rejected yield attempt is retried: the later success wins (qc2 F-002)", async () => {
-    // First attempt ends with isError (the SDK yield tool rejected the
+    // note: First attempt ends with isError (the SDK yield tool rejected the
     // payload and the model retried) — it must not be captured even though
     // its args carried a payload; the corrected re-yield is the envelope.
     parentRejectedYields = [{ schema: "mstar.review/v1", verdict: "ship it", summary_md: "bad", findings: [] }];
@@ -1774,7 +1774,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       errorCalls.push(args);
     });
     try {
-      // The envelope was yielded and engine-validated before the throw —
+      // note: The envelope was yielded and engine-validated before the throw —
       // returning it stands, but the turn error must stay observable.
       const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
       expect(envelope.schema).toBe("mstar.review/v1");
@@ -1786,7 +1786,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("a prompt throw WITHOUT a yield rethrows the turn error", async () => {
-    // No `agent_end` either: the turn never ended where the runtime could
+    // why: No `agent_end` either: the turn never ended where the runtime could
     // observe it, so the operational failure stays fatal (the stopped-run
     // synthesis is gated on the end event, never on the throw).
     parentPromptThrow = "model provider exploded before any yield";
@@ -1824,7 +1824,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     );
   });
 
-  // A deep turn that ENDED without a yield is a stopped run, not an exception:
+  // why: A deep turn that ENDED without a yield is a stopped run, not an exception:
   // the SDK's `agent_end` carries the gathered messages, and the adapter
   // synthesizes the engine's `incomplete` fact from them — the engine stays
   // the oracle, and a turn that never ended keeps throwing.
@@ -1841,12 +1841,12 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       reason: "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
       unscanned: ["deep-parent: the whole diff"],
     });
-    // The fact is synthesized, never hand-built: the engine's own tally echoes
+    // invariant: The fact is synthesized, never hand-built: the engine's own tally echoes
     // the fact it derived the verdict from.
     expect(envelope.tally?.incomplete).toEqual(envelope.incomplete);
-    // The gathered content is published as the summary — never dropped.
+    // invariant: The gathered content is published as the summary — never dropped.
     expect(envelope.summary_md).toContain("lib/c.ts needs a null check");
-    // The reviewed PR still rides the envelope (reconFacts are the one source).
+    // invariant: The reviewed PR still rides the envelope (reconFacts are the one source).
     expect(envelope.target).toEqual({
       owner: "acme",
       repo: "widgets",
@@ -1865,7 +1865,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("a stop the SDK reported is the declared cause, one line, and no summary is fabricated", async () => {
-    // A deadline that fired at the turn boundary: the stop is recorded on the
+    // note: A deadline that fired at the turn boundary: the stop is recorded on the
     // message and there is no assistant prose to publish. Provider/abort text
     // spans lines — the engine's fact rejects that, so it is collapsed.
     parentAgentEnd = [stoppedTurn("", "Deadline exceeded\nwhile streaming\n(the tier cap)")];
@@ -1874,7 +1874,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.incomplete?.reason).toBe("Deadline exceeded while streaming (the tier cap)");
-    // No text gathered → the key stays ABSENT (the engine never fabricates a
+    // why: No text gathered → the key stays ABSENT (the engine never fabricates a
     // summary) and the envelope still validates.
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
     expect(envelope.summary_md).toBeUndefined();
@@ -1892,7 +1892,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("a stopped turn whose prompt also threw states that failure as the cause", async () => {
-    // The turn ended (agent_end) and the awaited prompt failed: the stop is
+    // note: The turn ended (agent_end) and the awaited prompt failed: the stop is
     // still deliverable, and the cause is the failure — never a silent success.
     parentAgentEnd = [stoppedTurn("partial notes")];
     parentPromptThrow = "provider connection dropped";
@@ -1904,7 +1904,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("an end whose transcript carries no assistant message is still a stopped turn", async () => {
-    // A deadline can fire at the turn boundary, right after tool results: the
+    // note: A deadline can fire at the turn boundary, right after tool results: the
     // gathered transcript has no assistant prose left, and the run is still
     // delivered rather than failed.
     parentAgentEnd = [{ role: "toolResult", toolCallId: "call-1", toolName: "read", content: [] }];
@@ -1919,7 +1919,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("a tool-only terminal assistant entry does not erase the text an earlier entry gathered", async () => {
-    // The turn's last step dispatched a seat and stopped there: the terminal
+    // note: The turn's last step dispatched a seat and stopped there: the terminal
     // entry is a tool call, and the prose the turn gathered sits one entry
     // earlier — the stop is still the terminal entry's own account.
     parentAgentEnd = [
@@ -1931,7 +1931,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.incomplete?.reason).toBe("Deadline exceeded while the seat ran");
-    // The summary is the last assistant entry that actually said something.
+    // invariant: The summary is the last assistant entry that actually said something.
     expect(envelope.summary_md).toContain("lib/c.ts needs a null check");
   });
 
@@ -1954,7 +1954,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
-    // The yielded payload passes through verbatim: the end event never
+    // invariant: The yielded payload passes through verbatim: the end event never
     // contributes to an envelope the model actually produced.
     expect(envelope.verdict).toBe("needs fixes");
     expect(envelope.findings).toHaveLength(1);
@@ -1963,7 +1963,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(envelope.incomplete).toBeUndefined();
   });
 
-  // A NON-terminal end is a scheduling pause, not a stop: the SDK has already
+  // why: A NON-terminal end is a scheduling pause, not a stop: the SDK has already
   // queued the delivery that resumes the session, so the continuation's yield
   // or its own terminal end is awaited (bounded) before anything is decided.
   test("a parked end waits for the resumed terminal end and reports THAT stop", async () => {
@@ -1974,11 +1974,11 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     expect(envelope.verdict).toBe("incomplete");
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    // The TERMINAL end's account — the parked end never becomes the stop.
+    // invariant: The TERMINAL end's account — the parked end never becomes the stop.
     expect(envelope.incomplete?.reason).toBe("Cancelled after the pause");
     expect(envelope.summary_md).toContain("Resumed and wrapped up.");
     expect(envelope.summary_md).not.toContain("Interrupted mid-review.");
-    // The pause did not tear the session down before the continuation ran, and
+    // invariant: The pause did not tear the session down before the continuation ran, and
     // the teardown still happened exactly once afterwards.
     expect(disposeCallsAtResume).toBe(0);
     expect(disposeCalls).toBe(1);
@@ -2001,7 +2001,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
         settled = true;
       },
     );
-    // The parked end has ARRIVED and the continuation the SDK queued is still
+    // note: The parked end has ARRIVED and the continuation the SDK queued is still
     // pending — it rides a later tick (setImmediate in the fake), so the review
     // cannot settle on the pause.
     await parkedDelivered.promise;
@@ -2009,7 +2009,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     const { envelope } = await run;
 
-    // The continuation's yield wins outright: no stopped envelope is synthesized
+    // why: The continuation's yield wins outright: no stopped envelope is synthesized
     // over a review the resumed turn completed.
     expect(envelope.verdict).toBe("needs fixes");
     expect(envelope.findings).toHaveLength(1);
@@ -2030,7 +2030,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
-    // The FIRST resumed yield must not settle the wait: the continuation was
+    // why: The FIRST resumed yield must not settle the wait: the continuation was
     // still running, so the corrected payload — last successful yield wins —
     // only becomes visible when the terminal end releases the wait. The
     // terminal transcript never overwrites a yielded review.
@@ -2042,7 +2042,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("a parked turn whose terminal end lands as the prompt settles reports that end, not a deadline stop", async () => {
-    // The SDK can deliver the run's `agent_end` inside the same settle that
+    // note: The SDK can deliver the run's `agent_end` inside the same settle that
     // returns the prompt — after the pause, before `await prompt` resumes.
     // The continuation latch is armed before the prompt, so that end is
     // replayed into the bounded wait instead of the wait burning the
@@ -2058,13 +2058,13 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
     expect(envelope.incomplete?.reason).toBe("Cancelled after the pause");
     expect(envelope.summary_md).toContain("Settled as the prompt unwound.");
-    // No RunnerBudgetExhausted(1,1), and no deadline abort ever fired.
+    // invariant: No RunnerBudgetExhausted(1,1), and no deadline abort ever fired.
     expect(parentAbortReasons.every((call) => call.reason !== "runner deadline reached")).toBe(true);
     expect(disposeCalls).toBe(1);
   });
 
   test("a parked turn that never comes back expires its bounded wait into the budget signal", async () => {
-    // The wait's bound is the anchored OUTER deadline minus the publication
+    // why: The wait's bound is the anchored OUTER deadline minus the publication
     // tail, so its expiry is the run's own deadline evidence — a budget stop,
     // not a fabricated operational failure. An already-exhausted clock expires
     // a beat after the pause parks; nothing about the parked end changes
@@ -2084,11 +2084,11 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     parentYields = [deepEnvelope()];
     await ompAgentRuntime.runReview(DEEP_INPUT);
 
-    // Snapshotted from the clone at session creation: exactly the deep seat
+    // note: Snapshotted from the clone at session creation: exactly the deep seat
     // roles (no seat-agent.md, no other harness roles on the deep path).
     expect(installedAgentFiles).toEqual(["code-reviewer.md", "frontend-dev.md", "fullstack-dev.md"]);
     expect(installedSeatAgent).toBeNull();
-    // The clone is caller-owned: installed definitions are cleaned up, the
+    // invariant: The clone is caller-owned: installed definitions are cleaned up, the
     // worktree itself must survive.
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents"))).toBe(false);
     expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);
@@ -2102,7 +2102,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     expect(installedSeatDefs).not.toBeNull();
     for (const [name, content] of Object.entries(installedSeatDefs!)) {
-      // parseAgent is the SDK's own pipeline for an installed agent file:
+      // note: parseAgent is the SDK's own pipeline for an installed agent file:
       // frontmatter parse + parseAgentFields — exactly what omp task
       // discovery runs. A regression to raw harness agents/*.md (OpenCode
       // `tools:` object map) lands here as tools: [] — the declaration parse
@@ -2111,18 +2111,18 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       const agent = parseAgent(name, content, "project");
       expect(agent.name).toBe(name.replace(/\.md$/, ""));
       expect(agent.tools).toEqual(["read", "grep", "glob", "yield"]);
-      // SDK >= 18.10.2 filters `yield` out again unless the definition opts
+      // note: SDK >= 18.10.2 filters `yield` out again unless the definition opts
       // into the structured result contract (the deep parent's task tool
       // runs with `task.structured` off), so the seat must declare it.
       expect(agent.structured).toBe(true);
-      // Zero-copy: the role BODY is the fixture marker loaded from the
+      // note: Zero-copy: the role BODY is the fixture marker loaded from the
       // plugin root at runtime, not a pasted copy.
       expect(agent.systemPrompt).toContain(`# fixture agent: ${agent.name}`);
     }
   });
 
   test("a partially-failed install cleans the seat files from the clone (qc1 F-002)", async () => {
-    // A per-test CLONE of the shared fixture: this case DELETES a role file, and
+    // why: A per-test CLONE of the shared fixture: this case DELETES a role file, and
     // the shared root must stay intact for every other suite that imports it.
     const pluginRoot = mkdtempSync(join(tmpdir(), "mstar-harness-partial-"));
     cpSync(PLUGIN_ROOT_FIXTURE, pluginRoot, { recursive: true });
@@ -2130,7 +2130,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     process.env.HARNESS_PLUGIN_ROOT = pluginRoot;
     try {
       rmSync(join(pluginRoot, "agents", "fullstack-dev.md"));
-      // code-reviewer.md lands first, then the missing fullstack-dev.md
+      // note: code-reviewer.md lands first, then the missing fullstack-dev.md
       // fails the install — cleanup must still remove what was written.
       await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
         /missing the deep seat role agents\/fullstack-dev\.md/,
@@ -2149,7 +2149,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     parentYields = [deepEnvelope()];
     await ompAgentRuntime.runReview(DEEP_INPUT);
 
-    // The fixture marker text only exists in $HARNESS_PLUGIN_ROOT — its
+    // why: The fixture marker text only exists in $HARNESS_PLUGIN_ROOT — its
     // presence in the prompt proves the runtime loaded the command from the
     // plugin root instead of a pasted copy in src/.
     expect(promptTexts[0]).toContain("Fixture marker for the pinned 3.5.0 command.");
@@ -2188,7 +2188,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 });
 
 /**
- * The strict parent yield shape exercised through the SDK'S OWN validator: the
+ * why: The strict parent yield shape exercised through the SDK'S OWN validator: the
  * fake parent emits its payloads straight to the runtime's listener, so the
  * `buildOutputValidator` the yield tool binds from `session.outputSchema` is
  * what decides acceptance here (the engine gate still runs inside runReview).
@@ -2201,7 +2201,7 @@ function parentYieldValidator(): OutputValidator {
   return validator;
 }
 
-/** One mstar.review/v1 `incomplete` fact: the declared cause plus the scope the run never reached. */
+/** note: One mstar.review/v1 `incomplete` fact: the declared cause plus the scope the run never reached. */
 const INCOMPLETE_FACT = { reason: "seat budget exhausted", unscanned: ["lib/c.ts"] };
 
 describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.4)", () => {
@@ -2215,10 +2215,10 @@ describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.4
 
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
-    // The envelope-level fact the 4.0.4 prompt asks for: the strict shape
+    // note: The envelope-level fact the 4.0.4 prompt asks for: the strict shape
     // accepts it, so the turn can yield it at all…
     expect(parentYieldValidator().validate(payload).success).toBe(true);
-    // …and the engine re-validation carries it onto the returned envelope.
+    // note: …and the engine re-validation carries it onto the returned envelope.
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.incomplete).toEqual(INCOMPLETE_FACT);
   });
@@ -2241,7 +2241,7 @@ describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.4
 
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
-    // `band` (engine-emitted since 4.0.0) and the tally's echo are declared
+    // note: `band` (engine-emitted since 4.0.0) and the tally's echo are declared
     // members — additionalProperties:false no longer refuses a valid tally.
     expect(parentYieldValidator().validate(payload).success).toBe(true);
     expect(envelope.tally?.band).toBe("good");
@@ -2258,7 +2258,7 @@ describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.4
     expect(validator.validate(payload).success).toBe(true);
     expect(envelope.verdict).toBe("needs fixes");
     expect(envelope.incomplete).toBeUndefined();
-    // Still strict: an undeclared member and an off-vocabulary band are refused.
+    // invariant: Still strict: an undeclared member and an off-vocabulary band are refused.
     expect(validator.validate({ ...(payload as Record<string, unknown>), stray: true }).success).toBe(false);
     expect(
       validator.validate({
@@ -2292,7 +2292,7 @@ describe("ompAgentRuntime.runReview — envelope", () => {
               line_start: 4,
               fingerprint_hint: "fp-lib",
             },
-            // Duplicate of seat 1's must-fix by composite fingerprint.
+            // note: Duplicate of seat 1's must-fix by composite fingerprint.
             {
               mergeClass: "must-fix",
               title: "Unbounded loop",
@@ -2308,7 +2308,7 @@ describe("ompAgentRuntime.runReview — envelope", () => {
     const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
 
     expect(envelope.schema).toBe("mstar.review/v1");
-    // A must-fix finding drives the engine tally → "blocked".
+    // note: A must-fix finding drives the engine tally → "blocked".
     expect(envelope.verdict).toBe("blocked");
     expect(envelope.findings).toHaveLength(2);
     expect(envelope.findings.map((finding) => finding.title).sort()).toEqual([
@@ -2316,7 +2316,7 @@ describe("ompAgentRuntime.runReview — envelope", () => {
       "Unbounded loop",
     ]);
     expect(envelope.tally?.tally).toEqual({ mustFix: 1, shouldFix: 1, mayFix: 0, nit: 0 });
-    // recon facts fold into the envelope target.
+    // note: recon facts fold into the envelope target.
     expect(envelope.target).toEqual({
       owner: "acme",
       repo: "widgets",
@@ -2332,7 +2332,7 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (AL-23-1; 
 
     expect(createdOptions).toHaveLength(1);
     expect(createdOptions[0]!.agentDir).toBe("/tmp/omp-agent-abc");
-    // The rest of the isolation set is untouched (agentDir is additive).
+    // invariant: The rest of the isolation set is untouched (agentDir is additive).
     expect(createdOptions[0]!.cwd).toBe(TEST_WORKTREE);
     expect(createdOptions[0]!.settings).toEqual({
       kind: "isolated",
@@ -2363,7 +2363,7 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (AL-23-1; 
   });
 
   test("input.authStorage reaches the session options on EVERY path — no discoverAuthStorage fallback", async () => {
-    // The credential store is the fix for the run's own tools reading the App's
+    // safety: The credential store is the fix for the run's own tools reading the App's
     // key pool: the SDK's default is `discoverAuthStorage(agentDir)`, which
     // recreates `<agentDir>/agent.db` on disk. Omitting `authStorage` on ANY
     // call site silently undoes that, so each is asserted by identity on the
@@ -2383,7 +2383,7 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (AL-23-1; 
   });
 
   test("a distinct instance is passed through verbatim, never a re-created store", async () => {
-    // Guards the failure mode the SDK's own default would produce: the option
+    // why: Guards the failure mode the SDK's own default would produce: the option
     // must be the caller's instance, not a fresh `discoverAuthStorage` result.
     const other = { close: () => {}, kind: "other-store" } as never;
     seatResults = [{ data: seatPayload() }];
@@ -2393,10 +2393,10 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (AL-23-1; 
   });
 });
 
-/** Recheck fixtures shared with the report-seat suite (both dispatch the same seat definition). */
+/** note: Recheck fixtures shared with the report-seat suite (both dispatch the same seat definition). */
 const RECHECK_SHA = "0123456789abcdef0123456789abcdef01234567";
 
-/** Minimal trusted-catalog recheck input (shape mirrors the T1 fixtures). */
+/** note: Minimal trusted-catalog recheck input (shape mirrors the T1 fixtures). */
 function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
   return {
     schema: "mstar.recheck-input/v1",
@@ -2444,7 +2444,7 @@ function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
   };
 }
 
-/** A document validateRecheckDoc accepts against `recheckInput()`. */
+/** note: A document validateRecheckDoc accepts against `recheckInput()`. */
 function validRecheckDoc(): RecheckDoc {
   return {
     schema: "mstar.recheck/v1",
@@ -2455,14 +2455,14 @@ function validRecheckDoc(): RecheckDoc {
   };
 }
 
-/** A stale document — validateRecheckDoc rejects it as a whole. */
+/** note: A stale document — validateRecheckDoc rejects it as a whole. */
 function staleRecheckDoc(): RecheckDoc {
   return { ...validRecheckDoc(), headSha: "ffffffffffffffffffffffffffffffffffffffff" };
 }
 
 describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   beforeEach(() => {
-    // A fresh far-future anchor per test: an hour of outer guard left, so the
+    // note: A fresh far-future anchor per test: an hour of outer guard left, so the
     // TIER's clock (deep, 15 min) is the whole budget — and immune to anchor
     // state leaked from other test files (bun's module registry is
     // process-global — the runner's anchorRecheckDeadline state is shared).
@@ -2470,16 +2470,16 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   afterEach(() => {
-    // Same neutralization for every describe that runs after this one.
+    // note: Same neutralization for every describe that runs after this one.
     anchorRecheckDeadline(Date.now() + 3_600_000, "deep");
   });
 
   test("quick/default: the recheck child runs concurrently on the SAME read-only ToolSession", async () => {
-    // Dispatch order: the recheck child is created BEFORE the review seats.
+    // invariant: Dispatch order: the recheck child is created BEFORE the review seats.
     seatResults = [{ data: validRecheckDoc() }, { data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     const { envelope, recheck } = await ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
 
-    // The validated doc rides the result; the envelope is untouched.
+    // note: The validated doc rides the result; the envelope is untouched.
     expect(recheck).toEqual(validRecheckDoc());
     expect(envelope.schema).toBe("mstar.review/v1");
     expect(envelope.verdict).toBe("blocked");
@@ -2487,7 +2487,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(subagentRequests).toHaveLength(3);
     const request = subagentRequests[0]!;
     expect(request.agent).toBe("mstar-review-seat");
-    // The ToolSession handed to the recheck child reports the PR-clone cwd
+    // note: The ToolSession handed to the recheck child reports the PR-clone cwd
     // (probe by property access — the shim proxy erases to unknown, and
     // toMatchObject cannot see through the get trap).
     expect((request.session as { cwd: unknown }).cwd).toBe(TEST_WORKTREE);
@@ -2495,12 +2495,12 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(request.schemaMode).toBe("strict");
     expect(request.enableLsp).toBe(false);
     expect(request.enableIrc).toBe(false);
-    // The cap is the anchored tier's own clock (deep: 15 min), never the
+    // note: The cap is the anchored tier's own clock (deep: 15 min), never the
     // retired fixed 180s; the SDK abort signal is wired.
     expect(request.maxRuntimeMs).toBe(PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes * 60_000);
     expect(request.signal).toBeInstanceOf(AbortSignal);
     expect(request.model).toEqual([...BASE_INPUT.modelSelectors]);
-    // The assignment labels the discussion untrusted and carries the
+    // safety: The assignment labels the discussion untrusted and carries the
     // ORIGINAL concern body + trusted catalog.
     const assignment = request.assignment as string;
     expect(assignment).toContain("mstar.recheck-input/v1");
@@ -2508,7 +2508,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(assignment).toContain("The reaper recurses without a depth bound.");
     expect(assignment).toContain("UNTRUSTED");
     expect(assignment).toContain("mstar.recheck/v1");
-    // The review seats keep their own assignments.
+    // note: The review seats keep their own assignments.
     expect(subagentRequests[1]!.assignment).toContain("changeset-1-src");
     expect(subagentRequests[2]!.assignment).toContain("changeset-2-lib");
   });
@@ -2525,11 +2525,11 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     } finally {
       spy.mockRestore();
     }
-    // Seat failure/invalid payload never loses the review and never throws.
+    // invariant: Seat failure/invalid payload never loses the review and never throws.
     expect(result.recheck).toBeNull();
     expect(result.envelope.schema).toBe("mstar.review/v1");
     expect(result.envelope.verdict).toBe("blocked");
-    // The round is attributable even though it produced no document.
+    // invariant: The round is attributable even though it produced no document.
     expect(result.recheckStatus).toEqual({
       schema: "mstar.recheck-status/v1",
       headSha: RECHECK_SHA,
@@ -2546,11 +2546,11 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("exhausted budget → the seat is skipped entirely (no child started), status reason budget", async () => {
-    // A frozen clock pins the skip's figures: the outer deadline lands exactly
+    // why: A frozen clock pins the skip's figures: the outer deadline lands exactly
     // on now, so the whole durable status is comparable to a literal. The
     // explicit deadline (not the tier's derived cap) is what pins "left 0ms".
     jest.useFakeTimers();
-    anchorRecheckDeadline(Date.now(), "quick", Date.now()); // outer deadline spent → 0
+    anchorRecheckDeadline(Date.now(), "quick", Date.now()); // note: outer deadline spent → 0
     seatResults = [{ data: seatPayload() }];
     const { recheck, recheckStatus } = await ompAgentRuntime.runReview({
       ...BASE_INPUT,
@@ -2567,11 +2567,11 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       rejected: 0,
       rejected_row_ids: [],
       rejected_unnamed: 0,
-      // The tail skip names its cause AND the figures it decided on: the outer
+      // note: The tail skip names its cause AND the figures it decided on: the outer
       // time the seat's 30s floor plus the 60s publication tail needs.
       error: "recheck seat skipped (tail): the review's outer deadline left 0ms, the seat needs at least 90000ms",
     });
-    // Only the review seat ran — no recheck child was dispatched.
+    // invariant: Only the review seat ran — no recheck child was dispatched.
     expect(subagentRequests).toHaveLength(1);
     expect(subagentRequests[0]!.outputSchema).not.toBe(RECHECK_OUTPUT_SCHEMA);
   });
@@ -2593,7 +2593,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("a review that settles early lets the in-flight recheck finish and returns its document", async () => {
-    // The recheck is still running when the review seats return. The runner
+    // note: The recheck is still running when the review seats return. The runner
     // awaits that same seat on ITS OWN budget — settlement of the review is
     // no longer a reason to stop it.
     holdSeats = true;
@@ -2604,17 +2604,17 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     const run = ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
     await dispatched[2]!.promise;
 
-    // Both review seats return; the recheck seat (dispatch 0) is still held.
+    // note: Both review seats return; the recheck seat (dispatch 0) is still held.
     seatReleases[1]!();
     seatReleases[2]!();
     for (let i = 0; i < 50; i += 1) await Promise.resolve();
 
-    // It survived the review's settlement: the old abort-on-settle contract
+    // invariant: It survived the review's settlement: the old abort-on-settle contract
     // would have fired the shared controller by now.
     const signal = subagentRequests[0]!.signal as AbortSignal;
     expect(signal.aborted).toBe(false);
 
-    // It settles on its own schedule and its document rides the result.
+    // note: It settles on its own schedule and its document rides the result.
     seatReleases[0]!();
     const { recheck, recheckStatus } = await run;
     expect(recheck).toEqual(validRecheckDoc());
@@ -2622,7 +2622,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("the settle-time gate stays open near the floor: a seat that started is awaited, not aborted", async () => {
-    // 100 s of outer budget left: the 60 s publication tail leaves 40 s, above
+    // note: 100 s of outer budget left: the 60 s publication tail leaves 40 s, above
     // the 30 s floor, so the seat starts — and the settle-time gate
     // (remaining <= 30 s) does NOT abort it. The old unconditional abort would
     // have.
@@ -2645,7 +2645,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("an exhausted outer budget aborts the still-running recheck instead of blocking the run", async () => {
-    // The seat parks until its own signal fires; both review seats deliver.
+    // note: The seat parks until its own signal fires; both review seats deliver.
     holdSeats = true;
     const dispatched = [deferred(), deferred(), deferred()];
     seatDispatchQueue = dispatched.map((entry) => entry.resolve);
@@ -2654,13 +2654,13 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     const run = ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
     await dispatched[2]!.promise;
 
-    // The review outlived the outer deadline: by the time it settles there is
+    // note: The review outlived the outer deadline: by the time it settles there is
     // no room left to finish the recheck, so the runner must stop the seat
     // rather than block the run's tail waiting for it.
     anchorRecheckDeadline(Date.now() - 600_000, "quick");
     seatReleases[1]!();
     seatReleases[2]!();
-    // Release the seat's dispatch hold so it reaches its own signal wait.
+    // note: Release the seat's dispatch hold so it reaches its own signal wait.
     seatReleases[0]!();
 
     const { recheck, recheckStatus } = await run;
@@ -2679,7 +2679,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("a seat rejecting with a plain string still resolves failed — never throws out of the catch", async () => {
-    // A non-Error rejection has no `.message`; reading it blind would make the
+    // why: A non-Error rejection has no `.message`; reading it blind would make the
     // documented never-throws catch throw and lose the real failure.
     seatResults = [{ rejectWith: "provider boom" }, { data: seatPayload() }];
     const spy = spyOn(console, "error").mockImplementation(() => {});
@@ -2699,7 +2699,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("a long secret-bearing seat error is redacted BEFORE it is truncated", async () => {
-    // The secret straddles the bound. `AIza…` needs 30 trailing chars to match,
+    // safety: The secret straddles the bound. `AIza…` needs 30 trailing chars to match,
     // so slicing FIRST would leave `AIzaBBBBBB` — too short for the pattern —
     // surviving in the status; redacting first replaces the whole token and the
     // slice only ever sees the marker's prefix. Padding is sized off
@@ -2716,10 +2716,10 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     }
 
     const error = result.recheckStatus?.error ?? "";
-    // The raw message exceeded the bound, so the redacted slice fills it —
+    // note: The raw message exceeded the bound, so the redacted slice fills it —
     // asserted as a bound, not as one exact width.
     expect(error.length).toBeLessThanOrEqual(RECHECK_STATUS_ERROR_MAX_CHARS);
-    // No recognizable fragment of the key survives the cut.
+    // safety: No recognizable fragment of the key survives the cut.
     expect(error).not.toContain("AIza");
     expect(error).toContain("[REDACT");
   });
@@ -2736,7 +2736,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
         },
       ],
     });
-    // Both rows carry a legal enum value in the wrong pairing slot: each is
+    // why: Both rows carry a legal enum value in the wrong pairing slot: each is
     // dropped by the row-level rules, leaving an EMPTY document. The gate
     // accepted the document but nothing survived it, so the round delivered
     // nothing usable — `failed`/`all-rows-rejected`, not `ok`.
@@ -2816,7 +2816,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
         },
       ],
     });
-    // One row survives; the other carries an empty rowId, so the gate drops it
+    // note: One row survives; the other carries an empty rowId, so the gate drops it
     // without a name. The Worker can only attribute that drop if the status
     // CARRIES the count — the named list cannot express it.
     const docWithNamelessDrop = {
@@ -2850,14 +2850,14 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("a review failure aborts the recheck child and still rejects (never lose the review)", async () => {
-    // Two review seats — one delivers, one fails: the failure is fatal because
+    // note: Two review seats — one delivers, one fails: the failure is fatal because
     // the wave still has a review to publish.
     seatResults = [{ data: validRecheckDoc() }, { data: seatPayload() }, { error: "provider boom" }];
     await expect(
       ompAgentRuntime.runReview({ ...BASE_INPUT, level: "default", recheck: recheckInput() }),
     ).rejects.toThrow(/provider boom/);
 
-    // The recheck child was aborted through the shared controller; the
+    // note: The recheck child was aborted through the shared controller; the
     // review seats carry no SDK signal — they ARE the work that settles.
     expect(subagentRequests).toHaveLength(3);
     expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(true);
@@ -2870,46 +2870,46 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     seatResults = [{ data: validRecheckDoc() }];
     const { envelope, recheck } = await ompAgentRuntime.runReview({ ...DEEP_INPUT, recheck: recheckInput() });
 
-    // The deep parent envelope capture is uncontaminated by the recheck
+    // invariant: The deep parent envelope capture is uncontaminated by the recheck
     // session: exactly the yielded envelope, re-validated.
     expect(envelope.schema).toBe("mstar.review/v1");
     expect(envelope.findings[0]!.title).toBe("Missing null check");
     expect(recheck).toEqual(validRecheckDoc());
 
-    // TWO sessions: the deep parent + the dedicated recheck session.
+    // note: TWO sessions: the deep parent + the dedicated recheck session.
     expect(createdOptions).toHaveLength(2);
     const parent = createdOptions[0]!;
     const recheckSessionOptions = createdOptions[1]!;
     expect(parent.toolNames).toEqual(["read", "grep", "glob", "task"]);
     expect(parent.requireYieldTool).toBe(true);
-    // The recheck session: quick/default isolation — read/grep/glob only,
+    // note: The recheck session: quick/default isolation — read/grep/glob only,
     // no `task` tool, no yield schema.
     expect(recheckSessionOptions.toolNames).toEqual(["read", "grep", "glob"]);
     expect(recheckSessionOptions.requireYieldTool).toBe(false);
     expect(recheckSessionOptions.outputSchema).toBeUndefined();
     expect(recheckSessionOptions.cwd).toBe(TEST_WORKTREE);
     expect(recheckSessionOptions.agentDir).toBe(AGENT_DIR);
-    // Both deep-path sessions carry the run's credential store — the third of
+    // safety: Both deep-path sessions carry the run's credential store — the third of
     // the three call sites; omitting it would let the SDK recreate the
     // credential database on disk for the recheck session.
     expect(parent.authStorage).toBe(TEST_AUTH_STORAGE);
     expect(recheckSessionOptions.authStorage).toBe(TEST_AUTH_STORAGE);
 
-    // Exactly one structured child: the recheck seat (never a second
+    // invariant: Exactly one structured child: the recheck seat (never a second
     // prompt/yield stream on the parent session).
     expect(subagentRequests).toHaveLength(1);
     expect(subagentRequests[0]!.outputSchema).toBe(RECHECK_OUTPUT_SCHEMA);
     expect(subagentRequests[0]!.assignment).not.toContain("Fixture marker");
     expect(promptTexts).toHaveLength(1);
 
-    // The shared mstar-review-seat definition joined the deep installs.
+    // note: The shared mstar-review-seat definition joined the deep installs.
     expect(installedAgentFiles).toEqual([
       "code-reviewer.md",
       "frontend-dev.md",
       "fullstack-dev.md",
       "mstar-review-seat.md",
     ]);
-    // Both sessions settle before the cleanup; the clone survives.
+    // invariant: Both sessions settle before the cleanup; the clone survives.
     expect(disposeCalls).toBe(2);
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
     expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);
@@ -2925,13 +2925,13 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
 
     expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(true);
     expect(disposeCalls).toBe(2);
-    // Cleanup still removed every installed definition (both sessions settled).
+    // invariant: Cleanup still removed every installed definition (both sessions settled).
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents"))).toBe(false);
   });
 });
 
 describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
-  // The seat's yield: narrative keys only. `headSha` is the runner's to bind,
+  // note: The seat's yield: narrative keys only. `headSha` is the runner's to bind,
   // so every expectation below is the seat's document PLUS the envelope head.
   const REPORT = {
     schema: "mstar.report/v1" as const,
@@ -2948,7 +2948,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
   };
 
   test("quick/default: a report seat runs SERIALLY after the settled review and its document rides the result", async () => {
-    // Dispatch order: review seat, then the report seat (never concurrent —
+    // invariant: Dispatch order: review seat, then the report seat (never concurrent —
     // the report cites the settled envelope).
     seatResults = [{ data: seatPayload() }, { data: REPORT }];
     const result = await ompAgentRuntime.runReview({
@@ -2957,25 +2957,25 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
       prContext: PR_CONTEXT,
     });
 
-    // The head is the envelope's, never the seat's.
+    // invariant: The head is the envelope's, never the seat's.
     expect(result.report).toEqual(BOUND_REPORT);
-    // The review itself is unchanged by the report: the seat's finding still
+    // invariant: The review itself is unchanged by the report: the seat's finding still
     // synthesized the published envelope.
     expect(result.envelope.verdict).toBe("blocked");
     expect(subagentRequests).toHaveLength(2);
     const request = subagentRequests[1]!;
     expect(request.outputSchema).toBe(REPORT_OUTPUT_SCHEMA);
     expect(request.schemaMode).toBe("strict");
-    // The report seat sees the settled envelope and the untrusted PR context.
+    // note: The report seat sees the settled envelope and the untrusted PR context.
     const assignment = request.assignment as string;
-    // The settled envelope rides verbatim (its verdict comes from synthesis).
+    // invariant: The settled envelope rides verbatim (its verdict comes from synthesis).
     expect(assignment).toContain('"schema":"mstar.review/v1"');
     expect(assignment).toContain('"verdict":"blocked"');
     expect(assignment).toContain("Closes #7");
     expect(assignment).toContain("reject expired tokens");
     expect(assignment).toContain("mstar.report/v1");
     expect(request.model).toEqual([...BASE_INPUT.modelSelectors]);
-    // That session is the fan-out HOST, and the report seat is one more
+    // why: That session is the fan-out HOST, and the report seat is one more
     // structured child of it — no seat prompts the host directly. One-off
     // read of the mocked ToolSession's identity (the proxy type erases it).
     const hostSessionManager = (request.session as { sessionManager: unknown }).sessionManager;
@@ -3000,7 +3000,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     }
     expect(result.report).toBeNull();
     expect(result.envelope.schema).toBe("mstar.review/v1");
-    // The review itself is unaffected: same synthesized verdict as a run
+    // invariant: The review itself is unaffected: same synthesized verdict as a run
     // without a report seat.
     expect(result.envelope.verdict).toBe("blocked");
   });
@@ -3025,23 +3025,23 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     seatResults = [{ data: REPORT }];
     const result = await ompAgentRuntime.runReview({ ...DEEP_INPUT, prContext: PR_CONTEXT });
 
-    // The settled review still lands, with the bound narrative beside it.
+    // note: The settled review still lands, with the bound narrative beside it.
     expect(result.envelope.schema).toBe("mstar.review/v1");
     expect(result.envelope.verdict).toBe("needs fixes");
     expect(result.report).toEqual(BOUND_REPORT);
     expect(subagentRequests).toHaveLength(1);
 
-    // TWO sessions: the deep parent's prompt/yield stream and a DEDICATED
+    // note: TWO sessions: the deep parent's prompt/yield stream and a DEDICATED
     // report session. The seat's ToolSession is the latter — never the parent's.
     expect(createdOptions).toHaveLength(2);
-    // One-off read of the mocked ToolSession's identity (the proxy type erases it).
+    // note: One-off read of the mocked ToolSession's identity (the proxy type erases it).
     const seatSessionManager = (subagentRequests[0]!.session as { sessionManager: unknown }).sessionManager;
     expect(seatSessionManager).toBe(createdOptions[1]!.sessionManager);
     expect(seatSessionManager).not.toBe(createdOptions[0]!.sessionManager);
-    // The report session carries the quick/default isolation shape.
+    // note: The report session carries the quick/default isolation shape.
     expect(createdOptions[1]!.toolNames).toEqual(["read", "grep", "glob"]);
     expect(createdOptions[1]!.requireYieldTool).toBe(false);
-    // Teardown disposed the report session with the parent.
+    // note: Teardown disposed the report session with the parent.
     expect(disposeCalls).toBe(2);
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
   });
@@ -3051,7 +3051,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     ["deep", DEEP_INPUT],
   ] as const) {
     test(`${name}: a caller abort after the report seat starts resolves null, never throws`, async () => {
-      // The seat parks until its OWN signal fires, so the abort lands while the
+      // note: The seat parks until its OWN signal fires, so the abort lands while the
       // seat is in flight — the caller-teardown contract, not the pre-abort one.
       if (input.level === "deep") parentYields = [deepEnvelope()];
       const dispatch = deferred();
@@ -3073,14 +3073,14 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
         spy.mockRestore();
       }
       expect(result.report).toBeNull();
-      // The review itself is untouched: the envelope still resolves.
+      // invariant: The review itself is untouched: the envelope still resolves.
       expect(result.envelope.schema).toBe("mstar.review/v1");
       expect(errors.filter((line) => line.includes("report_seat_aborted"))).toHaveLength(1);
     });
   }
 
   test("a seat definition missing at dispatch degrades to no report — never a failed review", async () => {
-    // The install keeps the definition in place for the whole run; if it is
+    // why: The install keeps the definition in place for the whole run; if it is
     // gone when the report seat is reached, the seat is optional narrative and
     // the settled review must still land. Per-test clone: this test deletes the
     // definition mid-run, and the shared worktree fixture must stay intact.
@@ -3112,11 +3112,11 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     expect(result.report).toBeNull();
     expect(result.envelope.schema).toBe("mstar.review/v1");
     expect(errors.filter((line) => line.includes('"reason":"seat-definition-missing"'))).toHaveLength(1);
-    // Only the review seat reached the SDK: no dispatch without a definition.
+    // invariant: Only the review seat reached the SDK: no dispatch without a definition.
     expect(subagentRequests).toHaveLength(1);
   });
 
-  // Round-4: the seat definition must exist BEFORE the session is created —
+  // why: Round-4: the seat definition must exist BEFORE the session is created —
   // omp discovers agents per session, so an install that lands after creation
   // is invisible to it. A deep report round WITHOUT a recheck used to install
   // nothing while still dispatching the report seat.
@@ -3132,7 +3132,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     ] as ReadonlyArray<readonly [string, Partial<AgentRuntimeRunInput>, boolean, boolean]>) {
       test(`${tier}: ${name} installs the seat definition before the session exists`, async () => {
         if (tier === "deep") parentYields = [deepEnvelope()];
-        // Dispatch order: the recheck child first (it is created before the
+        // invariant: Dispatch order: the recheck child first (it is created before the
         // review work), then the level's review seats, then the report seat.
         const seatCount = tier === "deep" ? 0 : tier === "quick" ? 1 : 2;
         seatResults = [
@@ -3145,7 +3145,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
 
         expect(installedAgentFiles).toContain("mstar-review-seat.md");
         expect(result.report).toEqual(wantsReport ? BOUND_REPORT : null);
-        // The cleanup set is static, so the added install is undone with the
+        // note: The cleanup set is static, so the added install is undone with the
         // rest — a leftover definition would leak into the caller's clone.
         expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
       });
@@ -3154,17 +3154,17 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
 });
 
 /**
- * Seat supervision (progress nudges): while a seat runs it is told how much of
+ * note: Seat supervision (progress nudges): while a seat runs it is told how much of
  * the shared review clock is left and asked to converge; a seat that returned is
  * never messaged again. The loop's ticks are driven through bun's FAKE CLOCK
  * (`jest.useFakeTimers`), so every tick, figure and delivery is deterministic.
  */
 describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () => {
-  /** The engine cadence this repo reads — never a re-typed number of seconds. */
+  /** note: The engine cadence this repo reads — never a re-typed number of seconds. */
   const normalTickMs = PR_REVIEW_NUDGE_CADENCE.normalSeconds * 1000;
   const overrunTickMs = PR_REVIEW_NUDGE_CADENCE.overrunSeconds * 1000;
 
-  /** Let the supervision loop's pending microtasks run without moving the clock. */
+  /** note: Let the supervision loop's pending microtasks run without moving the clock. */
   async function flush(): Promise<void> {
     for (let i = 0; i < 50; i += 1) await Promise.resolve();
   }
@@ -3188,7 +3188,7 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
       })),
     });
 
-    // Nothing before the tick — and the tick is the engine's.
+    // invariant: Nothing before the tick — and the tick is the engine's.
     jest.advanceTimersByTime(normalTickMs - 1);
     await flush();
     expect(deliveries).toHaveLength(0);
@@ -3199,18 +3199,18 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
       { id: "a", deliverAs: "aside" },
       { id: "b", deliverAs: "aside" },
     ]);
-    // The figure is the live shared remainder, never the tier cap: the cap minus
+    // invariant: The figure is the live shared remainder, never the tier cap: the cap minus
     // the one tick elapsed since the anchor.
     expect(deliveries[0]!.text).toContain(`${cap - PR_REVIEW_NUDGE_CADENCE.normalSeconds / 60} min left`);
 
-    // Seat `a` returned: it is never nudged again while the running seat keeps
+    // note: Seat `a` returned: it is never nudged again while the running seat keeps
     // its tick.
     running.delete("a");
     jest.advanceTimersByTime(normalTickMs);
     await flush();
     expect(deliveries.slice(2).map(({ id }) => id)).toEqual(["b"]);
 
-    // The supervised work settled: the loop ends there — and only because the
+    // invariant: The supervised work settled: the loop ends there — and only because the
     // pending tick was cleared (nothing advances the clock again), never a
     // detached timer left running.
     done.resolve();
@@ -3223,7 +3223,7 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
   test("past the soft cap the tick shortens and the nudge hardens to a steer", async () => {
     jest.useFakeTimers();
     const cap = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes;
-    // Anchored past the tier cap: the review is already over its shared clock.
+    // note: Anchored past the tier cap: the review is already over its shared clock.
     anchorRecheckDeadline(Date.now() - (cap * 60_000 + 60_000), "default");
     const deliveries: Array<{ deliverAs: string; text: string }> = [];
     const done = deferred();
@@ -3241,19 +3241,19 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
       ],
     });
 
-    // The OVERRUN tick governs the wait — the normal tick would not have fired.
+    // invariant: The OVERRUN tick governs the wait — the normal tick would not have fired.
     jest.advanceTimersByTime(overrunTickMs - 1);
     await flush();
     expect(deliveries).toHaveLength(0);
     jest.advanceTimersByTime(1);
     await flush();
     expect(deliveries).toHaveLength(1);
-    // Over budget: the nudge interrupts the turn instead of riding the next step
+    // why: Over budget: the nudge interrupts the turn instead of riding the next step
     // boundary, and reports the overrun.
     expect(deliveries[0]!.deliverAs).toBe("steer");
     expect(deliveries[0]!.text).toMatch(/min over/i);
 
-    // The overrun tick governs the NEXT wait too.
+    // invariant: The overrun tick governs the NEXT wait too.
     jest.advanceTimersByTime(overrunTickMs);
     await flush();
     expect(deliveries).toHaveLength(2);
@@ -3266,7 +3266,7 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     jest.useFakeTimers();
     anchorRecheckDeadline(Date.now(), "default");
     const cap = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes;
-    // The reserved ids are the `<domain>-<seat>` slugs the dispatch mandates, so
+    // note: The reserved ids are the `<domain>-<seat>` slugs the dispatch mandates, so
     // the fake registry stands exactly where the SDK's would: addressable while
     // that seat runs.
     registerSeat("changeset-1-src");
@@ -3287,14 +3287,14 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     ]);
     expect(nudgeCalls[0]!.text).toContain(`${cap - PR_REVIEW_NUDGE_CADENCE.normalSeconds / 60} min left`);
 
-    // The first seat returns: only the seat still running is nudged again.
+    // note: The first seat returns: only the seat still running is nudged again.
     seatReleases.shift()!();
     await flush();
     jest.advanceTimersByTime(normalTickMs);
     await flush();
     expect(nudgeCalls.slice(2).map(({ id }) => id)).toEqual(["changeset-2-lib"]);
 
-    // The second seat returns: the fan-out resolves, the review completes, and
+    // note: The second seat returns: the fan-out resolves, the review completes, and
     // the loop is gone with it.
     seatReleases.shift()!();
     const { envelope } = await run;
@@ -3312,18 +3312,18 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     holdSeats = true;
     const dispatched = [deferred(), deferred()];
     seatDispatchQueue = dispatched.map((entry) => entry.resolve);
-    // Seat 0 fails (SDK execution error) while seat 1 is still running.
+    // note: Seat 0 fails (SDK execution error) while seat 1 is still running.
     seatResults = [{ error: "provider boom" }, { data: seatPayload({ findings: [] }) }];
 
     const run = ompAgentRuntime.runReview(BASE_INPUT);
-    // Observe the eventual rejection without blocking the mid-flight assertions.
+    // note: Observe the eventual rejection without blocking the mid-flight assertions.
     const outcome = run.then(
       () => null,
       (error: unknown) => error,
     );
     await dispatched[1]!.promise;
 
-    // Seat 0 returned (rejected): its sibling keeps its ticks, and nothing has
+    // note: Seat 0 returned (rejected): its sibling keeps its ticks, and nothing has
     // been torn down while that sibling still runs.
     seatReleases.shift()!();
     await flush();
@@ -3333,11 +3333,11 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     expect(disposeCalls).toBe(0);
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(true);
 
-    // Seat 1 returns: the review fails with the ORIGINAL seat error — a
+    // note: Seat 1 returns: the review fails with the ORIGINAL seat error — a
     // surviving seat never synthesizes a review on its own.
     seatReleases.shift()!();
     expect(String(await outcome)).toMatch(/review seat 0 .*failed: provider boom/);
-    // Teardown happened only after the last settlement, and neither seat is
+    // invariant: Teardown happened only after the last settlement, and neither seat is
     // nudged again.
     expect(disposeCalls).toBe(1);
     jest.advanceTimersByTime(normalTickMs * 3);
@@ -3347,7 +3347,7 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
 
   test("deep: the running parent turn is nudged aside inside the cap, steered past it, then left alone", async () => {
     jest.useFakeTimers();
-    // The explicit far deadline keeps the turn inside the runner's own hard
+    // note: The explicit far deadline keeps the turn inside the runner's own hard
     // bound (outer − publication tail), so the advance past the SOFT cap below
     // exercises supervision, not the deadline abort.
     anchorRecheckDeadline(Date.now(), "deep", Date.now() + 3_600_000);
@@ -3361,7 +3361,7 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     const run = ompAgentRuntime.runReview(DEEP_INPUT);
     await started.promise;
 
-    // Inside the cap: a non-interrupting aside carrying the live remainder.
+    // note: Inside the cap: a non-interrupting aside carrying the live remainder.
     jest.advanceTimersByTime(normalTickMs);
     await flush();
     expect(nudgeCalls.map(({ id, deliverAs }) => ({ id, deliverAs }))).toEqual([
@@ -3369,14 +3369,14 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     ]);
     expect(nudgeCalls[0]!.text).toContain(`${cap - PR_REVIEW_NUDGE_CADENCE.normalSeconds / 60} min left`);
 
-    // Past the soft cap: the next nudge interrupts and reports the overrun.
+    // invariant: Past the soft cap: the next nudge interrupts and reports the overrun.
     jest.advanceTimersByTime(cap * 60_000);
     await flush();
     expect(nudgeCalls).toHaveLength(2);
     expect(nudgeCalls[1]!.deliverAs).toBe("steer");
     expect(nudgeCalls[1]!.text).toMatch(/min over/i);
 
-    // The turn returns: the review resolves without waiting out a pending tick
+    // invariant: The turn returns: the review resolves without waiting out a pending tick
     // (the timer was cleared), and the parent session is never touched again.
     release.resolve();
     const { envelope } = await run;
@@ -3393,7 +3393,7 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     const release = deferred();
     parentPromptStarted = started.resolve;
     parentPromptRelease = release.promise;
-    // The turn is over; only the driver's settlement is still pending.
+    // note: The turn is over; only the driver's settlement is still pending.
     parentStreaming = false;
     parentYields = [deepEnvelope()];
 
@@ -3401,7 +3401,7 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     await started.promise;
     jest.advanceTimersByTime(normalTickMs * 2);
     await flush();
-    // An aside here would start a fresh turn and a steer could resume one — a
+    // invariant: An aside here would start a fresh turn and a steer could resume one — a
     // seat that already returned must never be restarted.
     expect(nudgeCalls).toHaveLength(0);
 
@@ -3411,7 +3411,7 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
 });
 
 /**
- * The applied-model rule, pinned at its own seam. The quick/default attribution
+ * note: The applied-model rule, pinned at its own seam. The quick/default attribution
  * reads each settled seat's session through the process-global agent registry,
  * so the SDK facts this rests on are stated once, here:
  *   - `AgentRegistry.register` stores the child's session on its ref
