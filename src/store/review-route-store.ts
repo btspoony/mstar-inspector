@@ -457,17 +457,18 @@ export async function landFailureEffect(
 }
 
 /**
- * Stamp the head's abandoned claim — the head-wide key — only under a proof of
- * ownership, because KV has no compare-and-set and the value cannot tell one
- * delivery's `1` from another's:
+ * Stamp the head's abandoned claim — the head-wide key — ONLY from the pass that
+ * provably owns this attempt's settlement, i.e. the pass whose own insert landed
+ * the failure record (`owned`). KV has no compare-and-set and the value cannot
+ * tell one delivery's `1` from another's, so exclusivity is the only safe rule: a
+ * pass that lost the insert race — or that is only repairing an earlier pass's
+ * unlanded stamp — cannot prove its generation and writes NOTHING. The head may
+ * already have been re-claimed by a fresh delivery, and the row's failure record
+ * stands without this write.
  *
- * - the pass that LANDED this attempt's failure row owns the stamp (it is the
- *   one that must stop the stale sentinel from suppressing a re-trigger);
- * - a later pass may repair a stamp that never landed (`claim-stamp` absent) while
- *   the settlement is still owed, which is the unreadable-read retry;
- * - every other pass writes NOTHING: its settlement may already be complete, or a
- *   fresh delivery may have re-claimed the head, and the head-wide key is not
- *   its to touch. The row's failure record stands regardless.
+ * residual: an owner whose KV write faulted leaves the stamp owed forever; no
+ * later pass can prove ownership, so no repair is attempted. Closing that needs a
+ * compare-and-set (or a generation-scoped key) this platform does not offer.
  *
  * `null` means nothing was written. The write's own proof is the caller's to
  * judge (`written`/`done` are facts, `unreadable` is still owed).
@@ -477,13 +478,10 @@ export async function stampOwedSettlementClaim(
   kv: KVNamespace,
   input: { attemptId: string; key: string; ttlSeconds: number; owned: boolean },
 ): Promise<AbandonClaimWrite | null> {
+  if (!input.owned) return null;
   const handoff = await readAttemptHandoffByAttempt(db, input.attemptId);
+  // The owner still defers to a settlement another actor completed in between.
   if (handoff === null || handoff.settledMs !== null) return null;
-  // The repair path: a settlement that is still owed, whose stamp never landed.
-  // An open Check keeps a COMPLETED stamp's settlement unsettled, so the effect
-  // itself — not `settled_ms` — decides whether the head-wide key is still owed.
-  const stamped = (handoff.settledEffects ?? []).includes("claim-stamp");
-  if (!input.owned && stamped) return null;
   return putAbandonClaim(kv, input.key, IDEM_FAILED, input.ttlSeconds);
 }
 
@@ -679,8 +677,15 @@ export async function listUnpublishedLaunchSettlements(
              WHERE (
                -- OWNERSHIP FIRST, head-independent: a journal this attempt staged is
                -- its own body (a headless delivery's checkout head, or a resolved head
-               -- that differs from the payload) and the publication lane owns it.
-               COALESCE(
+               -- that differs from the payload) and the publication lane owns it. The
+               -- tenant scope leads so the expression index (0097) seeks by prefix and
+               -- an unrelated tenant's history is never touched.
+               p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
+               AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
+               AND p.owner = json_extract(h.payload_json, '$.owner')
+               AND p.repo = json_extract(h.payload_json, '$.repo')
+               AND p.pr_number = json_extract(h.payload_json, '$.pr_number')
+               AND COALESCE(
                  json_extract(p.payload_json, '$.admittedAttemptId'),
                  json_extract(p.payload_json, '$.attemptId')
                ) = h.attempt_id

@@ -106,9 +106,12 @@ async function landSettlementEffects(
     landed.add("failure-row");
   }
   if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
-    // Ownership, not a stale snapshot, decides whether the head-wide key may move;
-    // and only a PROVEN write — or a proven `done` — is the stamped effect: an
-    // unreadable claim stays owed, so the head remains re-triggerable.
+    // ONLY the pass that landed the record may move the head-wide key (a loser or a
+    // repair pass cannot prove its generation), and only a PROVEN write — or a
+    // proven `done` — is the stamped effect: an unreadable claim stays owed, so the
+    // head remains re-triggerable. A repair a non-owner could do is deliberately
+    // not attempted: KV has no compare-and-set, so it could overwrite a fresh
+    // delivery's claim. See `stampOwedSettlementClaim`'s residual note.
     const stamped = await stampOwedSettlementClaim(env.DB, env.IDEMPOTENCY_KV, {
       attemptId: handoff.attemptId,
       key: idemKey({
@@ -204,10 +207,19 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
   // paid result hidden behind a queued Check. It is a recorded terminal failure,
   // not a publication: the staged body (diff/catalog/prepared state) is not
   // durable anywhere, so nothing here can re-render what was never written.
-  for (const handoff of await listUnpublishedLaunchSettlements(env.DB, {
-    deadlineBeforeMs: nowMs,
-    limit: ROUTE_RECOVERY_LIMIT,
-  })) {
+  // The SELECTOR is contained with its family: a fault there (a corrupt JSON
+  // payload, a store hiccup) yields this pass's selection only — the re-enqueue,
+  // settlement and claim families below still run, and the next pass retries.
+  let unpublished: AttemptHandoff[] = [];
+  try {
+    unpublished = await listUnpublishedLaunchSettlements(env.DB, {
+      deadlineBeforeMs: nowMs,
+      limit: ROUTE_RECOVERY_LIMIT,
+    });
+  } catch {
+    unpublished = [];
+  }
+  for (const handoff of unpublished) {
     try {
       await landSettlementEffects(
         env,
