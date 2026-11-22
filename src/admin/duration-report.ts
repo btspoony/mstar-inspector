@@ -28,9 +28,12 @@
  * EARLIER is the boundary, so a failure after the result was persisted is still
  * charged to execution, not to recovery. A launch row with no result has no
  * execution boundary at all — the settlement's start is not a substitute for an
- * outcome the attempt never recorded. `settled_ms` is written after the
- * publication and Check lanes closed, so a Check that concluded while a
- * publication recovery was still due cannot truncate the third bucket.
+ * outcome the attempt never recorded. `settled_ms` is written only when the
+ * obligations the attempt incurred are discharged: after the publication lane
+ * closed and, where the attempt froze a Check, after that Check concluded. An
+ * attempt that froze none has no Check lane to wait for, so a frozen Check that
+ * concluded while a publication recovery was still due cannot truncate the
+ * third bucket.
  */
 import type { D1Like } from "../store/types";
 

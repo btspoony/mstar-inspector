@@ -825,5 +825,8 @@ describe("what the surfaces claim the settlement record proves", () => {
     expect(release).toContain("尝试若有冻结的 Check");
     expect(module).toContain("where the attempt froze a Check pair");
     expect(module).toContain("froze no Check");
+    // The settlement's own wait is conditional too: no frozen Check means no
+    // Check lane to wait for.
+    expect(module).toContain("attempt that froze none has no Check lane to wait for");
   });
 });
