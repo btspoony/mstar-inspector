@@ -5166,18 +5166,19 @@ async function collectPhase(
   // the exact-value second pass (the session's ACTUAL secret values) on
   // top of the shape-based redaction — a credential that evades every
   // pattern is still removed before the post or the put.
-  const capped = capFindings(
-    clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), progress.secretValues)),
-  );
-  // A redaction inside a suggestion fence must not stay a one-click apply:
-  // downgrade that fence to a plain block before any renderer sees the body.
-  const output: ReviewOutput = {
-    ...capped.output,
-    findings: capped.output.findings.map((finding) => ({
+  const redacted = redactReviewOutputExact(redactReviewOutput(parsed.output), progress.secretValues);
+  // A redaction inside a suggestion fence must not stay a one-click apply, and
+  // the removed patch must not consume the body budget before the clamp: drop
+  // the fence FIRST, then clamp what actually publishes.
+  const suggestionsDropped: ReviewOutput = {
+    ...redacted,
+    findings: redacted.findings.map((finding) => ({
       ...finding,
       body: dropRedactedSuggestions(finding.body),
     })),
   };
+  const capped = capFindings(clampFindingSizes(suggestionsDropped));
+  const output = capped.output;
   // SEC-01 publish gate: scan the MODEL fields before any renderer runs. Host
   // template (markers, commit SHA, schema tags) is not model output, so a key
   // whose encoding collides with it can never refuse a clean review.

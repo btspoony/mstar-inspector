@@ -822,6 +822,13 @@ describe("dropRedactedSuggestions", () => {
 });
 
 describe("dropUnsafeFences (any fence, not only suggestions)", () => {
+  test("a list fence with a 3-space opener and 4-space closer stays closed", () => {
+    const body = "1. step\n   ```\n   const x = 1;\n    ```\n2. keep this instruction";
+    // A list's indentation is not part of the fence kind: the block is closed,
+    // so the instruction after it survives.
+    expect(dropUnsafeFences(body, 10_000)).toEqual({ text: body, dropped: false });
+  });
+
   test("a plain fence crossing the budget is dropped whole; the prose after it survives", () => {
     const pad = "P".repeat(20) + "\n";
     const fence = "```\nconst x = 1;\n```";

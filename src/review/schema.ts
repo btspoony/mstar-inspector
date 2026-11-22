@@ -289,8 +289,13 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
   };
 }
 
-/** A backtick or tilde fence line per CommonMark: up to 3 leading spaces, 3+ fence chars, then the info string. */
-const FENCE_LINE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+/**
+ * A backtick or tilde fence line per CommonMark: any leading indentation, 3+
+ * fence chars, then the info string. List-nested content is routinely indented
+ * more than three spaces, and GitHub accepts an opener and closer at different
+ * indents, so indentation cannot decide whether a line is a fence.
+ */
+const FENCE_LINE = /^( *)(`{3,}|~{3,})(.*)$/;
 
 /** Safe non-empty body shown when a finding consists only of dropped suggestion fences. */
 export const SUGGESTION_OMITTED = "(suggestion omitted)";

@@ -32,6 +32,7 @@ import {
 import { testAppPem } from "../helpers/rsa-key";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createConsumerHarness, makePayload } from "../helpers/consumer-harness";
+import { FINDING_BODY_MAX } from "../../src/review/schema";
 import { inlineWorkflowStep } from "../helpers/workflow-route";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
@@ -2314,6 +2315,35 @@ describe("the SEC-01 publish gate", () => {
     expect(payload.lineIntents.length).toBeGreaterThan(0);
     expect(inline).not.toContain("```suggestion");
     expect(inline).toContain("after");
+  });
+
+  test("the suggestion is dropped before the clamp, so the explanation stays intact", async () => {
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    const explanation = "Z".repeat(FINDING_BODY_MAX - 10);
+    const suggestion = '```suggestion\nconst key = "sk-test";\n```';
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+    // The body only fits once the removed patch stops consuming the budget.
+    output.findings[0]!.body = `${suggestion}\n${explanation}`;
+    execution.run.stdout = JSON.stringify(output);
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publication = db.raw
+      .prepare("SELECT payload_json FROM review_publications WHERE id = ?")
+      .get(collected.collected.publicationId) as { payload_json: string };
+    const payload = JSON.parse(publication.payload_json) as {
+      artifact: { payload: { findings: Array<{ body: string }> } };
+    };
+    const body = payload.artifact.payload.findings[0]!.body;
+    expect(body).toBe(explanation);
+    expect(body.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
   });
 
   /** The paid result rewritten to a schema-invalid body carrying `echo`. */
