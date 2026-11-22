@@ -7167,7 +7167,7 @@ function scriptedChecks(): ChecksOctokit {
           // the status and stops short of a conclusion.
           const updated: CheckRunPayload =
             "conclusion" in params
-              ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+              ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
               : "status" in params
                 ? { ...run, status: "in_progress" }
                 : run;
@@ -7467,7 +7467,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
         "conclusion" in params
-          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
           : { ...run, status: "in_progress" };
       checkRuns.set(params.check_run_id, updated);
       return updated;
@@ -7539,7 +7539,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
         "conclusion" in params
-          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
           : { ...run, status: "in_progress" };
       checkRuns.set(params.check_run_id, updated);
       return updated;
@@ -8695,7 +8695,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
               // `queued` → `in_progress` promotion moves only the status.
               const updated: CheckRunPayload =
                 "conclusion" in params
-                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
                   : "status" in params
                     ? { ...run, status: "in_progress" }
                     : run;
@@ -8909,7 +8909,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
               // `queued` → `in_progress` promotion moves only the status.
               const updated: CheckRunPayload =
                 "conclusion" in params
-                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
                   : "status" in params
                     ? { ...run, status: "in_progress" }
                     : run;
@@ -9316,7 +9316,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
         "conclusion" in params
-          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
           : "status" in params
             ? { ...run, status: "in_progress" }
             : run;
@@ -9355,7 +9355,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
         "conclusion" in params
-          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
           : "status" in params
             ? { ...run, status: "in_progress" }
             : run;

@@ -229,6 +229,85 @@ describe("the Check summary carries the approved wording", () => {
     expect(row.attempts).toBe(1);
   });
 
+  test("a reply without the frozen text is not delivery — that run is sent again", async () => {
+    const db = seededDb();
+    const id = await frozenCapStop(db);
+    let updates = 0;
+    const fetchStub = stubFetch();
+    try {
+      // Pass 1: the update is dispatched, and its reply carries this attempt's
+      // conclusion with NO readable output. The wording is what the user reads,
+      // so this reply proves nothing.
+      const first = await run(db, {
+        now: () => T0 + 1,
+        credentials: scriptedCredentials(db, {
+          fetch: async (identity, checkRunId) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: checkRunId, status: "in_progress", conclusion: null }),
+          }),
+          complete: async (identity, checkRunId) => {
+            updates += 1;
+            return {
+              kind: "completed",
+              remote: remoteFor(identity, {
+                id: checkRunId,
+                status: "completed",
+                conclusion: "failure",
+                summary: null,
+              }),
+            };
+          },
+        }),
+      });
+      expect(first.completed).toBe(0);
+      const afterFirst = await rawRow(db, id);
+      expect(afterFirst.observed).not.toBe("failure");
+      expect(afterFirst.terminal_ms).toBeNull();
+      expect(afterFirst.desired_summary).toBe(APPROVED);
+      // Still owed, and still bound to the SAME run.
+      expect(afterFirst.check_run_id).toBe(4242);
+      expect(afterFirst.next_attempt_ms).not.toBeNull();
+
+      // Pass 2: the run STILL lacks the text, so the frozen intent is sent to
+      // that same run — never to a replacement check.
+      const second = await run(db, {
+        now: () => T0 + 61_000,
+        credentials: scriptedCredentials(db, {
+          fetch: async (identity, checkRunId) => ({
+            kind: "found",
+            remote: remoteFor(identity, {
+              id: checkRunId,
+              status: "completed",
+              conclusion: "failure",
+              summary: null,
+            }),
+          }),
+          complete: async (identity, checkRunId, conclusion) => {
+            updates += 1;
+            return {
+              kind: "completed",
+              remote: remoteFor(identity, {
+                id: checkRunId,
+                status: "completed",
+                conclusion: "failure",
+                summary: conclusion.summary,
+              }),
+            };
+          },
+        }),
+      });
+      expect(second.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(updates).toBe(2);
+    const row = await rawRow(db, id);
+    expect(row.check_run_id).toBe(4242);
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.desired_summary).toBe(APPROVED);
+  });
+
   test("a waiting attempt keeps no failure text and is never examined", async () => {
     const db = seededDb();
     // The review is still running: the row wants `in_progress` and its own

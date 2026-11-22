@@ -479,7 +479,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
             expect(conclusion.summary).toContain('verdict "ship it"');
             expect(conclusion.summary).toContain("score 85");
             expect(conclusion.summary).toContain("floor 60");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }) };
           },
         }),
       });
@@ -515,7 +515,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
             expect(conclusion.desired).toBe("failure");
             expect(conclusion.failureStatus).toBe("unknown-failure");
             expect(conclusion.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -546,7 +546,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
             // rides the reconciler's own log line, never a visible field.
             expect(conclusion.failureStatus).toBe("unknown-failure");
             expect(conclusion.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -584,7 +584,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             pushed.push(conclusion);
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -631,7 +631,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("success");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }) };
           },
         }),
       });
@@ -671,7 +671,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
             expect(conclusion.desired).toBe("success");
             expect(conclusion.summary).toContain('verdict "ship it"');
             expect(conclusion.summary).toContain("score 95");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }) };
           },
         }),
       });
@@ -699,7 +699,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -737,9 +737,9 @@ describe("adoption before creation (spec §7.9 / RL-12)", () => {
             return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
           },
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }) }),
-          complete: async (identity, runId) => {
+          complete: async (identity, runId, conclusion) => {
             expect(runId).toBe(909);
-            return { kind: "completed", remote: remoteFor(identity, { id: 909, conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { id: 909, conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -768,7 +768,7 @@ describe("adoption before creation (spec §7.9 / RL-12)", () => {
             return { kind: "ready", remote: remoteFor(identity, { id: 555, status: "in_progress", conclusion: null }) };
           },
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { id: 555, status: "in_progress", conclusion: null }) }),
-          complete: async (identity) => ({ kind: "completed", remote: remoteFor(identity, { id: 555, conclusion: "failure" }) }),
+          complete: async (identity, _id, conclusion) => ({ kind: "completed", remote: remoteFor(identity, { id: 555, conclusion: "failure", summary: conclusion.summary }) }),
         }),
       });
       expect(summary.completed).toBe(1);
@@ -911,13 +911,13 @@ describe("response validation and stale-epoch writes (spec §7.11.2 step 4)", ()
           adopt: async () => ({ kind: "absent" }),
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
-          complete: async (identity) => {
+          complete: async (identity, _id, conclusion) => {
             // Between the validated response and the local write, another
             // invocation's recovery claim takes the row over (new epoch).
             db.raw
               .prepare(`UPDATE review_checks SET lease_epoch = lease_epoch + 1 WHERE id = ?`)
               .run(identity.attemptId);
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -1652,7 +1652,7 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
             kind: "found",
             remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }),
           }),
-          complete: async (identity) => ({ kind: "completed", remote: remoteFor(identity, { id: 909, conclusion: "failure" }) }),
+          complete: async (identity, _id, conclusion) => ({ kind: "completed", remote: remoteFor(identity, { id: 909, conclusion: "failure", summary: conclusion.summary }) }),
         }, undefined, SCOPE, true),
       });
       expect(summary.completed).toBe(1);
@@ -2633,9 +2633,9 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
             kind: "found",
             remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }),
           }),
-          complete: async (identity) => ({
+          complete: async (identity, _id, conclusion) => ({
             kind: "completed",
-            remote: remoteFor(identity, { id: 909, conclusion: "failure" }),
+            remote: remoteFor(identity, { id: 909, conclusion: "failure", summary: conclusion.summary }),
           }),
         }, undefined, SCOPE, true),
       });
@@ -3054,7 +3054,9 @@ function publishingScript(sent: { desired?: string; summary?: string }): Adapter
     complete: async (identity, _runId, conclusion) => {
       sent.desired = conclusion.desired;
       sent.summary = conclusion.summary;
-      return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+      // Delivery needs the frozen TEXT too (spec §7.9), so the ACK a landed
+      // update produces echoes what was sent.
+      return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
     },
   };
 }
@@ -3169,7 +3171,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
           adopt: async () => ({ kind: "absent" }),
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
-          complete: async (identity, _id, conclusion) => ({ kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) }),
+          complete: async (identity, _id, conclusion) => ({ kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) }),
         }),
       });
       expect(summary.examined).toBe(1);
@@ -4024,7 +4026,7 @@ describe("an owed Check settlement has a reader and a clearer", () => {
           complete: async (identity, _id, conclusion) => {
             completeCalls += 1;
             expect(conclusion.desired).toBe("success");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }) };
           },
         }),
       });

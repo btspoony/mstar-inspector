@@ -379,6 +379,52 @@ describe("the category is frozen with the intent (migration 0087)", () => {
     expect(row.terminalFailureStatus).toBeNull();
   });
 
+  test("a proof never rewrites a frozen stop category", async () => {
+    // Both stops name WHY the attempt ended, so a prior generation's
+    // publication is not evidence that can overwrite them.
+    for (const status of ["cap-stop", "budget-stop"] as const) {
+      const db = seededDb();
+      const { attemptId, lease } = await claimed(db);
+      db.raw
+        .prepare(
+          `INSERT INTO review_publications
+             (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+              payload_json, created_ms, updated_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'prepared', '{}', ?, ?)`,
+        )
+        .run(`proof-${status}`, APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, T0, T0);
+      const summary =
+        status === "budget-stop" ? terminalFailureSummary("budget-stop", BUDGET_RECORD) : TERMINAL_FAILURE_TEXT["cap-stop"];
+      expect(
+        await setCheckDesired(
+          db,
+          attemptId,
+          lease,
+          { desired: "failure", title: CHECK_NAME, summary, failureStatus: status },
+          null,
+          T0,
+        ),
+      ).toBe(true);
+      expect(await setCheckDesired(
+        db,
+        attemptId,
+        lease,
+        { desired: "success", title: CHECK_NAME, summary: "Review gate met." },
+        `proof-${status}`,
+        T0,
+      )).toBe(false);
+
+      const row = (await getCheckAttempt(db, attemptId))!;
+      expect(row.desired).toBe("failure");
+      expect(row.terminalFailureStatus).toBe(status);
+      const stored = (await db
+        .prepare("SELECT desired_summary FROM review_checks WHERE id = ?")
+        .bind(attemptId)
+        .first()) as { desired_summary: string };
+      expect(stored.desired_summary).toBe(summary);
+    }
+  });
+
   test("the schema refuses a category outside the approved four", async () => {
     const db = seededDb();
     const { attemptId } = await claimed(db);

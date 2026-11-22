@@ -87,7 +87,7 @@ function countingScript(calls: AdapterCalls): AdapterScript {
     }),
     complete: async (identity: CheckIdentity, _runId: number, conclusion: CheckConclusion) => {
       calls.complete += 1;
-      return { kind: "completed" as const, remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+      return { kind: "completed" as const, remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
     },
   };
 }
@@ -171,7 +171,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
             ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
             complete: async (identity, _runId, conclusion) => {
               sent.desired = conclusion.desired;
-              return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+              return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
             },
           }),
         });
@@ -325,7 +325,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -394,7 +394,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             settled.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -457,7 +457,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
             sent.summary = conclusion.summary;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -619,7 +619,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -657,7 +657,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -762,7 +762,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -793,7 +793,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -982,7 +982,7 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => ({
             kind: "completed" as const,
-            remote: remoteFor(identity, { conclusion: conclusion.desired }),
+            remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }),
           }),
         }),
       });

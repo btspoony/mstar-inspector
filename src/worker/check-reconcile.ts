@@ -1238,7 +1238,13 @@ async function recordTerminal(
   now: () => number,
   summary: CheckReconcileSummary,
 ): Promise<"recorded" | "mismatch" | "lost"> {
-  const agrees = remote.status === "completed" && remote.conclusion === frozen.desired;
+  // Delivery needs the frozen conclusion AND the frozen text (spec §7.9): a
+  // reply whose output is absent or different proves nothing about what the
+  // user reads, so it is a miss and the same run is sent again next pass.
+  const agrees =
+    remote.status === "completed" &&
+    remote.conclusion === frozen.desired &&
+    remote.summary === frozen.summary;
   if (!agrees) return "mismatch";
   const written = await recordCheckObservation(db, attemptId, lease, remote, now());
   if (!written) return "lost";

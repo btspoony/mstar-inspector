@@ -188,10 +188,13 @@ export type CheckConclusion = {
   title: string;
   summary: string;
   /**
-   * The approved failure category this intent carries, frozen in the SAME write
-   * as the text. Absent for every non-failure (a verdict, a success, a neutral
-   * skip): `desired` excludes `in_progress` by type, so a category can never be
-   * written for an attempt that is still waiting.
+   * The approved category this intent carries, frozen in the SAME write as the
+   * text. It names why the intent reports something the user must act on, so it
+   * is absent only where no fault is reported (a verdict, a superseded attempt,
+   * a plain skip). A paused run is the one `neutral` conclusion that carries
+   * one: `neutral` + `"paused"` is the honest outcome, not a failure. `desired`
+   * excludes `in_progress` by type, so a category can never be written for an
+   * attempt that is still waiting.
    */
   failureStatus?: CheckFailureStatus;
 };
@@ -1408,8 +1411,11 @@ export async function rollbackCheckCreateDispatch(
  * proof turns up, and the correction is honored ONLY when the caller supplies
  * that proof link (spec §7.9: "newly discovered positive publication proof may
  * correct a previously unknown failure into success/neutral on the same owned
- * run; record that correction, do not create another run"). Any other change —
- * a downgrade, a lateral swap, or a correction with no proof — returns false.
+ * run; record that correction, do not create another run") AND the frozen
+ * category is absent or `unknown-failure` — a `cap-stop`/`budget-stop` names
+ * why the attempt ended and is never rewritten by a proof. Any other change —
+ * a downgrade, a lateral swap, a correction with no proof, or a correction of a
+ * known stop — returns false.
  *
  * A re-write of the SAME desired is the idempotent replay case, and it is a
  * NO-OP on the frozen fields: the title, the text and the category that selects
@@ -1431,7 +1437,15 @@ export async function setCheckDesired(
   const was = current.desired;
   const replay = was === conclusion.desired;
   if (was !== "in_progress" && !replay) {
-    const correction = was === "failure" && (conclusion.desired === "success" || conclusion.desired === "neutral");
+    // Only a failure whose CAUSE was unknown can be corrected: a frozen
+    // `cap-stop`/`budget-stop` states why this attempt ended, so a prior
+    // generation's publication cannot rewrite it (first write wins).
+    const causeUnknown =
+      current.terminalFailureStatus === null || current.terminalFailureStatus === "unknown-failure";
+    const correction =
+      was === "failure" &&
+      causeUnknown &&
+      (conclusion.desired === "success" || conclusion.desired === "neutral");
     if (!correction || publicationId === null) return false;
   }
   if (replay) {
