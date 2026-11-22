@@ -1,5 +1,5 @@
 /**
- * Catalog sizes for a provider DECLARATION — the bridge between the generated
+ * why: Catalog sizes for a provider DECLARATION — the bridge between the generated
  * vendor table and a declaration an App saved.
  *
  * A model's context window and output cap are properties of the MODEL, not of
@@ -26,7 +26,7 @@ import { MODEL_LIMITS, type ModelLimit } from "./provider-model-limits.generated
 export function catalogLimitsFor(
   providerId: string,
 ): Readonly<Record<string, ModelLimit>> | undefined {
-  // Own-property lookups on both tables: a prototype-chain name is never a row.
+  // why: Own-property lookups on both tables: a prototype-chain name is never a row.
   const resolvedId = Object.hasOwn(PROVIDER_CATALOG, providerId)
     ? providerId
     : Object.hasOwn(LEGACY_PROVIDER_IDS, providerId)

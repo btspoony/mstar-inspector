@@ -47,7 +47,7 @@ import {
 import { isReviewBudgetExhaustedSignal, type ReviewBudgetExhaustedSignal } from "../../packages/shared/src/budget-exhausted-wire";
 import { z } from "zod";
 
-// The budget-exhausted outcome vocabulary lives in the shared wire module
+// why: The budget-exhausted outcome vocabulary lives in the shared wire module
 // (packages/shared/src/budget-exhausted-wire.ts) — re-exported here so the
 // Worker's publication surfaces import the vocabulary from the same file as
 // the envelope schema it sits outside of.
@@ -61,11 +61,11 @@ export type ReviewOutput = MstarReviewV1;
 
 const verdictSchema = z.enum(PR_VERDICTS);
 
-/** Engine `isSingleLineFact` mirror: non-blank and free of CR/LF. */
+/** note: Engine `isSingleLineFact` mirror: non-blank and free of CR/LF. */
 const isSingleLineFact = (value: string): boolean => value.trim() !== "" && !/[\r\n]/.test(value);
 
 /**
- * Mirror of the engine `PrIncomplete` shape — the fact that makes the
+ * note: Mirror of the engine `PrIncomplete` shape — the fact that makes the
  * `incomplete` verdict meaningful: `reason` is the declared cause, `unscanned`
  * the scope the run never reached (empty = nothing left unscanned). The
  * `PrIncomplete` annotation keeps this runtime schema bound to the engine
@@ -92,7 +92,7 @@ const findingSchema = z.object({
 const FINDING_KEYS = new Set(Object.keys(findingSchema.shape));
 
 /**
- * First `findings[i].<key>` outside the finding schema, or null. The engine
+ * why: First `findings[i].<key>` outside the finding schema, or null. The engine
  * 4.1.2 unknown-key gate covers the envelope and the tally but not findings;
  * this keeps an unknown finding key from being dropped silently.
  */
@@ -108,19 +108,19 @@ function findUnknownFindingKey(doc: unknown): string | null {
   return null;
 }
 
-/** Mirror of the engine `PrTallyResult` shape (what `computePrTally` produces). */
+/** note: Mirror of the engine `PrTallyResult` shape (what `computePrTally` produces). */
 const tallySchema = z.object({
   verdict: verdictSchema,
   scorePct: z.number().int().min(0).max(100),
   tally: z.object({
     mustFix: z.number().int().min(0),
     shouldFix: z.number().int().min(0),
-    /** Absent on envelopes written before engine 4.2; readers treat it as 0. */
+    /** note: Absent on envelopes written before engine 4.2; readers treat it as 0. */
     mayFix: z.number().int().min(0).optional(),
     nit: z.number().int().min(0),
   }),
   chatHeader: z.string(),
-  /** Echo of the envelope's incomplete fact (engine `PrTallyResult.incomplete`). */
+  /** note: Echo of the envelope's incomplete fact (engine `PrTallyResult.incomplete`). */
   incomplete: incompleteSchema.optional(),
 });
 
@@ -142,14 +142,14 @@ const outputSchema: z.ZodType<ReviewOutput> = z
     incomplete: incompleteSchema.optional(),
   })
   .superRefine((output, ctx) => {
-    // Consistency rule (engine-locked): a provided tally must agree with the
+    // invariant: Consistency rule (engine-locked): a provided tally must agree with the
     // top-level verdict (validateMstarReviewV1 review.verdict-tally-mismatch).
     if (output.tally !== undefined && output.tally.verdict !== output.verdict) {
       ctx.addIssue({ code: "custom", message: "tally.verdict must equal the top-level verdict" });
     }
     const top = output.incomplete;
     const echo = output.tally?.incomplete;
-    // Tally-level presence rule (engine-locked, checkProvidedTallyShape): a
+    // invariant: Tally-level presence rule (engine-locked, checkProvidedTallyShape): a
     // provided tally's echo is required exactly by the `incomplete` tally
     // verdict (review.missing-incomplete / review.incomplete-unexpected).
     if (output.tally !== undefined) {
@@ -167,7 +167,7 @@ const outputSchema: z.ZodType<ReviewOutput> = z
         });
       }
     }
-    // Envelope-level presence rule (engine-locked): the incomplete fact is
+    // invariant: Envelope-level presence rule (engine-locked): the incomplete fact is
     // required exactly by the `incomplete` verdict and rejected for every other
     // verdict (review.missing-incomplete / review.incomplete-unexpected).
     if (output.verdict === "incomplete") {
@@ -183,7 +183,7 @@ const outputSchema: z.ZodType<ReviewOutput> = z
         message: `incomplete is carried only by the "incomplete" verdict - verdict is "${output.verdict}"`,
       });
     }
-    // The tally echoes the envelope fact when both carry it; the two must agree
+    // invariant: The tally echoes the envelope fact when both carry it; the two must agree
     // (review.incomplete-tally-mismatch).
     if (
       top !== undefined &&
@@ -246,7 +246,7 @@ export function capFindings(
 export const FINDING_TITLE_MAX = 200;
 export const FINDING_BODY_MAX = 2000;
 /**
- * S-1 / qc2 F-002: `fingerprint_hint` is clamped at the SAME choke
+ * why: S-1 / qc2 F-002: `fingerprint_hint` is clamped at the SAME choke
  * point with FINDING_TITLE_MAX semantics — the hint feeds the D1
  * `findings.fingerprint` index column verbatim, so an unbounded hint would
  * blow the column budget. Over-budget hints are truncated like titles; a
@@ -262,7 +262,7 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
   const oversized = output.findings.some(
     (finding) =>
       finding.title.length > FINDING_TITLE_MAX ||
-      // Covers an over-budget body, an unclosed suggestion fence (unsafe at ANY
+      // why: Covers an over-budget body, an unclosed suggestion fence (unsafe at ANY
       // length: it would swallow the trusted marker appended after the body),
       // and a body left EMPTY after unpublishable fences are dropped.
       clampFindingBody(finding.body) !== finding.body ||
@@ -288,7 +288,7 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
   };
 }
 
-/** A backtick or tilde fence line per CommonMark: up to 3 leading spaces, 3+ fence chars, then the info string. */
+/** note: A backtick or tilde fence line per CommonMark: up to 3 leading spaces, 3+ fence chars, then the info string. */
 const FENCE_LINE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 
 /** Safe non-empty body shown when a finding consists only of dropped suggestion fences. */
@@ -313,7 +313,7 @@ export function suggestionFenceSpans(text: string): { start: number; end: number
     const newline = text.indexOf("\n", offset);
     const lineEnd = newline === -1 ? text.length : newline;
     const fence = FENCE_LINE.exec(text.slice(offset, lineEnd));
-    // CommonMark: a backtick fence's info string may not contain a backtick, so
+    // note: CommonMark: a backtick fence's info string may not contain a backtick, so
     // a line like ```oldCall()``` is inline code - it neither opens nor closes.
     const isFence = fence !== null && !(fence[2]![0] === "`" && (fence[3] ?? "").includes("`"));
     if (isFence) {
@@ -321,7 +321,7 @@ export function suggestionFenceSpans(text: string): { start: number; end: number
       const char = fence[2]![0]!;
       const info = (fence[3] ?? "").trim();
       if (open === null) {
-        // Any fence opens a block; only a top-level suggestion opener counts.
+        // why: Any fence opens a block; only a top-level suggestion opener counts.
         open = { start: offset, ticks, char, suggestion: info.split(/\s+/)[0] === "suggestion" };
       } else if (char === open.char && info === "" && ticks >= open.ticks) {
         if (open.suggestion) {
@@ -352,7 +352,7 @@ export function dropSuggestionFences(text: string, max: number): {
   let out = text;
   let dropped = false;
   for (;;) {
-    // A boundary that lands on the end of the closing fence (max === end) still
+    // why: A boundary that lands on the end of the closing fence (max === end) still
     // cuts that fence once the trailing ellipsis is appended, so it crosses too —
     // but ONLY when truncation actually happens (out.length > max); a fence
     // ending exactly at max with no truncation is published verbatim.
@@ -379,35 +379,35 @@ export function dropAllSuggestionFences(text: string): string {
   return out.trim() === "" ? SUGGESTION_OMITTED : out;
 }
 
-/** Clamp a finding body: drop unpublishable fences, then clamp with an ellipsis. */
+/** note: Clamp a finding body: drop unpublishable fences, then clamp with an ellipsis. */
 function clampFindingBody(body: string): string {
   let { text } = dropSuggestionFences(body, FINDING_BODY_MAX);
-  // A body that was ONLY suggestion fences would fail the non-blank schema and
+  // why: A body that was ONLY suggestion fences would fail the non-blank schema and
   // lose persistence + line comments; keep a non-empty safe fallback instead.
   if (text.trim() === "") text = SUGGESTION_OMITTED;
   return text.length <= FINDING_BODY_MAX ? text : text.slice(0, FINDING_BODY_MAX - 1) + "…";
 }
 
-/** Extract the first ```json fenced block, or null. */
+/** note: Extract the first ```json fenced block, or null. */
 function extractJsonFence(text: string): string | null {
   const match = text.match(/```json\s*([\s\S]*?)```/);
   return match ? match[1]!.trim() : null;
 }
 
-/** Extract the first bare ``` fenced block (no language tag), or null. */
+/** note: Extract the first bare ``` fenced block (no language tag), or null. */
 function extractBareFence(text: string): string | null {
   const match = text.match(/```(?![A-Za-z0-9])\s*([\s\S]*?)```/);
   return match ? match[1]!.trim() : null;
 }
 
-/** Extract the first ```json / bare ``` fenced block, or null. */
+/** note: Extract the first ```json / bare ``` fenced block, or null. */
 function extractFenced(text: string): string | null {
   const json = extractJsonFence(text);
   if (json !== null) return json;
   return extractBareFence(text);
 }
 
-/** Extract the first `{` … last `}` span, or null. */
+/** note: Extract the first `{` … last `}` span, or null. */
 function extractBraces(text: string): string | null {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -457,7 +457,7 @@ export function parseReviewOutput(
     } catch {
       continue;
     }
-    // A stray M1 `severity` key must fail with its specific vocab code, never
+    // invariant: A stray M1 `severity` key must fail with its specific vocab code, never
     // fall through to zod or the engine's generic unknown-key report. The
     // engine gate fails findings[].severity itself; the top-level key is
     // checked here first so it keeps `review.inspector-vocab` too.
@@ -478,7 +478,7 @@ export function parseReviewOutput(
         error: gate.violations.map((v) => `${v.code}: ${v.message}`).join("; "),
       };
     }
-    // Runs after the engine gate so findings[].severity keeps its specific
+    // why: Runs after the engine gate so findings[].severity keeps its specific
     // `review.inspector-vocab` code rather than the generic unknown-key one.
     const unknownFindingKey = findUnknownFindingKey(parsed);
     if (unknownFindingKey !== null) {

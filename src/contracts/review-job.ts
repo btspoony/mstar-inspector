@@ -1,5 +1,5 @@
 /**
- * Review job queue payload — single source of truth (compass contracts B).
+ * why: Review job queue payload — single source of truth (compass contracts B).
  * Produced by the worker (04) and consumed by the pipeline (06).
  * MUST NOT contain tokens, secrets, or private keys (compass contracts D).
  *
@@ -23,7 +23,7 @@ export type ReviewJobPayload = {
   pr_number: number;
   head_sha: string | null;
   /**
-   * The PR's `pull_request.updated_at` for the delivery that produced this
+   * note: The PR's `pull_request.updated_at` for the delivery that produced this
    * job, normalized to UTC ISO-8601 (`…Z`) so it compares as text against the
    * ledger's `pull_requests.head_at`. It has exactly two uses, both in the
    * supersede comparison: the payload stamp is the left operand and the
@@ -37,7 +37,7 @@ export type ReviewJobPayload = {
    */
   head_at?: string;
   /**
-   * The `issue_comment` id that produced this job — the comment trigger's
+   * note: The `issue_comment` id that produced this job — the comment trigger's
    * identity, and the only thing an idempotency claim can key on when
    * `head_sha` is null (a mention delivery states no commit). Present on
    * every `issue_comment` job whose payload carried a readable `comment.id`;
@@ -47,10 +47,10 @@ export type ReviewJobPayload = {
   action: string;
   triggered_by: "pull_request" | "issue_comment";
   botRef: { appId: string };
-  /** The `review_targets` row this job's review configuration comes from. */
+  /** note: The `review_targets` row this job's review configuration comes from. */
   targetId: string;
   /**
-   * The Check attach identity of the DELIVERY that created this job's Check run
+   * note: The Check attach identity of the DELIVERY that created this job's Check run
    * (spec §7.9): the id the delivery path used as its holder
    * (`delivery:<id>`). The queue carries the ID only — never credentials.
    *

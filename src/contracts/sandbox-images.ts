@@ -1,5 +1,5 @@
 /**
- * Sandbox runtime-image registry (spec
+ * why: Sandbox runtime-image registry (spec
  * dashboard-sandbox-configuration § Runtime-image contract) — the single
  * source-controlled list of runtime images an App can select. Every entry is
  * static build-time data: this module must never import dashboard/pipeline/
@@ -44,21 +44,21 @@ export type SandboxImageId = string;
  * two builds of this same Dockerfile can carry different gh binaries.
  */
 export type SandboxImagePins = {
-  /** Debian base image manifest digest (linux/amd64). */
+  /** note: Debian base image manifest digest (linux/amd64). */
   readonly baseImageDigest: string;
-  /** `docker.io/cloudflare/sandbox` shim tag the Dockerfile COPYs from. */
+  /** note: `docker.io/cloudflare/sandbox` shim tag the Dockerfile COPYs from. */
   readonly sandboxShimTag: string;
-  /** The shim image's manifest digest — moves only together with `sandboxShimTag`. */
+  /** note: The shim image's manifest digest — moves only together with `sandboxShimTag`. */
   readonly sandboxShimDigest: string;
-  /** Bun version, carried by the `oven/bun:<v>-debian` image tag. */
+  /** note: Bun version, carried by the `oven/bun:<v>-debian` image tag. */
   readonly bunVersion: string;
-  /** The `oven/bun:<bunVersion>-debian` manifest digest — moves only together with `bunVersion`. */
+  /** note: The `oven/bun:<bunVersion>-debian` manifest digest — moves only together with `bunVersion`. */
   readonly bunImageDigest: string;
-  /** mstar-harness tag the image clones (recorded in the Dockerfile comment). */
+  /** note: mstar-harness tag the image clones (recorded in the Dockerfile comment). */
   readonly harnessVersion: string;
-  /** mstar-harness deref commit fetched into the image. */
+  /** note: mstar-harness deref commit fetched into the image. */
   readonly harnessRef: string;
-  /** Exact `@mstar-harness/cli` version preinstalled at the container level. */
+  /** note: Exact `@mstar-harness/cli` version preinstalled at the container level. */
   readonly harnessCliVersion: string;
 };
 
@@ -84,17 +84,17 @@ export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
 
 /** One selectable sandbox runtime image. */
 export type SandboxImageDefinition = {
-  /** Stable registry id — the value stored on review_bots.sandbox_image_id. */
+  /** note: Stable registry id — the value stored on review_bots.sandbox_image_id. */
   id: SandboxImageId;
-  /** Only ENABLED entries are storable/selectable (store-enforced value domain). */
+  /** note: Only ENABLED entries are storable/selectable (store-enforced value domain). */
   enabled: boolean;
-  /** Dockerfile path relative to repo root. */
+  /** note: Dockerfile path relative to repo root. */
   dockerfilePath: string;
-  /** wrangler `containers[].images.sandbox.dockerfile` path (build_context stays repo root). */
+  /** note: wrangler `containers[].images.sandbox.dockerfile` path (build_context stays repo root). */
   wranglerImagePath: string;
-  /** That image's build pins (see `SandboxImagePins`). */
+  /** note: That image's build pins (see `SandboxImagePins`). */
   pins: SandboxImagePins;
-  /** Runtime kind — names the runner/synthesizer implementation this entry executes under. */
+  /** note: Runtime kind — names the runner/synthesizer implementation this entry executes under. */
   runtime: "omp";
 };
 
