@@ -2220,13 +2220,13 @@ describe("the SEC-01 publish gate", () => {
   });
 
   /** The paid result rewritten to a schema-invalid body carrying `echo`. */
-  async function brokenStdout(echo: string) {
+  async function brokenStdout(echo: string, whole = false) {
     const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
     const launch = db.raw
       .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT_ID) as { result_json: string };
     const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
-    execution.run.stdout = `not a review ${echo}`;
+    execution.run.stdout = whole ? echo : `not a review ${echo}`;
     db.raw
       .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
       .run(JSON.stringify(execution), ATTEMPT_ID);
@@ -2258,5 +2258,56 @@ describe("the SEC-01 publish gate", () => {
     expect(
       h.logLines.filter((line) => line.level === "warn" && line.msg.includes("publish gate could not run")),
     ).toHaveLength(1);
+  });
+
+  test("the degraded gate exact-matches an encoding that is the whole stdout", async () => {
+    // `{` encodes to a 2-char base64url; the gate must see the stdout on its
+    // own, not concatenated with the parse error, or the exact match is lost.
+    const key = "{";
+    const echo = Buffer.from(key).toString("base64url");
+    expect(echo).toBe("ew");
+    const { deps, db, ref, prepared } = await brokenStdout(echo, true);
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [key] });
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
+    const staged = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+      .get(SHA) as { n: number };
+    expect(staged.n).toBe(0);
+  });
+
+  test("an unproven failure settlement is not reported as a settled collect", async () => {
+    const { deps, db, ref, prepared } = await reviewedEcho(ECHOES.base64, false);
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+    output.findings[0]!.body = `echo ${ECHOES.base64}`;
+    execution.run.stdout = JSON.stringify(output);
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+    // A live launch row plus an unwritable failure row: the failure settlement
+    // returns `unknown` instead of certifying an outcome it cannot prove.
+    deps.failureStore = {
+      ...deps.failureStore,
+      record: async () => {
+        throw new Error("injected: no durable failure row");
+      },
+    };
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "unknown" } });
+    const handoff = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(handoff.settled_ms).toBeNull();
+    const staged = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+      .get(SHA) as { n: number };
+    expect(staged.n).toBe(0);
   });
 });

@@ -4888,29 +4888,29 @@ export async function collectAttempt(
 }
 
 /**
- * SEC-01 publish gate: return true when `text` carries a credential form and
- * the send was refused. A refusal settles through the ATTEMPT'S FAILURE path
- * (failure row + failed claim + Check conclusion) — the review genuinely did
- * not deliver, and a publication-only settlement would have nothing to close.
- * A resumed host with no credentials warns once and lets the caller continue:
- * the stored payload was already redacted by the host that wrote it.
+ * SEC-01 publish gate: return the refusal outcome for the first text that
+ * carries a credential form. A refusal settles through the ATTEMPT'S FAILURE
+ * path (failure row + failed claim + Check conclusion) — the review genuinely
+ * did not deliver, and a publication-only settlement would have nothing to
+ * close. A resumed host with no credentials warns once and lets the caller
+ * continue: the stored payload was already redacted by the host that wrote it.
  */
 async function refusesCredentialEcho(
   deps: ProcessDeps,
   ref: AttemptRef,
   prepared: PreparedAttempt,
   progress: ReviewAttemptProgress,
-  text: string,
+  texts: readonly string[],
   fields: ConsumerLogFields,
-): Promise<boolean> {
+): Promise<"clear" | "settled" | "unknown"> {
   if (progress.secretValues.length === 0) {
     deps.log.warn(
       fields,
       "review publish gate could not run — this host holds no credentials for the attempt (the stored payload was redacted at write time)",
     );
-    return false;
+    return "clear";
   }
-  if (!carriesSecretForm(text, progress.secretValues)) return false;
+  if (!texts.some((text) => carriesSecretForm(text, progress.secretValues))) return "clear";
   const refusal = new Error("publish gate refused the review — the outgoing body carries a credential echo");
   const wrapped = phaseFailure("collect", refusal, {
     stage: "pipeline",
@@ -4922,14 +4922,18 @@ async function refusesCredentialEcho(
     changedLines: prepared.observedChangedLines,
     sendAttemptPublicationId: null,
   });
+  let settlement: ProcessOutcome | null = null;
   try {
-    await settleAttemptFailure(deps, ref, wrapped, { headSha: prepared.headSha });
+    settlement = await settleAttemptFailure(deps, ref, wrapped, { headSha: prepared.headSha });
   } catch (err) {
     // The failure settlement rethrows its cause after every effect is durable;
     // this gate has already refused to publish, so that signal ends here.
     if (err !== refusal) throw err;
   }
-  return true;
+  // A returned settlement is the failure path saying it could NOT prove the
+  // outcome (unreadable launch row, or no durable failure row): never certify
+  // that as a settled collect.
+  return settlement?.kind === "unknown" ? "unknown" : "settled";
 }
 
 async function collectPhase(
@@ -5024,11 +5028,18 @@ async function collectPhase(
       deps.log.warn(fields, `review_failures insert failed (degrade continues): ${detail}`);
     }
     // The degraded body embeds the raw stdout and the parse error: gate the
-    // same credential forms before anything is staged or sent.
-    if (
-      await refusesCredentialEcho(deps, ref, prepared, progress, `${redactedStdout}\n${redactedError}`, fields)
-    ) {
-      return { kind: "settled", outcome: { kind: "ok" } };
+    // same credential forms — each text on its own, so a short encoding that
+    // IS the whole stdout still exact-matches — before anything is staged.
+    const degradedGate = await refusesCredentialEcho(
+      deps,
+      ref,
+      prepared,
+      progress,
+      [redactedStdout, redactedError],
+      fields,
+    );
+    if (degradedGate !== "clear") {
+      return { kind: "settled", outcome: { kind: degradedGate === "unknown" ? "unknown" : "ok" } };
     }
     // §7.7 degraded publication (plan: stage → claim → send the exact
     // prepared body → proof → applied mark). The same resolved commenter
@@ -5293,8 +5304,9 @@ async function collectPhase(
   // SEC-01 publish gate: the body is the last thing before GitHub. The
   // write-time redaction is the guarantee; this second scan refuses a body the
   // resumed host's stored payload let through.
-  if (await refusesCredentialEcho(deps, ref, prepared, progress, preparedBody, fields)) {
-    return { kind: "settled", outcome: { kind: "ok" } };
+  const publishGate = await refusesCredentialEcho(deps, ref, prepared, progress, [preparedBody], fields);
+  if (publishGate !== "clear") {
+    return { kind: "settled", outcome: { kind: publishGate === "unknown" ? "unknown" : "ok" } };
   }
 
   // Seen records for the current findings: the stable finding identity is
