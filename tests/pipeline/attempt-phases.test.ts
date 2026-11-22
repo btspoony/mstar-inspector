@@ -55,6 +55,7 @@ import {
 } from "../../src/store/review-route-store";
 import { CHECK_NAME, attachCheckRunId, claimAttempt, claimCheckRecovery, releaseCheckClaim, setCheckCreateState } from "../../src/store/review-checks";
 import { acquireInflight } from "../../src/store/inflight-store";
+import type { WorkflowStep } from "cloudflare:workers";
 import type { TestD1 } from "../store/helpers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
@@ -171,6 +172,37 @@ function makeRef(payload: ReviewJobPayload): AttemptRef {
     },
     attempts: 1,
   };
+}
+
+const INSTANCE_DIED = "review workflow instance died mid-step";
+
+/**
+ * note: A durable step store — everything a resumed instance owns. A recorded step
+ * replays its output instead of re-running, and once the instance reaches
+ * `dieAt` it is gone: that step and everything after it never return.
+ */
+function stepStore(store: Map<string, unknown>, dieAt?: string): WorkflowStep {
+  let died = false;
+  return {
+    do: async (name: string, configOrCallback: unknown, maybeCallback?: unknown): Promise<unknown> => {
+      if (store.has(name)) return store.get(name);
+      if (died || name === dieAt) {
+        died = true;
+        throw new Error(INSTANCE_DIED);
+      }
+      const callback = (typeof configOrCallback === "function" ? configOrCallback : maybeCallback) as (
+        ctx: unknown,
+      ) => Promise<unknown>;
+      const output = await callback({ step: { name, count: 1 }, attempt: 1, config: {} });
+      store.set(name, output);
+      return output;
+    },
+    sleep: async () => {},
+    sleepUntil: async () => {},
+    waitForEvent: async (): Promise<never> => {
+      throw new Error("the test step store does not wait for events");
+    },
+  } as unknown as WorkflowStep;
 }
 
 describe("createCheckSettlement", () => {
@@ -2215,6 +2247,51 @@ describe("the SEC-01 publish gate", () => {
       h.logLines.filter((line) => line.level === "warn" && line.msg.includes("publish gate could not run")),
     ).toHaveLength(1);
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 1 });
+  });
+
+  test("a resumed collect rebuilds the gate's credentials and refuses the encoded echo", async () => {
+    // note: Host A pays for the review, then the instance dies inside `collect`:
+    // only the database and the workflow's recorded step outputs survive. Host B
+    // is a fresh host — no credential cache, no resolved runner config.
+    const { deps: paying, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    // note: The App's seeded key (`ark-key`, the per-App config in D1) leaks only
+    // base64-encoded. Host A holds no such value, so write-time exact redaction
+    // keeps the echo in the paid result.
+    const echo = Buffer.from("ark-key", "utf8").toString("base64");
+    h.sandbox.runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [{ ...VALID_OUTPUT.findings[0]!, body: `echo ${echo}` }],
+    });
+    const steps = new Map<string, unknown>();
+    const ref = makeRef(payload);
+    await expect(
+      runReviewAttemptWorkflow(paying, ref, stepStore(steps, "collect"), async () => {}),
+    ).rejects.toThrow(INSTANCE_DIED);
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    expect(launch.result_json).toContain(echo);
+
+    const { deps: resumed } = await makeDeps({ db });
+    resumed.runnerConfigs.clear();
+    expect(resumed.credentials.size).toBe(0);
+    await runReviewAttemptWorkflow(resumed, ref, stepStore(steps), async () => {});
+
+    // note: Refused WITH credentials — the rebuilt list carries the App's key, so
+    // the encoded echo is a credential form again, and the resume warn never runs.
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
+    expect(
+      h.logLines.filter((line) => line.level === "warn" && line.msg.includes("publish gate could not run")),
+    ).toHaveLength(0);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+    const failure = db.raw.prepare("SELECT error FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      error: string;
+    }[];
+    expect(failure.some((row) => row.error.includes("publish gate refused"))).toBe(true);
   });
 
   test("a short key equal to trusted marker text is not refused", async () => {

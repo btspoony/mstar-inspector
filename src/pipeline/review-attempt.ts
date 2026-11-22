@@ -1614,7 +1614,8 @@ const RUNNER_EXEC_ENV_PASSTHROUGH_NAMES: readonly string[] = [
  * a prompt-injected model could echo verbatim — plus the installation token
  * minted for the session. `redactExactSecrets` removes them even when they
  * evade every shape pattern. The key list is the SAME resolution the runner
- * exec used (no re-resolution split-brain).
+ * exec used (no re-resolution split-brain). The exec env adds nothing here: it
+ * carries only the names in `RUNNER_EXEC_ENV_PASSTHROUGH_NAMES`.
  */
 function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: readonly string[], token: string): string[] {
   const values: string[] = [token, ...keyValues];
@@ -1623,6 +1624,20 @@ function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: reado
     if (value !== "") values.push(value);
   }
   return values;
+}
+
+/**
+ * The key values a RESUMED host can rebuild for the publish gate (I-000685):
+ * the same resolution the paid step transported, from the App config it used.
+ * The paid session's installation token is left out — it is unrecoverable, and
+ * a fresh mint is a DIFFERENT value that could never equal an echo; token forms
+ * stay with the shape-based `redactSecrets`.
+ */
+export function runnerCredentialValues(
+  appCfg: RunnerAppConfig,
+  customProviders?: readonly CustomProviderConsumerConfig[],
+): string[] {
+  return buildRunnerCredentials(appCfg, undefined, undefined, customProviders).keyValues;
 }
 
 /** Characters of an exec's stderr tail carried by its failure message. */

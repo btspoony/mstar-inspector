@@ -132,6 +132,7 @@ import {
   claimUnactivatedAttempt,
   markAttemptRevoked,
   readAttemptActivation,
+  runnerCredentialValues,
   type RunnerAppConfig,
 } from "./review-attempt";
 import {
@@ -1639,6 +1640,32 @@ export async function ensureRunnerConfig(
   const config: RunnerConfig = { appCfg, modelOverrides, customProviders };
   deps.runnerConfigs.set(payload.botRef.appId, config);
   return config;
+}
+
+/**
+ * The publish gate's exact-value list on a host that did not run the paid step.
+ * A resumed instance replays `prepare`/`review` without executing them, so the
+ * invocation's credential cache is empty and the SEC-01 gate would read no
+ * credentials and publish past them (I-000685). The list is rebuilt from the
+ * same App config the paid step resolved, never persisted: nothing new is
+ * stored, and a key rotated since the paid call simply is not in it.
+ *
+ * A config that no longer resolves (the App was deleted or its key pool emptied
+ * after the paid call) must not fail a restart that only has to finish
+ * `collect`/`publish` — this host warns and leaves the list empty, which the
+ * gate's own no-credentials warn reports.
+ */
+export async function hydrateAttemptCredentials(deps: ProcessDeps, ref: AttemptRef): Promise<void> {
+  if (deps.credentials.has(ref.attemptId)) return;
+  try {
+    const runner = await ensureRunnerConfig(ref.payload, deps);
+    deps.credentials.set(ref.attemptId, {
+      secretValues: runnerCredentialValues(runner.appCfg, runner.customProviders),
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(toBaseFields(ref.payload), `publish-gate credentials could not be re-derived: ${detail}`);
+  }
 }
 
 /**

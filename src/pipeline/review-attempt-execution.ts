@@ -2376,10 +2376,11 @@ export type ProcessDeps = {
    * The attempt's re-derived session credential, cached on the host channel so
    * the inline route mints once: `prepare` registers the token it minted, the
    * paid step replaces the entry with the session's full exact-value set, and a
-   * RESUMED host (empty map) mints and derives again. No token ever crosses a
-   * phase boundary.
+   * RESUMED host registers the set it can rebuild (`token` absent — the paid
+   * session's token is unrecoverable) so the publish gate still has credentials.
+   * No token ever crosses a phase boundary.
    */
-  credentials: Map<string, { token: string; secretValues: string[] }>;
+  credentials: Map<string, { token?: string; secretValues: string[] }>;
 };
 
 /**
