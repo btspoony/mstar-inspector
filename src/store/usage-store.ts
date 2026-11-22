@@ -41,7 +41,7 @@ export type UsageEventInput = {
    */
   rp: number;
   /**
-   * The source that price was computed from — `shared` for the shared bot,
+   * note: The source that price was computed from — `shared` for the shared bot,
    * `byok` for the workspace's own App (D7: BYOK is metered too). Stored
    * beside `rp` because the product of the two factors cannot be decomposed
    * back into them once a profile chooses its own multipliers.
