@@ -38,6 +38,11 @@ import {
   readReviewLaunch,
 } from "../../src/pipeline/review-attempt";
 import { readPublication } from "../../src/store/finding-lifecycle";
+import {
+  deliveryKeyOf,
+  readAttemptHandoff,
+  reserveAttemptHandoff,
+} from "../../src/store/review-route-store";
 import { claimAttempt } from "../../src/store/review-checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
@@ -904,5 +909,216 @@ describe("a resumed settlement claims only the frozen pair", () => {
       .prepare("SELECT check_owed_ms FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT_ID) as { check_owed_ms: number | null };
     expect(launch.check_owed_ms).toBeNull();
+  });
+});
+
+/**
+ * The attempt's publication settlement mark — the operator report's third
+ * bucket end. It is written only when NO publication work remains: a proof that
+ * never landed, or a lifecycle apply still owed to recovery, leaves the
+ * attempt's publication interval open, and marking it would understate the
+ * duration the cap is chosen from.
+ */
+describe("the publication settlement mark", () => {
+  /**
+   * The attempt up to its staged publication, with the handoff row whose mark
+   * the report reads. Returns the publication id `publishAttempt` sends.
+   */
+  async function stagedPublication(): Promise<{
+    db: Awaited<ReturnType<typeof createSeededTestD1>>;
+    ref: AttemptRef;
+    payload: ReviewJobPayload;
+    publicationId: string;
+  }> {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    const { deps: collecting } = await makeDeps({ db });
+    const collected = await collectAttempt(collecting, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+    return { db, ref, payload, publicationId: collected.collected.publicationId };
+  }
+
+  test("a send whose proof is not durable is NOT settled — discovery still owns it", async () => {
+    const { db, ref, payload, publicationId } = await stagedPublication();
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
+    // The proof UPDATE fails; nothing else does. A plain D1 double with one
+    // statement refused, named here so the access is checked at this seam.
+    const failingDb = new Proxy(db as unknown as object, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          const underlying = target as { prepare(query: string): unknown };
+          return (sql: string) => {
+            if (sql.includes("proof_json = ?")) throw new Error("injected: the proof write is not durable");
+            return underlying.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    publishing.deps.env.DB = failingDb as never;
+
+    expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
+
+    // The send happened, and its staged/sending row is the recovery evidence.
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
+    expect((await readPublication(db as never, publicationId))?.phase).toBe("sending");
+    // The publication lane has NOT closed, so no end-to-end interval exists yet.
+    expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.settledMs).toBeNull();
+  });
+
+  test("a closed publication records the settlement the report's third bucket ends at", async () => {
+    const { db, ref, payload, publicationId } = await stagedPublication();
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
+
+    expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
+
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.settledMs).toEqual(expect.any(Number));
+    expect(handoff?.settledEffects).toContain("publication");
+  });
+
+  test("a foreground settlement failure leaves nothing applied-but-unmeasured", async () => {
+    const { db, ref, payload, publicationId } = await stagedPublication();
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
+    // The settlement rides the apply transaction; its failure rolls the apply
+    // back, so the journal stays recoverable instead of applied-and-unmeasured.
+    const underlying = db as unknown as { prepare(query: string): unknown };
+    publishing.deps.env.DB = new Proxy(db as unknown as object, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql.includes("UPDATE review_attempt_handoffs")) {
+              throw new Error("injected: the settlement write never landed");
+            }
+            return underlying.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as never;
+
+    expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
+
+    // Confirmed and still due for recovery: never `applied` without its mark.
+    expect((await readPublication(db as never, publicationId))?.phase).toBe("confirmed");
+    expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.settledMs).toBeNull();
+  });
+
+  test("a resumed publication whose Check is open and held elsewhere is not settled", async () => {
+    const { db, ref, payload, publicationId } = await stagedPublication();
+    // The attempt froze a Check pair; ANOTHER holder owns the open row, so the
+    // resumed host's `settlementFor` finds nothing to adopt.
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: "someone-else",
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`test setup: claim failed: ${claimed.kind}`);
+    const check = db.raw
+      .prepare("SELECT attempt_key, generation FROM review_checks WHERE id = ?")
+      .get(claimed.attempt.identity.attemptId) as { attempt_key: string; generation: number };
+    db.raw
+      .prepare("UPDATE review_launches SET attempt_key = ?, attempt_generation = ? WHERE attempt_id = ?")
+      .run(check.attempt_key, check.generation, ATTEMPT_ID);
+
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = undefined;
+    expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
+
+    // The rule discovers the frozen pair: the open row is an obligation, so the
+    // publication is recorded but the attempt is not certified as settled.
+    expect((await readPublication(db as never, publicationId))?.phase).toBe("applied");
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.settledMs).toBeNull();
+    expect(handoff?.settledEffects).toContain("publication");
+  });
+
+  test("a journal that refuses to close leaves the attempt unmeasured", async () => {
+    const { db, ref, payload, publicationId } = await stagedPublication();
+    const publishing = await makeDeps({ db });
+    publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
+    // The send is definitively rejected, but the failed-phase mark cannot land:
+    // the journal stays recoverable, so the publication lane is still open.
+    h.commenterState.preparedReviewReject = true;
+    const underlying = db as unknown as { prepare(query: string): unknown };
+    publishing.deps.env.DB = new Proxy(db as unknown as object, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql.includes("phase = 'failed'")) {
+              throw new Error("injected: the journal refused to close");
+            }
+            return underlying.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as never;
+
+    expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
+
+    expect((await readPublication(db as never, publicationId))?.phase).not.toBe("failed");
+    expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.settledMs).toBeNull();
+  });
+
+  test("a degraded notice settles the attempt it completed", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    // Invalid output: collect publishes a degraded notice instead of a review.
+    h.sandbox.runnerStdout = "not a verdict";
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
+    const { deps: reviewing } = await makeDeps({ db });
+    await reviewAttempt(reviewing, ref, prepared);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    const { deps: collecting } = await makeDeps({ db });
+    expect(await collectAttempt(collecting, ref, prepared)).toEqual({
+      kind: "settled",
+      outcome: { kind: "degraded" },
+    });
+
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.settledMs).toEqual(expect.any(Number));
+    expect(handoff?.settledEffects).toContain("publication");
   });
 });

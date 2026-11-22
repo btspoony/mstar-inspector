@@ -106,6 +106,7 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
       attemptId: "attempt-recovered",
       payload,
       nowMs: 1_000,
+      enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
     expect((await readAttemptHandoff(db as never, key))?.state).toBe("owed");
@@ -150,6 +151,7 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
         attemptId: `attempt-${state}`,
         payload,
         nowMs: 1_000,
+        enqueuedMs: 0,
         deadlineMs: Date.now() + 600_000,
       });
       await markAttemptHandoff(db as never, key, state, 1_000);
@@ -346,5 +348,29 @@ describe("claim 5 — error classification carries proof", () => {
     expect(probed).toBe(handoff?.attemptId);
     expect(handoff?.state).toBe("created");
     expect(h.messageAckCalls).toHaveLength(1);
+  });
+
+  test("an absent Queue send stamp is recorded as absent, never invented", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const batch = h.makeBatch(payload);
+    // A hand-built message may carry `null`; `Number(null)` is 0, which would
+    // become a fabricated origin if the boundary did not normalize it.
+    const message = batch.messages[0]!;
+    const unstamped = message as unknown as { timestamp?: Date | null };
+    unstamped.timestamp = null;
+
+    const route = recordingStarter();
+    const consumer = createReviewConsumer(
+      await h.makeEnv({ DB: db as never }),
+      h.testLog,
+      { ...h.overrides, startAttempt: route.startAttempt },
+    );
+    await consumer(batch);
+
+    expect(route.started).toHaveLength(1);
+    // The cap still anchors at admission; the measured queue wait does not
+    // exist, so it stays NULL and the report excludes the attempt.
+    expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.enqueuedMs).toBeNull();
   });
 });

@@ -18,7 +18,7 @@
  * worker imports.
  */
 import type { ReviewJobPayload } from "../contracts/review-job";
-import type { D1Like } from "./types";
+import type { D1Like, D1StatementLike } from "./types";
 
 export type AttemptHandoffState = "owed" | "ambiguous" | "created" | "failed";
 
@@ -36,6 +36,12 @@ export type AttemptHandoff = {
    * actually had), never from a later delivery's clock.
    */
   deadlineMs: number | null;
+  /**
+   * The original Queue send stamp (migration 0087): the attempt's queue wait is
+   * `createdMs - enqueuedMs`. `null` on rows written before the column — the
+   * boundary is genuinely missing, never a zero.
+   */
+  enqueuedMs: number | null;
   /**
    * When this row was first written — the immutable origin a pre-migration row
    * is anchored from. Read-only after its insert.
@@ -174,6 +180,7 @@ type HandoffRow = {
   payload_json: string;
   state: AttemptHandoffState;
   deadline_ms: number | null;
+  enqueued_ms: number | null;
   created_ms: number;
   settled_ms: number | null;
   settled_effects: string | null;
@@ -187,6 +194,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
     payload: JSON.parse(row.payload_json) as ReviewJobPayload,
     state: row.state,
     deadlineMs: row.deadline_ms,
+    enqueuedMs: row.enqueued_ms,
     createdMs: row.created_ms,
     settledMs: row.settled_ms,
     settledEffects: row.settled_effects === null ? null : (JSON.parse(row.settled_effects) as SettlementEffect[]),
@@ -198,12 +206,46 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
 export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promise<AttemptHandoff | null> {
   const row = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
          FROM review_attempt_handoffs WHERE delivery_key = ?`,
     )
     .bind(deliveryKey)
     .first<HandoffRow>();
   return row === null ? null : toHandoff(row);
+}
+
+/**
+ * The handoff row by its attempt id — the handle a recovery lane holds (a
+ * publication names its attempt, never the delivery key). `attempt_id` is
+ * UNIQUE, so this is the same row `readAttemptHandoff` answers.
+ */
+export async function readAttemptHandoffByAttempt(db: D1Like, attemptId: string): Promise<AttemptHandoff | null> {
+  const row = await db
+    .prepare(
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
+         FROM review_attempt_handoffs WHERE attempt_id = ?`,
+    )
+    .bind(attemptId)
+    .first<HandoffRow>();
+  return row === null ? null : toHandoff(row);
+}
+
+/**
+ * Whether this attempt's Check is still open. The pair is the one the attempt
+ * froze on its launch row; a row with no frozen key has no Check to conclude.
+ */
+export async function attemptCheckIsOpen(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS open FROM review_launches l
+         JOIN review_checks c
+           ON c.attempt_key = l.attempt_key AND c.generation = l.attempt_generation
+        WHERE l.attempt_id = ? AND c.terminal_ms IS NULL
+        LIMIT 1`,
+    )
+    .bind(attemptId)
+    .first<{ open: number }>();
+  return row !== null;
 }
 
 /**
@@ -229,13 +271,20 @@ export async function reserveAttemptHandoff(
     payload: ReviewJobPayload;
     nowMs: number;
     deadlineMs: number;
+    /**
+     * The original Queue send stamp, or `null` when the platform supplied none.
+     * Copied here because the queue's own timestamp is not durable: after this
+     * delivery the only record of when the attempt started waiting is this
+     * column, and an absent stamp must stay absent rather than be invented.
+     */
+    enqueuedMs: number | null;
   },
 ): Promise<AttemptHandoff> {
   await db
     .prepare(
       `INSERT INTO review_attempt_handoffs
-         (delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, updated_ms)
-       VALUES (?, ?, ?, 'owed', ?, ?, ?)
+         (delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, updated_ms)
+       VALUES (?, ?, ?, 'owed', ?, ?, ?, ?)
        ON CONFLICT (delivery_key) DO NOTHING`,
     )
     .bind(
@@ -243,6 +292,7 @@ export async function reserveAttemptHandoff(
       input.attemptId,
       JSON.stringify(input.payload),
       input.deadlineMs,
+      input.enqueuedMs,
       input.nowMs,
       input.nowMs,
     )
@@ -288,7 +338,7 @@ export async function touchAttemptHandoff(db: D1Like, deliveryKey: string, nowMs
 }
 
 /** The effects a settlement can make durable (see `settleAttemptFailure`). */
-export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip";
+export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip" | "publication";
 
 /**
  * Complete the settle-once mark. It is written by the settlement itself, and it
@@ -305,12 +355,120 @@ export async function markAttemptSettled(
   required: readonly SettlementEffect[],
   nowMs: number,
 ): Promise<boolean> {
-  // ONE statement, because two settlements can run for one row (a step retry
-  // racing a resumed host): the effects ACCUMULATE (the union keeps what the
-  // other execution landed) and completeness is decided against the union, so
-  // neither write can erase the other's progress and neither can certify an
-  // effect that is missing. `json_each` is SQLite's own JSON1 surface.
-  const written = await db
+  const written = await settlementStatement(db, "delivery_key = ?", [deliveryKey], landed, required, nowMs).run();
+  return written.meta.changes === 1;
+}
+
+/** What one settlement execution actually made durable for its attempt. */
+export type AttemptSettlementInput = {
+  attemptId: string;
+  landed: readonly SettlementEffect[];
+};
+
+/**
+ * THE settlement rule. An attempt settles only when every obligation it
+ * incurred is discharged; a caller reports the effects it actually made durable
+ * and never decides completeness for itself.
+ *
+ * The obligations come from the attempt's own durable facts:
+ * - the OUTCOME lane — `publication` (the journal reached applied, or a
+ *   definitive close) or `failure-row` (the failure settlement);
+ * - `check` when the attempt froze a Check pair on its launch row. The row is
+ *   read through that pair, so a Check another holder owns is still an
+ *   obligation, and an OPEN row is not a conclusion whatever a handle saw;
+ * - the failed-claim stamp when the failure lane names a commit — the lane that
+ *   can leave a stale "1" claiming a review that will never come. A
+ *   publication's success is its claim's discharge.
+ *
+ * The Check effect is added here when the row is terminal (a conclusion another
+ * lane recorded) and dropped when it is open, so `settled_effects` never claims
+ * a conclusion the database does not hold. Returns `null` when no lane has
+ * closed yet — nothing may be settled or certified.
+ */
+async function settlementPlan(
+  db: D1Like,
+  input: AttemptSettlementInput,
+): Promise<{ deliveryKey: string; landed: SettlementEffect[]; required: SettlementEffect[] } | null> {
+  const handoff = await readAttemptHandoffByAttempt(db, input.attemptId);
+  if (handoff === null) return null;
+  const landed = new Set<SettlementEffect>([...(handoff.settledEffects ?? []), ...input.landed]);
+  // The pair the attempt froze is the ONLY fact that says a Check exists; the
+  // caller's handle says what it could reach, not what the attempt owes.
+  const checkInvolved = (await readAttemptCheckKey(db, input.attemptId)) !== null;
+  const checkOpen = checkInvolved ? await attemptCheckIsOpen(db, input.attemptId) : false;
+  if (checkOpen) landed.delete("check");
+  else if (checkInvolved) landed.add("check");
+
+  let required: SettlementEffect[];
+  if (landed.has("skip")) {
+    required = ["skip"];
+  } else if (landed.has("failure-row")) {
+    required = settlementObligationsOf(handoff.payload, checkInvolved);
+  } else if (landed.has("publication")) {
+    required = ["publication"];
+    if (checkInvolved) required.push("check");
+  } else {
+    return null;
+  }
+  return { deliveryKey: handoff.deliveryKey, landed: [...landed], required };
+}
+
+/**
+ * Apply the rule now: merge what this execution landed and complete the mark
+ * only when the attempt's obligations are discharged. `false` means nothing was
+ * written (no lane closed, or no handoff row).
+ */
+export async function settleAttemptIfDischarged(
+  db: D1Like,
+  input: AttemptSettlementInput,
+  nowMs: number,
+): Promise<boolean> {
+  const plan = await settlementPlan(db, input);
+  if (plan === null) return false;
+  return markAttemptSettled(db, plan.deliveryKey, plan.landed, plan.required, nowMs);
+}
+
+/**
+ * The rule as a STATEMENT for a caller that must record it inside another
+ * transaction (a recovery apply). The publication guard makes the statement
+ * self-checking: it only lands when the journal really reached `applied`. The
+ * obligations are read from durable facts NOW, before the batch.
+ */
+export async function settlementStatementIfDischarged(
+  db: D1Like,
+  input: AttemptSettlementInput & { publicationId: string },
+  nowMs: number,
+): Promise<D1StatementLike | null> {
+  const plan = await settlementPlan(db, input);
+  if (plan === null) return null;
+  return settlementStatement(
+    db,
+    `attempt_id = ? AND EXISTS (
+       SELECT 1 FROM review_publications WHERE id = ? AND phase = 'applied'
+     )`,
+    [input.attemptId, input.publicationId],
+    plan.landed,
+    plan.required,
+    nowMs,
+  );
+}
+
+/**
+ * ONE statement, because two settlements can run for one row (a step retry
+ * racing a resumed host): the effects ACCUMULATE (the union keeps what the
+ * other execution landed) and completeness is decided against the union, so
+ * neither write can erase the other's progress and neither can certify an
+ * effect that is missing. `json_each` is SQLite's own JSON1 surface.
+ */
+function settlementStatement(
+  db: D1Like,
+  whereSql: string,
+  whereBinds: readonly string[],
+  landed: readonly SettlementEffect[],
+  required: readonly SettlementEffect[],
+  nowMs: number,
+): D1StatementLike {
+  return db
     .prepare(
       `UPDATE review_attempt_handoffs
           SET settled_effects = (
@@ -332,17 +490,15 @@ export async function markAttemptSettled(
                 ) THEN ?
                 ELSE NULL
               END
-        WHERE delivery_key = ?`,
+        WHERE ${whereSql}`,
     )
     .bind(
       JSON.stringify(landed),
       JSON.stringify(required),
       JSON.stringify(landed),
       nowMs,
-      deliveryKey,
-    )
-    .run();
-  return written.meta.changes === 1;
+      ...whereBinds,
+    );
 }
 
 /**
@@ -396,7 +552,7 @@ export async function listIncompleteSettlements(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
          FROM review_attempt_handoffs
         WHERE settled_ms IS NULL AND settling_ms IS NOT NULL AND settling_ms <= ?
         ORDER BY settling_ms
@@ -418,7 +574,7 @@ export async function listHandoffsForRecovery(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
          FROM review_attempt_handoffs
         WHERE state IN ('owed', 'ambiguous') AND updated_ms <= ?
         ORDER BY updated_ms

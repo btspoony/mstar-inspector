@@ -1543,6 +1543,38 @@ export const en = {
       /** The stored budget could not be read — the number is the documented default. */
       recheckUnreadable:
         "The stored recheck assignment budget could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
+      /** The platform's one end-to-end maximum review duration. */
+      attemptCapTitle: "Maximum review duration",
+      attemptCapDescription:
+        "The whole attempt stops at this cap: queue wait, execution and publication together. A review stopped by it is terminal and is not re-run automatically.",
+      attemptCapLabel: "Maximum duration (ms)",
+      /** {min}/{max} in ms plus minutes; a refusal names the same range. */
+      attemptCapRange:
+        "Accepted range: {min}–{max} ms ({minMinutes}–{maxMinutes} minutes). A value outside it is refused.",
+      attemptCapSave: "Save",
+      attemptCapSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      attemptCapFailed: "Could not change the maximum review duration.",
+      /** {value} = the stored cap, so the operator knows it is a save. */
+      attemptCapCurrentSaved: "Effective on the next review: {value} ms (saved value).",
+      /** {value} = the absent-row default — never presented as a saved value. */
+      attemptCapCurrentDefault:
+        "Effective on the next review: {value} ms (platform default — no value is saved).",
+      /** A save's re-read disagreed with its echo: the store's value wins. */
+      attemptCapChangedElsewhere:
+        "Another save changed the stored value while this page was open; the effective value is now {value} ms, which is what the store holds.",
+      /** A save is in flight or accepted; no value shows until it is read back. */
+      attemptCapConfirming:
+        "A save was sent and the stored value is being confirmed. No effective value is shown until it can be read back.",
+      /**
+       * The save did not answer (network, timeout, 5xx): it may have landed.
+       * Never say it failed — say the outcome is unknown.
+       */
+      attemptCapUnknown:
+        "The save's outcome is unknown: the request did not answer, so it may or may not have been stored. Retry reads the stored value back; no number is shown until it does.",
+      /** No attempt is admitted while the stored cap cannot be read. */
+      attemptCapUnreadable:
+        "The stored maximum duration could not be read, so no new review is admitted until it is readable again or a new value is saved.",
       /** Admission refusals the pipeline recorded over the trailing 24h. */
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:
@@ -1577,6 +1609,40 @@ export const en = {
       /** No message is waiting, so the gauge reports no oldest stamp. */
       queueEmpty: "Empty",
       githubRateLimitedLabel: "GitHub secondary limits (24 h)",
+      /** The duration analysis: the evidence for choosing the attempt cap. */
+      durationTitle: "Review duration distribution",
+      durationDescription:
+        "Attempts admitted in the last {days} days. Percentiles use only intervals whose settlement instant is written and whose settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than that instant. An empty window stays empty — it never reads as a zero.",
+      durationEmpty: "No attempt was admitted in this window.",
+      durationEmptyExcluded:
+        "No attempt was measured: all {n} admitted attempts were excluded — {checkOpen} with a Check not proven closed at settlement, {recordMissing} with no settlement record, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
+      durationSample: "{n} complete attempts",
+      durationTotal: "End to end",
+      durationQueueWait: "Queue wait",
+      durationExecution: "Execution",
+      durationPublication: "Publication / recovery",
+      durationP50: "p50",
+      durationP90: "p90",
+      durationMax: "max",
+      durationBuckets:
+        "Every attempt's interval splits into these three phases. Percentiles are per row, so one column does not add up across rows.",
+      durationExcluded:
+        "Excluded from the percentiles: {checkOpen} with a Check not proven closed at settlement, {recordMissing} with no settlement record, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
+      durationFailureTail:
+        "An attempt whose paid step failed without a durable result has no execution end and is excluded before its duration is measured: while its settlement is still owed it counts as unsettled; once settled, a frozen Check not proven closed at settlement is counted before the missing result; otherwise the missing result reads as a missing boundary. A durable result does not by itself make an attempt measurable — a later failure still excludes it when the settlement, the queue stamp, the boundary order or the settlement record is missing, or when the attempt froze a Check that was not proven closed at settlement.",
+      durationSettlementBasis:
+        "A sample is measured because its settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than the settlement instant. Delivery idempotency is not part of the interval.",
+      durationCandidateLabel: "Candidate cap (ms)",
+      /** The analysis range, stated only when a typed candidate falls outside it. */
+      durationCandidateRange: "The analysis accepts an integer from {min} to {max} ms.",
+      durationCandidateApply: "Show cutoff",
+      durationCutoff: "A {cap} ms cap would exclude {over} of {n} attempts ({share}).",
+      durationCutoffNone: "No completed attempt would exceed {cap} ms.",
+      durationCutoffEmpty: "No sample to compare against.",
+      durationCrossed:
+        "First phase past the cap: queue wait {queueWait}, execution {execution}, publication or recovery {publication}.",
+      durationCaveat:
+        "A capped attempt is terminal: the work it already observed is not re-run automatically, and whether a cap-stopped paid review is billed remains an open question.",
       /**
        * Deployment version footer. `{version}` carries the
        * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

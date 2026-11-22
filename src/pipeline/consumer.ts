@@ -1370,6 +1370,20 @@ export function createProcessDeps(
 }
 
 /**
+ * The Queue send stamp as milliseconds, or `null` when the platform supplied
+ * none. A `Date` is the platform's form; a numeric stamp is accepted for
+ * hand-built batches. Anything else is ABSENCE — never `Number(...)`, which
+ * would turn `null` into a finite 0 and invent the attempt's origin.
+ */
+function queueStampOf(timestamp: unknown): number | null {
+  if (timestamp instanceof Date) {
+    const ms = timestamp.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return typeof timestamp === "number" && Number.isFinite(timestamp) ? timestamp : null;
+}
+
+/**
  * Create the queue consumer: admission, dedupe, skip settlement and the
  * hand-off only. One admitted delivery becomes one Workflow instance through
  * the caller's `startAttempt` (or the `startAttempt` override); the consumer
@@ -1454,9 +1468,9 @@ export function createReviewConsumer(
     }
     for (const message of batch.messages) {
       // The Queue send stamp is the attempt deadline's origin. It is a `Date`
-      // on the platform and may be absent in a hand-built test batch; a
-      // non-finite/absent value falls back to the admission instant.
-      const sentAtMs = message.timestamp instanceof Date ? message.timestamp.getTime() : Number(message.timestamp);
+      // on the platform and may be absent in a hand-built test batch; the
+      // boundary normalization keeps an absent stamp absent.
+      const sentAtMs = queueStampOf(message.timestamp);
       const outcome = await processMessage(message.body, deps, message.attempts, starter, sentAtMs);
       // BB-3: guard-held is a typed outcome — schedule the per-message
       // delayed retry (or the final ack-with-warning) instead of throwing
@@ -1567,8 +1581,10 @@ export async function ensureRunnerConfig(
  *   only the value past the queue's retry budget matters — it stamps the
  *   idempotency key `failed` so a DLQ-bound commit stops counting as reviewed-
  *   or-pending proof.
- * @param queueSentAtMs the original Queue send stamp: the attempt deadline's
- *   origin. A redelivery of an already-frozen attempt ignores it in favour of
+ * @param queueSentAtMs the original Queue send stamp, already normalized at the
+ *   boundary: `null` means the platform supplied none. An absent value is NOT
+ *   replaced: the cap falls back to admission, while the report's origin stays
+ *   missing. A redelivery of an already-frozen attempt ignores it in favour of
  *   the recorded deadline.
  */
 async function processMessage(
@@ -1576,16 +1592,19 @@ async function processMessage(
   deps: ProcessDeps,
   attempts = 1,
   startAttempt?: AttemptStarter,
-  queueSentAtMs = Number.NaN,
+  queueSentAtMs: number | null = null,
 ): Promise<ProcessOutcome> {
   // This invocation's entry instant. Every best-effort step that can spend a
   // sandbox window is measured against it, and it is the fallback origin for
   // an attempt whose Queue send stamp is unavailable.
   const roundStartedAt = Date.now();
   // The attempt's clock starts at the ORIGINAL Queue send, not here: the queue
-  // wait is charged against the cap. A send stamp after "now" (clock skew) or
-  // an absent one is the admission instant instead.
-  const enqueuedMs = Number.isFinite(queueSentAtMs) ? Math.min(queueSentAtMs, roundStartedAt) : roundStartedAt;
+  // wait is charged against the cap. The REPORT's origin stays absent when the
+  // platform supplied no stamp — an invented origin would make the measured
+  // queue wait a lie. The CAP still needs an instant, so its origin is the send
+  // stamp clamped to this instant (a future stamp is clock skew), or admission
+  // when there is none — the timing contract's documented fallback.
+  const capOriginMs = queueSentAtMs === null ? roundStartedAt : Math.min(queueSentAtMs, roundStartedAt);
   // The delivery key and the recorded attempt id are learned inside the try, so
   // a DB fault or a legacy payload still flows through the structured failure
   // channel. A redelivery of this message finds the row its predecessor wrote
@@ -1991,7 +2010,7 @@ async function processMessage(
           warn: (readerFields, msg) =>
             deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
         }));
-      deadlineMs = (previousHandoff?.createdMs ?? enqueuedMs) + capMs;
+      deadlineMs = (previousHandoff?.createdMs ?? capOriginMs) + capMs;
     }
     // The guard row must outlive the attempt's own hard stop: an operator cap
     // can exceed the level's ceiling-derived TTL, and a guard that expired
@@ -2215,6 +2234,7 @@ async function processMessage(
       payload,
       nowMs: Date.now(),
       deadlineMs,
+      enqueuedMs: queueSentAtMs,
     });
     if (handoff.attemptId !== attemptId) {
       // Two deliveries of the same message raced; the other one owns this

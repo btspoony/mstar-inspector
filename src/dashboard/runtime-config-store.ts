@@ -725,30 +725,103 @@ export type ReviewAttemptCap = {
 };
 
 /**
- * The end-to-end attempt cap in ONE read. Only an absent row is the default; a
- * present value the parse cannot trust or a read failure answers the default
- * with `degraded: true` and never throws — the caller (admission) decides that
- * a degraded answer leaves the delivery retryable rather than inventing a cap.
+ * The cap plus WHERE its number came from. `saved` is true only when a stored
+ * row parsed in range, so the operator surface can show an absent row as the
+ * default instead of claiming a value the store does not hold.
  */
-export async function getReviewAttemptCap(db: DashboardD1): Promise<ReviewAttemptCap> {
+export type ReviewAttemptCapSetting = ReviewAttemptCap & { saved: boolean };
+
+/**
+ * The end-to-end attempt cap in ONE read, plus whether a stored row produced
+ * it. Only an absent row is the default; a present value the parse cannot
+ * trust or a read failure answers the default with `degraded: true` and never
+ * throws — admission REFUSES a degraded answer (retrying the delivery) and the
+ * operator surface reports it as unreadable instead of showing a number.
+ */
+export async function getReviewAttemptCapSetting(
+  db: DashboardD1,
+): Promise<ReviewAttemptCapSetting> {
   try {
     const row = await db
       .prepare(`SELECT value FROM review_runtime_settings WHERE key = ?1`)
       .bind(REVIEW_ATTEMPT_CAP_KEY)
       .first<RuntimeSettingRow>();
-    if (row === null) return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: false };
+    if (row === null) {
+      return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, saved: false, degraded: false };
+    }
     // A result row without its (NOT NULL) value column is malformed, not absent.
     if (row.value === undefined) {
-      return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: true, reason: "malformed" };
+      return {
+        capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS,
+        saved: false,
+        degraded: true,
+        reason: "malformed",
+      };
     }
     const capMs = parseInRange(row.value, REVIEW_ATTEMPT_CAP_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS);
     if (Number.isNaN(capMs)) {
-      return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: true, reason: "untrusted" };
+      return {
+        capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS,
+        saved: false,
+        degraded: true,
+        reason: "untrusted",
+      };
     }
-    return { capMs: capMs ?? REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: false };
+    // A present row whose value is NULL is an absent setting, not a save.
+    return capMs === undefined
+      ? { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, saved: false, degraded: false }
+      : { capMs, saved: true, degraded: false };
   } catch {
-    return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, degraded: true, reason: "read-failed" };
+    return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, saved: false, degraded: true, reason: "read-failed" };
   }
+}
+
+/** The enforcement read: the effective cap of {@link getReviewAttemptCapSetting}. */
+export async function getReviewAttemptCap(db: DashboardD1): Promise<ReviewAttemptCap> {
+  const { capMs, degraded, reason } = await getReviewAttemptCapSetting(db);
+  return reason === undefined ? { capMs, degraded } : { capMs, degraded, reason };
+}
+
+/** The audit ledger's target id for the cap (one operator save, one row). */
+const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";
+
+/**
+ * One operator save, one audit row: `before` carries the stored value under
+ * the readers' trust rule (a corrupt row is `null`), `after` the accepted one.
+ */
+const REVIEW_ATTEMPT_CAP_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.attempt_cap.set', 'runtime', ?3,
+          json_object('before', ${storedBudgetSql("?5", "NULL", REVIEW_ATTEMPT_CAP_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS)},
+                      'after', ?4),
+          ?6)`;
+
+/**
+ * Set the end-to-end attempt cap. A value outside its range refuses the write
+ * (`invalid_value`, the accepted range named in the message) with no row and
+ * no audit entry; an accepted value is audited with the actor in ONE batch and
+ * returned.
+ */
+export async function setReviewAttemptCap(
+  db: DashboardD1,
+  value: number,
+  actor: string,
+): Promise<number> {
+  if (!isIntegerIn(value, REVIEW_ATTEMPT_CAP_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `the attempt cap must be an integer in ${REVIEW_ATTEMPT_CAP_MIN_MS}..${REVIEW_ATTEMPT_CAP_MAX_MS} ms`,
+    );
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(REVIEW_ATTEMPT_CAP_AUDIT_SQL)
+      .bind(crypto.randomUUID(), actor, REVIEW_ATTEMPT_CAP_TARGET, value, REVIEW_ATTEMPT_CAP_KEY, now),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_ATTEMPT_CAP_KEY, String(value), now, actor),
+  ]);
+  return value;
 }
 
 /**

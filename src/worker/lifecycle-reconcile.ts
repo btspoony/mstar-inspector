@@ -65,7 +65,7 @@
 
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
-import type { D1Like } from "../store/types";
+import type { D1Like, D1StatementLike } from "../store/types";
 import {
   applyPublishedLifecycle,
   claimPublication,
@@ -96,6 +96,7 @@ import {
 import { createSecretbox } from "../dashboard/secretbox";
 import { createReviewCommenter, PreparedSendRejected, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 import { sha256Hex } from "../pipeline/review-threads";
+import { settlementStatementIfDischarged } from "../store/review-route-store";
 
 // ---------------------------------------------------------------------------
 // Summary + budget constants (spec §7.11.1 verbatim values)
@@ -732,6 +733,33 @@ async function reconcilePublications(
 }
 
 /**
+ * A recovery apply COMPLETES the attempt that staged the publication. The
+ * settlement statement is planned from the attempt's durable obligations
+ * before the batch and rides the apply's own transaction, so the applied mark
+ * and the attempt's end cannot diverge — and when an obligation is still open
+ * (an open Check), the statement records the publication effect WITHOUT
+ * `settled_ms`. A pre-deploy row carries no `attemptId`: there is no attempt.
+ */
+async function settlementTailStatements(
+  db: D1Like,
+  row: PublicationRow,
+  nowMs: number,
+): Promise<D1StatementLike[]> {
+  const attemptId = row.payload.attemptId;
+  if (attemptId === undefined) return [];
+  const statement = await settlementStatementIfDischarged(
+    db,
+    {
+      attemptId,
+      publicationId: row.id,
+      landed: ["publication"],
+    },
+    nowMs,
+  );
+  return statement === null ? [] : [statement];
+}
+
+/**
  * The crashed-window core: a confirmed publication whose local apply never
  * completed. Proof-gated, idempotent, and PURELY local — no GitHub calls
  * and no reviewer needed ("after proof, local apply may proceed even if
@@ -746,7 +774,9 @@ async function applyConfirmedPublication(
   const lease = await claimPublication(db, row.id, HOLDER, now());
   if (lease === null) return; // another invocation owns the live lease
   try {
-    const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
+    const at = now();
+    const tail = await settlementTailStatements(db, row, at);
+    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, () => tail);
     if (applied) {
       summary.applied += 1;
       return;
@@ -851,7 +881,9 @@ async function sendPreparedPublication(
       await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the confirmation", summary, true);
       return;
     }
-    const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
+    const at = now();
+    const tail = await settlementTailStatements(db, row, at);
+    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, () => tail);
     if (applied) {
       summary.applied += 1;
       return;
@@ -970,7 +1002,9 @@ async function discoverUncertainPublication(
       await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the discovered publication", summary, true);
       return;
     }
-    const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
+    const at = now();
+    const tail = await settlementTailStatements(db, row, at);
+    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, () => tail);
     if (applied) {
       summary.applied += 1;
       return;
