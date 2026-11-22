@@ -610,22 +610,17 @@ export type ProviderCatalogEntry = {
   label: string;
   /** note: builtin = allowlisted BYOK provider (pool-transported); template = metadata + prefill only. */
   tier: ProviderTier;
-  /** safety: RETAINED mapping metadata — NOT the container injection variable. The key
   envName: string | null;
-  /** note: Default API base URL. Template entries may carry a {account_id}
   baseUrl: string | null;
-  /** note: Custom-provider API protocol to materialize a template with (template
   api: string | null;
   /** note: Representative model ids (display/prefill metadata). */
   models: readonly string[];
   /** note: Provider docs URL. */
   doc: string | null;
-  /** note: Mixed-protocol providers only: every selectable protocol, the default
   protocols?: readonly ProviderProtocolOption[];
 };
 
 export type ProviderInfo = {
-  /** safety: RETAINED mapping metadata — the legacy scalar name of a provider that is
   envName: string;
   /** note: Human-readable provider label for the picker/table. */
   label: string;

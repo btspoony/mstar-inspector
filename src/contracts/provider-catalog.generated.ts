@@ -91,31 +91,17 @@ export type ProviderCatalogEntry = {
   label: string;
   /** note: builtin = allowlisted BYOK provider (pool-transported); template = metadata + prefill only. */
   tier: ProviderTier;
-  /** safety: RETAINED mapping metadata — NOT the container injection variable. The key
-   *  rides the stdin credential payload under the provider id;
-   *  this scalar only marks builtin allowlist membership (providerEnvName).
-   *  Null for template — materialized as a custom-provider declaration. */
   envName: string | null;
-  /** note: Default API base URL. Template entries may carry a {account_id}
-   *  placeholder the save flow substitutes; a console-only builtin carries
-   *  its declaration's URL shape (any {placeholder} is the operator's). */
   baseUrl: string | null;
-  /** note: Custom-provider API protocol to materialize a template with (template
-   *  tier), or the declaration prefill of a console-only builtin: null for a
-   *  verifiable builtin, which needs no declaration. */
   api: string | null;
   /** note: Representative model ids (display/prefill metadata). */
   models: readonly string[];
   /** note: Provider docs URL. */
   doc: string | null;
-  /** note: Mixed-protocol providers only: every selectable protocol, the default
-   *  FIRST. Absent = this row has exactly one protocol (api/baseUrl/models). */
   protocols?: readonly ProviderProtocolOption[];
 };
 
 export type ProviderInfo = {
-  /** safety: RETAINED mapping metadata — the legacy scalar name of a provider that is
-   *  on the BYOK allowlist; the key itself rides the credential payload. */
   envName: string;
   /** note: Human-readable provider label for the picker/table. */
   label: string;
