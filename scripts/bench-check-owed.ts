@@ -7,6 +7,8 @@ import { clearConcludedCheckOwed } from "../src/pipeline/review-attempt";
 // Times the per-minute Check reconcile's two owed-mark statements (the due
 // batch selection and the concluded-mark clear) with and without
 // idx_review_launches_check_owed, over a growing review_launches history.
+// The open Checks are in backoff; the owed marks are due, so the owed branch
+// selects the marked Checks and both arms must return the same attempt ids.
 const warmups = 5;
 const runs = 31;
 const waiting = 50;
@@ -17,7 +19,7 @@ function median(values: number[]): number {
   return values.sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
 }
 
-console.log(`bun:sqlite; ${waiting} nonterminal Checks in backoff, ${marked} owed marks; median of ${runs} runs; times in ms`);
+console.log(`bun:sqlite; ${waiting} nonterminal Checks in backoff, ${marked} owed marks due; median of ${runs} runs; times in ms`);
 console.log("attempts\tbefore ms\tafter ms\tspeedup\tbatch rows");
 for (const attempts of [5_000, 20_000, 80_000]) {
   const handle = createMigratedTestD1();
@@ -40,26 +42,26 @@ for (const attempts of [5_000, 20_000, 80_000]) {
     check.run(`check-${i}`, i, key, `ext-${i}`, now + 60_000, open ? now + 60_000 : null,
       open ? null : now - 1, now - 1000, now - 1000);
     const owed = i >= attempts - marked;
-    launch.run(`attempt-${i}`, key, now - 1000, owed ? key : null, owed ? 1 : null, owed ? now + 60_000 : null);
+    launch.run(`attempt-${i}`, key, now - 1000, owed ? key : null, owed ? 1 : null, owed ? now - 1 : null);
   }
   db.exec("COMMIT");
 
-  async function measure(): Promise<{ ms: number; rows: number }> {
-    let rows = 0;
+  async function measure(): Promise<{ ms: number; ids: string[] }> {
+    let ids: string[] = [];
     for (let i = 0; i < warmups; i++) await clearConcludedCheckOwed(handle);
     const times: number[] = [];
     for (let i = 0; i < runs; i++) {
       const start = performance.now();
-      rows = (await listCheckReconcileBatch(handle, now, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).length;
+      ids = (await listCheckReconcileBatch(handle, now, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((row) => row.id);
       await clearConcludedCheckOwed(handle);
       times.push(performance.now() - start);
     }
-    return { ms: median(times), rows };
+    return { ms: median(times), ids };
   }
 
   const after = await measure();
   execMigrationScript(db, "DROP INDEX idx_review_launches_check_owed;");
   const before = await measure();
-  if (before.rows !== after.rows) throw new Error("batch selection changed with the index");
-  console.log(`${attempts}\t${before.ms.toFixed(2)}\t${after.ms.toFixed(3)}\t${(before.ms / after.ms).toFixed(0)}x\t${after.rows}`);
+  if (after.ids.length !== marked || JSON.stringify(before.ids) !== JSON.stringify(after.ids)) throw new Error("batch selection changed with the index");
+  console.log(`${attempts}\t${before.ms.toFixed(2)}\t${after.ms.toFixed(3)}\t${(before.ms / after.ms).toFixed(0)}x\t${after.ids.length}`);
 }
