@@ -1,5 +1,5 @@
 /**
- * Idempotency contract lock — `src/contracts/idem.ts` is the
+ * invariant: Idempotency contract lock — `src/contracts/idem.ts` is the
  * single source of truth for the KV key format and TTL (plan Clarify 2 /
  * Global Constraints: no second `idem:` literal or magic 86400 anywhere).
  *
@@ -41,7 +41,7 @@ describe("contracts/idem", () => {
   });
 
   test("isEnqueuedClaim: queued and done skip a redelivery; every other state re-enqueues", () => {
-    // The worker's pre-check. `superseded` is NOT on the skip side: it only
+    // why: The worker's pre-check. `superseded` is NOT on the skip side: it only
     // says the sha was a leftover when it was acked, and a force-push can make
     // that same sha the PR head again (A → B → A), where it must be enqueued
     // and the consumer's ledger comparison decides.
