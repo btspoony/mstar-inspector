@@ -1,0 +1,15 @@
+-- SEC-01 resume (I-000685): the exact credential set the paid session handed
+-- its model — the provider keys it transported plus the installation token it
+-- minted — sealed with the secretbox envelope (AAD
+-- `review_launches.gate_secrets_enc:<attempt_id>`) in the SAME statement that
+-- records the paid result.
+--
+-- The publish gate of a RESUMED collect scans for these values; re-deriving
+-- them from the App config would scan for whatever the config holds LATER, so a
+-- rotated or removed key's echo would pass. Only that gate opens the envelope:
+-- it never reaches the runner, a log line or any other consumer.
+--
+-- NULL for attempts paid before this migration (and when sealing was
+-- impossible): their collect re-derives the set from the App config and refuses
+-- to publish when it can establish neither.
+ALTER TABLE review_launches ADD COLUMN gate_secrets_enc TEXT;

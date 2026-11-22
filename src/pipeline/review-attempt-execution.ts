@@ -146,7 +146,9 @@ import {
   MovedHeadError,
   noLaunchState,
   noteCheckOwed,
+  openGateSecrets,
   runReviewAttempt,
+  readGateSecretsEnvelope,
   AttemptUnknownError,
   discardReviewAttempt,
   type ReviewAttemptExecution,
@@ -4930,30 +4932,47 @@ function modelTexts(
 }
 
 /**
+ * The credential values the publish gate scans for: the paid session's own set,
+ * sealed onto the attempt row (its transported provider keys and its minted
+ * installation token), or the set this host already holds. `null` means the
+ * host could establish NEITHER — the gate then refuses to publish (a body it
+ * never scanned is not a clean body) instead of certifying it as clear. A store
+ * fault throws, so the attempt retries rather than publishes unscanned.
+ */
+async function attemptGateSecrets(deps: ProcessDeps, ref: AttemptRef): Promise<string[] | null> {
+  const cached = deps.credentials.get(ref.attemptId);
+  if (cached !== undefined) return cached.secretValues;
+  const sealed = await readGateSecretsEnvelope(deps.env.DB, ref.attemptId);
+  if (sealed === null) return null;
+  return openGateSecrets(deps.env.DASHBOARD_ENCRYPTION_KEY, ref.attemptId, sealed);
+}
+
+/**
  * SEC-01 publish gate: return the refusal outcome for the first text that
  * carries a credential form. A refusal settles through the ATTEMPT'S FAILURE
  * path (failure row + failed claim + Check conclusion) — the review genuinely
  * did not deliver, and a publication-only settlement would have nothing to
- * close. A resumed host with no credentials warns once and lets the caller
- * continue: the stored payload was already redacted by the host that wrote it.
+ * close. `secrets === null` (no envelope, no rebuilt set) is refused the same
+ * way: publishing a body the gate could not scan would be the very gap this
+ * gate exists to close.
  */
 async function refusesCredentialEcho(
   deps: ProcessDeps,
   ref: AttemptRef,
   prepared: PreparedAttempt,
   progress: ReviewAttemptProgress,
+  secrets: readonly string[] | null,
   texts: readonly string[],
-  fields: ConsumerLogFields,
 ): Promise<"clear" | "settled" | "unknown"> {
-  if (progress.secretValues.length === 0) {
-    deps.log.warn(
-      fields,
-      "review publish gate could not run — this host holds no credentials for the attempt (the stored payload was redacted at write time)",
-    );
-    return "clear";
-  }
-  if (!texts.some((text) => carriesSecretForm(text, progress.secretValues))) return "clear";
-  const refusal = new Error("publish gate refused the review — the outgoing body carries a credential echo");
+  const refusal =
+    secrets === null
+      ? new Error(
+          "publish gate refused the review — this host could not establish the session's credential set",
+        )
+      : texts.some((text) => carriesSecretForm(text, secrets))
+        ? new Error("publish gate refused the review — the outgoing body carries a credential echo")
+        : null;
+  if (refusal === null) return "clear";
   const wrapped = phaseFailure("collect", refusal, {
     stage: "pipeline",
     headSha: prepared.headSha,
@@ -5025,16 +5044,16 @@ async function collectPhase(
   const catalogExcluded: ReadonlySet<string> = new Set(prepared.catalogExcluded);
   const catalogBudgetExcluded: ReadonlySet<string> = new Set(prepared.catalogBudgetExcluded);
   const budgetExcluded = new Set(prepared.budgetExcluded);
-  // SEC-01, bounded by the plan: exact-value redaction is a SAME-HOST guarantee.
-  // This host holds the session's ACTUAL values only when it ran the paid step;
-  // a resumed host has none, and it must not substitute values it mints now (a
-  // different token, rotated provider keys) and present them as exact. It
-  // redacts by SHAPE instead — the recorded residual, never a silent claim of
-  // exact coverage. Persisting the secrets to make the resumed set exact would
-  // put credentials in D1, which is worse than the gap.
-  progress.secretValues = deps.credentials.get(attemptId)?.secretValues ?? [];
   // The paid result is the LAUNCH ROW's, never a predecessor's return value.
   const execution = await readPaidExecution(deps, attemptId);
+  // SEC-01: the gate — and every exact-value redaction below — works from the
+  // credential set the PAID session actually handed the model, sealed onto this
+  // attempt's row by the paid step. A resumed host keeps no cache of its own,
+  // so the row is its carrier; a host that ran the paid step holds the same set
+  // directly. `null` means neither can establish it: the gate refuses rather
+  // than certify a body it could not scan.
+  const gateSecrets = await attemptGateSecrets(deps, ref);
+  progress.secretValues = gateSecrets ?? [];
   const { run, recheck, report, appliedProvider } = execution;
   const recheckDoc = recheck?.doc ?? null;
   const rejectedRowIds = recheck?.rejected ?? new Set<string>();
@@ -5084,8 +5103,8 @@ async function collectPhase(
       ref,
       prepared,
       progress,
+      gateSecrets,
       [redactedStdout, redactedError],
-      fields,
     );
     if (degradedGate !== "clear") {
       return { kind: "settled", outcome: { kind: degradedGate === "unknown" ? "unknown" : "ok" } };
@@ -5195,12 +5214,12 @@ async function collectPhase(
     ref,
     prepared,
     progress,
+    gateSecrets,
     modelTexts(
       output,
       report,
       targets.map((target) => target.original.title),
     ),
-    fields,
   );
   if (publishGate !== "clear") {
     return { kind: "settled", outcome: { kind: publishGate === "unknown" ? "unknown" : "ok" } };
