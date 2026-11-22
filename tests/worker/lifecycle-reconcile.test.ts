@@ -1478,7 +1478,7 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     });
   });
 
-  test("a capture write that fails does not reset the failed-readback count", async () => {
+  test("a capture write that fails counts as a failed attempt and does not reset", async () => {
     const db = createMigratedTestD1();
     seedApp(db, APP);
     await seedAppliedLineBatch(db, { id: "pub-fault", appliedAgeMs: 100_000, dispatched: true, discoveryAttempts: 1 });
@@ -1514,11 +1514,67 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       { now: () => T0, reviewer, log: SILENT_LOG },
     );
 
-    // Nothing persisted, so the count neither resets nor advances.
+    // Nothing persisted, so the count advances instead of resetting.
     expect(batchColumns(db, "pub-fault")).toMatchObject({
-      line_discovery_attempts: 1,
+      line_discovery_attempts: 2,
       line_unresolvable_ms: null,
     });
+  });
+
+  test("a partial capture counts as progress, so the next miss cannot retire the batch", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, {
+      id: "pub-progress",
+      appliedAgeMs: 100_000,
+      dispatched: true,
+      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      intentCount: 2,
+    });
+
+    // Pass 1: the readback finds one of the two comments. That PERSISTED, so the
+    // count starts over even though the batch is not complete.
+    const partial = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [{ associationId: "assoc-pub-progress", commentId: 9301, path: "src/a.ts", line: 10 }],
+          ambiguous: [],
+          captured: false,
+          reviewId: 9300,
+          failure: "comment-gone",
+        }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer: partial, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-progress")).toMatchObject({
+      line_discovery_attempts: 0,
+      line_unresolvable_ms: null,
+    });
+
+    // Pass 2: the last comment is still missing — ONE failed attempt, nowhere
+    // near the bound the batch had already reached before its partial capture.
+    const miss = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [],
+          ambiguous: [],
+          captured: false,
+          reviewId: 9300,
+          failure: "comment-gone",
+        }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 1_000, reviewer: miss, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-progress")).toMatchObject({
+      line_discovery_attempts: 1,
+      line_unresolvable_ms: null,
+      line_unresolvable_reason: null,
+    });
+
+    // Still eligible, with the one remaining thread recoverable by a later pass.
+    expect(await listLineBatchRecovery(db, T0 + 2_000, RECONCILE_SELECT_LIMIT)).toHaveLength(1);
+    const pending = db.raw
+      .prepare(`SELECT id FROM review_threads WHERE publication_id = ? AND review_id IS NULL`)
+      .all("pub-progress") as Array<{ id: string }>;
+    expect(pending).toEqual([{ id: "assoc-pub-progress-1" }]);
   });
 });
 

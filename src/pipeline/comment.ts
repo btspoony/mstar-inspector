@@ -2372,10 +2372,16 @@ export function renderLineCommentText(finding: ReviewFinding): string {
  * `ambiguous` — more than one does; `comment-gone` — the batch review is ours
  * but an intent's comment is not in it; `readback-scope` — a read, or the
  * authenticated identity a read needs, was unavailable, so nothing could be
- * observed. It is the last observation the recovery lane can record as the
+ * observed; `capture-failed` — the ids were observed but could not be
+ * persisted. It is the last observation the recovery lane can record as the
  * batch's stop reason, never a guess about what happened on GitHub.
  */
-export type LineDiscoveryFailure = "marker-missing" | "ambiguous" | "comment-gone" | "readback-scope";
+export type LineDiscoveryFailure =
+  | "marker-missing"
+  | "ambiguous"
+  | "comment-gone"
+  | "readback-scope"
+  | "capture-failed";
 
 /**
  * §7.7 line-comment capture result: the returned review

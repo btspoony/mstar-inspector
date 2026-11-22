@@ -878,16 +878,17 @@ async function reconcileLineBatches(
             "line-comment id capture failed — the intent stays, discovery owns the rest",
           );
         }
-        // A pass that captured nothing is the observation the bound counts: the
-        // batch cannot leave the eligible set by ordering, only by this count.
-        // A capture that did not persist is neither a success to reset on nor a
-        // readback failure to count.
-        if (!recovered.captured) {
-          if (await noteLineDiscoveryFailure(db, row, recovered.failure ?? "marker-missing", state.captures, now(), log)) {
-            retired += 1;
-          }
-        } else if (capturePersisted) {
+        const persistedProgress = capturePersisted && recovered.posted.length > 0;
+        if (persistedProgress) {
+          // ANY persisted capture is progress — the count means consecutive
+          // attempts that saved nothing, not consecutive incomplete ones.
           await resetLineDiscoveryFailures(db, row.id, now());
+        } else {
+          // A capture that persisted nothing — a write that threw included —
+          // IS a failed attempt under that definition.
+          const reason: LineDiscoveryFailure =
+            recovered.captured || recovered.failure === undefined ? "capture-failed" : recovered.failure;
+          if (await noteLineDiscoveryFailure(db, row, reason, state.captures, now(), log)) retired += 1;
         }
         log.info(
           { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },

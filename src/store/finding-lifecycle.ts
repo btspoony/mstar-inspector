@@ -1494,13 +1494,15 @@ export async function releaseLineDispatch(
 export type LineDiscoveryOutcome = { attempts: number; unresolvable: boolean };
 
 /**
- * ONE discovery pass that captured nothing, recorded durably on the batch.
- * The count is monotone because a clock-based bound would re-admit the row on
- * every slow pass; at `bound` failures the batch leaves the eligible set with
- * the reason the LAST pass observed, so an operator can see why recovery
- * stopped. The row, its count and its reason stay (leaving the set is not
- * deletion), and a row already unresolvable returns `null` — the caller has
- * nothing new to report.
+ * ONE discovery pass that persisted no progress, recorded durably on the batch.
+ * The count therefore means CONSECUTIVE discovery attempts that saved nothing
+ * (not lifetime attempts, and not attempts that merely left comments missing);
+ * a write that threw saved nothing and counts. The count is monotone because a
+ * clock-based bound would re-admit the row on every slow pass; at `bound`
+ * failures the batch leaves the eligible set with the reason the LAST pass
+ * observed, so an operator can see why recovery stopped. The row, its count
+ * and its reason stay (leaving the set is not deletion), and a row already
+ * unresolvable returns `null` — the caller has nothing new to report.
  *
  * The write is OPTIMISTIC on the capture state this attempt observed
  * (`readLineBatchState().captures`): a concurrent pass that saved comment ids
@@ -1541,11 +1543,11 @@ export async function recordLineDiscoveryFailure(
 }
 
 /**
- * A discovery pass that CAPTURED the batch clears its failed-readback count:
- * the bound counts consecutive reads that observed nothing, not lifetime
- * attempts, so an earlier failure must not sit one pass away from a cap the
- * batch no longer deserves. Only the counter moves — an unresolvable batch is
- * never selected, so its marker columns cannot be cleared from here.
+ * A discovery pass that PERSISTED at least one comment id clears the count —
+ * a partial capture is progress, even while other comments stay missing, so
+ * the batch must not carry earlier misses toward a cap it no longer deserves.
+ * Only the counter moves; an unresolvable batch is never selected, so its
+ * marker columns cannot be cleared from here.
  */
 export async function resetLineDiscoveryFailures(db: D1Like, id: string, nowMs: number): Promise<void> {
   await db
