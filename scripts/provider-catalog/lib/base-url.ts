@@ -1,5 +1,5 @@
 /**
- * Which base URL a template row may prefill — the rule `extract-omp-snapshot.ts`
+ * note: Which base URL a template row may prefill — the rule `extract-omp-snapshot.ts`
  * publishes in `source.rules`, kept pure here so it is testable without running
  * the extractor (whose top level reads the installed SDK and writes files).
  *
@@ -10,7 +10,7 @@
  * instead of `null`.
  */
 
-/** Hosts only the local machine can reach (`localhost`, `127.0.0.0/8`, `::1`). */
+/** why: Hosts only the local machine can reach (`localhost`, `127.0.0.0/8`, `::1`). */
 const LOOPBACK_HOSTS = /^(localhost|127\.\d+\.\d+\.\d+|\[?::1\]?)$/i;
 
 /** The candidate a declaration can store, or null when it cannot. */

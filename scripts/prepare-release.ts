@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * prepare-release.ts — assemble changelog fragments + bump every version
+ * note: prepare-release.ts — assemble changelog fragments + bump every version
  * surface.
  *
  * Usage:
@@ -55,9 +55,9 @@ export type PrepareOptions = {
   version?: string;
   bump: "patch" | "minor";
   allowEmpty: boolean;
-  /** Repo root the relative paths resolve under. Default: process.cwd(). */
+  /** note: Repo root the relative paths resolve under. Default: process.cwd(). */
   root?: string;
-  /** Release date (YYYY-MM-DD) in the section header. Default: today. */
+  /** note: Release date (YYYY-MM-DD) in the section header. Default: today. */
   date?: string;
 };
 
@@ -101,7 +101,7 @@ function parseFrontmatter(text: string): { fm: Record<string, string>; body: str
   for (const line of fmText.split("\n")) {
     const m = line.match(/^([A-Za-z0-9 _-]+):\s*(.*)$/);
     if (m) {
-      // Strip a trailing inline comment (` # optional`) — the value ends at
+      // why: Strip a trailing inline comment (` # optional`) — the value ends at
       // the first whitespace-preceded `#` (`.changes/README.md` examples use
       // them; a `#` glued to the value without whitespace is kept).
       const key = m[1]?.trim() ?? "";
@@ -189,7 +189,7 @@ export function insertSection(changelog: string, version: string, date: string, 
   if (unreleased !== -1) {
     const lineEnd = changelog.indexOf("\n", unreleased);
     if (lineEnd === -1) {
-      // `## [Unreleased]` is the final line with no trailing newline — append
+      // note: `## [Unreleased]` is the final line with no trailing newline — append
       // below it instead of mis-inserting at the top of the file.
       return `${changelog}\n${section}`;
     }
@@ -206,7 +206,7 @@ export function insertSection(changelog: string, version: string, date: string, 
 }
 
 async function readCurrentVersion(root: string): Promise<string> {
-  // Auto-bump derivation source is package.json#version specifically (AD-2) —
+  // why: Auto-bump derivation source is package.json#version specifically (AD-2) —
   // the one surface every release is cut from.
   const pkg = (await Bun.file(join(root, "package.json")).json()) as { version?: string };
   if (!pkg.version) throw new Error("package.json has no version");
@@ -279,7 +279,7 @@ function printUsage(): void {
   bun run release:prepare -- --allow-empty   # allow an empty .changes/unreleased/`);
 }
 
-// Run only when executed directly (`bun run scripts/prepare-release.ts`) —
+// why: Run only when executed directly (`bun run scripts/prepare-release.ts`) —
 // importing the module (unit tests) must not start the release flow.
 if (import.meta.main) {
   const args = parseArgs(process.argv);

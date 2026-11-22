@@ -1,5 +1,5 @@
 /**
- * The design-system gate: one entry point, six links of one chain. CI runs this
+ * why: The design-system gate: one entry point, six links of one chain. CI runs this
  * and nothing else of the chain.
  *
  *   source → stylesheet   `scripts/build-tokens.ts --check` (also emits the
@@ -65,10 +65,10 @@ const DESIGN_PATH = path.join(ROOT, "DESIGN.md");
 export const SPA_ROOT = path.join(ROOT, "src/spa");
 /** Hand-written reference pages under the design system: static, never built. */
 export const PROTOTYPES_ROOT = path.join(ROOT, "src/design-system/prototypes");
-/** The one stylesheet under `src/spa` the token source derives — link 1 owns it. */
+/** note: The one stylesheet under `src/spa` the token source derives — link 1 owns it. */
 const GENERATED_STYLESHEET = "src/spa/styles/tokens.css";
 /**
- * The consumer's comment grammar, from its extension lower-cased once. The
+ * why: The consumer's comment grammar, from its extension lower-cased once. The
  * walk and the comment stripper both read this one rule, so a file cannot be
  * admitted under one extension spelling and stripped under another
  * (`I-000352`). `null` is not a consumer.
@@ -89,7 +89,7 @@ function consumerKind(file: string): ConsumerKind | null {
 }
 
 /**
- * The links that are a `--check` run of a generator, in report order. The
+ * note: The links that are a `--check` run of a generator, in report order. The
  * document link is not one of them: it compares in-process, below.
  */
 const GENERATORS = [
@@ -99,7 +99,7 @@ const GENERATORS = [
 ] as const;
 
 /**
- * The trees whose hand-written CSS/HTML/TSX answers to the token source. A root
+ * why: The trees whose hand-written CSS/HTML/TSX answers to the token source. A root
  * that contributes no consumer (moved, renamed, emptied) breaks the link: a
  * global "some consumer exists" passes while one root silently checks nothing,
  * which is the failure mode this link exists to catch.
@@ -121,20 +121,20 @@ const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
  * equals the token source.
  */
 export interface ConsumerWalk {
-  /** Every consumer found, repo-relative, sorted. */
+  /** note: Every consumer found, repo-relative, sorted. */
   readonly files: readonly string[];
-  /** One row per declared root, in the order given, with its repo-relative path. */
+  /** note: One row per declared root, in the order given, with its repo-relative path. */
   readonly roots: readonly ConsumerRoot[];
-  /** Every unreadable entry, each naming its path and cause. */
+  /** note: Every unreadable entry, each naming its path and cause. */
   readonly failures: readonly string[];
 }
 
 export interface ConsumerRoot {
   readonly root: string;
-  /** Consumers this root contributed. */
+  /** note: Consumers this root contributed. */
   readonly consumers: number;
   /**
-   * The first unreadable entry under this root, or null when the walk read it
+   * note: The first unreadable entry under this root, or null when the walk read it
    * through — reported however many consumers the root also contributed.
    * `rootsWithoutConsumers` speaks only for roots with `consumers === 0`, so a
    * partly unreadable root is named here and never as empty.
@@ -153,7 +153,7 @@ export function consumerWalk(dirs: readonly string[] = CONSUMER_ROOTS): Consumer
     return {
       root: path.relative(ROOT, dir),
       consumers: found.length,
-      // Any unreadability is a fact about this root, even when it also yielded
+      // why: Any unreadability is a fact about this root, even when it also yielded
       // consumers; the emptiness rule reads `consumers === 0` on its own.
       failure: unreadable ? (failures[failureMark] ?? null) : null,
     };
@@ -162,7 +162,7 @@ export function consumerWalk(dirs: readonly string[] = CONSUMER_ROOTS): Consumer
 }
 
 /**
- * The consumers under one root, repo-relative. Roots are absolute paths into
+ * why: The consumers under one root, repo-relative. Roots are absolute paths into
  * this checkout, outputs are repo-relative: a relative root cannot be walked
  * (it would resolve against the CWD and match nothing), so it fails loudly
  * instead of reading as an empty root.
@@ -191,7 +191,7 @@ function walkConsumers(dir: string, failures: string[] = []): string[] {
   return out;
 }
 
-/** The entries of one directory, or none if it cannot be listed (reported, not thrown). */
+/** note: The entries of one directory, or none if it cannot be listed (reported, not thrown). */
 function readdirEntries(dir: string, failures: string[]): string[] {
   try {
     return readdirSync(dir);
@@ -201,7 +201,7 @@ function readdirEntries(dir: string, failures: string[]): string[] {
   }
 }
 
-/** Whether one path is a directory, or null if it cannot be stat'ed (reported, not thrown). */
+/** note: Whether one path is a directory, or null if it cannot be stat'ed (reported, not thrown). */
 function statIsDirectory(full: string, failures: string[]): boolean | null {
   try {
     return statSync(full).isDirectory();
@@ -222,7 +222,7 @@ export function rootsWithoutConsumers(roots: readonly ConsumerRoot[]): string[] 
 }
 
 /**
- * A `var()` reference, whether or not it carries a fallback or spaces inside
+ * why: A `var()` reference, whether or not it carries a fallback or spaces inside
  * the call: `var(--x)`, `var(--x, #fff)`, `var( --x )` and `var( --x , … )`
  * all name `x`. Requiring the closing paren immediately after the name lost the
  * fallback form, which is the one that hides a retired token behind a literal;
@@ -230,7 +230,7 @@ export function rootsWithoutConsumers(roots: readonly ConsumerRoot[]): string[] 
  */
 const REFERENCE = /var\s*\(\s*--([a-z0-9-]+)[\s,)]/g;
 /**
- * The same reference in Tailwind v4's shorthand, which is how a TSX consumer
+ * note: The same reference in Tailwind v4's shorthand, which is how a TSX consumer
  * spells it: `bg-(--x)`, `rounded-(--radius-control)`, and the typed form
  * `text-(length:--typo-label-12-size)` all name `x`. The closing paren is
  * required: `bg-(--tone-${tone}-fg)` computes its name at runtime and names
@@ -239,26 +239,26 @@ const REFERENCE = /var\s*\(\s*--([a-z0-9-]+)[\s,)]/g;
  */
 const SHORTHAND = /[a-z][a-z0-9-]*-\((?:[a-z-]+:)?--([a-z0-9-]+)\)/g;
 /**
- * A custom property the stylesheet declares itself — the bridge's own keys.
+ * note: A custom property the stylesheet declares itself — the bridge's own keys.
  * The declared value is captured with the name: a declaration that references
  * its own name excuses nothing (see `danglingReferences`).
  */
 const DECLARATION = /(?:^|[;{\s}])(--[a-z0-9-]+)\s*:\s*([^;{}]*)/g;
-/** A block comment: a stylesheet's prose, and one of the two shapes a script's comment may take. */
+/** note: A block comment: a stylesheet's prose, and one of the two shapes a script's comment may take. */
 const BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g;
-/** The other consumer grammar: an HTML shell's own comment. */
+/** note: The other consumer grammar: an HTML shell's own comment. */
 const HTML_COMMENT = /<!--[\s\S]*?-->/g;
-/** A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
+/** note: A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
 const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
 /**
- * A script's other comment shape: `//` to the end of its line. It places spans
+ * note: A script's other comment shape: `//` to the end of its line. It places spans
  * that *may* be comments (see `scriptCommentSpans`), never a reference, so it
  * does not have to be right about a slash's context.
  */
 const LINE_COMMENT = /\/\/[^\n]*/g;
 
 /**
- * `text` without its comments, read in the grammar the file is written in: a
+ * why: `text` without its comments, read in the grammar the file is written in: a
  * stylesheet's block comments, an HTML shell's `<!-- … -->` ones, and — in the
  * shell's `<style>` blocks — the stylesheet's again. A TS/TSX module is
  * returned unchanged: see `danglingReferences` for why its comments are placed
@@ -281,7 +281,7 @@ function withoutComments(file: string, text: string): string {
 }
 
 /**
- * Every span in a script that may hold one of its comments, the two shapes
+ * why: Every span in a script that may hold one of its comments, the two shapes
  * taken independently so that neither can hide the other's start.
  *
  * A real comment always lies inside one of these — that is the whole property
@@ -369,7 +369,7 @@ export function danglingReferences(file: string, text: string): DanglingReferenc
 type Layer = Readonly<Record<string, string>>;
 export type Fixture = Readonly<Record<ThemeName, Readonly<Record<string, Layer>>>>;
 
-/** `typo-copy-14-line` → `typography.copy-14.lineHeight`. */
+/** note: `typo-copy-14-line` → `typography.copy-14.lineHeight`. */
 const TYPO_PROP: Readonly<Record<string, string>> = {
   family: "fontFamily",
   size: "fontSize",
@@ -378,7 +378,7 @@ const TYPO_PROP: Readonly<Record<string, string>> = {
   tracking: "letterSpacing",
 };
 
-/** `radius-control` → `rounded.sm` — the AD-574 two-tier names. */
+/** note: `radius-control` → `rounded.sm` — the AD-574 two-tier names. */
 const RADIUS_KEY: Readonly<Record<string, string>> = {
   control: "sm",
   container: "md",
@@ -392,7 +392,7 @@ const NO_SLOT_INVARIANT = "font family / breakpoint — carried per typography r
 const NO_SLOT_GEOMETRY = "control / row height — the spec has no size group";
 
 /**
- * Frontmatter leaves the design-md spec requires that no fixture token backs.
+ * why: Frontmatter leaves the design-md spec requires that no fixture token backs.
  * They are named so the reverse sweep can stay total: any other declared leaf
  * under these groups is a name the source dropped. Printed, never silent.
  */
@@ -436,9 +436,9 @@ export function documentSlot(layer: string, name: string, theme: ThemeName): Slo
 
 export interface Divergence {
   readonly token: string;
-  /** Frontmatter path read, or the class that has no path. */
+  /** note: Frontmatter path read, or the class that has no path. */
   readonly at: string;
-  /** What DESIGN.md holds — `undefined` when it holds nothing there. */
+  /** note: What DESIGN.md holds — `undefined` when it holds nothing there. */
   readonly document: string | undefined;
   readonly fixture: string;
 }
@@ -451,23 +451,23 @@ export interface StaleName {
 
 export interface SyncReport {
   readonly ok: boolean;
-  /** Token/path pairs compared — one count per theme for a themed value. */
+  /** note: Token/path pairs compared — one count per theme for a themed value. */
   readonly compared: number;
   readonly divergences: readonly Divergence[];
-  /** Document-only names under a group the forward pass writes: the reverse direction. */
+  /** note: Document-only names under a group the forward pass writes: the reverse direction. */
   readonly stale: readonly StaleName[];
   /**
-   * Two fixture tokens claiming one frontmatter path with different values:
+   * note: Two fixture tokens claiming one frontmatter path with different values:
    * either the two themes disagree on a theme-independent slot, or two names
    * route to the same slot. Neither can be represented by one document value.
    */
   readonly collisions: readonly Collision[];
-  /** Names the frontmatter cannot hold, by reason. */
+  /** note: Names the frontmatter cannot hold, by reason. */
   readonly unexpressed: Readonly<Record<string, number>>;
 }
 
 export interface Collision {
-  /** Frontmatter path both claims landed on. */
+  /** note: Frontmatter path both claims landed on. */
   readonly at: string;
   readonly first: string;
   readonly firstValue: string;
@@ -475,18 +475,18 @@ export interface Collision {
   readonly secondValue: string;
 }
 
-/** One hop; absent or non-object nodes read as `undefined`, never throw. */
+/** note: One hop; absent or non-object nodes read as `undefined`, never throw. */
 const hop = (node: unknown, key: string): unknown =>
   typeof node === "object" && node !== null && Object.hasOwn(node, key)
     ? Reflect.get(node, key)
     : undefined;
 
-/** Reads `a.b.c` out of the frontmatter; `undefined` when any hop is absent. */
+/** note: Reads `a.b.c` out of the frontmatter; `undefined` when any hop is absent. */
 function at(frontmatter: Record<string, unknown>, dotted: string): unknown {
   return dotted.split(".").reduce<unknown>(hop, frontmatter);
 }
 
-/** Every leaf path under `node`, prefixed: `typography.heading-32.fontSize`. */
+/** note: Every leaf path under `node`, prefixed: `typography.heading-32.fontSize`. */
 function leaves(node: unknown, prefix: string): string[] {
   if (typeof node !== "object" || node === null || Array.isArray(node)) return [prefix];
   return Object.entries(node).flatMap(([key, child]) => leaves(child, `${prefix}.${key}`));
@@ -553,7 +553,7 @@ export function documentSync(fixture: Fixture, frontmatter: Record<string, unkno
     }
   }
 
-  // Reverse sweep: colours per theme, then every group the forward pass writes.
+  // note: Reverse sweep: colours per theme, then every group the forward pass writes.
   for (const theme of THEMES) {
     const declared = at(frontmatter, `themes.${theme}.colors`);
     if (typeof declared !== "object" || declared === null) continue;
@@ -563,7 +563,7 @@ export function documentSync(fixture: Fixture, frontmatter: Record<string, unkno
     }
   }
   for (const group of ["typography", "spacing", "rounded", "motion", "elevation"] as const) {
-    // An absent group is the forward pass's to report: every token it would
+    // why: An absent group is the forward pass's to report: every token it would
     // hold reads as absent. Only a declared group can carry stale leaves.
     const declared = at(frontmatter, group);
     if (typeof declared !== "object" || declared === null) continue;
@@ -584,7 +584,7 @@ export function documentSync(fixture: Fixture, frontmatter: Record<string, unkno
 }
 
 /**
- * The failure is read by whoever has to raise `DESIGN.md` onto the fixture, so
+ * why: The failure is read by whoever has to raise `DESIGN.md` onto the fixture, so
  * a disagreement prints both values in full, while absent names are grouped by
  * the frontmatter path prefix they belong under — 94 missing keys are one
  * structural fact per group, not 94 separate investigations.
@@ -601,7 +601,7 @@ function report(report: SyncReport): void {
       report.collisions.length
     } colliding)`,
   );
-  // Coverage is part of the verdict: "in sync" is only as strong as the sweep
+  // why: Coverage is part of the verdict: "in sync" is only as strong as the sweep
   // that produced it, so the sweep says what it read in both directions.
   const documentOnly = Object.keys(DOCUMENT_ONLY).join(", ");
   console.log(
@@ -658,7 +658,7 @@ export function parseFixture(json: string): Fixture {
   if (typeof themes !== "object" || themes === null) {
     throw new Error(`${path.relative(ROOT, FIXTURE_PATH)} has no "themes" map; run \`bun scripts/build-fixture.ts\`.`);
   }
-  // Shape checked above for the one map this gate reads; the rest is the
+  // why: Shape checked above for the one map this gate reads; the rest is the
   // generator's output, not external input.
   return themes as Fixture;
 }
@@ -669,7 +669,7 @@ function readFrontmatter(): Record<string, unknown> {
   if (fenced === null) throw new Error("DESIGN.md has no `---` fenced YAML frontmatter");
   const parsed: unknown = Bun.YAML.parse(fenced[1] as string);
   if (typeof parsed !== "object" || parsed === null) throw new Error("DESIGN.md frontmatter is not a YAML map");
-  // A parsed YAML map is a record by definition; the keys are the document's.
+  // note: A parsed YAML map is a record by definition; the keys are the document's.
   return parsed as Record<string, unknown>;
 }
 
@@ -710,7 +710,7 @@ export const CHART_PAIRS: readonly ChartPair[] = [
   ]),
 ];
 
-/** WCAG 2.x relative luminance of an opaque `#rrggbb` literal, or a refusal. */
+/** note: WCAG 2.x relative luminance of an opaque `#rrggbb` literal, or a refusal. */
 function luminance(hex: string): number {
   const match = /^#([0-9a-f]{6})$/i.exec(hex);
   if (match === null) {
@@ -768,7 +768,7 @@ if (import.meta.main) {
     if (run.exitCode !== 0) brokenLinks.push(label);
   }
 
-  // A missing or malformed fixture is a broken link, never an early exit: the
+  // why: A missing or malformed fixture is a broken link, never an early exit: the
   // consumer link below must still run, or this gate reports on a tree it only
   // partly checked — and a link an earlier failure can skip reads as green.
   const sync = (() => {
@@ -778,7 +778,7 @@ if (import.meta.main) {
       }
       return documentSync(parseFixture(readFileSync(FIXTURE_PATH, "utf8")), readFrontmatter());
     } catch (error) {
-      // The message names the cause and the command that regenerates the file.
+      // note: The message names the cause and the command that regenerates the file.
       console.error(`fail  fixture → DESIGN.md: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
@@ -790,10 +790,10 @@ if (import.meta.main) {
     if (!sync.ok) brokenLinks.push("fixture → DESIGN.md");
   }
 
-  // One unreadable file or directory is a fact about this tree, not the end of
+  // why: One unreadable file or directory is a fact about this tree, not the end of
   // the run: it is reported by name and the remaining links still run.
   try {
-    // One traversal of both roots: the consumers to read and the per-root facts
+    // why: One traversal of both roots: the consumers to read and the per-root facts
     // the emptiness rule needs come from the same walk, so the gate never
     // reaches one tree twice or reports two answers for it.
     const walk = consumerWalk(CONSUMER_ROOTS);
@@ -808,7 +808,7 @@ if (import.meta.main) {
       }
     });
     const failures = [...walk.failures, ...readFailures];
-    // A root that contributed nothing proves nothing (wrong root, moved tree):
+    // why: A root that contributed nothing proves nothing (wrong root, moved tree):
     // that is a failure per root, not an empty pass. A root that could not be
     // read is already named by its failure, so it is never reported as empty.
     const consumersOk = failures.length === 0 && emptyRoots.length === 0 && dangling.length === 0;
@@ -828,7 +828,7 @@ if (import.meta.main) {
     brokenLinks.push("consumers → source");
   }
 
-  // A chart fill is a large graphic face: WCAG 1.4.11's 3:1, not 4.5:1. Every
+  // why: A chart fill is a large graphic face: WCAG 1.4.11's 3:1, not 4.5:1. Every
   // pair prints its measured ratio, so a token change that erodes a margin is
   // a visible diff rather than a silent pass. A token that throws on read is a
   // broken link of its own, named like the others, so the report below still

@@ -1,5 +1,5 @@
 /**
- * Generator for `src/design-system/fixture.json`.
+ * note: Generator for `src/design-system/fixture.json`.
  *
  * The fixture is the machine-readable copy of the token source: every name the
  * source declares, per theme and per layer, with each value fully resolved.

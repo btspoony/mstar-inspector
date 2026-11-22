@@ -9,7 +9,7 @@ import { SESSION_COOKIE, createSessionValue } from "../src/dashboard/session";
 import { createMigratedTestD1, seedDefaultMemberships, seedTarget } from "../tests/store/helpers";
 import type { D1Like, D1StatementLike } from "../src/store/types";
 
-// Usage: bun scripts/bench-app-settings.ts [delay-ms=15] [optional-catalog-path]
+// note: Usage: bun scripts/bench-app-settings.ts [delay-ms=15] [optional-catalog-path]
 const delayMs = Number(process.argv[2] ?? 15);
 if (!Number.isFinite(delayMs) || delayMs < 0) throw new Error("delay-ms must be nonnegative");
 const catalogPath = process.argv[3];
@@ -75,7 +75,7 @@ try {
     api: "openai-completions", model_ids: ["custom-model"],
   }, "fixture-custom-key");
 
-  // Exercise metering independently of route implementation, including batch unwrapping.
+  // why: Exercise metering independently of route implementation, including batch unwrapping.
   await meteredDb.prepare("SELECT 1").first();
   await meteredDb.prepare("SELECT 1").all();
   await meteredDb.prepare("SELECT 1").run();

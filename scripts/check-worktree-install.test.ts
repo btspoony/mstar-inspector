@@ -1,5 +1,5 @@
 /**
- * The worktree install check's decision seam (`scripts/check-worktree-install.ts`).
+ * why: The worktree install check's decision seam (`scripts/check-worktree-install.ts`).
  *
  * A feature worktree lives INSIDE the repository, so a worktree without its own
  * install still resolves modules from the parent checkout: a before/after
@@ -14,18 +14,18 @@ import { join } from "node:path";
 
 const script = join(import.meta.dir, "check-worktree-install.ts");
 
-/** A throwaway tree; the check only ever reads it. */
+/** note: A throwaway tree; the check only ever reads it. */
 function fixture(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "worktree-install-"));
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-/** A populated install: a directory that holds no packages proves nothing. */
+/** why: A populated install: a directory that holds no packages proves nothing. */
 function modules(dir: string): void {
   mkdirSync(join(dir, "node_modules", "some-pkg"), { recursive: true });
 }
 
-/** A bare `node_modules` directory — the shape that used to pass as an install. */
+/** note: A bare `node_modules` directory — the shape that used to pass as an install. */
 function emptyModules(dir: string): void {
   mkdirSync(join(dir, "node_modules"), { recursive: true });
 }
@@ -48,7 +48,7 @@ describe("check-worktree-install", () => {
       modules(worktree);
       const { code, out } = run(worktree);
       expect(code).toBe(0);
-      // The check reports real paths: macOS resolves /var through /private/var.
+      // why: The check reports real paths: macOS resolves /var through /private/var.
       expect(out).toContain(join(realpathSync(worktree), "node_modules"));
     } finally {
       cleanup();
@@ -63,7 +63,7 @@ describe("check-worktree-install", () => {
       mkdirSync(worktree);
       const { code, out } = run(worktree);
       expect(code).toBe(1);
-      // Both paths: the directory inspected, and the tree it would inherit.
+      // note: Both paths: the directory inspected, and the tree it would inherit.
       expect(out).toContain(realpathSync(worktree));
       expect(out).toContain(join(realpathSync(dir), "node_modules"));
       expect(out).toContain("bun install");
@@ -107,7 +107,7 @@ describe("check-worktree-install", () => {
     try {
       const worktree = join(dir, "a", "worktree");
       mkdirSync(worktree, { recursive: true });
-      // The path exists but stat cannot answer (ELOOP): an unreadable answer,
+      // why: The path exists but stat cannot answer (ELOOP): an unreadable answer,
       // never the neutral "nothing to inherit" pass.
       symlinkSync("node_modules", join(dir, "a", "node_modules"));
       const { code, out } = run(worktree);
@@ -125,7 +125,7 @@ describe("check-worktree-install", () => {
     try {
       const worktree = join(dir, "a", "worktree");
       mkdirSync(worktree, { recursive: true });
-      // A dangling link: nothing is installed there, so the walk must continue
+      // why: A dangling link: nothing is installed there, so the walk must continue
       // to the neutral pass instead of refusing.
       symlinkSync("missing-target", join(dir, "a", "node_modules"));
       const { code, out } = run(worktree);
@@ -139,7 +139,8 @@ describe("check-worktree-install", () => {
   test("a local node_modules that resolves outside the worktree is not a pass", () => {
     const { dir, cleanup } = fixture();
     try {
-      modules(dir); // the parent tree a link would borrow
+      // note: the parent tree a link would borrow
+      modules(dir);
       const worktree = join(dir, "worktree");
       mkdirSync(worktree, { recursive: true });
       symlinkSync(join(dir, "node_modules"), join(worktree, "node_modules"));
@@ -156,7 +157,8 @@ describe("check-worktree-install", () => {
   test("an empty local node_modules does not certify an install", () => {
     const { dir, cleanup } = fixture();
     try {
-      modules(dir); // a reachable ancestor tree
+      // note: a reachable ancestor tree
+      modules(dir);
       const worktree = join(dir, "worktree");
       emptyModules(worktree);
       const { code, out } = run(worktree);
@@ -219,7 +221,7 @@ describe("check-worktree-install", () => {
       const worktree = join(dir, "worktree");
       modules(worktree);
       writeFileSync(join(worktree, "package-lock.json"), "{}\n");
-      // The first marker matches the repository; the second one must not be
+      // why: The first marker matches the repository; the second one must not be
       // shadowed by it.
       writeFileSync(join(worktree, "node_modules", ".package-lock.json"), "{}\n");
       writeFileSync(join(worktree, "node_modules", ".modules.yaml"), "\n");
@@ -239,7 +241,7 @@ describe("check-worktree-install", () => {
       const worktree = join(dir, "worktree");
       mkdirSync(worktree, { recursive: true });
       modules(join(worktree, "..deps"));
-      // Inside the worktree: only a segment NAME starts with two dots.
+      // why: Inside the worktree: only a segment NAME starts with two dots.
       symlinkSync(join("..deps", "node_modules"), join(worktree, "node_modules"));
       const { code, out } = run(worktree);
       expect(code).toBe(0);

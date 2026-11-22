@@ -288,8 +288,8 @@ floors, the saturation point or the refusal vocabulary updates this page,
 ## Known limits
 
 - The runner-side derivation of the `incomplete` verdict remains staged in the runner
-  (`ENGINE-OWNED, STAGED HERE`); moving it into `@mstar-harness/engine` is not part of this
-  implementation.
+  (`packages/runner/src/runtime-omp.ts`); `@mstar-harness/engine` owning it is an open
+  follow-up, not part of this implementation.
 - A truncation exactly at a line boundary cannot be detected: the platform supplies no truncation
   flag.
 - The cap's own terminal Check category (`cap stop`) and its customer wording are owned by the

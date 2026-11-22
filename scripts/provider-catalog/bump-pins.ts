@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * bump-pins.ts — move the SDK / engine / harness pins in one place.
+ * why: bump-pins.ts — move the SDK / engine / harness pins in one place.
  *
  *   bun run scripts/provider-catalog/bump-pins.ts --omp 18.23.0 --engine 4.8.0 [--harness-ref <sha>]
  *
@@ -122,7 +122,7 @@ export function installedVersion(dir: string, packageName: string): string | nul
  *  pin; the runner's pin is exact. */
 export type Expected = { name: string; version: string; caret: boolean };
 
-/** `[major, minor, patch]`, or null when the string is not a version. */
+/** note: `[major, minor, patch]`, or null when the string is not a version. */
 function versionTriple(value: string): number[] | null {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(value);
   return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
@@ -161,7 +161,7 @@ export function installAndVerify(dir: string, expected: Expected[], modes: strin
   }
 }
 
-/** Regenerate `dir`'s bun.lock from the committed lock + manifest beside it.
+/** why: Regenerate `dir`'s bun.lock from the committed lock + manifest beside it.
  *  `path.resolve`, not `path.join`: the runner's lock is built in an absolute
  *  temp directory, and `join` would nest it under the repo root instead. */
 function regenerateLock(dir: string, root: string = ROOT): void {
@@ -196,7 +196,7 @@ export function planEdits(
   }
   const engineMoves = to.engine !== undefined && to.engine !== engineFrom;
   const refMoves = to.harnessRef !== undefined && to.harnessRef !== from.harnessRef;
-  // HARNESS_VERSION, the CLI pin and the Dockerfile's ref/tag anchor describe
+  // why: HARNESS_VERSION, the CLI pin and the Dockerfile's ref/tag anchor describe
   // ONE release. Moving the version without the ref would declare v4.8.0 over a
   // 4.7.3 commit — and, because the next run would then build its anchor match
   // from the assumed tag, wedge every later bump. So the two move together or
@@ -235,7 +235,7 @@ export function planEdits(
       from: `harnessRef: "${from.harnessRef}"`,
       to: `harnessRef: "${to.harnessRef}"`,
     });
-    // The anchor comment names the ref, the tag AND the day it moved. The tag is
+    // why: The anchor comment names the ref, the tag AND the day it moved. The tag is
     // taken from the comment the file actually carries (`from.anchorTag`), so a
     // file that drifted is reported instead of being silently rewritten into a
     // shape no match string expects.
@@ -277,7 +277,7 @@ export function expectedInstalls(edits: PinEdit[], manifest: string): Expected[]
  *  real install and before the tree is consistent again. */
 export type BumpHooks = { afterRootInstall?: () => void };
 
-/** Move the pins and make the installed tree match them. Throws on any failure —
+/** note: Move the pins and make the installed tree match them. Throws on any failure —
  *  the caller owns the restore, and must restore the INSTALLED tree, not just
  *  the manifests (see the workflow's `git checkout … && bun install` pair). */export async function runBump(
   root: string,
@@ -302,28 +302,28 @@ export type BumpHooks = { afterRootInstall?: () => void };
     console.log(`updated ${file} (${fileEdits.length} pin${fileEdits.length === 1 ? "" : "s"})`);
   }
 
-  // Root: relock from the committed lock, install for real, then prove a clean
+  // why: Root: relock from the committed lock, install for real, then prove a clean
   // checkout would get the same tree. The install is what makes the extractor
   // read the NEW SDK; `--frozen-lockfile` is the second check.
   regenerateLock("", root);
   installAndVerify(root, expectedInstalls(edits, "package.json"), [[], ["--frozen-lockfile"]]);
   hooks.afterRootInstall?.();
 
-  // CLI pin: its own manifest + lock (no source imports the CLI, so a lock is
+  // why: CLI pin: its own manifest + lock (no source imports the CLI, so a lock is
   // the whole artifact).
   if (edits.some((edit) => edit.file === "sandbox-image/cli-global/package.json")) {
     regenerateLock("sandbox-image/cli-global", root);
     console.log("regenerated sandbox-image/cli-global/bun.lock");
   }
 
-  // Runner: relock + install in a temp copy (a nested node_modules here would
+  // why: Runner: relock + install in a temp copy (a nested node_modules here would
   // shadow the root resolution), then copy the resulting lock back. The install
   // is real so the copy proves the lock resolves to the pinned tree.
   if (edits.some((edit) => edit.file === "packages/runner/package.json")) {
     const tmp = mkdtempSync(path.join(tmpdir(), "runner-lock-"));
     try {
       cpSync(path.join(root, "packages/runner/package.json"), path.join(tmp, "package.json"));
-      // A committed lock is seeded when present so only the pin's rows move;
+      // why: A committed lock is seeded when present so only the pin's rows move;
       // absent, `regenerateLock` resolves the whole tree instead.
       const committedLock = path.join(root, "packages/runner/bun.lock");
       if (existsSync(committedLock)) cpSync(committedLock, path.join(tmp, "bun.lock"));

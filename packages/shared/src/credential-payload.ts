@@ -1,5 +1,5 @@
 /**
- * Credential-transport wire contract — the runner's stdin payload.
+ * why: Credential-transport wire contract — the runner's stdin payload.
  *
  * This is the ONLY credential channel into the review container. The consumer
  * builds the payload from the App's decrypted key pools and streams it into the
@@ -69,7 +69,7 @@ export function decodeCredentialPayload(raw: string): CredentialPools {
   if (rawPools === null || typeof rawPools !== "object" || Array.isArray(rawPools)) {
     throw new Error('the credential payload must carry a "pools" object');
   }
-  // Null-prototype dictionary: a `__proto__` pool key must become an OWN
+  // why: Null-prototype dictionary: a `__proto__` pool key must become an OWN
   // property, never silently re-target the object's prototype (that would drop
   // a transported pool without a word — the one thing this channel must not do).
   const pools: CredentialPools = Object.create(null);
@@ -87,7 +87,7 @@ export function decodeCredentialPayload(raw: string): CredentialPools {
       if (typeof entry !== "string" || entry === "") {
         throw new Error(`credential pool ${providerId} entry ${index} must be a non-empty string`);
       }
-      // The stored `login` api_key is handed to the SDK's config-value
+      // why: The stored `login` api_key is handed to the SDK's config-value
       // resolver verbatim, and THAT runs any `!`-prefixed value as a shell
       // command (packages/shared/src/credential-key.ts) — a transported key of this
       // shape would be remote code execution inside the review container when

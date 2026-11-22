@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * extract-changelog-section.ts — print a version's changelog section body.
+ * note: extract-changelog-section.ts — print a version's changelog section body.
  * Feeds the bilingual GitHub Release notes.
  *
  * Usage:
@@ -17,13 +17,13 @@ import { join } from "node:path";
 import { changelogPathFor } from "./release-surfaces";
 
 export type ExtractOptions = {
-  /** Bare version (X.Y.Z) — same form as the section header and archive dir. */
+  /** note: Bare version (X.Y.Z) — same form as the section header and archive dir. */
   version: string;
   lang: "en" | "cn";
-  /** Base the changelog path resolves under. Default: process.cwd(). */
+  /** note: Base the changelog path resolves under. Default: process.cwd(). */
   root?: string;
   /**
-   * Bound the emitted body. GitHub refuses a PR body over 65536 characters and
+   * why: Bound the emitted body. GitHub refuses a PR body over 65536 characters and
    * a Release body over 125000; a first release carries every accumulated
    * fragment, so an unbounded section breaks the cut instead of publishing it.
    */
@@ -115,7 +115,7 @@ function printUsage(): void {
   RELEASE_VERSION=<version> bun run scripts/extract-changelog-section.ts --lang cn`);
 }
 
-// Run only when executed directly — importing the module (unit tests) must
+// why: Run only when executed directly — importing the module (unit tests) must
 // not read the real checkout's changelogs.
 if (import.meta.main) {
   let parsed;

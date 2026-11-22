@@ -1,5 +1,5 @@
 /**
- * Container review-runner entry.
+ * note: Container review-runner entry.
  *
  * Runs INSIDE the sandbox image and is invoked by the Worker consumer via
  * `exec` (the consumer wires the runtime in):
@@ -136,7 +136,7 @@ const USAGE =
   "prContext?: { prBody: string, issues: [{ number, title, body }] } })";
 
 /**
- * One `customProviders` entry: the shipped shape guard (the id pattern, base
+ * note: One `customProviders` entry: the shipped shape guard (the id pattern, base
  * URL and api vocabulary live dashboard-side in assertCustomProvider) plus the
  * per-model metadata overlay. Every stated field is re-checked against its wire
  * type and copied into the returned declaration — a malformed entry FAILS, it
@@ -178,7 +178,7 @@ function parseCustomProviderEntry(entry: unknown, index: number): CustomProvider
 }
 
 /**
- * The metadata overlay's wire guard: an object keyed by ids THIS declaration
+ * note: The metadata overlay's wire guard: an object keyed by ids THIS declaration
  * lists, each entry an object of the five known fields with their wire types.
  * A key outside `model_ids` is unreachable data (the dashboard write gate
  * refuses it too) and a non-positive size is not a statement — both fail here
@@ -239,17 +239,16 @@ export type RunnerInputJson = {
   reconFacts?: string[];
   modelOverrides?: Record<string, string>;
   customProviders?: CustomProviderDeclaration[];
-  /** Optional typed recheck input — passed through to the runtime. */
   recheck?: RecheckInput;
-  /** The operator's recheck ask budget in bytes — absent = the runner default. */
+  /** note: The operator's recheck ask budget in bytes — absent = the runner default. */
   recheckAssignmentMaxBytes?: number;
-  /** The caller's absolute exec deadline (Date.now() ms) — absent = the level's tier cap from process start. */
+  /** note: The caller's absolute exec deadline (Date.now() ms) — absent = the level's tier cap from process start. */
   outerDeadlineEpochMs?: number;
-  /** Optional PR context for the report seat — passed through to the runtime. */
+  /** note: Optional PR context for the report seat — passed through to the runtime. */
   prContext?: PrContext;
 };
 
-/** Parse CLI flags. Throws (usage) on missing/unknown flags or missing values. */
+/** note: Parse CLI flags. Throws (usage) on missing/unknown flags or missing values. */
 function parseArgs(argv: string[]): {
   level: string;
   inputPath: string;
@@ -288,14 +287,14 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
   }
   const record = parsed as Record<string, unknown>;
   const input = {} as RunnerInputJson;
-  // The capability hosts are the base of the synthesized models.yml —
+  // why: The capability hosts are the base of the synthesized models.yml —
   // REQUIRED as a field (there is no baked in-image base), EMPTY on production
   // runs. Shape validation ONLY: a runtime-supplied base is registry data
   // (keyless); the generator emits it verbatim.
   if (!Array.isArray(record.capabilityHosts)) {
     throw new Error("input JSON field `capabilityHosts` must be an array of capability hosts");
   }
-  // An empty array is the normal run: the per-review models.yml is the App's
+  // why: An empty array is the normal run: the per-review models.yml is the App's
   // own provider declarations alone, and built-in providers resolve from the
   // SDK's catalog. The array stays REQUIRED so the input shape is explicit.
 
@@ -351,7 +350,7 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
         maxTokens: m.maxTokens as number,
       };
     });
-    // The per-field guards above proved the six scalars are strings.
+    // note: The per-field guards above proved the six scalars are strings.
     return {
       id: host.id as string,
       catalogProviderId: host.catalogProviderId as string,
@@ -375,7 +374,7 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
     input.reconFacts = record.reconFacts;
   }
   if (record.modelOverrides !== undefined) {
-    // (spec Architect lock L3): shape validation ONLY here — the
+    // invariant: (spec Architect lock L3): shape validation ONLY here — the
     // role vocabulary lives dashboard-side and selector grammar in the
     // dashboard store's parseModelChain mirror; unknown agent names pass
     // through inertly (the SDK consumes only names it actually dispatches).
@@ -393,7 +392,7 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
     input.modelOverrides = map as Record<string, string>;
   }
   if (record.customProviders !== undefined) {
-    // (AL-23-1): shape validation ONLY here — the id
+    // invariant: (AL-23-1): shape validation ONLY here — the id
     // pattern/baseUrl/api-enum/model bounds live dashboard-side
     // (assertCustomProvider). The declarations carry NO keys: each key rides
     // the STDIN credential payload under its provider id (packages/shared/src/credential-payload)
@@ -409,7 +408,7 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
     input.customProviders = list.map((entry, index) => parseCustomProviderEntry(entry, index));
   }
   if (record.recheck !== undefined) {
-    // Shape validation ONLY — the §7.3 wire SSOT is
+    // invariant: Shape validation ONLY — the §7.3 wire SSOT is
     // validateRecheckDoc, which the runtime applies to the seat's OUTPUT
     // against this input. The consumer builds the document from
     // store-selected targets, so the runner guards the envelope shape only:
@@ -435,7 +434,7 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
     input.recheck = doc as RecheckInput;
   }
   if (record.recheckAssignmentMaxBytes !== undefined) {
-    // Shape validation ONLY: the accepted RANGE lives in the dashboard store
+    // invariant: Shape validation ONLY: the accepted RANGE lives in the dashboard store
     // (`review.recheck.assignment_max_bytes`), which the consumer read.
     const maxBytes = record.recheckAssignmentMaxBytes;
     if (typeof maxBytes !== "number" || !Number.isInteger(maxBytes) || maxBytes <= 0) {
@@ -444,7 +443,7 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
     input.recheckAssignmentMaxBytes = maxBytes;
   }
   if (record.outerDeadlineEpochMs !== undefined) {
-    // The caller's own exec deadline as an absolute worker-clock instant: the
+    // why: The caller's own exec deadline as an absolute worker-clock instant: the
     // anchor takes it verbatim, so a shortened run plans against the exec that
     // will kill it instead of the tier cap. A PAST instant is valid — it anchors
     // a spent budget that every seat clamps — so only the shape is rejected.
@@ -462,7 +461,7 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
     input.outerDeadlineEpochMs = outerDeadlineEpochMs;
   }
   if (record.prContext !== undefined) {
-    // Shape validation ONLY, mirroring the recheck guard: the consumer builds
+    // invariant: Shape validation ONLY, mirroring the recheck guard: the consumer builds
     // this from bounded `gh` reads, and the runner's own report gate
     // (`validateReportDoc`) covers the OUTPUT. Absent = no report seat.
     const context = record.prContext;
@@ -495,7 +494,7 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
 }
 
 /**
- * The provider pools one run must load, keyed by the models.yml provider id
+ * why: The provider pools one run must load, keyed by the models.yml provider id
  * the session resolves credentials under. Two identity sources, in order:
  *
  *   1. DECLARED identity (what the synthesis itself puts in models.yml) —
@@ -552,7 +551,7 @@ export function createInMemoryAuthStorage(): Promise<AuthStorage> {
 }
 
 /**
- * Load the transported credential pool into the run's credential store.
+ * safety: Load the transported credential pool into the run's credential store.
  *
  * The store is IN MEMORY (`createInMemoryAuthStorage`): `<agentDir>` keeps
  * only the synthesized models.yml, so there is no credential database for the
@@ -579,10 +578,10 @@ async function loadCredentialPool(json: RunnerInputJson, payload: string): Promi
   const loaded: Array<{ providerId: string; keys: string[] }> = [];
   for (const { providerId, poolKey } of poolProviders(json, Object.keys(pools))) {
     const keys = pools[poolKey];
-    if (keys === undefined) continue; // no pool transported for this provider
+    if (keys === undefined) continue; // note: no pool transported for this provider
     loaded.push({ providerId, keys });
   }
-  // A keyless run still gets an instance: the session must never fall back to
+  // safety: A keyless run still gets an instance: the session must never fall back to
   // discoverAuthStorage(agentDir), which would create the database on disk.
   const storage = await createInMemoryAuthStorage();
   if (loaded.length === 0) return storage;
@@ -593,11 +592,11 @@ async function loadCredentialPool(json: RunnerInputJson, payload: string): Promi
         providerId,
         keys.map((key) => ({ type: "api_key" as const, key, source: "login" as const })),
       );
-      // Provider id + pool size only — never a key value.
+      // safety: Provider id + pool size only — never a key value.
       console.error(JSON.stringify({ event: "credential_pool", provider: providerId, pool_size: keys.length }));
     }
   } catch (error) {
-    // A failed write must not leave the half-loaded store open; the caller
+    // safety: A failed write must not leave the half-loaded store open; the caller
     // aborts the run on this throw, so nothing else holds it.
     storage.close();
     throw error;
@@ -624,14 +623,14 @@ async function loadCredentialPool(json: RunnerInputJson, payload: string): Promi
  */
 export const CREDENTIAL_STDIN_TIMEOUT_MS = 30_000;
 
-/** No pipe (interactive TTY) or nothing to read is the keyless run shape. */
+/** note: No pipe (interactive TTY) or nothing to read is the keyless run shape. */
 async function* defaultStdinChunks(): AsyncGenerator<Uint8Array> {
   if (process.stdin.isTTY) return;
   for await (const chunk of Bun.stdin.stream()) yield chunk;
 }
 
 /**
- * True once `text` is a whole JSON document. A trailing `}` gate only avoids
+ * note: True once `text` is a whole JSON document. A trailing `}` gate only avoids
  * a parse attempt per chunk; `JSON.parse` is the real test, so a `}` inside a
  * string cannot end the read early.
  */
@@ -715,7 +714,7 @@ export function chainAttributionBlock(
       attributionEntries(attributeChain(walkSeatGates({ registry, chain }))),
     );
   } catch (error) {
-    // The attribution itself failed. The diagnostic still goes through the ONE
+    // why: The attribution itself failed. The diagnostic still goes through the ONE
     // budgeted formatter as a single entry: a multi-kilobyte stack trace must
     // not push the original provider error out of the Worker's stderr tail —
     // which is exactly when the operator needs it most.
@@ -735,7 +734,7 @@ export async function main(
   runtime: AgentRuntime = ompAgentRuntime,
   readStdin: () => Promise<string> = readCredentialStdin,
   statusPath: string = process.env.MSTAR_RECHECK_STATUS_PATH?.trim() || RECHECK_STATUS_PATH,
-  // The applied-model document's path: fixed in the image, a parameter for the
+  // why: The applied-model document's path: fixed in the image, a parameter for the
   // SAME reason as `statusPath` — a test must write its own file, never the
   // production one.
   appliedModelPath: string = APPLIED_MODEL_PATH,
@@ -750,14 +749,14 @@ export async function main(
     console.error((error as Error).message);
     return 2;
   }
-  // Level validity is knowable before any I/O — treat it as a usage error.
+  // why: Level validity is knowable before any I/O — treat it as a usage error.
   if (!isReviewLevel(level)) {
     console.error(
       `review: unknown level ${JSON.stringify(level)} (expected one of: ${REVIEW_LEVELS.join(", ")})`,
     );
     return 2;
   }
-  // The side-channel paths are FIXED, so every attempt (a retry, a
+  // safety: The side-channel paths are FIXED, so every attempt (a retry, a
   // re-delivered job, a duplicate run) shares them. A document left there by an
   // earlier attempt would otherwise be read back as this round's when the seat
   // that owned it skips or fails and writes nothing. Remove them BEFORE the
@@ -768,7 +767,7 @@ export async function main(
   const stale: string[] = [];
   if (recheckOutPath !== undefined) stale.push(recheckOutPath, statusPath);
   if (reportOutPath !== undefined) stale.push(reportOutPath);
-  // The applied-model document is THIS round's fact and this round may report
+  // why: The applied-model document is THIS round's fact and this round may report
   // none: a leftover from an earlier run in the same container would otherwise
   // be read back as this round's provider. Always cleared.
   stale.push(appliedModelPath);
@@ -780,7 +779,7 @@ export async function main(
       return 1;
     }
   }
-  // The per-run directory carries only the synthesized models.yml — the
+  // safety: The per-run directory carries only the synthesized models.yml — the
   // credential rows live in an in-memory store (below), so no key material is
   // ever written to disk. The directory still exists only for this run, so it
   // is removed once the runtime has settled, on every path (success,
@@ -795,19 +794,19 @@ export async function main(
       console.error(`review: cannot remove credential directory ${agentDir}: ${(error as Error).message}`);
     }
   };
-  // Closed once the runtime has settled — the store must outlive every session
+  // safety: Closed once the runtime has settled — the store must outlive every session
   // the runtime creates (all three call sites receive this exact instance).
   let authStorage: AuthStorage | undefined;
 
   try {
-    // The chain rides this run's runtime input AND the failure attribution
+    // why: The chain rides this run's runtime input AND the failure attribution
     // below — parsed once so the two can never disagree.
     const chain = parseModelSelectors(Bun.env.OMP_REVIEW_MODEL);
     let input: AgentRuntimeRunInput;
     try {
       const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
       const json = parseRunnerInput(parsed);
-      // spec §7.8: anchor the ABSOLUTE outer review deadline once per process
+      // why: spec §7.8: anchor the ABSOLUTE outer review deadline once per process
       // — the recheck seat's budget derives from it, so the seat can never
       // outlive (or restart past) the review's own wall-clock cap. The anchor
       // takes the caller's own exec deadline VERBATIM when the input supplies
@@ -816,7 +815,7 @@ export async function main(
       // deadline back. It runs after the input is parsed because only the input
       // carries that deadline, and still before the runtime starts.
       anchorRecheckDeadline(Date.now(), level, json.outerDeadlineEpochMs);
-      // (AL-23-1): EVERY run synthesizes the COMPLETE per-review models.yml
+      // note: (AL-23-1): EVERY run synthesizes the COMPLETE per-review models.yml
       // (/tmp/omp-agent-<uuid>/) — the (empty) capability base plus the
       // custom-provider declarations — and the directory rides as `agentDir`
       // (the SDK reads <agentDir>/models.yml instead of the retired in-image file).
@@ -825,7 +824,7 @@ export async function main(
         skippedCollisions.push(providerId);
       });
       agentDir = dir;
-      // A custom id colliding with a base provider is skipped (base wins,
+      // note: A custom id colliding with a base provider is skipped (base wins,
       // AL-23-1) — never silent: one structured stderr warn per colliding
       // id (id + total count; zero key material).
       for (const providerId of skippedCollisions) {
@@ -837,7 +836,7 @@ export async function main(
           }),
         );
       }
-      // The transported credential pool arrives on STDIN and lands in an
+      // safety: The transported credential pool arrives on STDIN and lands in an
       // IN-MEMORY store before any session exists: the synthesized models.yml
       // pins no apiKey, so the stored `login` rows are what the runtime rotates
       // across, and no file exists for the session's own tools to read.
@@ -855,26 +854,26 @@ export async function main(
         worktreePath: json.worktreePath ?? process.cwd(),
         reconFacts: json.reconFacts ?? [],
         modelSelectors: chain,
-        // Optional per-role overrides: included ONLY when the map
+        // invariant: Optional per-role overrides: included ONLY when the map
         // is present, so legacy input builds a byte-identical runtime input.
         ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
-        // Optional typed recheck input: included ONLY when
+        // invariant: Optional typed recheck input: included ONLY when
         // present — same byte-identical legacy rule as modelOverrides.
         ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
-        // The operator's ask budget: read once by the consumer, absent for a
+        // invariant: The operator's ask budget: read once by the consumer, absent for a
         // legacy input, so the runtime keeps its documented default.
         ...(json.recheckAssignmentMaxBytes !== undefined
           ? { recheckAssignmentMaxBytes: json.recheckAssignmentMaxBytes }
           : {}),
-        // The caller's own exec deadline: absent for a direct legacy
+        // invariant: The caller's own exec deadline: absent for a direct legacy
         // invocation, so the runtime input keeps its tier-cap behaviour.
         ...(json.outerDeadlineEpochMs !== undefined
           ? { outerDeadlineEpochMs: json.outerDeadlineEpochMs }
           : {}),
-        // Optional PR context: the report seat's untrusted input. Absent =
+        // invariant: Optional PR context: the report seat's untrusted input. Absent =
         // no report seat runs, so the runtime input stays byte-identical.
         ...(json.prContext !== undefined ? { prContext: json.prContext } : {}),
-        // The synthesized per-review models dir (present
+        // note: The synthesized per-review models dir (present
         // on EVERY run — there is no baked models.yml to fall back to), and the
         // in-memory credential store the sessions must use.
         agentDir: dir,
@@ -887,7 +886,7 @@ export async function main(
 
     try {
       const { envelope, recheck, recheckStatus, report, appliedModel } = await runtime.runReview(input);
-      // The applied model crosses the container boundary as its OWN document:
+      // why: The applied model crosses the container boundary as its OWN document:
       // the published envelope is the engine's schema and must not grow fields.
       // Written only when a model actually served — an absent file is the
       // round's "no model served", which the Worker must never read as "the
@@ -895,7 +894,7 @@ export async function main(
       // review: the review is already valid, and losing the attribution must
       // not lose the review with it.
       if (appliedModel === undefined) {
-        // No model served: the file must NOT exist, so the Worker's proven-absent
+        // why: No model served: the file must NOT exist, so the Worker's proven-absent
         // read is the truth rather than a stale document from an earlier round.
         try {
           rmSync(appliedModelPath, { force: true });
@@ -921,7 +920,7 @@ export async function main(
           );
         }
       }
-      // The optional --recheck-out file is written only when a
+      // safety: The optional --recheck-out file is written only when a
       // recheck result exists, and BEFORE the envelope reaches stdout — a
       // write failure is a genuine I-O failure (exit 1, no stdout), not a
       // silent lie about the file. No flag / no result writes nothing; stdout
@@ -930,7 +929,7 @@ export async function main(
         try {
           writeFileSync(recheckOutPath, JSON.stringify(recheck));
         } catch (error) {
-          // The validated document is lost: exit 1 with no stdout, so the
+          // why: The validated document is lost: exit 1 with no stdout, so the
           // Worker takes its own runner-failure path. A `write-failed` status
           // would be unreachable — the Worker never reads the status of a
           // non-zero run.
@@ -938,7 +937,7 @@ export async function main(
           return 1;
         }
       }
-      // The optional --report-out file is written only when a report exists,
+      // safety: The optional --report-out file is written only when a report exists,
       // and BEFORE the envelope reaches stdout. The report is OPTIONAL
       // narrative: a write failure is logged and swallowed, so the validated
       // envelope still publishes (exit 0) and the Worker renders `none` —
@@ -956,7 +955,7 @@ export async function main(
           );
         }
       }
-      // The STATUS is written AFTER the document succeeds (and whenever no
+      // safety: The STATUS is written AFTER the document succeeds (and whenever no
       // document was produced — the budget skip, seat failure and invalid
       // document rounds) so it never claims an outcome the run did not
       // deliver. Best-effort: a status write failure is noise, never a failed
@@ -964,12 +963,12 @@ export async function main(
       if (recheckOutPath !== undefined && recheckStatus !== undefined) {
         writeRecheckStatus(recheckStatus, statusPath);
       }
-      // stdout carries ONLY the envelope JSON (plan Module contracts).
+      // invariant: stdout carries ONLY the envelope JSON (plan Module contracts).
       console.log(JSON.stringify(envelope));
       return 0;
     } catch (error) {
       if (error instanceof RunnerBudgetExhausted) {
-        // The runner's own deadline evidence stopped the review — a budget
+        // why: The runner's own deadline evidence stopped the review — a budget
         // fact, never a failure to attribute or a verdict to publish. stdout
         // gets the closed mstar.review-budget-exhausted/v1 document and the
         // process still exits 0: the Worker terminalizes the failure from
@@ -980,7 +979,7 @@ export async function main(
           console.error(`review: budget-exhausted signal failed its own shape: ${JSON.stringify(signal)}`);
           return 1;
         }
-        // The side documents carry this round's attribution exactly as on the
+        // why: The side documents carry this round's attribution exactly as on the
         // envelope path: the applied model when one served, the recheck round's
         // document and status (the seat the stop aborted still accounts for
         // its round). A side write that fails is a stderr diagnostic, never a
@@ -1014,7 +1013,7 @@ export async function main(
         return 0;
       }
       const cause = (error as Error).message;
-      // The round is over, but the CONFIGURED chain's eligibility is still
+      // why: The round is over, but the CONFIGURED chain's eligibility is still
       // knowable: the probe's gate walker runs over this run's own inputs (the
       // synthesized models.yml and the pool it loaded). It is ONE bounded
       // block — cause first, dispositions after, folded by a counted marker —
@@ -1025,21 +1024,20 @@ export async function main(
       if (agentDir !== undefined && authStorage !== undefined) {
         console.error(chainAttributionBlock(cause, chain, agentDir, authStorage));
       } else {
-        // No synthesized models.yml to walk: the cause alone, still through the
+        // why: No synthesized models.yml to walk: the cause alone, still through the
         // formatter so even this path cannot print an unbounded block.
         console.error(formatFailureAttribution(cause, []));
       }
       return 1;
     }
   } finally {
-    // The store is released only after the runtime has settled — every
+    // safety: The store is released only after the runtime has settled — every
     // session it created held this instance for the whole run.
     authStorage?.close();
     removeAgentDir();
   }
 }
 
-// Auto-run only when executed directly.
 if (import.meta.main) {
   process.exitCode = await main(Bun.argv.slice(2));
 }
