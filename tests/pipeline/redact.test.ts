@@ -8,12 +8,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   REDACTED,
+  redactDocument,
   redactExactSecrets,
   redactReviewOutput,
   redactReviewOutputExact,
   redactSecrets,
-  redactTransformed,
   secretTransforms,
+  skippedSecrets,
 } from "../../src/pipeline/redact";
 import { buildReviewBody } from "../../src/pipeline/comment";
 import type { ReviewOutput } from "../../src/review/schema";
@@ -107,7 +108,7 @@ describe("redactExactSecrets", () => {
   });
 });
 
-describe("redactTransformed", () => {
+describe("redactDocument", () => {
   const SECRET = "sk-live/paid-session-secret-01";
   const forms = secretTransforms(SECRET);
 
@@ -122,124 +123,150 @@ describe("redactTransformed", () => {
     expect(Object.keys(one).sort()).toEqual(["base64", "base64url", "hex", "raw", "urlEncoded"]);
   });
 
-  test("removes every transform from nested decoded leaves, leaving non-strings untouched", () => {
+  test("removes every transform from nested leaves, leaving non-strings untouched", () => {
     const injected = [forms.raw, forms.urlEncoded, forms.base64, forms.base64url, forms.hex];
     const payload = {
-      run: { stdout: JSON.stringify({ echoes: injected }), exitCode: 0 },
-      recheck: { rejected: new Set(injected.map((form, index) => `row${index}:${form}`)) },
+      findings: [{ body: injected.join(" ") }],
+      rejected: new Set(injected.map((form, index) => `row${index}:${form}`)),
       report: null,
       passed: true,
       score: 0.5,
     };
 
-    const outcome = redactTransformed(payload, [SECRET]);
+    const outcome = redactDocument(payload, [SECRET], "text");
 
-    // Fixture shape is ours: the envelope we just serialized.
-    const redactedEnvelope = JSON.parse(outcome.value.run.stdout) as { echoes: string[] };
-    expect(redactedEnvelope.echoes).toEqual(Array(5).fill("[redacted]"));
-    expect([...outcome.value.recheck.rejected]).toEqual(
-      injected.map((_, index) => `row${index}:[redacted]`),
-    );
-    expect(outcome.value.run.exitCode).toBe(0);
+    expect(outcome.value.findings[0]?.body).toBe(Array(5).fill("[redacted]").join(" "));
+    expect([...outcome.value.rejected]).toEqual(injected.map((_, index) => `row${index}:[redacted]`));
     expect(outcome.value.passed).toBe(true);
     expect(outcome.value.score).toBe(0.5);
     expect(outcome.value.report).toBeNull();
     expect(outcome.replaced).toBe(10);
-    expect(outcome.skipped).toBe(0);
+  });
+
+  test("a forged identity field in model text is redacted; the host path is not", () => {
+    const secret = "abcdefgh";
+    const envelope = JSON.stringify({
+      target: { head_sha: secret },
+      summary_md: `{"head_sha":"${secret}"}`,
+      findings: [{ body: `only ${secret}` }],
+    });
+
+    const outcome = redactDocument(envelope, [secret], "run");
+    // Fixture shape is ours: the envelope serialized above.
+    const redacted = JSON.parse(outcome.value) as {
+      target: { head_sha: string };
+      summary_md: string;
+      findings: { body: string }[];
+    };
+
+    // The host-written path is byte-identical.
+    expect(redacted.target.head_sha).toBe(secret);
+    // Forged text — in a string and inside an array — is redacted like any leaf.
+    expect(redacted.summary_md).toBe('{"head_sha":"[redacted]"}');
+    expect(redacted.findings[0]?.body).toBe("only [redacted]");
+  });
+
+  test("the recheck document protects its identity paths and redacts everything else", () => {
+    const secret = "abcdefgh";
+    const recheck = {
+      doc: {
+        schema: "mstar.recheck/v1",
+        headSha: secret,
+        results: [
+          {
+            rowId: secret,
+            disposition: "addressed",
+            reason: "verified-fix",
+            evidence: { sliceId: secret, startLine: 1, endLine: 2, quote: secret },
+          },
+        ],
+      },
+      docFailure: null,
+      rejected: new Set([`row:${secret}`]),
+      anonymousRejectedRows: 0,
+      status: { schema: "mstar.recheck-status/v1", headSha: secret },
+    };
+
+    const outcome = redactDocument(recheck, [secret], "recheck");
+
+    expect(outcome.value.doc.headSha).toBe(secret);
+    expect(outcome.value.doc.results[0]?.rowId).toBe(secret);
+    expect(outcome.value.doc.results[0]?.evidence.sliceId).toBe(secret);
+    expect(outcome.value.status.headSha).toBe(secret);
+    // Everything off the table is model text.
+    expect(outcome.value.doc.results[0]?.evidence.quote).toBe("[redacted]");
+    expect([...outcome.value.rejected]).toEqual(["row:[redacted]"]);
+  });
+
+  test("a model-printed marker shields nothing and the marker survives", () => {
+    const outcome = redactDocument("x[redacted]abcdefgh", ["abcdefgh"], "text");
+
+    expect(outcome.value).toBe("x[redacted][redacted]");
+    expect(outcome.replaced).toBe(1);
   });
 
   test("a mixed escape echo decodes before matching (`\\u002f`, `\\/`)", () => {
     const unicodeEcho = '{"summary_md":"abc\\u002fdefg"}';
     const slashEcho = '{"summary_md":"abc\\/defg"}';
-    // Fixture shape is ours: the two envelopes above.
-    const decodedUnicode = JSON.parse(unicodeEcho) as { summary_md: string };
-    const decodedSlash = JSON.parse(slashEcho) as { summary_md: string };
-    expect(decodedUnicode.summary_md).toBe("abc/defg");
-    expect(decodedSlash.summary_md).toBe("abc/defg");
 
-    expect(redactTransformed(unicodeEcho, ["abc/defg"]).value).toBe('{"summary_md":"[redacted]"}');
-    expect(redactTransformed(slashEcho, ["abc/defg"]).value).toBe('{"summary_md":"[redacted]"}');
+    expect(redactDocument(unicodeEcho, ["abc/defg"], "run").value).toBe(
+      '{"summary_md":"[redacted]"}',
+    );
+    expect(redactDocument(slashEcho, ["abc/defg"], "run").value).toBe(
+      '{"summary_md":"[redacted]"}',
+    );
   });
 
-  test("a short credential is skipped, leaving head_sha byte-identical", () => {
-    const headSha = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
-    const envelope = JSON.stringify({ head_sha: headSha, attempt_id: "abc-id", note: "abc" });
-
-    const outcome = redactTransformed(envelope, ["abc"]);
-
-    expect(outcome.value).toBe(envelope);
-    expect(outcome.replaced).toBe(0);
-    expect(outcome.skipped).toBe(1);
-  });
-
-  test("an identity field is never rewritten, even when an 8+ char value occurs in it", () => {
-    const headSha = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
-    const key = "cabcabca";
-    const envelope = JSON.stringify({ head_sha: headSha, attempt_id: "abc-id", note: key });
-
-    const outcome = redactTransformed(envelope, [key]);
-    // Envelope shape is ours: the object serialized above.
-    const redacted = JSON.parse(outcome.value) as { head_sha: string; note: string };
-
-    expect(redacted.head_sha).toBe(headSha);
-    expect(redacted.note).toBe("[redacted]");
-  });
-
-  test("model text at depth ≥ 1 that looks like an identity field is redacted", () => {
-    const secret = "abcdefgh";
-    const envelope = JSON.stringify({
-      head_sha: "a".repeat(40),
-      summary_md: `{"head_sha":"${secret}"}`,
-    });
-
-    const outcome = redactTransformed(envelope, [secret]);
-    // Fixture shape is ours: the envelope serialized above.
-    const redacted = JSON.parse(outcome.value) as { head_sha: string; summary_md: string };
-
-    expect(redacted.head_sha).toBe("a".repeat(40));
-    // The nested object is model text: its `head_sha` key gets no exemption.
-    expect(JSON.parse(redacted.summary_md)).toEqual({ head_sha: "[redacted]" });
-  });
-
-  test("a whitespace-padded envelope is still decoded", () => {
+  test("a whitespace-padded document is decoded, and keeps its bytes when nothing matches", () => {
     const envelope = '\n  {"summary_md":"abc\\u002fdefg"}\n';
 
-    const outcome = redactTransformed(envelope, ["abc/defg"]);
-
+    const outcome = redactDocument(envelope, ["abc/defg"], "run");
     expect(outcome.replaced).toBe(1);
-    // Documented consequence: a re-serialized envelope loses that padding.
+    // Documented consequence: a re-serialized document loses that padding.
     expect(outcome.value).toBe('{"summary_md":"[redacted]"}');
+
+    expect(redactDocument(envelope, ["sk-unrelated-credential-0001"], "run").value).toBe(envelope);
   });
 
-  test("is idempotent within one pass, including marker-overlapping values", () => {
-    const once = redactTransformed({ text: `key ${SECRET}` }, [SECRET]);
-    const twice = redactTransformed(once.value, [SECRET]);
-    expect(twice.value).toEqual(once.value);
-    expect(twice.replaced).toBe(0);
-
-    // A leaf that already carries the marker is this function's own output.
-    const marked = redactTransformed({ text: "[redacted]" }, ["redacted"]);
-    expect(marked.value).toEqual({ text: "[redacted]" });
-    expect(marked.replaced).toBe(0);
-    expect(redactTransformed({ text: "redacted" }, ["redacted"]).value).toEqual({ text: "[redacted]" });
-
-    // Two values that overlap across the marker boundary reach a fixed point.
+  test("is idempotent for the sequences that failed before", () => {
     const secrets = ["x[redact", "abcdefgh"];
-    const first = redactTransformed({ text: "xabcdefgh" }, secrets);
+    const first = redactDocument({ text: "xabcdefgh" }, secrets, "text");
     expect(first.value).toEqual({ text: "x[redacted]" });
-    const second = redactTransformed(first.value, secrets);
+    const second = redactDocument(first.value, secrets, "text");
     expect(second.value).toEqual(first.value);
     expect(second.replaced).toBe(0);
+
+    // The marker is a fixed point too: parking it means nothing matches inside.
+    const marked = redactDocument({ text: "x[redacted]abcdefgh" }, secrets, "text");
+    const again = redactDocument(marked.value, secrets, "text");
+    expect(again.value).toEqual(marked.value);
+    expect(again.replaced).toBe(0);
+  });
+
+  test("a short credential is never applied and is counted once per distinct value", () => {
+    expect(skippedSecrets(["abc"])).toBe(1);
+    expect(skippedSecrets(["abc", "abc", "", "abcdefgh"])).toBe(1);
+
+    const envelope = JSON.stringify({
+      target: { head_sha: "abcabcabcabcabcabcabcabcabcabcabcabcabca" },
+      note: "abc",
+    });
+    const outcome = redactDocument(envelope, ["abc"], "run");
+    expect(outcome.value).toBe(envelope);
+    expect(outcome.replaced).toBe(0);
   });
 
   test("a payload with no secret present keeps its exact bytes", () => {
-    const envelope = JSON.stringify({ head_sha: "a".repeat(40), attempt_id: "id", score: 0.5, ok: true });
+    const envelope = JSON.stringify({
+      target: { head_sha: "a".repeat(40) },
+      score: 0.5,
+      ok: true,
+    });
 
-    // The runner's envelope round-trips byte-for-byte, so an untouched leaf is
-    // never reshaped by this pass.
+    // The runner's document round-trips byte-for-byte, so nothing is reshaped.
     expect(JSON.stringify(JSON.parse(envelope))).toBe(envelope);
-    expect(redactTransformed(envelope, []).value).toBe(envelope);
-    const unrelated = redactTransformed(envelope, ["sk-unrelated-credential-0001"]);
+    expect(redactDocument(envelope, [], "run").value).toBe(envelope);
+    const unrelated = redactDocument(envelope, ["sk-unrelated-credential-0001"], "run");
     expect(unrelated.value).toBe(envelope);
     expect(unrelated.replaced).toBe(0);
   });

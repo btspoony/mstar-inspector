@@ -20,7 +20,7 @@ import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { resolveModelSize } from "../contracts/provider-models";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { providerEnvName } from "./provider-catalog";
-import { redactExactSecrets, redactSecrets, redactTransformed } from "./redact";
+import { redactDocument, redactExactSecrets, redactSecrets, skippedSecrets } from "./redact";
 import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
 import type { D1Like } from "../store/types";
@@ -2431,18 +2431,14 @@ export async function runReviewAttempt(input: {
   // them, are removed HERE, on the host that holds them; the stored and the
   // returned value are this one sanitized object, so nothing downstream can
   // publish the raw stream either. Each retained document is redacted as its
-  // own ROOT (its identity keys are host-written; anything nested under them is
-  // model text), and every numeric leaf stays byte-identical.
+  // own root, with its host-written identity protected BY PATH — a forged
+  // `{"head_sha": …}` in model text is at no protected path and is redacted.
   const secretValues = progress.secretValues;
-  const stdoutRedaction = redactTransformed(run.stdout, secretValues);
-  const recheckRedaction = redactTransformed(recheck, secretValues);
-  const reportRedaction = redactTransformed(report, secretValues);
-  const providerRedaction = redactTransformed(appliedProvider, secretValues);
-  const skipped =
-    stdoutRedaction.skipped +
-    recheckRedaction.skipped +
-    reportRedaction.skipped +
-    providerRedaction.skipped;
+  const stdoutRedaction = redactDocument(run.stdout, secretValues, "run");
+  const recheckRedaction = redactDocument(recheck, secretValues, "recheck");
+  const reportRedaction = redactDocument(report, secretValues, "report");
+  const providerRedaction = redactDocument(appliedProvider, secretValues, "text");
+  const skipped = skippedSecrets(secretValues);
   if (skipped > 0) {
     // Visible, never silent: these credentials were NOT applied (each was
     // shorter than a credential), so a text echo of one would survive.
