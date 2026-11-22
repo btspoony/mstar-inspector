@@ -14,6 +14,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { ExecOutput } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
+import { TEST_KEY } from "../helpers/consumer-fixtures";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 // note: The shared mock must register the workerd builtin BEFORE the sandbox adapter
@@ -297,7 +298,12 @@ describe("prepare writes the marker before any checkout work", () => {
 
 describe("collection refuses an unproven container", () => {
   const executionInput = (sandbox: SandboxDouble, db: TestD1) => ({
-    deps: { log: { info: () => {}, warn: () => {} }, env: { DB: db } },
+    // note: The paid step seals the session's gate credential set, so the host
+    // channel carries the deployment's envelope key.
+    deps: {
+      log: { info: () => {}, warn: () => {} },
+      env: { DB: db, DASHBOARD_ENCRYPTION_KEY: TEST_KEY },
+    },
     deadlineMs: Date.now() + 600_000,
     sandbox: sandbox as never,
     headSha: SHA,

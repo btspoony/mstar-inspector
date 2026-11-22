@@ -2377,12 +2377,11 @@ export type ProcessDeps = {
   /**
    * The attempt's re-derived session credential, cached on the host channel so
    * the inline route mints once: `prepare` registers the token it minted, the
-   * paid step replaces the entry with the session's full exact-value set, and a
-   * RESUMED host registers the set it can rebuild (`token` absent — the paid
-   * session's token is unrecoverable) so the publish gate still has credentials.
-   * No token ever crosses a phase boundary.
+   * paid step replaces the entry with the session's full exact-value set. Only a
+   * host that ran the paid step has one — a resumed host reads the sealed set
+   * from the attempt row instead. No token ever crosses a phase boundary.
    */
-  credentials: Map<string, { token?: string; secretValues: string[] }>;
+  credentials: Map<string, { token: string; secretValues: string[] }>;
 };
 
 /**
@@ -4934,10 +4933,10 @@ function modelTexts(
 /**
  * The credential values the publish gate scans for: the paid session's own set,
  * sealed onto the attempt row (its transported provider keys and its minted
- * installation token), or the set this host already holds. `null` means the
- * host could establish NEITHER — the gate then refuses to publish (a body it
- * never scanned is not a clean body) instead of certifying it as clear. A store
- * fault throws, so the attempt retries rather than publishes unscanned.
+ * installation token), or the set this host holds because it ran the paid step.
+ * There is no third source: `null` means the row predates the sealed set, and
+ * the gate refuses to publish a body it cannot scan. A store fault throws, so
+ * the attempt retries rather than publishes unscanned.
  */
 async function attemptGateSecrets(deps: ProcessDeps, ref: AttemptRef): Promise<string[] | null> {
   const cached = deps.credentials.get(ref.attemptId);
@@ -4967,7 +4966,7 @@ async function refusesCredentialEcho(
   const refusal =
     secrets === null
       ? new Error(
-          "publish gate refused the review — this host could not establish the session's credential set",
+          "publish gate refused the review — this attempt predates the sealed credential set",
         )
       : texts.some((text) => carriesSecretForm(text, secrets))
         ? new Error("publish gate refused the review — the outgoing body carries a credential echo")

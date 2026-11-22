@@ -17,7 +17,6 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   createProcessDeps,
   ensureRunnerConfig,
-  hydrateAttemptCredentials,
   hydrateAttemptHost,
 } from "../pipeline/consumer";
 import {
@@ -104,13 +103,7 @@ export async function runReviewAttemptWorkflow(
         return reviewAttempt(deps, ref, prepared.prepared);
       },
     );
-    // A resumed host replays `review` without executing it, so the paid step's
-    // credential cache is empty here: the publish gate's list is rebuilt from
-    // the App config the paid step resolved (I-000685).
-    const collected = await step.do("collect", async () => {
-      await hydrateAttemptCredentials(deps, ref);
-      return collectAttempt(deps, ref, prepared.prepared);
-    });
+    const collected = await step.do("collect", () => collectAttempt(deps, ref, prepared.prepared));
     if (collected.kind === "settled") return;
     await step.do("publish", () => publishAttempt(deps, ref, collected.collected.publicationId));
   } catch (err) {

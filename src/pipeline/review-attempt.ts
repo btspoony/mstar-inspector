@@ -1688,20 +1688,6 @@ function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: reado
   return values;
 }
 
-/**
- * The key values a RESUMED host can rebuild for the publish gate (I-000685):
- * the same resolution the paid step transported, from the App config it used.
- * The paid session's installation token is left out — it is unrecoverable, and
- * a fresh mint is a DIFFERENT value that could never equal an echo; token forms
- * stay with the shape-based `redactSecrets`.
- */
-export function runnerCredentialValues(
-  appCfg: RunnerAppConfig,
-  customProviders?: readonly CustomProviderConsumerConfig[],
-): string[] {
-  return buildRunnerCredentials(appCfg, undefined, undefined, customProviders).keyValues;
-}
-
 /** Characters of an exec's stderr tail carried by its failure message. */
 export const STDERR_TAIL_MAX = 600;
 
@@ -2271,6 +2257,17 @@ export async function runReviewAttempt(input: {
   // transported provider keys + the minted installation token) — needed by
   // the failure message below and shared by the degrade and success paths.
   progress.secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
+  // SEC-01 resume (I-000685): the exact set this exec is about to hand the model
+  // — the provider keys it transports plus the installation token it minted — is
+  // sealed HERE, before anything is spent, and rides the statement that records
+  // the paid result. A failure to seal is a failure of the paid step itself: an
+  // unsealed attempt would be a review whose body no resumed host could ever
+  // protect, so it fails while nothing has been paid, never after.
+  const gateSecretsEnc = await sealGateSecrets(
+    deps.env.DASHBOARD_ENCRYPTION_KEY,
+    attemptId,
+    progress.secretValues,
+  );
   // §7.8: with a recheck input the runner gains `--recheck-out` — the seat
   // writes its validated document to the audited fixed path before the
   // envelope reaches stdout. `--report-out` rides whenever the report seat
@@ -2522,28 +2519,6 @@ export async function runReviewAttempt(input: {
     appliedProvider: providerRedaction.value,
   };
   let recorded = false;
-  // SEC-01 resume (I-000685): the exact set THIS exec handed the model — the
-  // provider keys it transported plus the installation token it minted — is
-  // sealed onto the attempt's own row in the SAME statement that stores the
-  // result, so a resumed collect scans for these values instead of
-  // re-resolving a config that may have rotated since. Sealing is best effort:
-  // an unavailable envelope key must not discard a paid review — the resumed
-  // collect then re-derives the set and refuses to publish if it cannot.
-  let gateSecretsEnc: string | null = null;
-  if (secretValues.length > 0) {
-    try {
-      gateSecretsEnc = await sealGateSecrets(deps.env.DASHBOARD_ENCRYPTION_KEY, attemptId, secretValues);
-    } catch (err) {
-      const detail = redactExactSecrets(
-        redactSecrets(err instanceof Error ? err.message : String(err)),
-        secretValues,
-      );
-      deps.log.warn(
-        { ...fields, error: detail },
-        "publish-gate credential envelope not sealed — a resumed collect must rebuild the set",
-      );
-    }
-  }
   try {
     recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now(), gateSecretsEnc);
   } catch (err) {

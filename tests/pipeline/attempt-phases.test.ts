@@ -79,9 +79,7 @@ const {
   reviewAttempt,
 } = await import("../../src/pipeline/review-attempt-execution");
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
-const { hydrateAttemptCredentials, hydrateAttemptHost, ensureRunnerConfig } = await import(
-  "../../src/pipeline/consumer"
-);
+const { hydrateAttemptHost, ensureRunnerConfig } = await import("../../src/pipeline/consumer");
 // note: Dynamic so the module graph loads AFTER the workerd shim above (same reason
 // every product module in this file is loaded dynamically).
 const { PublicationDeadlineSpent, postLineCommentsWithOctokit, postPreparedReviewWithOctokit, publicationSendGuard, PreparedSendRejected } = await import(
@@ -2349,43 +2347,96 @@ describe("the SEC-01 publish gate", () => {
 
     // note: A transient fault surfaces (the Workflow retries the step); it is never
     // absorbed into an empty set that would publish unscanned.
-    await expect(hydrateAttemptCredentials(resumed, ref)).rejects.toThrow("gate-secrets read lost");
-    await expect(collectAttempt(resumed, ref, prepared)).rejects.toThrow();
+    await expect(collectAttempt(resumed, ref, prepared)).rejects.toThrow("gate-secrets read lost");
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
   });
 
-  test("an attempt with no envelope whose set cannot be rebuilt is refused, not published", async () => {
-    // note: An attempt paid before the envelope existed carries none, and its App
-    // config no longer resolves — so neither the row nor a re-derivation can
-    // establish the set.
-    const { db, resumed, ref, prepared } = await paidThenResumed("plain text");
+  test("a pre-envelope attempt is refused at collect, not certified by provider keys", async () => {
+    // note: An attempt paid before the sealed set existed carries no envelope, and
+    // the App config a resumed host can read holds the CURRENT provider key — never
+    // the session's. Nothing rebuilds a provider-keys-only set, so the attempt is
+    // refused rather than certified by a list that cannot match the echo.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { db, resumed, ref, steps } = await paidWorkflowThenResumed(echo, paidKey);
     db.raw.prepare("UPDATE review_launches SET gate_secrets_enc = NULL WHERE attempt_id = ?").run(ATTEMPT_ID);
-    // note: The App's key pool is gone, so the config no longer satisfies the
-    // chain it declares — the fallback resolution fails.
-    db.raw.prepare("DELETE FROM bot_provider_keys").run();
 
-    await hydrateAttemptCredentials(resumed, ref);
-    expect(resumed.credentials.size).toBe(0);
-    expect(h.logLines.some((line) => line.msg.includes("publish-gate credentials could not be re-derived"))).toBe(true);
+    await runReviewAttemptWorkflow(resumed, ref, stepStore(steps), async () => {});
 
-    expect(await collectAttempt(resumed, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
-
-    expect(h.logLines.some((line) => line.msg.includes("could not establish the session's credential set"))).toBe(true);
+    expect(h.logLines.some((line) => line.msg.includes("predates the sealed credential set"))).toBe(true);
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
     const failure = db.raw.prepare("SELECT error FROM review_failures WHERE head_sha = ?").all(SHA) as {
       error: string;
     }[];
-    expect(failure.some((row) => row.error.includes("could not establish"))).toBe(true);
+    expect(failure.some((row) => row.error.includes("predates the sealed credential set"))).toBe(true);
+    // note: No provider-keys-only set was rebuilt to stand in for the session's.
+    expect(resumed.credentials.size).toBe(0);
   });
 
-  test("a resumed collect rebuilds the gate's credentials and refuses the encoded echo", async () => {
-    // note: Host A pays for the review, then the instance dies inside `collect`:
-    // only the database and the workflow's recorded step outputs survive. Host B
-    // is a fresh host — no credential cache, no resolved runner config.
+  test("a sealing fault fails the paid step and records no unsealed attempt", async () => {
+    // note: A deployment whose envelope key is unusable cannot protect an outgoing
+    // body. The paid step fails BEFORE it spends, through the existing failure
+    // settlement — never by recording an attempt the gate could not protect.
+    const { deps, db } = await makeDeps();
+    deps.env = { ...deps.env, DASHBOARD_ENCRYPTION_KEY: "not-a-32-byte-key" };
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+
+    // note: The settlement runs first and rethrows its cause once every effect is
+    // durable — the delivery fails for real and a fresh delivery may retry.
+    await expect(runReviewAttemptWorkflow(deps, ref, inlineWorkflowStep(), async () => {})).rejects.toThrow(
+      /DASHBOARD_ENCRYPTION_KEY is not valid base64/,
+    );
+
+    const failures = db.raw.prepare("SELECT error FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      error: string;
+    }[];
+    expect(failures.length).toBeGreaterThan(0);
+    const row = db.raw
+      .prepare("SELECT state, gate_secrets_enc, result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { state: string; gate_secrets_enc: string | null; result_json: string | null };
+    expect(row.state).not.toBe("persisted");
+    expect(row.result_json).toBeNull();
+    expect(row.gate_secrets_enc).toBeNull();
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
+  });
+
+  test("a tampered envelope fails the collect instead of publishing", async () => {
+    // note: An undecryptable set is a fault of the step (the Workflow retries it),
+    // never an empty set that would certify an unscanned body.
+    const { db, resumed, ref, prepared } = await paidThenResumed("plain text");
+    const row = db.raw
+      .prepare("SELECT gate_secrets_enc FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { gate_secrets_enc: string };
+    const parts = row.gate_secrets_enc.split(".");
+    const bytes = Buffer.from(parts[3]!, "base64");
+    bytes[0] = bytes[0]! ^ 0xff;
+    parts[3] = bytes.toString("base64");
+    db.raw
+      .prepare("UPDATE review_launches SET gate_secrets_enc = ? WHERE attempt_id = ?")
+      .run(parts.join("."), ATTEMPT_ID);
+
+    await expect(collectAttempt(resumed, ref, prepared)).rejects.toThrow(/secretbox: decrypt failed/);
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
+  });
+
+  /**
+   * note: The workflow-shaped resume: host A pays and the instance dies inside
+   * `collect`, so only the database and the recorded step outputs survive; host B
+   * keeps no credential cache and no resolved runner config.
+   */
+  async function paidWorkflowThenResumed(
+    echo: string,
+    paidKey = "sk-paid-session-1",
+  ): Promise<{ db: TestD1; resumed: ProcessDeps; ref: AttemptRef; steps: Map<string, unknown> }> {
     const { deps: paying, db } = await makeDeps();
-    const paidKey = "sk-paid-session-1";
     paying.runnerConfigs.set(TEST_APP_ID, {
       appCfg: { keys: { ark: [paidKey] }, modelChain: "ark/deepseek-v4-flash" },
       modelOverrides: undefined,
@@ -2394,29 +2445,30 @@ describe("the SEC-01 publish gate", () => {
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
-    // note: The key the SESSION carries leaks only base64-encoded, which the
-    // paying host's write-time redaction does not remove.
-    const echo = Buffer.from(paidKey, "utf8").toString("base64");
-    h.sandbox.runnerStdout = JSON.stringify({
-      ...VALID_OUTPUT,
-      findings: [{ ...VALID_OUTPUT.findings[0]!, body: `echo ${echo}` }],
-    });
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const steps = new Map<string, unknown>();
     const ref = makeRef(payload);
     await expect(
       runReviewAttemptWorkflow(paying, ref, stepStore(steps, "collect"), async () => {}),
     ).rejects.toThrow(INSTANCE_DIED);
-    // The echo is written into the paid result: write-time redaction covers the
-    // forms this host knew, so a form it did not is the gate's own case.
+    // The echo is written into the paid result: write-time redaction covers every
+    // form of the values this host held, so a form it did not is the gate's case.
     stubStoredEcho(db, echo);
+    const { deps: resumed } = await makeDeps({ db });
+    resumed.runnerConfigs.clear();
+    return { db, resumed, ref, steps };
+  }
+
+  test("a resumed collect opens the paid session's sealed set and refuses the encoded echo", async () => {
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { db, resumed, ref, steps } = await paidWorkflowThenResumed(echo, paidKey);
     const launch = db.raw
       .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT_ID) as { result_json: string };
     expect(launch.result_json).toContain(echo);
-
-    const { deps: resumed } = await makeDeps({ db });
-    resumed.runnerConfigs.clear();
     expect(resumed.credentials.size).toBe(0);
+
     await runReviewAttemptWorkflow(resumed, ref, stepStore(steps), async () => {});
 
     // note: Refused WITH credentials — the resumed host opens the paid session's own

@@ -132,8 +132,6 @@ import {
   claimUnactivatedAttempt,
   markAttemptRevoked,
   readAttemptActivation,
-  readGateSecretsEnvelope,
-  runnerCredentialValues,
   type RunnerAppConfig,
 } from "./review-attempt";
 import {
@@ -1641,34 +1639,6 @@ export async function ensureRunnerConfig(
   const config: RunnerConfig = { appCfg, modelOverrides, customProviders };
   deps.runnerConfigs.set(payload.botRef.appId, config);
   return config;
-}
-
-/**
- * Establish the publish gate's exact-value set on a host that did not run the
- * paid step. A resumed instance replays `prepare`/`review` without executing
- * them, so the invocation's credential cache is empty and the SEC-01 gate would
- * otherwise have nothing to scan for (I-000685).
- *
- * The paid session's own set is the authority, and it is already sealed on the
- * attempt row: this host leaves it to `collect`, which opens it. Only an
- * attempt that carries no envelope (paid before it existed, or sealing was
- * impossible) is rebuilt from the App config the paid step resolved — and if
- * that fails too, the cache stays empty and the gate refuses to publish a body
- * it could not scan.
- */
-export async function hydrateAttemptCredentials(deps: ProcessDeps, ref: AttemptRef): Promise<void> {
-  if (deps.credentials.has(ref.attemptId)) return;
-  // A store fault here throws: the collect step must retry, never publish.
-  if ((await readGateSecretsEnvelope(deps.env.DB, ref.attemptId)) !== null) return;
-  try {
-    const runner = await ensureRunnerConfig(ref.payload, deps);
-    deps.credentials.set(ref.attemptId, {
-      secretValues: runnerCredentialValues(runner.appCfg, runner.customProviders),
-    });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    deps.log.warn(toBaseFields(ref.payload), `publish-gate credentials could not be re-derived: ${detail}`);
-  }
 }
 
 /**
