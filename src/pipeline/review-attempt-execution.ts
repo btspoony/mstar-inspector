@@ -80,7 +80,11 @@ import {
 } from "../store/review-checks";
 import {
   beginAttemptSettlement,
+  clearRecheckOwed,
   deliveryKeyOf,
+  markRecheckAttributed,
+  noteRecheckOwed,
+  readRecheckObligation,
   readAttemptCheckKey,
   readAttemptHandoff,
   recordSuccessorIntent,
@@ -5166,7 +5170,6 @@ async function collectPhase(
         ? `${recheckOutcome}: status text withheld — the attempt carries no sealed credential set`
         : redactLedgerText(redactSecrets(detailSource), progress.secretValues)
     ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
-    let attribution = true;
     // Shipped failure rule: a round that SENT rows records one row when its
     // document is absent or the seat reported `failed` — a seat budget skip
     // records one too, because that round ran and answered nothing. A round
@@ -5174,16 +5177,20 @@ async function collectPhase(
     // (capture failed, catalog exclusion, §7.3 size budget), records none:
     // its rows are already accounted as `budget`/`no-evidence`/`omitted` in
     // the closure section.
-    if (recheckInput !== undefined && !roundCancelled && (recheckDoc === null || recheckOutcome === "failed")) {
+    const shipped =
+      recheckInput !== undefined && !roundCancelled && (recheckDoc === null || recheckOutcome === "failed");
+    if (shipped) {
+      // A REFUSAL waits for this row: the obligation is opened first (so a fault
+      // leaves the attempt undischargeable, not settled) and cleared once the row
+      // is durable — by any later pass (F-006).
+      if (required) await noteRecheckOwed(deps.env.DB, attemptId, Date.now());
       try {
         // Attempt+stage id, distinct from the parse/main rows: ONE durable record
         // per shipped round, so a collect retry (or two concurrent entries)
-        // cannot count the round twice. `changes` also decides the attribution
-        // line — a replay that finds the row already there is not a new round.
-        const written = await settlementFailureRowStatement(
-          deps.env.DB,
-          {
-            target_id: payload.targetId,
+        // cannot count the round twice.
+        await deps.failureStore.record({
+          id: `${attemptId}:recheck`,
+          target_id: payload.targetId,
             installation_id: payload.installation_id,
             owner: payload.owner,
             repo: payload.repo,
@@ -5191,20 +5198,23 @@ async function collectPhase(
             head_sha: headSha,
             stage: "recheck",
             error: recheckDetail,
-          },
-          `${attemptId}:recheck`,
-        ).run();
-        attribution = written.meta.changes === 1;
+        });
+        if (required) await clearRecheckOwed(deps.env.DB, attemptId);
       } catch (err) {
-        // A refused review waits for this row (the collect retries); a review
-        // that is about to publish keeps the best-effort rule instead — the
-        // insert must never mask the round (AL-6 pattern).
+        // A refused review keeps the obligation open (the collect retries, and a
+        // settlement cannot discharge it); a review that is about to publish
+        // keeps the best-effort rule instead — the insert must never mask the
+        // round (AL-6 pattern).
         if (required) throw err;
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(fields, `review_failures insert failed (recheck round continues): ${detail}`);
       }
     }
-    if (!attribution) return reconciled;
+    // The attribution LINE has its own replayable fact: a committed row is not a
+    // delivered log line (D1 can lose the reply, or the host can die between the
+    // insert and the log), so the line is deduplicated by that fact and not by
+    // an insert's change count (F-007).
+    if ((await readRecheckObligation(deps.env.DB, attemptId)).attributed) return reconciled;
     deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
       {
         ...fields,
@@ -5240,6 +5250,7 @@ async function collectPhase(
           ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
           : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
     );
+    await markRecheckAttributed(deps.env.DB, attemptId, Date.now());
     return reconciled;
   };
 
@@ -5270,7 +5281,10 @@ async function collectPhase(
         ? "parse diagnostic withheld — the attempt carries no sealed credential set"
         : redactLedgerText(redactSecrets(parsed.error), progress.secretValues);
     try {
+      // Attempt+stage identity: the stdout is immutable, so a re-entered collect
+      // must not append a second diagnostic for the same parse failure (F-008).
       await deps.failureStore.record({
+        id: `${attemptId}:parse`,
         target_id: payload.targetId,
         installation_id: payload.installation_id,
         owner: payload.owner,

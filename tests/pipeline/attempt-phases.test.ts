@@ -2334,6 +2334,39 @@ describe("the SEC-01 publish gate", () => {
       .run(JSON.stringify(execution), ATTEMPT_ID);
   }
 
+  /**
+   * A failure store whose `record` for ONE stage faults: `commitThenFail` models
+   * D1 committing the write and losing the reply; `times` bounds how many calls
+   * fault (Infinity = the row can never be written on this host).
+   */
+  type FailureStageName = ProcessDeps["failureStore"] extends { record: (input: infer T) => unknown }
+    ? T extends { stage: infer S }
+      ? S
+      : never
+    : never;
+
+  function failureInsertFault(
+    store: { record: (input: never) => Promise<void> } | ProcessDeps["failureStore"],
+    stage: FailureStageName,
+    mode: "fail" | "commitThenFail",
+    times = 1,
+  ): { store: ProcessDeps["failureStore"]; faults: () => number } {
+    let faults = 0;
+    const base = store as ProcessDeps["failureStore"];
+    return {
+      store: {
+        ...base,
+        record: async (input) => {
+          if (input.stage !== stage || faults >= times) return base.record(input);
+          if (mode === "commitThenFail") await base.record(input);
+          faults += 1;
+          throw new Error(`${stage} failure row insert lost`);
+        },
+      },
+      faults: () => faults,
+    };
+  }
+
   /** The attempt's `recheck` shipped-failure rows. */
   function recheckRows(db: TestD1): Array<{ id: string; error: string }> {
     return db.raw.prepare("SELECT id, error FROM review_failures WHERE head_sha = ? AND stage = 'recheck'").all(SHA) as Array<{
@@ -2546,23 +2579,12 @@ describe("the SEC-01 publish gate", () => {
       deadlineMs: ref.deadlineMs,
     });
 
-    let faults = 0;
-    const faulting = new Proxy(db as object, {
-      get(target, prop) {
-        if (prop !== "prepare") return Reflect.get(target, prop);
-        return (sql: string) => {
-          if (faults === 0 && sql.includes("INSERT INTO review_failures")) {
-            faults += 1;
-            throw new Error("recheck row insert lost");
-          }
-          return (target as { prepare: (statement: string) => unknown }).prepare(sql);
-        };
-      },
-    });
-    deps.env = { ...deps.env, DB: faulting as never };
+    const healthy = deps.failureStore;
+    const faulty = failureInsertFault(healthy, "recheck", "fail");
+    deps.failureStore = faulty.store;
 
-    await expect(collectAttempt(deps, ref, prepared)).rejects.toThrow("recheck row insert lost");
-    expect(faults).toBe(1);
+    await expect(collectAttempt(deps, ref, prepared)).rejects.toThrow("recheck failure row insert lost");
+    expect(faulty.faults()).toBe(1);
     // Nothing settled, nothing recorded: the collect retries.
     expect(recheckRows(db)).toHaveLength(0);
     const unsettled = db.raw
@@ -2571,7 +2593,7 @@ describe("the SEC-01 publish gate", () => {
     expect(unsettled.settled_ms).toBeNull();
 
     // The retry writes the missing row, then the settlement completes.
-    deps.env = { ...deps.env, DB: db as never };
+    deps.failureStore = healthy;
     expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
     expect(recheckRows(db)).toHaveLength(1);
     const settled = db.raw
@@ -2718,8 +2740,10 @@ describe("the SEC-01 publish gate", () => {
   async function paidWorkflowThenResumed(
     echo: string,
     paidKey = "sk-paid-session-1",
+    seed?: (seedDb: TestD1) => Promise<void>,
   ): Promise<{ db: TestD1; resumed: ProcessDeps; ref: AttemptRef; steps: Map<string, unknown> }> {
     const { deps: paying, db } = await makeDeps();
+    if (seed !== undefined) await seed(db);
     paying.runnerConfigs.set(TEST_APP_ID, {
       appCfg: { keys: { ark: [paidKey] }, modelChain: "ark/deepseek-v4-flash" },
       modelOverrides: undefined,
@@ -2741,6 +2765,130 @@ describe("the SEC-01 publish gate", () => {
     resumed.runnerConfigs.clear();
     return { db, resumed, ref, steps };
   }
+
+  /** A shipped, failed recheck round for the workflow-shaped fixtures. */
+  const shippedFailedRound = async (seedDb: TestD1): Promise<void> => {
+    await seedPriorPublication(seedDb);
+    await seedOpenTarget(seedDb);
+    h.sandbox.recheckFileContent = "";
+    h.sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "seat-failed",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: "session aborted",
+    });
+  };
+
+  test("the outer settlement cannot discharge a refusal whose recheck row is missing", async () => {
+    // note: F-006 — the Workflow's terminal catch settles the attempt after the
+    // collect rejects. The refused round's row is an OBLIGATION, so the settlement
+    // lands the rest and leaves the attempt UNSETTLED until the row exists.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { db, resumed, ref, steps } = await paidWorkflowThenResumed(echo, paidKey, shippedFailedRound);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(ref.payload),
+      attemptId: ATTEMPT_ID,
+      payload: ref.payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+    // The row can never be written on this host.
+    const healthyStore = resumed.failureStore;
+    const faulty = failureInsertFault(healthyStore, "recheck", "fail", Number.POSITIVE_INFINITY);
+    resumed.failureStore = faulty.store;
+
+    // The settlement runs (its effects land) and rethrows its cause, as documented.
+    await expect(runReviewAttemptWorkflow(resumed, ref, stepStore(steps), async () => {})).rejects.toThrow(
+      "recheck failure row insert lost",
+    );
+
+    expect(faulty.faults()).toBeGreaterThan(0);
+    // The ordinary settlement landed; the round's row is still owed...
+    const rows = db.raw.prepare("SELECT stage FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      stage: string;
+    }[];
+    expect(rows.some((row) => row.stage === "pipeline")).toBe(true);
+    expect(recheckRows(db)).toHaveLength(0);
+    // ...so the attempt is NOT settled.
+    const unsettled = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(unsettled.settled_ms).toBeNull();
+    // Recovery sees the same obligation: the attempt stays on the incomplete list.
+    const incomplete = await listIncompleteSettlements(db as never, {
+      settlingBeforeMs: Date.now() + 1,
+      limit: 10,
+    });
+    expect(incomplete.map((row) => row.attemptId)).toContain(ATTEMPT_ID);
+
+    // The collect retries on a healthy host: the row lands and the mark completes.
+    resumed.failureStore = healthyStore;
+    await runReviewAttemptWorkflow(resumed, ref, stepStore(steps), async () => {});
+    expect(recheckRows(db)).toHaveLength(1);
+    const settled = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(settled.settled_ms).not.toBeNull();
+  });
+
+  test("a committed recheck row whose reply was lost still emits its attribution line once", async () => {
+    // note: F-007 — D1 commits and the reply is lost. The next collect sees the row
+    // already there; the line's own fact (not the insert's change count) decides
+    // delivery.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, shippedFailedRound);
+    await sealStoredGateSecrets(db, [paidKey]);
+    stubStoredEcho(db, echo);
+
+    const lossy = failureInsertFault(deps.failureStore, "recheck", "commitThenFail");
+    const healthy = deps.failureStore;
+    deps.failureStore = lossy.store;
+    await expect(collectAttempt(deps, ref, prepared)).rejects.toThrow("recheck failure row insert lost");
+    expect(lossy.faults()).toBe(1);
+    // The row committed, but its line was never emitted.
+    expect(recheckRows(db)).toHaveLength(1);
+    expect(h.logLines.filter((line) => line.fields.recheck_outcome !== undefined)).toHaveLength(0);
+
+    deps.failureStore = healthy;
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    expect(h.logLines.filter((line) => line.fields.recheck_outcome !== undefined)).toHaveLength(1);
+    expect(recheckRows(db)).toHaveLength(1);
+  });
+
+  test("a degraded refusal retried after a recheck fault keeps one parse row", async () => {
+    // note: F-008 — the parse diagnostic is attempt+stage keyed too: the immutable
+    // stdout must not append a second row on the retry.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await shippedFailedRound(seedDb);
+    });
+    await sealStoredGateSecrets(db, [paidKey]);
+    stubStoredStdout(db, `not a review ${echo}`);
+    expect(prepared.recheckInput).toBeDefined();
+
+    const healthy = deps.failureStore;
+    const faulty = failureInsertFault(healthy, "recheck", "fail");
+    deps.failureStore = faulty.store;
+    await expect(collectAttempt(deps, ref, prepared)).rejects.toThrow("recheck failure row insert lost");
+    expect(faulty.faults()).toBe(1);
+
+    deps.failureStore = healthy;
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    const stageRows = db.raw.prepare("SELECT stage FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      stage: string;
+    }[];
+    expect(stageRows.filter((row) => row.stage === "parse")).toHaveLength(1);
+    expect(recheckRows(db)).toHaveLength(1);
+  });
 
   test("a resumed collect opens the paid session's sealed set and refuses the encoded echo", async () => {
     const paidKey = "sk-paid-session-1";

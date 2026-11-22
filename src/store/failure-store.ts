@@ -132,6 +132,12 @@ export {
  * tenant faces bind it, so a row without one belongs to no workspace.
  */
 export type ReviewFailureInput = {
+  /**
+   * Optional deterministic row key (the attempt, or an attempt+stage). With it the
+   * insert is idempotent, so a replay cannot append a second row for one fact;
+   * absent, the row gets a random id.
+   */
+  id?: string;
   target_id: string;
   installation_id: number;
   owner: string;
@@ -270,7 +276,8 @@ function assertFailureStage(stage: string): void {
 export function settlementFailureRowStatement(
   db: D1Like,
   input: ReviewFailureInput,
-  attemptId: string,
+  /** The deterministic row key: the attempt, or the attempt+stage for a per-stage row. */
+  rowId: string,
 ): D1StatementLike {
   assertFailureStage(input.stage);
   return db
@@ -280,7 +287,7 @@ export function settlementFailureRowStatement(
        ON CONFLICT(id) DO NOTHING`,
     )
     .bind(
-      attemptId,
+      rowId,
       input.target_id,
       input.installation_id,
       input.owner,
@@ -300,6 +307,13 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
         throw new Error(
           `failure-store: stage ${JSON.stringify(input.stage)} is not on the producer vocabulary (${FAILURE_STAGES.join(" | ")}) — zero rows written`,
         );
+      }
+      // An explicit identity makes the write REPLAY-SAFE: one row per caller-chosen
+      // key (an attempt, or an attempt+stage), so a retried collect cannot count
+      // the same fact twice.
+      if (input.id !== undefined) {
+        await settlementFailureRowStatement(db, input, input.id).run();
+        return;
       }
       await db
         .prepare(

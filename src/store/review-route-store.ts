@@ -340,8 +340,60 @@ export async function touchAttemptHandoff(db: D1Like, deliveryKey: string, nowMs
     .run();
 }
 
-/** The effects a settlement can make durable (see `settleAttemptFailure`). */
-export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip" | "publication";
+/**
+ * The effects a settlement can make durable (see `settleAttemptFailure`).
+ * `recheck-row` is the refused round's shipped `recheck` failure row: it is
+ * REQUIRED while the attempt's `recheck_owed_ms` marker is set, so neither the
+ * live settlement nor recovery can discharge a refusal whose row is missing.
+ */
+export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip" | "publication" | "recheck-row";
+
+const NOTE_RECHECK_OWED_SQL = `
+UPDATE review_launches SET recheck_owed_ms = ? WHERE attempt_id = ? AND recheck_owed_ms IS NULL
+`;
+const CLEAR_RECHECK_OWED_SQL = `UPDATE review_launches SET recheck_owed_ms = NULL WHERE attempt_id = ?`;
+const MARK_RECHECK_ATTRIBUTED_SQL = `
+UPDATE review_launches SET recheck_attributed_ms = ? WHERE attempt_id = ? AND recheck_attributed_ms IS NULL
+`;
+const READ_RECHECK_OBLIGATION_SQL = `SELECT recheck_owed_ms, recheck_attributed_ms FROM review_launches WHERE attempt_id = ?`;
+
+/**
+ * Open the attempt's `recheck-row` obligation — the shipped round's row is owed.
+ * Idempotent: an obligation already open stays open.
+ */
+export async function noteRecheckOwed(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
+  await db.prepare(NOTE_RECHECK_OWED_SQL).bind(nowMs, attemptId).run();
+}
+
+/** Discharge the obligation once the row is durable. */
+export async function clearRecheckOwed(db: D1Like, attemptId: string): Promise<void> {
+  await db.prepare(CLEAR_RECHECK_OWED_SQL).bind(attemptId).run();
+}
+
+/**
+ * The attempt's round-accounting facts: whether its shipped `recheck` row is
+ * still OWED (a settlement obligation) and whether its attribution LINE was
+ * already emitted (the line's own replayable fact — a committed insert is not a
+ * delivered log line).
+ */
+export async function readRecheckObligation(
+  db: D1Like,
+  attemptId: string,
+): Promise<{ owed: boolean; attributed: boolean }> {
+  const row = await db
+    .prepare(READ_RECHECK_OBLIGATION_SQL)
+    .bind(attemptId)
+    .first<{ recheck_owed_ms: number | null; recheck_attributed_ms: number | null }>();
+  return {
+    owed: row?.recheck_owed_ms !== null && row?.recheck_owed_ms !== undefined,
+    attributed: row?.recheck_attributed_ms !== null && row?.recheck_attributed_ms !== undefined,
+  };
+}
+
+/** Record that this attempt's round attribution line was emitted. Idempotent. */
+export async function markRecheckAttributed(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
+  await db.prepare(MARK_RECHECK_ATTRIBUTED_SQL).bind(nowMs, attemptId).run();
+}
 
 /**
  * Complete the settle-once mark. It is written by the settlement itself, and it
@@ -407,6 +459,10 @@ async function settlementPlan(
     required = ["skip"];
   } else if (landed.has("failure-row")) {
     required = settlementObligationsOf(handoff.payload, checkInvolved);
+    // A refused round's shipped row is owed until it is durable — the same
+    // marker the accounting writes, read by the live settlement AND recovery, so
+    // no lane can stamp `settled_ms` over an incomplete ledger (F-006).
+    if ((await readRecheckObligation(db, input.attemptId)).owed) required.push("recheck-row");
   } else if (landed.has("publication")) {
     required = ["publication"];
     if (checkInvolved) required.push("check");
