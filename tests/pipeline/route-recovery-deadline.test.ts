@@ -210,11 +210,14 @@ describe("claim 10 — a delayed delivery is anchored on its claim, not its enqu
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
       const batch = h.makeBatch(payload);
       // note: The guard's cumulative delayed retries, spent before admission —
-      // the platform keeps the ORIGINAL send stamp across them.
-      const delivered = batch.messages[0];
-      if (delivered === undefined) throw new Error("the batch carries no message");
-      delivered.timestamp = new Date(clock.now - 2_460_000);
-      await consumer(batch);
+      // the platform keeps the ORIGINAL send stamp across them. Constructed, not
+      // mutated: `Message.timestamp` is readonly.
+      const sentAt = new Date(clock.now - 2_460_000);
+      const delivered = {
+        ...batch,
+        messages: batch.messages.map((message) => ({ ...message, timestamp: sentAt })),
+      };
+      await consumer(delivered);
 
       // note: The round really ran to its review, and the clock it ran under is
       // the operator cap from THIS delivery — not the stamp it was sent with.

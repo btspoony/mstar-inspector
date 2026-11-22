@@ -523,7 +523,9 @@ export async function landFailureEffect(
   input: AttemptSettlementInput & { failure: ReviewFailureInput },
   nowMs: number,
 ): Promise<{ landed: boolean; owned: boolean }> {
-  const landed = input.landed.includes("failure-row") ? [...input.landed] : [...input.landed, "failure-row"];
+  const landed: SettlementEffect[] = input.landed.includes("failure-row")
+    ? [...input.landed]
+    : [...input.landed, "failure-row"];
   const mark = await settlementStatementForEffects(db, { attemptId: input.attemptId, landed }, nowMs);
   if (mark === null) return { landed: false, owned: false };
   const [insert] = await db.batch([settlementFailureRowStatement(db, input.failure, input.attemptId), mark]);
