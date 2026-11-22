@@ -48,8 +48,8 @@ const { plan, send, discovery, credentials } = RECONCILE_REQUEST_ESTIMATES;
 const CHECK_ROW_MIN_REQUESTS = credentials + discovery + send;
 /** Cold credentials precede the publication plan and guarded send. */
 const PUBLICATION_MIN_REQUESTS = credentials + plan + send;
-/** Stable thread/issue captures, one mutation, and a post-mutation capture. */
-const THREAD_MIN_REQUESTS = discovery + discovery + plan + discovery;
+/** Cold credentials, stable thread/issue captures, mutation, and post-capture. */
+const THREAD_MIN_REQUESTS = credentials + discovery + discovery + plan + discovery;
 /** Publication admission must leave room for a thread operation in the same run. */
 const LIFECYCLE_MIN_REQUESTS = PUBLICATION_MIN_REQUESTS + THREAD_MIN_REQUESTS;
 

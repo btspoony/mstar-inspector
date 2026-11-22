@@ -2788,10 +2788,10 @@ behave.
 
   | API field | Absent-row default | Accepted range |
   |---|---:|---:|
-  | `lifecycleMaxRequests` | 80 | 12–100 |
+  | `lifecycleMaxRequests` | 80 | 14–100 |
   | `lifecycleRunBudgetMs` | 45,000 | 1–60,000 |
   | `lifecyclePerRequestMs` | 5,000 | 1–15,000 |
-  | `lifecycleThreadOperationRequests` | 15 | 7–100 |
+  | `lifecycleThreadOperationRequests` | 15 | 9–100 |
   | `lifecyclePublicationLaneMaxRequests` | 40 | 5–100 |
   | `lifecycleSelectLimit` | 10 | 1–100 |
   | `lifecycleMaxAttempts` | 5 | 1–10 |
@@ -2804,7 +2804,9 @@ behave.
 
   Request minima include cold credential resolution and a single-page remote
   operation: Check adoption/create/fetch/update, publication plan/send, or
-  thread/issue captures and resolution. Pagination can require a larger budget.
+  thread/issue captures and resolution. The thread allowance includes its own
+  cold credentials when publication work used a different App pair. Pagination
+  can require a larger budget.
   Per-request timeouts must not exceed their run budget. Publication-lane
   plus thread-operation request allowances must not exceed lifecycle total
   requests, leaving room to admit a thread after the publication lane;

@@ -3239,7 +3239,6 @@ describe("runtime lifecycle selection", () => {
               dispatched += sent;
               if (sent !== requests) return { kind: "retry", reason: "api" };
             }
-            db.raw.prepare("UPDATE review_threads SET resolution_state='resolved', resolved_ms=? WHERE id='minimum-association'").run(T0);
             return { kind: "resolved", threadId: "thread-minimum", adopted: false, outdated: false, lateChange: false };
           },
         });
@@ -3247,7 +3246,56 @@ describe("runtime lifecycle selection", () => {
     });
     expect(dispatched).toBe(credentials + discovery + discovery + plan + discovery);
     expect(summary.resolved).toBe(1);
-    expect(threadRow(db, "minimum-association").resolution_state).toBe("resolved");
+  });
+
+  test("minimum budgets leave cold credential headroom for a different thread pair", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    seedApp(db, APP_B, { githubAppId: 1002, installationId: SCOPE_B.installationId });
+    minimumRequestSettings(db);
+    await seedPrepared(db, "headroom-publication", reviewPayload(SCOPE), 120_000);
+    await seedPrepared(db, "headroom-thread", degradedPayload(SCOPE_B), 0);
+    db.raw.prepare("UPDATE review_publications SET phase='superseded', recovery_state='done' WHERE id='headroom-thread'").run();
+    seedFindingRow(db, "headroom-finding", "headroom-thread", SCOPE_B, "addressed");
+    seedThreadRow(db, {
+      id: "headroom-association", publicationId: "headroom-thread", findingRowId: "headroom-finding",
+      scope: SCOPE_B, verified: verifiedFor("headroom-association", "headroom-finding"),
+    });
+    const { credentials, discovery, plan, send } = RECONCILE_REQUEST_ESTIMATES;
+    let publicationRequests = 0;
+    let threadRequests = 0;
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: async ({ appId, transport }) => {
+        const cold = await meterRequests(transport!, credentials);
+        if (appId === APP) publicationRequests += cold;
+        else threadRequests += cold;
+        return okResolution({
+          planReviewUpsert: async () => {
+            publicationRequests += await meterRequests(transport!, plan);
+            return { action: "create", round: 1 };
+          },
+          postPreparedReview: async () => {
+            const sent = await meterRequests(transport!, send);
+            publicationRequests += sent;
+            if (sent !== send) throw new Error("send budget refused");
+            return { commentId: 777 };
+          },
+          resolveFindingThread: async () => {
+            for (const requests of [discovery, discovery, plan, discovery]) {
+              const sent = await meterRequests(transport!, requests);
+              threadRequests += sent;
+              if (sent !== requests) return { kind: "retry", reason: "api" };
+            }
+            return { kind: "resolved", threadId: "thread-headroom", adopted: false, outdated: false, lateChange: false };
+          },
+        });
+      },
+    });
+    expect(publicationRequests).toBe(RECONCILE_LIMITS.lifecyclePublicationLaneMaxRequests.min);
+    expect(summary, JSON.stringify({ summary, publicationRequests, threadRequests })).toMatchObject({ applied: 1, resolved: 1, errors: 0 });
+    expect(threadRequests).toBe(credentials + discovery + discovery + plan + discovery);
+    expect(threadRow(db, "headroom-association").resolution_state).not.toBe("local-error");
   });
 
   test("configured selection limit and attempt cap bound a pass with one snapshot", async () => {
