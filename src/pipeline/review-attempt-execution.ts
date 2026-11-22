@@ -40,8 +40,8 @@ import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../rev
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import {
   carriesSecretForm,
-  redactCredentialForms,
   redactExactSecrets,
+  redactLedgerText,
   redactReviewOutput,
   redactReviewOutputExact,
   redactSecrets,
@@ -5263,7 +5263,7 @@ async function collectPhase(
     const seatText = (text: string): string | null =>
       progress.secretValues.length === 0
         ? null
-        : redactCredentialForms(redactSecrets(text), progress.secretValues);
+        : redactLedgerText(redactSecrets(text), progress.secretValues);
     const detailSource =
       recheckDoc === null && docFailure !== null && recheckOutcome === "ok"
         ? `document ${docFailure}: ${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`
@@ -5271,7 +5271,7 @@ async function collectPhase(
     const recheckDetail = (
       progress.secretValues.length === 0
         ? `${recheckOutcome}: status text withheld — the attempt carries no sealed credential set`
-        : redactCredentialForms(redactSecrets(detailSource), progress.secretValues)
+        : redactLedgerText(redactSecrets(detailSource), progress.secretValues)
     ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
     deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
       {
