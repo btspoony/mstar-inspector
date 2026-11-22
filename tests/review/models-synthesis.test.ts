@@ -1,5 +1,5 @@
 /**
- * Per-review omp models.yml synthesis tests (AL-23-1;
+ * why: Per-review omp models.yml synthesis tests (AL-23-1;
  * capability-host base, always synthesize).
  *
  * The omp SDK (18.13.3) has NO include semantics: the ModelRegistry reads ONE
@@ -46,7 +46,7 @@ import type { CapabilityHost } from "../../packages/shared/src/runtime";
 import { sk } from "../helpers/fake-secrets";
 
 /**
- * The omp capability base, pinned byte-for-byte (equivalence lock): the
+ * why: The omp capability base, pinned byte-for-byte (equivalence lock): the
  * poolized capability base — one bare block per capability host, `auth:
  * oauth`, NO scalar `apiKey`. This is TEST data: the product registry
  * declares no provider and no model.
@@ -84,10 +84,10 @@ const EXPECTED_OMP_BASE = `providers:
         maxTokens: 65536
 `;
 
-/** The generated base under test. */
+/** note: The generated base under test. */
 const BASE_YAML = capabilityHostsYaml([ARK_PLAN_HOST]);
 
-/** Fixture secret that must never appear in any synthesized text. */
+/** safety: Fixture secret that must never appear in any synthesized text. */
 const FIXTURE_KEY = sk("live-fixture-12345abcdef");
 
 const CUSTOM: CustomProviderDeclaration = {
@@ -145,18 +145,18 @@ describe("capabilityHostsYaml (the registry-generated base)", () => {
 describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
   test("preserves the capability base ark declaration AND appends the custom provider block", () => {
     const yaml = synthesizeModelsYaml(BASE_YAML, [CUSTOM]);
-    // Base preserved verbatim (the merge must be complete, not destructive).
+    // why: Base preserved verbatim (the merge must be complete, not destructive).
     expect(yaml).toContain("ark:");
     expect(yaml).toContain("baseUrl: https://ark.cn-beijing.volces.com/api/plan");
     expect(yaml).toContain("api: anthropic-messages");
     expect(yaml).toContain("id: deepseek-v4-flash");
-    // Custom provider block: quoted id key, baseUrl, api, auth, declared model ids.
+    // note: Custom provider block: quoted id key, baseUrl, api, auth, declared model ids.
     expect(yaml).toContain('"my-provider":');
     expect(yaml).toContain(`baseUrl: "${CUSTOM.base_url}"`);
     expect(yaml).toContain('api: "openai-completions"');
     expect(yaml).toContain(`- id: "my-model-1"`);
     expect(yaml).toContain(`- id: "my-model-2"`);
-    // NO block pins a scalar apiKey; every poolized block authenticates oauth.
+    // safety: NO block pins a scalar apiKey; every poolized block authenticates oauth.
     expect(yaml).not.toMatch(/^\s*apiKey:/m);
     expect(yaml.match(/^    auth: oauth$/gm)).toHaveLength(2);
   });
@@ -177,7 +177,7 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
       },
     };
     const yaml = synthesizeModelsYaml(BASE_YAML, [withMeta]);
-    // Same keys, same 6/8-space indentation and the same ORDER as the
+    // why: Same keys, same 6/8-space indentation and the same ORDER as the
     // capability-host block; user-derived scalars quoted (yamlQuote), numbers
     // and booleans bare.
     expect(yaml).toContain(
@@ -194,7 +194,7 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
         '      - id: "id-only"',
       ].join("\n"),
     );
-    // The id-only model gains NO line: an unstated fact is absent, never a
+    // why: The id-only model gains NO line: an unstated fact is absent, never a
     // guessed number (the defect this field closes, one layer down).
     const tail = yaml.slice(yaml.indexOf('      - id: "id-only"'));
     expect(tail).not.toMatch(/contextWindow|maxTokens|name:|reasoning:|input:/);
@@ -225,7 +225,7 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
     };
     const yaml = synthesizeModelsYaml(BASE_YAML, [CUSTOM, second]);
     expect(yaml.indexOf('"my-provider":')).toBeLessThan(yaml.indexOf('"second-one":'));
-    expect(yaml).toContain('api: "anthropic-messages"'); // the second custom block, quoted form
+    expect(yaml).toContain('api: "anthropic-messages"'); // note: the second custom block, quoted form
     expect(yaml).not.toMatch(/^\s*apiKey:/m);
     expect(yaml).not.toContain(FIXTURE_KEY);
   });
@@ -237,7 +237,7 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
       base_url: "https://evil.example.com/",
     };
     const yaml = synthesizeModelsYaml(BASE_YAML, [clash]);
-    // Exactly ONE ark block, and it is the CAPABILITY one (its baseUrl,
+    // why: Exactly ONE ark block, and it is the CAPABILITY one (its baseUrl,
     // not the custom's) — the merge never shadows a capability declaration.
     expect(yaml.match(/^  ark:/gm)).toHaveLength(1);
     expect(yaml).not.toContain("https://evil.example.com/");
@@ -251,7 +251,7 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
     };
     const collisions: string[] = [];
     const yaml = synthesizeModelsYaml(BASE_YAML, [clash, CUSTOM], (id) => collisions.push(id));
-    // The skip is reported (id only — zero key material) and the merge still
+    // why: The skip is reported (id only — zero key material) and the merge still
     // keeps the BASE ark block while appending the non-colliding custom.
     expect(collisions).toEqual(["ark"]);
     expect(yaml.match(/^  ark:/gm)).toHaveLength(1);
@@ -266,7 +266,7 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
       model_ids: ["pin-model"],
     };
     const yaml = synthesizeModelsYaml(BASE_YAML, [pin]);
-    // The key is double-quoted (a bare `on:` would parse as boolean true in
+    // why: The key is double-quoted (a bare `on:` would parse as boolean true in
     // YAML 1.1 — a strict parser then rejects the providers map shape).
     expect(yaml).toContain('  "on":');
     expect(yaml).not.toMatch(/^  on:/m);
@@ -291,16 +291,16 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
     const sameApiAsBase: CustomProviderDeclaration = {
       ...CUSTOM,
       provider_id: "ark-style-mirror",
-      api: "anthropic-messages", // the SAME literal the capability ark block carries bare
+      api: "anthropic-messages", // note: the SAME literal the capability ark block carries bare
     };
     const yaml = synthesizeModelsYaml(BASE_YAML, [sameApiAsBase]);
-    // The custom block emits the QUOTED form (yamlQuote, like baseUrl and
+    // why: The custom block emits the QUOTED form (yamlQuote, like baseUrl and
     // model ids) — a raw `api: ${decl.api}` splice would be the one
     // user-derived scalar escaping the file's defensive posture.
     expect(yaml).toContain('    api: "anthropic-messages"');
-    // The capability ark block stays BARE — the merge never rewrites the base.
+    // why: The capability ark block stays BARE — the merge never rewrites the base.
     expect(yaml).toContain("    api: anthropic-messages");
-    // Exactly one quoted and one bare api line: the two forms never blur.
+    // note: Exactly one quoted and one bare api line: the two forms never blur.
     expect(yaml.match(/^    api: "anthropic-messages"$/gm)).toHaveLength(1);
     expect(yaml.match(/^    api: anthropic-messages$/gm)).toHaveLength(1);
   });
@@ -312,7 +312,7 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
       model_ids: ['model "quoted"', "plain-model"],
     };
     const yaml = synthesizeModelsYaml(BASE_YAML, [weird]);
-    // The double-quoted scalar escapes the inner quotes; the parsed value
+    // why: The double-quoted scalar escapes the inner quotes; the parsed value
     // round-trips — and the raw `"quoted"` splice can never break the block.
     expect(yaml).toContain(`baseUrl: "https://weird.example.com/v1?x=\\"quoted\\"&y=z"`);
     expect(yaml).toContain(`- id: "model \\"quoted\\""`);
@@ -325,7 +325,7 @@ describe("writePerReviewModelsYaml (always synthesizes from capability hosts)", 
     const agentDir = await writePerReviewModelsYaml([ARK_PLAN_HOST]);
     expect(agentDir).toMatch(/^\/tmp\/omp-agent-/);
     const written = readFileSync(join(agentDir, "models.yml"), "utf8");
-    // The zero-custom path equivalence lock: a defaulted App's synthesized
+    // why: The zero-custom path equivalence lock: a defaulted App's synthesized
     // file carries EXACTLY this provider surface (ark et al), poolized.
     expect(written).toBe(EXPECTED_OMP_BASE);
     expect(written).toContain("ark:");
@@ -337,7 +337,7 @@ describe("writePerReviewModelsYaml (always synthesizes from capability hosts)", 
   test("custom providers merge into the capability base inside the per-review /tmp dir", async () => {
     const agentDir = await writePerReviewModelsYaml([ARK_PLAN_HOST], [CUSTOM]);
     const written = readFileSync(join(agentDir, "models.yml"), "utf8");
-    // Complete merged file: capability base + custom, zero key material.
+    // note: Complete merged file: capability base + custom, zero key material.
     expect(written).toContain("ark:");
     expect(written).toContain('"my-provider":');
     expect(written).not.toMatch(/^\s*apiKey:/m);
