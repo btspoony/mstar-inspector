@@ -1,12 +1,3 @@
-/**
- * Support access — the operator's time-boxed cross-workspace windows
- * (spec §3.4): the open list, a create form, and a revoke per row.
- *
- * Both writes are audited by the server (one `audit_events` row each, with the
- * grant's target workspace); this screen only states that in its copy. A
- * created grant is read back from the server rather than appended locally —
- * its id and expiry are the server's to mint.
- */
 import { useState, type FormEvent } from "react";
 import {
   Button,
@@ -37,18 +28,11 @@ import {
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
-/** The list and the form's workspace options come from one read. */
 async function readSupportPage(): Promise<{ grants: GrantRow[]; workspaces: WorkspaceRow[] }> {
   const [grants, workspaces] = await Promise.all([readGrants(), readWorkspaces()]);
   return { grants, workspaces };
 }
 
-/**
- * A grant's window, to the minute — the part of an ISO stamp an operator reads.
- * The stamp is UTC (`toISOString`), and the console renders no other
- * time-converted stamp, so the marker is spelled out (I-000164): a bare
- * `2026-11-01 09:00` reads as local time to an operator outside UTC.
- */
 function windowStamp(iso: string): string {
   return `${iso.slice(0, 16).replace("T", " ")} UTC`;
 }
@@ -59,8 +43,6 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
   const [operatorLogin, setOperatorLogin] = useState("");
   const [reason, setReason] = useState("");
   const [ttlHours, setTtlHours] = useState("24");
-  // In-flight writes stay independent: the submit button guards only on the
-  // create, and each revoke row guards on its own id — one never blocks the other.
   const [creating, setCreating] = useState(false);
   const [revokingIds, setRevokingIds] = useState<ReadonlySet<string>>(new Set());
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -80,7 +62,6 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
       setReason("");
       reload();
     } catch (error) {
-      // Generic message primary, the server's `{error}` text as secondary detail.
       const generic = t(locale, "admin.supportGrants.createFailed");
       setRefusal(
         error instanceof AdminWriteError
@@ -99,7 +80,6 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
       await revokeGrant(grant.id);
       update((page) => ({ ...page, grants: page.grants.filter((item) => item.id !== grant.id) }));
     } catch (error) {
-      // Generic message primary, the server's `{error}` text as secondary detail.
       const generic = t(locale, "admin.supportGrants.revokeFailed");
       setRefusal(
         error instanceof AdminWriteError

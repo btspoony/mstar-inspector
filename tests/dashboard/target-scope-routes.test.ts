@@ -1,15 +1,3 @@
-/**
- * why: The target-addressed read family, driven through
- * the real worker mount:
- *
- *   GET /dashboard/<ref>/api/targets/<targetId>/insights/summary
- *   GET /dashboard/<ref>/api/targets/<targetId>/pull-requests[/<id>[/<section>]]
- *
- * Each resolves the target with `getInWorkspace(workspaceId, targetId)` and
- * binds `{ kind: "target", targetId, workspaceId }` to the same store call the
- * workspace face makes, so the payload keys cannot drift and a foreign id is
- * the resolution's own 404. The App-addressed family is removed with it.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -54,7 +42,6 @@ function seedWorkspace(db: TestD1, id: string, login: string): void {
     login,
     "2026-10-01T00:00:00.000Z",
   );
-  // why: The manage rule is the workspace role: a plain member would 403.
   seed(
     db,
     "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)",
@@ -103,11 +90,6 @@ async function get(db: TestD1, path: string, login: string): Promise<Response> {
   );
 }
 
-/**
- * note: `ws-two` owns two live targets on two bots (two repositories, one review and
- * one ledger row each); `ws-foreign` owns a target of its own and must never
- * read `ws-two`'s ids.
- */
 function fixture(): { db: TestD1; widgets: string; portal: string } {
   const db = createMigratedTestD1();
   seedWorkspace(db, "ws-two", "dana");
@@ -143,7 +125,6 @@ describe("GET /dashboard/<ref>/api/targets/:targetId/insights/summary", () => {
         "repos",
       ].sort(),
     );
-    // why: Target scope, not workspace scope: one of the workspace's two reviews.
     expect(body.reviews_total).toBe(1);
     expect(body.repos).toEqual(["acme/widgets"]);
   });
@@ -198,11 +179,9 @@ describe("GET /dashboard/<ref>/api/targets/:targetId/pull-requests", () => {
       expect(res.status, section).toBe(200);
       const body = (await res.json()) as { items: unknown[]; total: number; limit: number };
       expect(body.limit, section).toBe(10);
-      // note: The family answers this target's page: one review, no findings/failures.
       expect(body.total, section).toBe(section === "reviews" ? 1 : 0);
     }
 
-    // why: The other target's tuple is a miss under this target, not a fallback.
     const miss = await get(db, "ws-two/api/targets/t-widgets/pull-requests/acme/portal/2", "dana");
     expect(miss.status).toBe(404);
     expect(await miss.json()).toEqual({ error: "unknown pull request" });
@@ -219,9 +198,6 @@ describe("GET /dashboard/<ref>/api/targets/:targetId/pull-requests", () => {
 describe("the target scope is the single-target scope", () => {
   test("the route payload equals the store's one-id aggregation", async () => {
     const { db } = fixture();
-    // why: The route resolves its target with `getInWorkspace(workspaceId, id)` and
-    // binds `{ kind: "target", targetId, workspaceId }`; hand-building the same
-    // scope must produce the same numbers.
     const scope = { kind: "target", targetId: "t-portal", workspaceId: "ws-two" } as const;
     const expected = await createInsightsStore(db, { ...scope, windowDays: 30, includeRepos: true });
     const res = await get(db, "ws-two/api/targets/t-portal/insights/summary?include=repos", "dana");
@@ -252,7 +228,6 @@ describe("the removed App-addressed family", () => {
       const res = await get(db, path, "dana");
       expect(res.status, path).toBe(404);
     }
-    // why: The workspace-scope siblings are untouched by the removal.
     expect((await get(db, "ws-two/api/insights/summary", "dana")).status).toBe(200);
     expect((await get(db, "ws-two/api/pull-requests", "dana")).status).toBe(200);
   });

@@ -1,43 +1,3 @@
-/**
- * Both-theme acceptance pass (dashboard surface pass, 2026-11-01; the console
- * joined it the same day).
- *
- * Every customer-facing surface of the compass `## Surface census` — and now
- * the operator console's four screens plus its shell — is rendered under
- * `data-theme="light"` and the token vocabulary its markup carries is checked
- * against the token source. Each finding below is a way a surface ends up
- * working only in dark:
- *
- * 1. A colour the page names instead of the token layer: a **primitive** palette
- *    step (`bg-(--gray-200)`), a raw hex (`#9ca3af`), or a Tailwind palette
- *    utility (`text-neutral-400`, `bg-black`). It paints, but it cannot invert,
- *    and it is not the page's layer to name.
- * 2. A name declared nowhere (or not in both themes). It renders as
- *    `currentColor`, which looks correct exactly where another theme's value
- *    happened to be inherited.
- * 3. A colour token whose resolved value is the SAME in both themes — a surface
- *    face that cannot invert. That is a **token** defect, not a page defect:
- *    it returns to plans 201/202 instead of being patched locally. The D14
- *    carve-out (`chart-2`…`chart-6`, one approved literal per theme) is the
- *    only documented exemption.
- *
- * Two vocabularies are legitimate besides the semantic/component layers: the
- * shadcn bridge keys (`--card`, `--border`, …) declared in
- * `src/spa/styles/shadcn-theme.css`, which resolve onto a semantic; and a
- * component-local geometry variable (`--gap`, `--sidebar-width`) that the very
- * markup declares inline. The pass follows the first to its semantic target and
- * skips the second, because neither carries a colour of its own.
- *
- * happy-dom resolves no `var()` chain, so a rendered DOM cannot be asked for
- * computed colours. The observable is the token vocabulary the render carries —
- * which is exactly what a page owns.
- *
- * The colour probe reads rendered `class` and `style` values only. A colour that
- * reaches the paint any other way — a rule in a stylesheet, an SVG presentation
- * attribute, a class name composed at runtime — is invisible to it; the
- * stylesheet forms belong to `tests/design-system/boundary.test.ts`, which names
- * its own limits. Nothing here claims to see them.
- */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { act, createElement, type ReactElement } from "react";
@@ -83,7 +43,6 @@ const allLayers = (theme: ThemeName): Record<string, string> => {
 const DARK = allLayers("dark");
 const LIGHT = allLayers("light");
 
-/** note: The shadcn bridge: `@theme inline` keys → the semantic token each one names. */
 const BRIDGE: Readonly<Record<string, string>> = (() => {
   const css = readFileSync(new URL("../../src/spa/styles/shadcn-theme.css", import.meta.url), "utf8");
   const declared: Record<string, string> = {};
@@ -93,26 +52,17 @@ const BRIDGE: Readonly<Record<string, string>> = (() => {
   return declared;
 })();
 
-/** note: The semantic token a bridge key resolves to, or null when `name` is no bridge key. */
 const bridgeTarget = (name: string): string | null => {
   const declared = BRIDGE[name];
   return declared === undefined ? null : (/^var\(--([a-z0-9-]+)\)$/.exec(declared)?.[1] ?? null);
 };
 
-/** note: A token's value in one theme, following one bridge hop when it is a bridge key. */
 const tokenValue = (theme: ThemeName, name: string): string | undefined => {
   const layer = theme === "dark" ? DARK : LIGHT;
   const target = bridgeTarget(name);
   return layer[name] ?? (target === null ? undefined : layer[target]);
 };
 
-/** note: D14 carve-out: the quiet 600-step chart fills are one approved literal for
- * both themes on purpose (semantic.ts carries the reasoning). A chart is not a
- * surface, so it is the single exemption from "a colour must invert".
- * `chart-5` left this set when dark was lifted to clear the 3:1 non-text bar
- * on the dark raised planes (`I-000232`): it is now the one fill that does
- * invert, deliberately.
- */
 const THEME_FIXED: Readonly<Record<string, true>> = {
   "chart-2": true,
   "chart-3": true,
@@ -120,44 +70,20 @@ const THEME_FIXED: Readonly<Record<string, true>> = {
   "chart-6": true,
 };
 
-/** note: A token REFERENCE: a name that closes a paren group — `bg-(--x)`,
- * `text-(length:--x)`, `var(--x)`. A custom property the markup DECLARES
- * (`style="--sidebar-width: 16rem"`) is not a reference and is not counted.
- */
 const TOKEN_REF = /--([a-z][a-z0-9-]*)\)/g;
-/** note: A custom property declared inline by the markup that then consumes it. */
 const INLINE_DECL = /--([a-z][a-z0-9-]*):/g;
 
-/** note: A colour painted without naming a token, in the two spellings that carry no
- * token reference at all: a hex literal, and a Tailwind palette utility. Both
- * are the dark-only face this pass exists to catch, and neither closes a paren
- * group — which is exactly why the token probe alone passed them. The family
- * list is shared with the StatusBadge face guard (`tests/helpers`), so the two
- * cannot drift into covering different halves of Tailwind's palette.
- */
 const RAW_HEX = /#[0-9a-f]{3,8}\b/gi;
 const PALETTE_UTILITY = new RegExp(PALETTE_UTILITY_SOURCE, "g");
-/** note: The rendered attribute values a colour can be painted in. */
 const RENDERED_ATTRIBUTE = /\b(?:class|style)="([^"]*)"/g;
 
 const isColour = (value: string | undefined): boolean => value !== undefined && /^#[0-9a-f]{3,8}$/i.test(value);
 
-/** note: Token references measured per surface — the coverage count behind the verdict. */
 const measured: Record<string, number> = {};
 
-/** note: The light root every static surface is rendered inside — the attribute the
- * pre-paint bootstrap writes; the mounted faces set it on the document element.
- */
 const renderLight = (element: Parameters<typeof renderToStaticMarkup>[0]): string =>
   `<div data-theme="light">${renderToStaticMarkup(element)}</div>`;
 
-/** note: Mount a page whose contract lives in its effect, under the light attribute.
- *
- * `surface` is the console document's second root attribute (D15): the admin
- * document carries both, so the pass renders those screens exactly as the
- * server ships them. `boot` is the injected `window.__BOOT__` the console entry
- * reads its locale and login from.
- */
 async function mountLight(
   element: ReactElement,
   path: string,
@@ -168,8 +94,6 @@ async function mountLight(
     win.document.documentElement.dataset.theme = "light";
     if (surface !== undefined) win.document.documentElement.dataset.surface = surface;
     if (boot !== undefined) {
-      // note: `readBoot()` reads `window.__BOOT__`; installDom has just made the
-      // happy-dom window the global, so this is the Worker's injection channel.
       const bootHost = globalThis as { window?: { __BOOT__?: SpaBoot } };
       bootHost.window!.__BOOT__ = boot;
     }
@@ -187,7 +111,6 @@ async function mountLight(
   }
 }
 
-/** note: The colours one surface paints without naming a token — finding 1, raw form. */
 function rawColourFindings(surface: string, markup: string): string[] {
   const findings: string[] = [];
   for (const [, value] of markup.matchAll(RENDERED_ATTRIBUTE)) {
@@ -201,12 +124,10 @@ function rawColourFindings(surface: string, markup: string): string[] {
   return findings;
 }
 
-/** note: Everything one surface's markup says about the token contract. */
 function surfaceFindings(surface: string, markup: string): string[] {
   const findings = rawColourFindings(surface, markup);
   const names = [...new Set([...markup.matchAll(TOKEN_REF)].map((match) => match[1] as string))].sort();
   measured[surface] = names.length;
-  // invariant: A probe that matched nothing is not a pass: every surface names tokens.
   if (names.length === 0) {
     findings.push(`${surface}: rendered no token reference`);
     return findings;
@@ -217,7 +138,6 @@ function surfaceFindings(surface: string, markup: string): string[] {
     const dark = tokenValue("dark", name);
     const light = tokenValue("light", name);
     if (dark === undefined || light === undefined) {
-      // note: A geometry variable its own primitive emits inline carries no theme.
       if (!inline.has(name)) findings.push(`${surface}: --${name} is declared nowhere`);
       continue;
     }
@@ -342,14 +262,12 @@ const WORKSPACE = {
   pendingInvites: 0,
 };
 
-/** note: The support read the mounted face performs. */
 const SUPPORT_VIEW = {
   workspace: { id: "ws_1", name: "Acme", slug: "acme", created_at: "2026-01-01 00:00:00" },
   members: [{ github_login: "octocat", role: "member" }],
   grants: [{ operator_login: "operator", reason: "incident 42", expires_at: "2026-11-01 00:00:00" }],
 };
 
-/** note: The console's four reads, answered from one stub by path. */
 const ADMIN_FLAGS = [
   { key: "review_global", enabled: true },
   { key: "signup_open", enabled: false },
@@ -383,7 +301,6 @@ const ADMIN_GRANTS = [
   },
 ];
 
-/** note: The data-upgrade screen's one item: a running row paints every state face. */
 const ADMIN_UPGRADES = [
   {
     id: "repo-backfill",
@@ -415,7 +332,6 @@ const ADMIN_UPGRADES = [
   },
 ];
 
-/** note: The console's read stub: one payload per endpoint the console calls. */
 const adminApi = (url: string): unknown => {
   if (url.includes("/data-upgrades")) return { upgrades: ADMIN_UPGRADES };
   if (url.includes("/runtime"))
@@ -434,7 +350,6 @@ const adminApi = (url: string): unknown => {
         degraded: false,
         derived: false,
       },
-      // note: The upgrade banner's window: measured with the console's own labels.
       maintenance: { enabled: true, reason: "data upgrade", since: "2026-11-16T07:59:00.000Z" },
     };
   if (url.includes("/workspaces")) return { workspaces: ADMIN_WORKSPACES };
@@ -443,12 +358,6 @@ const adminApi = (url: string): unknown => {
   return { flags: ADMIN_FLAGS };
 };
 
-/** note: Mount one console screen exactly as the server ships it: the stored-light
- * root plus D15's `data-surface="ops"`, with the console's reads answered from
- * `adminApi`. The ops attribute is part of the measurement, not a convenience —
- * the console's real document carries it, and a token that only works because
- * the variant is absent would not be caught here.
- */
 async function mountAdmin(
   element: ReactElement,
   path: string,
@@ -471,21 +380,16 @@ async function mountAdmin(
 
 type Surface = {
   readonly name: string;
-  /** invariant: Copy the render must carry — proves the pass measured a real surface. */
   readonly marker: string;
   readonly render: () => string | Promise<string>;
 };
 
-/** note: A held review lock, as both PR faces receive it (compass D11/D16). */
 const LIVE_REVIEWING = {
   state: "live",
   head_sha: "aaa111bbb222",
   acquired_at: "2026-11-01T10:00:00.000Z",
 } as const;
 
-/** note: The census, in the plan's order. Each surface renders the loaded face a user
- * actually meets (state supplied), never the loading skeleton.
- */
 const SURFACES: readonly Surface[] = [
   {
     name: "Apps list",
@@ -520,10 +424,6 @@ const SURFACES: readonly Surface[] = [
     marker: t("en", "insights.heading"),
     render: () => renderLight(createElement(InsightsRecordsView, { locale: "en", data: INSIGHTS })),
   },
-  // note: The two PR faces carry the D11 reviewing badge: a quiet accent outline
-  // beside the filled state pill, and a quiet neutral note for an unreadable
-  // read. Both faces are measured with a LIVE lock so the new vocabulary is
-  // actually painted here, not only in the loading/empty branches.
   {
     name: "App detail — pull requests",
     marker: t("en", "pullRequests.columnPr"),
@@ -531,8 +431,6 @@ const SURFACES: readonly Surface[] = [
       renderLight(
         createElement(PullRequestsListView, {
           locale: "en",
-          // note: Both badge faces in one measured surface: the accent outline for a
-          // held lock and the neutral note for an unreadable read.
           rows: [
             { ...ROW_OPEN, reviewing: LIVE_REVIEWING },
             { ...ROW_OPEN, number: 7, title: "Unreadable lock", reviewing: { state: "unknown" } },
@@ -641,10 +539,6 @@ const SURFACES: readonly Surface[] = [
     marker: t("en", "login.signIn"),
     render: () => renderLight(createElement(LoginPage, { boot: { locale: "en", login: null, name: null } })),
   },
-  // note: The 2026-11-01 census, extended by the runtime-parameters screen: the
-  // console's five page family plus the shell they mount in.
-  // Each marker is a loaded-face string, so a screen that fell back to its
-  // skeleton or error branch cannot pass the marker assertion.
   {
     name: "Console — shell",
     marker: t("en", "admin.flags.effectReviewGlobal"),
@@ -723,17 +617,11 @@ describe("both-theme acceptance pass", () => {
     const findings: string[] = [];
     for (const surface of SURFACES) {
       const markup = await surface.render();
-      // note: The loaded face really rendered — the probe measured a surface, not a
-      // skeleton or an error branch.
       expect(markup, surface.name).toContain(surface.marker);
       findings.push(...surfaceFindings(surface.name, markup));
     }
-    // note: Empty = no token is returned to plans 201/202.
     expect(findings).toEqual([]);
-    // note: The verdict names what it compared: 14 surfaces, this many references.
     expect(Object.keys(measured)).toHaveLength(SURFACES.length);
-    // note: The console's seven are part of the verdict, not appended to it: each one
-    // rendered a token vocabulary of its own.
     const consoleSurfaces = Object.entries(measured).filter(([name]) => name.startsWith("Console"));
     expect(consoleSurfaces).toHaveLength(7);
     for (const [name, count] of consoleSurfaces) expect(count, name).toBeGreaterThan(0);
@@ -742,22 +630,15 @@ describe("both-theme acceptance pass", () => {
   });
 
   test("the rule has teeth: a palette step in a surface is caught", () => {
-    // note: The failure path on a synthetic markup — the real surfaces are clean, and
-    // a guard that cannot fail is not a guard.
     expect(surfaceFindings("probe", '<div class="bg-(--gray-200)">probe</div>')).toEqual([
       "probe: --gray-200 is a primitive palette step",
     ]);
     expect(surfaceFindings("probe", '<div class="bg-(--surface-page)">probe</div>')).toEqual([]);
-    // invariant: Nothing else is exempt from inverting: the semantic colours that keep one
-    // value across the themes are exactly the D14 chart fills.
     const themeFixed = NAMES.semantic.filter((name) => isColour(DARK[name]) && DARK[name] === LIGHT[name]);
     expect(themeFixed.sort()).toEqual(Object.keys(THEME_FIXED).sort());
   });
 
   test("the colour probe catches what the token probe could not see", () => {
-    // why: Each seeded surface below named no token at all, so it produced an empty
-    // finding list: that is the hole this probe closes. A palette utility and a
-    // hex literal are the two spellings a dark-only face actually takes.
     expect(surfaceFindings("probe", '<div class="text-neutral-400">probe</div>')).toEqual([
       "probe: text-neutral-400 is a Tailwind palette utility",
       "probe: rendered no token reference",
@@ -768,8 +649,6 @@ describe("both-theme acceptance pass", () => {
     expect(
       surfaceFindings("probe", '<div class="text-(--text-primary)" style="color:#9ca3af">probe</div>'),
     ).toEqual(["probe: #9ca3af is a raw colour, not a token"]);
-    // note: The token spellings stay legal: a token reference is not a palette
-    // utility, even where the two names collide (`neutral` is a tone family).
     expect(surfaceFindings("probe", '<div class="border-(--tone-neutral-border) bg-transparent">probe</div>')).toEqual(
       [],
     );

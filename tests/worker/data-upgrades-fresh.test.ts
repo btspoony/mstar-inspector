@@ -1,20 +1,8 @@
-/** note: Every registered data upgrade on a fresh deployment.
- *
- * A team that deploys today has none of the historical shapes these items
- * exist for: no 0067 leftover target, no NULL-target ledger row, no row pinned
- * to another repository, no target awaiting its id. The console must still show
- * all four (so the operator can see the list is complete), each preflight must
- * read zero, and a click must leave the database untouched.
- *
- * This is the contract that keeps a "run" button from being a hazard on an
- * empty deployment: no maintenance window, no created target, no written row.
- */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { DATA_UPGRADES } from "../../src/admin/data-upgrades";
 import { getMaintenanceMode } from "../../src/dashboard/runtime-config-store";
 
-/** note: Every table an upgrade can touch. */
 const TOUCHED = ["review_targets", "pull_requests", "reviews", "review_findings", "review_failures"];
 
 function snapshot(db: TestD1): Record<string, number> {
@@ -70,10 +58,6 @@ describe("data upgrades on a fresh deployment", () => {
       expect(batch.processed, item.id).toBe(0);
       expect(batch.done, item.id).toBe(true);
     }
-    // invariant: `runBatch` is the batch step, not the runner: it never claims a state row.
-    // The console is what keeps a click off a zero-worklist card (the disabled
-    // start control, pinned in the page suite), so nothing here opens the
-    // maintenance window a downtime item would own.
     const states = db.raw.prepare("SELECT COUNT(*) AS n FROM operator_data_upgrades").get() as { n: number };
     expect(states.n).toBe(0);
     expect((await getMaintenanceMode(db)).enabled).toBe(false);

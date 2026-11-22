@@ -1,19 +1,3 @@
-/**
- * The console's bot-scope and official-workspace routes (contract § 8.1–§ 8.3).
- *
- * Pinned here:
- *   - a non-operator sees the framework 404 with an empty body and changes no
- *     row; a self-hosted worker does not register the routes at all;
- *   - `PATCH /api/official-workspace` refuses a malformed body, an unknown id
- *     and answers `200 { workspaceId: null }` for a clear;
- *   - `PATCH /api/bots/:botId/scope` maps the store's three refusals to their
- *     exact status/body pairs, and a refused write appends no audit row;
- *   - every accepted write carries exactly one `platform_audit_events` row
- *     with the before/after pair in the same batch, and a same-value write
- *     appends none;
- *   - `GET /api/bots` lists live rows only, and `GET /api/runtime` states the
- *     official workspace.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
@@ -46,7 +30,6 @@ function envFor(db: TestD1, overrides: Partial<Env> = {}): Env {
   } as unknown as Env;
 }
 
-/** note: A workspace beside the seeded `default`; `deleted` stamps `deleted_at`. */
 function seedWorkspace(db: TestD1, id: string, deleted = false): void {
   db.raw
     .prepare(
@@ -56,7 +39,6 @@ function seedWorkspace(db: TestD1, id: string, deleted = false): void {
     .run(id, id, id);
 }
 
-/** note: One bot with its `bot_workspaces` mapping; the id doubles as its name. */
 function seedBot(
   db: TestD1,
   id: string,
@@ -77,7 +59,6 @@ function seedBot(
   }
 }
 
-/** note: One GitHub installation for `botId`; `removed` stamps `removed_at`. */
 function seedInstallation(db: TestD1, botId: string, installationId: number, removed = false): void {
   db.raw
     .prepare(
@@ -87,7 +68,6 @@ function seedInstallation(db: TestD1, botId: string, installationId: number, rem
     .run(crypto.randomUUID(), botId, installationId, `acct-${installationId}`);
 }
 
-/** note: One review target for `botId`; `deleted` stamps `deleted_at`. */
 function seedTarget(db: TestD1, botId: string, workspaceId: string, name: string, deleted = false): void {
   db.raw
     .prepare(
@@ -99,10 +79,6 @@ function seedTarget(db: TestD1, botId: string, workspaceId: string, name: string
     .run(crypto.randomUUID(), workspaceId, botId, name);
 }
 
-/** note: A D1 double that counts `prepare` calls. The console's bot list must cost
- * the SAME number of statements for one bot and for many; a per-row count
- * read would make the two differ.
- */
 function countingDb(db: TestD1): { db: TestD1; prepared: () => number } {
   let prepared = 0;
   const counting: TestD1 = {
@@ -169,7 +145,6 @@ function officialRow(db: TestD1): string | null {
   return row?.value ?? null;
 }
 
-/** note: One admin request; `body` absent means no request body at all. */
 async function adminRequest(
   db: TestD1,
   path: string,
@@ -196,15 +171,10 @@ async function adminRequest(
   );
 }
 
-/** note: The framework's unknown-path answer, for the same method and caller. The
- * admin namespace must not distinguish its refusals from a path that does not
- * exist, so each non-operator case is compared against this.
- */
 async function unknownPath(db: TestD1, method: "GET" | "PATCH", login: string | null): Promise<Response> {
   return adminRequest(db, "/api/not-a-route", { method, login });
 }
 
-/** note: The exact bodies the contract freezes (§ 8.1–§ 8.2). */
 const SHAPE_SCOPE_ERROR = 'body must be { scope: "owned" | "shared" }';
 const SHAPE_WORKSPACE_ERROR = "body must be { workspaceId: <id> | null }";
 
@@ -443,7 +413,6 @@ describe("PATCH /_internal_admin/api/official-workspace", () => {
       },
     ]);
 
-    // invariant: Clearing again is idempotent and appends nothing.
     const again = await adminRequest(db, "/api/official-workspace", {
       method: "PATCH",
       body: JSON.stringify({ workspaceId: null }),
@@ -476,24 +445,18 @@ describe("GET /_internal_admin/api/bots", () => {
     insertUser(db, OPERATOR);
     seedWorkspace(db, "other");
     seedOfficialWorkspace(db, "default");
-    // note: The names order OPPOSITE to the ids, so dropping the `name` sort key
-    // answers ["bot-a", "bot-b"] and fails the assertion below.
     seedBot(db, "bot-b", { githubAppId: 7101, workspaceId: "other", name: "Alpha" });
     seedBot(db, "bot-a", { githubAppId: 7102, workspaceId: "default", name: "Zulu" });
     seedBot(db, "bot-dead", { githubAppId: 7103, workspaceId: "default", deleted: true, name: "Alpha" });
     db.raw
       .prepare("UPDATE review_bots SET scope = 'shared', shared_at = '2026-01-05T00:00:00.000Z' WHERE id = 'bot-b'")
       .run();
-    // note: bot-b: one live installation and one removed (the count is live rows
-    // only), two live targets and one soft-deleted (same rule).
     seedInstallation(db, "bot-b", 8101);
     seedInstallation(db, "bot-b", 8102, true);
     seedTarget(db, "bot-b", "other", "acme/one");
     seedTarget(db, "bot-b", "other", "acme/two");
     seedTarget(db, "bot-b", "other", "acme/gone", true);
-    // note: bot-a: one installation, no target.
     seedInstallation(db, "bot-a", 8103);
-    // invariant: A retired bot's rows never reach the console.
     seedInstallation(db, "bot-dead", 8104);
     seedTarget(db, "bot-dead", "default", "acme/dead");
 
@@ -507,7 +470,6 @@ describe("GET /_internal_admin/api/bots", () => {
           githubAppId: 7101,
           workspaceId: "other",
           workspaceName: "other",
-          // why: Seeded official workspace is `default`, so this one is outside it.
           isOfficial: false,
           scope: "shared",
           sharedAt: "2026-01-05T00:00:00.000Z",
@@ -520,7 +482,6 @@ describe("GET /_internal_admin/api/bots", () => {
           name: "Zulu",
           githubAppId: 7102,
           workspaceId: "default",
-          // note: The seeded default workspace's display name (migration 0026).
           workspaceName: "Default",
           isOfficial: true,
           scope: "owned",
@@ -531,7 +492,6 @@ describe("GET /_internal_admin/api/bots", () => {
         },
       ],
     });
-    // note: The console read is unaudited.
     expect(audits(db)).toEqual([]);
   });
 
@@ -541,11 +501,6 @@ describe("GET /_internal_admin/api/bots", () => {
     seedWorkspace(db, "retired");
     seedBot(db, "bot-orphan", { githubAppId: 7301, workspaceId: "retired" });
     seedOfficialWorkspace(db, "retired");
-    // invariant: Retiring a workspace only stamps its own row: the setting and
-    // `bot_workspaces` survive, so a stale value is what this read must not
-    // trust — the share guard would refuse the write it would otherwise enable
-    // (the console disables the action on `isOfficial: false`, pinned by the
-    // Bots screen's "disabled with the reason" case).
     db.raw
       .prepare("UPDATE workspaces SET deleted_at = '2026-01-06T00:00:00.000Z' WHERE id = ?")
       .run("retired");
@@ -560,7 +515,6 @@ describe("GET /_internal_admin/api/bots", () => {
           githubAppId: 7301,
           workspaceId: "retired",
           workspaceName: "retired",
-          // note: The stale designation names a retired tenant: not official.
           isOfficial: false,
           scope: "owned",
           sharedAt: null,
@@ -571,7 +525,6 @@ describe("GET /_internal_admin/api/bots", () => {
       ],
     });
 
-    // note: The two faces agree: the runtime read degrades the same row to "none".
     const runtime = await adminRequest(db, "/api/runtime", { method: "GET" });
     expect((await runtime.json()) as { officialWorkspaceId: unknown }).toMatchObject({
       officialWorkspaceId: null,
@@ -579,7 +532,6 @@ describe("GET /_internal_admin/api/bots", () => {
   });
 
   test("costs one statement however many bots it lists", async () => {
-    /** note: One database with `count` bots, each with an installation and a target. */
     const seeded = (count: number) => {
       const db = createMigratedTestD1();
       for (let index = 0; index < count; index += 1) {
@@ -597,8 +549,6 @@ describe("GET /_internal_admin/api/bots", () => {
 
     await adminRequest(one.db, "/api/bots", { method: "GET" });
     await adminRequest(many.db, "/api/bots", { method: "GET" });
-    // note: Same cost for one bot and for five: the aggregates ride the one list
-    // statement instead of a read per row.
     expect(many.prepared()).toBe(one.prepared());
   });
 

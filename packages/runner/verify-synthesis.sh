@@ -54,9 +54,6 @@ set -euo pipefail
 
 cd /opt/runner
 
-# why: The Dockerfile rewrites the installed shim's shebang to bun (the shipped
-# dist shim says node; the image ships no node). Assert only that it runs and
-# reports a version — no expected number, so a pin bump cannot redden this.
 mstar_version="$(mstar --version)"
 if [ -z "$mstar_version" ]; then
   echo "MSTAR_CLI_VERSION=fail (empty --version output)" >&2

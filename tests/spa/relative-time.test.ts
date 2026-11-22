@@ -1,11 +1,7 @@
-/** note: i18n relative-time buckets for the two stamp formats the stores write:
- * SQLite UTC stamps (review-store faces) and ISO-8601 member stamps
- * (users store / MembersPage).
- */
 import { describe, expect, test } from "bun:test";
 import { formatRelativeTime } from "../../src/spa/relative-time";
 
-const NOW = Date.UTC(2026, 8, 2, 12, 0, 0); // note: 2026-09-02 12:00:00 UTC
+const NOW = Date.UTC(2026, 8, 2, 12, 0, 0);
 
 function stamp(offsetMs: number): string {
   const d = new Date(NOW - offsetMs);
@@ -38,8 +34,6 @@ describe("formatRelativeTime", () => {
   });
 
   test("the sub-second SQLite form buckets exactly like the plain one", () => {
-    // note: bot_installations.seen_at is written by strftime('%Y-%m-%d %H:%M:%f','now'),
-    // so the installed table must not degrade to "unknown".
     expect(formatRelativeTime(`${stamp(120_000)}.123`, "en", NOW)).toBe("2 minutes ago");
     expect(formatRelativeTime(`${stamp(3_600_000)}.000`, "zh_CN", NOW)).toBe("1 小时前");
   });
@@ -56,9 +50,9 @@ describe("formatRelativeTime — ISO-8601 member stamps", () => {
   });
 
   test("invalid ISO strings are unknown; null stays never", () => {
-    expect(formatRelativeTime("2026-09-02T12:00:00Z", "en", NOW)).toBe("unknown"); // note: no millis
-    expect(formatRelativeTime("2026-09-02 12:00:00.000Z", "en", NOW)).toBe("unknown"); // note: space separator
-    expect(formatRelativeTime("2026-09-02T12:00:00.000+02:00", "en", NOW)).toBe("unknown"); // note: offset, not `Z`
+    expect(formatRelativeTime("2026-09-02T12:00:00Z", "en", NOW)).toBe("unknown");
+    expect(formatRelativeTime("2026-09-02 12:00:00.000Z", "en", NOW)).toBe("unknown");
+    expect(formatRelativeTime("2026-09-02T12:00:00.000+02:00", "en", NOW)).toBe("unknown");
     expect(formatRelativeTime(null, "en", NOW)).toBe("never");
     expect(formatRelativeTime(null, "zh_CN", NOW)).toBe("从未");
   });

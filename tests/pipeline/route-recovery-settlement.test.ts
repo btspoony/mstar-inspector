@@ -1,23 +1,5 @@
-/**
- * note: Route recovery claim 2 — the settle-once mark proves COMPLETION, not entry.
- *
- * The claim: an interruption after the mark but before the failure row, Check
- * conclusion and claim stamp must leave the settlement replayable, and the
- * settlement step must survive one transient error.
- *
- * Each case simulates the interruption rather than the happy path:
- * - the mark is read from the database AT the moment the settlement's first
- *   durable effect lands (an entry-mark would already be visible there);
- * - a host killed while the settlement's first effect is still in flight leaves
- *   no mark, and the resumed run settles;
- * - a completed settlement is not repeated when the step is re-executed;
- * - a transient fault inside the settlement is retried and completes.
- */
 import { beforeEach, describe, expect, test } from "bun:test";
 
-// note: Load shim FIRST: a static import of the execution module would be hoisted
-// above it (it imports ./sandbox → `cloudflare:workers`, unresolvable in Bun's
-// runner). The module graph under test is loaded dynamically on purpose.
 import "../helpers/cloudflare-workers-mock";
 
 import type { WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
@@ -105,7 +87,6 @@ async function makeDeps(db: TestD1, failureStore?: FailureStore): Promise<Proces
   } as ProcessDeps;
 }
 
-/** note: The delivery's handoff row — where the settle-once mark lives. */
 async function seedHandoff(db: TestD1, payload: ReturnType<typeof makePayload>): Promise<void> {
   await reserveAttemptHandoff(db as never, {
     deliveryKey: deliveryKeyOf(payload),
@@ -124,7 +105,6 @@ function settledEffects(db: TestD1): string[] | null {
   return row?.settled_effects === null || row === null ? null : (JSON.parse(row.settled_effects) as string[]);
 }
 
-/** note: The settlement record of one DELIVERY (the replayer cases use another attempt id). */
 function settlementOf(db: TestD1, deliveryKey: string): { settled_ms: number | null; settled_effects: string | null } {
   return db.raw
     .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE delivery_key = ?")
@@ -138,14 +118,6 @@ function settledMark(db: TestD1): number | null {
   return row?.settled_ms ?? null;
 }
 
-/**
- * note: A step host that runs each callback in place and models the platform's retry
- * policy from the SAME config the real host reads. `failOn` is a step that
- * threw before doing anything; `dieOn` is a HOST DEATH at that step — with
- * `inFlight: false` the step never started, with `inFlight: true` its callback
- * is started and abandoned mid-await, so whatever it landed before the kill
- * stays and it never completes.
- */
 function stepHost(options: { failOn?: string; dieOn?: string; inFlight?: boolean } = {}): {
   step: WorkflowStep;
   runs: string[];
@@ -195,7 +167,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const deps = await makeDeps(db, {
       ...real,
       record: async (input) => {
-        // note: The instant the settlement's durable outcome is written.
         markWhenRowLanded = settledMark(db);
         await real.record(input);
       },
@@ -211,7 +182,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     await seedHandoff(db, payload);
-    // note: The settlement's first effect never returns: the host dies awaiting it.
     const hungWrite = Promise.withResolvers<void>();
     const hung = {
       ...createFailureStore(db as never),
@@ -226,11 +196,9 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       ),
     ).rejects.toThrow(/died during settle-failure/);
 
-    // note: Nothing durable came of it, and the mark does NOT claim otherwise.
     expect(failureRows(db)).toHaveLength(0);
     expect(settledMark(db)).toBeNull();
 
-    // note: The resumed host settles: the mark was never set by the dead attempt.
     await runReviewAttemptWorkflow(
       await makeDeps(db),
       makeRef(payload),
@@ -254,8 +222,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const afterFirst = failureRows(db).length;
     expect(afterFirst).toBe(1);
 
-    // note: A resumed host whose durable step result was lost re-runs the step: the
-    // completion mark means it does not settle a second time.
     const host = stepHost({ failOn: "prepare" });
     await runReviewAttemptWorkflow(await makeDeps(db), makeRef(payload), host.step, async () => {});
     expect(host.runs).toContain("settle-failure");
@@ -266,8 +232,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     await seedHandoff(db, payload);
-    // note: The settlement's durable outcome never lands (an infra fault on the row),
-    // and no container exists, so the settlement continues to its end.
     const broken = {
       ...createFailureStore(db as never),
       record: async () => {
@@ -278,12 +242,9 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       runReviewAttemptWorkflow(await makeDeps(db, broken), makeRef(payload), stepHost({ failOn: "prepare" }).step, async () => {}),
     ).rejects.toThrow();
 
-    // note: The mark must NOT certify a settlement whose row is missing: the retry
-    // would skip it and the failure would vanish.
     expect(failureRows(db)).toHaveLength(0);
     expect(settledMark(db)).toBeNull();
 
-    // note: A healthy replay finishes the settlement and only then marks it.
     await runReviewAttemptWorkflow(
       await makeDeps(db),
       makeRef(payload),
@@ -298,22 +259,13 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     await seedHandoff(db, payload);
-    // note: The commit's failed-claim stamp cannot be written: the settlement's other
-    // effects land, so this is a PARTIAL settlement and must say so.
     h.kvState.putError = new Error("KV unavailable");
     await expect(
       runReviewAttemptWorkflow(await makeDeps(db), makeRef(payload), stepHost({ failOn: "prepare" }).step, async () => {}),
     ).rejects.toThrow();
 
-    // note: The step retried the settlement once (the mark was not complete), so the
-    // tolerated duplicate event row may be present — never a second claim.
     expect(failureRows(db).length).toBeGreaterThanOrEqual(1);
-    // note: This failure is pre-checkout, so no Check conclusion was owed: the mark
-    // must record exactly the effects this settlement had, and not the stamp.
-    // The array is a SET (the mark's union sorts it), not an ordered log.
     expect(settledEffects(db)).toEqual(["failure-row"]);
-    // note: Not complete: a replay must finish the missing stamp, so the mark must
-    // not skip the settlement.
     expect(settledMark(db)).toBeNull();
 
     h.kvState.putError = undefined;
@@ -332,13 +284,9 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const payload = makePayload();
     const key = deliveryKeyOf(payload);
     await seedHandoff(db, payload);
-    // note: The settlement started (the Workflow step wrote its in-progress marker)
-    // and only the Check effect landed before the execution vanished.
     db.raw
       .prepare("UPDATE review_attempt_handoffs SET settling_ms = ?, settled_effects = ? WHERE delivery_key = ?")
       .run(1_000, null, key);
-    // note: The attempt's outcome is durable on its launch row — the only condition
-    // under which the pass may write.
     db.raw
       .prepare(
         `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms, failed_at_ms, result_outcome)
@@ -348,12 +296,10 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
 
-    // note: Too fresh: a live step may still be finishing.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 60_000);
     expect(failureRows(db)).toHaveLength(0);
     expect(settledMark(db)).toBeNull();
 
-    // note: Past the quiet window the pass lands what needs no dead host's memory.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 5 * 60_000 + 1);
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).toContain("settlement replay");
@@ -361,7 +307,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     expect(settledMark(db)).toEqual(expect.any(Number));
     expect(settledEffects(db)).toEqual(["claim-stamp", "failure-row"]);
 
-    // note: Completed: a second pass does nothing.
     const rowsAfter = failureRows(db).length;
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 10 * 60_000);
     expect(failureRows(db)).toHaveLength(rowsAfter);
@@ -373,8 +318,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const key = deliveryKeyOf(payload);
     await seedHandoff(db, payload);
 
-    // note: Execution A landed the failure row; execution B landed the stamp. Neither
-    // alone is the obligation, and B must not erase A's progress.
     await markAttemptSettled(db as never, key, ["failure-row"], ["failure-row", "claim-stamp"], 2_000);
     expect(settledEffects(db)).toEqual(["failure-row"]);
     expect(settledMark(db)).toBeNull();
@@ -383,7 +326,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     expect(settledEffects(db)).toEqual(["claim-stamp", "failure-row"]);
     expect(settledMark(db)).toEqual(3_000);
 
-    // note: A later empty write keeps the union and the completion.
     await markAttemptSettled(db as never, key, [], ["failure-row", "claim-stamp"], 4_000);
     expect(settledEffects(db)).toEqual(["claim-stamp", "failure-row"]);
     expect(settledMark(db)).toEqual(3_000);
@@ -394,7 +336,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
 
-    // note: (a) launched, no outcome: the container may still be running.
     const unknownPayload = makePayload();
     await reserveAttemptHandoff(db as never, {
       deliveryKey: deliveryKeyOf(unknownPayload),
@@ -414,7 +355,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       )
       .run("attempt-unknown", 900, 950);
 
-    // note: (b) a moved-head skip: no paid outcome, and it is not a failure.
     const skipPayload = makePayload({ head_sha: "9999999999999999999999999999999999999999" });
     await reserveAttemptHandoff(db as never, {
       deliveryKey: deliveryKeyOf(skipPayload),
@@ -436,7 +376,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
 
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 5 * 60_000 + 1);
 
-    // note: Nothing was written for either: no failure row, no claim stamp, no mark.
     expect(failureRows(db)).toHaveLength(0);
     expect(h.kvPuts).toHaveLength(0);
     const rows = db.raw
@@ -457,7 +396,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       repo: TEST_REPO,
       prNumber: TEST_PR_NUMBER,
     };
-    // note: A real Check row for this attempt, still open (no terminal_ms).
     const claimed = await claimAttempt(db as never, {
       scope,
       githubAppId: 424242,
@@ -470,7 +408,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     });
     if (claimed.kind !== "claimed") throw new Error(`the test could not create the Check: ${claimed.kind}`);
     const identity = claimed.attempt.identity;
-    // note: The Check row's own attempt key — the identity the launch row freezes.
     const checkKey = (
       db.raw.query("SELECT attempt_key FROM review_checks WHERE id = ?").get(identity.attemptId) as {
         attempt_key: string;
@@ -497,20 +434,16 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
 
-    // note: The Check is open: the row and stamp land, but the mark must NOT complete.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 5 * 60_000 + 1);
     expect(failureRows(db)).toHaveLength(1);
     expect(JSON.parse(settlementOf(db, key).settled_effects!)).toEqual(["claim-stamp", "failure-row"]);
     expect(settlementOf(db, key).settled_ms).toBeNull();
 
-    // note: The check reconciler closes the Check at its lease; the next pass records
-    // that conclusion and only then completes.
     db.raw.prepare("UPDATE review_checks SET terminal_ms = ? WHERE id = ?").run(Date.now(), claimed.attempt.identity.attemptId);
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 10 * 60_000);
     expect(JSON.parse(settlementOf(db, key).settled_effects!)).toEqual(["check", "claim-stamp", "failure-row"]);
     expect(settlementOf(db, key).settled_ms).toEqual(expect.any(Number));
 
-    // note: Completed: no further writes.
     const rows = failureRows(db).length;
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 15 * 60_000);
     expect(failureRows(db)).toHaveLength(rows);
@@ -521,8 +454,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const payload = makePayload();
     await seedHandoff(db, payload);
     const deps = await makeDeps(db);
-    // note: A Check conclusion that fails once — a transient fault inside the
-    // settlement, after its failure row.
     let terminalizeCalls = 0;
     const settlement: CheckSettlement = {
       handle: null,
@@ -534,8 +465,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       terminalize: async () => {
         terminalizeCalls += 1;
         if (terminalizeCalls === 1) {
-          // note: Only the first settlement attempt hits this: the retry re-runs the
-          // whole settlement, which is why the mark must not be set yet.
           throw new Error("Checks API unavailable");
         }
         settlement.terminalized = true;
@@ -543,8 +472,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     };
     deps.checkSettlements.set(ATTEMPT_ID, settlement);
 
-    // note: The step retries once; the retried settlement finishes, then propagates
-    // the attempt's own error (the route's terminal outcome).
     await expect(
       runReviewAttemptWorkflow(deps, makeRef(payload), stepHost({ failOn: "prepare" }).step, async () => {}),
     ).rejects.toThrow();
@@ -555,13 +482,6 @@ describe("claim 2 — the mark proves completion, not entry", () => {
   });
 });
 
-/**
- * note: A D1 double whose launch-row read answers a row THIS BUILD cannot interpret
- * (a state/outcome pair the decoder refuses). Schema enforcement means such a
- * row can only come from another build or a damaged database — which is exactly
- * the case the settlement must survive without concluding anything. Every other
- * statement delegates to the real double.
- */
 function unreadableLaunchDb(db: TestD1): D1Like {
   const row = {
     state: "launched",
@@ -591,7 +511,6 @@ function unreadableLaunchDb(db: TestD1): D1Like {
 }
 
 describe("a rejection is not an observation", () => {
-  /** note: The attempt's row after a paid exec that was SENT and never answered. */
   async function launchedAttempt(db: TestD1): Promise<void> {
     const now = Date.now();
     expect(await claimReviewAttempt(db as never, ATTEMPT_ID, now, null)).toBe("claimed");
@@ -610,9 +529,6 @@ describe("a rejection is not an observation", () => {
     const ref = makeRef(makePayload());
     await launchedAttempt(db);
 
-    // note: A Workflow step rejected — a timeout while the platform waited for the
-    // paid reply, a post-run read — so the error is NOT an AttemptPhaseError
-    // and carries no `runnerReturned` fact at all.
     const outcome = await settleAttemptFailure(
       await makeDeps(db),
       ref,
@@ -621,8 +537,6 @@ describe("a rejection is not an observation", () => {
     );
 
     expect(outcome).toEqual({ kind: "unknown" });
-    // note: No failure row, no Check conclusion, no stamp: the row that fences the
-    // launch says the outcome is unknown, and that outranks the step's story.
     expect(failureRows(db)).toHaveLength(0);
     expect(launchState(db)).toBe("launched");
   });
@@ -636,8 +550,6 @@ describe("a rejection is not an observation", () => {
     const deps = await makeDeps(db);
     deps.env = { ...deps.env, DB: unreadableLaunchDb(db) as never };
 
-    // note: The phase even OBSERVED a return; the row cannot say which outcome it
-    // records, so the outcome is unobservable and its story must not settle it.
     const err = new BudgetExhaustedError(
       {
         kind: "budget-exhausted",
@@ -671,7 +583,6 @@ describe("a rejection is not an observation", () => {
     expect(outcome).toEqual({ kind: "unknown" });
     expect(failureRows(db)).toHaveLength(0);
     expect(settledMark(db)).toBeNull();
-    // note: The real row is untouched: only the READ was damaged.
     expect(launchState(db)).toBe("launched");
   });
 
@@ -679,7 +590,6 @@ describe("a rejection is not an observation", () => {
     const db = await createSeededTestD1();
     const ref = makeRef(makePayload());
     await launchedAttempt(db);
-    // note: The phase saw the paid call RETURN and chose the exhaustion signal.
     const err = new BudgetExhaustedError(
       {
         kind: "budget-exhausted",
@@ -711,8 +621,6 @@ describe("a rejection is not an observation", () => {
     const outcome = await settleAttemptFailure(await makeDeps(db), ref, phase, {});
 
     expect(outcome.kind).toBe("budget-exhausted");
-    // note: Both terminal facts exist, and the ROW is what cleanup reads: a confirmed
-    // stop may not strand the attempt in `launched` and hold its capacity.
     expect(failureRows(db)).toHaveLength(1);
     expect(launchState(db)).toBe("failed");
   });

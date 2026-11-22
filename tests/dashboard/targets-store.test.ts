@@ -1,21 +1,3 @@
-/**
- * why: Unit tests for `src/dashboard/targets-store.ts` — the repository-keyed review
- * target store.
- *
- * Pinned here:
- *   - every tenant read binds `workspace_id`: another workspace's target reads
- *     absent and every write against it changes nothing;
- *   - `create` refuses a duplicate by `repo_id` OR by an unclaimed
- *     owner/name match, and creates with `follow_workspace_defaults = 1`;
- *   - `resolveByRepo` resolves by id, refreshes renamed caches, claims a legacy
- *     NULL-`repo_id` row on its first delivery, and answers null otherwise;
- *   - effective settings answer from the workspace while inheriting and from
- *     the row otherwise, and `setInheritance` snapshots on toggle-off;
- *   - `setReviewConfig` writes only the columns named, vocabulary-checked.
- *
- * The fixture is the fully migrated schema (tests/store/helpers), so the
- * assertions run against the real DDL rather than a hand-built table.
- */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
 import type { TestD1 } from "../store/helpers";
@@ -44,7 +26,6 @@ function seedWorkspace(db: TestD1, id: string): void {
     .run(id, id, id);
 }
 
-/** note: One live bot mapped to a workspace, with no target. */
 function seedBot(db: TestD1, botId: string, workspaceId = WS): void {
   db.raw
     .prepare(
@@ -57,11 +38,6 @@ function seedBot(db: TestD1, botId: string, workspaceId = WS): void {
   db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(botId, workspaceId);
 }
 
-/**
- * note: A target row in the current shape. `repoId` null is the migrated/awaiting-
- * claim state; the caller owns every policy column so the inheritance cases
- * can state their own overrides.
- */
 function seedTarget(
   db: TestD1,
   input: {
@@ -195,8 +171,6 @@ describe("listLiveByBot", () => {
     seedBot(db, "bot-two");
     const older = seedTarget(db, { id: "t-older", botId: "bot-two", repoId: 9600, repoOwner: "acme", repoName: "widgets" });
     const newer = seedTarget(db, { id: "t-newer", botId: "bot-two", repoId: 9601, repoOwner: "acme", repoName: "gadgets" });
-    // why: The insert stamps both rows in the same second; the columns are updated
-    // so creation order is the row's own fact, not the fixture's timing.
     db.raw.prepare("UPDATE review_targets SET created_at = '2026-01-01 00:00:00' WHERE id = ?").run(older);
     db.raw.prepare("UPDATE review_targets SET created_at = '2026-01-02 00:00:00' WHERE id = ?").run(newer);
     const store = createTargetsStore(db);
@@ -292,8 +266,6 @@ describe("create (one repository, one workspace)", () => {
     });
     const store = createTargetsStore(db);
 
-    // why: 0068: one repository belongs to one workspace PER BOT, so a live row of
-    // a sibling workspace is the same claim — the guarded insert refuses.
     expect(
       await store.create({
         workspaceId: WS,
@@ -304,7 +276,6 @@ describe("create (one repository, one workspace)", () => {
         createdBy: "octocat",
       }),
     ).toEqual({ outcome: "duplicate" });
-    // why: A soft-deleted row releases its repository: the partial index admits a re-add.
     expect(
       (await store.create({
         workspaceId: WS,
@@ -392,7 +363,6 @@ describe("resolveByRepo (webhook resolution)", () => {
     expect(resolved?.repo_id).toBe(9800);
     expect(targetRow(db, targetId)).toMatchObject({ repo_id: 9800, repo_owner: "acme", repo_name: "widgets" });
 
-    // why: The claim is written once: the next delivery resolves by id.
     expect((await store.resolveByRepo("bot-claim", { id: 9800, owner: "acme", name: "widgets" }))?.id).toBe(targetId);
   });
 
@@ -409,7 +379,6 @@ describe("resolveByRepo (webhook resolution)", () => {
   test("the bot's ONE all-NULL row is claimed on its first delivery (the migrated shape)", async () => {
     const db = createMigratedTestD1();
     seedBot(db, "bot-first");
-    // note: Exactly what 0067 leaves behind: no id, no owner, no name.
     const targetId = seedTarget(db, { id: "t-first", botId: "bot-first" });
     const store = createTargetsStore(db);
 
@@ -420,7 +389,6 @@ describe("resolveByRepo (webhook resolution)", () => {
       repo_owner: "acme",
       repo_name: "widgets",
     });
-    // why: The claim is written once: the next delivery resolves by id.
     expect((await store.resolveByRepo("bot-first", { id: 9810, owner: "acme", name: "widgets" }))?.id).toBe(targetId);
   });
 
@@ -442,14 +410,10 @@ describe("resolveByRepo (webhook resolution)", () => {
     const targetId = seedTarget(db, { id: "t-case", botId: "bot-case", repoOwner: "Acme", repoName: "Widgets" });
     const store = createTargetsStore(db);
 
-    // why: The delivery spells the same repository differently: the claim must not
-    // orphan the row.
     const resolved = await store.resolveByRepo("bot-case", { id: 9830, owner: "acme", name: "widgets" });
     expect(resolved?.id).toBe(targetId);
     expect(targetRow(db, targetId)).toMatchObject({ repo_id: 9830, repo_owner: "acme", repo_name: "widgets" });
 
-    // why: An unclaimed row spelled `Acme/Widgets` IS the repository `ACME/WIDGETS`
-    // names, so `create` refuses it instead of adding a second target.
     seedBot(db, "bot-case-2");
     seedTarget(db, { id: "t-case-unclaimed", botId: "bot-case-2", repoOwner: "Acme", repoName: "Widgets" });
     expect(
@@ -473,7 +437,6 @@ describe("resolveByRepo (webhook resolution)", () => {
     seedTarget(db, { id: "t-legacy", botId: "bot-clash", repoOwner: "acme", repoName: "widgets-legacy" });
     const store = createTargetsStore(db);
 
-    // why: Step 1 answers: the id is bound. The unclaimed legacy row is not touched.
     expect((await store.resolveByRepo("bot-clash", { id: 9900, owner: "acme", name: "widgets" }))?.id).toBe(
       "t-claimed",
     );
@@ -487,8 +450,6 @@ describe("resolveByRepo (webhook resolution)", () => {
     const store = createTargetsStore(db);
     expect(await store.resolveByRepo("bot-amb", { id: 9950, owner: "acme", name: "gone" })).toBeNull();
 
-    // why: Two unclaimed rows on one owner/name: the fallback cannot choose, so the
-    // delivery is ignored rather than attributed to one of them.
     seedTarget(db, { id: "t-dup-a", botId: "bot-amb", repoOwner: "acme", repoName: "two" });
     seedTarget(db, { id: "t-dup-b", botId: "bot-amb", repoOwner: "acme", repoName: "two" });
     expect(await store.resolveByRepo("bot-amb", { id: null, owner: "acme", name: "two" })).toBeNull();
@@ -548,7 +509,6 @@ describe("effective settings and inheritance", () => {
       checkMinScore: 45,
       checkPassVerdicts: ["ship it", "blocked"],
       checkPassVerdictsReadable: true,
-      // why: Target-owned, so it answers from the row even while inheriting.
       reviewDrafts: true,
     });
     const own = (await store.getInWorkspace(WS, "t-own"))!;
@@ -585,12 +545,10 @@ describe("effective settings and inheritance", () => {
     });
     const store = createTargetsStore(db);
 
-    // why: A workspace default change reaches a following target with no write.
     db.raw.prepare("UPDATE workspaces SET default_review_trigger_mode = 'manual' WHERE id = ?").run(WS);
     expect((await getWorkspaceReviewDefaults(db, WS)).triggerMode).toBe("manual");
-    expect(targetRow(db, targetId).review_trigger_mode).toBe("every_push"); // note: inert placeholder, never copied
+    expect(targetRow(db, targetId).review_trigger_mode).toBe("every_push");
 
-    // why: Toggle off: the four effective values land in the row.
     await setInheritance(db, WS, targetId, 0);
     expect(targetRow(db, targetId)).toMatchObject({
       follow_workspace_defaults: 0,
@@ -600,7 +558,6 @@ describe("effective settings and inheritance", () => {
       check_pass_verdicts: '["ship it"]',
     });
 
-    // why: Toggle on: the flag only — stored overrides become inert.
     await setInheritance(db, WS, targetId, 1);
     expect(targetRow(db, targetId)).toMatchObject({
       follow_workspace_defaults: 1,
@@ -624,7 +581,6 @@ describe("effective settings and inheritance", () => {
 
     const target = (await store.getInWorkspace(WS, "t-gate"))!;
     expect(effectiveTargetSettings(target, await getWorkspaceReviewDefaults(db, WS)).checkPassVerdicts).toEqual([]);
-    // note: A save repairs it.
     expect(await store.setReviewConfig(WS, "t-gate", { checkPassVerdicts: ["ship it"] })).toBe(true);
     expect(targetRow(db, "t-gate").check_pass_verdicts).toBe('["ship it"]');
   });
@@ -669,7 +625,6 @@ describe("setReviewConfig", () => {
       check_pass_verdicts: '["ship it","blocked"]',
     });
 
-    // why: `null` is the "follow the operator default" choice, a real write.
     expect(await store.setReviewConfig(WS, targetId, { level: null })).toBe(true);
     expect(targetRow(db, targetId).review_level).toBeNull();
   });
@@ -715,7 +670,6 @@ describe("setReviewConfig", () => {
     });
     const store = createTargetsStore(db);
 
-    // why: Baseline: the placeholder floor is inert while inheriting.
     expect(checkGateOf(await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, targetId))!))).toEqual({
       minScore: 45,
       passVerdicts: ["ship it"],
@@ -723,7 +677,6 @@ describe("setReviewConfig", () => {
 
     expect(await store.setReviewConfig(WS, targetId, { checkMinScore: 90, follow: 0 })).toBe(true);
     expect(targetRow(db, targetId)).toMatchObject({ follow_workspace_defaults: 0, check_min_score: 90 });
-    // note: …and the saved floor is now the one the target runs with.
     expect(checkGateOf(await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, targetId))!))).toEqual({
       minScore: 90,
       passVerdicts: ["ship it"],
@@ -755,11 +708,6 @@ describe("setReviewConfig", () => {
   });
 });
 
-/**
- * why: The workspace defaults face's ONE store function: it stores the three
- * `default_*` columns AND the gate floor (`workspaces.check_min_score`), so the
- * legacy `/api/settings/check-min-score` address cannot drift from it.
- */
 describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
   const ACTION = "workspace.check_min_score.set";
 
@@ -781,7 +729,6 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
 
   test("writes the three defaults and the floor in one call, and ledgers the floor", async () => {
     const db = createMigratedTestD1();
-    // note: The migrated fixture already holds the `default` workspace.
 
     expect(
       await setWorkspaceReviewDefaults(
@@ -802,14 +749,11 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
       default_check_pass_verdicts: '["ship it","blocked"]',
       check_min_score: 45,
     });
-    // why: NULL was never a floor in effect, so the ledger's `before` is the absent
-    // state rather than the platform default it degraded to.
     expect(floorAudits(db)).toEqual([{ before: null, after: 45 }]);
   });
 
   test("each later floor save ledgers the value it replaced", async () => {
     const db = createMigratedTestD1();
-    // note: The migrated fixture already holds the `default` workspace.
 
     for (const value of [45, 0, 100]) {
       await setWorkspaceReviewDefaults(db, WS, { checkMinScore: value }, "operator");
@@ -825,7 +769,6 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
 
   test("an off-vocabulary value is refused before any write", async () => {
     const db = createMigratedTestD1();
-    // note: The migrated fixture already holds the `default` workspace.
 
     for (const bad of [-1, 101, 60.5, Number.NaN]) {
       await expect(
@@ -850,7 +793,6 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
 
   test("a patch that names nothing writes nothing", async () => {
     const db = createMigratedTestD1();
-    // note: The migrated fixture already holds the `default` workspace.
 
     expect(await setWorkspaceReviewDefaults(db, WS, {}, "operator")).toBe(false);
     expect(floorAudits(db)).toEqual([]);
@@ -858,7 +800,6 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
 
   test("an unknown workspace is refused as such", async () => {
     const db = createMigratedTestD1();
-    // note: The migrated fixture already holds the `default` workspace.
 
     await expect(
       setWorkspaceReviewDefaults(db, "ws_missing", { checkMinScore: 50 }, "operator"),
@@ -867,8 +808,6 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
 
   test("an untrusted stored floor is ledgered as absent, not as the default", async () => {
     const db = createMigratedTestD1();
-    // note: The migrated fixture already holds the `default` workspace.
-    // Wrong RANGE, written by a foreign writer (the DDL CHECK refuses it).
     db.raw.exec("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 150 WHERE id = ?").run(WS);
     db.raw.exec("PRAGMA ignore_check_constraints = OFF");

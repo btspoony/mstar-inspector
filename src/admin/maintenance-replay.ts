@@ -18,7 +18,7 @@
  *
  * shortcut: queue send and D1 sent-stamp cannot commit atomically; recovery can
  * resend after a crash or concurrent sweep, with existing D1/PR guards
- * preventing a second completed review. Upgrade only if exactly-once enqueue
+ * preventing a second completed review. upgrade: only if exactly-once enqueue
  * becomes a confirmed requirement.
  */
 import type { Queue } from "@cloudflare/workers-types";
@@ -91,7 +91,6 @@ export function maintenanceReplayPayload(
   };
 }
 
-/** The failure row by id, or null (the route's 404). */
 async function readFailure(db: DashboardD1, id: string): Promise<MaintenanceReplayFailureRow | null> {
   return db
     .prepare(
@@ -103,18 +102,12 @@ async function readFailure(db: DashboardD1, id: string): Promise<MaintenanceRepl
     .first<MaintenanceReplayFailureRow>();
 }
 
-/**
- * The failure's CURRENT live target, bot and workspace. A soft-deleted target,
- * a deleted or disabled bot or a deleted workspace makes the PR's ownership
- * unresolvable: the record stays visible and is never resurrected.
- */
 async function readLiveTarget(db: DashboardD1, failureId: string): Promise<MaintenanceReplayTarget | null> {
-  // One statement, so every predicate is read from one snapshot: a target retired
-  // between two reads would otherwise be enqueued with its stale bot.
   const row = await db
     // shortcut: tenant-bypass — internal maintenance read (operator route and sweep
     // retry); it returns no identity or ownership column, and the workspace join is
-    // the tenant gate.
+    // the tenant gate. upgrade: tenant-filter it once the maintenance replay becomes
+    // workspace-scoped.
     .prepare(
       `SELECT t.id AS target_id, t.bot_id AS bot_id
          FROM review_failures f
@@ -128,11 +121,6 @@ async function readLiveTarget(db: DashboardD1, failureId: string): Promise<Maint
   return row === null ? null : { targetId: row.target_id, botId: row.bot_id };
 }
 
-/**
- * Stamp the attempt time. Written BEFORE the send, so a send or sent-stamp that
- * throws still leaves the row's rotation position behind it — the ordering only
- * reads this column, and an unstamped failed attempt would own the next sweep.
- */
 async function stampAttempt(db: DashboardD1, id: string, now: string): Promise<void> {
   await db
     .prepare("UPDATE review_failures SET maintenance_replay_last_attempt_at = ? WHERE id = ?")
@@ -140,7 +128,6 @@ async function stampAttempt(db: DashboardD1, id: string, now: string): Promise<v
     .run();
 }
 
-/** Stamp the sent time; guarded so a concurrent stamp is never overwritten. */
 async function stampSent(db: DashboardD1, id: string, now: string): Promise<void> {
   await db
     .prepare(
@@ -171,17 +158,12 @@ export async function requestMaintenanceReplay(
   if (failure.stage !== MAINTENANCE_DEFERRED_STAGE) {
     return { kind: "refused", error: "not_maintenance_deferred", status: 409 };
   }
-  // A recorded request is answered from the row before any window gate: the
-  // operator must be able to observe an existing recovery precisely while a
-  // maintenance window or a settings failure is in progress.
   if (failure.maintenance_replay_requested_at !== null) {
     return {
       kind: "repeat",
       state: failure.maintenance_replay_sent_at === null ? "requested" : "sent",
     };
   }
-  // A NEW request fail-closes like every traffic gate: an unreadable window is
-  // a closed one, and replay writes the queue, which only an OPEN window allows.
   const maintenance = await getMaintenanceMode(db);
   if (maintenance.unreadable) return { kind: "refused", error: "maintenance_unreadable", status: 503 };
   if (maintenance.enabled) return { kind: "refused", error: "maintenance_active", status: 409 };
@@ -189,10 +171,6 @@ export async function requestMaintenanceReplay(
   if (target === null) return { kind: "refused", error: "target_unavailable", status: 409 };
   if (queue === undefined) return { kind: "refused", error: "queue_unavailable", status: 503 };
 
-  // ONE batch: the audit row and the request stamp commit together or not at
-  // all. Both carry the same `requested IS NULL` + stage guard, so a concurrent
-  // request (or a row that stopped being deferred) appends nothing and the
-  // loser learns it from `meta.changes`.
   const [, request] = await db.batch([
     db
       .prepare(
@@ -220,8 +198,6 @@ export async function requestMaintenanceReplay(
       .bind(input.now, failure.id, MAINTENANCE_DEFERRED_STAGE),
   ]);
   if ((request?.meta.changes ?? 0) === 0) {
-    // Lost the race (or a concurrent sweep stamped it): the winner owns the
-    // send, so read the state back rather than sending twice.
     const current = await readFailure(db, failure.id);
     if (current === null) return { kind: "refused", error: "unknown_failure", status: 404 };
     return {
@@ -231,14 +207,11 @@ export async function requestMaintenanceReplay(
   }
 
   try {
-    // Every attempt stamps, so the sweep's rotation sees this one too.
     await stampAttempt(db, failure.id, input.now);
     await queue.send(maintenanceReplayPayload(failure, target));
     await stampSent(db, failure.id, input.now);
     return { kind: "ok", state: "sent" };
   } catch (error) {
-    // The durable request stands: the sweep retries it while the window is
-    // open, so this is a redacted warning, never a lost recovery.
     const detail = error instanceof Error ? error.message : String(error);
     console.warn(
       JSON.stringify({
@@ -273,7 +246,6 @@ export async function retryMaintenanceReplay(
   now: string,
 ): Promise<MaintenanceReplayRetry> {
   const failure = await readFailure(db, failureId);
-  // A row that vanished between the scan and this read has no replayable target.
   if (failure === null) return "target_unavailable";
   await stampAttempt(db, failure.id, now);
   const target = await readLiveTarget(db, failure.id);

@@ -1,19 +1,3 @@
-/** note: The repository id claim item.
- *
- * A target can name a repository and still have no `repo_id`: the shape
- * `repo-backfill` leaves when it merges the 0067 leftover target, and the one
- * the dashboard reads as 待安装. This item is the explicit repair — it never
- * creates or re-points anything, only asks GitHub for the id.
- *
- * What is pinned:
- *
- *   - preflight counts only live, named targets without an id;
- *   - a live installation binds the id the lookup answers with;
- *   - no live installation leaves the id NULL and counts unbound, without
- *     failing;
- *   - a second run visits nothing;
- *   - an id already set is never visited.
- */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 import { repoIdClaim } from "../../src/admin/data-upgrades/repo-id-claim";
@@ -46,10 +30,6 @@ function seedInstallation(
 const lookupFound = (repoId: number): RepoLookup => async () => ({ kind: "found", repoId });
 const lookupAbsent: RepoLookup = async () => ({ kind: "absent" });
 
-/** note: A target in the shape this item exists for: it names a repository and carries
- * no `repo_id`. `seedTarget` always writes a hashed id, so this fixture writes
- * the NULL itself rather than widening that helper for one item.
- */
 function seedUnclaimedTarget(db: TestD1, botId: string, owner: string, repo: string): void {
   db.raw
     .prepare(

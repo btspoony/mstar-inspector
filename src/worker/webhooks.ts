@@ -1,31 +1,3 @@
-/**
- * Webhook verification + event filtering (pure, testable).
- *
- * Fail-closed secret policy (compass S4, along M0): missing, empty, or the
- * Probot default "development" secret → reject with zero side effects.
- * Signature verification uses `@octokit/webhooks` (Web Crypto, workerd-safe).
- * Every reject path logs a structured warning (no secret material) so the
- * operator can spot bad configurations / probes (Phase 5 B6).
- *
- * Event whitelist (spec review-trigger-policy §2.1):
- * - `pull_request.{opened,synchronize,reopened,ready_for_review}` filtered by
- *   the resolved target's `review_trigger_mode`: `open` auto-triggers `opened`
- *   and `ready_for_review` only, `every_push` (the default) all four,
- *   `manual` none. A draft PR is additionally held back unless the target's
- *   `review_drafts` switch is on; `ready_for_review` bypasses that draft gate.
- * - `issue_comment.created` whose body contains the App's bot mention
- *   `@{github_slug}` as a standalone token (spec §3 grammar), on a pull request
- *   thread, sent by a non-bot whose login is the PR author or the repository
- *   owner (Phase 5 B5 actor allowlist — prevents quota abuse by arbitrary
- *   commenters on public installs).
- * - `installation.{created,new_permissions_accepted}` whose payload carries
- *   `installation.account.login` — recorded as the install's account; not
- *   review work, so it never enqueues.
- * - `installation.deleted` — the installation is gone, so the route marks the
- *   local row removed; also not review work, also never enqueues.
- * Everything else returns 200 quickly — GitHub retries non-2xx, so
- * uninteresting events must not 4xx.
- */
 import { Webhooks } from "@octokit/webhooks";
 import { z } from "zod";
 import { normalizeRfc3339 } from "../contracts/rfc3339";
@@ -59,16 +31,9 @@ export const INSTALLATION_ACTIONS = ["created", "new_permissions_accepted"] as c
 export type ReviewTriggerContext = {
   mode: ReviewTriggerMode;
   appSlug: string;
-  /**
-   * The resolved target's draft switch (migration 0070). Whether a PR its
-   * author is still drafting is reviewed at all. Optional — absent means
-   * true, so a caller that states no policy keeps today's behaviour (a draft
-   * is reviewed like any other PR).
-   */
   reviewDrafts?: boolean;
 };
 
-/** The one trigger context a delivery without a resolver is classified with. */
 const DEFAULT_TRIGGER: ReviewTriggerContext = { mode: "every_push", appSlug: "" };
 
 /**
@@ -93,25 +58,8 @@ export type ReviewTriggerResolver = (delivery: DeliveryIdentity) => Promise<Revi
  */
 export const NO_TARGET_REASON = "no review target resolves for this delivery";
 
-/**
- * The GitHub login continuation set (spec §3): `A-Z a-z 0-9 -`. A mention
- * match is a standalone token only when the characters immediately before
- * `@` and immediately after the slug are BOTH outside this set (absent
- * counts as outside). Hyphens continue a login, so `@slug-other` /
- * `@slugbot` never match and an email-shaped `name@slug.host` never matches.
- * Always evaluated against the ORIGINAL body text, never a case-folded copy
- * (see bodyMentionsApp).
- */
 const LOGIN_CONTINUATION = /[A-Za-z0-9-]/;
 
-/**
- * ASCII-restricted case-insensitive equality for two single body characters:
- * identical, or both ASCII (code unit ≤ 127) with the same toLowerCase()
- * form. `String.toLowerCase()` alone is a Unicode SUPERSET of ASCII folding
- * (U+212A KELVIN SIGN folds to `k`, U+0130 folds to `i` + combining dot), so
- * it must never decide a match — a non-ASCII character never equals an ASCII
- * letter here (QC F-001/S-1).
- */
 function asciiFoldEquals(a: string, b: string): boolean {
   if (a === b) {
     return true;
@@ -122,22 +70,6 @@ function asciiFoldEquals(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
-/**
- * Whether `body` mentions the App's bot: contains `@{github_slug}` (ASCII
- * case-insensitive, literal) as a standalone token per the LOGIN_CONTINUATION
- * boundary rule. Any position in the body; the mention IS the entire
- * grammar (spec §3 — no wording, no commands).
- *
- * The scan runs over the ORIGINAL body: the case fold is applied
- * per-character via asciiFoldEquals (ASCII-only), and both boundary
- * characters are read from the original text. A whole-string
- * `toLowerCase()` copy would corrupt the grammar in both directions
- * (QC F-001/S-1): Unicode-only folds fabricate occurrences that do not
- * exist in the original (`@<KELVIN>-bot` lowering to `@k-bot`) and the
- * length change (U+0130 is one code unit lowering to two) shifts every
- * index after the fold, misreading both boundaries. An empty slug never
- * matches — fail-safe: no trigger rather than a spurious one.
- */
 function bodyMentionsApp(body: string, appSlug: string): boolean {
   if (!appSlug) {
     return false;
@@ -204,11 +136,6 @@ export function payloadMentionsALogin(rawBody: string): boolean {
   while (i !== -1) {
     let end = i + 1;
     while (end < body.length && LOGIN_CONTINUATION.test(body[end]!)) end++;
-    // A non-empty login run whose leading boundary is outside the
-    // continuation set (body start counts as outside) — this is what rejects
-    // the email-shaped `name@host`. The trailing boundary needs no check: the
-    // loop above only stops at a non-continuation character or the body end,
-    // so the character after the run is outside the set by construction.
     if (end > i + 1 && !LOGIN_CONTINUATION.test(i > 0 ? body[i - 1]! : "")) {
       return true;
     }
@@ -217,12 +144,6 @@ export function payloadMentionsALogin(rawBody: string): boolean {
   return false;
 }
 
-/**
- * §2.1 matrix for the auto (pull_request) face: `open` enqueues `opened` and
- * `ready_for_review` (the draft the user just published — the one delivery
- * that must not be missed); `every_push` enqueues all whitelisted actions;
- * `manual` never auto-triggers (a bot mention is the only trigger).
- */
 function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
   if (mode === "manual") {
     return false;
@@ -230,14 +151,6 @@ function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
   return mode === "open" ? action === "opened" || action === "ready_for_review" : true;
 }
 
-/**
- * GitHub gives every bot account a login ending in `[bot]` (dependabot[bot],
- * github-actions[bot], an App's own `<slug>[bot]`). A PR opened by one of
- * them is machine-generated — release prep, dependency bumps, self-authored
- * PRs from another automation — and is never reviewed, on either trigger
- * face. Case-insensitive because GitHub logins are; the suffix is the whole
- * rule, so a login without it (whatever its account type) still triggers.
- */
 const BOT_LOGIN = /\[bot\]$/i;
 
 const BOT_PR_REASON = "PR authored by a bot account";
@@ -252,17 +165,9 @@ const MISSING_AUTHOR_REASON = "payload carried no PR author login";
  */
 export const DRAFT_PULL_REQUEST_REASON = "draft pull request";
 
-// Stable labels for reason-keyed log greps: the outcome `reason` stays prose,
-// the log line uses snake_case like every other webhook-face diagnostic.
 const BOT_AUTHOR_LABEL = "bot_author";
 const MISSING_AUTHOR_LABEL = "missing_author";
 
-/**
- * Both trigger faces share one author rule: a PR whose author is unknown is
- * ignored (GitHub always sends the login — a truncated payload cannot prove a
- * human authored it), and a `[bot]` login is never reviewed. Info-level, not
- * warn: a bot PR is a normal skip, and the delivery row still records it.
- */
 function ignoredForAuthor(
   login: string | null | undefined,
   event: "pull_request" | "issue_comment",
@@ -287,25 +192,6 @@ function ignoredForAuthor(
 /** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
 export const WEBHOOK_BODY_LIMIT = 1_000_000;
 
-/**
- * Module-level verifier cache (QC F-005; the hardening item /
- * architect lock L1): the hot path constructed a `Webhooks` instance per
- * request only to call `verify`, which uses nothing but `options.secret`.
- * KEYED BY CACHEKEY, NOT the raw secret: each entry is `{ secret, webhooks }`
- * under the caller's cache key — each per-App
- * `POST /webhook/:workspaceId/:appId` route passes its `review_bots.id` — so per-App isolation holds AND a
- * cached entry whose `secret` differs from the caller's current secret
- * (credential rotation) is rebuilt and REPLACED: the rotated secret
- * verifies with the NEW secret only, and the old entry is evicted exactly
- * (no LRU wait). The bound is STRUCTURAL (≤ review_bots rows — keys are
- * drawn from the fixed universe of row ids), so no eviction policy is
- * tunable or needed; an entry outliving its row (soft-deleted App) is dead
- * weight only — that route 404s before classifyWebhook, so the entry can
- * never be hit again. `getWebhooks` stays exported as a test seam to lock
- * the reuse and rotation-replace behavior; the worker always passes an
- * explicit cacheKey, and direct callers that omit it fall back to the
- * legacy secret-keyed memoization.
- */
 type VerifierCacheEntry = { secret: string; webhooks: Webhooks };
 
 const webhooksCache = new Map<string, VerifierCacheEntry>();
@@ -315,9 +201,6 @@ export function getWebhooks(cacheKey: string, secret: string): Webhooks {
   if (cached !== undefined && cached.secret === secret) {
     return cached.webhooks;
   }
-  // First use for this cacheKey, or a SECRET MISMATCH (rotation): build and
-  // REPLACE the entry — the old instance (and its old secret) is dropped
-  // exactly, never retained alongside the new one.
   const webhooks = new Webhooks({ secret });
   webhooksCache.set(cacheKey, { secret, webhooks });
   return webhooks;
@@ -363,60 +246,20 @@ export async function verifySignature(
 export type WebhookOutcome =
   | { kind: "reject"; status: 400 | 401 | 500; reason: string }
   | { kind: "ignore"; reason: string }
-  /**
-   * A review job. `installationAccount` is `installation.account.login`
-   * when the payload carries it, falling back to `repository.owner.login` —
-   * the installation's own account is authoritative and the repository
-   * owner covers only payloads that omit it (the review path does NOT always
-   * receive an owner-derived login). It is carried OUTSIDE
-   * `payload` so it never enters the queue message (the consumer contract
-   * `ReviewJobPayload` must not grow an account field) while the route can
-   * still record it on `bot_installations`.
-   *
-   * `accountAuthoritative` is always false here: a review payload is not an
-   * install statement, so the store only lets this value FILL an empty login.
-   */
   | {
       kind: "job";
       payload: Omit<ReviewJobPayload, "botRef" | "targetId">;
       installationAccount: string;
       accountAuthoritative: false;
     }
-  /**
-   * An install delivery is not review work: it names the installation whose
-   * `account_login` the route records, and never carries a queue payload.
-   * `accountLogin` is null only when GitHub omits `installation.account`
-   * (the schema permits it) — the store's COALESCE then keeps whatever is
-   * already stored. `accountAuthoritative` is always true: this payload IS
-   * the installation's own statement, so it overwrites a stored login.
-   */
   | {
       kind: "installation";
       installationId: number;
       accountLogin: string | null;
       accountAuthoritative: true;
     }
-  /**
-   * An `installation.deleted` delivery: the installation no longer exists, so
-   * the route stamps the local row's `removed_at` (never deletes it — the
-   * historical reviews still reference it). Carries the installation id only;
-   * no login, no queue payload.
-   */
   | { kind: "installation_removed"; installationId: number };
 
-/**
- * Minimal webhook payload shapes — only the fields the gateway consumes.
- *
- * `account.login` is the installation's own account — the authority for
- * `bot_installations.account_login`. `repository.owner.login` is only a
- * fallback: an install covers repositories owned by the installing account,
- * but the payload's own `installation.account` is the value GitHub states,
- * and it must win so it is never overwritten by an inferred owner.
- *
- * An empty login is rejected at the boundary (`min(1)`): `""` is not a login,
- * and treating it as an absent account is what keeps it from reaching the
- * store as a value.
- */
 const installationAccountSchema = z.object({ login: z.string().min(1) }).nullable().optional();
 const installationSchema = z
   .object({ id: z.number(), account: installationAccountSchema })
@@ -426,36 +269,12 @@ const repositorySchema = z
   .object({
     name: z.string(),
     owner: z.object({ login: z.string() }),
-    // Optional: GitHub states the `owner/name` form on every repository
-    // payload, but the classifiers only ever needed the pair — requiring it
-    // would turn an old-shaped delivery into a parse failure.
     full_name: z.string().min(1).optional(),
-    // GitHub's numeric `repository.id` — the STABLE target identity (migration
-    // 0067). Optional like the pair: a payload without it resolves by
-    // owner/name, the historical path.
     id: z.number().int().optional(),
   })
   .nullable()
   .optional();
 
-/**
- * The install's own account login, with the repository owner as the fallback a
- * delivery without `installation.account` allows — shared by both review
- * classifiers so the authority order is stated once.
- *
- * Two sources, one rule (`bot_installations.account_login` is either
- * AUTHORITATIVE or INFERRED):
- * - authoritative = `installation.account.login` on an `installation.*` event
- *   (the installation's own statement) — overwrites a stored login;
- * - inferred = the login a review delivery (`pull_request` / `issue_comment`)
- *   carries, which is `installation.account.login` when the payload has it and
- *   `repository.owner.login` otherwise — only fills an EMPTY stored login.
- * The precedence is stated here once. They are never interchangeable: the store
- * picks its update expression from `accountAuthoritative`, not from which value
- * looks more specific.
- *
- * An empty-string login is treated as absent, so the owner covers it.
- */
 function installationAccountOf(
   installation: { account?: { login: string } | null } | null | undefined,
   owner: string,
@@ -464,11 +283,6 @@ function installationAccountOf(
   return login ? login : owner;
 }
 
-/**
- * The `installation` event's own shape (not the bare `installationSchema`,
- * which only supplies the id inside the review events): the account login is
- * the whole point, and it sits one level down under `account`.
- */
 const installationEventSchema = z.object({
   action: z.string(),
   installation: z
@@ -484,19 +298,11 @@ const pullRequestSchema = z.object({
   pull_request: z
     .object({
       number: z.number().optional(),
-      // PR author — a bot-authored PR is never reviewed (either face).
       user: z.object({ login: z.string().optional() }).nullable().optional(),
-      // Draft state (migration 0070): `true` = the author is still drafting.
-      // Optional, absent meaning false; a non-boolean keeps the existing 400
-      // (it is a malformed payload, which a retry cannot repair).
       draft: z.boolean().optional(),
-      // Display fields for the per-App PR ledger (`pullRequestRecord`). All
-      // optional *and* nullable: a delivery may omit them and every existing
-      // classifier guard stays decided by `number` / `head.sha` alone.
       title: z.string().nullable().optional(),
       state: z.string().nullable().optional(),
       merged: z.boolean().nullable().optional(),
-      // GitHub's own clock for the PR row — the ledger's ordering key.
       updated_at: z.string().nullable().optional(),
       head: z.object({ sha: z.string().nullable().optional() }).optional(),
     })
@@ -508,22 +314,16 @@ const pullRequestSchema = z.object({
 const issueCommentSchema = z.object({
   action: z.string(),
   installation: installationSchema,
-  // `id` is the comment-trigger's identity (`ReviewJobPayload.comment_id`);
-  // optional so a payload without it still classifies and enqueues.
   comment: z.object({ body: z.string(), id: z.number().int().positive().optional() }).nullable().optional(),
   issue: z
     .object({
       number: z.number(),
-      // PR author (issue.user.login) — the actor allowlist (B5) and the
-      // bot/missing-author guard. `login` is optional so a truncated payload
-      // fails closed on the guard instead of rejecting 400.
       user: z.object({ login: z.string().optional() }).nullable().optional(),
       pull_request: z.unknown().optional(),
     })
     .nullable()
     .optional(),
   repository: repositorySchema,
-  // Commenter identity: type (bot guard) + login (actor allowlist, B5).
   sender: z.object({ type: z.string().optional(), login: z.string().optional() }).nullable().optional(),
 });
 
@@ -600,19 +400,10 @@ export async function classifyWebhook(
     );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
-  // ONE parse per delivery (see classifyEvent): verification has passed, so
-  // this document may be read, and `onParsed` hands it on without a second
-  // JSON.parse.
   const parsed = parseBody(rawBody);
   onParsed?.(parsed);
-  // A resolver asks the route for the delivery's target, so it is consulted
-  // only for the two events that can enqueue a review: an install delivery is
-  // bot-scoped bookkeeping with no review configuration to resolve.
   if (typeof trigger === "function" && (eventName === "pull_request" || eventName === "issue_comment")) {
     const identity = deliveryIdentityOf(parsed);
-    // A payload that cannot name its installation or repository is MALFORMED,
-    // not unconfigured: it takes the classifier's own 400 below instead of
-    // being resolved. Only a well-formed delivery asks the route for a target.
     if (identity.installationId !== null && identity.repository !== null) {
       const resolved = await trigger(identity);
       if (resolved === null) return { kind: "ignore", reason: NO_TARGET_REASON };
@@ -622,11 +413,6 @@ export async function classifyWebhook(
   return classifyParsed(eventName, parsed, log, typeof trigger === "function" ? DEFAULT_TRIGGER : trigger);
 }
 
-/**
- * The body's `installation.id` and source repository, or an absent part when
- * the document cannot state one. One read of the already-parsed body, so the
- * resolver never re-parses up to 1 MB.
- */
 function deliveryIdentityOf(parsed: unknown): DeliveryIdentity {
   if (typeof parsed !== "object" || parsed === null) return { installationId: null, repository: null };
   const installation = "installation" in parsed ? parsed.installation : null;
@@ -668,15 +454,11 @@ export function classifyEvent(
   trigger: ReviewTriggerContext = DEFAULT_TRIGGER,
   onParsed?: (parsed: unknown) => void,
 ): WebhookOutcome {
-  // ONE parse per delivery: the classifiers read this document, and `onParsed`
-  // hands the same one to the caller (the route records its source repository
-  // from it), so no delivery is JSON.parse'd a second time.
   const parsed = parseBody(rawBody);
   onParsed?.(parsed);
   return classifyParsed(eventName, parsed, log, trigger);
 }
 
-/** The dispatch over an already-parsed body — the shared tail of both entry points. */
 function classifyParsed(
   eventName: string | null,
   parsed: unknown,
@@ -698,16 +480,6 @@ function classifyParsed(
   return { kind: "ignore", reason: `event ${eventName} is not whitelisted` };
 }
 
-/**
- * `installation.{created,new_permissions_accepted}` → the installing account's
- * login. This is the one path that observes a fresh install before any review
- * traffic exists, so it is the reason `bot_installations.account_login` can be
- * filled at all. `installation.deleted` names the installation being removed.
- *
- * Every malformed case is a 400 reject, exactly like the sibling classifiers:
- * GitHub retries non-2xx, but a payload that cannot name an installation is
- * not something a retry fixes.
- */
 function classifyInstallation(parsed: unknown): WebhookOutcome {
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
@@ -757,12 +529,7 @@ function classifyPullRequest(
   const repo = repository?.name;
   const prNumber = pull_request?.number ?? result.data.number;
   const headSha = pull_request?.head?.sha ?? null;
-  // The commit's ordering stamp (`ReviewJobPayload.head_at`): the same
-  // normalized spelling the ledger stores, so the consumer compares queue
-  // message and D1 row as plain strings. Junk/absent → the field is omitted.
   const headAt = normalizeRfc3339(pull_request?.updated_at);
-  // Malformed-payload reject BEFORE the mode gate: reject stays reserved for
-  // malformed payloads in EVERY mode (spec §2.1 — exactly as today).
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
   }
@@ -770,22 +537,10 @@ function classifyPullRequest(
   if (authorIgnore) {
     return authorIgnore;
   }
-  // Draft gate (migration 0070): a PR its author is still drafting is not
-  // reviewed while the target says so. `ready_for_review` is the delivery that
-  // announces the draft became reviewable, so it bypasses THIS gate only —
-  // every other gate (signature, target resolution, author, pause,
-  // entitlement) still decides. Absent `reviewDrafts` means true (today's
-  // behaviour); the mode gate below still applies to a ready delivery.
   if (pull_request?.draft === true && reviewDrafts === false && action !== "ready_for_review") {
     return { kind: "ignore", reason: DRAFT_PULL_REQUEST_REASON };
   }
-  // The install's own account wins: the payload states it, whereas the owner
-  // is only the inference a delivery without `installation.account` allows.
-  // Whichever source supplied it, a review delivery is INFERRED for the store.
   const installationAccount = installationAccountOf(installation, owner);
-  // §2.1 matrix: the mode gates the auto face (manual never auto-triggers;
-  // open admits `opened` and `ready_for_review`). The bot-mention comment face
-  // is orthogonal.
   if (!autoTriggerAllows(mode, action)) {
     return { kind: "ignore", reason: `pull_request action ${action} does not auto-trigger in ${mode} mode` };
   }
@@ -818,8 +573,6 @@ function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appS
   if (action !== "created") {
     return { kind: "ignore", reason: `issue_comment action ${action} is not whitelisted` };
   }
-  // Malformed payloads reject before any policy gate, exactly as on the
-  // pull_request face: 400 stays reserved for what a retry cannot repair.
   const installationId = installation?.id;
   const owner = repository?.owner.login;
   const repo = repository?.name;
@@ -827,10 +580,6 @@ function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appS
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "issue_comment payload missing required fields" };
   }
-  // Bot authorship outranks the mention grammar: a PR opened by a bot is
-  // ignored whatever the comment says, and reaching the mention check first
-  // would report MENTION_MISS_REASON on an unsynced App — a false
-  // `mention_unresolved` warn whose remedy cannot change the outcome.
   if (issue?.pull_request == null) {
     return { kind: "ignore", reason: "comment is not on a pull request thread" };
   }
@@ -838,10 +587,6 @@ function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appS
   if (authorIgnore) {
     return authorIgnore;
   }
-  // Bare mention (spec review-trigger-policy §3): the body must contain the
-  // resolved App's `@{appSlug}` as a standalone token — any position, no
-  // required wording. Keyed to the route-resolved slug, so one App's mention
-  // never triggers another App.
   const body = comment?.body ?? "";
   if (!bodyMentionsApp(body, appSlug)) {
     return { kind: "ignore", reason: MENTION_MISS_REASON };
@@ -849,17 +594,12 @@ function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appS
   if (sender?.type === "Bot") {
     return { kind: "ignore", reason: "comment sent by a bot (self-comment loop guard)" };
   }
-  // Actor allowlist (B5): only the PR author or the repository owner may
-  // trigger a review. Ignore + structured log otherwise (quota abuse guard).
   const actorLogin = sender?.login ?? null;
   const authorLogin = issue?.user?.login ?? null;
   const ownerLogin = repository?.owner?.login ?? null;
   if (actorLogin === null || (actorLogin !== authorLogin && actorLogin !== ownerLogin)) {
     log?.warn(
       {
-        // Log hygiene: this warn is only reachable via
-        // classifyEvent("issue_comment", …), so `event` carries the REAL
-        // GitHub event — filterable, never the literal "unknown".
         event: "issue_comment",
         reason: "actor_not_allowed",
         detail: `actor=${actorLogin ?? "null"} author=${authorLogin ?? "null"} owner=${ownerLogin ?? "null"}`,
@@ -868,9 +608,6 @@ function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appS
     );
     return { kind: "ignore", reason: "comment actor is not the PR author or repo owner" };
   }
-  // Same authority as the pull_request face: the payload's own
-  // `installation.account.login`, with the repository owner as the fallback —
-  // and inferred either way, since this is not an install statement.
   const installationAccount = installationAccountOf(installation, owner);
   return {
     kind: "job",
@@ -880,8 +617,6 @@ function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appS
       repo,
       pr_number: prNumber,
       head_sha: null,
-      // The comment trigger's identity — the idempotency claim for a job
-      // that states no commit. Omitted when the payload carried none.
       ...(comment?.id === undefined ? {} : { comment_id: comment.id }),
       action: "created",
       triggered_by: "issue_comment",
@@ -930,10 +665,6 @@ export function pullRequestRecord(parsed: unknown): {
     title: pull_request?.title ?? null,
     state,
     headSha: pull_request?.head?.sha ?? null,
-    // Only a well-formed stamp rides through, rewritten to the SAME UTC
-    // spelling the payload's `head_at` carries (the consumer compares the two
-    // as text); junk degrades to "no stamp", which the store resolves to now
-    // EXPLICITLY.
     updatedAt: normalizeRfc3339(pull_request?.updated_at) ?? null,
   };
 }

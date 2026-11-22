@@ -1,23 +1,7 @@
-/** note: The one happy-dom install for the SPA suites.
- *
- * `react-dom/client` latches `canUseDOM` when it is evaluated, and Radix latches
- * the same answer in `@radix-ui/primitive`. Module evaluated while no DOM exists
- * → React's event plugins never register (a controlled input's `onChange` never
- * fires) and Radix portals never open. Which module evaluates first depends on
- * the order the runner discovered FILES, not on the test, so no test file can
- * fix this on its own: a single file that imports `react-dom/client` at module
- * scope poisons every mount-based test after it.
- *
- * `warmDom()` evaluates both under a throwaway window and is called by the test
- * preload, which runs before any test module. Every later static import is then
- * a cache hit answered `true`, so a test file may import in any order and needs
- * no dynamic `import()`.
- */
 import { Window } from "happy-dom";
 
 const scope = globalThis as unknown as Record<string, unknown>;
 
-/** note: happy-dom constructors the mounted React tree and Radix widgets read. */
 const DOM_CONSTRUCTORS = [
   "HTMLElement",
   "HTMLInputElement",
@@ -43,13 +27,10 @@ const DOM_CONSTRUCTORS = [
   "ResizeObserver",
 ] as const;
 
-/** note: The globals a window contributes, installed by name so teardown is exact. */
 function globalsOf(win: Window): Record<string, unknown> {
   const dom = win as unknown as Record<string, unknown>;
   const installed: Record<string, unknown> = {
     window: win,
-    // note: Pages derive their API base and workspace ref from the location, so it
-    // rides the stub rather than only `window`.
     location: win.location,
     document: win.document,
     navigator: win.navigator,
@@ -120,10 +101,6 @@ export async function withMarkup<T>(
 export async function warmDom(): Promise<void> {
   const { cleanup } = installDom("http://localhost/");
   try {
-    // note: Dynamic by necessity, not preference: a static import is hoisted above
-    // the install and would latch `canUseDOM` false — the exact bug this file
-    // exists to prevent. `@radix-ui/primitive` is the answer every Radix
-    // package reads, so one dialog import loads it.
     await import("react-dom/client");
     await import("@design-system");
   } finally {

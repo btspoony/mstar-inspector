@@ -26,7 +26,6 @@ const REPO = new URL("../../", import.meta.url).pathname;
 const CSS_PATH = join(REPO, "src/spa/styles/tokens.css");
 const css = readFileSync(CSS_PATH, "utf8");
 
-/** note: A declaration and its value from one selector block. */
 function block(selector: string): Record<string, string> {
   const at = css.indexOf(`${selector} {`);
   if (at === -1) throw new Error(`missing block: ${selector}`);
@@ -55,8 +54,6 @@ const OPS = block(':root[data-surface="ops"]');
 
 describe("generated tokens.css", () => {
   test("is exactly what the generator produces from the current source", () => {
-    // why: The same comparison `--check` makes, run here so a hand edit fails the
-    // suite too rather than only the CI step.
     const check = spawnSync("bun", ["scripts/build-tokens.ts", "--check"], {
       cwd: REPO,
       encoding: "utf8",
@@ -82,9 +79,6 @@ describe("generated tokens.css", () => {
   });
 
   test("every dark semantic and component declaration reaches :root at its source value", () => {
-    // why: The generator's own `--check` compares the file to its last output, so a
-    // filter inside `build()` would stay green after a regeneration. Compare
-    // the source to the file instead: a dropped declaration has nowhere to hide.
     const dark = tokenLayers("dark");
     for (const [layer, tokens] of [
       ["semantic", dark.semantic],
@@ -98,9 +92,6 @@ describe("generated tokens.css", () => {
 
   test("no removed step reappears as a declaration", () => {
     const declared = new Set([...Object.keys(ROOT), ...Object.keys(LIGHT)]);
-    // why: The families D14 emptied out entirely — after task 4 the chart steps
-    // that used to survive transitionally are gone too, so nothing of teal or
-    // pink may remain.
     for (const family of ["blue", "teal", "pink", "purple"]) {
       const survivors = survivorSteps.filter((step) => step.startsWith(`${family}-`));
       const alive = [...declared].filter((name) => name.startsWith(`${family}-`));
@@ -109,10 +100,6 @@ describe("generated tokens.css", () => {
   });
 
   test("the light branch re-declares only what differs", () => {
-    // why: A full re-declaration would also work, but it hides which names are
-    // genuinely theme-varying and doubles the surface a hand edit could drift
-    // in. Primitives are re-declared whole (their values are raw hexes); the
-    // semantic half carries only the names whose declaration changed.
     const dark = tokenLayers("dark");
     const light = tokenLayers("light");
     const varyingSemantics = Object.keys(dark.semantic).filter(
@@ -121,7 +108,6 @@ describe("generated tokens.css", () => {
     expect(Object.keys(LIGHT).sort()).toEqual(
       [...Object.keys(light.primitive), ...varyingSemantics].sort(),
     );
-    // why: And the assertion has teeth: at least the surface ladder varies.
     expect(varyingSemantics.length).toBeGreaterThan(10);
   });
 
@@ -135,10 +121,6 @@ describe("generated tokens.css", () => {
     expect(OPS["tone-accent-solid"]).toBe("var(--tone-neutral-solid)");
     expect(OPS["button-primary-bg"]).toBe("var(--tone-neutral-bg)");
 
-    // why: Source order is load-bearing: `:root[data-theme="light"]` and
-    // `:root[data-surface="ops"]` both score 0-2-0, so only the later block
-    // wins. Emit ops first and the light branch repaints the console's accent
-    // tokens — a silent return of the tone D15 withholds.
     const lightAt = css.indexOf(':root[data-theme="light"] {');
     const opsAt = css.indexOf(':root[data-surface="ops"] {');
     expect(lightAt).toBeGreaterThan(-1);

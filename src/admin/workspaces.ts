@@ -1,21 +1,3 @@
-/**
- * Workspace reads and the plan assignment write for `/_internal_admin`
- * (spec operator-admin-surface §3.2 / §3.3).
- *
- * The list is ONE statement: live member count, pending invite count, owner
- * login, plan and creation stamp are all resolved in SQL, so the console never
- * issues a per-row read. The plan column mirrors the SaaS half of
- * `resolveWorkspacePlan` (`active` subscription, else the seeded `free` row) —
- * the same SQL mirror `countFreeMembershipsForLogin` keeps
- * (src/dashboard/workspace-store.ts:298) — and imports `FREE_PLAN_ID` so that
- * fallback has one spelling. The module is only reachable through the `saas`
- * router (src/worker/index.ts), so the resolver's `self-hosted` branch, which
- * answers before any DB read, has no reachable case here.
- *
- * The write is ONE `batch`: the subscription upsert and its
- * `platform_audit_events` row land together or not at all, so a failed write
- * appends no audit row and a successful one appends exactly one.
- */
 import { FREE_PLAN_ID, resolveWorkspacePlan } from "../dashboard/entitlement";
 import type { DashboardD1, DashboardD1BatchResult } from "../dashboard/users";
 
@@ -29,21 +11,10 @@ export type AdminWorkspaceRow = {
   pendingInviteCount: number;
   planId: string;
   planName: string;
-  /** The seat cap; NULL is no cap at all, never `0` (migration 0031's contract). */
   includedMembers: number | null;
   createdAt: string;
 };
 
-/**
- * Every live workspace, newest first. Binds: `?1` the live-invite stamp
- * (`now`), `?2` the free plan id the plan column falls back to.
- *
- * A workspace normally holds one owner (the removal guard refuses to leave
- * none, src/dashboard/users.ts:293-294), but a promoted second owner must not
- * make the row depend on scan order, so the owner subquery picks the earliest
- * deterministically. Soft-deleted workspaces are invisible, like every other
- * live read.
- */
 const LIST_SQL = `
   SELECT w.id         AS id,
          w.name       AS name,
@@ -86,11 +57,6 @@ export type SetWorkspacePlanOutcome =
   | { kind: "unknown_plan" }
   | { kind: "unknown_workspace" };
 
-/**
- * `created_at` is written on a fresh row only: the conflict branch keeps the
- * original subscription start and moves `updated_at`, and re-activates a
- * cancelled row rather than forking a second one (`workspace_id` is the PK).
- */
 const SUBSCRIPTION_UPSERT_SQL = `
   INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
   VALUES (?1, ?2, 'active', ?3, ?3)
@@ -99,7 +65,6 @@ const SUBSCRIPTION_UPSERT_SQL = `
     status = 'active',
     updated_at = excluded.updated_at`;
 
-/** Platform-scope ledger row: the tenant is the target, the detail is before/after. */
 const AUDIT_INSERT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -123,25 +88,12 @@ export type SetWorkspaceSlugOutcome =
   | { kind: "slug_is_workspace_id" }
   | { kind: "unknown_workspace" };
 
-/**
- * Both guards live in the UPDATE's own WHERE, so the statement is atomic: no
- * OTHER workspace may carry the slug in any case, and the value may not be any
- * workspace's id (that would make `getWorkspaceByRef` see two rows and answer
- * null). The TARGET must still be live.
- */
 const SLUG_UPDATE_SQL = `UPDATE workspaces SET slug = ?1
    WHERE id = ?2
      AND deleted_at IS NULL
      AND NOT EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2)
      AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2)`;
 
-/**
- * The ledger row carries the before/after pair and rides the same batch as the
- * UPDATE. It is declared FIRST and guarded by the UPDATE's own predicate: a
- * fixed bind cannot read the old value after the write, and the two statements
- * see the same rows inside one transaction, so the ledger row lands exactly
- * when the write does — a refused or vanished target appends nothing.
- */
 const SLUG_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -156,7 +108,6 @@ const SLUG_AUDIT_SQL = `
         AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?4 AND id <> ?3)
    )`;
 
-/** Which guard matched, read once after a refused write (index order = precedence). */
 const SLUG_CONFLICT_SQL = `SELECT
      EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2) AS slug_taken,
      EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2) AS id_taken`;
@@ -175,17 +126,12 @@ export async function setWorkspaceSlug(
   let results: DashboardD1BatchResult[];
   try {
     results = await db.batch([
-      // The audit row runs FIRST so its `before` subquery still reads the old
-      // slug; its guard is the UPDATE's own predicate, so both statements agree.
       db
         .prepare(SLUG_AUDIT_SQL)
         .bind(crypto.randomUUID(), input.actorLogin, input.workspaceId, input.slug, input.now),
       db.prepare(SLUG_UPDATE_SQL).bind(input.slug, input.workspaceId),
     ]);
   } catch (err) {
-    // Pinned to the D1 driver's message, the only conflict signal it exposes:
-    // if that wording drifts this falls through to a 500 (visible, not a wrong
-    // 409). Re-check when the D1 face starts carrying a structured error code.
     if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) {
       return { kind: "slug_taken" };
     }
@@ -199,8 +145,6 @@ export async function setWorkspaceSlug(
     .first<{ slug_taken: number; id_taken: number }>();
   if (guard?.slug_taken) return { kind: "slug_taken" };
   if (guard?.id_taken) return { kind: "slug_is_workspace_id" };
-  // Neither guard matched, so the WHERE's live-row condition hit nothing: the
-  // workspace is gone.
   return { kind: "unknown_workspace" };
 }
 

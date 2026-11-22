@@ -1,22 +1,3 @@
-/**
- * The review route's durable handoffs (migration 0083).
- *
- * Two records make the route's transitions survive an interrupted host:
- *
- * - `review_attempt_handoffs` — the admission's handoff record, written BEFORE
- *   the Workflow instance is created. The delivery key is the stable identity of
- *   the queue message, so a redelivery finds the same row and replays the same
- *   attempt id (the UNIQUE attempt id makes a second attempt impossible). The
- *   row's state records the create outcome, and its settle-once mark keeps a
- *   re-executed settlement step from settling twice.
- * - `review_successors` — the moved head's outbox. The dedupe key is the
- *   observed head's identity, so one moved head records at most one successor;
- *   a delivery pass (immediate, then the reconciler) sends it and marks it
- *   delivered only after the queue accepted it.
- *
- * Store module boundary (compass contracts A): D1 types only, no pipeline or
- * worker imports.
- */
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { D1Like, D1StatementLike } from "./types";
 
@@ -27,39 +8,11 @@ export type AttemptHandoff = {
   attemptId: string;
   payload: ReviewJobPayload;
   state: AttemptHandoffState;
-  /**
-   * The attempt's absolute hard stop, frozen when this row was first written:
-   * the delivery's Queue send stamp plus the operator's end-to-end cap. Every
-   * replay of the same attempt reads it instead of re-deriving it. `null` only
-   * on a row written before the column existed — "not yet anchored"; the next
-   * admission anchors it ONCE from `createdMs` (the only instant that attempt
-   * actually had), never from a later delivery's clock.
-   */
   deadlineMs: number | null;
-  /**
-   * The original Queue send stamp (migration 0087): the attempt's queue wait is
-   * `createdMs - enqueuedMs`. `null` on rows written before the column — the
-   * boundary is genuinely missing, never a zero.
-   */
   enqueuedMs: number | null;
-  /**
-   * When this row was first written — the immutable origin a pre-migration row
-   * is anchored from. Read-only after its insert.
-   */
   createdMs: number;
-  /** The settle-once mark the Workflow's settlement step takes after completing. */
   settledMs: number | null;
-  /**
-   * The effects that settlement actually landed. `settledMs` is set only when
-   * the required set is complete, so this array is how a replay (or an
-   * operator) sees what is still owed.
-   */
   settledEffects: SettlementEffect[] | null;
-  /**
-   * When the settlement step STARTED. A settlement that started and never
-   * completed is the recovery pass's obligation; `settledMs` alone cannot tell
-   * it apart from an attempt that has not failed yet.
-   */
   settlingMs: number | null;
 };
 
@@ -69,9 +22,6 @@ export type AttemptHandoff = {
  * comment, another push) differs in at least one of these fields.
  */
 export function deliveryKeyOf(payload: ReviewJobPayload): string {
-  // A pre-deploy message may carry no `botRef` (AL-24-4 accepts the TypeError
-  // on the admission path); the key must not throw before the structured
-  // failure channel can speak for it.
   const botRef = payload.botRef as { appId?: string } | undefined;
   return JSON.stringify([
     payload.installation_id,
@@ -90,15 +40,6 @@ export function deliveryKeyOf(payload: ReviewJobPayload): string {
   ]);
 }
 
-/**
- * One moved head of ONE origin, one successor. The key names the owner (App and
- * target), the observed head, and the delivery whose attempt observed it, so:
- * a replay of the SAME intent (a re-executed step, the immediate send racing
- * the reconciler) collapses into one row; an independent App/target observing
- * that head keeps its own row instead of being silently refused by another
- * owner's; and a later genuine recurrence of the head is a new intent, not a
- * row that was delivered once and can never be sent again.
- */
 function successorDedupeKeyOf(input: {
   appId: string;
   targetId: string;
@@ -149,15 +90,8 @@ export function successorIntentOf(
     payload: {
       ...payload,
       head_sha: movedHeadSha,
-      // Ordering authority: the delivery's own stamp only when it describes the
-      // SAME head. When the observed head differs, we hold no stamp for it, so
-      // the successor carries none — a fabricated "now" could outrank a
-      // genuinely newer head in the admission comparison.
       head_at: movedHeadSha === payload.head_sha ? payload.head_at : undefined,
-      // The comment identity is preserved; the marker tells admission its claim
-      // was already consumed by the skipped attempt.
       successor_of: origin,
-      // The successor's own attach identity, stable across outbox retries.
       attachDeliveryId: successorAttachIdOf(dedupeKey),
     },
   };
@@ -271,12 +205,6 @@ export async function reserveAttemptHandoff(
     payload: ReviewJobPayload;
     nowMs: number;
     deadlineMs: number;
-    /**
-     * The original Queue send stamp, or `null` when the platform supplied none.
-     * Copied here because the queue's own timestamp is not durable: after this
-     * delivery the only record of when the attempt started waiting is this
-     * column, and an absent stamp must stay absent rather than be invented.
-     */
     enqueuedMs: number | null;
   },
 ): Promise<AttemptHandoff> {
@@ -365,26 +293,6 @@ export type AttemptSettlementInput = {
   landed: readonly SettlementEffect[];
 };
 
-/**
- * THE settlement rule. An attempt settles only when every obligation it
- * incurred is discharged; a caller reports the effects it actually made durable
- * and never decides completeness for itself.
- *
- * The obligations come from the attempt's own durable facts:
- * - the OUTCOME lane — `publication` (the journal reached applied, or a
- *   definitive close) or `failure-row` (the failure settlement);
- * - `check` when the attempt froze a Check pair on its launch row. The row is
- *   read through that pair, so a Check another holder owns is still an
- *   obligation, and an OPEN row is not a conclusion whatever a handle saw;
- * - the failed-claim stamp when the failure lane names a commit — the lane that
- *   can leave a stale "1" claiming a review that will never come. A
- *   publication's success is its claim's discharge.
- *
- * The Check effect is added here when the row is terminal (a conclusion another
- * lane recorded) and dropped when it is open, so `settled_effects` never claims
- * a conclusion the database does not hold. Returns `null` when no lane has
- * closed yet — nothing may be settled or certified.
- */
 async function settlementPlan(
   db: D1Like,
   input: AttemptSettlementInput,
@@ -392,8 +300,6 @@ async function settlementPlan(
   const handoff = await readAttemptHandoffByAttempt(db, input.attemptId);
   if (handoff === null) return null;
   const landed = new Set<SettlementEffect>([...(handoff.settledEffects ?? []), ...input.landed]);
-  // The pair the attempt froze is the ONLY fact that says a Check exists; the
-  // caller's handle says what it could reach, not what the attempt owes.
   const checkInvolved = (await readAttemptCheckKey(db, input.attemptId)) !== null;
   const checkOpen = checkInvolved ? await attemptCheckIsOpen(db, input.attemptId) : false;
   if (checkOpen) landed.delete("check");
@@ -453,13 +359,6 @@ export async function settlementStatementIfDischarged(
   );
 }
 
-/**
- * ONE statement, because two settlements can run for one row (a step retry
- * racing a resumed host): the effects ACCUMULATE (the union keeps what the
- * other execution landed) and completeness is decided against the union, so
- * neither write can erase the other's progress and neither can certify an
- * effect that is missing. `json_each` is SQLite's own JSON1 surface.
- */
 function settlementStatement(
   db: D1Like,
   whereSql: string,
@@ -652,8 +551,6 @@ export async function markSuccessorDelivered(
   generation: number,
   nowMs: number,
 ): Promise<boolean> {
-  // Generation-scoped: a re-arm that landed while this send was in flight must
-  // stay owed, so the next pass delivers it. `false` means exactly that.
   const written = await db
     .prepare(
       `UPDATE review_successors SET state = 'delivered', delivered_ms = ?

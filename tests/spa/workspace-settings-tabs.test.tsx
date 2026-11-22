@@ -1,12 +1,3 @@
-/** note: Workspace settings tabs: the same header + tabs + content shell the App and
- * repository detail pages mount. Two faces — 额度 (the read-only spend of the
- * addressed workspace) and 配置 (the cards a manager may write).
- *
- * Mounted, because two contracts live only in the running tree: switching
- * faces (Radix selects on pointer/mouse down) and the quota card actually
- * rendering its figures — a static render stops at its loading face, so the
- * unit assertion below would pass over an empty card.
- */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -41,7 +32,6 @@ const boot: SpaBoot = {
   memberships: [{ id: "ws_acme", slug: "acme", name: "Acme", role: "owner", plan: "Free" }],
 };
 
-/** note: Every read this page issues, settled — one quota-bearing month included. */
 function stubPageFetch(): typeof fetch {
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: unknown) => {
@@ -66,7 +56,6 @@ function stubPageFetch(): typeof fetch {
   return realFetch;
 }
 
-/** note: One press as the browser performs it — a Radix trigger selects on mousedown. */
 async function click(win: Window, node: DomElement | null | undefined): Promise<void> {
   const pointer = (type: string) =>
     new win.PointerEvent(type, { bubbles: true, cancelable: true, button: 0 });
@@ -114,10 +103,7 @@ describe("workspace settings tabs", () => {
         t(locale, "workspace.tabQuota"),
         t(locale, "workspace.tabConfiguration"),
       ]);
-      // why: The credit face really rendered — figures included, so the unit check
-      // below measures a populated card rather than its loading state.
       expect(page.container.textContent).toContain("37.50 / 100.00");
-      // invariant: The raw unit is the wire's, never the operator's.
       expect(page.container.textContent ?? "").not.toMatch(/\bRP\b/);
       await page.close();
     }
@@ -128,17 +114,14 @@ describe("workspace settings tabs", () => {
     const [quotaTab, configurationTab] = pageTabs(page.container);
     const panels = () => [...page.container.querySelectorAll('[data-slot="tabs-content"]')];
 
-    // note: Quota is the opening face.
     expect(panels().map((node) => node.getAttribute("data-state"))).toEqual(["active", "inactive"]);
     expect(panels()[0]!.textContent).toContain(t("en", "workspace.quotaCreditsLabel"));
     expect(panels()[1]!.textContent).toContain(t("en", "workspace.concurrencyHeading"));
 
     await click(page.win, configurationTab);
-    // note: The SAME two nodes: forceMount keeps the quota card's loaded value.
     expect(panels().map((node) => node.getAttribute("data-state"))).toEqual(["inactive", "active"]);
     expect(panels()[1]!.textContent).toContain(t("en", "workspace.concurrencyHeading"));
     expect(panels()[1]!.textContent).toContain(t("en", "workspace.nameHeading"));
-    // note: The quota figures survive the round trip in the hidden panel.
     expect(panels()[0]!.textContent).toContain("37.50 / 100.00");
 
     await click(page.win, quotaTab);
@@ -147,8 +130,6 @@ describe("workspace settings tabs", () => {
   });
 
   test("switching the workspace reloads the quota face with the new workspace's spend", async () => {
-    // note: A's month and B's month differ in every figure, so a card left mounted
-    // from A shows up as A's numbers rather than as a missing card.
     const betaQuota = {
       ...QUOTA,
       usedRp: 400,
@@ -210,7 +191,6 @@ describe("workspace settings tabs", () => {
       });
       await act(async () => {});
 
-      // note: B's read landed on B's own base, and B's figures replaced A's.
       expect(calls).toContain("/dashboard/ws_beta/api/settings/review-usage");
       expect(text()).toContain("40.00 / 100.00");
       expect(text()).toContain("30.00");

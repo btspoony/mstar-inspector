@@ -21,10 +21,6 @@ export const opsSurface = {
   "button-primary-bg": "var(--tone-neutral-bg)",
   "button-primary-fg": "var(--text-primary)",
   "button-primary-border": "var(--border-strong)",
-  // The base hover brightens the brand step; withholding the accent means the
-  // ops action hovers one plane up the neutral ladder instead. Without this
-  // line the ops primary would hover toward the accent, leaking back the tone
-  // D15 withholds.
   "button-primary-hover-bg": "var(--surface-overlay)",
 } as const;
 

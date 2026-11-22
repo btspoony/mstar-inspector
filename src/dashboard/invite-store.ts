@@ -1,31 +1,3 @@
-/**
- * Workspace invitation store — the one write/read authority for
- * `workspace_invites` (migration 0028 is the DDL single source).
- *
- * An invite is the only way into a workspace besides owning it by creation: a
- * signed-in login holding a live `pending` row may accept it, and acceptance
- * writes the `workspace_members` row in the SAME batch. `owner` is not
- * invitable — ownership comes from workspace creation or an explicit
- * owner-only promote.
- *
- * Expiry is a LAZY FLIP, never a timer: every invite write path runs
- * `UPDATE … SET status = 'expired' WHERE … expires_at <= ?` as its FIRST
- * statement, inside its own `db.batch`, the reads keep the
- * `status = 'pending' AND expires_at > ?` predicate, and the worker's
- * scheduled sweep flips the rest in bounded batches ({@link expireLapsedInvites}).
- * Reads never write, so a lapsed row keeps reading `pending` (while already
- * being absent from every list and from the seat count) until a write or the
- * sweep flips it. The partial unique index `workspace_invites_pending` only ever
- * holds genuinely live invites — which is what makes a replacement invite
- * after expiry legal while a second invite for a live pending row is still a
- * UNIQUE violation.
- *
- * Module boundary (the `workspace-store` one): the `db` parameter is a
- * locally-declared narrow D1 face (types only). The single exception is the
- * joined `./entitlement` import — the create batch enforces the plan's seat cap
- * itself (it must, or two concurrent creates both pass the route's read) and
- * refuses with the entitlement's own cap error instead of copying either below.
- */
 
 import type { DeploymentMode } from "../worker/env";
 import {
@@ -100,7 +72,6 @@ export type AcceptInviteOutcome =
   | { kind: "gone" }
   | { kind: "member_cap"; limit: number };
 
-/** Narrow D1 face: reads plus the invite write paths' batched statements. */
 type InviteStoreStatement = {
   bind(...values: unknown[]): InviteStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -118,7 +89,6 @@ type InviteStoreD1 = {
   >;
 };
 
-/** UNIQUE-constraint detection that tolerates bun:sqlite and D1 error shapes. */
 function isUniqueConstraintError(err: unknown): boolean {
   if (err instanceof Error) {
     if ("code" in err && typeof err.code === "string" && err.code.includes("UNIQUE")) return true;
@@ -127,18 +97,6 @@ function isUniqueConstraintError(err: unknown): boolean {
   return false;
 }
 
-/**
- * Bind one statement by NAME: its `:name` tokens become D1's `?N` placeholders,
- * numbered in first-appearance order, and the values follow that same order.
- * Each guard therefore carries its own values, and appending or reordering a
- * guard cannot shift another guard's parameter — no statement's position is
- * derived from the order conditions were pushed.
- *
- * A token with no supplied value throws instead of binding NULL: the guards
- * that must disappear on an unlimited plan are OMITTED from the SQL text (and
- * their value from the map), never bound as NULL — `count < NULL` evaluates to
- * NULL, which would refuse every write.
- */
 function bindNamed(
   statement: string,
   values: Record<string, unknown>,
@@ -163,11 +121,6 @@ function bindNamed(
   };
 }
 
-/**
- * The write-path flip: every invite write path runs it FIRST, in the same
- * batch as its own write. The sweep's bulk flip ({@link expireLapsedInvites})
- * is the other producer.
- */
 const FLIP_LAPSED_SQL = `UPDATE workspace_invites SET status = 'expired'
 WHERE workspace_id = ? AND status = 'pending' AND expires_at <= ?`;
 
@@ -212,33 +165,13 @@ export async function expireLapsedInvites(
   return result.meta.changes;
 }
 
-/** Live-invite read predicate — lazy expiry, so every read filters it. */
 const LIVE = `status = 'pending' AND expires_at > ?`;
 
-/**
- * The seat guard, as a SQL condition the insert carries: members plus live
- * pending invites below the plan's included seats. Re-reading the count inside
- * the insert is what closes the read-then-write window — two concurrent creates
- * both pass the route's fast-fail read, and the second one's condition is false,
- * so its batch writes no invite row. Its `:workspaceId` / `:now` tokens are the
- * same ones the insert above binds, so the guard reuses them by NAME instead of
- * relying on a positional `?N`. It appears only for a numeric limit, and
- * `:limit` is only ever bound by that numeric path (see `bindNamed`).
- */
 const SEAT_GUARD_SQL = `(SELECT
         (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = :workspaceId)
       + (SELECT COUNT(*) FROM workspace_invites
           WHERE workspace_id = :workspaceId AND status = 'pending' AND expires_at > :now)) < :limit`;
 
-/**
- * The acceptance's free-slot ALLOW predicate, as a SQL condition the membership
- * insert carries: true only when the TARGET workspace is on a paid plan, or the
- * accepting login holds no live free membership yet — the same join rule as
- * `countFreeMembershipsForLogin`. Re-reading it inside the insert is what closes
- * the read-then-write window the route gate leaves open. Its `:login` token is
- * the insert above's own; `:freePlanId` is bound only by the `saas` path that
- * appends this condition. `i` is the invite row.
- */
 const ACCEPT_FREE_SLOT_GUARD_SQL = `(EXISTS (
         SELECT 1 FROM workspace_subscriptions ts
          WHERE ts.workspace_id = i.workspace_id AND ts.status = 'active'
@@ -252,28 +185,6 @@ const ACCEPT_FREE_SLOT_GUARD_SQL = `(EXISTS (
              AND w.deleted_at IS NULL
              AND (s.plan_id IS NULL OR s.plan_id = :freePlanId)) < 1)`;
 
-/**
- * The acceptance's seat condition, as a SQL condition its membership insert
- * carries: the target workspace's MEMBERS below the plan's included seats.
- * Re-reading the count inside the insert is what closes the read-then-write
- * window — two accepts racing past the same pre-read cannot both land.
- *
- * Members only, deliberately: an acceptance CONVERTS one pending invite into
- * one member (`members + 1`, `pending - 1`), so the invite rule's
- * `members + pending <= limit` sum is unchanged by it. Counting the pending
- * row here too would refuse a legitimate conversion at `limit - 1` members.
- * The converse is why the guard cannot be dropped after a downgrade: the
- * operator's plan change never removes a member or an invite, so
- * `members + pending` can sit above the new cap. Admitting those pending
- * invites one at a time raises members only while a seat is free; once they
- * reach the cap the rest refuse `member_cap` and stay pending. Refusing every
- * conversion instead would strand invites that were legitimately issued.
- *
- * The workspace comes from the insert's own `i` row. `:limit` is bound only by
- * the numeric-limit path that appends this condition: an unlimited plan omits
- * the condition instead of binding NULL (`count < NULL` is NULL, so it would
- * refuse every acceptance).
- */
 const ACCEPT_SEAT_GUARD_SQL = `(SELECT COUNT(*)
         FROM workspace_members am
        WHERE am.workspace_id = i.workspace_id) < :limit`;
@@ -281,12 +192,6 @@ const ACCEPT_SEAT_GUARD_SQL = `(SELECT COUNT(*)
 const INVITE_COLUMNS = `id, workspace_id, github_login, role, status, invited_by,
        created_at, expires_at, accepted_at`;
 
-/**
- * The invite row insert without the seat condition. `createInvite` appends
- * {@link SEAT_GUARD_SQL} only for a numeric seat limit: a NULL limit means no
- * cap, and binding NULL into `:limit` would make `count < NULL` evaluate to
- * NULL, so the insert would write no row and mint a spurious refusal.
- */
 const INVITE_INSERT_SQL = `INSERT INTO workspace_invites
              (id, workspace_id, github_login, role, status, invited_by,
               created_at, expires_at, accepted_at)
@@ -332,8 +237,6 @@ export async function createInvite(
     expires_at: input.expiresAt,
     accepted_at: null,
   };
-  // `seats: null` says the guarded insert below IS the authority: the verdict
-  // never refuses, and it carries the plan so the limit is bound from one read.
   const verdict = await checkEntitlement({
     db,
     mode,
@@ -351,8 +254,6 @@ export async function createInvite(
     now: row.created_at,
     expiresAt: row.expires_at,
   };
-  // The seat condition is appended (and only then is `:limit` supplied): an
-  // unlimited plan omits it entirely rather than binding NULL into it.
   const guarded = limit === null ? INVITE_INSERT_SQL : `${INVITE_INSERT_SQL}\n            WHERE ${SEAT_GUARD_SQL}`;
   const insert = bindNamed(guarded, limit === null ? values : { ...values, limit });
   let results: { results: unknown[]; meta: { changes: number; last_row_id: number } }[];
@@ -365,9 +266,6 @@ export async function createInvite(
     if (isUniqueConstraintError(err)) throw new InvitePendingExistsError(input.login);
     throw err;
   }
-  // The guard refused: no invite row was written (the flip above only ever
-  // expires already-lapsed rows, so it changed no seat). A null limit has no
-  // guard, so it can never reach this refusal.
   if (limit !== null && results[1]!.meta.changes === 0) {
     throw new MemberCapError(MEMBER_CAP_REFUSAL(limit));
   }
@@ -384,9 +282,6 @@ export async function listPendingInvites(
   workspaceId: string,
   now: string,
 ): Promise<WorkspaceInviteRow[]> {
-  // The predicate filters lapsed rows, so a row that expires between the sweep
-  // runs is never listed (and holds no seat) while its stored status is still
-  // `pending`.
   const { results } = await db
     .prepare(
       `SELECT ${INVITE_COLUMNS} FROM workspace_invites
@@ -552,8 +447,6 @@ export async function acceptInvite(
     .prepare(`SELECT ${INVITE_COLUMNS} FROM workspace_invites WHERE id = ?`)
     .bind(inviteId)
     .first<WorkspaceInviteRow>();
-  // A login mismatch is the same 404 as an unknown invite: no tenant-existence
-  // oracle, and the accept route is the only surface that reads this.
   if (invite === null || invite.github_login.toLowerCase() !== login.toLowerCase()) {
     return { kind: "not_found" };
   }
@@ -561,35 +454,16 @@ export async function acceptInvite(
 
   const memberRole = await memberRoleOf(db, invite.workspace_id, login);
   if (invite.status === "accepted") {
-    // Repeat accept: the membership row already exists, so return it. Accepted
-    // is not in the plan's 410 set (only revoked/expired are), so an invite
-    // whose membership has since been removed falls to the "neither" branch:
-    // 404, with zero writes.
     return memberRole === null
       ? { kind: "not_found" }
       : { kind: "accepted", workspaceId: invite.workspace_id, role: memberRole };
   }
 
   if (invite.expires_at <= now) {
-    // The invite expired before any write reached it: flip it to its terminal
-    // state so the repeat attempt answers 410 (the write-path invariant, still
-    // one batch).
     await db.batch([db.prepare(FLIP_LAPSED_SQL).bind(invite.workspace_id, now)]);
     return { kind: "expired" };
   }
 
-  // Both guards append their own NAME tokens; `bindNamed` numbers each
-  // statement's placeholders from the text itself, so neither guard's parameter
-  // position depends on which conditions are present. A condition that is inert
-  // is OMITTED from the SQL (and its value from the map), never bound as NULL:
-  // `count < NULL` is NULL, which would refuse every acceptance.
-  //
-  // This literal's order IS the refusal precedence (free slot, then seat), used
-  // by both the insert's AND chain and the classifier's CASE below — so
-  // precedence is stated once here instead of falling out of a push sequence.
-  //
-  // `seats: null` says the insert's own guards below are the authority: the
-  // verdict never refuses here and supplies the limit from the same plan read.
   const limit = (
     await checkEntitlement({
       db,
@@ -611,17 +485,6 @@ export async function acceptInvite(
   for (const condition of conditions) Object.assign(bindings, condition.binds);
   const guard = conditions.map((condition) => `\n            AND ${condition.allow}`).join("");
 
-  // The refusal classifier runs INSIDE the same batch, so it evaluates both
-  // allow predicates on the transaction snapshot the insert's own guards read —
-  // no window between the refusal and its classification. Precedence when both
-  // refuse is the free-slot class: it is the one the invitee can clear alone,
-  // and `member_cap`'s plan-upgrade copy would mislead a login that also holds a
-  // free workspace. The trailing ELSE is the residual (a blocker cleared
-  // concurrently): it keeps the free-slot copy, whose last instruction ("then
-  // accept this invite") is exactly what the retry then succeeds at.
-  //
-  // Only a numeric limit brings a second possible class, so an unlimited plan
-  // needs no classifier — the free-slot refusal is already the throw below.
   const classified =
     limit === null
       ? null
@@ -661,8 +524,6 @@ export async function acceptInvite(
   ];
   const results = await db.batch(statements);
 
-  // Classify by re-read: a membership row proves the batch admitted (or had
-  // already admitted) this login; a terminal row means it lost the race.
   const admitted = await memberRoleOf(db, invite.workspace_id, login);
   if (admitted !== null) {
     return { kind: "accepted", workspaceId: invite.workspace_id, role: admitted };
@@ -674,10 +535,6 @@ export async function acceptInvite(
   if (after === null || after.status === "revoked" || after.status === "expired") {
     return { kind: "gone" };
   }
-  // Still pending with no membership written: a guard inside the insert
-  // refused, and statement (3) only consumes the invite for an admitted login,
-  // so the invite stays pending either way. WHICH guard is whatever the batch's
-  // own classifier reported — the same snapshot the guards evaluated.
   if (classified !== null && limit !== null) {
     const row = results[statements.length - 1]!.results[0] as { blockedBy?: string } | undefined;
     if (row?.blockedBy === "member_cap") return { kind: "member_cap", limit };
@@ -685,7 +542,6 @@ export async function acceptInvite(
   throw new FreeWorkspaceSlotError(INVITE_FREE_SLOT_REFUSAL);
 }
 
-/** The login's role in one workspace, or null when they are not a member. */
 async function memberRoleOf(
   db: InviteStoreD1,
   workspaceId: string,

@@ -62,8 +62,6 @@ const LAYER_TITLE: Readonly<Record<Layer, string>> = {
   component: "Component — composed from the semantic layer",
 };
 
-/** note: The three strengths a tone is used at: quiet withholds the tint, soft is the
- * tint, solid is the fill. */
 const STRENGTHS = ["quiet", "soft", "solid"] as const;
 type Strength = (typeof STRENGTHS)[number];
 
@@ -86,11 +84,9 @@ const ENTITIES: Readonly<Record<string, string>> = {
   '"': "&quot;",
 };
 
-/** why: Token values reach the page as text and as attribute values. */
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>"]/g, (character) => ENTITIES[character] as string);
 
-/** why: The exact inverse of `escapeHtml`, one pass, so `&amp;quot;` survives. */
 const decodeHtml = (value: string): string =>
   value.replace(/&(?:lt|gt|quot|amp);/g, (entity) =>
     ({ "&lt;": "<", "&gt;": ">", "&quot;": '"', "&amp;": "&" })[entity] as string,
@@ -102,14 +98,6 @@ const tokensOf = (resolved: Readonly<Record<string, string>>, name: string, wher
   return value;
 };
 
-/**
- * why: How one token is demonstrated. A token is only previewed if the page has a
- * specimen for its family — a paint needs a swatch, a shadow a cast surface, a
- * spacing step a run at its own length. A token whose family is not here has no
- * specimen, and `--check` fails rather than printing it as plain text and
- * calling that a preview: a new kind of token has to teach this generator how
- * to show it before it can pass.
- */
 type Specimen =
   | "paint"
   | "shadow"
@@ -122,9 +110,6 @@ type Specimen =
   | "type"
   | "width";
 
-/** invariant: Ordered: the first matching rule wins, so the specific families precede the
- * generic name-prefix ones. `button-height-xs` and `card-radius` carry the slot
- * in the middle, so those rules match the word anywhere, not just at the end. */
 const FAMILIES: readonly { readonly kind: Specimen; readonly test: (name: string, value: string) => boolean }[] = [
   { kind: "paint", test: (_name, value) => COLOR_VALUE.test(value) },
   { kind: "shadow", test: (name) => name.startsWith("shadow-") },
@@ -163,9 +148,6 @@ export function specimenOf(name: string, value: string): { kind: Specimen; html:
     case "family":
       return swatch("specimen-family", `font-family: var(--${name})`, "Aa");
     case "type": {
-      // note: The slot is the trailing segment; a role's five slots are shown against
-      // the same sample text, which is how they compose. An unknown slot has no
-      // property to set, so it reports no specimen rather than a blank one.
       const property = TYPO_PROPERTY[name.slice(name.lastIndexOf("-") + 1)];
       if (property === undefined) return undefined;
       return swatch("specimen-family", `${property}: var(--${name})`, "Aa 0123");
@@ -177,7 +159,6 @@ export function specimenOf(name: string, value: string): { kind: Specimen; html:
   }
 }
 
-/** note: One token entry: name, the specimen for its family, and the resolved value. */
 function tokenRow(layer: Layer, name: string, value: string): string {
   const specimen = specimenOf(name, value);
   return (
@@ -199,7 +180,6 @@ function tokenTable(layer: Layer, tokens: Readonly<Record<string, string>>): str
   ];
 }
 
-/** note: The tone meanings the semantic layer declares, in source order. */
 function toneMeanings(names: readonly string[]): string[] {
   const meanings: string[] = [];
   for (const name of names) {
@@ -213,21 +193,16 @@ function pillStyle(meaning: string, strength: Strength): string {
   const slot = `--tone-${meaning}`;
   switch (strength) {
     case "quiet":
-      // why: The tint is withheld; the edge and the label still carry the meaning.
       return `background:transparent;border-color:var(${slot}-border);color:var(${slot}-fg)`;
     case "soft":
       return `background:var(${slot}-bg);border-color:var(${slot}-border);color:var(${slot}-fg)`;
     case "solid":
-      // why: The label is the page ink: a tone fg is chosen to sit on the tint, not
-      // on its own solid step.
       return `background:var(${slot}-solid);border-color:transparent;color:var(--surface-page)`;
   }
 }
 
 function toneGrid(semantic: Readonly<Record<string, string>>): string[] {
   const meanings = toneMeanings(Object.keys(semantic));
-  // why: A meaning declared without one of its four faces would render a pill with
-  // an undefined var — visible as "no style", not as a missing token.
   const absent = meanings.flatMap((meaning) =>
     ["bg", "border", "fg", "solid"]
       .filter((slot) => !(`tone-${meaning}-${slot}` in semantic))
@@ -270,7 +245,6 @@ function controlHeights(semantic: Readonly<Record<string, string>>): string[] {
   ];
 }
 
-/** note: One specimen per typography role, set from that role's own five tokens. */
 function typeSpecimens(semantic: Readonly<Record<string, string>>): string[] {
   const roles: string[] = [];
   for (const name of Object.keys(semantic)) {
@@ -282,8 +256,6 @@ function typeSpecimens(semantic: Readonly<Record<string, string>>): string[] {
     "<h2>Type</h2>",
     ...roles.map((role) => {
       const declarations = Object.entries(TYPO_PROPERTY).map(([slot, property]) => {
-        // why: A role missing one slot would set an undefined property and
-        // inherit the page's — a specimen that lies about the role.
         tokensOf(semantic, `typo-${role}-${slot}`, `the ${role} type role`);
         return `${property}: var(--typo-${role}-${slot});`;
       });
@@ -292,7 +264,6 @@ function typeSpecimens(semantic: Readonly<Record<string, string>>): string[] {
   ];
 }
 
-/** note: The operator-surface remap: the same names, resolved onto neutral emphasis. */
 function operatorSurface(): string[] {
   return [
     `<h2>Operator surface variant — <code>${escapeHtml(OPS_SURFACE_ATTR)}</code></h2>`,
@@ -310,26 +281,9 @@ function operatorSurface(): string[] {
   ];
 }
 
-/**
- * why: Component coverage: one rendered specimen per primitive, and the exported
- * faces the server renderer cannot paint.
- *
- * A specimen is a composition, not a singleton: a Radix face only mounts
- * inside the part that owns it (a `SelectItem` lives in a `SelectContent`), and
- * the page is only evidence if the face really rendered. One composition per
- * primitive therefore covers every export that primitive offers.
- *
- * `renderToStaticMarkup` inherits one limit from Radix: a portal mounts its
- * container in a layout effect, so nothing paints during server rendering.
- * Those faces — and every context root, which renders no host node at all —
- * are named in `UNPAINTED` with their reason. The check requires that set to be
- * *exactly* the exports the markup did not paint, so a new export cannot pass
- * unexplained and a reason cannot outlive the export it names.
- */
 type UnpaintedReason = "Radix portal — the server renderer mounts no container" | "context root — renders no host node";
 
 const UNPAINTED: Readonly<Record<string, UnpaintedReason>> = {
-  // note: Dialogs: the trigger paints; everything behind the overlay is portalled.
   Dialog: "context root — renders no host node",
   DialogPortal: "Radix portal — the server renderer mounts no container",
   DialogOverlay: "Radix portal — the server renderer mounts no container",
@@ -339,7 +293,6 @@ const UNPAINTED: Readonly<Record<string, UnpaintedReason>> = {
   DialogDescription: "Radix portal — the server renderer mounts no container",
   DialogFooter: "Radix portal — the server renderer mounts no container",
   DialogClose: "Radix portal — the server renderer mounts no container",
-  // note: Sheets reuse the dialog root and portal.
   Sheet: "context root — renders no host node",
   SheetContent: "Radix portal — the server renderer mounts no container",
   SheetHeader: "Radix portal — the server renderer mounts no container",
@@ -347,7 +300,6 @@ const UNPAINTED: Readonly<Record<string, UnpaintedReason>> = {
   SheetDescription: "Radix portal — the server renderer mounts no container",
   SheetFooter: "Radix portal — the server renderer mounts no container",
   SheetClose: "Radix portal — the server renderer mounts no container",
-  // note: Menus: the trigger paints; the menu body is portalled.
   DropdownMenu: "context root — renders no host node",
   DropdownMenuPortal: "Radix portal — the server renderer mounts no container",
   DropdownMenuContent: "Radix portal — the server renderer mounts no container",
@@ -362,7 +314,6 @@ const UNPAINTED: Readonly<Record<string, UnpaintedReason>> = {
   DropdownMenuSub: "context root — renders no host node",
   DropdownMenuSubTrigger: "Radix portal — the server renderer mounts no container",
   DropdownMenuSubContent: "Radix portal — the server renderer mounts no container",
-  // note: Selects: the trigger and its value paint; the item list is portalled.
   Select: "context root — renders no host node",
   SelectContent: "Radix portal — the server renderer mounts no container",
   SelectGroup: "Radix portal — the server renderer mounts no container",
@@ -371,13 +322,11 @@ const UNPAINTED: Readonly<Record<string, UnpaintedReason>> = {
   SelectSeparator: "Radix portal — the server renderer mounts no container",
   SelectScrollUpButton: "Radix portal — the server renderer mounts no container",
   SelectScrollDownButton: "Radix portal — the server renderer mounts no container",
-  // note: Tooltips: the trigger paints; the root, its provider and the bubble do not.
   Tooltip: "context root — renders no host node",
   TooltipProvider: "context root — renders no host node",
   TooltipContent: "Radix portal — the server renderer mounts no container",
 };
 
-/** why: Readable alias so the compositions below read as markup, not as a lookup. */
 const P = primitives;
 
 const SPECIMENS: Readonly<Record<string, ReactElement>> = {
@@ -558,19 +507,13 @@ const SPECIMENS: Readonly<Record<string, ReactElement>> = {
   ),
 };
 
-/** note: kebab name → `data-slot`, with the one component whose slot is not its name. */
 const SLOT_ALIAS: Readonly<Record<string, string>> = { SidebarProvider: "sidebar-wrapper" };
 
 const slotOf = (name: string): string =>
   SLOT_ALIAS[name] ?? name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
-/** why: The two tiers the public barrel re-exports as components. The barrel's
- *  token exports are values and types, not faces, so the ledger reads the
- *  tier barrels — both of them: a pattern that ships undeclared is the same
- *  gap as a primitive. */
 const TIERS = [primitives, patterns] as const;
 
-/** note: The components the tiers export: functions whose name is capitalised. */
 const exportedComponents = (): string[] =>
   TIERS.flatMap((tier) =>
     Object.entries(tier)
@@ -582,11 +525,6 @@ const SPECIMEN_HTML: Readonly<Record<string, string>> = Object.fromEntries(
   Object.entries(SPECIMENS).map(([name, element]) => [name, renderToStaticMarkup(element)]),
 );
 
-/**
- * note: The exports a markup string paints, by their own `data-slot`. Run against the
- * specimens to produce the section's counts, and against a theme section by the
- * check to prove the page carries them.
- */
 const paintedComponents = (markup: string): string[] =>
   exportedComponents().filter((name) => markup.includes(`data-slot="${slotOf(name)}"`));
 
@@ -611,7 +549,6 @@ function primitiveSection(): string[] {
   ];
 }
 
-/** note: Faces the server renderer cannot paint, printed once with their reason. */
 function unpaintedSection(): string[] {
   return [
     "<h2>Unpainted primitive faces</h2>",
@@ -755,7 +692,6 @@ code { color: var(--text-secondary); font-family: var(--font-mono); font-size: 1
   font-size: 11px;
 }`;
 
-/** why: One theme's resolved declarations, so each section renders itself. */
 function themeStyle(theme: ThemeName): string {
   const resolved = resolveTheme(theme);
   const declarations = LAYERS.flatMap((layer) => Object.entries(resolved[layer])).map(
@@ -764,7 +700,6 @@ function themeStyle(theme: ThemeName): string {
   return `[data-theme="${theme}"] { ${declarations.join(" ")} }`;
 }
 
-/** invariant: The remap is theme-invariant: every value names another token. */
 function operatorStyle(): string {
   const declarations = Object.entries(opsSurface).map(([name, value]) => `--${name}: ${value};`);
   return `[${OPS_SURFACE_ATTR}] { ${declarations.join(" ")} }`;
@@ -787,12 +722,6 @@ function themeSection(theme: ThemeName): string[] {
   ];
 }
 
-/**
- * why: Rendered once, in dark ink: the faces the theme sections cannot print — the
- * component exports the server renderer cannot paint, and the reduced-motion
- * fold. Neither varies by theme, so a per-theme copy would imply a second value
- * that does not exist.
- */
 function sharedSection(): string[] {
   return [
     "<!-- theme:shared -->",
@@ -844,7 +773,6 @@ function sectionOf(html: string, theme: ThemeName): string {
   return html.slice(open, close);
 }
 
-/** note: Entries of one theme section, by token name — the shape the page promises. */
 function entryValues(section: string): Map<string, { value: string; specimen: string }> {
   const entries = new Map<string, { value: string; specimen: string }>();
   const ENTRY =
@@ -860,32 +788,23 @@ function entryValues(section: string): Map<string, { value: string; specimen: st
 
 export interface PreviewCoverage {
   readonly ok: boolean;
-  /** note: Token entries the page carries, and the count it owes. */
   readonly entries: number;
   readonly expectedEntries: number;
-  /** note: Tone × strength specimens, across both themes. */
   readonly tonePairs: number;
   readonly expectedTonePairs: number;
   readonly controlHeights: number;
   readonly expectedControlHeights: number;
-  /** note: Operator-surface remaps, across both themes. */
   readonly remaps: number;
   readonly expectedRemaps: number;
-  /** note: Component specimens, across both themes. */
   readonly specimens: number;
   readonly expectedSpecimens: number;
-  /** note: Exported components whose own `data-slot` the markup paints. */
   readonly painted: number;
   readonly expectedPainted: number;
-  /** note: Faces that cannot paint on the server, listed once with their reason. */
   readonly unpainted: number;
   readonly expectedUnpainted: number;
-  /** note: The reduced-motion fold, printed once. */
   readonly reducedMotion: number;
   readonly expectedReducedMotion: number;
-  /** note: One line per thing the page fails to carry. */
   readonly missing: readonly string[];
-  /** note: Entries that printed a value the token source does not hold for that theme. */
   readonly wrong: readonly { readonly entry: string; readonly page: string; readonly source: string }[];
 }
 
@@ -911,9 +830,6 @@ export function previewCoverage(html: string): PreviewCoverage {
   const exported = exportedComponents();
   const unpaintedFaces = Object.keys(UNPAINTED);
 
-  // why: `entryValues` keys by token name alone, so the layers must not share one.
-  // They do not (each layer references the one beneath it, never declares its
-  // names), and a shared name would make one entry silently cover two tokens.
   const shared = names.primitive.filter(
     (name) => names.semantic.includes(name) || names.component.includes(name),
   );
@@ -948,8 +864,6 @@ export function previewCoverage(html: string): PreviewCoverage {
         if (page === undefined) missing.push(`${theme}: no entry for ${layer}/${name}`);
         else if (page.value !== source) wrong.push({ entry, page: page.value, source });
         else if (expected === undefined) {
-          // why: The family is what makes an entry a preview rather than a text row:
-          // a new token kind must teach this generator a specimen first.
           missing.push(`${entry} has no specimen family; add one to FAMILIES`);
         } else if (page.specimen !== expected.kind) {
           missing.push(`${entry} is shown as ${page.specimen}, but its family is ${expected.kind}`);
@@ -979,8 +893,6 @@ export function previewCoverage(html: string): PreviewCoverage {
       else missing.push(`${theme}: no primitive specimen for ${name}`);
     }
 
-    // why: Coverage is closed in both directions: an export the markup does not
-    // paint must be declared, and a declaration must still be unpaid.
     const painted = paintedComponents(section);
     counts.painted += painted.length;
     for (const name of exported) {

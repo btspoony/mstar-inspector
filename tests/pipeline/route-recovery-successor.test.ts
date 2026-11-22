@@ -1,23 +1,5 @@
-/**
- * note: Route recovery claims 3 and 4 — the moved head's successor.
- *
- * 3. The successor outbox row exists BEFORE the moved-head settlement that
- *    terminalizes the old Check, so an interruption leaves an owed row rather
- *    than nothing.
- * 4. The successor dedupe key fences sends and identifies its owner: the stored
- *    winning payload is what gets sent, the key includes the App/target and the
- *    originating delivery, and a replay of one intent cannot produce two
- *    admissions.
- *
- * The cases read the outbox AT the instant the old Check is terminalized (the
- * ordering the claim names), and drive admission with the exact payload the
- * outbox would send.
- */
 import { beforeEach, describe, expect, test } from "bun:test";
 
-// note: Load shim FIRST: a static import of the execution module would be hoisted
-// above it (it imports ./sandbox → `cloudflare:workers`, unresolvable in Bun's
-// runner). The module graph under test is loaded dynamically on purpose.
 import "../helpers/cloudflare-workers-mock";
 
 import {
@@ -48,7 +30,6 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { Lease } from "../../src/store/finding-lifecycle";
 import type { AttemptRef, CheckHandle, ProcessDeps } from "../../src/pipeline/review-attempt-execution";
 import type { TestD1 } from "../store/helpers";
-/** note: The KV the recovery pass writes failed-claim stamps to (a minimal double). */
 const routeKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
@@ -127,7 +108,6 @@ async function makeDeps(db: TestD1): Promise<ProcessDeps> {
   } as ProcessDeps;
 }
 
-/** note: A real open Check row this attempt owns, plus the handle that adopts it. */
 async function seedOwnedCheck(db: TestD1): Promise<{ handle: CheckHandle }> {
   const claimed = await claimAttempt(db as never, {
     scope: SCOPE,
@@ -146,12 +126,6 @@ async function seedOwnedCheck(db: TestD1): Promise<{ handle: CheckHandle }> {
   return { handle: { ...HANDLE, attemptId: row.id } };
 }
 
-/**
- * note: Drive the whole route to a moved head. The rival's identity is frozen on this
- * attempt's row, so the checkout's head is a foreign one and the attempt settles
- * as skipped. `dieOn` makes the step host die at that step (a killed isolate:
- * nothing after it runs), which is how an interruption is simulated here.
- */
 async function runMovedHead(
   db: TestD1,
   options: { dieOn?: string; onTerminalize?: () => void } = {},
@@ -197,8 +171,6 @@ describe("claim 3 — the outbox row precedes the moved-head settlement", () => 
     let rowsAtTerminalize: number | undefined;
     const { successors } = await runMovedHead(db, {
       onTerminalize: () => {
-        // note: The Check conclusion is the settlement's terminal effect: a successor
-        // recorded after it would be lost by an interruption between the two.
         rowsAtTerminalize = outboxRows(db).length;
       },
     });
@@ -212,13 +184,9 @@ describe("claim 3 — the outbox row precedes the moved-head settlement", () => 
 
   test("a host killed before the successor step leaves an owed row the recovery pass delivers", async () => {
     const db = await createSeededTestD1();
-    // note: The host dies right after the old Check was terminalized: the moved-head
-    // signal and the outbox row exist, but the send never ran.
     const run = runMovedHead(db, { dieOn: "settle-failure" });
     await expect(run).rejects.toThrow(/died during settle-failure/);
 
-    // note: The row was written BEFORE the settlement, so the head is owed rather
-    // than lost — and nothing was sent.
     const owed = outboxRows(db);
     expect(owed).toHaveLength(1);
     expect(owed[0]!.state).toBe("owed");
@@ -243,9 +211,6 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
   test("the workflow sends the STORED winner, never its own rebuilt payload", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
-    // note: Another execution of the same intent already recorded a winner — with a
-    // payload this delivery would never build (a different attach identity and
-    // an ordering stamp the moved head does not have).
     const intent = successorIntentOf(payload, SHA)!;
     const storedWinner: ReviewJobPayload = {
       ...intent.payload,
@@ -258,8 +223,6 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
       nowMs: 1,
     });
 
-    // note: The whole route runs to the moved head, so the real `recordSuccessor`
-    // builds its own payload, hits the conflict and must enqueue the stored one.
     const { successors } = await runMovedHead(db);
 
     expect(successors).toHaveLength(1);
@@ -275,7 +238,6 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
     const head = "feedfacefeedfacefeedfacefeedfacefeedface";
     const intent = successorIntentOf(base, head)!;
 
-    // note: The same intent recorded twice is one row and the stored payload wins.
     await recordSuccessorIntent(db as never, { dedupeKey: intent.dedupeKey, payload: intent.payload, nowMs: 1 });
     const stored = await recordSuccessorIntent(db as never, {
       dedupeKey: intent.dedupeKey,
@@ -285,7 +247,6 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
     expect(stored.payload).toEqual(intent.payload);
     expect(await listOwedSuccessors(db as never, 10)).toHaveLength(1);
 
-    // note: Admission of that payload twice creates exactly one attempt.
     const started: AttemptRef[] = [];
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
@@ -297,9 +258,6 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
     await consumer(h.makeBatch(stored.payload));
     expect(started).toHaveLength(1);
 
-    // note: A DIFFERENT origin observing the same head is a legitimate separate
-    // trigger: it is not silently refused by the first origin's key (the guard
-    // serializes it), so neither head is lost to a permanent collision.
     const otherOrigin = successorIntentOf({ ...base, comment_id: 4242 }, head)!;
     expect(otherOrigin.dedupeKey).not.toBe(intent.dedupeKey);
     await consumer(h.makeBatch(otherOrigin.payload));
@@ -311,23 +269,17 @@ describe("claim 4 — the dedupe key fences sends and names its owner", () => {
     const base = makePayload();
     const head = "feedfacefeedfacefeedfacefeedfacefeedface";
 
-    // note: One origin, one intent: a replay is the same row.
     expect(successorIntentOf(base, head)!.dedupeKey).toBe(successorIntentOf({ ...base }, head)!.dedupeKey);
 
-    // note: Independent origins observing the same head are NOT one another's
-    // collision: a later legitimate trigger keeps its own row.
     const otherOrigin = successorIntentOf({ ...base, comment_id: 4242 }, head)!;
     expect(otherOrigin.dedupeKey).not.toBe(successorIntentOf(base, head)!.dedupeKey);
 
-    // note: Another App/target observing the same head keeps its own row too.
     const otherApp = successorIntentOf(
       { ...base, botRef: { appId: "another-app" }, targetId: "target-another-app" },
       head,
     )!;
     expect(otherApp.dedupeKey).not.toBe(successorIntentOf(base, head)!.dedupeKey);
 
-    // note: And the intent carries only the ordering it actually has: no stamp for a
-    // head this delivery never saw.
     expect(successorIntentOf(base, head)!.payload.head_at).toBeUndefined();
     expect(successorIntentOf(base, SHA)!.payload.head_at).toBe(base.head_at);
   });

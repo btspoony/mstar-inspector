@@ -1,21 +1,3 @@
-/** note: The repository surface's three routes (product spec J1/J2):
- *
- *   - `GET  /dashboard/:ref/api/targets` — the list: one row per live target,
- *     `repo_id: null` for a 待安装 row, the bot name and the newest review
- *     stamp. Another workspace's targets never appear;
- *   - `GET  /dashboard/:ref/api/apps/:appId/installation-repositories` — the
- *     add dialog's options: one App JWT, one token mint plus one listing per
- *     live installation, deduped by `repo_id`. A failed installation answers a
- *     502, a partial one answers `degraded: true` on a usable list, and zero
- *     repositories is a real `200 []`;
- *   - `POST /dashboard/:ref/api/targets` — one target per selected repository,
- *     `201` with `created` + `duplicates`. A duplicate refuses only its own
- *     row: the rows created in the same batch stay written.
- *
- * Isolation is asserted on the READ faces (a foreign workspace's rows are not
- * in the payload) and on the write (a foreign workspace keeps its row count).
- * GitHub is stubbed at `globalThis.fetch`; nothing here reaches the network.
- */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
@@ -29,9 +11,7 @@ import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "targets", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-/** invariant: The App's immutable GitHub App id — the only App address form (D0). */
 const APP_ID = 9401;
-/** invariant: A second, foreign workspace: its targets must never reach `default`. */
 const OTHER_WS = "ws-foreign";
 
 function makeEnv(db: TestD1): Env {
@@ -54,22 +34,9 @@ async function session(login: string): Promise<Record<string, string>> {
   };
 }
 
-// note: --- GitHub stubbing -------------------------------------------------------
 
 type FetchCall = { url: string; method: string; authorization: string | null };
 
-/** note: Stub the installation-repositories face: the token mint
- * (`POST /app/installations/{id}/access_tokens`) plus the listing
- * (`GET /installation/repositories`). `answers` maps an installation id to the
- * repositories GitHub would return for it; an id absent from the map answers
- * 500 on its mint, which is the "this installation failed to mint" case.
- * `failingListings` names installations whose mint still succeeds but whose
- * listing answers 500 — the "this installation failed to list" case.
- *
- * The minted token embeds the installation id (`tok-<id>`) so the listing can
- * resolve which installation's grant to answer, exactly as GitHub resolves an
- * installation token.
- */
 function stubRepositories(
   answers: Record<number, Array<{ id: number; name: string; owner: string }>>,
   failingListings: readonly number[] = [],
@@ -92,7 +59,6 @@ function stubRepositories(
       const installationId = Number(/^tok-(\d+)$/.exec(authorization?.replace(/^Bearer /, "") ?? "")?.[1]);
       const rows = failingListings.includes(installationId) ? undefined : answers[installationId];
       if (rows === undefined) return new Response("upstream boom", { status: 500 });
-      // note: GitHub's shape: an envelope whose account is an object, not a bare login.
       const payload = rows.map((row) => ({ id: row.id, name: row.name, owner: { login: row.owner } }));
       return new Response(JSON.stringify({ total_count: payload.length, repositories: payload }), {
         status: 200,
@@ -109,14 +75,9 @@ afterEach(() => {
   globalThis.fetch = origFetch;
 });
 
-// note: --- world -----------------------------------------------------------------
 
 type World = { db: TestD1; botId: string };
 
-/** note: One owned bot in `default` with a real (decryptable) private key, a live
- * installation the routes may walk, and a second workspace holding its own
- * target so every read has something foreign to exclude.
- */
 async function seededWorld(opts: { installations?: number[]; target?: boolean } = {}): Promise<World> {
   const db = createMigratedTestD1();
   await createUser(db, { login: "mallory", role: "member" });
@@ -129,8 +90,6 @@ async function seededWorld(opts: { installations?: number[]; target?: boolean } 
     githubSlug: "repo-bot",
     githubAppId: APP_ID,
     name: "repo-bot",
-    // A real PKCS#8 body: minting the App JWT imports the key, so a dummy PEM
-    // would fail before any installation read. Memoized by the helper.
     privateKeyEnc: await box.encryptSecret(await testAppPem(), `github_apps.private_key_enc:${id}`),
     webhookSecretEnc: await box.encryptSecret("test-webhook", `github_apps.webhook_secret_enc:${id}`),
     createdBy: "mallory",
@@ -169,7 +128,6 @@ async function seededWorld(opts: { installations?: number[]; target?: boolean } 
       authoritative: true,
     });
   }
-  // note: Equal fixed stamps make the installation_id tiebreak independent of the clock.
   db.raw
     .prepare("UPDATE bot_installations SET seen_at = '2026-01-01 00:00:00.000' WHERE bot_id = ?")
     .run(id);
@@ -196,13 +154,8 @@ const post = (db: TestD1, path: string, login: string, body: unknown): Promise<R
     ),
   );
 
-// note: --- GET /api/targets ------------------------------------------------------
 
 describe("GET /dashboard/:workspaceRef/api/targets", () => {
-  /** note: One review row for a target. `reviewedAt` is either a literal stamp or
-   * `null`, which asks SQLite for `datetime('now')` — the 7-day window is
-   * evaluated in SQL, so a relative fixture is the only honest one.
-   */
   function seedReview(
     db: TestD1,
     row: { id: string; targetId: string; botId: string; reviewedAt: string | null },
@@ -215,7 +168,6 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
       )
       .run(
         row.id,
-        // note: One PR number per row keeps the unique key clear.
         Number(row.id.replace(/\D/g, "")) || 1,
         row.id,
         row.reviewedAt ?? new Date().toISOString().slice(0, 19).replace("T", " "),
@@ -242,10 +194,7 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
     expect(row.repo_owner).toBe("acme");
     expect(row.repo_name).toBe("api");
     expect(row.app_name).toBe("Acme Inspector");
-    // note: A fixture row keeps the DDL default (the create path's 1 is asserted on
-    // the POST suite below); the list reports the stored column verbatim.
     expect(row.follow_workspace_defaults).toBe(0);
-    // invariant: The other workspace's repository never reaches this payload.
     expect(JSON.stringify(body)).not.toContain("foreign");
   });
 
@@ -269,8 +218,6 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
       repoOwner: undefined,
       repoName: undefined,
     });
-    // note: seedTarget hashes a repo id from the row id; clear it to make the row the
-    // migrated 待安装 shape (0067 leaves the three columns NULL).
     db.raw
       .prepare("UPDATE review_targets SET repo_id = NULL, repo_owner = NULL, repo_name = NULL WHERE bot_id = ?")
       .run(botId);
@@ -285,7 +232,6 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
 
   test("each row carries its review total and its last-7-day count", async () => {
     const { db, botId } = await seededWorld({});
-    // note: A second and third repository of the same bot (0088's claim is per repo).
     const webId = seedTarget(db, botId, {
       workspaceId: "default",
       repoId: 555002,
@@ -320,17 +266,12 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
     expect(byName.get("api")?.last_reviewed_at).toBe("2025-02-01 00:00:00");
     expect(byName.get("web")?.reviews_total).toBe(1);
     expect(byName.get("web")?.reviews_7d).toBe(1);
-    // invariant: A never-reviewed repository answers zeros, not nulls.
     expect(byName.get("docs")?.reviews_total).toBe(0);
     expect(byName.get("docs")?.reviews_7d).toBe(0);
   });
 
   test("the list is review-descending, with never-reviewed rows last", async () => {
     const { db, botId } = await seededWorld({});
-    // note: Distinct creation stamps, newest LAST (api < web < docs): a creation-order
-    // read would answer docs, web, api — the exact reverse of this assertion —
-    // so a regression to `created_at DESC` fails deterministically instead of
-    // resolving a three-way tie by UUID.
     const apiId = (
       db.raw
         .query("SELECT id FROM review_targets WHERE bot_id = ? AND repo_id = 555001")
@@ -353,8 +294,6 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
       repoName: "docs",
       createdAt: "2026-01-03T00:00:00.000Z",
     });
-    // invariant: web was reviewed most recently; api older; docs never reviewed — the
-    // never-reviewed row sorts last even though it is the NEWEST row.
     seedReview(db, { id: "r-api", targetId: apiId, botId, reviewedAt: "2025-01-01 00:00:00" });
     seedReview(db, { id: "r-web", targetId: webId, botId, reviewedAt: null });
 
@@ -365,7 +304,6 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
   });
 });
 
-// note: --- GET /api/apps/:appId/installation-repositories -----------------------
 
 describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories", () => {
   test("two installations are walked once each and deduped by repo id", async () => {
@@ -385,8 +323,6 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      // note: `claimed` is the bot-wide duplicate predicate: this bot's one seeded
-      // target holds repo 555001, so none of these is taken.
       repositories: [
         { repo_id: 501, owner: "acme", name: "api", claimed: false },
         { repo_id: 502, owner: "acme", name: "web", claimed: false },
@@ -394,8 +330,6 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
       ],
       degraded: false,
     });
-    // safety: One mint + one listing per installation, and the credentials never swap:
-    // the mint carries the App JWT, the listing the installation token.
     expect(calls).toHaveLength(4);
     const mints = calls.filter((call) => call.url.endsWith("/access_tokens"));
     expect(mints.map((call) => call.url)).toEqual([
@@ -403,7 +337,6 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
       "https://api.github.com/app/installations/12/access_tokens",
     ]);
     expect(mints.map((call) => call.method)).toEqual(["POST", "POST"]);
-    // invariant: An App JWT is a signed JWS: three dot-separated segments, never a token.
     expect(mints.every((call) => /^Bearer [\w-]+\.[\w-]+\.[\w-]+$/.test(call.authorization ?? ""))).toBe(true);
     const listings = calls.filter((call) => !call.url.endsWith("/access_tokens"));
     expect(listings.map((call) => call.url)).toEqual([
@@ -415,7 +348,6 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
 
   test("a failed token mint degrades that installation only", async () => {
     const { db } = await seededWorld({ installations: [61, 62] });
-    // note: 61's mint is absent from the answers map → 500; 62 still lists.
     const calls = stubRepositories({ 62: [{ id: 611, name: "api", owner: "acme" }] });
 
     const res = await get(db, `/dashboard/default/api/apps/${APP_ID}/installation-repositories`, "mallory");
@@ -425,13 +357,11 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
       repositories: [{ repo_id: 611, owner: "acme", name: "api", claimed: false }],
       degraded: true,
     });
-    // invariant: The failed installation never reached its listing.
     expect(calls.filter((call) => call.url.includes("/installation/repositories"))).toHaveLength(1);
   });
 
   test("a failed listing degrades that installation only", async () => {
     const { db } = await seededWorld({ installations: [71, 72] });
-    // note: Both mints succeed; 71's listing answers 500.
     const calls = stubRepositories(
       { 71: [{ id: 801, name: "api", owner: "acme" }], 72: [{ id: 802, name: "web", owner: "acme" }] },
       [71],
@@ -444,13 +374,11 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
       repositories: [{ repo_id: 802, owner: "acme", name: "web", claimed: false }],
       degraded: true,
     });
-    // note: A failed listing is not an empty grant: both installations were listed.
     expect(calls.filter((call) => call.url.includes("/installation/repositories"))).toHaveLength(2);
   });
 
   test("every installation failing to list is a 502", async () => {
     const { db } = await seededWorld({ installations: [81, 82] });
-    // note: Both mints succeed; both listings answer 500.
     const calls = stubRepositories(
       { 81: [{ id: 901, name: "api", owner: "acme" }], 82: [{ id: 902, name: "web", owner: "acme" }] },
       [81, 82],
@@ -464,11 +392,7 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
   });
 
   test("a repository a SIBLING workspace already holds on this bot is marked claimed", async () => {
-    // why: The duplicate predicate is the BOT's (store DUPLICATE_REPO), so the walk
-    // must mark a sibling workspace's claim too — otherwise the dialog offers a
-    // row whose only possible POST outcome is `duplicates` (I-000642 follow-up).
     const { db, botId } = await seededWorld({ installations: [11] });
-    // note: 777001 is already a live target of bot-foreign in the OTHER workspace.
     stubRepositories({
       11: [
         { id: 777001, owner: "foreign", name: "repo" },
@@ -476,7 +400,6 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
         { id: 556001, owner: "acme", name: "free" },
       ],
     });
-    // note: Put the sibling claim on THIS bot: same bot, different workspace.
     seedTarget(db, botId, {
       workspaceId: OTHER_WS,
       repoId: 777001,
@@ -491,17 +414,12 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
       repositories: Array<{ repo_id: number; claimed: boolean }>;
     };
     const byId = new Map(body.repositories.map((row) => [row.repo_id, row.claimed]));
-    // note: This bot's own target in `default`.
     expect(byId.get(555001)).toBe(true);
-    // note: The sibling workspace's row on the same bot — the finding's case.
     expect(byId.get(777001)).toBe(true);
-    // invariant: A repository no live target of the bot holds stays selectable.
     expect(byId.get(556001)).toBe(false);
   });
 
   test("an unclaimed migrated row claims its repository by owner/name too", async () => {
-    // note: The predicate's second arm: a live row still holding NULL for repo_id but
-    // naming owner/name is the SAME repository, so the walk must mark it.
     const { db, botId } = await seededWorld({ target: false, installations: [11] });
     seedTarget(db, botId, {
       workspaceId: "default",
@@ -541,7 +459,6 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
 
   test("one failed installation degrades the list instead of failing it", async () => {
     const { db } = await seededWorld({ installations: [31, 32] });
-    // note: 32 is absent from the answers map → 500.
     stubRepositories({ 31: [{ id: 601, name: "api", owner: "acme" }] });
 
     const res = await get(db, `/dashboard/default/api/apps/${APP_ID}/installation-repositories`, "mallory");
@@ -574,10 +491,8 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
   });
 });
 
-// note: --- POST /api/targets -----------------------------------------------------
 
 describe("POST /dashboard/:workspaceRef/api/targets", () => {
-  /** invariant: The add dialog's own list: every authorized id must come from here. */
   const INSTALLATION = 11;
   const grant = (repositories: Array<{ id: number; owner: string; name: string }>) =>
     stubRepositories({ [INSTALLATION]: repositories });
@@ -623,7 +538,6 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     const res = await post(db, "/dashboard/default/api/targets", "mallory", {
       bot_id: botId,
       repositories: [
-        // note: Already a live target of this bot.
         { repo_id: 555001, owner: "acme", name: "api" },
         { repo_id: 901, owner: "acme", name: "new" },
       ],
@@ -636,7 +550,6 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     };
     expect(body.created.map((row) => row.repo_id)).toEqual([901]);
     expect(body.duplicates).toEqual([{ repo_id: 555001, owner: "acme", name: "api" }]);
-    // invariant: The batch's own row is written, and the refused one wrote nothing.
     const repoIds = (
       db.raw
         .query("SELECT repo_id FROM review_targets WHERE workspace_id = 'default' AND deleted_at IS NULL")
@@ -658,8 +571,6 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     const body = (await res.json()) as { created: unknown[]; duplicates: unknown[] };
     expect(body.created).toHaveLength(1);
     expect(body.duplicates).toEqual([]);
-    // note: 0068's claim is per bot: the foreign bot keeps its row and this App's
-    // installation grants the same repository to this workspace.
     const holders = db.raw
       .query("SELECT bot_id FROM review_targets WHERE repo_id = 777001 ORDER BY workspace_id")
       .all() as Array<{ bot_id: string }>;
@@ -675,14 +586,12 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
       bot_id: botId,
       repositories: [
         { repo_id: 801, owner: "acme", name: "api" },
-        // note: A repository of somebody else's installation: unprovable here.
         { repo_id: 802, owner: "acme", name: "stolen" },
       ],
     });
 
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "repository_not_installed", repo_ids: [802] });
-    // invariant: Nothing written — not even the row whose id WAS installed.
     expect(
       (db.raw.query("SELECT COUNT(*) AS n FROM review_targets WHERE workspace_id = 'default'").get() as { n: number })
         .n,
@@ -691,7 +600,6 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
 
   test("a failed installation walk refuses the request (fail closed) and writes nothing", async () => {
     const { db, botId } = await seededWorld({ target: false, installations: [INSTALLATION] });
-    // note: The installation answers 500, so no id can be proven.
     stubRepositories({});
 
     const res = await post(db, "/dashboard/default/api/targets", "mallory", {
@@ -734,11 +642,6 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     expect(res.status).toBe(404);
   });
 
-  /** note: The contract's visibility rule is the sibling reads' resolve: a shared bot
-   * is reachable only through a live target this workspace already holds on it.
-   * The first repository on a shared bot stays out of scope (compass Non-Goal),
-   * so the POST refuses exactly as the GET does — no write, no partial add.
-   */
   test("a shared bot with no live target here is a 404, and becomes reachable once one exists", async () => {
     const { db } = await seededWorld({ target: false });
     const sharedId = "bot-shared-platform";
@@ -752,7 +655,6 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
                  'active', 'shared', datetime('now'), datetime('now'), datetime('now'))`,
       )
       .run(sharedId);
-    // note: A real key: the create proof mints an installation JWT from it.
     db.raw
       .prepare("UPDATE review_bots SET private_key_enc = ? WHERE id = ?")
       .run(await box.encryptSecret(await testAppPem(), `github_apps.private_key_enc:${sharedId}`), sharedId);
@@ -782,8 +684,6 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
       .get(sharedId) as { n: number };
     expect(written.n).toBe(0);
 
-    // note: The workspace now holds a live target on it: the bot is visible, so the
-    // next repository is an ordinary create.
     seedTarget(db, sharedId, { workspaceId: "default", repoId: 1302, repoOwner: "acme", repoName: "web" });
     const accepted = await post(db, "/dashboard/default/api/targets", "mallory", body);
     expect(accepted.status).toBe(201);
@@ -810,7 +710,6 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
   });
 });
 
-/** invariant: The list is a tenant read: it never asks GitHub. The create route's proof does. */
 test("the list route never calls GitHub", async () => {
   const { db } = await seededWorld({});
   const spy = spyOn(globalThis, "fetch");

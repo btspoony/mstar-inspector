@@ -20,9 +20,7 @@ import path from "node:path";
 export type CatalogEntry = { models: readonly string[]; protocols?: readonly { models: readonly string[] }[] };
 
 export type CatalogRemovals = {
-  /** note: Providers the old module carried and the new one does not. */
   providersDropped: string[];
-  /** note: provider → model ids that disappeared while the provider survived. */
   modelsRemoved: Record<string, string[]>;
 };
 
@@ -76,8 +74,6 @@ export function renderRemovals({ providersDropped, modelsRemoved }: CatalogRemov
   return lines.join("\n").trimEnd();
 }
 
-/** note: Read a generated catalog module's `PROVIDER_CATALOG` (the module has zero
- *  imports, so a copied or generated path imports like any other). */
 async function loadCatalog(file: string): Promise<Record<string, CatalogEntry>> {
   const module = (await import(path.resolve(file))) as { PROVIDER_CATALOG?: unknown };
   const catalog = module.PROVIDER_CATALOG;

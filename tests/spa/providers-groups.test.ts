@@ -1,9 +1,3 @@
-/** note: `providerGroups` — the providers area's group derivation (AC-1).
- *
- * The contract is asserted clause by clause: group key, kind, declaration,
- * label, order and the total fallback. No DOM: the derivation is pure, so a
- * manage-payload literal is the whole fixture.
- */
 import { describe, expect, test } from "bun:test";
 import type {
   CatalogProvider,
@@ -186,7 +180,6 @@ describe("order", () => {
         ],
       }),
     );
-    // note: b's maximum is its newest key, not its first; a and c tie and fall to id order.
     expect(groups.map((group) => group.providerId)).toEqual(["b", "a", "c"]);
   });
 
@@ -246,9 +239,7 @@ describe("a declaration stored under a collapsed per-protocol id", () => {
       }),
     );
     expect(groups).toHaveLength(1);
-    // note: The stored id is what every write and removal names…
     expect(groups[0]?.providerId).toBe("merged-vendor-anthropic");
-    // note: …while the label, tier and vocabulary read through the absorbed row.
     expect(groups[0]?.catalogId).toBe("merged-vendor");
     expect(groups[0]?.label).toBe("merged-vendor label");
     expect(groups[0]?.kind).toBe("template");

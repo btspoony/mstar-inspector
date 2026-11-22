@@ -1,20 +1,3 @@
-/** note: The operator's quota-version face (iteration v1.17, M9):
- * `GET/POST /_internal_admin/api/quota-versions` and its `/preview` sibling.
- *
- * Pinned at the product seams the plan settled:
- *
- * - the list derives each interval end from the NEXT profile's `effective_from`
- *   and marks exactly one version `current` — the one judging this month, never
- *   "the profile current at render time", so a version scheduled mid-month is
- *   `scheduled` and never `current`;
- * - the preview counts workspaces whose today's usage has already reached the
- *   candidate ceiling, over the same month sum the enqueue reads;
- * - a publish without a preview is refused, and so is one whose preview no
- *   longer matches; a publish writes ONE profile row plus its per-plan rows and
- *   one audit row in a batch, and mutates no existing profile;
- * - the preview's count equals the enforcement's verdicts for the same seed
- *   data and the same numbers — the last describe drives the real webhook.
- */
 import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
@@ -29,7 +12,6 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "quota", "faces", "session", "32-bytes!"].join("-");
-/** invariant: base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const OPERATOR = "Support-Bot";
 
@@ -51,9 +33,6 @@ function seed(db: TestD1, sql: string, ...params: Array<string | number | null>)
   db.raw.prepare(sql).run(...params);
 }
 
-/** note: A migrated database that carries the operator's own `users` row: the console
- * gate refuses a login with no account, so every case here needs one.
- */
 function fixture(): TestD1 {
   const db = createMigratedTestD1();
   seed(
@@ -63,8 +42,6 @@ function fixture(): TestD1 {
     OPERATOR,
     "2026-10-01T00:00:00.000Z",
   );
-  // note: The route's operating switch: ON here (the acceptance gate is OFF by
-  // default per spec § Deployment gate; this suite exercises the preview).
   seed(
     db,
     `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
@@ -95,7 +72,6 @@ function seedSubscription(db: TestD1, workspaceId: string, planId: string): void
   );
 }
 
-/** note: Meter `rp` into the current month under a named source. */
 function seedUsage(db: TestD1, workspaceId: string, rp: number, source: "byok" | "shared" = "byok"): void {
   const reviewId = `prior-${workspaceId}-${rp}-${source}`;
   seed(
@@ -111,10 +87,6 @@ function seedUsage(db: TestD1, workspaceId: string, rp: number, source: "byok" |
   );
 }
 
-/** note: A profile that already judges this month, so the preview and the enqueue read
- * the same numbers. Publishing mid-month could not produce one (D5), which is
- * exactly why this fixture writes it directly.
- */
 function seedJudgingProfile(db: TestD1, ceilings: Record<string, number | null>): void {
   const month = quotaMonth(new Date());
   seed(
@@ -138,8 +110,6 @@ function seedJudgingProfile(db: TestD1, ceilings: Record<string, number | null>)
 
 async function adminFetch(
   db: TestD1,
-  // invariant: `PATCH`/`DELETE` are here for the "no edit path" pin: the surface must 404
-  // a method it never registered, not answer 405 through the router.
   method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
@@ -159,12 +129,10 @@ async function adminFetch(
   );
 }
 
-/** note: The next month's 1st, `YYYY-MM-DD` — the earliest instant a publish accepts. */
 function nextFirst(): string {
   return quotaMonth(new Date()).endIso.slice(0, 10);
 }
 
-/** note: A candidate body: the settled numbers plus one ceiling per plan. */
 function candidate(effectiveFrom = nextFirst()): Record<string, unknown> {
   return {
     effectiveFrom,
@@ -180,7 +148,6 @@ describe("GET /_internal_admin/api/quota-versions", () => {
   test("lists every version with its derived interval and marks the judging one", async () => {
     const db = fixture();
     const month = quotaMonth(new Date());
-    // note: A scheduled successor: its start closes the v1 interval.
     seed(
       db,
       `INSERT INTO quota_profiles
@@ -207,16 +174,10 @@ describe("GET /_internal_admin/api/quota-versions", () => {
       versions: Array<Record<string, unknown>>;
       uncoveredPlanIds: string[];
     };
-    // note: The payload carries no month of its own: `judgingVersion` IS the
-    // month-relative answer, and the form renders no month label.
     expect(body).not.toHaveProperty("month");
-    // invariant: v1 covers this month's 1st; v2 starts after it and never judges the month
-    // in progress.
     expect(body.judgingVersion).toBe(1);
     expect(body.nextVersion).toBe(3);
     expect(body.plans.map((plan) => plan.id)).toEqual(["free", "pro", "unlimited"]);
-    // why: Both stored versions cover every plan, so the page has nothing to warn
-    // about.
     expect(body.uncoveredPlanIds).toEqual([]);
     expect(body.versions).toEqual([
       {
@@ -264,7 +225,6 @@ describe("GET /_internal_admin/api/quota-versions", () => {
       judgingVersion: number;
       versions: Array<{ version: number; state: string }>;
     };
-    // note: The 1st of the month is covered by v1, so v1 judges it whatever today is.
     expect(body.judgingVersion).toBe(1);
     expect(body.versions.find((row) => row.version === 2)?.state).toBe("scheduled");
   });
@@ -278,8 +238,6 @@ describe("POST /_internal_admin/api/quota-versions/preview", () => {
     seedUsage(db, "ws-over", 2001);
     seedWorkspace(db, "ws-exactly");
     seedSubscription(db, "ws-exactly", "free");
-    // invariant: Exactly at the candidate ceiling: the next review is refused, so the
-    // preview counts it — the same state the card banners.
     seedUsage(db, "ws-exactly", 2000);
     seedWorkspace(db, "ws-under");
     seedSubscription(db, "ws-under", "free");
@@ -315,8 +273,6 @@ describe("POST /_internal_admin/api/quota-versions/preview", () => {
       startsOn: string;
     };
     expect(asFirst.startsOn).toBe(first);
-    // note: The same rule the read applies: a mid-month instant cannot cover a 1st
-    // before it, so the first month it judges starts a month later.
     expect(quotaStartsOn(`${midMonth}T00:00:00.000Z`)).toBe(afterThat.toISOString().slice(0, 10));
     const asMid = (await (await adminFetch(db, "POST", "/api/quota-versions/preview", candidate(midMonth))).json()) as {
       startsOn: string;
@@ -340,7 +296,6 @@ describe("POST /_internal_admin/api/quota-versions", () => {
     const res = await adminFetch(db, "POST", "/api/quota-versions", candidate());
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("/preview");
-    // invariant: Nothing was written.
     expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: 1 });
   });
 
@@ -396,15 +351,12 @@ describe("POST /_internal_admin/api/quota-versions", () => {
         target_id: created.id,
       },
     ]);
-    // invariant: Append-only: the v1 row and its ceilings are byte-identical.
     expect(db.raw.query("SELECT * FROM quota_profiles WHERE id = 'quota-v1'").get()).toEqual(before);
   });
 
   test("refuses an effective time that would judge the month in progress", async () => {
     const db = fixture();
     const month = quotaMonth(new Date());
-    // why: The month's own 1st (or anything before it) would become the judging
-    // profile for a month already under way — the cutover D5 forbids.
     const body = candidate(month.startIso.slice(0, 10));
     const impact = { count: 0, total: 1, startsOn: nextFirst() };
     const res = await adminFetch(db, "POST", "/api/quota-versions", { ...body, impact });
@@ -425,8 +377,6 @@ describe("POST /_internal_admin/api/quota-versions", () => {
     };
     const res = await adminFetch(db, "POST", "/api/quota-versions", { ...body, impact });
     expect(res.status).toBe(201);
-    // note: The grace rule the field hint states: a mid-month version judges from the
-    // following 1st, so it never pushes a workspace over inside this month.
     const following = new Date(
       Date.UTC(new Date(first).getUTCFullYear(), new Date(first).getUTCMonth() + 1, 1),
     );
@@ -469,19 +419,12 @@ describe("the console gate", () => {
     const before = db.raw.query("SELECT * FROM quota_profiles WHERE id = 'quota-v1'").get();
     for (const path of ["/api/quota-versions/quota-v1", "/api/quota-versions"]) {
       const res = await adminFetch(db, "PATCH", path, { notes: "rewritten" });
-      // invariant: Append-only is a surface with no write route, not a guarded one: the
-      // only writes are a create and nothing else.
       expect(res.status).toBe(404);
     }
     expect(db.raw.query("SELECT * FROM quota_profiles WHERE id = 'quota-v1'").get()).toEqual(before);
   });
 });
 
-/** note: The acceptance pin: the preview's count is not a second opinion. Seed usage
- * and a profile that judges this month with the SAME numbers the preview is
- * given, then let the real enqueue decide — a workspace the preview counts is
- * refused, one it does not count is enqueued.
- */
 describe("the impact preview agrees with the enqueue", () => {
   test("preview count === refusals for the same seed data and the same numbers", async () => {
     const db = fixture();
@@ -492,8 +435,6 @@ describe("the impact preview agrees with the enqueue", () => {
     seedWorkspace(db, "ws-under");
     seedSubscription(db, "ws-under", "pro");
     seedUsage(db, "ws-under", 18, "byok");
-    // why: One delivery per workspace, each with its own bot so the signature can be
-    // checked (the App's secret is the credential the route verifies).
     const over = await seedDelivery(db, "ws-over", "app-over", "secret-over", 7001);
     const under = await seedDelivery(db, "ws-under", "app-under", "secret-under", 7002);
 
@@ -518,8 +459,6 @@ describe("the impact preview agrees with the enqueue", () => {
     const body = JSON.stringify(PR_PAYLOAD);
     const refused = await postWebhook("/webhook/ws-over/app-over", body, "secret-over", env);
     expect(refused.status).toBe(200);
-    // invariant: The counted workspace is refused exactly the way enforcement refuses: no
-    // send, one `quota` failure.
     expect(sent).toHaveLength(0);
     expect(db.raw.query("SELECT stage FROM review_failures ORDER BY rowid").all()).toEqual([
       { stage: QUOTA_STAGE },
@@ -527,12 +466,10 @@ describe("the impact preview agrees with the enqueue", () => {
     const failure = db.raw.query("SELECT error FROM review_failures").get() as { error: string };
     expect(failure.error).toContain(QUOTA_SKIP_REASON);
 
-    // why: The uncounted workspace is admitted, so the preview under-counts nothing.
     const admitted = await postWebhook("/webhook/ws-under/app-under", body, "secret-under", env);
     expect(admitted.status).toBe(200);
     expect(sent).toHaveLength(1);
     expect(sent[0]?.targetId).toBe(under.targetId);
-    // invariant: `over` never queued anything: the count and the verdicts are one set.
     expect(sent.some((message) => message.targetId === over.targetId)).toBe(false);
   });
 });
@@ -545,11 +482,6 @@ const PR_PAYLOAD = {
   repository: { id: 7001, name: "test-repo", owner: { login: "test-owner" } },
 };
 
-/** note: An active bot with an encrypted webhook secret, its workspace mapping and one
- * repository target. The route resolves the target from the delivery's own
- * repository (migration 0067 dropped the installation binding), so the target
- * carries the payload's owner/name and id.
- */
 async function seedDelivery(
   db: TestD1,
   workspaceId: string,
@@ -607,7 +539,6 @@ async function postWebhook(path: string, body: string, secret: string, env: Env)
 }
 
 describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
-  /** invariant: A profile whose plan set is missing exactly `missing`, judging this month. */
   function fixtureMissing(missing: string[]): TestD1 {
     const db = fixture();
     const month = quotaMonth(new Date());
@@ -641,8 +572,6 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
 
   test("a gap in a version that does NOT judge this month refuses nothing and is not reported", async () => {
     const db = fixture();
-    // note: The v1 row keeps all three plans; the incomplete one is scheduled for the
-    // next month, so today's verdicts never consult it.
     const month = quotaMonth(new Date());
     seed(
       db,
@@ -660,11 +589,6 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
     expect(body.uncoveredPlanIds).toEqual([]);
   });
 
-  /** note: The read-consistency seam: the judging profile and the catalogue are ONE
-   * `batch` (one D1 transaction) and neither is read again on its own — a
-   * second read could see a publish that the other result predates and report
-   * a gap the judge already covers.
-   */
   test("the judging profile and the plan list come from one batch, with no independent read", async () => {
     const db = fixtureMissing(["pro"]);
     const reads = { batches: [] as number[], readsOutsideBatch: 0 };
@@ -719,9 +643,6 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
   test("a month preceding every version is judged by the earliest profile, and its gap is reported", async () => {
     const db = fixture();
     const month = quotaMonth(new Date());
-    // why: Both profiles start after this month's 1st, so the fallback decides. They
-    // cover different plans: only the earlier one judges, otherwise the page
-    // would report the later profile's gaps.
     const start = new Date(month.startIso);
     const nearIso = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1)).toISOString();
     const farIso = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 2, 1)).toISOString();
@@ -756,8 +677,6 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
     seed(db, "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-far', 'free', 3000)");
     const res = await adminFetch(db, "GET", "/api/quota-versions");
     const body = (await res.json()) as { judgingVersion: number; uncoveredPlanIds: string[] };
-    // note: The earliest profile (9) judges and its own gap is reported; picking the
-    // later one (10) would answer 10 and ["pro", "unlimited"] instead.
     expect(body.judgingVersion).toBe(9);
     expect(body.uncoveredPlanIds).toEqual(["unlimited"]);
   });

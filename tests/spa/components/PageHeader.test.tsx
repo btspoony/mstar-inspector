@@ -1,11 +1,3 @@
-/** note: PageHeader — the single spelling of the page header band (compass D4).
- *
- * Static render (props-only, no hooks): the band exposes the title, the
- * optional subtitle line, the action slot, the wayfinding link and the
- * metric strip. Assertions name the rendered structure, the slot attributes
- * and the text — never a design-token class, so a token rename cannot
- * false-fail this file.
- */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -42,7 +34,6 @@ describe("PageHeader", () => {
     });
     expect(html).toContain('<button type="submit">Create App</button>');
     expect(html.indexOf("</h1>")).toBeLessThan(html.indexOf("Create App"));
-    // note: The action and the title share one row; the subtitle is the next line.
     expect(html.indexOf("Create App")).toBeLessThan(html.indexOf("One per repository"));
   });
 

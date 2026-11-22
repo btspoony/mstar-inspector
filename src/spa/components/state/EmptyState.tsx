@@ -1,11 +1,3 @@
-/**
- * Composed empty state (AD-582): a guidance view — optional
- * icon chip, title line, description, optional action slot — on the
- * restyled Card surface, replacing the old bordered single-line box.
- * Purely presentational: pages resolve `t()` themselves and pass
- * localized strings/nodes; the icon is a lucide node chosen per consumer.
- * Page-level only — op-outcome notices stay on `PageNotice`.
- */
 import type { ReactNode } from "react";
 import { Card } from "@design-system";
 

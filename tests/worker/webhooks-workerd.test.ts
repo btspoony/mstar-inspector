@@ -1,25 +1,9 @@
-/** note: Workerd-equivalent signature verification tests (QC F-001 + F-005).
- *
- * On the deployed Worker, wrangler resolves `@octokit/webhooks-methods` via
- * the `browser` condition → WebCrypto verify → `hexToUInt8Array` throws a
- * TypeError on malformed (non-hex) signatures, while Bun/node resolves the
- * `node` condition → `timingSafeEqual` → returns false. The `verifySignature`
- * seam reproduces the workerd throw path and locks the behavior both
- * runtimes must share: malformed signature → 401, never 500, with a
- * structured stage-labeled warning (log hygiene).
- *
- * The `getWebhooks` accessor is used to lock the module-level verifier
- * cache (F-005 + L1): the hot path must not build a `Webhooks`
- * instance per request, cacheKeys are isolated, and a secret mismatch
- * (rotation) rebuilds + replaces the entry.
- */
 import { describe, expect, mock, test } from "bun:test";
 import { classifyWebhook, getWebhooks, verifySignature } from "../../src/worker/webhooks";
 import type { Env } from "../../src/worker/env";
 
 const SECRET = ["s3cret", "webhook", "secret"].join("-");
 
-/** note: The workerd WebCrypto throw: `hexToUInt8Array` on non-hex input. */
 const workerdVerify = async (): Promise<boolean> => {
   throw new TypeError("Cannot read properties of null (reading 'map')");
 };
@@ -51,8 +35,6 @@ describe("verifySignature — workerd hex-decode throw path (F-001)", () => {
     expect(valid).toBe(false);
     expect(warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = warn.mock.calls[0] ?? [];
-    // note: log hygiene: no literal "unknown" — the direct call passes no
-    // event, so the warn falls back to the stage label.
     expect(fields).toMatchObject({
       event: "signature_verification_error",
       reason: "signature verification threw",
@@ -101,17 +83,14 @@ describe("module-level verifier cache (F-005 + L1)", () => {
     const second = getWebhooks("another-app-row-id", SECRET);
     const perApp = getWebhooks("some-app-row-id", SECRET);
     expect(perApp).not.toBe(second);
-    // note: Same key again → the memoized instance (not a third one).
     expect(getWebhooks("another-app-row-id", SECRET)).toBe(second);
   });
 
   test("secret mismatch on the same cacheKey → rebuild + REPLACE (rotation evicts the old entry exactly)", () => {
     const before = getWebhooks("workerd-rotation-key", "secret-v1");
     const rotated = getWebhooks("workerd-rotation-key", "secret-v2");
-    expect(rotated).not.toBe(before); // invariant: rebuilt
-    expect(getWebhooks("workerd-rotation-key", "secret-v2")).toBe(rotated); // safety: memoized
-    // safety: The old secret's entry is GONE: the same cacheKey + old secret rebuilds
-    // again instead of returning the pre-rotation instance.
+    expect(rotated).not.toBe(before);
+    expect(getWebhooks("workerd-rotation-key", "secret-v2")).toBe(rotated);
     expect(getWebhooks("workerd-rotation-key", "secret-v1")).not.toBe(before);
   });
 });

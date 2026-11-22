@@ -1,22 +1,3 @@
-/**
- * The installation-repository lookup a data upgrade uses to claim a target's
- * numeric `repo_id` (spec operator-data-upgrade § Ledger target alignment).
- *
- * A target named only by owner/name waits for the repository's first delivery to
- * claim its `repo_id` (migration 0067, D15). When the owner still has a live
- * installation of that bot, the upgrade can ask GitHub instead of waiting: mint
- * an installation token, list that installation's repositories, and match
- * `owner/name`.
- *
- * One listing per installation per call: the groups of one batch share install-
- * ations, and a listing is 1–5 upstream requests. The cache lives in this
- * closure, so it spans the batch it was built for.
- *
- * Every GitHub failure (no encryption key, an undecryptable PEM, a rejected
- * mint, a listing that could not be read) answers `failed` — never a throw, so
- * a batch completes and counts it. Only a listing that WAS read answers
- * `absent`, which the item reports as an unbound group.
- */
 import { createSecretbox } from "../dashboard/secretbox";
 import {
   fetchInstallationRepositories,
@@ -35,7 +16,6 @@ export function createRepoLookup(
   db: DashboardD1,
   encryptionKey: string | undefined,
 ): RepoLookup {
-  /** `installation_id` → its repositories, or `null` once the read failed. */
   const listings = new Map<number, Map<string, number> | null>();
   const jwts = new Map<string, string | null>();
 
@@ -47,7 +27,8 @@ export function createRepoLookup(
         // shortcut: tenant-bypass — internal maintenance read (the data-upgrade
         // runner's binding seam): it resolves one bot's App credentials by exact
         // id to mint an installation token and returns no identity, ownership or
-        // response field.
+        // response field. upgrade: tenant-filter it once the data-upgrade runner
+        // becomes workspace-scoped.
         .prepare("SELECT github_app_id, private_key_enc FROM review_bots WHERE id = ?1")
         .bind(botId)
         .first<{ github_app_id: number; private_key_enc: string }>();

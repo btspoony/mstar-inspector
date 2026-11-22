@@ -1,30 +1,16 @@
-/**
- * why: Migration equivalence for the custom-provider model-metadata overlay
- * (`app_custom_providers.models_meta`): the column is added by its own
- * migration, every existing declaration keeps its model ids verbatim, and the
- * overlay starts empty (`'{}'`) — the product never invents a size the owner
- * did not state.
- */
 import { describe, expect, test } from "bun:test";
 import { createTestD1, migrationNumber, migrationsAfter, type TestD1 } from "./helpers";
 import { applyMigrations } from "../helpers/migration-shapes";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 
 const OVERLAY_MIGRATION = "0053_custom_provider_models_meta.sql";
-/** note: The store face below addresses the post-rename tables, so the fixture continues to 0056. */
 const RENAME_MIGRATION = "0056_review_bots_rename.sql";
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 
-/**
- * why: Every migration BEFORE the overlay one, in wrangler's apply order. Derived by
- * PREFIX, not by excluding one filename: a later migration (0054+) must be part
- * of the "after" half, or the production order this test replays would skip it.
- */
 const BEFORE_OVERLAY = migrationsAfter(2).filter(
   (name) => migrationNumber(name) < migrationNumber(OVERLAY_MIGRATION),
 );
 
-/** note: One github_apps row of the post-0038 shape (no crypto path needed here). */
 function seedApp(db: TestD1, id: string): void {
   db.raw
     .prepare(
@@ -36,7 +22,6 @@ function seedApp(db: TestD1, id: string): void {
     .run(id, 7001, id);
 }
 
-/** note: One id-only declaration, written in the pre-overlay shape. */
 function seedDeclaration(db: TestD1, appId: string): void {
   db.raw
     .prepare(
@@ -73,8 +58,6 @@ describe("migration: app_custom_providers.models_meta overlay", () => {
     expect(overlay).toBeDefined();
     expect(overlay!.notnull).toBe(1);
     expect(overlay!.dflt_value).toBe("'{}'");
-    // invariant: No backfill DML: the default carries the existing row, which keeps its
-    // ids and its timestamps — a reordering or a dropped id would be a defect.
     const after = db.raw
       .query("SELECT model_ids, models_meta, created_at, updated_at FROM app_custom_providers WHERE app_id = ?")
       .get("app-legacy") as { model_ids: string; models_meta: string; created_at: string; updated_at: string };

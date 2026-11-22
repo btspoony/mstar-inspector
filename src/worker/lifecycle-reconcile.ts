@@ -1,67 +1,3 @@
-/**
- * M8 publication and thread recovery reconciler (spec
- * review-lifecycle §7.11 composition + §7.11.1) — the self-sufficient cron
- * lane that makes crash recovery no longer lose assessments.
- *
- * Two bounded lanes per run, publication lane first with at most half the
- * run's GitHub request budget:
- *   1. Publication lane (`listPublicationRecovery`, LIMIT 10):
- *      - `confirmed` → local idempotent apply (proof-gated, NO GitHub —
- *        "after proof, local apply may proceed even if GitHub is
- *        unavailable");
- *      - `prepared` older than PREPARED_SEND_MIN_AGE_MS → read-only
- *        staleness pre-check (never a stale send over a newer round — that
- *        row is superseded), then a conditional epoch-fenced lease claim
- *        and ONE send of the exact prepared body (review or degraded
- *        chain), proof persisted before any local apply;
- *      - `sending`/`unknown` → read-only discovery only: the PR's bounded
- *        newest issue comments are scanned for the EXACT prepared body
- *        (marker + digest match, this App's own authorship) — a hit proves the
- *        publication and applies the saved payload without the model; a
- *        miss stays unknown and defers with backoff ("never issue a blind
- *        second create").
- *   2. Thread lane (`listResolutionRecovery`, LIMIT 10): each queued
- *      association with a stored verified snapshot is re-driven through the
- *      §7.5 resolution surface (ownership proof, HEAD/conversation
- *      fences and adoption are its contract, never re-implemented here).
- *      Outcomes: resolved / abandoned (terminal), needs-recheck (stops
- *      cycling, concern retained for the next real review), retry (backoff
- *      1/2/4/8/16 min; at the 5-attempt cap a terminal, visible local-error
- *      — never deleted).
- *
- * Credential routing (spec §7.6): the EXACT `(bot_id, installation_id)`
- * pair through `bot_installations` into the matching `review_bots` row —
- * never a repository-wide bot scan, never cross-bot substitution. Missing
- * mapping, soft-deleted or disabled bot → every pending row of the pair is
- * durably `suspended` (attempts untouched) and nothing calls GitHub;
- * `listSuspendedLifecycleApps` + the same exact-pair routing query re-check
- * suspension each run, and an App that re-enabled resumes with fresh
- * fencing. A paused App (review_enabled=0) keeps the frozen pause policy:
- * no NEW primary publication (prepared rows are left due), but local apply
- * of already-confirmed publications, read-only discovery and
- * previously-authorized resolution retry continue.
- *
- * Budgets (spec §7.11.1): ≤80 GitHub requests and 45s per run, ≤15 requests
- * per thread operation, each request ≤5s and capped by the remaining run
- * deadline. The per-operation envelopes are PRE-FLIGHT ADMISSION ESTIMATES
- * that decide whether an operation may start; the ACTUAL requests are what
- * the run is charged, metered at the single transport choke point every
- * request funnels through. Reserving estimates AND metering real requests
- * would double-count (a scan estimated at 3 that paginates 11 times must
- * cost 11, not 14). Budget/deadline exhaustion therefore stops a lane before
- * any claim — a claim never happens, so no attempt is spent — and a refusal
- * inside an already-claimed send releases that claim back to due `prepared`
- * rather than recording post-attempt uncertainty. The ≤5s per-request bound
- * is ENFORCED, not declared: the App's commenter is built with a bounded
- * `fetchImpl` that aborts every request (identity probe, token mint and API
- * calls alike) at `min(5s, remaining run deadline)`, so a hung request
- * cannot outlive the run. Timeout and unknown outcomes stay conservative —
- * the send is not retried blindly, the row is deferred or capped durably.
- *
- * Throw-proof: the whole function is wrapped — a recovery failure (even a
- * throwing injected dependency) is logged and folded into `errors`; nothing
- * ever throws out of `scheduled`.
- */
 import { getReconcileSettings } from "../dashboard/runtime-config-store";
 import { RECONCILE_REQUEST_ESTIMATES, type ReconcileValues } from "../contracts/reconcile-settings";
 import type { ScheduledEnv } from "./env";
@@ -108,9 +44,6 @@ import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavai
 import { sha256Hex } from "../pipeline/review-threads";
 import { settlementStatementIfDischarged } from "../store/review-route-store";
 
-// ---------------------------------------------------------------------------
-// Summary + budget constants (spec §7.11.1 verbatim values)
-// ---------------------------------------------------------------------------
 
 export type LifecycleReconcileSummary = {
   examined: number;
@@ -121,38 +54,13 @@ export type LifecycleReconcileSummary = {
   errors: number;
 };
 
-/**
- * Conservative, non-mutating preflight admission estimates for the
- * publication lane's operations (plan, send, read-only discovery).
- * `canSpend` consults them only to decide whether an operation may start;
- * they are NOT reservations and are never charged — the transport meters
- * every ACTUAL request (§7.11.1), and charging an estimate on top would
- * double-count a paginating scan.
- */
 const PLAN_REQUESTS = RECONCILE_REQUEST_ESTIMATES.plan;
 const SEND_REQUESTS = RECONCILE_REQUEST_ESTIMATES.send;
 const DISCOVERY_REQUESTS = RECONCILE_REQUEST_ESTIMATES.discovery;
-/**
- * The §7.5 live App-identity proof (`GET /app`) issues exactly one request
- * per App pair per run (the resolution is cached). The probe's request is
- * metered at the shared transport choke point like every other request the
- * pair issues, so it is counted under the whole-run cap; this constant is
- * only the preflight estimate the suspended-pair re-enable admission
- * consults before the pair is built. It is neither a charge nor a
- * reservation — `reviewerForPair` charges nothing and `budget.spent` is
- * mutated only by the transport's `reserve`. The estimate is accounted
- * separately from the per-thread-operation admission bound (≤15 requests of
- * the §7.5 surface itself, §7.11.1): the two gate different operations, and
- * the probe is metered once, at the transport — never double-counted.
- */
 const IDENTITY_REQUESTS = RECONCILE_REQUEST_ESTIMATES.identity;
 
-/** Lease holder label for M8 recovery claims. */
 const HOLDER = "lifecycle-reconcile";
 
-// ---------------------------------------------------------------------------
-// Reviewer surface — the §7.6 credential-routing seam
-// ---------------------------------------------------------------------------
 
 /**
  * The GitHub surface M8 needs. `resolveFindingThread` is the §7.5 adapter
@@ -174,23 +82,11 @@ export type ReviewerResolution =
       kind: "ok";
       reviewer: ReconcileReviewer;
       paused: boolean;
-      /**
-       * This App's canonical `<slug>[bot]` — NOT ownership evidence: publication
-       * discovery proves authorship from the capture's authenticated
-       * `viewerDidAuthor`, because login text and bodies are both copyable.
-       */
       botLogin: string;
     }
   | {
       kind: "unavailable";
       reason: ReviewerUnavailableReason;
-      /**
-       * Digest of the ENCRYPTED credential envelope this pair is suspended
-       * on (§7.6 / P67-QC-007). It is not a secret (the envelope is already
-       * ciphertext) and lets a later pass tell "same credentials, same
-       * mismatch" from "the operator corrected the credentials" without
-       * touching the network. Absent when no credential row was reachable.
-       */
       credentialFingerprint?: string;
     };
 
@@ -201,9 +97,7 @@ export type ReviewerResolution =
  * remaining time; the run deadline is the ceiling either way.
  */
 export type ReconcileTransport = {
-  /** Abort a single request after at most this many ms (≥1). */
   boundMs: () => number;
-  /** Wrapped fetch — the ONLY transport the built reviewer may use. */
   fetchImpl: CommenterFetch;
 };
 
@@ -224,10 +118,6 @@ export type ReviewerFactory = (input: {
   appId: string;
   installationId: number;
   transport?: ReconcileTransport;
-  /**
-   * The run's clock. The resolved reviewer's store faces use it too, so a
-   * journal claim taken with this clock is verified against the same one.
-   */
   now?: () => number;
 }) => Promise<ReviewerResolution>;
 
@@ -240,7 +130,6 @@ type RoutingRow = {
   private_key_enc: string;
 };
 
-/** The exact-pair routing query (also the re-enable probe — D1 only). */
 async function routingRow(db: D1Like, appId: string, installationId: number): Promise<RoutingRow | null> {
   return db
     // shortcut: tenant-bypass — reconciler credential routing by exact (bot_id,
@@ -272,10 +161,6 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
   if (row === null) return { kind: "unavailable", reason: "missing" };
   if (row.deleted_at !== null) return { kind: "unavailable", reason: "deleted" };
   if (row.status !== "active") return { kind: "unavailable", reason: "disabled" };
-  // The suspension fingerprint binds a durable identity-mismatch suspension
-  // to the credentials it was proven against (§7.6 / P67-QC-007): digesting
-  // the ENCRYPTED envelope means the value can be persisted and compared
-  // without ever exposing or re-deriving the private key.
   const credentialFingerprint = await sha256Hex(row.private_key_enc);
   try {
     const pem = await createSecretbox(env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
@@ -284,8 +169,6 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
     );
     const commenter = createReviewCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem }, {
       db,
-      // ONE clock: the publication authority this lane proves at dispatch is
-      // the journal claim taken with the run's clock, not the wall clock.
       ...(now === undefined ? {} : { nowMs: now }),
       ...(transport === undefined ? {} : { fetchImpl: transport.fetchImpl }),
     });
@@ -293,11 +176,6 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
     if (resolveFindingThread === undefined || getAppIdentity === undefined) {
       return { kind: "unavailable", reason: "decrypt-failed", credentialFingerprint };
     }
-    // The single purpose-scoped App-auth construction point also proves the
-    // LIVE identity (spec §7.5's JWT `GET /app`): the row's `github_app_id`
-    // must be the App the credentials actually authenticate as, with a
-    // nonblank slug. Any disagreement — wrong key, rotated credential,
-    // substituted pair — means no mutation is authorized for this pair.
     const identity = await getAppIdentity();
     if (identity === null || identity.githubAppId !== row.github_app_id) {
       return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint };
@@ -305,9 +183,6 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
     return {
       kind: "ok",
       paused: row.review_enabled === 0,
-      // The authenticated `<slug>[bot]` login is the EXACT App-ownership
-      // proof (spec §7.5); recovery must never fall back to a generic
-      // `[bot]` suffix (P67-QC-011).
       botLogin: `${identity.slug}[bot]`,
       reviewer: {
         planReviewUpsert: (input) => commenter.planReviewUpsert(input),
@@ -320,14 +195,10 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
       },
     };
   } catch {
-    // missing key / tampered envelope — fail closed
     return { kind: "unavailable", reason: "decrypt-failed", credentialFingerprint };
   }
 };
 
-// ---------------------------------------------------------------------------
-// Log + deps
-// ---------------------------------------------------------------------------
 
 /** Structured JSON-lines log (warn for failures, one info summary line). */
 export type ReconcileLog = {
@@ -341,41 +212,19 @@ export const defaultReconcileLog: ReconcileLog = {
 };
 
 export type LifecycleReconcileDeps = {
-  /** Injectable clock (integer Unix ms); defaults to Date.now. */
   now?: () => number;
-  /** Injectable reviewer factory; defaults to the exact-pair D1 routing above. */
   reviewer?: ReviewerFactory;
-  /** Injectable log; defaults to structured JSON lines. */
   log?: ReconcileLog;
 };
 
-// ---------------------------------------------------------------------------
-// Run budget
-// ---------------------------------------------------------------------------
 
 type RunBudget = {
   settings: ReconcileValues;
-  /** ACTUAL requests issued this run (mutated only at the transport). */
   spent: number;
   deadline: number;
-  /**
-   * Admission ceiling for the lane currently running (§7.11.1: "Publication
-   * lane gets at most half the run budget before the thread lane"). Applied
-   * to actual requests at the transport so the lane share is a real bound,
-   * not merely a scheduling hint.
-   */
   laneCap: number;
 };
 
-/**
- * Non-mutating preflight admission (§7.11.1). The per-operation envelopes
- * below are ESTIMATES used only to decide whether an operation may start —
- * they are never charged, because the transport meters every ACTUAL request
- * and charging both would double-count (an operation estimated at 3 that
- * issues 11 real requests must cost 11, not 14). A false return stops the
- * lane WITHOUT spending an attempt — no claim, no GitHub call, the row
- * simply stays due.
- */
 function canSpend(budget: RunBudget, nowMs: number, cost: number, laneScoped: boolean): boolean {
   if (budget.spent + cost > budget.settings.lifecycleMaxRequests) return false;
   if (laneScoped && budget.spent + cost > budget.settings.lifecyclePublicationLaneMaxRequests) return false;
@@ -384,37 +233,15 @@ function canSpend(budget: RunBudget, nowMs: number, cost: number, laneScoped: bo
   return true;
 }
 
-/** Charge one ACTUAL request (called only from the transport choke point). */
 function reserve(budget: RunBudget, cost: number): void {
   budget.spent += cost;
 }
 
-/**
- * The enforced per-request transport bound AND the actual-request meter
- * (§7.11.1: "each request ≤5s and additionally capped by remaining run
- * deadline"; ≤80 requests/run). Every request gets its own abort signal at
- * `min(5s, time left in the run)` — computed at the request, so a request
- * issued late in the run cannot exceed the run's remaining time. A
- * caller-supplied signal is preserved by combining signals rather than being
- * replaced. This is the same runtime primitive the sweep's alert webhook
- * uses (`AbortSignal.timeout`).
- *
- * Metering lives HERE, at the single choke point every request funnels
- * through (identity probe, token mint, pagination pages, mutations alike),
- * because per-operation reservations are only PRE-FLIGHT ESTIMATES: one
- * `octokit.paginate` call or one 5-page thread scan issues many real HTTP
- * requests that a per-operation cost can never bound. Reserving per request
- * is what makes the ≤80 cap true. A request that cannot be admitted FAILS
- * BEFORE DISPATCH (the throw below) — the lane's caller-visible behavior is
- * unchanged: a throw is typed by the lane into a deferral, so the work
- * stays durable and due rather than being lost or silently unmetered.
- */
 function buildTransport(budget: RunBudget, now: () => number): ReconcileTransport {
   const boundMs = (): number => Math.max(1, Math.min(budget.settings.lifecyclePerRequestMs, budget.deadline - now()));
   return {
     boundMs,
     fetchImpl: (input, init) => {
-      // Admission + accounting for THIS request, atomically before dispatch.
       if (!canSpend(budget, now(), 1, false)) {
         return Promise.reject(
           new RecoveryBudgetRefused(
@@ -430,20 +257,15 @@ function buildTransport(budget: RunBudget, now: () => number): ReconcileTranspor
   };
 }
 
-/** Backoff for the NEXT attempt after `attemptsAfter` consumed attempts. */
 function backoffFor(attemptsAfter: number): number {
   const index = Math.min(Math.max(attemptsAfter - 1, 0), LIFECYCLE_BACKOFF_MS.length - 1);
   return LIFECYCLE_BACKOFF_MS[index]!;
 }
 
-/** Structured give-up line — App/scope/work ID + reason, no payload/secret. */
 function giveUpLine(scope: Scope, workId: string, attempts: number, reason: string): string {
   return `gave up after ${attempts} attempts (app=${scope.appId}, installation=${scope.installationId}, owner=${scope.owner}, repo=${scope.repo}, pr=${scope.prNumber}, work=${workId}): ${reason}`;
 }
 
-// ---------------------------------------------------------------------------
-// The reconciler
-// ---------------------------------------------------------------------------
 
 /**
  * One bounded M8 recovery pass. Never throws (the §7.11 composition
@@ -472,24 +294,9 @@ export async function reconcileReviewLifecycle(
     const now = deps.now ?? (() => Date.now());
     const budget: RunBudget = { settings: settings.values, spent: 0, deadline: now() + settings.values.lifecycleRunBudgetMs, laneCap: settings.values.lifecycleMaxRequests };
     const reviewerFactory = deps.reviewer ?? productionReviewerFactory;
-    // The enforced per-request bound (§7.11.1): every request made by a
-    // reviewer this run builds is aborted at min(5s, remaining run time).
     const transport = buildTransport(budget, now);
-    // Per-pair resolution cache: one routing pass (and at most ONE bulk
-    // suspension) per App pair per run.
     const reviewerCache = new Map<string, Promise<ReviewerResolution>>();
 
-    // 0. Exact-App re-enable policy (D1 only, no credentials):
-    //    - a DISABLED App resumes by status alone once its row is active
-    //      again (§7.6 "Re-enable allows due suspended rows to resume with
-    //      the same IDs and fresh fencing");
-    //    - every other suspension kind (identity mismatch, missing mapping,
-    //      deleted App, credential failure) is DURABLE until an exact-App
-    //      live identity proof succeeds (P67-QC-007). Unchanged credentials
-    //      are proven unchanged by the recorded encrypted-envelope digest —
-    //      the pair is left alone with no probe and no churn — and the
-    //      proof is attempted again only after the credential envelope
-    //      actually changed (the operator's correction).
     const suspendedPairs = await listSuspendedLifecycleApps(db, budget.settings.lifecycleSelectLimit);
     for (const pair of suspendedPairs) {
       try {
@@ -499,14 +306,8 @@ export async function reconcileReviewLifecycle(
         if (pair.requiresIdentityProof) {
           const currentFingerprint = row === null ? null : await sha256Hex(row.private_key_enc);
           if (currentFingerprint === null || currentFingerprint === pair.credentialFingerprint) {
-            // Same credentials that already proved the mismatch (or no
-            // evidence they changed): stay suspended, issue nothing.
             continue;
           }
-          // Credentials changed — the operator's correction is the one event
-          // that reopens the identity question. The probe is a real request,
-          // so it passes the same whole-run admission gate as any other
-          // (§7.11.1): unaffordable → the pair simply stays suspended.
           if (!canSpend(budget, now(), IDENTITY_REQUESTS, false)) continue;
           const proof = await reviewerFactory({
             db,
@@ -517,8 +318,6 @@ export async function reconcileReviewLifecycle(
             now,
           });
           if (proof.kind !== "ok") {
-            // Still mismatched / still unusable: re-stamp BOTH lanes with the
-            // CURRENT fingerprint so the next pass can tell again.
             const suspension = {
               kind: proof.reason,
               reason: UNAVAILABLE_REASON_TEXT[proof.reason],
@@ -530,8 +329,6 @@ export async function reconcileReviewLifecycle(
             await suspendResolutionRecovery(db, pair, suspension, now());
             continue;
           }
-          // Identity proved against the corrected credentials: cache it so
-          // this run's lanes reuse the proof instead of probing again.
           reviewerCache.set(`${pair.appId}:${pair.installationId}`, Promise.resolve(proof));
         }
         await reenableLifecycleForApps(db, [pair], now());
@@ -543,28 +340,17 @@ export async function reconcileReviewLifecycle(
       }
     }
 
-    // 1. Publication lane — at most half the run's request budget. The cap is
-    // applied to ACTUAL requests at the transport (a paginating scan or a
-    // token mint can issue more than its operation estimate), so the half
-    // share is a real bound for this lane rather than a scheduling hint.
     budget.laneCap = budget.settings.lifecyclePublicationLaneMaxRequests;
     await reconcilePublications(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
-    // 1b. Post-apply line lane (spec §7.9a condition 2) — the same half share:
-    // applied publications that still owe a line batch, or owe its capture.
     await reconcileLineBatches(db, now, budget, reviewerFactory, env, transport, reviewerCache, log, summary);
 
-    // 2. Thread lane — the remaining run budget (its own ≤15-request
-    // per-operation envelope is the admission estimate; the actual requests
-    // are metered under the whole-run cap).
     budget.laneCap = budget.settings.lifecycleMaxRequests;
     await reconcileResolutions(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
     log.info({ event: "ops_lifecycle_reconcile", ...summary }, "lifecycle reconcile pass complete");
     return summary;
   } catch (error) {
-    // Throw-proof wrapper (§7.11): a recovery failure never escapes into
-    // `scheduled`; the partial summary is returned to the composition.
     summary.errors += 1;
     log.warn(
       { event: "ops_lifecycle_reconcile_failed", detail: error instanceof Error ? error.message : String(error) },
@@ -574,26 +360,8 @@ export async function reconcileReviewLifecycle(
   }
 }
 
-/**
- * The per-run reviewer cache key. Probes are cached per (app, installation)
- * pair, so every budget gate that needs to know whether a pair's identity
- * probe is already accounted builds this key the same way (lockstep).
- */
 const pairKeyOf = (scope: Scope): string => `${scope.appId}:${scope.installationId}`;
 
-/**
- * Resolve (and cache) the reviewer for a pair; on `unavailable` suspend the
- * pair's pending rows durably (once per pair per run — attempts untouched,
- * no cross-App substitution).
- *
- * Transport metering only. The live App-identity probe the factory runs
- * (`GET /app`) is a GitHub request like any other, so it is metered at the
- * transport choke point (`buildTransport`) together with every later request
- * this pair issues; nothing is charged here. Charging a per-operation
- * estimate HERE on top of the real requests would double-count the probe and
- * shrink the run's true §7.11.1 allowance. A cached pair resolves without a
- * second probe, so it also costs nothing.
- */
 async function reviewerForPair(
   db: D1Like,
   env: ScheduledEnv,
@@ -611,15 +379,8 @@ async function reviewerForPair(
   if (cached !== undefined) return cached;
   const resolution = (async () => {
     try {
-      // The factory proves the live App identity before returning; that probe
-      // (and every other real request the pair issues) is metered at the
-      // transport choke point, so no per-operation reservation is charged
-      // here — reserving an estimate AND metering the real requests would
-      // double-count and shrink the run's true allowance.
       return await reviewerFactory({ db, env, appId: scope.appId, installationId: scope.installationId, transport, now });
     } catch (error) {
-      // A throwing factory is a credential-path failure — fail closed to a
-      // durable suspension rather than letting it escape the lane.
       log.warn(
         { event: "ops_lifecycle_reviewer_factory_failed", detail: error instanceof Error ? error.message : String(error) },
         "reviewer factory threw — pair suspended",
@@ -650,11 +411,6 @@ async function reviewerForPair(
   return settled;
 }
 
-/**
- * Operator-facing suspension reasons (no payload/secret). An App-identity
- * mismatch gets its own line so the operator can tell a wrong/rotated
- * credential apart from a disabled or deleted App.
- */
 const UNAVAILABLE_REASON_TEXT: Record<ReviewerUnavailableReason, string> = {
   missing: "mapping missing",
   deleted: "deleted",
@@ -663,7 +419,6 @@ const UNAVAILABLE_REASON_TEXT: Record<ReviewerUnavailableReason, string> = {
   "identity-mismatch": "live App identity does not match the routed github_app_id — no GitHub mutation",
 };
 
-// --- publication lane -------------------------------------------------------
 
 async function reconcilePublications(
   env: ScheduledEnv,
@@ -679,22 +434,15 @@ async function reconcilePublications(
   const rows = await listPublicationRecovery(db, now(), budget.settings.lifecycleSelectLimit, budget.settings.lifecycleMaxAttempts);
   for (const row of rows) {
     summary.examined += 1;
-    // A definitively failed send is not re-sent by recovery (the operator
-    // retry retains that phase deliberately); applied/superseded pending
-    // rows are bookkeeping residue — examined, never re-worked.
     if (row.phase === "failed" || row.phase === "applied" || row.phase === "superseded") continue;
     if (row.phase === "confirmed") {
       await applyConfirmedPublication(db, now, budget, row, summary);
       continue;
     }
-    // prepared / sending / unknown need GitHub — route credentials first.
-    // The identity probe and every other real request are metered at the
-    // transport; this gate only decides whether even ONE request could still
-    // fit the run, so an exhausted run stops the lane before any claim.
     const scope = row.payload.scope;
-    if (!canSpend(budget, now(), 1, true)) continue; // stays due, no claim
+    if (!canSpend(budget, now(), 1, true)) continue;
     const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
-    if (resolved.kind === "unavailable") continue; // pair suspended durably
+    if (resolved.kind === "unavailable") continue;
     if (row.phase === "prepared") {
       await sendPreparedPublication(db, now, budget, resolved, row, log, summary);
     } else {
@@ -703,14 +451,6 @@ async function reconcilePublications(
   }
 }
 
-/**
- * A recovery apply COMPLETES the attempt that staged the publication. The
- * settlement statement is planned from the attempt's durable obligations
- * before the batch and rides the apply's own transaction, so the applied mark
- * and the attempt's end cannot diverge — and when an obligation is still open
- * (an open Check), the statement records the publication effect WITHOUT
- * `settled_ms`. A pre-deploy row carries no `attemptId`: there is no attempt.
- */
 async function settlementTailStatements(
   db: D1Like,
   row: PublicationRow,
@@ -730,12 +470,6 @@ async function settlementTailStatements(
   return statement === null ? [] : [statement];
 }
 
-/**
- * The crashed-window core: a confirmed publication whose local apply never
- * completed. Proof-gated, idempotent, and PURELY local — no GitHub calls
- * and no reviewer needed ("after proof, local apply may proceed even if
- * GitHub is unavailable"); the frozen pause policy keeps this lane running.
- */
 async function applyConfirmedPublication(
   db: D1Like,
   now: () => number,
@@ -744,7 +478,7 @@ async function applyConfirmedPublication(
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
   const lease = await claimPublication(db, row.id, HOLDER, now(), row.phase);
-  if (lease === null) return; // another invocation owns the live lease
+  if (lease === null) return;
   try {
     const at = now();
     const tail = await settlementTailStatements(db, row, at);
@@ -759,21 +493,6 @@ async function applyConfirmedPublication(
   }
 }
 
-/**
- * §7.9a condition 2's recovery half: the post-apply line lane. It selects
- * `applied` publications that still carry an uncaptured line intent and either
- *   - records the dispatch intent and sends the batch under the SAME conditional
- *     transition the foreground uses (exactly one lane wins), or
- *   - finds an intent already recorded and performs read-only discovery —
- *     never a second send.
- *
- * The selection is bounded, so one query cannot guarantee a resolvable batch
- * behind unresolvable ones is reached. Whenever a pass retires a batch (its
- * discovery bound is spent), the lane re-queries: the retired rows are gone
- * from the next result, so the pass keeps moving through the backlog and a
- * fresh batch is reached in THIS pass. `handled` remembers what this pass
- * already touched, so a row that stays eligible is not processed twice.
- */
 async function reconcileLineBatches(
   db: D1Like,
   now: () => number,
@@ -793,10 +512,7 @@ async function reconcileLineBatches(
       if (handled.has(row.id)) continue;
       handled.add(row.id);
       const scope = row.payload.scope;
-      if (!canSpend(budget, now(), 1, true)) continue; // stays due, no claim
-      // ONE conditional transition decides who sends: the durable dispatch
-      // intent. `null` means the batch was already dispatched (or another lane
-      // holds it) — then the only work left is read-only discovery.
+      if (!canSpend(budget, now(), 1, true)) continue;
       const lease = await recordLineDispatchIntent(db, row.id, `recovery-lines:${row.id}`, now());
       if (lease === null) {
         const state = await readLineBatchState(db, row.id);
@@ -807,8 +523,6 @@ async function reconcileLineBatches(
         try {
           recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
         } catch (error) {
-          // A budget refusal never dispatched, so it observed nothing and spends
-          // no attempt: the row stays exactly where it was (spec §7.11.1).
           if (isBudgetRefusal(error)) {
             log.info(
               { event: "ops_lifecycle_line_discovery_deferred", detail: `publication=${row.id}: request budget exhausted` },
@@ -816,8 +530,6 @@ async function reconcileLineBatches(
             );
             continue;
           }
-          // Any other thrown read observed nothing: one failed pass under the
-          // read-scope reason, never a capture.
           if (await noteLineDiscoveryFailure(db, row, "readback-scope", state.captures, now(), budget.settings.lifecycleMaxAttempts, log)) retired += 1;
           log.warn(
             { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
@@ -835,12 +547,8 @@ async function reconcileLineBatches(
           );
         }
         if (newlyCaptured > 0) {
-          // A NEW id is progress — the count means consecutive attempts that
-          // saved nothing, not consecutive incomplete ones.
           await resetLineDiscoveryFailures(db, row.id);
         } else if (recovered.failure !== "budget-refused") {
-          // A budget refusal observed nothing and spends no attempt. A write that
-          // persisted nothing — a throw included — IS a failed attempt.
           const reason: LineDiscoveryFailure =
             recovered.captured || recovered.failure === undefined ? "capture-failed" : recovered.failure;
           if (await noteLineDiscoveryFailure(db, row, reason, state.captures, now(), budget.settings.lifecycleMaxAttempts, log)) retired += 1;
@@ -883,8 +591,6 @@ async function reconcileLineBatches(
         }
         outcome = "sent";
       } catch (error) {
-        // A definitive pre-send refusal proves nothing was sent; anything else
-        // may have landed, so the intent is kept and only discovery may follow.
         if (error instanceof PreparedSendRejected) outcome = "refused";
         log.warn(
           { event: "ops_lifecycle_line_send_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
@@ -898,17 +604,6 @@ async function reconcileLineBatches(
   }
 }
 
-/**
- * ONE discovery pass that captured nothing: the durable count moves toward the
- * bound and, at it, the batch leaves the eligible set with the reason this
- * pass observed. Reported ONCE — that transition is the report; the selector
- * never returns the row again — and the row, its count and its reason stay
- * readable, so an operator can see why recovery stopped. Returns true only
- * when this call retired the batch (the caller re-queries the selection then).
- *
- * `observedCaptures` is the capture state this pass was taken against; a
- * capture that landed since (full or partial) makes the write a no-op.
- */
 async function noteLineDiscoveryFailure(
   db: D1Like,
   row: PublicationRow,
@@ -930,7 +625,6 @@ async function noteLineDiscoveryFailure(
   return true;
 }
 
-/** The exact frozen batch of one applied publication. */
 function lineInputOf(row: PublicationRow): PostPreparedLineCommentsInput {
   const scope = row.payload.scope;
   return {
@@ -945,9 +639,6 @@ function lineInputOf(row: PublicationRow): PostPreparedLineCommentsInput {
   };
 }
 
-/** The identity a publication was admitted under, resolved from its FROZEN
- *  evidence — the staged payload's launch-attempt id plus that row's
- *  `(attempt_key, generation)` pair. Never a recency lookup. */
 type AdmittedAttempt =
   | { kind: "check"; attemptId: string }
   | { kind: "no-check" }
@@ -968,22 +659,11 @@ async function admittedAttemptOf(db: D1Like, admittedAttemptId: string | undefin
     .bind(launch.attempt_key, launch.attempt_generation)
     .first<{ id: string }>();
   if (check === null) {
-    // The frozen identity names this attempt, and it never created a Check
-    // run (no Checks surface): the lane the foreground also uses — the
-    // journal claim — is its one authority. Rows are retained, so absence is
-    // not a lost link.
     return { kind: "no-check" };
   }
   return { kind: "check", attemptId: check.id };
 }
 
-/**
- * Send a prepared publication once, with the same identity (§7.7 failure
- * matrix: "Staged, before send → M8 sends once with same identity when
- * enabled/current"). Order: pause gate → age gate → budget → read-only
- * staleness pre-check (supersede instead of a stale send over a newer
- * round) → conditional claim → exact-body send → proof → apply.
- */
 async function sendPreparedPublication(
   db: D1Like,
   now: () => number,
@@ -994,19 +674,10 @@ async function sendPreparedPublication(
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
   const scope = row.payload.scope;
-  // Frozen pause policy: no NEW primary publication while paused — the row
-  // stays due (no attempt spent) for the re-enabled future.
   if (resolved.paused) return;
-  // Age gate: only a settled prepared row (≥60s old) is recovery-sent; the
-  // consumer owns younger ones.
   const createdMs = await getPublicationCreatedMs(db, row.id);
   if (createdMs === null || now() - createdMs < PREPARED_SEND_MIN_AGE_MS) return;
-  // Preflight admission only — the plan/send requests are metered as they are
-  // actually issued at the transport, so nothing is charged twice.
-  if (!canSpend(budget, now(), PLAN_REQUESTS + SEND_REQUESTS, true)) return; // remains due, no attempt
-  // Read-only staleness pre-check: never send a stale publication over a
-  // newer round. A pre-check failure is typed "stay due" — no claim, no
-  // attempt.
+  if (!canSpend(budget, now(), PLAN_REQUESTS + SEND_REQUESTS, true)) return;
   let plan: UpsertPlan;
   try {
     plan = await resolved.reviewer.planReviewUpsert({
@@ -1033,9 +704,6 @@ async function sendPreparedPublication(
     }
     return;
   }
-  // §7.9a condition 3: a degraded UPDATE reuses the comment a cleanup may be
-  // deleting. The same target exclusion the staging path holds covers this
-  // recovery send (and a target whose delete is unresolved refuses it).
   const degradedTarget =
     row.payload.kind === "degraded" && row.payload.targetCommentId !== null
       ? { scope, commentId: row.payload.targetCommentId }
@@ -1060,15 +728,9 @@ async function sendPreparedPublication(
     if (degradedTarget !== null && degradedTargetLease !== null) {
       await releaseDegradedTarget(db, { ...degradedTarget, lease: degradedTargetLease, nowMs: now(), keep: false });
     }
-    return; // claimed elsewhere between pre-check and claim
+    return;
   }
   try {
-    // §7.9a condition 1: a Check-backed publication's recovery send must meet
-    // the foreground send on the SAME per-action lease. That key is the attempt
-    // the publication was ADMITTED under — resolved from the launch row's
-    // frozen pair, never "the newest Check linked to this publication". An
-    // identity that cannot be resolved refuses; a fallback would be a second
-    // authority.
     const admitted = await admittedAttemptOf(db, row.payload.admittedAttemptId);
     if (admitted.kind === "unresolved") {
       throw new PublicationAuthorityUnavailable(`${admitted.reason} — nothing was sent`);
@@ -1084,18 +746,12 @@ async function sendPreparedPublication(
       targetCommentId: row.payload.targetCommentId,
       body: row.payload.body,
       publicationId: row.id,
-      // The per-action lease is the one authority when the admitted attempt
-      // has a Check row; the journal claim is the authority for the lane that
-      // has no Check attempt to key one on (and the foreground uses the same
-      // one there).
       journalClaim: lease,
       ...(admitted.kind === "check" ? { attemptId: admitted.attemptId } : {}),
     };
     let commentId: number;
     if (row.payload.kind === "degraded") {
       const sent = await resolved.reviewer.postPreparedDegraded(target);
-      // 0 = posted but the response carried no id — the typed sentinel
-      // ("sent, id uncaptured"); §7.5 discovery binds the exact comment later.
       commentId = sent.commentId ?? 0;
     } else {
       const sent = await resolved.reviewer.postPreparedReview(target);
@@ -1125,9 +781,6 @@ async function sendPreparedPublication(
     await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, "post-proof apply did not complete", summary, false);
   } catch (error) {
     if (error instanceof PublicationAuthorityUnavailable) {
-      // Another lane holds this action's lease and is the sender: nothing was
-      // sent here, so the claim is unspent. Hand the row back as due instead
-      // of recording a definitive failure we never observed (§7.9a).
       const restored = await releaseUnspentPublicationClaim(db, row.id, lease, now());
       if (!restored) {
         summary.errors += 1;
@@ -1144,13 +797,6 @@ async function sendPreparedPublication(
       return;
     }
     if (error instanceof PreparedSendRejected) {
-      // A definitive pre-send rejection (§7.7): no request left the Worker,
-      // so `failed` is the truthful durable phase — never the post-attempt
-      // `unknown`. Payload, digest and attempts are retained; recovery never
-      // re-sends a failed row (the phase is skipped on selection). The
-      // summary's frozen shape (§7.11.1) has no `failed` field, so this
-      // terminal outcome is reported through `errors`, exactly like the
-      // other terminal give-up paths.
       const marked = await markPublicationFailed(db, row.id, lease, error.message, now());
       if (marked) {
         log.warn(
@@ -1162,18 +808,8 @@ async function sendPreparedPublication(
       return;
     }
     if (isBudgetRefusal(error)) {
-      // The allowance refused a request BEFORE dispatch (§7.11.1: "budget
-      // exhaustion is not a failed attempt"). This send never left the
-      // Worker, so the claim is unwound — the row returns to due `prepared`
-      // with its attempt returned and stays re-sendable next run. Recording
-      // post-attempt `unknown` here would strand a publication that was
-      // never dispatched (P67-QC-018), and spending an attempt would charge
-      // a run's exhaustion against the publication.
       const restored = await releaseUnspentPublicationClaim(db, row.id, lease, now());
       if (!restored) {
-        // The claim was no longer ours (another invocation moved or released
-        // the row first). Report rather than assume the restore applied; the
-        // row keeps whatever truthful state its new owner gave it.
         summary.errors += 1;
         log.warn(
           { event: "ops_lifecycle_publication_claim_restore_missed", detail: `publication=${row.id}` },
@@ -1187,8 +823,6 @@ async function sendPreparedPublication(
       );
       return;
     }
-    // The send MAY have landed (§7.7): the honest phase is unknown —
-    // read-only discovery only, never a blind second create.
     await settleFailedPublicationAttempt(db, now, budget.settings.lifecycleMaxAttempts, row, lease, error instanceof Error ? error.message : String(error), summary, true);
   } finally {
     if (degradedTarget !== null && degradedTargetLease !== null) {
@@ -1197,19 +831,6 @@ async function sendPreparedPublication(
   }
 }
 
-/**
- * Read-only discovery for `sending`/`unknown` rows (§7.7 "Remote unknowns"):
- * scan the PR's bounded newest issue comments for the EXACT prepared body
- * (marker + digest — body equality implies both). Ownership is proven from the
- * AUTHENTICATED provenance the capture carries for this installation token
- * (GraphQL `viewerDidAuthor`, §7.5 / P67-QC-011) — never from login text and
- * never from a generic `[bot]` suffix. The body embeds an opaque publication
- * UUID, so the risk is low either way, but App-scoped ownership is the contract
- * the rest of the resolve path already enforces. A hit is proof: persist it and
- * apply the saved payload without the model. A miss defers with backoff —
- * never a blind second create; the cap leaves it local-error for operator
- * inspection.
- */
 async function discoverUncertainPublication(
   db: D1Like,
   now: () => number,
@@ -1219,18 +840,16 @@ async function discoverUncertainPublication(
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
   const scope = row.payload.scope;
-  if (!canSpend(budget, now(), DISCOVERY_REQUESTS, true)) return; // stays unknown/due, no attempt
+  if (!canSpend(budget, now(), DISCOVERY_REQUESTS, true)) return;
   const lease = await claimPublication(db, row.id, HOLDER, now(), row.phase);
-  if (lease === null) return; // another invocation owns discovery
+  if (lease === null) return;
   try {
     const discussion = await resolved.reviewer.listDiscussion({
       installationId: scope.installationId,
       owner: scope.owner,
       repo: scope.repo,
       prNumber: scope.prNumber,
-      threads: [], // issue comments only — the publication lives on the PR conversation
-      // The comment this lane is looking for IS one of our own publications,
-      // so the capture must not hide it from the walk.
+      threads: [],
       includeOwnPublications: true,
     });
     const hit = discussion.items.find(
@@ -1272,13 +891,6 @@ async function discoverUncertainPublication(
   }
 }
 
-/**
- * One failed publication attempt: backoff (1/2/4/8/16 min) or, at the
- * 5-attempt cap, a terminal durable local-error with the structured
- * App/scope/work-ID line — the row is retained for operator inspection,
- * never deleted. Budget exhaustion never reaches this path (no attempt was
- * spent).
- */
 async function settleFailedPublicationAttempt(
   db: D1Like,
   now: () => number,
@@ -1287,10 +899,9 @@ async function settleFailedPublicationAttempt(
   lease: Lease,
   reason: string,
   summary: LifecycleReconcileSummary,
-  /** true = the attempt was an uncertain send/discovery → phase `unknown`. */
   uncertain: boolean,
 ): Promise<void> {
-  const attemptsAfter = row.attempts + 1; // the claim counted exactly one
+  const attemptsAfter = row.attempts + 1;
   if (attemptsAfter >= maxAttempts) {
     await markPublicationLocalError(db, row.id, lease, giveUpLine(row.payload.scope, row.id, attemptsAfter, reason), now());
     summary.errors += 1;
@@ -1304,7 +915,6 @@ async function settleFailedPublicationAttempt(
   summary.errors += 1;
 }
 
-// --- thread lane ------------------------------------------------------------
 
 async function reconcileResolutions(
   env: ScheduledEnv,
@@ -1319,28 +929,16 @@ async function reconcileResolutions(
 ): Promise<void> {
   const rows = await listResolutionRecovery(db, now(), budget.settings.lifecycleSelectLimit, budget.settings.lifecycleMaxAttempts);
   for (const { associationId, scope } of rows) {
-    // Preflight admission BEFORE any claim: one operation may spend up to the
-    // §7.11.1 ≤15-request thread envelope (estimate only — the ACTUAL requests
-    // are metered at the transport). A false gate stops the lane WITHOUT a
-    // claim or an attempt — the row simply stays due (§7.11.1: budget
-    // exhaustion is not a failed attempt).
     if (!canSpend(budget, now(), budget.settings.lifecycleThreadOperationRequests, false)) return;
     summary.examined += 1;
-    // Pair credentials come FIRST; the §7.5 surface claims and counts its
-    // attempt only inside `resolveFindingThread`, which the admission above
-    // precedes.
     const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
-    if (resolved.kind === "unavailable") continue; // pair suspended durably
-    // A paused App keeps "previously-authorized resolution retry" running
-    // (frozen pause policy) — no extra gate here.
+    if (resolved.kind === "unavailable") continue;
     const work = await getResolutionRecoveryRow(db, associationId);
-    if (work === null) continue; // row vanished (operator action) — nothing to drive
+    if (work === null) continue;
     let verified;
     try {
       verified = JSON.parse(work.verifiedJson);
     } catch {
-      // A corrupt snapshot can never satisfy the §7.5 fences — terminal
-      // visible local-error instead of an eternal retry loop.
       await markResolutionLocalError(db, associationId, giveUpLine(work.scope, associationId, work.attempts, "stored verified snapshot is unreadable"), now());
       summary.errors += 1;
       continue;
@@ -1352,7 +950,7 @@ async function reconcileResolutions(
           summary.resolved += 1;
           break;
         case "abandoned":
-          break; // terminal; the §7.5 surface persisted the state + reason
+          break;
         case "needs-recheck":
           await recordNeedsRecheck(db, associationId, `resolve deferred to the next real review: ${outcome.reason}`, now());
           summary.unknown += 1;
@@ -1362,19 +960,11 @@ async function reconcileResolutions(
           break;
       }
     } catch (error) {
-      // The §7.5 surface contracts typed outcomes; a throw is an infra
-      // failure — attempt already consumed by its claim, so defer/cap.
       await settleFailedResolveAttempt(db, now, budget.settings.lifecycleMaxAttempts, associationId, work, error instanceof Error ? error.message : String(error), summary);
     }
   }
 }
 
-/**
- * One failed resolve attempt: backoff (1/2/4/8/16 min) after the attempt
- * the §7.5 claim consumed, or the terminal visible local-error at the
- * 5-attempt cap — structured App/scope/work-ID line, row retained (never
- * deleted).
- */
 async function settleFailedResolveAttempt(
   db: D1Like,
   now: () => number,
@@ -1384,7 +974,7 @@ async function settleFailedResolveAttempt(
   reason: string,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
-  const attemptsAfter = work.attempts + 1; // the §7.5 claim counted exactly one
+  const attemptsAfter = work.attempts + 1;
   if (attemptsAfter >= maxAttempts) {
     await markResolutionLocalError(db, associationId, giveUpLine(work.scope, associationId, attemptsAfter, reason), now());
     summary.errors += 1;

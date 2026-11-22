@@ -1,14 +1,3 @@
-/**
- * why: Failure-store tests (architect AL-1 + AL-6) — the
- * `review_failures` leaf (src/store/failure-store.ts) over the REAL
- * migration DDL (bun:sqlite D1 double, tests/store/helpers.ts).
- *
- * The store is an append-only event log: record (create) + listRecent
- * (read) are the only faces — update/delete do not exist by design
- * (audit-log semantics: the sweep counts rows, it never mutates
- * them). The best-effort contract lives at the consumer call sites; the
- * store itself fails loud.
- */
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -22,7 +11,6 @@ import {
 } from "../../src/store/failure-store";
 import { createMigratedTestD1, seedBot, seedTarget } from "./helpers";
 
-/** note: The target every recorded row is attributed to (its FK parent is seeded below). */
 const TARGET_ID = "target-failures";
 
 const BASE = {
@@ -34,10 +22,6 @@ const BASE = {
   head_sha: "0123456789abcdef0123456789abcdef01234567",
 };
 
-/**
- * note: A migrated DB with the target a failure row names. `target_id` is part of the
- * write contract, so every recording fixture needs its `review_targets` row.
- */
 function createFailureDb() {
   const db = createMigratedTestD1();
   seedBot(db, "bot-failures", 9201);
@@ -45,13 +29,6 @@ function createFailureDb() {
   return db;
 }
 
-/**
- * note: The `review_failures.error` shape a terminal admission drop carries
- * (`handleGuardHeld`, src/pipeline/consumer.ts), with an arbitrary retry count
- * and cap pair — these tests own the reader's grouping. The producer→reader
- * contract is pinned by the consumer test, which feeds the REAL writer row
- * through `countAdmissionDrops24h()` over the same database.
- */
 function dropError(reason: AdmissionDropReason): string {
   return `review dropped after 3 refused retries: ${reason} (system_cap 32, workspace_cap 4) — PR acme/widgets#42, head_sha ${BASE.head_sha}`;
 }
@@ -71,11 +48,6 @@ describe("createFailureStore", () => {
     });
     expect(typeof rows[0]!.id).toBe("string");
     expect(rows[0]!.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-    // invariant: BUG-03 created_at contract: `record` NEVER writes created_at — the
-    // column is ALWAYS the DDL DEFAULT `datetime('now')` (migration 0010),
-    // i.e. the `YYYY-MM-DD HH:MM:SS` UTC format the sweep's TEXT window
-    // comparison depends on. A producer writing ISO-8601/epoch would
-    // silently break the sweep — this pin is the guard.
     expect(rows[0]!.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 
@@ -107,10 +79,8 @@ describe("createFailureStore", () => {
     ids.push(...(db.raw.query("SELECT id FROM review_failures ORDER BY rowid").all() as Array<{ id: string }>).map((r) => r.id));
 
     const recent = await store.listRecent(3);
-    expect(recent.map((row) => row.id)).toEqual([ids[3]!, ids[2]!, ids[1]!]); // note: newest first
-    // note: Default limit covers everything written in this test.
+    expect(recent.map((row) => row.id)).toEqual([ids[3]!, ids[2]!, ids[1]!]);
     expect((await store.listRecent()).length).toBe(4);
-    // invariant: Same-second inserts keep a total order via rowid (first written = oldest).
     expect(recent[0]!.stage).toBe("pipeline");
   });
 
@@ -127,14 +97,10 @@ describe("createFailureStore", () => {
   test("countAdmissionDrops24h groups the terminal drops by reason over the trailing 24h", async () => {
     const db = createFailureDb();
     const store = createFailureStore(db);
-    // note: Three forced refusals of distinct reasons — the operator's contract.
     for (const reason of ["pr-held", "system-cap", "workspace-cap"] as const) {
       await store.record({ ...BASE, stage: "pipeline", error: dropError(reason) });
     }
-    // note: The fourth reason (admission storage fault) is counted on its own branch.
     await store.record({ ...BASE, stage: "pipeline", error: dropError("error") });
-    // invariant: Not admission drops: an ordinary pipeline failure, a drop-shaped error on
-    // another stage, and a reason token outside the closed vocabulary.
     await store.record({ ...BASE, stage: "pipeline", error: "comment post failed" });
     await store.record({ ...BASE, stage: "sandbox", error: dropError("system-cap") });
     await store.record({
@@ -142,8 +108,6 @@ describe("createFailureStore", () => {
       stage: "pipeline",
       error: "review dropped after 3 refused retries: not-a-reason (system_cap 0, workspace_cap 0)",
     });
-    // note: A drop outside the 24h window stays invisible. `record` never writes
-    // created_at, so the old row is seeded raw through the same table.
     db.raw
       .prepare(
         `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)
@@ -166,29 +130,20 @@ describe("createFailureStore", () => {
       "workspace-cap": 1,
       error: 1,
     });
-    // invariant: The reason vocabulary is closed: the operator's four buckets.
     expect(ADMISSION_DROP_REASONS).toEqual(["pr-held", "system-cap", "workspace-cap", "error"]);
   });
 
   test("countGithubRateLimited24h counts only the secondary prefix inside the trailing 24h", async () => {
     const db = createFailureDb();
     const store = createFailureStore(db);
-    // note: The metric's three in-window rows: the single catch's delivery failure
-    // and the degraded delete sweep's own `rate-limit` attribution — this count
-    // IS the metric, so no stage is excluded.
     await store.record({ ...BASE, stage: "pipeline", error: `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on comment update` });
     await store.record({ ...BASE, stage: "pipeline", error: `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on check update` });
     await store.record({ ...BASE, stage: "rate-limit", error: `${GITHUB_RATE_LIMIT_PREFIX}secondary limit on delete sweep` });
     const matchesOnly = await store.countGithubRateLimited24h();
     expect(matchesOnly).toBe(3);
 
-    // invariant: Not counted: the primary-limit prefix is its own words, and an ordinary
-    // failure carries neither prefix.
     await store.record({ ...BASE, stage: "pipeline", error: `${GITHUB_PRIMARY_RATE_LIMIT_PREFIX}primary limit on comment update` });
     await store.record({ ...BASE, stage: "pipeline", error: "comment post failed" });
-    // invariant: Matching rows outside the 24h window stay invisible. The count is a
-    // window-and-prefix predicate over the same index, so these decoys must
-    // leave its result exactly where the in-window matches put it.
     const oldRow = db.raw.prepare(
       `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?))`,
@@ -216,8 +171,6 @@ describe("createFailureStore", () => {
       .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_failures_pipeline_created'")
       .get() as { sql: string } | null;
     expect(index?.sql).toContain("WHERE stage = 'pipeline'");
-    // why: The read's own predicate shape must seek the partial index, not scan the
-    // `created_at` window and discard every non-pipeline stage row.
     const plan = (
       db.raw
         .query(

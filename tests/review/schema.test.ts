@@ -308,7 +308,6 @@ describe("parseReviewOutput", () => {
     const TALLY: PrTallyResult = {
       verdict: "needs fixes",
       scorePct: 45,
-      // note: Required since engine 4.0.0; scoreBand(45) === "fail" (< 60 floor).
       band: "fail",
       tally: { mustFix: 0, shouldFix: 2, mayFix: 0, nit: 1 },
       chatHeader: "**needs fixes** · 45%\n🔴 0 🟠 2 🔵 1",
@@ -318,17 +317,12 @@ describe("parseReviewOutput", () => {
       const r = parseReviewOutput(JSON.stringify({ ...VALID, tally: TALLY }));
       expect(r.ok).toBe(true);
       if (r.ok) {
-        // note: The local zod mirror (src/review/schema.ts) does not declare the
-        // engine's optional `band`, so it is stripped on parse; compare the
-        // fields the mirror round-trips.
         const { band: _band, ...roundTripped } = TALLY;
         expect(r.output.tally).toEqual(roundTripped);
       }
     });
 
     test("accepts a tally with and without mayFix (the engine field is optional)", () => {
-      // why: Pre-4.2 envelopes omit mayFix; readers treat absent as 0, so both
-      // shapes parse and a present one round-trips.
       const { mayFix: _absent, ...withoutMayFix } = TALLY.tally;
       const absent = parseReviewOutput(JSON.stringify({ ...VALID, tally: { ...TALLY, tally: withoutMayFix } }));
       expect(absent.ok).toBe(true);
@@ -368,7 +362,6 @@ describe("parseReviewOutput", () => {
   describe("incomplete verdict (four-token vocabulary)", () => {
     const FACT = { reason: "budget exhausted after 3 of 9 files", unscanned: ["src/b.ts", "src/c.ts"] };
     const INCOMPLETE: ReviewOutput = { ...VALID, verdict: "incomplete", incomplete: FACT };
-    /** note: Tally mirror of the incomplete envelope: the fact echoed verbatim. */
     const TALLY = {
       verdict: "incomplete",
       scorePct: 45,
@@ -531,7 +524,7 @@ describe("capFindings (Phase 5 B4, merge-class priority)", () => {
   test("returns the input unchanged with omitted=0 when within the cap", () => {
     const output = { ...base, findings: [finding("nit", "a"), finding("should-fix", "b")] };
     const { output: out, omitted } = capFindings(output);
-    expect(out).toBe(output); // note: same reference, no copy
+    expect(out).toBe(output);
     expect(omitted).toBe(0);
   });
 
@@ -634,7 +627,7 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
   test("a suggestion fence crossing the body budget is dropped whole, prose survives", () => {
     const prose = "P".repeat(1500);
     const fence = ["```suggestion", "C".repeat(800), "```"].join("\n");
-    const body = prose + "\n\n" + fence; // note: fence starts before FINDING_BODY_MAX and ends after it // 2502 chars, fence straddles FINDING_BODY_MAX
+    const body = prose + "\n\n" + fence;
     const clamped = clampFindingSizes({ ...base, findings: [finding("t", body)] });
     const clampedBody = clamped.findings[0]!.body;
     expect(clampedBody.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
@@ -644,8 +637,6 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
   });
 
   test("a fence whose closing fence ends exactly at FINDING_BODY_MAX is dropped whole, prose kept", () => {
-    // why: Span end (just past the closing fence line) lands exactly on the budget, so
-    // the final truncation would otherwise cut into that closing fence.
     const code = "const x = 1;";
     const pad = FINDING_BODY_MAX - 21 - code.length;
     const body = `${"P".repeat(pad)}\n\n\`\`\`suggestion\n${code}\n\`\`\`\n\ntail`;
@@ -653,7 +644,6 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
     expect(clampedBody).toBe(`${"P".repeat(pad)}\n\n\ntail`);
     expect(clampedBody).not.toContain("```");
     expect(clampedBody).not.toContain("…");
-    // invariant: Clamping the already-clamped body is a no-op, so the boundary case stays idempotent.
     expect(clampFindingSizes({ ...base, findings: [finding("t", clampedBody)] }).findings[0]!.body).toBe(clampedBody);
   });
 
@@ -708,13 +698,11 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
   });
 
   test("a suggestion-only body clamps to the non-empty fallback and still parses (persistable)", () => {
-    // note: Long enough that the closed fence crosses FINDING_BODY_MAX and must be dropped.
     const body = "```suggestion\n" + "C".repeat(2000) + "\n```";
     const raw = { ...base, findings: [finding("t", body)] };
     expect(parseReviewOutput(JSON.stringify(raw)).ok).toBe(true);
     const clamped = clampFindingSizes(raw);
     expect(clamped.findings[0]!.body).toBe("(suggestion omitted)");
-    // why: The clamped envelope re-parses: persistence and line comments still happen.
     expect(parseReviewOutput(JSON.stringify(clamped)).ok).toBe(true);
   });
 
@@ -824,8 +812,6 @@ describe("dropRedactedSuggestions", () => {
 describe("dropUnsafeFences (any fence, not only suggestions)", () => {
   test("a 3-space opener and 4-space closer inside a list close the same fence", () => {
     const body = "1. step\n   ```\n   const x = 1;\n    ```\n2. keep this instruction";
-    // Inside `1. ` the content column is 3: the closer's one extra space is
-    // still the same fence, so the block and the next instruction survive.
     expect(dropUnsafeFences(body, 10_000)).toEqual({ text: body, dropped: false });
   });
 
@@ -842,30 +828,23 @@ describe("dropUnsafeFences (any fence, not only suggestions)", () => {
 
   test("a closing fence below the list content column also ends the list item", () => {
     const body = "1. step\n   ```\n   code\n```\n    ```js\n    indented code\nkeep this";
-    // The 0-indent closer ends the list item: the following 4-space line is an
-    // indented code block, not a second fence, so nothing after it is dropped.
     expect(dropUnsafeFences(body, 10_000)).toEqual({ text: body, dropped: false });
   });
 
   test("a fence body's list text does not create a frame for a later suggestion", () => {
     const text = "```\n1. item\n```\n\n```suggestion\nconst x = \"[REDACTED]\";\n```\nafter";
-    // The `1. item` line is CODE inside the first fence: no list frame exists
-    // when the later suggestion is measured or removed.
     expect(suggestionFenceSpans(text)).toHaveLength(1);
     const out = dropRedactedSuggestions(text);
     expect(out).not.toContain("```suggestion");
-    expect(out).toContain("1. item"); // the code content itself survives
+    expect(out).toContain("1. item");
     expect(out).toContain("after");
   });
 
   test("a 4-space indented block does not hijack a later suggestion fence", () => {
     const text = "    ```js\nconst a = 1;\n    ```\n\n```suggestion\nconst x = \"[REDACTED]\";\n```\nafter";
-    // The indented pseudo-fence must not open the state machine: the real
-    // top-level suggestion is the one span recorded.
     expect(suggestionFenceSpans(text)).toHaveLength(1);
     const out = dropRedactedSuggestions(text);
     expect(out).not.toContain("```suggestion");
-    // The indented block and the prose after the suggestion both survive.
     expect(out).toContain("    ```js");
     expect(out).toContain("after");
   });
@@ -875,12 +854,11 @@ describe("dropUnsafeFences (any fence, not only suggestions)", () => {
     const fence = "```\nconst x = 1;\n```";
     const tail = "\nkeep";
     const body = `${pad}${fence}${tail}`;
-    const max = pad.length + 5; // lands inside the plain fence
+    const max = pad.length + 5;
 
     const { text, dropped } = dropUnsafeFences(body, max);
     expect(dropped).toBe(true);
     expect(text).toBe(`${pad}keep`);
-    // The explanation below the block is preserved, and no truncated fence rides out.
     expect(text).toContain("keep");
     expect(text).not.toContain("```");
     expect(text.length).toBeLessThanOrEqual(max);

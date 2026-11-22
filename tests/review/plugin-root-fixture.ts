@@ -21,9 +21,6 @@ const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 /** Absolute path of the temp fixture plugin root. */
 export const PLUGIN_ROOT_FIXTURE = mkdtempSync(join(tmpdir(), "mstar-harness-"));
 
-// why: Every suite that imports this module shares ONE temp root, so it cannot be
-// removed from a single file's `afterAll` — that would delete it from under the
-// next importing file. Remove it once the process is done with it instead.
 process.once("exit", () => rmSync(PLUGIN_ROOT_FIXTURE, { recursive: true, force: true }));
 
 // why: Mirror the real layout only as far as the assertions need: the session unit
@@ -45,25 +42,15 @@ writeFileSync(
   ].join("\n"),
 );
 
-// note: The pinned harness 3.5.0 plugin root ships
-// `commands/amazing-pr-review.md`; the fixture mirrors it as a marker only
-// (zero copy of the real command body).
 mkdirSync(join(PLUGIN_ROOT_FIXTURE, "commands"), { recursive: true });
 writeFileSync(
   join(PLUGIN_ROOT_FIXTURE, "commands", "amazing-pr-review.md"),
   ["# amazing-pr-review", "", "Fixture marker for the pinned 3.5.0 command.", ""].join("\n"),
 );
 
-// note: The deep parent path installs the deep seat roles
-// (code-reviewer / fullstack-dev / frontend-dev — the Stage 2 domain seats
-// of the harness three-stage flow) into the PR clone at .omp/agents/ so omp
-// task discovery can spawn them — the fixture mirrors one-line markers only
-// (zero copy of the real role definitions).
 mkdirSync(join(PLUGIN_ROOT_FIXTURE, "agents"), { recursive: true });
 writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "code-reviewer.md"), "# fixture agent: code-reviewer\n");
 writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "frontend-dev.md"), "# fixture agent: frontend-dev\n");
 writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "fullstack-dev.md"), "# fixture agent: fullstack-dev\n");
 
-// why: Set before any resolveHarnessRoot() call: the runner reads the env per call,
-// not at module load, so import order does not matter.
 process.env[HARNESS_ROOT_ENV] = PLUGIN_ROOT_FIXTURE;

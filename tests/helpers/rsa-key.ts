@@ -1,11 +1,3 @@
-/**
- * Real RSA key material for tests that must reach the HTTP transport
- * — a `fakePem`-shaped dummy cannot: `createAppAuth` signs
- * the App JWT with WebCrypto and `importKey` throws on a non-PKCS#8 body, so
- * the request never leaves the process and a fetch/identity seam stays
- * unobservable. Generated once per process and memoized — RSA-2048 keygen
- * costs ~100ms, which per-test generation would multiply across the suite.
- */
 import { pemBanner } from "./fake-secrets";
 
 let cached: Promise<string> | null = null;

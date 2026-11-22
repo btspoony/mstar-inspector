@@ -1,23 +1,3 @@
-/**
- * why: The platform parameter store's official-workspace row and its key-domain
- * registry (contract § 7.2).
- *
- * Pinned here:
- *   - the read degrades to `null` for an absent row, an unknown id, a
- *     soft-deleted workspace and an unusable value — "no official workspace"
- *     is a legal steady state, not an error;
- *   - the write validates the id against a LIVE workspace and refuses anything
- *     else with zero stored rows and zero audit rows;
- *   - clearing DELETEs the row and is idempotent, so a second clear answers
- *     the same and appends nothing;
- *   - every accepted write carries exactly one `runtime.official_workspace.set`
- *     row with the before/after pair, in the same batch;
- *   - `isRuntimeSettingKey` admits the two registered domains and refuses a
- *     bare domain, an empty segment and an unregistered prefix.
- *
- * The fixture is the fully migrated schema (tests/store/helpers), so the
- * assertions run against the real DDL rather than a hand-built table.
- */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import {
@@ -45,7 +25,6 @@ import {
 const NOW = "2026-02-01T00:00:00.000Z";
 const LATER = "2026-02-02T00:00:00.000Z";
 
-/** note: A workspace beside the seeded `default`; `deleted` stamps `deleted_at`. */
 function seedWorkspace(db: TestD1, id: string, deleted = false): void {
   db.raw
     .prepare(
@@ -55,7 +34,6 @@ function seedWorkspace(db: TestD1, id: string, deleted = false): void {
     .run(id, id, id);
 }
 
-/** note: The raw row the write path would produce — a read fixture, not a write. */
 function seedOfficialRow(db: TestD1, value: string): void {
   db.raw
     .prepare(
@@ -206,7 +184,6 @@ describe("official workspace write (contract § 7.2.2)", () => {
 });
 
 describe("maintenance mode (delivery-compass D20)", () => {
-  /** note: Every `platform.maintenance.*` row, raw, keyed by PK. */
   function storedMaintenance(db: TestD1): Record<string, string> {
     const rows = db.raw
       .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
@@ -226,9 +203,6 @@ describe("maintenance mode (delivery-compass D20)", () => {
 
   test("an unreadable window is flagged, never answered as open", async () => {
     const db = createMigratedTestD1();
-    // why: A settings read that throws cannot tell "no window" from "unknown": the
-    // reader states the third value and one structured line names the fault,
-    // so a gate can fail closed instead of unlocking traffic.
     const broken = {
       prepare() {
         throw new Error("settings unavailable");
@@ -249,7 +223,6 @@ describe("maintenance mode (delivery-compass D20)", () => {
     }
     expect(warns).toHaveLength(1);
     expect(JSON.parse(warns[0]!)).toMatchObject({ event: "maintenance_read_failed" });
-    // note: The fixture's own row is untouched: nothing was written to recover.
     expect(storedMaintenance(db)).toEqual({});
   });
 
@@ -299,7 +272,6 @@ describe("maintenance mode (delivery-compass D20)", () => {
     await setMaintenanceMode(db, { enabled: true, reason: "backfill", actor: "operator" }, NOW);
     await setMaintenanceMode(db, { enabled: false, reason: "ignored on disable", actor: "operator" }, LATER);
 
-    // why: The disable leaves the documented off-shape: no stale window survives.
     expect(storedMaintenance(db)).toEqual({ [MAINTENANCE_ENABLED_KEY]: "0" });
     expect(await getMaintenanceMode(db)).toEqual({
       enabled: false,
@@ -335,7 +307,6 @@ describe("maintenance mode (delivery-compass D20)", () => {
 });
 
 describe("key domain registry (contract § 7.2.5)", () => {
-  /** note: Every key an existing writer stores — read from the constants, not a copy. */
   const EXISTING_KEYS = [
     SYSTEM_CONCURRENCY_KEY,
     CHECK_TERMINALIZE_KEY,
@@ -355,7 +326,6 @@ describe("key domain registry (contract § 7.2.5)", () => {
     for (const domain of RUNTIME_SETTING_DOMAINS) {
       expect(isRuntimeSettingKey(`${domain}sample_key`), domain).toBe(true);
       expect(isRuntimeSettingKey(`${domain}nested.key_1`), domain).toBe(true);
-      // why: The bare domain and its trailing dot are not keys.
       expect(isRuntimeSettingKey(domain.slice(0, -1)), domain).toBe(false);
       expect(isRuntimeSettingKey(domain), domain).toBe(false);
     }
@@ -365,7 +335,6 @@ describe("key domain registry (contract § 7.2.5)", () => {
     for (const key of EXISTING_KEYS) {
       expect(isRuntimeSettingKey(key), key).toBe(true);
     }
-    // why: The `platform.` keys are the global parameters, never a tenant column.
     expect(EXISTING_KEYS.filter((key) => !key.startsWith("review."))).toEqual([
       OFFICIAL_WORKSPACE_KEY,
       MAINTENANCE_ENABLED_KEY,

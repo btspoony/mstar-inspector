@@ -1,12 +1,3 @@
-/**
- * why: Entitlement: plan resolution, the free-membership count and the in-write
- * guards. The slot predicates themselves are private — their behaviour is
- * pinned through `checkEntitlement` in tests/dashboard/entitlement.test.ts. The
- * subject is resolved limits and admission boundaries, so the fixture
- * is the fully-migrated D1 double (plans seeded by 0031) plus raw rows for the
- * cases the schema permits: no subscription row, an active plan, a non-active
- * one, and a soft-deleted tenant.
- */
 import { describe, expect, test } from "bun:test";
 import {
   FreeWorkspaceSlotError,
@@ -98,7 +89,6 @@ describe("resolveWorkspacePlan", () => {
 
   test("a missing seeded free row is an error, not invented limits", async () => {
     const db = createMigratedTestD1();
-    // note: The profile's plan set references `plans`, so the ceilings go first.
     db.raw.prepare("DELETE FROM quota_profile_plans").run();
     db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
     await expect(resolveWorkspacePlan(db, "default", "saas")).rejects.toThrow(/seeded 'free' row/);
@@ -109,8 +99,6 @@ describe("resolveWorkspacePlan", () => {
 describe("resolveWorkspacePlan — the mode decides before any read", () => {
   test("self-hosted resolves unlimited even when the workspace holds an active free row", async () => {
     const db = createMigratedTestD1();
-    // invariant: Every workspace created today holds this row; it must not cap the seats
-    // (spec §4: conditioning on it would leave existing deployments at five).
     seedSubscription(db, "default", "free");
     expect(await resolveWorkspacePlan(db, "default", "self-hosted")).toEqual({
       id: UNLIMITED_PLAN_ID,
@@ -130,7 +118,6 @@ describe("resolveWorkspacePlan — the mode decides before any read", () => {
 
   test("self-hosted reads no catalogue row, so a missing free row cannot fail it", async () => {
     const db = createMigratedTestD1();
-    // note: The profile's plan set references `plans`, so the ceilings go first.
     db.raw.prepare("DELETE FROM quota_profile_plans").run();
     db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
     expect((await resolveWorkspacePlan(db, "default", "self-hosted")).includedMembers).toBeNull();
@@ -147,13 +134,13 @@ describe("countFreeMembershipsForLogin", () => {
     seedWorkspace(db, "ws-free");
     seedWorkspace(db, "ws-pro");
     seedWorkspace(db, "ws-gone", "2026-10-24T00:00:00.000Z");
-    seedMembership(db, "ws-absent", "u1"); // note: no subscription row = free
+    seedMembership(db, "ws-absent", "u1");
     seedMembership(db, "ws-free", "u1");
     seedSubscription(db, "ws-free", "free");
-    seedMembership(db, "ws-pro", "u1"); // note: paid plan does not consume a free slot
+    seedMembership(db, "ws-pro", "u1");
     seedSubscription(db, "ws-pro", "pro");
-    seedMembership(db, "ws-gone", "u1"); // note: retired tenant is not a home
-    seedMembership(db, "ws-absent", "u2"); // note: another login's membership
+    seedMembership(db, "ws-gone", "u1");
+    seedMembership(db, "ws-absent", "u2");
 
     expect(await countFreeMembershipsForLogin(db, "octocat")).toBe(2);
     expect(await countFreeMembershipsForLogin(db, "OCTOCAT")).toBe(2);
@@ -170,7 +157,6 @@ describe("countFreeMembershipsForLogin", () => {
     seedMembership(db, "ws-free-inactive", "u1");
     seedSubscription(db, "ws-free-inactive", "free", "canceled");
 
-    // invariant: The resolver and the count must agree: a non-active row is "no plan".
     expect((await resolveWorkspacePlan(db, "ws-pro-inactive", "saas")).id).toBe("free");
     expect(await countFreeMembershipsForLogin(db, "octocat")).toBe(2);
     db.raw.close();
@@ -185,9 +171,6 @@ describe("in-write guards", () => {
     seedMembership(db, "ws-free", "u1");
     seedSubscription(db, "ws-free", "free");
 
-    // why: No route read ran here: the guard inside the creation batch is what
-    // refuses, and it must leave nothing behind (no orphan workspace,
-    // membership or subscription row).
     await expect(
       createWorkspace(db, {
         id: "ws-new",
@@ -207,7 +190,6 @@ describe("in-write guards", () => {
 
   test("self-hosted creation is always allowed and still writes the free subscription row", async () => {
     const db = createMigratedTestD1();
-    // note: The same fixture the saas guard refuses above.
     seedUser(db, "u1", "octocat");
     seedWorkspace(db, "ws-free");
     seedMembership(db, "ws-free", "u1");
@@ -221,7 +203,6 @@ describe("in-write guards", () => {
       ),
     ).toBe(true);
 
-    // note: The row records what SaaS would resolve; only resolution ignores it.
     expect(
       db.raw
         .query<{ plan_id: string; status: string }, []>(
@@ -234,8 +215,6 @@ describe("in-write guards", () => {
 
   test("createInvite refuses at the plan's cap and writes zero rows", async () => {
     const db = createMigratedTestD1();
-    // invariant: Five members fill the seeded free plan's five seats, so only the
-    // in-write predicate can refuse this insert.
     for (let i = 0; i < 5; i += 1) {
       seedUser(db, `u${i}`, `user${i}`);
       seedMembership(db, "default", `u${i}`);
@@ -260,7 +239,6 @@ describe("in-write guards", () => {
 
   test("a null seat limit admits the invite a five-seat plan refuses", async () => {
     const db = createMigratedTestD1();
-    // note: The same five filled seats that trip the free plan above.
     for (let i = 0; i < 5; i += 1) {
       seedUser(db, `u${i}`, `user${i}`);
       seedMembership(db, "default", `u${i}`);
@@ -301,14 +279,6 @@ describe("refusals", () => {
 });
 
 describe("resolveWorkspacePlans — a membership list larger than one D1 statement", () => {
-  /**
-   * why: A membership list is bounded by nothing: the free-slot rule and the plan
-   * caps limit paid memberships per workspace, not how many workspaces may
-   * invite one login. D1 refuses a statement binding more than 100 parameters,
-   * so the subscription read must be chunked — and every row must still come
-   * back, otherwise the switcher silently loses a workspace.
-   */
-  /** note: Records each prepared statement's text and how many values it bound. */
   function countingDb(db: TestD1): { observed: TestD1; bindCounts: Array<{ sql: string; binds: number }> } {
     const bindCounts: Array<{ sql: string; binds: number }> = [];
     const observed = {
@@ -342,28 +312,21 @@ describe("resolveWorkspacePlans — a membership list larger than one D1 stateme
       seedMembership(db, id, userId);
       ids.push(id);
     }
-    // note: Two plan groups spanning the chunk boundary: ids 000-059 and the last one
-    // are `pro`, the rest fall back to `free` — so a chunk that dropped its
-    // results, or one that over-reported `pro`, fails below.
     const proIds = [...ids.slice(0, 60), ids[100]!];
     for (const id of proIds) seedSubscription(db, id, "pro");
 
     const { observed, bindCounts } = countingDb(db);
     const plans = await resolveWorkspacePlans(observed, ids, "saas");
 
-    // invariant: Nothing truncated: every membership keeps its row, with its own plan.
     expect(plans.size).toBe(101);
     expect([...plans.keys()].sort()).toEqual([...ids].sort());
     for (const id of ids) {
       expect(plans.get(id)?.id).toBe(proIds.includes(id) ? "pro" : "free");
     }
 
-    // invariant: Chunked: no statement binds over D1's 100-parameter cap, and the ids went
-    // out as two subscription reads rather than one over-cap statement.
     const subscriptionReads = bindCounts.filter((entry) => entry.sql.includes("FROM workspace_subscriptions"));
     expect(subscriptionReads.map((entry) => entry.binds)).toEqual([100, 1]);
     expect(Math.max(...bindCounts.map((entry) => entry.binds))).toBeLessThanOrEqual(100);
-    // invariant: The free fallback stays ONE read however many ids need it.
     expect(bindCounts.filter((entry) => entry.sql.includes("FROM plans WHERE id = ?"))).toHaveLength(1);
     db.raw.close();
   });
@@ -379,16 +342,11 @@ describe("migration 0032 (unlimited plan)", () => {
       created_at: "2026-10-24T00:00:00.000Z",
     };
 
-    // invariant: Both seeded rows survive the rebuild byte-identically. `shared_bot_allowed`
-    // is migration 0061's later seed and `apps_per_workspace` 0063's — neither
-    // is 0032's rebuild; they are what distinguishes the two tiers, so neither
-    // row is the other's copy.
     expect(db.raw.prepare("SELECT * FROM plans WHERE id <> 'unlimited' ORDER BY id").all()).toEqual([
       { ...seeded, id: "free", name: "Free", monthly_price_cents: 0, apps_per_workspace: 1, shared_bot_allowed: 0 },
       { ...seeded, id: "pro", name: "Pro", apps_per_workspace: 10, shared_bot_allowed: 1 },
     ]);
 
-    // note: The column is relaxed — the reason the table was rebuilt at all ...
     expect(
       db.raw
         .prepare(
@@ -396,12 +354,10 @@ describe("migration 0032 (unlimited plan)", () => {
         )
         .get(),
     ).toEqual({ type: "INTEGER", notnull: 0 });
-    // note: ... and the new tier is one real row with every quota NULL.
     expect(
       db.raw.prepare("SELECT included_members FROM plans WHERE id = 'unlimited'").get(),
     ).toEqual({ included_members: null });
 
-    // invariant: The child FK survived the drop/re-create: declared, and still enforced.
     expect(
       db.raw
         .prepare(

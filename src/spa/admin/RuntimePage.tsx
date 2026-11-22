@@ -1,13 +1,3 @@
-/**
- * Runtime parameters — the non-secret values an operator changes without a
- * redeploy (iteration spec §1.1, §2.4): the system review-concurrency cap,
- * the §7.10 Check budgets and the recheck seat's assignment budget (UTF-8
- * bytes of ask the prior-findings seat may receive).
- *
- * One save writes ONE `PATCH /api/runtime`; the server pairs the write with its
- * audit row, so this screen owns no ledger logic. Each field is a local draft
- * over the loaded value, so a reload cannot leave a stale value on screen.
- */
 import { useMemo, useState, type FormEvent } from "react";
 import {
   Button,
@@ -53,7 +43,6 @@ import {
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
-/** The admission-drop card's fixed reason order and its label per reason. */
 const ADMISSION_DROP_FIELDS = [
   { reason: "pr-held", label: "admin.runtime.admissionDropsPrHeld" },
   { reason: "system-cap", label: "admin.runtime.admissionDropsSystemCap" },
@@ -61,21 +50,12 @@ const ADMISSION_DROP_FIELDS = [
   { reason: "error", label: "admin.runtime.admissionDropsError" },
 ] as const satisfies ReadonlyArray<{ reason: keyof AdmissionDropCounts; label: DictionaryKey }>;
 
-/**
- * How long the oldest queued message has waited. An unreadable gauge and an
- * empty queue are different states, so neither renders as a bare absence.
- */
 function oldestWait(locale: Locale, queue: QueueBacklog | null): string {
   if (queue === null) return t(locale, "admin.runtime.queueUnreadable");
   if (queue.oldestMessageTimestamp === null) return t(locale, "admin.runtime.queueEmpty");
   return formatRelativeTime(queue.oldestMessageTimestamp, locale);
 }
 
-/**
- * The stored row behind the gate's answer. A hand-edited value the read path
- * refuses says so with its raw content — the row a page would otherwise echo
- * as `on` while the gate refuses every delivery.
- */
 function routeWorkflowStored(locale: Locale, gate: RouteWorkflowConfig): string {
   if (gate.reason === "untrusted") {
     return t(locale, "admin.runtime.routeWorkflowStoredUntrusted", { value: gate.rejected ?? "" });
@@ -86,7 +66,6 @@ function routeWorkflowStored(locale: Locale, gate: RouteWorkflowConfig): string 
     : t(locale, "admin.runtime.routeWorkflowStoredAbsent");
 }
 
-/** The gate's own answer — what the queue handler acts on right now. */
 function routeWorkflowEffective(locale: Locale, gate: RouteWorkflowConfig): string {
   return t(
     locale,
@@ -96,11 +75,6 @@ function routeWorkflowEffective(locale: Locale, gate: RouteWorkflowConfig): stri
   );
 }
 
-/**
- * A runtime card's outcome face: errors keep the persistent notice box; a
- * success rides the save button (spinner → check) and its copy survives as
- * assistive text in a live region — never as a notice box.
- */
 function CardOutcome({
   notice,
   status,
@@ -123,22 +97,12 @@ function CardOutcome({
   );
 }
 
-/**
- * The duration analysis card — the evidence for choosing the attempt cap.
- *
- * It renders what the server measured and nothing more: percentiles are `null`
- * when the window completed nothing (an empty sample, never zeros), and the
- * candidate read is an observation about the same sample, not a prediction.
- */
 function DurationReportCard({ locale }: { locale: Locale }) {
   const [candidate, setCandidate] = useState("");
   const [capMs, setCapMs] = useState<number | null>(null);
   const read = useMemo(() => () => readDurationReport(capMs), [capMs]);
   const { state, reload } = useLoaded(read);
   const candidateValue = Number(candidate);
-  // The route refuses anything outside this range with a 4xx, which would turn
-  // the whole card into a load failure. The same range is checked here so an
-  // unusable candidate never leaves the distribution unrendered.
   const candidateValid =
     candidate.trim() !== "" &&
     Number.isInteger(candidateValue) &&
@@ -315,7 +279,6 @@ function DurationReportCard({ locale }: { locale: Locale }) {
 
 export function RuntimePage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readRuntime);
-  /** Only what the operator typed is local; the display falls back to the stored value. */
   const [draft, setDraft] = useState<string | null>(null);
   const [terminalizeDraft, setTerminalizeDraft] = useState<string | null>(null);
   const [updateDraft, setUpdateDraft] = useState<string | null>(null);
@@ -326,39 +289,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [sweepDraft, setSweepDraft] = useState<Partial<Record<SweepField, string>>>({});
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
   const [attemptCapDraft, setAttemptCapDraft] = useState<string | null>(null);
-  /**
-   * A save is in flight, or accepted and not yet read back. While true the card
-   * renders no number and blocks editing: once the request leaves, this page's
-   * last number — and the request's own echo — are values the row may not hold.
-   */
   const [attemptCapConfirming, setAttemptCapConfirming] = useState(false);
-  /**
-   * The save's outcome is unknown (network error, timeout, 5xx): the write may
-   * have landed. The card stays unconfirmed and says so, rather than reporting a
-   * failure the store may not have had.
-   */
   const [attemptCapSaveUnknown, setAttemptCapSaveUnknown] = useState(false);
-  /**
-   * The last CONFIRMED save's echo — what a later re-read is compared with.
-   * `null` after an uncertain failure: that save's fate is unknown, so the
-   * read may not be described as "someone else changed it".
-   */
   const [attemptCapEcho, setAttemptCapEcho] = useState<number | null>(null);
-  /**
-   * The store's value when the confirming re-read disagreed with the echo:
-   * another operator wrote the row while this page was open. The card keeps
-   * showing the store's number and says so until the next save.
-   */
   const [attemptCapChangedElsewhere, setAttemptCapChangedElsewhere] = useState<number | null>(null);
-  /** The window's pending state: `null` = untouched, so the stored one shows. */
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
-  /** The route switch's pending mode: `null` = untouched, so the gate's answer shows. */
   const [routeWorkflowTarget, setRouteWorkflowTarget] = useState<"on" | "off" | null>(null);
   const [reasonDraft, setReasonDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Every card's save rides its own button: the signal drives the spinner →
-  // check → alert face; the shared notice state carries the copy (the
-  // success copy as assistive text, the failure as the persistent box).
   const concurrencySignal = useSaveSignal();
   const checkBudgetsSignal = useSaveSignal();
   const commentClaimSignal = useSaveSignal();
@@ -368,9 +306,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const attemptCapSignal = useSaveSignal();
   const routeWorkflowSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
-  // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
-  // the terminalize/update relation included — reads as that field's error
-  // instead of a page-wide banner.
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
     message: string;
@@ -392,19 +327,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     degraded: boolean,
   ): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return;
     if (concurrencySubmitBlocked(degraded, draft)) return;
-    // `Number("")` is 0 and `Number("8abc")` is NaN — both fail the server's
-    // accepted-range gate, so the browser's own parsing needs no second validator.
     const next = Number((draft ?? String(stored)).trim());
     setBusy(true);
     setNotice(null);
     concurrencySignal.start();
     try {
       const saved = await setSystemConcurrency(next);
-      // A 2xx rewrote exactly the level this page reports, so the row is
-      // readable again: the server's answer replaces the value and clears the
-      // flag that made the field start empty.
       update((data) => ({ ...data, concurrency: saved, degraded: false }));
       setDraft(null);
       setNotice({
@@ -414,7 +344,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       });
       concurrencySignal.succeed();
     } catch (error) {
-      // Generic message primary, the server's own refusal text as secondary detail.
       const generic = t(locale, "admin.runtime.concurrencyFailed");
       setNotice({
         kind: "error",
@@ -435,15 +364,13 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     stored: CheckBudgetConfig,
   ): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return;
     if (
       concurrencySubmitBlocked(stored.degraded, terminalizeDraft) ||
       concurrencySubmitBlocked(stored.degraded, updateDraft)
     ) {
       return;
     }
-    // Same browser-side parsing as the concurrency field: the server's range
-    // gate is the only validator.
     const terminalizeMs = Number((terminalizeDraft ?? String(stored.terminalizeMs)).trim());
     const updateMs = Number((updateDraft ?? String(stored.updateMs)).trim());
     setBusy(true);
@@ -451,7 +378,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     checkBudgetsSignal.start();
     try {
       const saved = await setCheckBudgets({ terminalizeMs, updateMs }, stored);
-      // A 2xx rewrote both rows, so the card reads as trusted again.
       update((data) => ({ ...data, checkBudgets: saved }));
       setTerminalizeDraft(null);
       setUpdateDraft(null);
@@ -482,7 +408,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     stored: CommentClaimConfig,
   ): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return;
     if (
       concurrencySubmitBlocked(stored.degraded, retryDraft) ||
       concurrencySubmitBlocked(stored.degraded, attemptsDraft) ||
@@ -490,8 +416,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     ) {
       return;
     }
-    // Same browser-side parsing as the sibling cards: the server's range gate
-    // is the only validator.
     const retryMs = Number((retryDraft ?? String(stored.retryMs)).trim());
     const maxAttempts = Number((attemptsDraft ?? String(stored.maxAttempts)).trim());
     const outboxCap = Number((outboxDraft ?? String(stored.outboxCap)).trim());
@@ -500,7 +424,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     commentClaimSignal.start();
     try {
       const saved = await setCommentClaimSettings({ retryMs, maxAttempts, outboxCap }, stored);
-      // A 2xx rewrote all three rows, so the card reads as trusted again.
       update((data) => ({ ...data, commentClaim: saved }));
       setRetryDraft(null);
       setAttemptsDraft(null);
@@ -598,17 +521,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     stored: RecheckAssignmentConfig,
   ): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return;
     if (concurrencySubmitBlocked(stored.degraded, recheckDraft)) return;
-    // Same browser-side parsing as the concurrency field: the server's range
-    // gate is the only validator.
     const maxBytes = Number((recheckDraft ?? String(stored.maxBytes)).trim());
     setBusy(true);
     setNotice(null);
     recheckAssignmentSignal.start();
     try {
       const saved = await setRecheckAssignmentMaxBytes(maxBytes, stored);
-      // A 2xx rewrote the row, so it reads as trusted again.
       update((data) => ({ ...data, recheckAssignment: saved }));
       setRecheckDraft(null);
       setNotice({
@@ -633,13 +553,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
-  /**
-   * Read the stored cap back. `echo` is the confirmed save's value, or `null`
-   * when the save's outcome is unknown — then a differing read is just the
-   * store's answer, never "another save changed it". Answers false when the
-   * read did not answer, leaving the card in its unconfirmed state: neither
-   * the echo nor a guess is rendered as the effective value.
-   */
   async function confirmAttemptCap(echo: number | null): Promise<boolean> {
     const fresh = await readRuntime().catch(() => null);
     if (!fresh?.attemptCap) return false;
@@ -659,7 +572,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     if (busy || !attemptCapConfirming) return;
     setBusy(true);
     try {
-      // A failed retry leaves the unconfirmed state and its button in place.
       await confirmAttemptCap(attemptCapEcho);
     } finally {
       setBusy(false);
@@ -671,24 +583,16 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     stored: AttemptCapConfig,
   ): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return;
     if (concurrencySubmitBlocked(stored.degraded, attemptCapDraft)) return;
-    // Same browser-side parsing as the sibling fields: the server's range gate
-    // is the only validator.
     const capMs = Number((attemptCapDraft ?? String(stored.capMs)).trim());
     setBusy(true);
     setNotice(null);
     attemptCapSignal.start();
-    // The row may already be committed — and overwritten — while the request is
-    // in flight, so the number on screen stops being a claim the moment it
-    // leaves. Enter the unconfirmed state BEFORE dispatching, not on the reply.
     setAttemptCapConfirming(true);
     setAttemptCapSaveUnknown(false);
     try {
       const saved = await setAttemptCap(capMs, stored);
-      // The write landed. The VALUE still is not shown: the echo is what this
-      // request wrote, not what the row holds now, so the card stays
-      // unconfirmed until the re-read answers.
       setAttemptCapDraft(null);
       setAttemptCapEcho(saved.capMs);
       setNotice({
@@ -697,15 +601,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         source: "attemptCap",
       });
       attemptCapSignal.succeed();
-      // A failed confirmation is not a failed save: the unconfirmed state and
-      // its retry are the whole report, so this read never reaches the catch.
       await confirmAttemptCap(saved.capMs);
     } catch (error) {
       if (error instanceof AdminWriteError && error.status >= 400 && error.status < 500) {
-        // A DEFINITE refusal: THIS write did not land. It says nothing about
-        // the row another operator may have written since this page read it,
-        // so the pre-save number is not restored — the store is re-read, and
-        // until that read answers no effective value is shown.
         setAttemptCapSaveUnknown(false);
         setAttemptCapEcho(null);
         const generic = t(locale, "admin.runtime.attemptCapFailed");
@@ -717,10 +615,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         attemptCapSignal.fail();
         await confirmAttemptCap(null);
       } else {
-        // UNCERTAIN (network error, timeout, 5xx): the write may have landed, so
-        // neither outcome is claimed. The card stays unconfirmed with no number,
-        // and the retry reads the store back. No echo to compare against: this
-        // save's fate is unknown, so a differing read is not "changed elsewhere".
         setAttemptCapSaveUnknown(true);
         setAttemptCapEcho(null);
         attemptCapSignal.fail();
@@ -730,28 +624,15 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
-  /**
-   * Set the route switch. `value` is what the control shows (the gate's own
-   * answer until the operator changes it). The store refuses anything but the
-   * two exact strings; an accepted save whose echo carries no readable gate
-   * answer is confirmed by re-reading the runtime face, and an unreadable
-   * re-read says the outcome is unconfirmed — the request value never stands in
-   * for a mode the gate may not be applying.
-   */
   async function onSaveRouteWorkflow(value: "on" | "off"): Promise<void> {
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return;
     setBusy(true);
     setNotice(null);
     routeWorkflowSignal.start();
     try {
       const saved = await setRouteWorkflow(value);
-      // The write landed (2xx); only a readable gate answer may be rendered.
       const answer = saved ?? (await readRuntime().catch(() => null))?.routeWorkflow ?? null;
       if (answer === null) {
-        // Nothing confirmed the write, so the switch goes back to the last
-        // confirmed gate answer — the same value the status line shows. A
-        // control reading `on` beside a status reading `off` is the failure
-        // this card exists to prevent.
         setRouteWorkflowTarget(null);
         setNotice({
           kind: "error",
@@ -785,13 +666,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
-  /**
-   * Close or reopen the platform. `enabled` is the state the operator asked
-   * for; the reason rides only a close (the store drops it on reopen, so
-   * sending it then would be dead input).
-   */
   async function onSaveMaintenance(stored: MaintenanceConfig, enabled: boolean): Promise<void> {
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return;
     setBusy(true);
     setNotice(null);
     maintenanceSignal.start();
@@ -839,32 +715,17 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         locale={locale}
       >
         {(data) => {
-          // `null` = the server does not report the Check budgets (an older
-          // Worker behind a newer SPA bundle): the budget card is absent, the
-          // concurrency card is exactly as before, and nothing renders a bare
-          // `undefined`.
           const budgets = data.checkBudgets;
-          // Same absence rule for the migration-0048 card: an older Worker
-          // behind this bundle reports no group, so the card is hidden.
           const claim = data.commentClaim;
           const sweep = data.sweep;
           const reconcile = data.reconcile;
-          // And for the recheck seat's ask budget.
           const recheck = data.recheckAssignment;
-          // And the platform's one end-to-end attempt cap.
           const attemptCap = data.attemptCap;
-          // And the review route's operating switch (older Worker → no card).
           const routeWorkflow = data.routeWorkflow;
-          // And for the admission-drop counts.
           const drops = data.admissionDrops24h;
-          // The live queue gauge; `null` is "not readable", never an empty queue.
           const queue = data.queue;
-          // And for the maintenance window (older Worker → no card).
           const maintenance = data.maintenance;
-          // The state the toggle shows: what the operator picked, else stored.
           const maintenanceOn = maintenanceTarget ?? maintenance?.enabled ?? false;
-          // The route control starts at the gate's own answer, so an untrusted
-          // row shows `off` and a save repairs it.
           const routeWorkflowOn = (routeWorkflowTarget ?? routeWorkflow?.mode ?? "off") === "on";
           return (
           <div className="flex flex-col gap-4">
@@ -880,8 +741,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 {notice?.source === "maintenance" ? (
                   <CardOutcome notice={notice} status={maintenanceSignal.status} />
                 ) : null}
-                {/* The stored window as the gates read it: state, the operator's
-                    own reason and when it opened — never the pending target. */}
                 <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
                   <div className="flex flex-col gap-1">
                     <dt className="text-muted-foreground">{t(locale, "admin.flags.stateColumn")}</dt>
@@ -932,8 +791,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       id="maintenance-reason"
                       className="w-64"
                       autoComplete="off"
-                      // A reopen writes no reason (the store deletes it), so the
-                      // field is inert until the operator is closing again.
                       disabled={busy || !maintenanceOn}
                       value={reasonDraft ?? ""}
                       onChange={(event) => setReasonDraft(event.target.value)}
@@ -982,11 +839,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <CardOutcome notice={notice} status={concurrencySignal.status} />
                 ) : null}
                 {data.degraded ? (
-                  // The stored cap could not be trusted, so `data.concurrency` is
-                  // the conservative fallback: showing it as the current value
-                  // would invite saving a number nobody stored. The form starts
-                  // empty and withholds the "effective" line; a typed value or
-                  // Retry both repair the state.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.concurrencyUnreadable")} />
                   </div>
@@ -1053,20 +905,12 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <CardOutcome notice={notice} status={attemptCapSignal.status} />
                 ) : null}
                 {attemptCap.degraded ? (
-                  // While the row is unreadable admission refuses every
-                  // delivery, so no effective value is claimed and the form
-                  // starts empty; a typed value or Retry repairs the state.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.attemptCapUnreadable")} />
                   </div>
                 ) : attemptCapConfirming ? (
-                  // A save is in flight or landed, but the row has not been read
-                  // back: no echo is shown, and nothing is editable until a read
-                  // answers.
                   <div className="mt-4" data-attempt-cap="confirming">
                     {attemptCapSaveUnknown ? (
-                      // The write may or may not have landed: say the outcome is
-                      // unknown, never that it failed.
                       <p className="text-sm text-(--tone-warn-fg)" data-attempt-cap="unknown">
                         {t(locale, "admin.runtime.attemptCapUnknown")}
                       </p>
@@ -1127,8 +971,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   ) : null}
                 </form>
                 {attemptCap.degraded || attemptCapConfirming ? null : (
-                  // The two copies are the whole point: a stored value says so,
-                  // and an absent row says "default — nothing saved".
                   <>
                     <p className="mt-2 text-xs text-muted-foreground" data-attempt-cap="effective">
                       {t(
@@ -1140,8 +982,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       )}
                     </p>
                     {attemptCapChangedElsewhere === null ? null : (
-                      // Persistent, not a notice that disappears: the operator
-                      // must know the number they just sent is not the one in force.
                       <p className="mt-1 text-xs text-(--tone-warn-fg)" data-attempt-cap="changed-elsewhere">
                         {t(locale, "admin.runtime.attemptCapChangedElsewhere", {
                           value: attemptCapChangedElsewhere,
@@ -1165,9 +1005,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 {notice?.source === "routeWorkflow" ? (
                   <CardOutcome notice={notice} status={routeWorkflowSignal.status} />
                 ) : null}
-                {/* The row and the gate's own answer side by side: a stored value
-                    the read path refuses is named as such, never echoed as a
-                    working `on`. */}
                 <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
                   <div className="flex flex-col gap-1">
                     <dt className="text-muted-foreground">
@@ -1236,8 +1073,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <CardOutcome notice={notice} status={checkBudgetsSignal.status} />
                 ) : null}
                 {budgets.degraded ? (
-                  // Both numbers are the documented defaults, not the stored
-                  // setting: the form starts empty so a save cannot pin them.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.checkUnreadable")} />
                   </div>
@@ -1322,8 +1157,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <CardOutcome notice={notice} status={commentClaimSignal.status} />
                 ) : null}
                 {claim.degraded ? (
-                  // Every number is the documented default, not the stored
-                  // setting: the form starts empty so a save cannot pin them.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.claimUnreadable")} />
                   </div>
@@ -1534,8 +1367,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <CardOutcome notice={notice} status={recheckAssignmentSignal.status} />
                 ) : null}
                 {recheck.degraded ? (
-                  // The number shown is the documented default, not the stored
-                  // setting: the form starts empty so a save cannot pin it.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.recheckUnreadable")} />
                   </div>
@@ -1647,9 +1478,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           );
         }}
       </Screen>
-      {/* The deployment's release, from the generated src/version.ts surface:
-          the same `vX.Y.Z` form as /healthz and the release tags. Build-time
-          constant, so it renders in every read state. */}
       <p className="text-xs text-muted-foreground">
         {t(locale, "admin.runtime.version", { version: `v${APP_VERSION}` })}
       </p>

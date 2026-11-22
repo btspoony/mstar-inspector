@@ -1,28 +1,9 @@
-/**
- * why: Unit tests: the AES-256-GCM secretbox envelope (spec
- * dashboard-multi-app-platform § Crypto envelope, architect lock L1).
- *
- * Locked surface under test:
- *   - envelope `v1.<keyId>.<iv_b64>.<ct_b64>` — STANDARD base64 (D1 column
- *     carrier, not the cookie base64url), 12-byte random IV per encryption,
- *     ct_b64 = the full crypto.subtle.encrypt output (ciphertext ‖ 16B tag,
- *     encoded once, never split).
- *   - keyId is always "primary" in v1; decrypt on an unknown keyId → typed
- *     error (rotation reserved, not implemented this iteration).
- *   - master key = base64 DASHBOARD_ENCRYPTION_KEY decoding to EXACTLY 32
- *     bytes; missing / non-base64 / wrong length → SecretboxKeyError, lazy
- *     (first use), never a fallback to DASHBOARD_SESSION_SECRET.
- *   - AAD is caller-supplied (`<table>.<column>:<rowKey>`); an AAD mismatch
- *     must throw (GCM tag verification failure — the tamper anchor).
- */
 import { describe, expect, test } from "bun:test";
 import { SecretboxKeyError, createSecretbox } from "../../src/dashboard/secretbox";
 import { pemBanner } from "../helpers/fake-secrets";
 
-/** note: 32 raw bytes as base64 — a valid AES-256 master key. */
 const KEY_32 = btoa("k".repeat(32));
 const AAD = "github_apps.private_key_enc:app-1";
-// note: RSA-2048-shaped multi-line plaintext (PEM-like), not a real key.
 const PEM = [
   pemBanner("BEGIN", "RSA PRIVATE KEY"),
   ...Array.from({ length: 8 }, (_, i) => `${String(i).repeat(64)}`),
@@ -37,7 +18,6 @@ function b64Bytes(s: string): Uint8Array {
   return bytes;
 }
 
-/** note: Flip the first base64 char to another valid one (stays well-formed). */
 function flipFirstChar(s: string): string {
   return `${s.startsWith("A") ? "B" : "A"}${s.slice(1)}`;
 }
@@ -91,19 +71,16 @@ describe("encryptSecret envelope format (lock L1)", () => {
     const parts = envelope.split(".");
     expect(parts).toHaveLength(4);
     expect(parts[0]).toBe("v1");
-    expect(parts[1]).toBe("primary"); // note: v1 keyId is constant; rotation reserved
+    expect(parts[1]).toBe("primary");
     const ivB64 = parts[2]!;
     const ctB64 = parts[3]!;
-    // why: Standard base64 alphabet — NOT the cookie carrier's base64url.
     expect(ivB64).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
     expect(ctB64).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
     expect(ivB64).not.toMatch(/[-_]/);
     expect(ctB64).not.toMatch(/[-_]/);
-    // why: 12-byte random IV per encryption (WebCrypto AES-GCM convention).
     expect(b64Bytes(ivB64)).toHaveLength(12);
-    // why: ct_b64 is the full encrypt output: ciphertext ‖ 16B tag (never split).
     expect(b64Bytes(ctB64).length).toBeGreaterThanOrEqual(16);
-    expect(b64Bytes(ctB64).length).toBeGreaterThan(16); // note: non-empty plaintext
+    expect(b64Bytes(ctB64).length).toBeGreaterThan(16);
   });
 
   test("each encryption uses a fresh IV (same plaintext → different envelopes)", async () => {

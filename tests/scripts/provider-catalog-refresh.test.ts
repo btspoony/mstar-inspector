@@ -1,13 +1,3 @@
-/**
- * why: Provider-catalog refresh: the fetch/conversion contract, the pin-bump plan,
- * the removals report, and one regenerated-output determinism check.
- *
- * The nightly workflow (`.github/workflows/refresh-catalog.yml`) is the only
- * place these run unattended, so each rule it relies on is locked here: a
- * malformed upstream body must never replace the committed snapshot, an
- * unchanged body must never rewrite it, and the PR body must name what
- * disappeared.
- */
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,13 +9,10 @@ import { failCount, passCount, verdict } from "../../scripts/provider-catalog/pr
 import { pickNewestSnapshot } from "../../scripts/provider-catalog/lib/snapshot";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
-/** note: The committed harness ref (the Dockerfile anchor carries it verbatim). */
 const REPO_HARNESS_REF = /harnessRef: "([0-9a-f]{40})"/.exec(
   readFileSync(join(REPO_ROOT, "src/contracts/sandbox-images.ts"), "utf8"),
 )![1]!;
 
-/** note: An upstream body in models.dev's real shape: `models` keyed by model id,
- *  sizes in each record's `limit`. */
 const UPSTREAM = {
   zeta: {
     id: "zeta",
@@ -34,10 +21,8 @@ const UPSTREAM = {
     api: "https://api.zeta.example/v1",
     doc: "https://zeta.example/docs",
     models: {
-      // note: Deliberately unsorted: the snapshot vocabulary is sorted, not copied.
       "zeta-large": { id: "zeta-large", limit: { context: 200000, output: 64000 } },
       "zeta-small": { id: "zeta-small", limit: { context: 8000, output: 2000, input: 8000 } },
-      // note: Upstream really ships 0-output models (audio, embeddings): no sizes.
       "zeta-audio": { id: "zeta-audio", limit: { context: 8192, output: 0 } },
       "zeta-unsized": { id: "zeta-unsized" },
     },
@@ -51,8 +36,6 @@ const UPSTREAM = {
   },
 };
 
-/** note: A throwaway catalog directory. `test(fn)` and `test(name, fn)` both take it
- *  as `bun:test`'s first/second argument, so the body receives the path. */
 function withTempDir(run: (dir: string) => Promise<void> | void): () => Promise<void> {
   return async () => {
     const dir = mkdtempSync(join(tmpdir(), "catalog-refresh-"));
@@ -74,14 +57,11 @@ describe("models.dev conversion", () => {
       api: "https://api.zeta.example/v1",
       doc: "https://zeta.example/docs",
       model_ids: ["zeta-audio", "zeta-large", "zeta-small", "zeta-unsized"],
-      // why: `input` is not a field the generator consumes and does not survive;
-      // the unusable halves (0 output) and the absent row stay unsized.
       limits: {
         "zeta-large": { context: 200000, output: 64000 },
         "zeta-small": { context: 8000, output: 2000 },
       },
     });
-    // why: The absent `doc` is stated as null, never omitted (the generator reads it).
     expect(snapshot.alpha).toEqual({
       id: "alpha",
       name: "Alpha",
@@ -97,8 +77,6 @@ describe("models.dev conversion", () => {
     const rendered = renderSnapshot(convertModelsDev(UPSTREAM));
     expect(rendered.startsWith('{"alpha":')).toBe(true);
     expect(rendered.endsWith("}\n")).toBe(true);
-    // why: A second conversion of a re-ordered body renders the SAME bytes: nothing
-    // machine-, clock- or input-order-dependent enters the payload.
     const reordered = { alpha: UPSTREAM.alpha, zeta: UPSTREAM.zeta };
     expect(renderSnapshot(convertModelsDev(reordered))).toBe(rendered);
   });
@@ -109,16 +87,15 @@ describe("models.dev conversion", () => {
       const committed = `${JSON.stringify({ keep: { id: "keep" } })}\n`;
       writeFileSync(join(dir, "models.dev-2026-01-01.json"), committed);
       const bad: unknown[] = [
-        [], // note: not a map
-        {}, // note: empty map
-        { zeta: { name: "Zeta" } }, // note: no models
-        { zeta: { name: "Zeta", models: ["zeta-large"] } }, // note: array, not an id-keyed map
-        { zeta: { name: "", models: { a: {} } } }, // note: no name
+        [],
+        {},
+        { zeta: { name: "Zeta" } },
+        { zeta: { name: "Zeta", models: ["zeta-large"] } },
+        { zeta: { name: "", models: { a: {} } } },
       ];
       for (const body of bad) {
         await expect(refresh(dir, body, "2026-02-02")).rejects.toThrow();
       }
-      // note: Nothing was written and nothing was pruned.
       expect(readdirSync(dir)).toEqual(["models.dev-2026-01-01.json"]);
       expect(readFileSync(join(dir, "models.dev-2026-01-01.json"), "utf8")).toBe(committed);
     } finally {
@@ -141,14 +118,12 @@ describe("models.dev conversion", () => {
     writeFileSync(join(dir, "omp-api-key-providers.json"), "{}\n");
     const result = await refresh(dir, UPSTREAM, "2026-03-04");
     expect(result).toMatchObject({ changed: true, pruned: 2 });
-    // note: Exactly one dated snapshot survives; the other vendored files are untouched.
     expect(readdirSync(dir).sort()).toEqual(["models.dev-2026-03-04.json", "omp-api-key-providers.json"]);
   }));
 });
 
 describe("snapshot discovery", () => {
   test("the newest ISO-dated file wins and its date is returned", () => {
-    // why: Pure: the names are the argument, so this needs no directory at all.
     expect(
       pickNewestSnapshot([
         "models.dev-2026-01-09.json",
@@ -165,8 +140,6 @@ describe("snapshot discovery", () => {
   });
 
   test("the repo's committed snapshot is the one the generator reads", () => {
-    // why: Regenerating against unchanged upstream data must produce no diff, which
-    // holds only while the generator resolves the same file this does.
     const committed = pickNewestSnapshot(readdirSync(join(REPO_ROOT, "scripts/provider-catalog/inputs")));
     const generated = readFileSync(join(REPO_ROOT, "src/contracts/provider-catalog.generated.ts"), "utf8");
     expect(generated).toContain(`scripts/provider-catalog/inputs/${committed.file}`);
@@ -186,7 +159,6 @@ describe("catalog removals report", () => {
     const after = { kept: { models: ["a", "b"] }, shrunk: { models: ["x"], protocols: [{ models: ["z"] }] } };
     expect(catalogRemovals(before, after)).toEqual({
       providersDropped: ["dropped"],
-      // why: A protocol's vocabulary counts too — `y` lived in the row's own list.
       modelsRemoved: { shrunk: ["y"] },
     });
   });
@@ -225,9 +197,6 @@ describe("PR verdict (the publication gate)", () => {
   });
 
   test("a green STEP outcome over a log recording failures still refuses", () => {
-    // why: Round 1's bug: `bun test | tee` reports tee's 0, so the step says success
-    // while the log says 79 fail. The log is the second witness; a red run must
-    // publish nothing.
     const result = verdict("success", "success", RED_LOG);
     expect(result.green).toBe(false);
     expect(result.reason).toContain("79");
@@ -266,7 +235,6 @@ describe("pin bump plan", () => {
       "sandbox-image/cli-global/package.json",
       "src/contracts/sandbox-images.ts",
     ]);
-    // note: The root manifest keeps its caret range; the runner's stays exact.
     expect(edits).toContainEqual({
       file: "package.json",
       from: '"@mstar-harness/engine": "^4.7.3"',
@@ -277,11 +245,6 @@ describe("pin bump plan", () => {
       from: '"@mstar-harness/engine": "4.7.3"',
       to: '"@mstar-harness/engine": "4.8.0"',
     });
-    // why: The anchor comment names ref, tag AND the day it moved. `from` is the tag
-    // the file actually carries (`anchorTag`), not an assumed one — and
-    // tests/contracts/sandbox-images.test.ts now pins the tag against
-    // harnessVersion, which is the guard that keeps a version-only bump from
-    // shipping.
     expect(edits).toContainEqual({
       file: "sandbox-image/Dockerfile",
       from: `# mstar-harness plugin, pinned ref ${from.harnessRef} (tag v4.7.3, bumped ${from.bumped})`,
@@ -294,20 +257,12 @@ describe("pin bump plan", () => {
   });
 
   test("every lock beside a bumped manifest really is rewritten by the run", () => {
-    // why: Behaviour, not source text (round 2, TEST-03). A scratch repo pins BOTH
-    // packages to packed stubs, so the bump — and its install — resolves
-    // entirely offline. The engine 4.7.3 → 4.8.0 move is what forces three
-    // locks to move: root, runner, and the CLI's. A lock the run forgot still
-    // names the old version, which is what this reads.
     const root = mkdtempSync(join(tmpdir(), "bump-locks-"));
     try {
       const write = (rel: string, content: string): void => {
         mkdirSync(join(root, rel, ".."), { recursive: true });
         writeFileSync(join(root, rel), content);
       };
-      // why: One tarball per (package, version): a shared filename would let a later
-      // pack overwrite an earlier release, and the lock would then name the
-      // wrong package — exactly the kind of silence this test exists to catch.
       const pack = (name: string, version: string): string => {
         const slug = `${name.replace(/[^a-z0-9]+/gi, "-")}-${version}`;
         const build = join(root, `build-${slug}`, "package");
@@ -328,8 +283,6 @@ describe("pin bump plan", () => {
         "@oh-my-pi/pi-coding-agent": `file:${ompStub}`,
         "@mstar-harness/engine": `file:${engineStub}`,
       };
-      // note: The root keeps a caret range on the engine, the runner pins exactly —
-      // the shape the real manifests have.
       const manifest = (name: string, engineRange: string): string =>
         `${JSON.stringify({
           name,
@@ -339,7 +292,6 @@ describe("pin bump plan", () => {
         }, null, 2)}\n`;
       write("package.json", manifest("bump-locks-fixture", "^4.7.3"));
       write("packages/runner/package.json", manifest("bump-locks-runner", "4.7.3"));
-      // note: The CLI's own lock resolves to a stub at the version the engine names.
       write("sandbox-image/cli-global/package.json", `${JSON.stringify({
         dependencies: { "@mstar-harness/cli": "4.7.3" },
         overrides: { "@mstar-harness/cli": `file:${pack("@mstar-harness/cli", "4.8.0")}` },
@@ -355,8 +307,6 @@ describe("pin bump plan", () => {
       );
       write("scripts/provider-catalog/bump-pins.ts", readFileSync(join(REPO_ROOT, "scripts/provider-catalog/bump-pins.ts"), "utf8"));
 
-      // why: Version + ref together: the four image pins describe one release, so a
-      // version-only call is refused (round 4).
       const proc = Bun.spawnSync(
         ["bun", "run", "scripts/provider-catalog/bump-pins.ts", "--engine", "4.8.0", "--harness-ref", "d".repeat(40)],
         {
@@ -367,9 +317,6 @@ describe("pin bump plan", () => {
       );
       expect(proc.exitCode, proc.stderr.toString()).toBe(0);
 
-      // why: All three locks moved with the pin. Bun records a `file:` override by
-      // path in `packages`, so the version is asserted where the lock states it:
-      // the workspace's declared range, which is what a frozen install checks.
       for (const [lock, name, declared] of [
         ["bun.lock", "@mstar-harness/engine", "^4.8.0"],
         ["packages/runner/bun.lock", "@mstar-harness/engine", "4.8.0"],
@@ -379,7 +326,6 @@ describe("pin bump plan", () => {
         expect(text, lock).toContain(`"${name}": "${declared}"`);
         expect(text, lock).not.toContain(`"${name}": "${declared.replace("4.8.0", "4.7.3")}"`);
       }
-      // why: And the installed tree proves the install ran.
       const installed = JSON.parse(
         readFileSync(join(root, "node_modules/@mstar-harness/engine/package.json"), "utf8"),
       ) as { version: string };
@@ -390,11 +336,6 @@ describe("pin bump plan", () => {
   });
 
   test("every planned literal really is in the committed file", () => {
-    // why: Guards the anchors: a surface that drifts makes the workflow's bump step
-    // fail at 04:17 with no PR instead of silently bumping half the pins.
-    // Read the pins the committed files actually carry — a hardcoded previous
-    // release turns a routine pin bump red for no defect (AGENTS.md: no
-    // dependency pins in tests).
     const images = readFileSync(join(REPO_ROOT, "src/contracts/sandbox-images.ts"), "utf8");
     const dockerfile = readFileSync(join(REPO_ROOT, "sandbox-image/Dockerfile"), "utf8");
     const root = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {

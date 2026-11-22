@@ -1,19 +1,3 @@
-/** note: SF-1 — switching workspace must leave neither the previous workspace's
- * Apps nor its Create state on screen. The switcher navigates with
- * pushState + popstate (no new document), so the page must derive its API
- * base and its create eligibility from the URL + the boot's membership
- * list, not from the once-injected snapshot.
- *
- * Executed contract: the eligibility derivation, the pathname→base map and
- * the page's own list read are all driven here with a mocked `fetch`.
- *
- * Residual gap (no DOM runner in this suite, repo contract): the effect that
- * ties them together — `useEffect(load, [load])` with `load` keyed on
- * `[base]` — cannot be executed, so a regression that pins the base at mount
- * while keeping every helper correct would pass here. The same residual
- * applies to `tests/spa/app-detail.test.tsx`; both pages read their base per
- * render and the reads asserted below are the ones those effects issue.
- */
 import { describe, expect, test } from "bun:test";
 import { type Element as DomElement } from "happy-dom";
 import { act, createElement } from "react";
@@ -38,7 +22,6 @@ const boot: SpaBoot = {
   ],
 };
 
-/** note: The page's own read under the base its render derived, recording the URL. */
 async function readUnder(pathname: string): Promise<{ url: string; apps: string[] }> {
   const calls: string[] = [];
   const realFetch = globalThis.fetch;
@@ -65,9 +48,6 @@ async function readUnder(pathname: string): Promise<{ url: string; apps: string[
 
 describe("AppsPage list face — split payload leaves list links on the numeric App id", () => {
   test("list rows stay keyed by github_app_id; the settings split adds no list key", () => {
-    // note: The settings JSON grew a top-level target_id, but the Apps LIST face is
-    // untouched: rows keep the numeric github_app_id the list links target
-    // (`/apps/:githubAppId`), and no target id leaks onto the list wire.
     const payload = parseApps({
       viewer: { login: "octocat", role: "admin" },
       apps: [{ github_app_id: 1001, github_slug: "acme-app" }],
@@ -78,8 +58,6 @@ describe("AppsPage list face — split payload leaves list links on the numeric 
 
 describe("AppsPage create eligibility — addressed workspace", () => {
   test("navigating from workspace A (owner) to workspace B (member) flips Create off", () => {
-    // note: The A→B switch the finding describes: the eligibility follows the
-    // addressed ref, not the boot's once-injected `canCreateApp: true`.
     const refA = workspaceRefOf("/dashboard/acme/apps");
     const refB = workspaceRefOf("/dashboard/beta/apps");
     expect(canCreateAppFor(boot, refA)).toBe(true);
@@ -108,8 +86,6 @@ describe("AppsPage create eligibility — addressed workspace", () => {
   });
 
   test("the read follows the addressed workspace after the switch", async () => {
-    // invariant: The A→B switch: same page, different workspace segment — the read must
-    // land on B's list, never the A data the previous render fetched.
     expect(await readUnder("/dashboard/acme/apps")).toEqual({
       url: "/dashboard/acme/api/apps",
       apps: ["acme-app"],
@@ -121,18 +97,11 @@ describe("AppsPage create eligibility — addressed workspace", () => {
   });
 });
 
-/** note: The Create dialog: the Apps page creates Apps, never targets. Its two exits
- * are the repository surface's add flow (the only target creator) and the
- * self-hosted manifest flow. Shared bots are information here — the dialog
- * names them and posts NOTHING to `/api/targets`.
- * Mounted, because the dialog lives in a Radix portal.
- */
 describe("AppsPage create dialog", () => {
   const SHARED = { id: "bot-platform", github_slug: "platform-app", name: "Platform App", target_count: 1 };
 
   type Sent = { url: string; method: string; body: string };
 
-  /** note: Mount the page on `pathname`, answering the list read with `sharedBots`. */
   async function mountPage(pathname: string, sharedBots: unknown) {
     const { win, cleanup } = installDom(`http://localhost${pathname}`);
     const sent: Sent[] = [];
@@ -169,7 +138,6 @@ describe("AppsPage create dialog", () => {
     await act(async () => root.render(createElement(AppsPage, { boot })));
     await act(async () => {});
 
-    /** note: One event batch plus the React flush its state update schedules. */
     const drain = async (run: () => void): Promise<void> => {
       await act(async () => run());
       await act(async () => {});
@@ -184,7 +152,6 @@ describe("AppsPage create dialog", () => {
       win,
       sent,
       dialog,
-      /** note: Open the dialog from the page's Create control. */
       async open() {
         const trigger =
           [...win.document.querySelectorAll("button")].find(
@@ -192,7 +159,6 @@ describe("AppsPage create dialog", () => {
           ) ?? null;
         await click(trigger);
       },
-      /** note: The repository-surface link the dialog offers as its creation path. */
       addLink(): DomElement | null {
         const href = `${apiBase()}/repos`;
         return (
@@ -214,12 +180,9 @@ describe("AppsPage create dialog", () => {
     try {
       await page.open();
       expect(page.dialog()).not.toBeNull();
-      // note: The one target-creation entry is the repository surface's add flow.
       expect(page.addLink()?.getAttribute("href")).toBe("/dashboard/acme/repos");
-      // note: No target form, no Select, no submit-to-/api/targets path.
       expect(page.dialog()?.querySelector('[data-slot="create-target-form"]')).toBeNull();
       expect(page.dialog()?.querySelector("form[action$='/api/targets']")).toBeNull();
-      // invariant: Shared bots are information: the bot is named, nothing more.
       expect(page.dialog()?.querySelector('[data-slot="shared-bots"]')?.textContent).toContain("Platform App");
       expect(page.sent.filter((request) => request.method === "POST")).toHaveLength(0);
     } finally {
@@ -233,7 +196,6 @@ describe("AppsPage create dialog", () => {
       await page.open();
       expect(page.dialog()?.querySelector('form[action="/dashboard/acme/manifest/start"]')).not.toBeNull();
       expect(page.addLink()).not.toBeNull();
-      // note: A malformed shared-bot block reads as none — the dialog says so.
       expect(page.dialog()?.textContent).toContain(t("en", "apps.createDialog.noSharedBots"));
     } finally {
       await page.cleanup();

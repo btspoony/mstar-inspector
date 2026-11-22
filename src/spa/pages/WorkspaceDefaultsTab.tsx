@@ -1,16 +1,3 @@
-/**
- * The 所有仓库 detail's 评审配置 tab: the workspace's OWN defaults, which is what
- * every inheriting repository runs with. Two differences from the per-target
- * tab decide this face:
- * - this page IS the default, so there is no inheritance switch — and no
- *   pause, which is a per-repository fact;
- * - a save names exactly one changed field on `POST /api/targets/defaults`,
- *   with no `follow` companion (nothing here inherits).
- *
- * Read-only for a caller who cannot manage the workspace: the route answers
- * 403, and the form is disabled from the boot membership role so that refusal
- * is not the only feedback.
- */
 import { useState } from "react";
 import { t, type Locale } from "../../i18n";
 import { postJson } from "../api";

@@ -1,12 +1,3 @@
-/** note: Handler tests — idempotency pre-check, durable comment claim, queue enqueue.
- * Mock env: in-memory KV stub + queue send recorder + a migrated D1 double
- * carrying the REAL `comment_trigger_claims` DDL (migration 0048).
- *
- * Product lock (compass S4 / plan T1): a null `head_sha` must never become a
- * KV key. A bot-mention job claims its `comment_id` in D1 BEFORE the send, so
- * one comment id triggers at most one review even when the KV fast path misses
- * (TTL lapse, concurrency); a job with no comment id enqueues unclaimed.
- */
 import { describe, expect, mock, test, type Mock } from "bun:test";
 import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
@@ -15,7 +6,6 @@ import { claimIdempotency, handleReviewJob, idempotencyHit, type HandlerDeps, ty
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
-/** note: The `issue_comment` id a mention job claims its idempotency on. */
 const COMMENT_ID = 987654321;
 
 function prPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
@@ -27,7 +17,6 @@ function prPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload 
     head_sha: HEAD_SHA,
     action: "opened",
     triggered_by: "pull_request",
-    // safety: Required pair — references, never credentials.
     botRef: { appId: "11111111-2222-3333-4444-555555555555" },
     targetId: "66666666-7777-8888-9999-aaaaaaaaaaaa",
     ...overrides,
@@ -41,7 +30,6 @@ function mentionPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPay
     repo: "inspector",
     pr_number: 42,
     head_sha: null,
-    // invariant: The comment trigger's identity — the only claim a no-sha job can make.
     comment_id: COMMENT_ID,
     action: "created",
     triggered_by: "issue_comment",
@@ -51,7 +39,6 @@ function mentionPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPay
   };
 }
 
-/** safety: In-memory KV stub: get/put with TTL bookkeeping, optional failure injection. */
 function makeKvStub() {
   const store = new Map<string, { value: string; expirationTtl?: number }>();
   const get = mock(async (key: string) => store.get(key)?.value ?? null);
@@ -88,10 +75,6 @@ function makeLog(): { info: Mock<(fields: unknown, msg?: string) => void>; warn:
   } as { info: Mock<(fields: unknown, msg?: string) => void>; warn: Mock<(fields: unknown, msg?: string) => void> } & HandlerLog;
 }
 
-/** note: Handler deps with all three required bindings; `db` is injectable. The
- * default DB is a migrated double: the REAL `comment_trigger_claims` DDL, so
- * the claim insert behaves exactly as it does in production.
- */
 function handlerEnv(
   kv: KVNamespace,
   queue: Queue<ReviewJobPayload>,
@@ -108,7 +91,6 @@ function claimRows(db: D1Database): ClaimRow[] {
     .all() as ClaimRow[];
 }
 
-/** note: Seed a claim row in the given state — the "another delivery already owns it" case. */
 function insertClaim(db: D1Database, state: "queued" | "consumed" | "expired", commentId = COMMENT_ID): void {
   (db as unknown as TestD1).raw
     .prepare(
@@ -153,8 +135,6 @@ describe("handleReviewJob — enqueue once", () => {
     const outcome = await handleReviewJob(prPayload(), {
       env: handlerEnv(kv, queue),
       log,
-      // note: The Check attach runs here and hands its delivery identity to the
-      // message, so a later skip settlement can tell its own row from another's.
       beforeEnqueue: async (payload) => ({ ...payload, attachDeliveryId: "delivery-uuid" }),
     });
 
@@ -196,14 +176,6 @@ describe("handleReviewJob — enqueue once", () => {
 
 describe("handleReviewJob — a key that proves no review happened", () => {
   test("dropped / failed / paused / degraded / superseded values re-enqueue the commit and refresh the claim", async () => {
-    // note: `dropped` = the guard gave the job up for good; `failed` = the final
-    // delivery is heading to the DLQ; `paused` = the App is paused; `degraded`
-    // = the run ended in a degraded notice; `superseded` = a newer commit
-    // overtook this sha when it was acked, so THIS sha was never reviewed.
-    // None is "already enqueued", so the redelivery must enqueue again rather
-    // than be KV-skipped — a force-push back to the sha (A → B → A) depends on
-    // it, since the skip that wrote the claim no longer fires (the ledger's
-    // head is that sha again).
     const key = idemKey({ installation_id: 12345, owner: "acme", repo: "inspector", pr_number: 42, head_sha: HEAD_SHA });
     for (const value of ["dropped", "failed", "paused", "degraded", "superseded"] as const) {
       const { kv, store } = makeKvStub();
@@ -222,8 +194,6 @@ describe("handleReviewJob — a key that proves no review happened", () => {
 
 describe("handleReviewJob — a key that still covers the commit", () => {
   test("a done value skips the redelivery", async () => {
-    // note: `done` = this consumer already posted the review, so a redelivery is
-    // pure duplicate cost. `superseded` is deliberately NOT here — see above.
     const key = idemKey({ installation_id: 12345, owner: "acme", repo: "inspector", pr_number: 42, head_sha: HEAD_SHA });
     const value = "done";
     const { kv, store } = makeKvStub();
@@ -235,7 +205,6 @@ describe("handleReviewJob — a key that still covers the commit", () => {
 
     expect(outcome).toEqual({ kind: "skipped", reason: "idempotency hit" });
     expect(sent).toHaveLength(0);
-    // invariant: A skip never rewrites the claim.
     expect(store.get(key)?.value).toBe(value);
   });
 });
@@ -277,14 +246,10 @@ describe("handleReviewJob — durable comment-trigger claim (no head_sha)", () =
     expect(claimRows(db)).toHaveLength(1);
     log.info.mockClear();
 
-    // why: 1) KV fast path: the 24h comment claim is present, so the second
-    // delivery never reaches the insert.
     const fastPath = await handleReviewJob(mentionPayload(), { env, log });
     expect(fastPath).toEqual({ kind: "skipped", reason: "idempotency hit" });
     expect(log.info.mock.calls[0]?.[1]).toContain("idempotency hit");
 
-    // note: 2) Durable claim: drop the KV entry (TTL lapse / another isolate / a
-    // concurrent delivery) and the row alone must still refuse it.
     store.clear();
     log.info.mockClear();
     const outcome = await handleReviewJob(mentionPayload(), { env, log });
@@ -296,7 +261,6 @@ describe("handleReviewJob — durable comment-trigger claim (no head_sha)", () =
 
     const [row] = claimRows(db);
     expect(row).toMatchObject({ state: "queued", attempts: 0, consumed_ms: null });
-    // note: The stored payload is the outbox record the sweep re-sends.
     expect(JSON.parse(row!.payload_json)).toMatchObject({
       comment_id: COMMENT_ID,
       triggered_by: "issue_comment",
@@ -306,8 +270,6 @@ describe("handleReviewJob — durable comment-trigger claim (no head_sha)", () =
   });
 
   test("a claim row that another delivery already owns refuses the enqueue with no send", async () => {
-    // note: The concurrency case: D1 serializes the PRIMARY KEY insert, so whichever
-    // delivery loses sees `changes === 0` whatever state the winner left.
     for (const state of ["queued", "consumed", "expired"] as const) {
       const { kv } = makeKvStub();
       const { queue, sent } = makeQueueStub();
@@ -320,7 +282,6 @@ describe("handleReviewJob — durable comment-trigger claim (no head_sha)", () =
       expect(outcome, state).toEqual({ kind: "skipped", reason: "duplicate comment trigger" });
       expect(queue.send, state).not.toHaveBeenCalled();
       expect(sent, state).toHaveLength(0);
-      // invariant: The winner's row is never rewritten by the losing delivery.
       expect(claimRows(db), state).toHaveLength(1);
     }
   });
@@ -330,10 +291,6 @@ describe("handleReviewJob — durable comment-trigger claim (no head_sha)", () =
     const { queue, sent } = makeQueueStub();
     const log = makeLog();
     const db = createMigratedTestD1() as unknown as D1Database;
-    // note: The scenario `INSERT OR IGNORE` hid: a later migration adds a NOT NULL
-    // column the worker cannot fill. Only a duplicate key is suppressed now, so
-    // this refusal reaches the handler's uncaught-D1 path (500 → GitHub retry)
-    // instead of a silent drop with a misleading "duplicate" log.
     (db as unknown as TestD1).raw.exec(`
       CREATE TABLE comment_trigger_claims_v2 (
         installation_id INTEGER NOT NULL, owner TEXT NOT NULL, repo TEXT NOT NULL,
@@ -367,7 +324,6 @@ describe("handleReviewJob — durable comment-trigger claim (no head_sha)", () =
 
     await expect(handleReviewJob(mentionPayload(), { env, log })).rejects.toThrow("queue down");
 
-    // invariant: Nothing is left behind: no claim row, no KV key, no message.
     expect(claimRows(db)).toHaveLength(0);
     expect(sent).toHaveLength(0);
 
@@ -407,13 +363,10 @@ describe("handleReviewJob — send failure must not claim the KV key (C1)", () =
       handleReviewJob(prPayload(), { env: handlerEnv(kv, queue), log }),
     ).rejects.toThrow("queue down");
 
-    // invariant: No key was claimed — the retry must not be KV-skipped.
     expect(store.size).toBe(0);
     expect(kv.put).not.toHaveBeenCalled();
     expect(sent).toHaveLength(0);
 
-    // note: The failure path logs the seven-field structured event (QC F-002) so
-    // the operator can map the 500 to the specific event.
     expect(log.warn).toHaveBeenCalledTimes(1);
     const [warnFields, warnMsg] = log.warn.mock.calls[0] ?? [];
     expect(warnFields).toMatchObject({
@@ -488,11 +441,9 @@ describe("payload hygiene — no secrets", () => {
       repo: true,
       pr_number: true,
       head_sha: true,
-      // invariant: The comment trigger's identity (issue_comment jobs only).
       comment_id: true,
       action: true,
       triggered_by: true,
-      // invariant: The two configuration references — ids, never secrets.
       botRef: true,
       targetId: true,
     };

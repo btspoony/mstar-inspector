@@ -1,14 +1,3 @@
-/** note: The console's locale plumbing: `main.tsx` reads
- * `boot.locale`, renders the header/nav shell through `t(locale, …)`, and
- * threads the locale into every screen.
- *
- * - A `zh_CN` boot renders the nav in Chinese and the header switch offers
- *   English; an `en` boot renders English and offers 中文 — proving
- *   `boot.locale` reaches the page with no SPA locale state.
- * - The header switch is the same zero-JS form as the workspace shell: it
- *   POSTs `/dashboard/locale` with a hidden input set to the OTHER locale.
- *   (The POST's Set-Cookie/302 contract is covered by the worker test.)
- */
 import { afterEach, describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -23,11 +12,8 @@ type Mounted = {
   cleanup: () => void;
 };
 
-/** note: Boot the console document with `boot`, stub the flags read, render App. */
 async function mountApp(boot: SpaBoot): Promise<Mounted> {
   const { win, cleanup } = installDom("http://localhost/_internal_admin/flags");
-  // note: installDom makes the happy-dom window the global `window`; readBoot() reads
-  // `window.__BOOT__`, so this is the same channel the Worker's injection uses.
   const bootHost = globalThis as { window?: { __BOOT__?: SpaBoot } };
   bootHost.window!.__BOOT__ = boot;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -60,7 +46,6 @@ function switchForm(container: HTMLElement): HTMLFormElement {
   return form;
 }
 
-/** note: The hidden `locale` input of the switch form. */
 function localeInput(form: HTMLFormElement): HTMLInputElement {
   const input = form.querySelector('input[name="locale"]');
   if (!(input instanceof HTMLInputElement)) throw new Error("locale input missing");
@@ -80,7 +65,6 @@ describe("admin App locale plumbing", () => {
     expect(text).toContain("工作区");
     expect(text).toContain("用户");
     expect(text).toContain("支持访问");
-    // note: The switch offers the OTHER locale.
     const form = switchForm(container);
     expect(form.method).toBe("post");
     expect(localeInput(form).value).toBe("en");

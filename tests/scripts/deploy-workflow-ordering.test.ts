@@ -1,33 +1,9 @@
-/**
- * invariant: Deploy gate ordering — both workflows.
- *
- * `wrangler secret bulk` creates AND deploys a Worker version, exactly like
- * `wrangler deploy`, so "fail before deploy" means: the D1 migration, the
- * idempotent `0027` backfill and the zero-orphan abort gate all run BEFORE the
- * first deploy-capable step — not merely before the final `wrangler deploy`.
- *
- * Also pinned here: the ref-identity assertion still runs before every
- * deploy-capable step (the tenant-mode rollout that needed a replay binding is
- * gone; a moved tag/branch must never deploy), the deploy job's image rebuild
- * gate runs before the install and every version-creating step (a push diffs
- * `github.event.before`; a dispatch or the all-zeros first push is a printed
- * skip, and a dispatch that names `base_sha` runs the gate instead), the
- * container-digest comparison is reported, the last version-creating
- * step binds `DEPLOYMENT_MODE` (the one remaining deployment-shape switch), no
- * deploy command passes the retired tenant-mode var, and the always-run summary
- * derives its status keys from the deploy steps' outcomes — never from the
- * non-fatal version-id capture. The
- * summary pins assert the CONTENT the step actually writes into
- * `$GITHUB_STEP_SUMMARY` (the step body is executed), not the markdown source
- * shape.
- */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
-/** note: Release-shaped tag the git fixture creates at HEAD (`@tag` in a step's env). */
 const FIXTURE_TAG = "v0.0.1-fixture";
 const PY_DUMP = "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))";
 
@@ -40,7 +16,6 @@ type Step = {
   "continue-on-error"?: boolean;
 };
 
-/** note: Parse a workflow YAML into a plain object (python3 + PyYAML, no new deps). */
 function parseWorkflow(rel: string): Record<string, any> {
   const path = join(REPO_ROOT, ".github", "workflows", rel);
   const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
@@ -50,7 +25,6 @@ function parseWorkflow(rel: string): Record<string, any> {
   return JSON.parse(proc.stdout.toString());
 }
 
-/** note: Parse mutated workflow TEXT (mutation tests write a variant to a temp file). */
 function parseText(rel: string, text: string): Step[] {
   const dir = mkdtempSync(join(tmpdir(), "ordering-"));
   try {
@@ -66,16 +40,6 @@ function parseText(rel: string, text: string): Step[] {
   }
 }
 
-/**
- * why: Execute one step body exactly as Actions would (bash -eo pipefail, the step's
- * `env:` resolved from `vars`), in a scratch directory whose `scripts/` points
- * at the repository's. Returns what landed in `$GITHUB_OUTPUT` /
- * `$GITHUB_STEP_SUMMARY` — the emitted content, not the YAML shape.
- *
- * `opts.withGit` adds a real repository (HEAD + tag) so a step's
- * `git rev-parse` assertions run; the env value `"@head"` is then substituted
- * with that commit, which is how a step gets a SHA it can actually resolve.
- */
 function runStep(
   step: Step,
   env: Record<string, string>,
@@ -92,8 +56,6 @@ function runStep(
     writeFileSync(summary, "");
     let head = "";
     if (opts.withGit === true) {
-      // why: `-c …Sign=false`: an operator's global signing config must not decide
-      // whether the fixture can create a commit/tag.
       const git = (...args: string[]) =>
         Bun.spawnSync(["git", "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", ...args], {
           cwd: dir,
@@ -110,8 +72,6 @@ function runStep(
       git("init", "-q");
       git("commit", "-q", "--allow-empty", "-m", "fixture");
       head = git("rev-parse", "HEAD").stdout.toString().trim();
-      // why: prod asserts `refs/tags/<github.ref_name>^{commit}`; the fixture tag is a
-      // real release-shaped name pointing at HEAD, so `@tag` resolves.
       git("tag", FIXTURE_TAG);
     }
     const resolved: Record<string, string> = {};
@@ -144,27 +104,14 @@ function runStep(
   }
 }
 
-/** note: Steps that publish a Worker version (a `secret bulk` write does too). */
 const DEPLOY_CAPABLE = /bunx wrangler (deploy|secret bulk)\b/;
-/**
- * why: Every wrangler command that CREATES a Worker version — the one serving
- * traffic is the version made by the LAST of these, whatever its kind.
- */
 const VERSION_CREATING = /bunx wrangler (deploy|secret bulk|versions)\b/;
-/** note: The deployment-shape var the serving version must bind. */
 const DEPLOYMENT_VAR = '--var "DEPLOYMENT_MODE:saas"';
-/** note: The retired tenant-mode var, assembled so this file does not match its own scan. */
 const RETIRED_VAR = ["WORKSPACE", "TENANT", "MODE"].join("_");
 const GATE = "Assert zero orphan Apps (pre-deploy gate)";
 const KEY_GATE = "Assert usable encryption key (pre-deploy gate)";
 const BACKFILL = "Re-run App attribution repair (workspace-backfill.sql, idempotent)";
 
-/**
- * why: The version that serves a deploy is created by the LAST version-creating
- * command, and it must bind the deployment shape. `wrangler secret bulk`
- * cannot carry `--var` (a named environment rejects `keep_vars`), so the last
- * such command has to be a `wrangler deploy` that passes the var.
- */
 function assertServingStepBindsDeploymentMode(file: string, steps: Step[]): void {
   const versionCreating = steps.filter((s) => VERSION_CREATING.test(s.run ?? ""));
   expect(versionCreating.length, `${file}: no version-creating step found`).toBeGreaterThan(0);
@@ -177,7 +124,6 @@ function assertServingStepBindsDeploymentMode(file: string, steps: Step[]): void
   );
 }
 
-/** note: The always-run step that writes the status keys and the evidence summary. */
 function findSummaryStep(steps: Step[]): Step | undefined {
   return steps.find(
     (s) =>
@@ -193,15 +139,8 @@ const WORKFLOWS = [
     migrations: "Apply D1 migrations (remote)",
     refIdentity: "Assert checkout identity",
     refNeedles: ["HEAD_SHA"],
-    // why: `base_sha` is the image rebuild gate's explicit recovery base (a push
-    // whose own base was orphaned by a force-push), not a mode or replay
-    // binding — the dispatch still carries no deploy-shape input.
     dispatchInputs: ["base_sha", "expected_container_digest"],
-    // note: Wording the moved-ref exit must carry; everything after the dash is a
-    // file-specific tail clause and stays unpinned.
     redNeedles: ["checked-out HEAD", "!= run SHA"],
-    // why: Staging's `wrangler deploy` IS the last version-creating step, so the
-    // summary takes no separate serving outcome.
     serving: undefined,
   },
   {
@@ -210,12 +149,7 @@ const WORKFLOWS = [
     refIdentity: "Assert tag identity",
     refNeedles: ["refs/tags/", "TAG_SHA"],
     dispatchInputs: ["expected_container_digest"],
-    // why: Prod compares the TAG's commit with the run SHA (a separate checkout-head
-    // step exists, but it is not the step this case runs), so its exit must
-    // name the tag and the run it disagrees with — not the tail clause.
     redNeedles: ["names", "but this run executes"],
-    // why: Production re-deploys the deployment-shape version in a LATER step: the
-    // summary must consume that outcome too (I-000071).
     serving: { id: "serving", name: "Deploy serving version (prod)" },
   },
 ] as const;
@@ -243,9 +177,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
     });
 
     test("the encryption-key gate sits beside the zero-orphan gate, before every deploy-capable step", () => {
-      // why: A malformed DASHBOARD_ENCRYPTION_KEY deploys green and then 500s every
-      // encrypted write, so this gate has to precede `wrangler secret bulk` too
-      // (it publishes a version) — not merely the final `wrangler deploy`.
       const keyGate = steps.findIndex((s) => s.name === KEY_GATE);
       expect(keyGate, `${file}: encryption-key gate step is missing`).toBeGreaterThan(-1);
       expect(steps[keyGate]!.run, `${file}: the gate must run the script`).toBe(
@@ -260,9 +191,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
     });
 
     test("the encryption-key gate feeds the secret it checks", () => {
-      // why: The gate reads `process.env.DASHBOARD_ENCRYPTION_KEY`; a step that binds
-      // neither its own env nor (staging) the job-level one would answer "not
-      // set" on every deploy — a false red that trains operators to bypass it.
       const step = steps.find((s) => s.name === KEY_GATE)!;
       const jobValue = (parseWorkflow(file).jobs.deploy.env ?? {}).DASHBOARD_ENCRYPTION_KEY as
         | string
@@ -273,11 +201,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
     });
 
     test("the replayed file the deploy hands wrangler writes no workspace membership", () => {
-      // why: The regression this split exists for: whatever `--file` path the step
-      // relays is re-applied on EVERY deploy, so it must not write a per-person
-      // membership row (a routine deploy then re-adds every login — removed
-      // members included — to `default`). Asserted against the file on disk the
-      // step actually names, not a copy.
       const step = steps.find((s) => s.name === BACKFILL)!;
       expect(step, `${file}: backfill step is missing`).toBeDefined();
       const path = /--file\s+(\S+\.sql)/.exec(step.run ?? "")?.[1];
@@ -287,16 +210,12 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       expect(source, `${file}: ${path} replays a workspace_members write`).not.toMatch(
         /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+workspace_members\b/i,
       );
-      // why: It still carries the repair the gate depends on.
       expect(source, `${file}: ${path} must still map Apps`).toMatch(
         /INSERT\s+INTO\s+bot_workspaces\b/i,
       );
     });
 
     test("ref identity is asserted before every deploy-capable step", () => {
-      // why: The tenant-mode replay binding died with the mode; the REF IDENTITY
-      // assertion is what remains, and it applies to every run: a ref that
-      // moved between the approval and the deploy must never deploy.
       const index = steps.findIndex((s) => s.name === refIdentity);
       expect(index, `${file}: ref-identity step "${refIdentity}" is missing`).toBeGreaterThan(-1);
       const step = steps[index]!;
@@ -310,9 +229,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
     });
 
     test("ref identity EXECUTES: the tree it checks out passes, a moved ref reds before any deploy", () => {
-      // why: The property the deleted replay guard also carried: on a real repo the
-      // step compares the resolved ref with the run's SHA, and a disagreement
-      // must exit non-zero — a substring pin cannot see that.
       const step = steps.find((s) => s.name === refIdentity)!;
       const matching = runStep(
         step,
@@ -331,16 +247,12 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       );
       expect(moved.code, `${file}: a moved ref must red\n${moved.out}`).toBe(1);
       expect(moved.out, `${file}: a moved ref must say why`).toContain("::error::");
-      // note: Exiting 1 with any other message must not satisfy this case.
       for (const needle of redNeedles) {
         expect(moved.out, `${file}: red must name the moved ref (${needle})`).toContain(needle);
       }
     });
 
     test("no deploy command passes the retired tenant-mode var, and the shape var is the only one", () => {
-      // why: Scanned from the step bodies rather than the raw text so the assertion
-      // is about what a deploy actually hands wrangler. The repo-wide grep for
-      // the retired name lives in tests/contracts/wrangler-env-parity.test.ts.
       const passedVars = steps.flatMap((s) =>
         [...(s.run ?? "").matchAll(/--var\s+"?([A-Za-z_][A-Za-z0-9_]*):/g)].map((m) => m[1]!),
       );
@@ -366,7 +278,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       const deploy = steps.find((s) => (s.name ?? "").startsWith("Deploy Worker"))!;
       expect(deploy).toBeDefined();
       expect(deploy.id, `${file}: deploy step needs id: deploy`).toBe("deploy");
-      // why: one writer: the deploy step itself must not append status to the summary
       expect(deploy.run, `${file}: deploy step must not write the summary`).not.toContain("GITHUB_STEP_SUMMARY");
 
       const summary = findSummaryStep(steps);
@@ -374,7 +285,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       expect(summary!.env?.DEPLOY_OUTCOME, `${file}: summary must read the deploy outcome`).toBe(
         "${{ steps.deploy.outcome }}",
       );
-      // why: Run it: the emitted keys are the contract, not the step's markdown shape.
       const sha = "c".repeat(40);
       const failed = runStep(summary!, { DEPLOY_OUTCOME: "failure", RUN_SHA: sha });
       expect(failed.code, `${file}: the summary step must never fail the run`).toBe(0);
@@ -392,8 +302,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       const summary = findSummaryStep(steps)!;
       const sha = "d".repeat(40);
       if (serving === undefined) {
-        // why: Staging: one version-creating deploy, so its outcome alone decides and
-        // a fourth argument would invent a step that does not exist.
         expect(summary.env?.SERVING_OUTCOME).toBeUndefined();
         const ok = runStep(summary, { DEPLOY_OUTCOME: "success", RUN_SHA: sha });
         expect(ok.summary).toContain(`deploy_status=deployed\ndeployed_sha=${sha}`);
@@ -407,7 +315,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
         `\${{ steps.${serving.id}.outcome }}`,
       );
 
-      // note: First deploy green, serving deploy failed → the SHA is NOT certified.
       const partial = runStep(summary, {
         DEPLOY_OUTCOME: "success",
         SERVING_OUTCOME: "failure",
@@ -419,7 +326,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       );
       expect(partial.summary).not.toContain("deployed_sha=");
 
-      // note: Both green → the SHA is what this run shipped.
       const both = runStep(summary, {
         DEPLOY_OUTCOME: "success",
         SERVING_OUTCOME: "success",
@@ -429,9 +335,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
     });
 
     test("the evidence summary renders the Worker version as a markdown bullet", () => {
-      // why: N3: pin the CONTENT the step emits, not the echo shape. Both summaries
-      // carry the same evidence line; a bare `version_id=<uuid>` key renders as
-      // plain text in the run summary, so the bullet is the contract.
       const evidence = steps.find(
         (s) => (s.run ?? "").includes("Worker version") && (s.run ?? "").includes("GITHUB_STEP_SUMMARY"),
       )!;
@@ -450,9 +353,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
     });
 
     test("mutation: an appended bulk after the serving deploy, or a serving deploy without the var, fails the pin", () => {
-      // why: The hazard this pin exists for: every bulk write deploys a version from
-      // the config, so anything version-creating appended after the
-      // mode-binding deploy silently becomes the serving version.
       const src = readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8");
       const appended =
         src +
@@ -461,8 +361,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       const appendedSteps = parseText(file, appended);
       expect(() => assertServingStepBindsDeploymentMode(file, appendedSteps)).toThrow();
 
-      // note: and dropping the var from that last deploy leaves a serving version on
-      // whatever the config declares.
       const lastIdx = src.lastIndexOf(DEPLOYMENT_VAR);
       expect(lastIdx).toBeGreaterThan(-1);
       const stripped = src.slice(0, lastIdx) + src.slice(lastIdx + DEPLOYMENT_VAR.length);
@@ -473,7 +371,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
     if (file === "deploy.yml") {
       test("the version-id capture is a separate, non-fatal step", () => {
         const deploy = steps.find((s) => s.id === "deploy")!;
-        // why: a missing version id must not turn a successful deploy into a failure
         expect(deploy.run, "deploy step must not depend on the version capture").not.toContain("version_id.txt");
         const capture = steps.find((s) => s.name === "Capture Worker version id")!;
         expect(capture, "version-id capture step is missing").toBeDefined();
@@ -513,8 +410,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
           "deploy.yml: the dispatch must be able to name the base it diffs",
         ).toBe("${{ inputs.base_sha }}");
         expect(gate.run).toContain('bun scripts/check-image-inputs.ts --base "$base" --ref "$REF_NAME"');
-        // why: The job fails only through the script's exit 1: both no-base cases
-        // print a named skip and exit 0.
         expect(gate.run).not.toContain("exit 1");
 
         const ran = (event: string, base: string, dispatchBase: string) =>
@@ -529,11 +424,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
         expect(dispatch.code, `deploy.yml: a dispatch must not fail\n${dispatch.out}`).toBe(0);
         expect(dispatch.out, "deploy.yml: a dispatch skip must name the trigger").toContain("workflow_dispatch");
 
-        // note: ... but a dispatch that NAMES a base runs the gate instead of
-        // skipping it. The scratch tree has neither a git repository nor a
-        // config, so the gate refuses on the first fact it cannot read — a
-        // failing gate, never a silent pass. Which fact is named first is the
-        // script's ordering, not this workflow's contract.
         const withBase = ran("workflow_dispatch", "", "f".repeat(40));
         expect(withBase.code, `deploy.yml: a dispatch with a base must evaluate\n${withBase.out}`).toBe(1);
         expect(withBase.out, "deploy.yml: the recovery must run the gate").toContain("::error::");
@@ -549,13 +439,6 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
   });
 }
 
-/**
- * why: CI's gate is the one that runs on every push to `main` and every pull
- * request, so it carries the same shape this branch hardened: after `Setup
- * Bun`, before `Install dependencies`, and event values through `env:` only.
- * Only the deploy twin was pinned; without this, a revert to an interpolated
- * `run:` body — the injection shape this plan removed — passed the suite.
- */
 describe("ci.yml image rebuild gate", () => {
   const steps = parseWorkflow("ci.yml").jobs.test.steps as Step[];
   const index = steps.findIndex((s) => s.name === "Image rebuild gate");
@@ -581,7 +464,6 @@ describe("ci.yml image rebuild gate", () => {
       "${{ github.event.before }}",
     );
     expect(gate.run).toContain('bun scripts/check-image-inputs.ts --base "$base"');
-    // why: The job fails only through the script's exit 1: the no-base case skips.
     expect(gate.run).not.toContain("exit 1");
   });
 

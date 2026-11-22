@@ -122,7 +122,6 @@ export function installedVersion(dir: string, packageName: string): string | nul
  *  pin; the runner's pin is exact. */
 export type Expected = { name: string; version: string; caret: boolean };
 
-/** note: `[major, minor, patch]`, or null when the string is not a version. */
 function versionTriple(value: string): number[] | null {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(value);
   return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
@@ -161,9 +160,6 @@ export function installAndVerify(dir: string, expected: Expected[], modes: strin
   }
 }
 
-/** why: Regenerate `dir`'s bun.lock from the committed lock + manifest beside it.
- *  `path.resolve`, not `path.join`: the runner's lock is built in an absolute
- *  temp directory, and `join` would nest it under the repo root instead. */
 function regenerateLock(dir: string, root: string = ROOT): void {
   const install = Bun.spawnSync(["bun", "install", "--lockfile-only"], {
     cwd: path.resolve(root, dir),
@@ -196,12 +192,6 @@ export function planEdits(
   }
   const engineMoves = to.engine !== undefined && to.engine !== engineFrom;
   const refMoves = to.harnessRef !== undefined && to.harnessRef !== from.harnessRef;
-  // why: HARNESS_VERSION, the CLI pin and the Dockerfile's ref/tag anchor describe
-  // ONE release. Moving the version without the ref would declare v4.8.0 over a
-  // 4.7.3 commit — and, because the next run would then build its anchor match
-  // from the assumed tag, wedge every later bump. So the two move together or
-  // neither does: a version-only call with no new ref is refused before a single
-  // byte is written.
   if (engineMoves !== refMoves) {
     throw new Error(
       engineMoves
@@ -235,10 +225,6 @@ export function planEdits(
       from: `harnessRef: "${from.harnessRef}"`,
       to: `harnessRef: "${to.harnessRef}"`,
     });
-    // why: The anchor comment names the ref, the tag AND the day it moved. The tag is
-    // taken from the comment the file actually carries (`from.anchorTag`), so a
-    // file that drifted is reported instead of being silently rewritten into a
-    // shape no match string expects.
     edits.push({
       file: "sandbox-image/Dockerfile",
       from: `# mstar-harness plugin, pinned ref ${from.harnessRef} (tag v${from.anchorTag}, bumped ${from.bumped})`,
@@ -277,9 +263,7 @@ export function expectedInstalls(edits: PinEdit[], manifest: string): Expected[]
  *  real install and before the tree is consistent again. */
 export type BumpHooks = { afterRootInstall?: () => void };
 
-/** note: Move the pins and make the installed tree match them. Throws on any failure —
- *  the caller owns the restore, and must restore the INSTALLED tree, not just
- *  the manifests (see the workflow's `git checkout … && bun install` pair). */export async function runBump(
+export async function runBump(
   root: string,
   options: { omp?: string; engine?: string; harnessRef?: string },
   hooks: BumpHooks = {},
@@ -302,29 +286,19 @@ export type BumpHooks = { afterRootInstall?: () => void };
     console.log(`updated ${file} (${fileEdits.length} pin${fileEdits.length === 1 ? "" : "s"})`);
   }
 
-  // why: Root: relock from the committed lock, install for real, then prove a clean
-  // checkout would get the same tree. The install is what makes the extractor
-  // read the NEW SDK; `--frozen-lockfile` is the second check.
   regenerateLock("", root);
   installAndVerify(root, expectedInstalls(edits, "package.json"), [[], ["--frozen-lockfile"]]);
   hooks.afterRootInstall?.();
 
-  // why: CLI pin: its own manifest + lock (no source imports the CLI, so a lock is
-  // the whole artifact).
   if (edits.some((edit) => edit.file === "sandbox-image/cli-global/package.json")) {
     regenerateLock("sandbox-image/cli-global", root);
     console.log("regenerated sandbox-image/cli-global/bun.lock");
   }
 
-  // why: Runner: relock + install in a temp copy (a nested node_modules here would
-  // shadow the root resolution), then copy the resulting lock back. The install
-  // is real so the copy proves the lock resolves to the pinned tree.
   if (edits.some((edit) => edit.file === "packages/runner/package.json")) {
     const tmp = mkdtempSync(path.join(tmpdir(), "runner-lock-"));
     try {
       cpSync(path.join(root, "packages/runner/package.json"), path.join(tmp, "package.json"));
-      // why: A committed lock is seeded when present so only the pin's rows move;
-      // absent, `regenerateLock` resolves the whole tree instead.
       const committedLock = path.join(root, "packages/runner/bun.lock");
       if (existsSync(committedLock)) cpSync(committedLock, path.join(tmp, "bun.lock"));
       regenerateLock(tmp, root);

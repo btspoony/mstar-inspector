@@ -40,21 +40,10 @@ export const TARGETLESS_BOT_SQL =
 
 export type AttributionVerdict = {
   ok: boolean;
-  /** note: Parsed count; `null` when the wrangler output was unreadable. */
   count: number | null;
   message: string;
 };
 
-/**
- * note: Parse `wrangler d1 execute --json` stdout down to the one `COUNT(*) AS n`
- * row, or the reason it cannot be read.
- *
- * The CLI prints one entry per statement:
- *   [{ "results": [{ "n": 0 }], "success": true, "meta": { … } }]
- * Anything else — non-JSON, an empty array, no rows, a non-integer `n`,
- * `success: false` — is a failure: the count is unknown, so the gate must
- * not pass.
- */
 function readCount(stdout: string): { count: number } | { reason: string } {
   let parsed: unknown;
   try {
@@ -70,13 +59,9 @@ function readCount(stdout: string): { count: number } | { reason: string } {
     return { reason: "wrangler d1 execute returned a malformed statement result" };
   }
   const { success, results } = statement as Record<string, unknown>;
-  // why: Strict `true`: a missing flag or the string `"false"` is neither a success
-  // nor a readable answer, and this gate never passes on an unknown.
   if (success !== true) {
     return { reason: "wrangler d1 execute did not report success: true" };
   }
-  // why: Exactly one row: the query returns one COUNT(*), so extra rows mean the
-  // wrong statement (or a batched reply) and the first row is not the answer.
   if (!Array.isArray(results) || results.length !== 1) {
     return { reason: "wrangler d1 execute did not return exactly one result row (expected one COUNT(*) AS n row)" };
   }
@@ -129,7 +114,6 @@ export function targetlessVerdict(stdout: string): AttributionVerdict {
   };
 }
 
-/** note: One `wrangler d1 execute --command` call: the stdout, or why there is none. */
 function queryCount(
   db: string,
   envName: string | undefined,
@@ -182,8 +166,6 @@ if (import.meta.main) {
     console.error("assert-tenant-attribution: --db needs a database name");
     process.exit(1);
   }
-  // why: Both questions run before the verdict: one deploy attempt reports every
-  // broken row, and a failure in the first answer must not hide the second.
   let failed = false;
   for (const verdict of [runAttributionGate(db, envName), runTargetlessGate(db, envName)]) {
     if (verdict.ok) console.log(verdict.message);

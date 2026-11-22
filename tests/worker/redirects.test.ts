@@ -1,5 +1,3 @@
-/** note: trailing-slash 301 matrix (pure + Worker mount).
- */
 import { describe, expect, test } from "bun:test";
 import { normalizeDashboardTrailingSlash } from "../../src/worker/redirects";
 import worker from "../../src/worker/index";

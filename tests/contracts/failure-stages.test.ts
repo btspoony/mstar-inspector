@@ -1,15 +1,3 @@
-/**
- * why: GitHub rate-limit classification (the pure half of the consumer tagging
- * point). The classifier answers ONE question — which GitHub limit rejected
- * this call — because the persisted `review_failures.error` prefix and the
- * store's 24 h count are derived from it; a second interpretation of the same
- * rejection is what would let the page and the rows disagree.
- *
- * The shapes below are the octokit request-error shape the pipeline actually
- * throws (`{status, message, response: {headers}}`), the `Headers` instance a
- * transport may expose instead of a plain header map, and the non-request
- * values a decode can produce.
- */
 
 import { describe, expect, test } from "bun:test";
 
@@ -20,9 +8,6 @@ import {
 } from "../../src/contracts/failure-stages";
 
 describe("rate-limit error prefixes", () => {
-  // why: The two prefixes are the durable `review_failures.error` vocabulary the
-  // store counts by; a rename is a data-compat break, so the literals are
-  // pinned here (the dashboard and the 24 h counts read them, not the source).
   test("each prefix equals its documented literal", () => {
     expect(GITHUB_RATE_LIMIT_PREFIX).toBe("github-secondary-rate-limit: ");
     expect(GITHUB_PRIMARY_RATE_LIMIT_PREFIX).toBe("github-primary-rate-limit: ");
@@ -58,8 +43,6 @@ describe("classifyGithubRateLimit", () => {
   });
 
   test("403 with x-ratelimit-remaining: 0 is a PRIMARY limit", () => {
-    // why: GitHub answers 403 for primary exhaustion too; the exhausted budget is
-    // the primary signal, while retry-after / the message name the secondary.
     expect(
       classifyGithubRateLimit({
         status: 403,
@@ -94,7 +77,6 @@ describe("classifyGithubRateLimit", () => {
   });
 
   test("a plain 403, a 5xx and a retry-after on a non-403 are unclassified", () => {
-    // why: A permission/not-found 403 keeps some remaining budget: not a limit.
     expect(
       classifyGithubRateLimit({
         status: 403,
@@ -117,7 +99,6 @@ describe("classifyGithubRateLimit", () => {
       { status: "403" },
       [],
       () => undefined,
-      // why: Malformed envelopes: a transport that answered without response/headers.
       { status: 403, message: "Forbidden", response: null },
       { status: 403, message: "Forbidden", response: { headers: "retry-after: 60" } },
     ];

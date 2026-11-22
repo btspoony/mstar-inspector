@@ -1,29 +1,3 @@
-/**
- * (AD-542): the hand-rolled filterable provider combobox — the Add
- * Provider picker. The 214-entry catalog outgrew a plain Select, so the
- * picker is an input that narrows options as you type (case-insensitive
- * substring over label + id), with the 常用提供方 common tier grouped first
- * and the remaining entries under 目录模板 (grouping reads `display_group`
- * — display only; form/config branching keeps keying on tier/eligibility,
- * AD-547 red line).
- *
- * Deliberately hand-written at the components/ top level (the hand-written
- * layer — AppSidebar.tsx precedent), NOT one of the design system's primitives:
- * Radix Select cannot host a free-typed query and cmdk is out
- * of scope (zero new dependencies, AD-542 lock). Accessibility follows the
- * ARIA combobox pattern at the QA minimum bar: a typeable input
- * (role=combobox with aria-expanded/aria-controls/aria-autocomplete), a
- * listbox panel with role=option rows, ArrowDown/ArrowUp walking an
- * active-descendant highlight across the filtered rows with Enter to select
- * (task-3 review fix: 「可选」 must be keyboard-reachable) and Esc /
- * Tab / outside-click to dismiss (the full ARIA 1.2 pattern is still not
- * required; the highlight scrolls into view — QC fix round).
- *
- * Unavailable entries stay listed and marked (the "unavailable on {image}"
- * suffix + the dimmed face) in BOTH groups, and selecting one is allowed: the
- * AddProviderDialog's configuration step states the reason and renders no form,
- * with the server-side eligibility pre-check still refusing the save.
- */
 import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon } from "lucide-react";
 import { t, type Locale } from "../../i18n";
@@ -65,12 +39,6 @@ export function groupCatalogProviders(providers: readonly CatalogProvider[]): {
   return { common, catalog: rest };
 }
 
-/**
- * Deterministic option-row id — the aria-activedescendant bridge between the
- * combobox input and the panel rows. The panel renders it on every option;
- * the shell points the input at the highlighted one. Both call this, so the
- * two sides cannot drift.
- */
 function optionId(listboxId: string, providerId: string): string {
   return `${listboxId}-option-${providerId}`;
 }
@@ -99,9 +67,7 @@ export function ProviderComboboxPanel({
   imageId: string;
   listboxId: string;
   onSelect: (id: string) => void;
-  /** id of the keyboard-highlighted row (rendered via bg-accent). */
   activeId?: string;
-  /** Hover sync: the pointer moving over a row moves the highlight. */
   onHoverOption?: (providerId: string) => void;
 }) {
   const matches = filterCatalogProviders(providers, query);
@@ -114,8 +80,6 @@ export function ProviderComboboxPanel({
 
   if (total === 0) {
     return (
-      // Carries the listbox id so the input's aria-controls never dangles in
-      // the zero-match state (task-3 review fix).
       <p id={listboxId} className="px-2 py-1.5 text-sm text-muted-foreground">
         {t(locale, "settings.noProviderMatch", { query: query.trim() })}
       </p>
@@ -140,9 +104,6 @@ export function ProviderComboboxPanel({
                   className={cn(
                     "flex w-full cursor-pointer items-center gap-2 rounded-sm py-1.5 pr-2 pl-2 text-sm select-none hover:bg-accent",
                     activeId === rowId && "bg-accent",
-                    // Dimmed, not inert: discovery is the point. The entry
-                    // selects, and its configuration step states the reason with
-                    // no submit path.
                     unavailable && "opacity-50",
                   )}
                   onMouseMove={() => onHoverOption?.(provider.id)}
@@ -188,7 +149,6 @@ export function ProviderCombobox({
   imageId,
 }: {
   locale: Locale;
-  /** id of the visible field label (aria-labelledby precedent). */
   labelledby: string;
   providers: readonly CatalogProvider[];
   value: string | undefined;
@@ -201,15 +161,10 @@ export function ProviderCombobox({
   const rootRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
 
-  // The keyboard highlight walks the FILTERED rows in the panel's render
-  // order (common block, then catalog block) — derived from the same pure
-  // filter/group helpers the panel renders with, so the two cannot drift.
   const groups = groupCatalogProviders(filterCatalogProviders(providers, query));
   const visible = [...groups.common, ...groups.catalog];
   const active = visible[activeIndex];
 
-  // Outside-click dismiss (QA minimum bar). Client-only: effects never run
-  // during SSR, so the static-markup tests stay clean.
   useEffect(() => {
     if (!open) return;
     function onPointerDown(event: PointerEvent) {
@@ -219,13 +174,6 @@ export function ProviderCombobox({
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [open]);
 
-  // The keyboard highlight stays visible (QC fix round): the list is capped
-  // at max-h-72 with an internal scroll and arrow defaults are prevented, so
-  // without this an ArrowDown past the fold moves the highlight (and a
-  // following Enter commits) to a row the user cannot see — the replaced
-  // Radix Select auto-scrolled its active item. Same id bridge as
-  // aria-activedescendant. Client-only: effects never run during SSR, so the
-  // static-markup tests stay clean and the pure panel stays effect-free.
   useEffect(() => {
     if (!open || !active) return;
     document.getElementById(optionId(listboxId, active.id))?.scrollIntoView({ block: "nearest" });
@@ -234,8 +182,6 @@ export function ProviderCombobox({
   function select(id: string) {
     onValueChange(id);
     setQuery("");
-    // The query re-narrows the list — the highlight resets to the first
-    // match with it.
     setActiveIndex(0);
     setOpen(false);
   }
@@ -255,35 +201,21 @@ export function ProviderCombobox({
         placeholder={t(locale, "settings.selectProvider")}
         value={query}
         onFocus={() => setOpen(true)}
-        // Click re-opens after an Esc: focus is already on the input, so
-        // onFocus alone never re-fires (task-3 review fix).
         onClick={() => setOpen(true)}
         onChange={(event) => {
           setQuery(event.target.value);
-          // Every keystroke re-narrows the list — reset the highlight to the
-          // first match.
           setActiveIndex(0);
           setOpen(true);
         }}
         onKeyDown={(event) => {
           if (event.key === "Escape") setOpen(false);
-          // Tab moves focus out: collapse first so the overlay and
-          // aria-expanded don't go stale (QC fix round). In keydown, so it
-          // runs before the default focus move; no preventDefault — focus
-          // still advances (and a keydown sidesteps the blur-before-click
-          // trap that a blur-based close would hit on row clicks).
           if (event.key === "Tab") setOpen(false);
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
             if (!open) {
-              // Arrows open the list standalone (the replaced Radix Select
-              // was keyboard-operable): ArrowDown lands on the first match,
-              // ArrowUp on the last.
               setActiveIndex(event.key === "ArrowDown" ? 0 : Math.max(visible.length - 1, 0));
               setOpen(true);
             } else if (visible.length > 0) {
-              // Walk the highlight, clamped to the filtered list bounds
-              // (both group blocks, in panel render order).
               setActiveIndex((index) =>
                 event.key === "ArrowDown"
                   ? Math.min(index + 1, visible.length - 1)
@@ -292,16 +224,11 @@ export function ProviderCombobox({
             }
           } else if (event.key === "Enter" && open) {
             event.preventDefault();
-            // Unavailable rows select like any other: the configuration
-            // step is where the reason and the absent submit
-            // path live, so discovery cannot dead-end at the picker.
             if (active) select(active.id);
           }
         }}
       />
       {open ? (
-        // Height cap mirrors the old SelectContent max-h-72:
-        // an internal scroll keeps the 214-entry breadth usable.
         <div className="relative">
           <div className="absolute z-50 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-(--border-default) bg-popover p-1 text-popover-foreground shadow-(--shadow-pop)">
             <ProviderComboboxPanel

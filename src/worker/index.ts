@@ -1,25 +1,3 @@
-/**
- * Worker entry — Hono app exported as the module `fetch` handler (no listen).
- * 06 appends the queue wiring here (worker → pipeline, the only legal edge);
- * The cron face appends the `scheduled` wiring (worker → store read-only sweep,
- * AL-6 — the sweep statically imports nothing workerd-only, so the Bun test
- * runner keeps importing this module without SDK mocks).
- *
- * Routes:
- * - GET/HEAD /dashboard* trailing slash → 301 (src/worker/redirects.ts)
- * - GET/HEAD enumerated SPA pages with Accept text/html → ASSETS index.html
- * - GET /healthz → 200 {"ok":true,"version":"vX.Y.Z"} (version
- *   from the generated src/version.ts, same shape as the smoke-entry face)
- * - POST /webhook/:workspaceId/:appId → per-App webhook face (the ONLY HTTP review
- *   entry — the legacy bare `/webhook` face is
- *   retired): our webhook path → review_bots row (active, not deleted) → that App's
- *   decrypted webhook secret verifies the signature → resolve the delivery's
- *   review target → classify → enqueue with `botRef: { appId }` + `targetId`
- *   (spec § Multi-App 契约, locks L3/L4); a
- *   classified review job records its installing account in
- *   `bot_installations` before the pause/flag gates (best-effort)
- * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
- */
 import { Hono } from "hono";
 import type { D1Database, ExecutionContext, MessageBatch, ScheduledController, Workflow } from "@cloudflare/workers-types";
 import { deploymentModeOf, type DeploymentMode, type Env, type ScheduledEnv } from "./env";
@@ -78,19 +56,6 @@ import { spaDispatch } from "./spa-dispatch";
 import { APP_VERSION } from "../version";
 
 const app = new Hono<{ Bindings: Env }>();
-// `/dashboard*` GET/HEAD redirects (trailing
-// slash), then the tenant route-family gate, then SPA dispatch. The gate runs
-// HERE, ahead of SPA dispatch: a retired App path (`/dashboard/apps…`,
-// `/dashboard/api/apps…`) must answer 404 even when the SPA shell could serve
-// it. Requests the gate passes are unchanged; the dashboard app re-mounts the
-// same (idempotent) gate ahead of its own routes so direct mounts keep working.
-//
-// The maintenance window (D20) mounts the same way and for the same
-// reason: `spaDispatch` answers `GET /dashboard` and every browser page load
-// before `app.route("/dashboard", dashboardApp)` is ever reached, so a gate
-// inside `dashboardApp` alone would close the API and leave the shell open.
-// `/healthz` is an `app` route and `/_internal_admin/*` mounts
-// on the operator sub-app, so no ungated surface carries this prefix.
 app.use("*", trailingSlashRedirect());
 app.use("/dashboard/*", dashboardTenantGate);
 app.use("/dashboard/*", dashboardMaintenanceGate);
@@ -134,41 +99,14 @@ export function deliveryOutcomeFromWebhook(
   return sharedBotRefused ? "skipped" : "ok";
 }
 
-/**
- * Structured warn for the webhook face's rejection/bookkeeping paths (QC
- * F-005; log hygiene): the caller passes the real stage label
- * (e.g. `webhook_body_too_large`,
- * `db_binding_missing`, `installation_upsert_failed`) and it rides `event` —
- * never the generic "unknown" — so log consumers can filter these warns by
- * event alone; `reason` keeps the same label for the reason-keyed greps and
- * the three-field structured shape is unchanged.
- */
 function webhookWarn(event: string, detail: string, msg: string): void {
   defaultLog.warn({ event, reason: event, detail }, msg);
 }
 
-/**
- * Structured INFO twin (AL-23-2): the review_paused line is a legitimate
- * ops state answering 2xx, so it drops from warn to info — same
- * three-field shape, filterable by event, no sampling, no aggregation
- * state.
- */
 function webhookInfo(event: string, detail: string, msg: string): void {
   defaultLog.info({ event, reason: event, detail }, msg);
 }
 
-/**
- * Best-effort install bookkeeping shared by the two delivery paths that learn
- * an installing account (a review `job` and an `installation.*` event): upsert
- * the (appId, installationId) row's `account_login` / `seen_at`, and on any
- * store failure log the one structured warn and carry on. It never throws —
- * bookkeeping must not change the webhook response or the enqueue.
- *
- * `authoritative` says which source the login came from: an install event
- * states the installation's own account (overwrites any stored login), while
- * a review delivery only infers it from `repository.owner.login` (fills an
- * empty column, never replaces a value).
- */
 async function recordInstallation(
   appsStore: ReturnType<typeof createReviewBotsStore>,
   appId: string,
@@ -188,17 +126,6 @@ async function recordInstallation(
   }
 }
 
-/**
- * Byte-authoritative streamed body read for the webhook cap (61-R1): reads
- * the request stream up to `limit` bytes and UTF-8-decodes exactly those
- * bytes — TextDecoder's default (UTF-8, non-fatal) is the same decode
- * `request.text()` performed, so the returned string is decode-identical for
- * HMAC signature verification. Returns null the moment the accumulated byte
- * count exceeds `limit`: the remainder is never consumed (the stream is
- * cancelled), so a missing, chunked, or lying `content-length` header can
- * never buffer past the cap. `null` → the caller answers 413 with the
- * existing `webhook_body_too_large` warn.
- */
 async function readBodyWithinLimit(request: Request, limit: number): Promise<string | null> {
   const stream = request.body;
   if (stream === null) {
@@ -237,11 +164,6 @@ async function readBodyWithinLimit(request: Request, limit: number): Promise<str
  */
 export const CHECK_ATTACH_INLINE_BUDGET_MS = 2_500;
 
-/**
- * Resolve when `promise` settles or the budget elapses — whichever is first.
- * The promise is NOT cancelled: its owner (the invocation context) still holds
- * it, and a late attach is exactly what the consumer's takeover handles.
- */
 async function withinBudget(promise: Promise<unknown>, budgetMs: number): Promise<void> {
   const { promise: budget, resolve } = Promise.withResolvers<void>();
   const timer = setTimeout(resolve, budgetMs);
@@ -252,38 +174,15 @@ async function withinBudget(promise: Promise<unknown>, budgetMs: number): Promis
   }
 }
 
-/**
- * Attach the review Check on the DELIVERY path (spec §7.7 step 4 / §7.9).
- *
- * Runs BEFORE the enqueue: the attempt is claimed and its `queued` run created
- * NOW, so the Check shows up within seconds of the webhook instead of when a
- * worker finally starts the message — and an admitted message finds a row it
- * can adopt instead of racing this holder. The row is then RELEASED with the
- * run id persisted, which is exactly what the consumer's `begin` adopts; that
- * begin PROMOTES the run to `in_progress` once the review actually starts
- * (§7.9).
- *
- * Best-effort by contract: the client comes from the SAME
- * `createReviewCommenter` construction point every other Check send uses (spec
- * §7.6 — no second App auth), and every failure is ONE structured warn. The
- * `accepted` answer and the enqueue are never affected.
- *
- * `deliveryId` is generated BEFORE this call and recorded on the row it claims
- * (§7.9): the enqueued message carries the same id, so a later skip settlement
- * can tell THIS delivery's Check row from another's even after the release.
- */
 async function attachCheckOnAcceptance(input: {
   db: D1Database;
   env: Env;
   row: Pick<GithubAppTenantRow, "id" | "github_app_id" | "private_key_enc">;
   payload: Omit<ReviewJobPayload, "botRef" | "targetId">;
-  /** Generated BEFORE the attach starts, so the message always carries it. */
   deliveryId: string;
 }): Promise<void> {
   const { db, env, row, payload, deliveryId } = input;
   const headSha = payload.head_sha;
-  // A bot-mention delivery carries no SHA: the consumer claims after its own
-  // `rev-parse`, exactly as before.
   if (headSha === null) return;
   try {
     const pem = await createSecretbox(env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
@@ -320,8 +219,6 @@ async function attachCheckOnAcceptance(input: {
         deliveryId,
       },
     );
-    // One warn for a real failure (a refusal, a failed run-id write, a failed
-    // release). A busy/terminal skip is a legitimate no-op and stays silent.
     if (result.kind === "failed") {
       webhookWarn(
         "check_attach_failed",
@@ -385,8 +282,6 @@ export async function settleRefusedAfterAttach(input: {
   try {
     await input.attach;
   } catch {
-    // The attach logs its own fault and does not reject today; a rejected one
-    // still counts as finished, so the settlement below runs and finds nothing.
   }
   try {
     await input.settle();
@@ -395,28 +290,6 @@ export async function settleRefusedAfterAttach(input: {
   }
 }
 
-/**
- * The monthly RP ceiling for one admitted delivery: `null` means "may run",
- * a `quota-exhausted` verdict means the enqueue is refused.
- *
- * Step 2 of the admission order (see the route's gate). The cost comes from
- * the SAME two inputs the metering write prices — the target's resolved depth
- * (`review_level`, through `parseTargetReviewLevel`, falling back to the
- * operator default only when the row states none) and the bot's scope
- * (`shared` → source 10, anything else → source 1; D7 makes BYOK metered, not
- * exempt) — so a verdict and the charge it authorizes cannot be denominated
- * differently.
- *
- * The two counters are this caller's inputs (the plan's `review-quota` kind
- * takes them), and the ceiling itself is resolved INSIDE `checkEntitlement`
- * from the plan id it already read — so the ceiling can never be judged against
- * a different plan than the verdict carries. The month is the UTC calendar
- * month of `usage_events.occurred_at` (the field the ledger writes), and the
- * profile covering that month's first day (D5) prices it, so a profile
- * published mid-month never judges it. `used + cost > limit` refuses, so a
- * month exactly AT its ceiling still admits the review that lands on it and
- * only the next RP is refused.
- */
 async function quotaRefusal(
   db: D1Database,
   target: ReviewTargetRow,
@@ -424,10 +297,6 @@ async function quotaRefusal(
   mode: DeploymentMode,
 ): Promise<DeliveryRefusal | null> {
   const month = quotaMonth(new Date());
-  // Pricing this attempt and resolving its ceiling each need the profile
-  // covering `month.startIso`; the ctx shape carries a resolved `costRp`, so
-  // this path reads that one row twice (same month, same deterministic answer)
-  // rather than widening the shared verdict. It is one PK read on the gate path.
   const profile = await resolveQuotaProfile(db, month.startIso);
   let level = parseTargetReviewLevel(target.review_level);
   if (level === null) level = (await readDefaultReviewLevel(db)).value;
@@ -448,98 +317,9 @@ async function quotaRefusal(
     : null;
 }
 
-// `version` rides the healthz face — additive field, `ok:true`
-// contract unchanged; displayed with the `v` prefix (tag-shaped, eyeball-
-// reconcilable). Single source = generated src/version.ts.
 app.get("/healthz", (c) => c.json({ ok: true, version: `v${APP_VERSION}` }));
-// 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
-// module never imports pipeline/store/review (architect decision Q2).
 app.route("/dashboard", dashboardApp);
-/**
- * Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review
- * entry — the legacy bare `/webhook` face is
- * retired). Pre-order: body-size cap (413) → DB-unbound guard (500
- * fail-closed — the dashboard-dependency convention) → workspace + app id
- * lookup → signature verify → per-App `review_enabled` pause gate. The two
- * URL segments locate the `review_bots` row (active, not deleted) in THAT
- * workspace, whose DECRYPTED webhook secret parameterizes the same
- * `classifyWebhook` classifier (secret-parameterized only — the classifier
- * never sees the bot or target identity). Between signature verification and
- * classification the route resolves the ONE `review_targets` row this delivery
- * acts on, from `(bot_id, installation.id)`; the classifier cannot start
- * before that, because the target's trigger mode parameterizes it. No target
- * → 200 `ignored`, one `no_target_for_repo` line, zero enqueue, no PR ledger
- * row. With a target, the route attaches `botRef: { appId }` and `targetId`
- * before `REVIEW_QUEUE.send` (lock L3). Both segments are immutable internal
- * ids (the workspace's `workspaces.id` and the bot's `review_bots.id`) —
- * GitHub's mutable App slug is never part of the URL, so a rename cannot break
- * deliveries.
- * Unknown / mismatched pair / disabled / soft-deleted → 404, zero enqueue. Any webhook
- * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
- * envelope) → 500 fail-closed (lock L1); GitHub retries, nothing enqueues.
- *
- * Per-App pause (spec 语义锁 — paused ≠ disabled): once the
- * signature VERIFIED (classifyWebhook returned a non-reject),
- * `last_webhook_at` is touched exactly once — after signature verification,
- * regardless of the subsequent enqueue outcome (job / ignore / paused; a
- * queue-send failure below still leaves the touch committed), before the
- * pause check. Reject paths never touch, so the column reads "last verified
- * delivery" (NOT "last successful enqueue") and is decoupled from the review
- * switch. Then either pause flag at 0 — the bot's operational one or the
- * target's business one — answers 2xx with ZERO enqueue (the webhook
- * stays healthy while reviews are paused); disabled/deleted keep their 404
- * above. The in-flight queue face ack-skips paused messages symmetrically
- * (consumer lock L4).
- *
- * Install bookkeeping: a classified job payload always
- * carries `installation_id`, so the accepted path runs a `bot_installations`
- * seen_at upsert that also records `account_login` from
- * `outcome.installationAccount` — the installing account the delivery states,
- * with `repository.owner.login` only as the payload-missing fallback. A review
- * delivery's value is INFERRED (`accountAuthoritative: false`), so it only
- * fills an empty login and never replaces a stored one; an `installation`
- * delivery (`installation.created` / `new_permissions_accepted`) states the
- * installation's own account and overwrites (`accountAuthoritative: true`).
- * The job write runs BEFORE the pause gate, the global flag gate and the
- * enqueue, because those three decide only the ENQUEUE face: a paused App or a
- * disabled flag must still learn its installing account. An `installation`
- * delivery records the same row before answering `accepted` — earlier still,
- * before both gates (it never enqueues). Both are best-effort: a failure logs
- * one structured warn and never throws, blocks the enqueue, or fails the
- * webhook.
- *
- * Delivery recording (AL-20-1): immediately after
- * classification (before the reject return) ONE best-effort row is appended
- * to `webhook_deliveries` — every classified outcome lands (rejected /
- * ignored / paused / ok), the pre-classify failures record nothing, and a
- * store failure only logs a structured warn (the response and enqueue are
- * never affected). The retired legacy face recorded nothing (AL-20-1:
- * legacy 不落行 — it was the fallback path with no dashboard consumer).
- *
- * Order of the verified, non-reject path: signature verify → target
- * resolution (inside the classifier's seam) → classify → owner-allowlist
- * admission → delivery record → PR ledger → `last_webhook_at` touch → `ignore`
- * return → install bookkeeping (the `installation` branch records and returns;
- * the job path records and proceeds) → pause gate → global flag gate → enqueue.
- * The reject return sits between the delivery record and the PR ledger. A
- * delivery that resolved no target returns `ignored` at the `ignore` return:
- * it writes its delivery row and touches `last_webhook_at`, and it writes no
- * PR ledger row.
- *
- * Owner allowlist admission (migration 0045): an App with the switch on and an
- * owner set that excludes the delivery's `repository.owner.login` answers 200
- * and returns there — before the delivery row, the PR ledger, the
- * `last_webhook_at` touch and the enqueue, so a refused delivery leaves no
- * trace. It applies for EVERY cached visibility (`private` only hides the
- * Settings control). An unreadable owner proceeds (it cannot be judged); an
- * unreadable allowlist is fail-closed — 500, same zero writes, so GitHub
- * retries instead of the delivery slipping past an unapplied gate.
- */
 app.post("/webhook/:workspaceId/:appId", async (c) => {
-  // Body-size cap checked BEFORE buffering the body (B6). Two gates: the
-  // truthful over-limit header short-circuits before any byte is read, and
-  // the streamed read below is byte-authoritative (61-R1) — a missing,
-  // chunked, or lying `content-length` header never bypasses the byte count.
   const contentLength = Number(c.req.header("content-length") ?? "0");
   if (contentLength > WEBHOOK_BODY_LIMIT) {
     webhookWarn(
@@ -561,10 +341,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
 
-  // DB-unbound guard (fold-in): unreachable on the deployed Worker
-  // (wrangler.jsonc binds DB globally) — the branch exists because the
-  // shared fetch-face Env keeps DB optional for the dashboard's unbound-D1
-  // premises. Fail-closed 500, zero enqueue.
   const db = c.env.DB;
   if (db === undefined) {
     webhookWarn(
@@ -574,16 +350,8 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("db binding missing", 500);
   }
-  // The webhook path lookup is a tenant-facing `review_bots` read (AC2): the
-  // store's one read face joins `bot_workspaces`, so an App with no workspace
-  // mapping is unknown here too (404 with zero decrypt, zero delivery row and
-  // zero enqueue).
   const appsStore = createReviewBotsStore(db);
 
-  // Workspace + App lookup: the pair must name an App that belongs to that
-  // workspace. Unknown / mismatched / disabled / soft-deleted are all 404 with
-  // zero side effects (the log distinguishes them for the operator; the
-  // response does not).
   const workspaceId = c.req.param("workspaceId");
   const appId = c.req.param("appId");
   const webhookRef = `workspace_id=${workspaceId} app_id=${appId}`;
@@ -605,12 +373,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("unknown webhook path", 404);
   }
 
-  // The maintenance window (D20) refuses the delivery HERE — after the bot
-  // lookup, before the secret decrypt and signature verification — so an
-  // unauthenticated caller learns nothing and a verified delivery is asked to
-  // come back later instead of landing a pipeline write on a ledger the
-  // running backfill may be repointing. 503 (not 200) is what makes GitHub
-  // retry the delivery once the window closes. Read ONCE per delivery.
   const maintenance = await getMaintenanceMode(db);
   if (maintenanceClosed(maintenance)) {
     webhookWarn(
@@ -621,23 +383,12 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("maintenance in progress", 503);
   }
 
-  // The review configuration a delivery reads lives on the bot's target, not
-  // on the bot row: trigger mode and the business pause. A target IS a
-  // repository now (migration 0067), so resolution needs the delivery's own
-  // repository — which exists only in the body, so resolution runs inside the
-  // classifier's seam: after signature verification, before classification
-  // (whose trigger mode it supplies). The trigger mode comes from the
-  // EFFECTIVE settings, so one `workspaces` defaults read answers it per
-  // delivery.
   const targetsStore = createTargetsStore(db);
   const delivery: { target: ReviewTargetRow | null; installationId: number | null } = {
     target: null,
     installationId: null,
   };
 
-  // Decrypt this App's webhook secret (secretbox envelope, AAD pins the
-  // row). Fail-closed 500 on any decrypt failure — the signature is never
-  // verified against anything but the stored secret, and nothing enqueues.
   let appSecret: string;
   try {
     appSecret = await createSecretbox(c.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
@@ -654,22 +405,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("webhook secret decrypt failed", 500);
   }
 
-  // Architect lock L1: the verifier memoizes under the row id as
-  // cacheKey — a rotated webhook secret (same id, new envelope → new
-  // secret) is rebuilt + REPLACED on the next delivery; entries are
-  // structurally bounded (≤ review_bots rows) with no eviction policy.
-  // Trigger context (spec review-trigger-policy §2 read path): the resolved
-  // target's review_trigger_mode gates the pull_request auto
-  // face and the bot's GitHub slug keys the issue_comment bot mention — no
-  // second lookup. The mention target is GitHub's own slug (`github_slug`),
-  // NOT our webhook path: a rename changes the login that can trigger a
-  // review. NULL (never synced) collapses to "" and matches nothing — the
-  // existing fail-safe. The target's `review_drafts` switch rides the same
-  // context, so a draft delivery is classified against the row that owns it.
   const appSlug = row.github_slug ?? "";
-  // The classifier's ONE parse, kept for the delivery row's source repository
-  // and the PR ledger below — recording either must not re-parse up-to-1 MB of
-  // body.
   let classified: unknown = null;
   const outcome = await classifyWebhook(
     appSecret,
@@ -680,22 +416,14 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     row.id,
     async ({ installationId, repository }) => {
       delivery.installationId = installationId;
-      // The classifier consults a resolver only for a body that names a
-      // repository, so this is non-null by contract.
       const repo = repository!;
       delivery.target = await targetsStore.resolveByRepo(row.id, repo);
       const target = delivery.target;
       if (target === null) return null;
-      // Only a following target reads the workspace defaults: an own-columns
-      // target answers its stored mode directly (the column is CHECK-bound to
-      // the vocabulary), so the common path saves one D1 read per delivery.
       const mode =
         target.follow_workspace_defaults === 1
           ? (await getWorkspaceReviewDefaults(db, target.workspace_id)).triggerMode
           : target.review_trigger_mode;
-      // The draft switch is target-owned (D12), so the already-resolved row
-      // answers it in both inheritance branches — the same derivation
-      // `ownTargetSettings` uses, with no second defaults read.
       return { mode, appSlug, reviewDrafts: target.review_drafts !== 0 };
     },
     (parsed) => {
@@ -703,15 +431,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     },
   );
 
-  // ...which is also why an unsynced row must not fail SILENTLY: with no slug
-  // the mention can never match, so a `manual`-mode App (whose only trigger
-  // the mention is) just stops reviewing while the delivery reads `ignored`.
-  // Two gates keep this warn off every ordinary ignore: the classifier must
-  // have reached its mention check and missed (a `created` comment that did not
-  // match an empty slug — `edited`, other events and rejects never get here),
-  // AND the body must actually carry a login mention. Nothing else changes: the
-  // outcome, the delivery row's vocabulary (`ignored`) and the response stay as
-  // they were.
   if (
     appSlug === "" &&
     outcome.kind === "ignore" &&
@@ -725,12 +444,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
   }
 
-  // No target → this delivery has no review configuration to act on. It is an
-  // `ignore` (2xx, delivery row `ignored`, `last_webhook_at` touched), never a
-  // pause or a refusal: zero enqueue, no PR ledger row, and the allowlist is
-  // not consulted — nothing here can admit it. An `installation` delivery also
-  // resolves no target (it is bot-scoped bookkeeping with no review
-  // configuration); the classifier's own reason is what tells the two apart.
   const target = delivery.target;
   if (outcome.kind === "ignore" && outcome.reason === NO_TARGET_REASON) {
     webhookWarn(
@@ -739,53 +452,8 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       "per-App webhook ignored with 200 — no review target resolves for this delivery (zero enqueue, no ledger row)",
     );
   }
-  // Effective pause: the bot's OPERATIONAL flag and the target's BUSINESS flag.
-  // Both suppress a review, and the settings switch users flip is the target's,
-  // so this webhook must consult both — one derivation, read at the delivery
-  // record and at the pause gate. A delivery with no target cannot be a job,
-  // so it carries no pause state.
   const paused = target !== null && (row.review_enabled === 0 || target.review_enabled === 0);
-  // Owner allowlist admission is GONE with migration 0067 (D18): an App
-  // reviews every repository its targets name, and a repository owner outside
-  // any list is admitted exactly like one inside it. Nothing here can refuse a
-  // verified delivery before the delivery record.
 
-  // AL-20-1: best-effort delivery recording — the R2 diagnostics
-  // face ("断线看得见"). ONE row per ADMITTED verified delivery, written
-  // immediately after classification (before the reject return) so every
-  // classified outcome that reaches this line lands: reject → rejected
-  // (status_code = the classifier's status), ignore → ignored, job +
-  // review_enabled=0 or review_global=0 → paused, job → ok, installation →
-  // ignored (verified, but it enqueues nothing — not a reviewable event).
-  // The owner-allowlist refusal above (200 `ignored`) and its unreadable-read
-  // 500 return BEFORE this line, so those verified outcomes land no row by
-  // design — the gate admitted nothing.
-  // pre-classify failures (413 / db-guard / 404 /
-  // decrypt 500) never reach this line and record nothing (the retired
-  // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id
-  // is NOT NULL FK). Best-effort like the
-  // last_webhook_at touch: a store failure logs a structured warn and never
-  // changes the response or the enqueue.
-  //
-  // The `review_global` flag is read HERE — once per request — because BOTH
-  // consumers need it: this record (a globally blocked `job` is `paused`, never
-  // `ok`) and the enqueue gate below. One PK point read, per the flag read
-  // contract in src/admin/flags.ts; a second read for the gate is forbidden.
-  // Job-scoped: only a `job` can enqueue, so reject / ignore / installation
-  // deliveries must not gain a flag dependency (a failed read would turn their
-  // 2xx into a 500 and cost them their delivery row). A `job` that `paused`
-  // already covers — the bot's operational flag OR the target's business flag
-  // at 0, either one answers `paused` with zero enqueue — skips the read too:
-  // that derivation decides the outcome before the flag can.
-  // For the SAME reason the read itself is best-effort: it sits before the
-  // delivery row, the PR ledger and the last_webhook_at touch, so a D1
-  // failure here would drop all three diagnostics of an already-verified job.
-  // It logs one structured warn and falls back CLOSED — a failed read counts
-  // as "reviews disabled", never as "enabled", so a broken read can never
-  // silently defeat the kill switch by enqueueing a review while an operator
-  // believes it is on. The delivery row then reads `paused` (nothing
-  // enqueued); the response and every diagnostic write stay exactly as on a
-  // healthy read.
   let reviewGlobal = true;
   if (outcome.kind === "job" && !paused) {
     try {
@@ -800,49 +468,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
-  // The admission verdict, decided ONCE here, in the order the product fixes
-  // (capability first, then quota): a delivery may carry at most one refusal,
-  // so the two gates can never both fire and the author is told the cause that
-  // actually binds — a quota message for a workspace that may not use this bot
-  // at all would send it looking for a top-up it cannot buy here (D9).
-  //
-  //   1. Shared-bot capability — only for a job both switches admitted on a
-  //      bot the platform SHARES. A workspace's OWN bot is not the shared bot:
-  //      the owned path is untouched, and a Free workspace reviews with its own
-  //      App exactly as before. It reads the TARGET's workspace (the
-  //      consumer), never the bot's, and it is the very `checkEntitlement` entry
-  //      the target-creation route calls (`shared-bot` branch), so neither
-  //      surface re-derives the rule.
-  //   2. Monthly RP ceiling — only in the branch step 1 admitted. The cost is
-  //      `rpFor` over the SAME two inputs the metering write uses (the
-  //      target's level, the bot's scope), so the enqueue's verdict and the
-  //      charge cannot be denominated differently; the ceiling is read from the
-  //      profile judging this UTC month (D5) and `null` means unlimited.
-  //
-  // `self-hosted` never reaches either decision: the capability resolves
-  // `unlimited` before its first read and there is no ceiling to compare
-  // against, so the whole branch is skipped rather than paid for.
-  //
-  // The refusal feeds the delivery row below, the Check's skip settlement and
-  // the enqueue call at the end of this route; a store fault propagates as a
-  // 500, exactly like the allowlist read (an unapplied gate never admits a
-  // delivery).
-  //
-  // This whole block is BEST-EFFORT, for the reason the `review_global` read
-  // above it is: it sits before the PR ledger, the `last_webhook_at` touch and
-  // the enqueue, so a store fault here would turn an already-verified delivery
-  // into a 500 and cost it every one of those diagnostics. A fault is therefore
-  // a REFUSAL (recorded, skipped, 200), never a failed request: the review does
-  // not run, and the failure row says which read could not answer. Fail-closed
-  // — a verdict the platform could not compute never admits a delivery — and
-  // never silent: the row and one structured warn both name the cause.
   if (outcome.kind === "job") {
-    // THE ROUTE GATE, AT ACCEPTANCE (spec § Deployment gate). A closed route
-    // must be honoured HERE — before the Check is attached and before anything
-    // is enqueued. Attaching first would leave an eligible head with an
-    // `in_progress` Check that nothing adopts, and the reconciler would later
-    // report an unconfirmed failure for work the gate declined. A closed gate
-    // is NOT a failure: no Check, no terminal outcome, no reconciler work.
     const routeGate = await getReviewRouteWorkflowGate(db);
     if (routeGate.mode !== "on") {
       const line = JSON.stringify({
@@ -869,8 +495,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {
     try {
       if (row.scope === "shared") {
-        // The same one entry the target-creation route calls; an OWN bot is never
-        // asked, so this path pays no plan read for it.
         const verdict = await checkEntitlement({
           db,
           mode,
@@ -886,12 +510,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         refusal = await quotaRefusal(db, target, row.scope, mode);
       }
     } catch (err) {
-      // Three faults land here: a D1 error among the gate's own reads; an empty
-      // `quota_profiles` table (migration 0063 not applied); and a plan with no
-      // ceiling row in the judging profile — a CONFIGURATION defect that throws
-      // by design and would otherwise 500 every webhook of that plan until a
-      // new profile is published. All three are reported as an `entitlement`
-      // refusal, whose stage is the one the failure face already pages.
       refusal = { kind: "entitlement-unreadable" };
       webhookWarn(
         "entitlement_gate_failed",
@@ -906,12 +524,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       eventName,
       outcome: deliveryOutcomeFromWebhook(outcome, paused ? 0 : 1, reviewGlobal, refusal !== null),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
-      // The diagnostics face's "which repo did this come from?" answer, read
-      // off the classifier's own single parse of the body — null when the
-      // payload carries no repository.
       repositoryFullName: webhookRepositoryFullName(classified),
-      // Why a refusal happened: the classifier's own sentence, and only for a
-      // reject — every other outcome has none.
       reason: outcome.kind === "reject" ? outcome.reason : null,
     });
   } catch (err) {
@@ -923,23 +536,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text(outcome.reason, outcome.status);
   }
 
-  // PR ledger (migration 0039): every VERIFIED, non-reject `pull_request`
-  // delivery lands in `pull_requests` — including an `ignore` (a
-  // non-whitelisted action, a mode that does not auto-trigger, a paused App),
-  // which is exactly the "the App received this PR but nothing ran" case the
-  // dashboard must show. A reject records nothing (the payload did not
-  // validate). A delivery with NO resolved target records nothing either: the
-  // ledger belongs to a review configuration, and this one has none (the
-  // delivery row above still says `ignored`). Best-effort like recordDelivery
-  // above: a store failure logs a structured warn and never changes the
-  // response.
   if (eventName === "pull_request" && target !== null) {
     const record = pullRequestRecord(classified);
     if (record === null) {
-      // Visible, not silent: this delivery ran (or was ignored) with no ledger
-      // row, so the dashboard's "what did this App receive" answer is
-      // incomplete for it. Same best-effort posture as every sibling path —
-      // log, never change the response.
       webhookWarn(
         "pull_request_record_skipped",
         `${webhookRef} row_id=${row.id}`,
@@ -955,14 +554,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     }
   }
 
-  // Lock L5: the signature VERIFIED (classifyWebhook returned a
-  // non-reject), so this delivery is touched — after signature verification,
-  // regardless of the subsequent enqueue outcome (job / ignore / paused; a
-  // queue-send failure in handleReviewJob below still leaves this touch
-  // committed). The reject returns above never reach this line, so the
-  // column reads "last verified delivery", NOT "last successful enqueue".
-  // Best-effort (same pattern as the install upsert below): a failure logs a
-  // structured warn and never blocks the response.
   try {
     await appsStore.touchLastWebhook(row.id);
   } catch (err) {
@@ -974,19 +565,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("ignored", 200);
   }
 
-  // Install bookkeeping: every verified review-type delivery offers
-  // `outcome.installationAccount` — the installing account's login, inferred
-  // from the repository owner when the payload omits `installation.account` —
-  // so installs that predate this column fill in on their next delivery instead
-  // of waiting for another install event. The value is INFERRED, so the store
-  // only fills an EMPTY login: an account already recorded (by an install
-  // event, or an earlier delivery) is never overwritten by an inference. The
-  // login rides beside `payload`, never inside it: the queue message below
-  // stays account-free. Written BEFORE the pause gate, the global flag gate and
-  // the enqueue, because those three decide only the ENQUEUE face: a paused App
-  // or a disabled flag must still learn its installing account. Best-effort
-  // (the review path never fails on bookkeeping): a failure logs a structured
-  // warn and the webhook still returns 200.
   if (outcome.kind === "job") {
     await recordInstallation(
       appsStore,
@@ -997,12 +575,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
   }
 
-  // Install event (installation.created / new_permissions_accepted): the one
-  // delivery that observes a brand-new install before any review traffic, so
-  // it records `account_login` here — BEFORE the pause gate and the global
-  // flag gate, because those two gate the ENQUEUE face and this outcome never
-  // enqueues. Best-effort like every sibling bookkeeping write: a store
-  // failure logs and the webhook still answers 200.
   if (outcome.kind === "installation") {
     await recordInstallation(
       appsStore,
@@ -1014,13 +586,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("accepted", 200);
   }
 
-  // Uninstall (installation.deleted): stamp the local row, never delete it —
-  // the credential-routing and failure-attribution joins keep resolving, and
-  // the install-health read face stops listing it. No account_login is
-  // written: the payload states a removal, not a login. Best-effort like every
-  // sibling bookkeeping write: a store failure logs and the webhook still
-  // answers 200 (GitHub retries non-2xx, and a row we cannot stamp is fixed by
-  // the next metadata refresh's reconcile).
   if (outcome.kind === "installation_removed") {
     try {
       await appsStore.markInstallationRemoved(row.id, outcome.installationId);
@@ -1035,15 +600,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("accepted", 200);
   }
 
-  // Pause gate (spec 语义锁 — paused ≠ disabled): either pause flag
-  // =0 answers 2xx with ZERO enqueue — the webhook stays healthy (and
-  // touched, above) while reviews are paused. disabled/deleted already
-  // returned 404 above; the consumer ack-skips the in-flight messages it
-  // can no longer prevent (lock L4).
   if (paused) {
-    // AL-23-2: warn→info — paused is a legitimate ops state (2xx, zero
-    // enqueue), so the line rides the info channel with the same structured
-    // fields; no sampling, no aggregation state.
     webhookInfo(
       "review_paused",
       webhookRef,
@@ -1051,11 +608,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("ignored", 200);
   }
-  // Global review flag (spec §3.1, compass D21): OFF closes the ENQUEUE face
-  // for every App — same contract as the per-App pause above (2xx, zero
-  // enqueue) and deliberately NOT a dequeue-side check: work already queued
-  // keeps running. Absent flag row = enabled. `reviewGlobal` was read once
-  // before the delivery record — never re-read here.
   if (!reviewGlobal) {
     webhookInfo(
       "review_global_off",
@@ -1064,42 +616,14 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("ignored", 200);
   }
-  // Lock L3: both ids are attached at the route handler — after the target
-  // resolved, before the queue send. The queue message carries the id
-  // references only (lock L4: the PEM never leaves the consumer). Every
-  // remaining outcome is a `job`, and a job is only produced once the resolver
-  // returned a target (the no-target path classifies `ignore`, returned above).
-  // Store-only settlement lifecycle for a refusal (spec §7.9): a `null` adapter
-  // freezes the conclusion and releases the lease, and the minute reconciler
-  // performs the single remote update — so a refused delivery does ZERO
-  // credential work while its Check still closes honestly. The gate is read
-  // lazily from the target when a settlement runs, so the head's own confirmed
-  // proof is judged against the App's REAL gate instead of being deferred.
   const skipSettlement = refusalSkipSettlement({ db, target: target! });
   await handleReviewJob({ ...outcome.payload, botRef: { appId: row.id }, targetId: target!.id }, {
-    // `db` is the route's already-narrowed binding (the unbound guard above
-    // returned 500): the durable comment claim must never run against a
-    // possibly-unbound DB.
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
-    // The Check attaches HERE — BEFORE `REVIEW_QUEUE.send` — so an admitted
-    // message finds a released row to adopt instead of racing the delivery
-    // holder (spec §7.7 step 4 / §7.9). The webhook waits at most
-    // `CHECK_ATTACH_INLINE_BUDGET_MS`; past that the enqueue proceeds and the
-    // invocation context keeps the attach, which the consumer's bounded
-    // takeover of a stalled delivery holder covers.
     beforeEnqueue: async (payload) => {
-      // Generated BEFORE the attach starts (spec §7.9): the message must carry
-      // the identity even when the inline budget expires and the attach only
-      // finishes later — that row records the same id, so a later skip can
-      // still settle it.
       const attachDeliveryId = crypto.randomUUID();
       const attach = attachCheckOnAcceptance({ db, env: c.env, row, payload, deliveryId: attachDeliveryId });
       const headSha = payload.head_sha;
-      // A refused commit delivery settles the row it just attached, CHAINED
-      // onto that attach: the webhook may already have stopped waiting, and an
-      // inline settlement would race the create it kept running. A bot-mention
-      // delivery attached nothing (no head SHA) and settles nothing.
       const work =
         refusal === null || headSha === null
           ? attach
@@ -1130,9 +654,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       try {
         c.executionCtx.waitUntil(work);
       } catch {
-        // No invocation context (tests, a non-Worker host): the attach (and,
-        // on a refusal, its chained settlement) is already running detached
-        // and is best-effort either way.
         void work;
       }
       await withinBudget(attach, CHECK_ATTACH_INLINE_BUDGET_MS);
@@ -1142,18 +663,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   return c.text("accepted", 200);
 });
 
-/**
- * The `saas` router: `app` plus the hidden operator console.
- *
- * Built here, after every `app` registration — `route()` copies the source
- * app's route table at call time, so a route added to `app` later would be
- * absent from this one. The admin mount belongs to this router only: the
- * module body runs once per isolate while the deployment shape arrives per
- * request, which is why the choice happens in `fetch` instead of a mount
- * condition. A `self-hosted` deployment therefore serves `app`, where
- * `/_internal_admin` is an unknown path (404) for every caller — no runtime
- * mode flag inside a handler.
- */
 const saasApp = new Hono<{ Bindings: Env }>()
   .route("/", app)
   .route("/_internal_admin", adminApp);
@@ -1165,11 +674,6 @@ const saasApp = new Hono<{ Bindings: Env }>()
  */
 export const CHECK_RECOVERY_CRON = "* * * * *";
 
-/**
- * The M7 Check recovery stage in its OWN try/catch, shared by the minute
- * expression and the fifteen-minute composition, so both keep one failure
- * boundary.
- */
 async function runCheckReconcileStage(env: ScheduledEnv): Promise<void> {
   try {
     await reconcileReviewChecks(env);
@@ -1184,14 +688,8 @@ async function runCheckReconcileStage(env: ScheduledEnv): Promise<void> {
   }
 }
 
-/**
- * The queue face's env: the shared Worker env plus the review execution route's
- * platform binding. Kept out of `Env` so the fetch path (and the SPA program
- * that loads src/worker/env.ts) never pulls in the execution module's types.
- */
 type ReviewQueueEnv = Env & PipelineEnv & { REVIEW_WORKFLOW?: Workflow<AttemptRef> };
 
-/** The consumer surface the queue face needs, loadable at call time. */
 type ReviewQueueConsumerModule = Pick<
   typeof ConsumerModule,
   "createReviewConsumer" | "createWorkflowInstance"
@@ -1213,12 +711,6 @@ export async function runReviewQueueBatch(
   ctx: ExecutionContext,
   loadConsumer: () => Promise<ReviewQueueConsumerModule> = () => import("../pipeline/consumer"),
 ): Promise<void> {
-  // THE DEPLOYMENT GATE (spec § Deployment gate). Merging this code does not
-  // enable the review route: the operator flips `review.route.workflow` only
-  // after the nine claims hold and I-000666 closes. Until then a delivery is
-  // REFUSED here — acknowledged, one structured line — never silently
-  // re-routed to a path that no longer exists. Absent and unreadable rows are
-  // OFF (see `getReviewRouteWorkflowGate`).
   const gate = await getReviewRouteWorkflowGate(env.DB);
   if (gate.mode !== "on") {
     const line = JSON.stringify({
@@ -1231,26 +723,15 @@ export async function runReviewQueueBatch(
       batch_messages: batch.messages.length,
       msg: "review route is off (review.route.workflow) — the batch was acknowledged and no Workflow instance was created",
     });
-    // A stored `off` is the operator's intended state; an unreadable row is a
-    // fault worth surfacing, and both refuse the same way.
     if (gate.degraded) console.warn(line);
     else console.log(line);
     return;
   }
-  // ONE execution route: the consumer admits, dedupes and settles skips, and
-  // its hand-off calls THIS starter, which creates exactly one Workflow
-  // instance per admitted attempt — instance id = attempt id. The handler
-  // itself never touches a container, a sandbox credential or the model.
   const workflow = env.REVIEW_WORKFLOW;
   if (workflow === undefined) {
-    // A deploy without the binding could only drop every review it admits:
-    // fail loud into the queue's retry/DLQ path instead.
     throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
   }
   const { createReviewConsumer, createWorkflowInstance } = await loadConsumer();
-  // The invocation context owns the detached Check terminalization: the
-  // consumer hands it the promise, so an overrun still finishes after the
-  // handler returns instead of being reclaimed with the isolate.
   await createReviewConsumer(
     env,
     undefined,
@@ -1263,40 +744,10 @@ export async function runReviewQueueBatch(
 export default {
   fetch: (request: Request, env: Env, ctx?: ExecutionContext): Response | Promise<Response> =>
     (env.DEPLOYMENT_MODE === "saas" ? saasApp : app).fetch(request, env, ctx),
-  // 06 queue wiring — the ONLY legal worker → pipeline edge (compass A).
-  // Dynamic import: the consumer statically loads the sandbox adapter, which
-  // imports the workerd-only `cloudflare:workers` builtin — Bun's test runner
-  // cannot resolve it, so a
-  // static import would break the fetch-path tests (platform-specific
-  // module exception to the static-import rule).
   async queue(batch: MessageBatch<ReviewJobPayload>, env: ReviewQueueEnv, ctx: ExecutionContext): Promise<void> {
     await runReviewQueueBatch(batch, env, ctx);
   },
-  // Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
-  //
-  // `* * * * *` — the Check lane alone (spec §7.11.2) and its ONLY driver. A
-  // Check attempt whose terminalize overran or threw releases its lease
-  // immediately, so recovery must run on the same minute instead of waiting up
-  // to fifteen: this is what turns "terminal state 15 minutes after
-  // publication" into "about a minute".
-  //
-  // `*/15 * * * *` — the trailing-24h `review_failures` sweep composed with
-  // the M8 recovery reconciler — runSweep → reconcileReviewLifecycle. Every
-  // stage is caught INDEPENDENTLY, so one stage's failure can never break
-  // another, and nothing ever throws out of `scheduled` (a throwing cron
-  // handler just retries into alert noise). The sweep reads D1 only; the
-  // reconciler additionally reads the DASHBOARD_ENCRYPTION_KEY binding to route
-  // per-App recovery credentials (§7.6). The Check lane is deliberately NOT
-  // part of this composition: both expressions fire on :00/:15/:30/:45 and the
-  // minute expression already covers that minute, so a second pass would only
-  // duplicate work — including its suspension and backoff writes — against its
-  // own per-invocation budget. All stages are awaited directly, so no
-  // ctx.waitUntil is needed.
   async scheduled(controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
-    // The maintenance window (D20) short-circuits EVERY expression before any
-    // lane runs — the Check lane included, since its recovery writes the same
-    // ledger a running backfill may be repointing. ONE read per invocation;
-    // the window is read again on the next tick, so nothing is remembered.
     if (env.DB) {
       const maintenance = await getMaintenanceMode(env.DB);
       if (maintenanceClosed(maintenance)) {
@@ -1311,9 +762,6 @@ export default {
       await runCheckReconcileStage(env);
       return;
     }
-    // The database is the composition's prerequisite: captured ONCE after the
-    // guard (a reconciler call may widen `env`, and every stage needs the same
-    // bound handle).
     const db = env.DB;
     if (db === undefined) {
       defaultSweepLog.warn(
@@ -1325,9 +773,6 @@ export default {
     try {
       await runSweep(db, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
     } catch (error) {
-      // SEC-03: the sweep-failure detail is redacted before the warn line —
-      // an infra error can interpolate a secret-shaped value
-      // (defense-in-depth; clean strings pass through unchanged).
       defaultSweepLog.warn(
         {
           event: "ops_sweep_failed",
@@ -1336,10 +781,6 @@ export default {
         "ops sweep failed",
       );
     }
-    // M8 recovery reconciler (§7.11) — OWN try/catch AFTER runSweep.
-    // reconcileReviewLifecycle is throw-proof by contract; the catch is the
-    // composition's independent-failure guarantee (and matches the
-    // upcoming stage shape).
     try {
       await reconcileReviewLifecycle(env);
     } catch (error) {
@@ -1351,14 +792,7 @@ export default {
         "lifecycle reconcile failed",
       );
     }
-    // Durable route handoffs (migration 0083) — OWN try/catch, LAST stage: an
-    // unconfirmed Workflow create and a moved head's undelivered successor are
-    // re-sent to the queue here, so neither can vanish with an interrupted
-    // host.
     try {
-      // The scheduled lane's env type narrows the bindings it reads; the
-      // route's recovery pass also writes the commit claim, which this worker
-      // has bound at runtime (the scheduled handler receives the full Env).
       const routeKv = (env as Env).IDEMPOTENCY_KV;
       await reconcileReviewRoute({
         DB: db,

@@ -1,17 +1,10 @@
-/**
- * Stat idiom: a muted uppercase label (DESIGN.md label-12 step) over a
- * one-step-larger tabular figure, with an optional hint line and an optional
- * 0–1 progress bar. `StatCard` renders one definition-list group, so it is
- * written for the `StatGrid` wrapper — the semantic `<dl>` — and not for
- * standalone use. Both are props-only: pages pass resolved strings.
- */
 import type { ReactNode } from "react";
 import { cn } from "@design-system";
 
 /**
  * The fill width is a static class ladder because Tailwind only compiles
  * classes it can find in source. shortcut: the bar quantises to 10% steps,
- * upgrade to a CSS-var width if sub-step precision is ever needed.
+ * upgrade: to a CSS-var width if sub-step precision is ever needed.
  */
 const FILL_WIDTHS = [
   "w-0",
@@ -36,7 +29,6 @@ export function StatCard({
   label: ReactNode;
   value: ReactNode;
   hint?: ReactNode;
-  /** 0–1 filled ratio; values outside the range clamp. */
   progress?: number;
 }) {
   const step =

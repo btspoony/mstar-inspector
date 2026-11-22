@@ -132,7 +132,6 @@ describe("clampSection (bounded bodies)", () => {
 
   test("over the cap cuts on an entry boundary and counts the omitted entries", () => {
     const bounded = clampSection(body, 40, "en");
-    // why: never splits a bullet: every retained line is a whole entry
     expect(bounded.split("\n").filter((l) => l.startsWith("- "))).toEqual(["- one bullet", "- two bullet"]);
     expect(bounded).toContain("2 more entries — the full list is in [CHANGELOG.md](CHANGELOG.md).");
   });

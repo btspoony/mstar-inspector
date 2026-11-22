@@ -1,10 +1,3 @@
-/** note: The workspace default review-gate floor card.
- *
- * Mounted on its own (the card fetches its own payload), so the contract under
- * test is exactly the card's: `GET`/`PUT …/api/settings/check-min-score`, the
- * stored value is the server's answer, and a degraded read never presents the
- * platform fallback as a stored value.
- */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -35,10 +28,6 @@ describe("workspace default review-gate floor card", () => {
   test("shows the stored floor and settles on the server's answer after a save", async () => {
     const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
     const realFetch = globalThis.fetch;
-    // why: The PUT answers a normalized 40 for a typed 45, so the field can only
-    // settle on 40 by reading the server's body — echoing the draft cannot.
-    // A non-zero payload floor: a copy string carrying its own lower bound
-    // cannot match the rendered sentence.
     const bounds = { min: 3, max: 100 };
     const calls = stubFetch((call) =>
       call.method === "PUT" ? json(200, { min_score: 40 }) : json(200, { min_score: 60, ...bounds, degraded: false }),
@@ -67,7 +56,6 @@ describe("workspace default review-gate floor card", () => {
         { url: "/dashboard/ws_acme/api/settings/check-min-score", method: "PUT", body: JSON.stringify({ min_score: 45 }) },
       ]);
       expect(container.textContent).toContain(t("en", "workspace.checkMinScoreSaved"));
-      // note: The server's stored answer, not the typed draft (45).
       expect((win.document.querySelector("#workspace-check-min-score") as unknown as HTMLInputElement).value).toBe("40");
 
       await act(async () => root.unmount());

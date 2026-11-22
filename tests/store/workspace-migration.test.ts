@@ -1,13 +1,3 @@
-/**
- * why: Workspace ownership migrations: 0026 creates the tenant tables + the
- * 'default' workspace, 0027 attributes every existing App to it, and 0030
- * backfills the pre-open-sign-in users' memberships exactly once.
- *
- * 0027 is REPLAYED by both deploy workflows, so the interesting half is what
- * it must NOT do: a routine deploy must neither grant a fresh login a
- * membership nor resurrect a removed member. 0030 is the one-time half and is
- * scoped to the users that existed before open sign-in (cutover).
- */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,30 +7,17 @@ import { deleteWorkspaceMember, signInDashboardUser } from "../../src/dashboard/
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 const SCRIPTS_DIR = join(import.meta.dir, "../../scripts");
-/** note: The deploy replay: 0027's repair in the post-0056 names. */
 const APP_REPAIR = "workspace-backfill.sql";
-/** note: The historical form of the same repair, applied before the rename. */
 const HISTORICAL_APP_REPAIR = "0027_workspace_backfill.sql";
 const MEMBERSHIP_CUTOVER = "0030_workspace_membership_cutover.sql";
-/** note: The open-sign-in instant 0030 scopes on (see the migration header). */
 const CUTOVER = "2026-10-22T11:13:45.000Z";
 
-/**
- * note: Apply a SQL file the way `wrangler d1 execute --file` does on D1: statement
- * by statement, fail-fast. Reused for the deploy replay, which is the same
- * shape of file.
- */
 function runFile(db: TestD1, name: string, dir = MIGRATIONS_DIR): void {
   execMigrationScript(db.raw, readFileSync(join(dir, name), "utf8"));
 }
 
-/**
- * note: A database migrated exactly as production stood BEFORE 0030 applied: every
- * earlier file in filename order, 0030 not yet. Lets a test insert the
- * pre-cutover users and then let the migration do its one backfill.
- */
 function dbBeforeCutover(): TestD1 {
-  const db = createTestD1(); // note: already carries 0001 + 0002
+  const db = createTestD1();
   const before = readdirSync(MIGRATIONS_DIR)
     .filter((name) => {
       const prefix = name.slice(0, 4);
@@ -84,7 +61,6 @@ function insertApp(
     .run(id, githubAppId, slug, deletedAt);
 }
 
-/** note: The `default` workspace's membership logins, sorted. */
 function defaultMembers(db: TestD1): string[] {
   return (
     db.raw
@@ -175,18 +151,12 @@ describe("scripts/workspace-backfill.sql (replayed every deploy)", () => {
     expect(countRows(db, "workspace_members")).toBe(0);
   });
 
-  // invariant: The regression this split exists for: the file the workflows replay must
-  // not touch `workspace_members` at all.
   test("a routine replay grants no membership: a fresh login and a removed member stay out", async () => {
     const db = createMigratedTestD1();
     insertApp(db, "app-live", "live-app", 1001);
 
-    // note: (a) A login that signed in with no invite: a `users` row, no membership.
     const fresh = await signInDashboardUser(db, "fresh-login");
     if (fresh.outcome !== "allow") throw new Error("fixture sign-in was denied");
-    // note: (b) A member removed from the workspace: the membership row is gone, the
-    // users row survives (removal from a workspace is not a login ban) — which
-    // is exactly the state the old replay resurrected.
     const member = await signInDashboardUser(db, "removed-member");
     if (member.outcome !== "allow") throw new Error("fixture sign-in was denied");
     db.raw
@@ -197,13 +167,11 @@ describe("scripts/workspace-backfill.sql (replayed every deploy)", () => {
     expect(await deleteWorkspaceMember(db, "default", member.user.id)).toBe(true);
     expect(defaultMembers(db)).toEqual([]);
 
-    // note: The deploy's repair step, verbatim from disk — twice (a run can retry).
     runFile(db, APP_REPAIR, SCRIPTS_DIR);
     runFile(db, APP_REPAIR, SCRIPTS_DIR);
 
     expect(defaultMembers(db)).toEqual([]);
     expect(countRows(db, "users")).toBe(2);
-    // note: The App half still did its job in the same run.
     expect(countRows(db, "bot_workspaces")).toBe(1);
   });
 });
@@ -213,9 +181,7 @@ describe("migrations/0030_workspace_membership_cutover.sql (applied once)", () =
     const db = dbBeforeCutover();
     insertUser(db, "user-admin", "octocat", "admin");
     insertUser(db, "user-member", "hubot", "member");
-    // note: Signed in under open sign-in: joins nobody.
     insertUser(db, "user-late", "late", "member", CUTOVER);
-    // note: Removed by an operator before the cutover: stays out.
     insertUser(db, "user-removed", "mallory", "member");
     db.raw
       .prepare("INSERT INTO removed_logins (github_login, removed_at) VALUES (?, ?)")
@@ -235,15 +201,10 @@ describe("migrations/0030_workspace_membership_cutover.sql (applied once)", () =
       { login: "octocat", role: "owner" },
     ]);
 
-    // invariant: Exactly once: a second apply inserts nothing (the deploy never does
-    // this — the ledger does — but the guard is what makes that safe).
     runFile(db, MEMBERSHIP_CUTOVER);
     expect(defaultMembers(db)).toEqual(["hubot", "octocat"]);
   });
 
-  // invariant: The stamp is the discriminator the deploy runbook keys on: 0030's own rows
-  // must NOT reuse 0027's legacy stamp, or "written by the one-time migration"
-  // and "written by a replayed 0027" become indistinguishable afterwards.
   test("inserted rows carry the cutover stamp, never 0027's legacy stamp", () => {
     const db = dbBeforeCutover();
     insertUser(db, "user-admin", "octocat", "admin");
@@ -255,7 +216,6 @@ describe("migrations/0030_workspace_membership_cutover.sql (applied once)", () =
       .query("SELECT DISTINCT created_at AS stamp FROM workspace_members ORDER BY stamp")
       .all() as Array<{ stamp: string }>;
     expect(stamps).toEqual([{ stamp: CUTOVER }]);
-    // note: And the legacy value is exactly what the repair predicate excludes.
     expect(stamps.map((row) => row.stamp)).not.toContain("2026-10-21T00:00:00.000Z");
   });
 
@@ -287,18 +247,14 @@ describe("migrations/0030_workspace_membership_cutover.sql (applied once)", () =
   // blind spot".
   test("KNOWN: a pre-cutover user removed on the members page before the first apply is re-granted once", async () => {
     const db = dbBeforeCutover();
-    // note: The row was written while the retired allowlist admitted logins: its
-    // `created_at` predates the cutover, which is what makes 0030 want it.
     insertUser(db, "user-members-page-removed", "members-page-removed", "member");
     db.raw
       .prepare(
         "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, 'admin', ?)",
       )
       .run("user-members-page-removed", "2026-01-01T00:00:00.000Z");
-    // note: Removed the way this branch's members page removes somebody.
     expect(await deleteWorkspaceMember(db, "default", "user-members-page-removed")).toBe(true);
     expect(defaultMembers(db)).toEqual([]);
-    // invariant: The membership-only removal leaves no tombstone — that is the blind spot.
     expect(countRows(db, "removed_logins")).toBe(0);
 
     runFile(db, MEMBERSHIP_CUTOVER);
@@ -307,12 +263,8 @@ describe("migrations/0030_workspace_membership_cutover.sql (applied once)", () =
     const role = db.raw
       .query("SELECT role FROM workspace_members WHERE workspace_id = 'default' AND user_id = ?")
       .get("user-members-page-removed") as { role: string };
-    // note: The legacy `users.role` mapping decides the re-granted role — the
-    // pre-removal `admin` membership is gone, only the users row speaks.
     expect(role.role).toBe("member");
 
-    // invariant: One-shot: a second apply cannot add anything, and a deploy never replays
-    // this file through the ledger.
     runFile(db, MEMBERSHIP_CUTOVER);
     expect(defaultMembers(db)).toEqual(["members-page-removed"]);
   });

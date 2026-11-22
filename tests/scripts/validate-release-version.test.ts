@@ -26,7 +26,6 @@ import {
 } from "../../scripts/validate-release-version";
 import { disposeTempRoot, git, makeTempRoot, writeAt, writeVersionTs } from "./helpers";
 
-/** note: Init a git repo with one commit so lightweight tags resolve. */
 function initGitRepo(root: string): void {
   git(root, "init", "-q");
   git(root, "config", "user.email", "test@example.com");
@@ -95,7 +94,7 @@ describe("validateReleaseVersion gate", () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
-      writeVersionTs(root, "0.1.0"); // note: stale: the bump missed this surface
+      writeVersionTs(root, "0.1.0");
       initGitRepo(root);
 
       const result = await validateReleaseVersion("v1.0.0", root);
@@ -159,7 +158,6 @@ describe("validateReleaseVersion gate", () => {
       writeVersionTs(root, "1.0.0");
       initGitRepo(root);
       git(root, "tag", "-a", "v1.0.0", "-m", "release");
-      // why: a newer commit lands after the tag: the tag no longer points at HEAD
       writeAt(root, "later.txt", "");
       git(root, "add", "-A");
       git(root, "commit", "-q", "-m", "later");
@@ -180,7 +178,7 @@ describe("validateReleaseVersion gate", () => {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
       writeVersionTs(root, "1.0.0");
       initGitRepo(root);
-      git(root, "tag", "-a", "v1.0.0", "-m", "release"); // note: single commit == HEAD
+      git(root, "tag", "-a", "v1.0.0", "-m", "release");
 
       const result = await validateReleaseVersion("v1.0.0", root);
       expect(result.ok).toBe(true);
@@ -215,10 +213,10 @@ describe("resolveTagCommit / headCommit (git rev-parse)", () => {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
       initGitRepo(root);
       expect(resolveTagCommit("1.0.0", root)).toBeUndefined();
-      git(root, "tag", "-a", "v1.0.0", "-m", "release"); // note: annotated tag shape
+      git(root, "tag", "-a", "v1.0.0", "-m", "release");
       const head = headCommit(root);
       expect(head).toMatch(/^[0-9a-f]{40}$/);
-      expect(resolveTagCommit("1.0.0", root)).toBe(head); // note: peeled to the commit
+      expect(resolveTagCommit("1.0.0", root)).toBe(head);
     } finally {
       disposeTempRoot(root);
     }

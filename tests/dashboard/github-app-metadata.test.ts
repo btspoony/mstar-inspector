@@ -40,7 +40,6 @@ import {
 import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { fakePem } from "../helpers/fake-secrets";
 
-// note: --- test RSA key material (generated per test; no fixtures) ---
 
 async function generateKeyPair(): Promise<CryptoKeyPair> {
   return (await crypto.subtle.generateKey(
@@ -55,7 +54,6 @@ async function generateKeyPair(): Promise<CryptoKeyPair> {
   )) as CryptoKeyPair;
 }
 
-/** note: DER bytes → armored PEM (64-col base64, the standard wrap). */
 function toPem(der: Uint8Array, label: string): string {
   let binary = "";
   for (const byte of der) binary += String.fromCharCode(byte);
@@ -63,19 +61,11 @@ function toPem(der: Uint8Array, label: string): string {
   return `-----BEGIN ${label}-----\n${b64.match(/.{1,64}/g)!.join("\n")}\n-----END ${label}-----\n`;
 }
 
-/** note: base64url → bytes (JWT segment decoding). */
 function base64UrlToBytes(segment: string): Uint8Array<ArrayBuffer> {
   const b64 = segment.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (segment.length % 4)) % 4);
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
 
-/**
- * why: Unwrap the PKCS#8 PrivateKeyInfo container to its PKCS#1 RSAPrivateKey
- * payload (minimal sequential DER walk — the structure WebCrypto produces
- * is deterministic: SEQUENCE { INTEGER 0, SEQUENCE {rsaEncryption}, OCTET
- * STRING {pkcs1} }). Only used to BUILD a PKCS#1 test PEM; the module
- * under test does the inverse wrap via normalizePrivateKey.
- */
 function pkcs8DerToPkcs1Der(pkcs8: Uint8Array): Uint8Array {
   let i = 0;
   const readLen = (): number => {
@@ -87,33 +77,30 @@ function pkcs8DerToPkcs1Der(pkcs8: Uint8Array): Uint8Array {
     return len;
   };
   if (pkcs8[i++] !== 0x30) throw new Error("test key: not a PKCS#8 SEQUENCE");
-  readLen(); // note: outer SEQUENCE length
+  readLen();
   if (pkcs8[i++] !== 0x02) throw new Error("test key: version INTEGER missing");
   const versionLen = readLen();
-  i += versionLen; // note: version 0 — NOT `i += readLen()`: readLen mutates i itself
+  i += versionLen;
   if (pkcs8[i++] !== 0x30) throw new Error("test key: algorithm SEQUENCE missing");
   const algLen = readLen();
-  i += algLen; // note: rsaEncryption AlgorithmIdentifier
+  i += algLen;
   if (pkcs8[i++] !== 0x04) throw new Error("test key: OCTET STRING missing");
   const keyLen = readLen();
   return pkcs8.slice(i, i + keyLen);
 }
 
-/** note: A fresh PKCS#8 PEM (the modern export format) + its public key. */
 async function pkcs8Fixture(): Promise<{ pem: string; publicKey: CryptoKey }> {
   const { privateKey, publicKey } = await generateKeyPair();
   const der = new Uint8Array((await crypto.subtle.exportKey("pkcs8", privateKey)) as ArrayBuffer);
   return { pem: toPem(der, "PRIVATE KEY"), publicKey };
 }
 
-/** note: A fresh PKCS#1 PEM (the manifest-conversion PEM format) + its public key. */
 async function pkcs1Fixture(): Promise<{ pem: string; publicKey: CryptoKey }> {
   const { privateKey, publicKey } = await generateKeyPair();
   const der = new Uint8Array((await crypto.subtle.exportKey("pkcs8", privateKey)) as ArrayBuffer);
   return { pem: toPem(pkcs8DerToPkcs1Der(der), "RSA PRIVATE KEY"), publicKey };
 }
 
-// note: --- fetch stubbing (tests/worker/entry.test.ts precedent) ---
 
 type FetchCall = { url: string; init: RequestInit | undefined };
 
@@ -132,7 +119,6 @@ function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
 }
 
-/** note: A realistic GET /app body — public profile + fields that must NOT leak. */
 const GITHUB_PROFILE = {
   id: 1001,
   slug: "acme-inspector",
@@ -146,17 +132,8 @@ const GITHUB_PROFILE = {
   owner: { login: "acme", id: 1, avatar_url: "https://avatars.githubusercontent.com/u/1?v=4" },
 };
 
-/**
- * why: The icon URL: asserted through the SHARED contract the SPA also consumes, so
- * a drift in that one derivation cannot pass both sides green.
- */
 const AVATAR_URL = (appId: number): string => appAvatarUrl(appId);
 
-/**
- * why: The ONE upstream face a metadata sync may touch. Any other URL throws, so a
- * second request (the retired bot-account lookup) fails the test loudly
- * instead of passing silently.
- */
 function stubApp(profile: () => Response): { calls: FetchCall[] } {
   return stubFetch((url) => {
     if (url === "https://api.github.com/app") return profile();
@@ -164,7 +141,6 @@ function stubApp(profile: () => Response): { calls: FetchCall[] } {
   });
 }
 
-/** note: Decode a JWT and verify its signature against the fixture's public key. */
 async function decodeAndVerifyJwt(
   jwt: string,
   publicKey: CryptoKey,
@@ -196,9 +172,6 @@ describe("fetchAppMetadata (AD-531)", () => {
   test("mints a verifiable RS256 App JWT and extracts ONLY the public profile fields (PKCS#8 PEM)", async () => {
     const { pem, publicKey } = await pkcs8Fixture();
     const { calls } = stubApp(() => jsonResponse(GITHUB_PROFILE));
-    // why: Capture the AbortSignal.timeout argument while delegating to the real
-    // implementation (the signal stays genuine) — pins the locked AD-531
-    // 5s budget by value, not just by signal type.
     let timeoutMs: number | undefined;
     AbortSignal.timeout = ((ms: number) => {
       timeoutMs = ms;
@@ -207,9 +180,6 @@ describe("fetchAppMetadata (AD-531)", () => {
 
     const result = await fetchAppMetadata(1001, pem);
 
-    // why: Exactly the cached profile fields — permissions/events and the rest of
-    // the response body never leave the module. The icon is derived from the
-    // numeric App id (no CDN request).
     expect(result).toEqual({
       ok: true,
       metadata: {
@@ -221,8 +191,6 @@ describe("fetchAppMetadata (AD-531)", () => {
       },
     });
 
-    // why: Upstream face: exactly ONE request (GET /app), documented headers, and
-    // the AD-531 abort budget attached to it.
     expect(calls).toHaveLength(1);
     const call = calls[0]!;
     expect(call.url).toBe("https://api.github.com/app");
@@ -232,20 +200,18 @@ describe("fetchAppMetadata (AD-531)", () => {
     expect(headers.get("x-github-api-version")).toBe("2022-11-28");
     expect(headers.get("user-agent")).toBe("mstar-inspector");
     expect(call.init!.signal).toBeInstanceOf(AbortSignal);
-    expect(timeoutMs).toBe(5000); // note: the 5s AD-531 budget, exactly
+    expect(timeoutMs).toBe(5000);
 
-    // why: JWT: pinned header/claims + signature verifiable with the fixture's
-    // own public key.
     const auth = headers.get("authorization")!;
     expect(auth.startsWith("Bearer ")).toBe(true);
     const { header, claims, valid } = await decodeAndVerifyJwt(auth.slice("Bearer ".length), publicKey);
     expect(header).toEqual({ alg: "RS256", typ: "JWT" });
     expect(claims.iss).toBe(1001);
     const nowSec = Math.floor(Date.now() / 1000);
-    expect(claims.iat).toBeLessThanOrEqual(nowSec); // note: backdated, never in the future
+    expect(claims.iat).toBeLessThanOrEqual(nowSec);
     expect(nowSec - (claims.iat as number)).toBeGreaterThanOrEqual(59);
     expect(nowSec - (claims.iat as number)).toBeLessThan(120);
-    expect((claims.exp as number) - (claims.iat as number)).toBeLessThanOrEqual(600); // note: GitHub's 10-min cap
+    expect((claims.exp as number) - (claims.iat as number)).toBeLessThanOrEqual(600);
     expect(claims.exp).toBeGreaterThan(nowSec);
     expect(valid).toBe(true);
   });
@@ -289,7 +255,7 @@ describe("fetchAppMetadata (AD-531)", () => {
     const result = await fetchAppMetadata(1001, pem);
 
     expect(result).toEqual({ ok: false });
-    expect(calls).toHaveLength(0); // note: normalizePrivateKey's hard error fires pre-fetch
+    expect(calls).toHaveLength(0);
   });
 
   test("garbage / empty PEM (what a corrupt envelope yields) → {ok:false}, never throws", async () => {
@@ -305,7 +271,7 @@ describe("fetchAppMetadata (AD-531)", () => {
     const { calls } = stubFetch(() => jsonResponse({ message: "Not Found" }, 404));
     const { pem } = await pkcs8Fixture();
     expect(await fetchAppMetadata(1001, pem)).toEqual({ ok: false });
-    expect(calls).toHaveLength(1); // note: the zero-retry lock (AD-531), and no avatar leg
+    expect(calls).toHaveLength(1);
   });
 
   test("fetch rejection (network failure / abort) → {ok:false}, zero retries", async () => {
@@ -350,7 +316,7 @@ describe("fetchAppMetadata (AD-531)", () => {
         githubSlug: null,
       },
     });
-    expect(calls).toHaveLength(1); // note: no slug from either source, and no logo lookup to make
+    expect(calls).toHaveLength(1);
   });
 
   test("non-https html_url is dropped to null and yields no derived slug", async () => {
@@ -363,8 +329,6 @@ describe("fetchAppMetadata (AD-531)", () => {
       }),
     );
 
-    // why: The name still passes the shape gate; the non-https URLs degrade to
-    // null exactly like absent fields (the SPA renders them as href/img).
     expect(await fetchAppMetadata(1001, pem)).toEqual({
       ok: true,
       metadata: {
@@ -402,7 +366,6 @@ describe("fetchAppMetadata (AD-531)", () => {
   test("`slug` in the payload wins over the html_url derivation", async () => {
     const { pem } = await pkcs8Fixture();
     stubApp(() =>
-      // why: A renamed App: the API slug is current while html_url still trails it.
       jsonResponse({
         name: "Renamed App",
         slug: "renamed-app",
@@ -428,7 +391,6 @@ describe("fetchAppMetadata (AD-531)", () => {
     const { pem } = await pkcs8Fixture();
     stubApp(() => jsonResponse(GITHUB_PROFILE));
 
-    // why: App id 987654 ≠ the fixture's slug: the derived URL uses the id alone.
     const result = await fetchAppMetadata(987654, pem);
 
     expect(result.ok && result.metadata.githubAvatarUrl).toBe(AVATAR_URL(987654));
@@ -441,7 +403,6 @@ describe("githubAppSlugFromHtmlUrl (the html_url fallback)", () => {
     expect(githubAppSlugFromHtmlUrl("https://github.com/apps/wood-s-pr-inspector")).toBe(
       "wood-s-pr-inspector",
     );
-    // why: Trailing slash / query / fragment are not part of the slug.
     expect(githubAppSlugFromHtmlUrl("https://github.com/apps/acme/")).toBe("acme");
     expect(githubAppSlugFromHtmlUrl("https://github.com/apps/acme?tab=1#readme")).toBe("acme");
   });
@@ -450,7 +411,7 @@ describe("githubAppSlugFromHtmlUrl (the html_url fallback)", () => {
     expect(githubAppSlugFromHtmlUrl(null)).toBeNull();
     expect(githubAppSlugFromHtmlUrl(undefined)).toBeNull();
     expect(githubAppSlugFromHtmlUrl("")).toBeNull();
-    expect(githubAppSlugFromHtmlUrl("http://github.com/apps/acme")).toBeNull(); // note: scheme gate
+    expect(githubAppSlugFromHtmlUrl("http://github.com/apps/acme")).toBeNull();
     expect(githubAppSlugFromHtmlUrl("javascript:alert(1)//github.com/apps/acme")).toBeNull();
     expect(githubAppSlugFromHtmlUrl("not a url")).toBeNull();
     expect(githubAppSlugFromHtmlUrl("https://github.com/apps")).toBeNull();
@@ -467,8 +428,6 @@ describe("githubAppSlugFromHtmlUrl (the html_url fallback)", () => {
 });
 
 describe("isGithubMetadataStale (TTL — the settings read path's refresh gate)", () => {
-  // why: Fixed clock; `utcText` formats a UTC instant as the SQLite
-  // `datetime('now')` TEXT convention (`YYYY-MM-DD HH:MM:SS`, UTC).
   const NOW_MS = Date.UTC(2026, 8, 8, 12, 0, 0);
   const utcText = (ms: number): string => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
 
@@ -484,17 +443,13 @@ describe("isGithubMetadataStale (TTL — the settings read path's refresh gate)"
     expect(GITHUB_METADATA_TTL_MS).toBe(24 * 60 * 60 * 1000);
     expect(isGithubMetadataStale(utcText(NOW_MS - GITHUB_METADATA_TTL_MS + 60_000), NOW_MS)).toBe(false);
     expect(isGithubMetadataStale(utcText(NOW_MS - GITHUB_METADATA_TTL_MS - 60_000), NOW_MS)).toBe(true);
-    // why: At exactly the TTL the cache is expired (the window is [0, 24h)).
     expect(isGithubMetadataStale(utcText(NOW_MS - GITHUB_METADATA_TTL_MS), NOW_MS)).toBe(true);
   });
 
   test("the space-form TEXT is parsed as UTC (the datetime('now') convention)", () => {
-    // why: 23h old in UTC → fresh; if the space form were read as local time the
-    // wall-clock shift would flip the verdict on any non-UTC machine.
     const twentyThreeHoursOld = utcText(NOW_MS - 23 * 60 * 60 * 1000);
     expect(isGithubMetadataStale(twentyThreeHoursOld, NOW_MS)).toBe(false);
     expect(twentyThreeHoursOld).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    // why: A future timestamp is stale (doomed refresh attempt, never trusted).
     expect(isGithubMetadataStale(utcText(NOW_MS + 60_000), NOW_MS)).toBe(true);
   });
 });
@@ -512,7 +467,6 @@ describe("fetchAppVisibility (anonymous GET /apps/{slug})", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://api.github.com/apps/acme-inspector");
     const headers = new Headers(calls[0]!.init!.headers);
-    // why: Anonymous on purpose: the probe never mints or sends an App JWT.
     expect(headers.get("authorization")).toBeNull();
     expect(headers.get("accept")).toBe("application/vnd.github+json");
     expect(timeoutMs).toBe(3_000);
@@ -552,7 +506,7 @@ describe("fetchAppInstallations (the reconcile face)", () => {
     );
 
     expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: true, installationIds: [500, 501] });
-    expect(calls).toHaveLength(1); // note: zero retries
+    expect(calls).toHaveLength(1);
     const call = calls[0]!;
     expect(call.url).toBe(INSTALLATIONS_URL);
     expect(call.init!.method).toBe("GET");
@@ -590,8 +544,6 @@ describe("fetchAppInstallations (the reconcile face)", () => {
 
   test("a next link on another host makes the whole answer unusable — never a partial success", async () => {
     const { pem } = await pkcs8Fixture();
-    // why: The rejected target may be hiding every later page, so the ids collected
-    // so far are a subset — and a subset must never reach the reconcile.
     const { calls } = stubFetch(() =>
       new Response(JSON.stringify([{ id: 7 }]), {
         status: 200,
@@ -600,7 +552,7 @@ describe("fetchAppInstallations (the reconcile face)", () => {
     );
 
     expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
-    expect(calls).toHaveLength(1); // note: the rejected target is never fetched
+    expect(calls).toHaveLength(1);
   });
 
   test("ten pages each still carrying a next link → {ok:false}: the cap is a hard stop, never a truncated list", async () => {
@@ -618,14 +570,12 @@ describe("fetchAppInstallations (the reconcile face)", () => {
     });
 
     expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
-    expect(calls).toHaveLength(10); // note: no 11th request, and no ids escaped
+    expect(calls).toHaveLength(10);
   });
 
   test("one overall listing budget: a page past it is {ok:false}, never the ids collected so far", async () => {
     const { pem } = await pkcs8Fixture();
     const page2 = "https://api.github.com/app/installations?per_page=100&page=2";
-    // why: The clock is the budget: the first page burns all of it, so the second
-    // page has none left and the leg must fail rather than return page one.
     let clock = Date.now();
     Date.now = () => clock;
     const { calls } = stubFetch(() => {
@@ -640,7 +590,7 @@ describe("fetchAppInstallations (the reconcile face)", () => {
     });
 
     expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
-    expect(calls).toHaveLength(1); // note: the deadline stopped it, not the page cap
+    expect(calls).toHaveLength(1);
   });
 
   test("non-200, malformed payload and an abort all collapse to {ok:false} — never a throw", async () => {
@@ -649,10 +599,10 @@ describe("fetchAppInstallations (the reconcile face)", () => {
     expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
     expect(notOk.calls).toHaveLength(1);
 
-    stubFetch(() => jsonResponse({ id: 1 })); // note: an object, not the id array
+    stubFetch(() => jsonResponse({ id: 1 }));
     expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
 
-    stubFetch(() => jsonResponse([{ account: { login: "octo-org" } }])); // note: no numeric id
+    stubFetch(() => jsonResponse([{ account: { login: "octo-org" } }]));
     expect(await fetchAppInstallations(1001, pem)).toEqual({ ok: false });
 
     stubFetch(() => new Response("<html>gateway error</html>", { status: 200 }));

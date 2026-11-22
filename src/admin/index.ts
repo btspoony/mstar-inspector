@@ -1,15 +1,3 @@
-/**
- * The hidden platform console — `/_internal_admin`.
- *
- * Registration: `src/worker/index.ts` mounts this app on the `saas` router
- * only, beside `dashboardApp` and outside `APP_ROUTES`. Admin paths must never
- * join the workspace route table: `isOperatorReadPath`
- * (src/dashboard/index.ts) matches declared `access: "read"` paths by suffix,
- * so an admin row there would widen the operator ceiling for workspace routes.
- *
- * Authorization: every handler re-checks `operatorLogin` itself
- * (`./gate.ts`) — no mounted middleware stands in for it.
- */
 import { RECONCILE_LIMITS } from "../contracts/reconcile-settings";
 import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
@@ -100,14 +88,12 @@ import {
 } from "./quota-versions";
 import { quotaMonth } from "../store/quota-store";
 
-/** One declaration row of this namespace's own route table. */
 type AdminRoute = {
   method: "get" | "post" | "patch" | "delete";
   path: string;
   handler: (c: AdminContext) => Response | Promise<Response>;
 };
 
-/** Every known flag with its effective value; an absent row reads as enabled. */
 async function readFlags(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -116,21 +102,6 @@ async function readFlags(c: AdminContext): Promise<Response> {
   return c.json({ flags: await listFlags(db) });
 }
 
-/**
- * Set one flag. The row and its audit row are ONE `batch` (one D1
- * transaction): either both land or neither does, so every successful write
- * appends exactly one `platform_audit_events` row and a failed write appends
- * none. `detail_json` carries the before/after pair the ledger read needs.
- *
- * The before-value is read INSIDE that batch, never by a separate statement: a
- * batch fixes every bind at submit, so a value read outside it could be bound
- * into a statement that commits after a concurrent toggle, recording a `before`
- * that was never the stored state. The audit statement is therefore ordered
- * BEFORE the upsert and computes `before` with a subquery against the
- * not-yet-updated row (an absent row reads enabled, per the flag contract). A
- * failed upsert still appends nothing — the transaction rolls the audit row
- * back with it.
- */
 async function setFlag(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -143,7 +114,6 @@ async function setFlag(c: AdminContext): Promise<Response> {
     key = body.key;
     enabled = body.enabled;
   } catch {
-    // malformed body → the shape gate's 400, never a 500
   }
   if (!isServerFlagKey(key) || typeof enabled !== "boolean") {
     return c.json({ error: "body must be { key: <server flag key>, enabled: <boolean> }" }, 400);
@@ -178,27 +148,16 @@ async function setFlag(c: AdminContext): Promise<Response> {
   return c.json({ key, enabled });
 }
 
-/**
- * The live queue gauge `GET /api/runtime` reports; `null` says "not readable",
- * never "empty".
- */
 type RuntimeQueue = {
   backlogCount: number;
   backlogBytes: number;
   oldestMessageTimestamp: string | null;
 };
 
-/** The one read the gauge needs — optional, because a face may bind no queue. */
 type QueueGaugeSource = {
   metrics?: () => Promise<{ backlogCount: number; backlogBytes: number; oldestMessageTimestamp?: Date }>;
 };
 
-/**
- * Read the review queue's backlog. A missing binding, a binding without
- * `metrics()` and a rejected call all answer `null`: this face degrades rather
- * than becoming a 500. The oldest message is serialized as ISO-8601 (the wire
- * form) and is `null` for an empty queue.
- */
 async function readQueueBacklog(queue: QueueGaugeSource | undefined): Promise<RuntimeQueue | null> {
   try {
     const metrics = await queue?.metrics?.();
@@ -213,14 +172,6 @@ async function readQueueBacklog(queue: QueueGaugeSource | undefined): Promise<Ru
   }
 }
 
-/**
- * The system review-concurrency cap — the operator half of the runtime
- * configuration (iteration spec §1.1). One row in `review_runtime_settings`,
- * absent = the documented default; the leaf store owns the parse, the
- * 1..SYSTEM_CONCURRENCY_MAX range and the audit row, so this handler only
- * gates, shapes and maps. The operator default review depth rides the same
- * read: the tier every App without its own depth inherits.
- */
 async function readRuntime(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -261,10 +212,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     min: CONCURRENCY_MIN,
     max: SYSTEM_CONCURRENCY_MAX,
     degraded: system.degraded,
-    // The one workspace whose bots may be shared; `null` = none designated,
-    // which disables new shares and nothing else.
     officialWorkspaceId,
-    // §7.10 Check budgets: global, absent-row defaults documented in the store.
     checkBudgets: {
       terminalizeMs: budgets.terminalizeMs,
       updateMs: budgets.updateMs,
@@ -274,7 +222,6 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       updateMax: CHECK_UPDATE_MAX,
       degraded: budgets.degraded,
     },
-    // Migration 0048 comment-claim outbox budgets: the same global surface.
     commentClaim: {
       retryMs: claim.retryMs,
       maxAttempts: claim.maxAttempts,
@@ -289,18 +236,13 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     },
     reconcile: { values: reconcile.values, limits: RECONCILE_LIMITS, degraded: reconcile.issue !== null },
     sweep: { values: sweep.values, limits: SWEEP_LIMITS, degraded: sweep.issue !== null },
-    // The inheritance default, with the vocabulary so the console needs no
-    // second source for its options.
     reviewLevel: { value: level.value, levels: REVIEW_LEVELS, degraded: level.degraded },
-    // The recheck seat's ask budget: global, absent-row default in the store.
     recheckAssignment: {
       maxBytes: recheck.maxBytes,
       min: RECHECK_ASSIGNMENT_MIN,
       max: RECHECK_ASSIGNMENT_MAX,
       degraded: recheck.degraded,
     },
-    // The one end-to-end attempt cap. `saved` separates a stored value from
-    // the absent-row default, so the console never shows a default as a save.
     attemptCap: {
       capMs: attemptCap.capMs,
       saved: attemptCap.saved,
@@ -308,33 +250,14 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       max: REVIEW_ATTEMPT_CAP_MAX_MS,
       degraded: attemptCap.degraded,
     },
-    // The review route's operating switch as the gate reads it: `mode` is the
-    // answer the queue handler acts on, `saved` and `rejected` say what the row
-    // holds behind it (a hand-edited value reads `off` with `reason: untrusted`).
     routeWorkflow,
-    // Admission drops the pipeline already records as `review_failures` rows,
-    // grouped by the reason token of the drop prefix over the last 24h — the
-    // sub-threshold signal the failure sweep cannot page on.
     admissionDrops24h,
-    // GitHub secondary rate limits over the same 24h window: a separate
-    // rejection cause from any other delivery failure.
     githubRateLimited24h,
-    // Live queue depth for the same page; `null` means the gauge is not
-    // readable, never that the queue is empty.
     queue,
-    // The maintenance window as the gate reads it (D20), so the console states
-    // what `/dashboard/*` is answering rather than echoing its own last save.
     maintenance: await getMaintenanceMode(db),
   });
 }
 
-/**
- * The duration analysis report (`GET /api/runtime/duration-report`): the
- * observed distribution an operator reads before choosing the attempt cap.
- * `capMs` is a candidate for the "what would this cut off" read only — this
- * handler writes nothing and owns no configuration key. The report module owns
- * the window, the sample and the exclusions.
- */
 async function readDurationReport(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -357,7 +280,6 @@ async function readDurationReport(c: AdminContext): Promise<Response> {
   return c.json(await readReviewDurationReport(db, { nowMs: Date.now(), capMs }));
 }
 
-/** The accepted `commentClaim` body shape; the store owns the accepted ranges. */
 function commentClaimBody(value: unknown): CommentClaimValues | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const { retryMs, maxAttempts, outboxCap } = value as {
@@ -370,28 +292,18 @@ function commentClaimBody(value: unknown): CommentClaimValues | null {
     : null;
 }
 
-/**
- * The accepted `reviewLevel` body shape: the `value` of the GET group, with any
- * `levels` / `degraded` alongside it ignored — the read result is a valid save
- * body as-is. The store owns the vocabulary and the refusal message.
- */
 function reviewLevelValue(value: unknown): string | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const { value: level } = value as { value?: unknown };
   return typeof level === "string" ? level : null;
 }
 
-/**
- * The accepted `routeWorkflow` body shape: the `value` of the store's strict
- * vocabulary. Any other string is the store's 400; a non-string is a shape 400.
- */
 function routeWorkflowValue(value: unknown): string | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const { value: mode } = value as { value?: unknown };
   return typeof mode === "string" ? mode : null;
 }
 
-/** The accepted `checkBudgets` body shape; the store owns the accepted ranges. */
 function checkBudgetsBody(value: unknown): CheckBudgetValues | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const { terminalizeMs, updateMs } = value as { terminalizeMs?: unknown; updateMs?: unknown };
@@ -400,7 +312,6 @@ function checkBudgetsBody(value: unknown): CheckBudgetValues | null {
     : null;
 }
 
-/** The accepted `maintenance` body shape; the store owns the window. */
 function maintenanceBody(value: unknown): { enabled: boolean; reason?: string | null } | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const { enabled, reason } = value as { enabled?: unknown; reason?: unknown };
@@ -448,10 +359,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawRouteWorkflow = body.routeWorkflow;
     rawMaintenance = body.maintenance;
   } catch {
-    // malformed body → the shape gate's 400, never a 500
   }
-  // One save writes one parameter: a body carrying more than one is a shape
-  // error, so a refused half can never leave another half written.
   if (
     [
       concurrency,
@@ -494,7 +402,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     try {
       return c.json({ commentClaim: await setCommentClaimSettings(db, trio, login) });
     } catch (error) {
-      // Out of range: the store owns the ranges and the message.
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;
     }
@@ -524,7 +431,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       return c.json({ error: "body must be { recheckAssignment: { maxBytes } }" }, 400);
     }
     try {
-      // The store owns the accepted range and the refusal message.
       return c.json({
         recheckAssignment: {
           maxBytes: await setRecheckAssignmentMaxBytes(db, maxBytes, login),
@@ -544,7 +450,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       return c.json({ error: "body must be { attemptCap: { capMs } }" }, 400);
     }
     try {
-      // The store owns the accepted range and names it in the refusal.
       return c.json({ attemptCap: { capMs: await setReviewAttemptCap(db, capMs, login) } });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
@@ -557,8 +462,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       return c.json({ error: "body must be { routeWorkflow: { value } }" }, 400);
     }
     try {
-      // The store owns the `on` | `off` vocabulary and answers the gate's own
-      // read-back as `effective`, so the console never has to guess.
       return c.json({ routeWorkflow: await setReviewRouteWorkflow(db, value, login) });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
@@ -571,7 +474,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       return c.json({ error: "body must be { reviewLevel: { value } }" }, 400);
     }
     try {
-      // The store owns the vocabulary and the refusal message.
       return c.json({
         reviewLevel: { value: await setDefaultReviewLevel(db, level as ReviewLevel, login) },
       });
@@ -588,7 +490,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     try {
       return c.json({ checkBudgets: await setCheckBudgets(db, pair, login) });
     } catch (error) {
-      // Out of range: the store owns the ranges and the message.
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;
     }
@@ -602,12 +503,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   return c.json({ concurrency: await setSystemConcurrency(db, concurrency, login) });
 }
 
-/**
- * Set or clear the platform's official workspace (contract § 8.1): the one
- * tenant whose bots may be offered platform-wide. `null` clears the row and is
- * the only clear — an empty string is a body-shape error, never "clear". The
- * value's validation, the write and its audit row belong to the leaf store.
- */
 async function assignOfficialWorkspace(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -616,13 +511,10 @@ async function assignOfficialWorkspace(c: AdminContext): Promise<Response> {
   let value: unknown;
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
-    // `null` is a legal body (clear). A missing field leaves `value` undefined,
-    // which the shape gate below refuses — clearing is never implied.
     if (typeof body === "object" && body !== null && "workspaceId" in body) {
       value = body.workspaceId;
     }
   } catch {
-    // malformed body → the shape gate's 400, never a 500
   }
   if (!(value === null || (typeof value === "string" && value.length > 0))) {
     return c.json({ error: "body must be { workspaceId: <id> | null }" }, 400);
@@ -636,18 +528,11 @@ async function assignOfficialWorkspace(c: AdminContext): Promise<Response> {
       }),
     });
   } catch (error) {
-    // An unknown, retired or malformed id: nothing was written, nothing was
-    // audited. The refusal names the condition, not the value.
     if (error instanceof UnknownWorkspaceError) return c.json({ error: "workspace not found" }, 400);
     throw error;
   }
 }
 
-/**
- * Move one bot between `owned` and `shared` (contract § 8.2). The transition
- * table, its refusals and the audit row are the store's; this handler only
- * shapes the body and maps each refusal to its frozen status/body pair.
- */
 async function assignBotScope(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -660,7 +545,6 @@ async function assignBotScope(c: AdminContext): Promise<Response> {
     scope = body.scope;
     confirm = body.confirm;
   } catch {
-    // malformed body → the shape gate's 400, never a 500
   }
   if (scope !== "owned" && scope !== "shared") {
     return c.json({ error: 'body must be { scope: "owned" | "shared" }' }, 400);
@@ -670,7 +554,6 @@ async function assignBotScope(c: AdminContext): Promise<Response> {
   const outcome = await setBotScope(db, {
     botId,
     scope,
-    // Only a literal `true` confirms a revoke; any other value refuses it.
     confirm: confirm === true,
     actor: login,
     now: new Date().toISOString(),
@@ -685,11 +568,6 @@ async function assignBotScope(c: AdminContext): Promise<Response> {
   return c.json({ botId, scope: outcome.scope, sharedAt: outcome.sharedAt });
 }
 
-/**
- * Every live bot with its scope and the workspace/installation columns the
- * console's table shows (contract § 8.3), name-ordered. A console read is
- * unaudited: on this surface audit rows attach to writes.
- */
 async function readBots(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -703,7 +581,6 @@ async function readBots(c: AdminContext): Promise<Response> {
       githubAppId: row.github_app_id,
       workspaceId: row.workspace_id,
       workspaceName: row.workspace_name,
-      // The store answers SQLite's 0/1; the console reads a boolean.
       isOfficial: Boolean(row.is_official),
       scope: row.scope,
       sharedAt: row.shared_at,
@@ -714,12 +591,6 @@ async function readBots(c: AdminContext): Promise<Response> {
   });
 }
 
-/**
- * Every live workspace with its SQL-side counts, owner login and resolved
- * plan — one statement, so the console never fans out a read per row. The
- * plan's display name and seat cap ride along: `includedMembers` is NULL for
- * the no-cap tier and must stay NULL (never `0`).
- */
 async function readWorkspaces(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -728,13 +599,6 @@ async function readWorkspaces(c: AdminContext): Promise<Response> {
   return c.json({ workspaces: await listWorkspaces(db, new Date().toISOString()) });
 }
 
-/**
- * Shared-bot review usage per live workspace, for the current UTC month — one
- * statement, the same shape the workspace card reads with `?3` bound to
- * `NULL` (spec bot-scope-and-claiming § Review usage). The order is the
- * statement's: shared-bot reviews descending, own-bot reviews descending, then
- * the workspace name. No paging: the console filters the loaded rows.
- */
 async function readUsage(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -744,11 +608,6 @@ async function readUsage(c: AdminContext): Promise<Response> {
   return c.json({ month: window.month, workspaces: await readReviewUsage(db, window, null) });
 }
 
-/**
- * Every known user with its SQL-side counts — one statement. `isOperator` comes
- * from the env allowlist through `isPlatformOperator`, the same predicate the
- * gate uses, so the listed flag and the authorization decision cannot diverge.
- */
 async function readUsers(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -760,11 +619,6 @@ async function readUsers(c: AdminContext): Promise<Response> {
   });
 }
 
-/**
- * Assign one workspace's plan. An unknown plan id is a 400 with no write; a
- * downgrade below the live member count is allowed and only blocks new invites
- * (spec §3.2), so this handler never removes a member.
- */
 async function assignPlan(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -775,7 +629,6 @@ async function assignPlan(c: AdminContext): Promise<Response> {
     const body = (await c.req.json()) as { planId?: unknown };
     planId = body.planId;
   } catch {
-    // malformed body → the shape gate's 400, never a 500
   }
   if (typeof planId !== "string" || planId.length === 0) {
     return c.json({ error: "body must be { planId: <id from the plans catalogue> }" }, 400);
@@ -800,12 +653,6 @@ async function assignPlan(c: AdminContext): Promise<Response> {
   return c.json({ workspaceId, planId: outcome.planId });
 }
 
-/**
- * Set one workspace's slug. Slug authoring is a platform decision: the value is
- * the readable part of a workspace URL that the owner can no longer edit, so it
- * carries the same grammar, reserved-word and collision rules the deleted owner
- * route enforced. The store's guarded write and its audit row are ONE `batch`.
- */
 async function setSlug(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -816,7 +663,6 @@ async function setSlug(c: AdminContext): Promise<Response> {
     const body = (await c.req.json()) as { slug?: unknown };
     slug = body.slug;
   } catch {
-    // malformed body → the shape gate's 400, never a 500
   }
   if (typeof slug !== "string" || !WORKSPACE_SLUG_PATTERN.test(slug)) {
     return c.json(
@@ -847,12 +693,6 @@ async function setSlug(c: AdminContext): Promise<Response> {
   return c.json({ workspaceId, slug: outcome.slug });
 }
 
-/**
- * Every stored quota version with its derived interval, the marker on the one
- * judging this month and the ceilings it sets per plan — one read per table,
- * composed by `./quota-versions`. The console only needs this list to render
- * history, the current version and anything scheduled.
- */
 async function readQuotaVersions(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -861,12 +701,6 @@ async function readQuotaVersions(c: AdminContext): Promise<Response> {
   return c.json(await listQuotaVersions(db, new Date()));
 }
 
-/**
- * The impact preview for candidate numbers the operator typed but has not
- * published. It writes nothing; the count comes from the same month sum the
- * enqueue's ceiling read answers from, so it cannot disagree with a refusal at
- * equal usage.
- */
 async function previewQuotaVersion(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -876,7 +710,6 @@ async function previewQuotaVersion(c: AdminContext): Promise<Response> {
   try {
     parsed = await c.req.json();
   } catch {
-    // malformed body → the shape gate's 400, never a 500
   }
   const plans = await listPlans(db);
   const candidate = parseQuotaCandidate(
@@ -887,18 +720,6 @@ async function previewQuotaVersion(c: AdminContext): Promise<Response> {
   return c.json(await previewQuotaImpact(db, candidate.value, new Date()));
 }
 
-/**
- * Publish one quota version. Two refusals guard the form's promises:
- *
- * - `effectiveFrom` must be after this month's 1st, or the new numbers would
- *   judge the month in progress and could push a workspace over mid-month (D5);
- * - the body must echo the impact the operator was shown, and that echo must
- *   still match a fresh computation. A publish without a preview is refused
- *   (`previewRequired`), and so is one whose numbers moved since.
- *
- * The write itself is one batch (profile, per-plan ceilings, audit row):
- * publishing appends, and no existing profile is touched.
- */
 async function publishQuotaVersion(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -908,7 +729,6 @@ async function publishQuotaVersion(c: AdminContext): Promise<Response> {
   try {
     parsed = await c.req.json();
   } catch {
-    // malformed body → the shape gate's 400, never a 500
   }
   const plans = await listPlans(db);
   const candidate = parseQuotaCandidate(
@@ -954,11 +774,6 @@ async function publishQuotaVersion(c: AdminContext): Promise<Response> {
   return c.json({ version: outcome.version, startsOn: fresh.startsOn }, 201);
 }
 
-/**
- * Every open support window across workspaces — one statement, newest append
- * per (workspace, operator), expired rows excluded. The console's list reads
- * are deliberately unaudited (spec §4): audit rows attach to writes.
- */
 async function readSupportGrants(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -967,7 +782,6 @@ async function readSupportGrants(c: AdminContext): Promise<Response> {
   return c.json({ grants: await listAllActiveSupportGrants(db, new Date().toISOString()) });
 }
 
-/** One `POST /api/support-grants` body; every field is validated below. */
 type GrantBody = {
   workspaceId?: unknown;
   operatorLogin?: unknown;
@@ -975,10 +789,6 @@ type GrantBody = {
   ttlHours?: unknown;
 };
 
-/**
- * Create one support grant. The body's shape and a usable expiry are decided
- * here; the store write and its single audit row are `./support-grants`.
- */
 async function createGrant(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -988,11 +798,8 @@ async function createGrant(c: AdminContext): Promise<Response> {
   try {
     parsed = await c.req.json();
   } catch {
-    // malformed body → the shape gate's 400, never a 500
   }
   const invalid = (detail: string) => c.json({ error: `invalid support grant: ${detail}` }, 400);
-  // A JSON root that is not an object (a bare `null` included) is the shape
-  // gate's 400: reading fields off it would throw out of the handler.
   if (parsed === null || typeof parsed !== "object") return invalid("body must be a JSON object");
   const { workspaceId, operatorLogin: targetLogin, reason, ttlHours } = parsed as GrantBody;
   if (typeof workspaceId !== "string" || workspaceId.length === 0) {
@@ -1004,8 +811,6 @@ async function createGrant(c: AdminContext): Promise<Response> {
   if (typeof reason !== "string" || reason.trim().length === 0) {
     return invalid("reason must be non-empty");
   }
-  // The expiry is computed here so an unusable number is a 400, never a
-  // `RangeError` out of `toISOString`.
   const now = new Date();
   const expires =
     typeof ttlHours === "number" && Number.isFinite(ttlHours) && ttlHours > 0
@@ -1028,11 +833,6 @@ async function createGrant(c: AdminContext): Promise<Response> {
   return c.json({ grant: outcome.grant }, 201);
 }
 
-/**
- * Revoke one grant by id: the row is deleted (a grant is time-boxed access,
- * not history — spec §3.4) and exactly one audit row is appended with the
- * grant's workspace. An unknown id writes nothing.
- */
 async function revokeGrant(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -1051,10 +851,6 @@ async function revokeGrant(c: AdminContext): Promise<Response> {
   return c.json({ id, workspaceId: outcome.workspaceId });
 }
 
-/**
- * Every registered data upgrade with its state and preflight counts (spec
- * operator-data-upgrade § Upgrade registry and state machine).
- */
 async function readDataUpgrades(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -1063,14 +859,6 @@ async function readDataUpgrades(c: AdminContext): Promise<Response> {
   return c.json({ upgrades: await listDataUpgrades(db) });
 }
 
-/**
- * One upgrade action: `preflight | step | verify | reset`.
- *
- * An unknown id is the caller's 404 — the registry, not the URL, decides what
- * exists. A refused transition (409) states why: a downtime item will not step
- * outside a window it may not be allowed to close later, and `completed` /
- * `failed` items must be reset before they move again.
- */
 async function dataUpgradeAction(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -1107,16 +895,6 @@ async function dataUpgradeAction(c: AdminContext): Promise<Response> {
   return c.notFound();
 }
 
-/**
- * Replay one maintenance-deferred delivery (`POST
- * /api/maintenance-deferred/:failureId/replay`).
- *
- * The state machine and the one queue send live in `./maintenance-replay`; this
- * handler only gates (the same admin gate every row here uses) and maps each
- * outcome to its frozen status/body pair. A 202 means the recovery is under
- * way (`sent`) or durably requested (`requested` — the sweep retries it); a 200
- * is a repeated request answered from the row's own stamps, with no new send.
- */
 async function replayMaintenanceDeferred(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -1132,8 +910,6 @@ async function replayMaintenanceDeferred(c: AdminContext): Promise<Response> {
       now: new Date().toISOString(),
     });
   } catch {
-    // The request batch itself did not commit: nothing durable was written, so
-    // the operator may simply press replay again.
     return c.json({ error: "replay_request_failed" }, 500);
   }
   if (outcome.kind === "refused") return c.json({ error: outcome.error }, outcome.status);
@@ -1141,18 +917,11 @@ async function replayMaintenanceDeferred(c: AdminContext): Promise<Response> {
   return c.json({ failureId, state: outcome.state }, 202);
 }
 
-/**
- * The console document (`src/spa/admin.html`). `ASSETS` holds it and no other
- * route serves it: spa-dispatch matches only `/index.html` and `/app-assets/*`,
- * so this gated handler is the document's single entry point.
- */
 async function serveDocument(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
   const document = await c.env.ASSETS?.fetch(new URL("/admin.html", c.req.url));
   if (!document?.ok) return c.notFound();
-  // Minimal admin boot: identity and locale only. None of the workspace boot
-  // reads (memberships, invites, support redirects) run for this document.
   const locale = resolveLocale(c.req.raw);
   const html = localizeDocument(
     injectSpaBoot(await document.text(), {

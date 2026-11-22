@@ -1,7 +1,3 @@
-/**
- * Dashboard chrome: left sidebar (Apps / Members) +
- * slim navbar (theme + Lang + username + logout).
- */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Moon, Sun } from "lucide-react";
 import { Button, SidebarInset, SidebarProvider } from "@design-system";
@@ -20,12 +16,10 @@ import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-me
 type LayoutProps = {
   boot: SpaBoot;
   pathname: string;
-  /** One-shot outcome read at boot (`./flash`): shown until the pathname changes. */
   flash: FlashKind | null;
   children: ReactNode;
 };
 
-/** The one-shot outcome copy: tone plus the dictionary key that states it. */
 const FLASH_NOTICE: Record<
   FlashKind,
   { kind: "success" | "warn"; key: "notice.success.workspaceDeleted" | "notice.warn.workspaceUnavailable" }
@@ -36,10 +30,8 @@ const FLASH_NOTICE: Record<
 
 type Theme = "light" | "dark";
 
-/** Same key the pre-paint bootstrap in index.html reads. */
 const THEME_STORAGE_KEY = "mstar.dashboard.theme";
 
-/** Whitelist — a corrupted/unreadable stored value behaves as unset. */
 function storedTheme(): Theme | null {
   try {
     const stored = localStorage.getItem(THEME_STORAGE_KEY);
@@ -49,29 +41,18 @@ function storedTheme(): Theme | null {
   }
 }
 
-/** Stored choice wins; unset = dark default (deterministic — the OS
- * preference is never consulted, v0.3.4). */
 function effectiveTheme(): Theme {
   return storedTheme() ?? "dark";
 }
 
 function LoginChrome({ children }: { children: ReactNode }) {
-  // The r3 page plane under the centered card; the pre-paint `data-theme`
-  // bootstrap in index.html is what carries the stored light/dark choice here,
-  // exactly as it does under the shell.
   return <div className="min-h-svh bg-(--surface-page) text-(--text-primary) font-sans">{children}</div>;
 }
 
 function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
   const sidebar = buildSidebarModel(boot, pathname);
-  // Content measure tier (DESIGN.md Spacing & Layout): the shell stays
-  // full-bleed; list/table surfaces take the wide column, the rest prose.
-  // Mirror DashboardPage's early returns (pages.tsx): a workspace-less
-  // sign-in sees WorkspaceSetupPage and a support-grant operator sees
-  // SupportPage whatever the URL names, so both take the prose tier.
   const page = matchSpaRoute(pathname)?.page ?? null;
   const proseFace = boot.needsWorkspace === true || boot.supportOnly === true;
-  // The shell reads the shared membership list, not a second boot copy.
   const memberships = useLiveMemberships(boot);
   const switcher = buildWorkspaceSwitcherModel({ ...boot, memberships }, pathname);
   const navbar = buildNavbarModel(boot);
@@ -85,16 +66,11 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
     try {
       localStorage.setItem(THEME_STORAGE_KEY, next);
     } catch {
-      // Unavailable storage (e.g. private mode) — the flip still applies this session.
     }
   }
 
   return (
     <SidebarProvider defaultOpen className="h-svh overflow-hidden print:h-auto print:overflow-visible">
-      {/* First focusable control in the shell: keyboard users land on the
-          sidebar's three links before the page, so this jumps past both the
-          sidebar AND the toolbar to the content column rather than to `<main>`
-          (which contains that toolbar). Hidden until focused. */}
       <a
         href="#content"
         className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-(--radius-control) focus:bg-(--surface-raised) focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-(--text-primary) focus:no-underline"
@@ -102,26 +78,17 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
         {t(boot.locale, "nav.skipToContent")}
       </a>
       <AppSidebar model={sidebar} />
-      {/* The navigation effect's focus target: focus lands on the region, and
-          the visible ring shows a sighted keyboard user where it went — a
-          ring-only focus indicator, because mouse users never tab here. */}
       <SidebarInset
         id="main"
         tabIndex={-1}
         className="h-svh overflow-hidden outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) focus-visible:ring-inset print:h-auto print:overflow-visible"
       >
-        {/* v0.3 (DESIGN.md): navbar sits on the raised surface, one step above
-            the page canvas, matching the sidebar chrome layer. Two clusters: the
-            workspace switcher names what the whole shell is scoped to (left),
-            the account/locale/theme controls stay right. Control states
-            (hover/active/focus-visible) come from the restyled ghost Button. */}
         <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-(--surface-raised) px-4">
           <div className="flex min-w-0 items-center gap-2">
             <WorkspaceSwitcher model={switcher} boot={boot} />
           </div>
           <div className="flex items-center gap-2">
             <Button type="button" variant="ghost" size="sm" onClick={toggleTheme} aria-label={t(boot.locale, "nav.themeToggleAria", { mode: t(boot.locale, theme === "dark" ? "nav.themeDark" : "nav.themeLight"), target: t(boot.locale, theme === "dark" ? "nav.themeLight" : "nav.themeDark") })}>
-              {/* Icon-only: the icon depicts the CURRENT mode; the aria-label carries the action. */}
               {theme === "dark" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
             </Button>
             <form className="m-0" method="post" action="/dashboard/locale">
@@ -141,19 +108,12 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
           </div>
         </header>
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4 md:p-6 print:overflow-visible">
-          {/* The undismissable support notice sits above every workspace page:
-              the tenant must see an active operator grant on any screen, and it
-              carries no control (AC4). */}
-          {/* The skip link's target: the page content itself, past the toolbar
-              it would otherwise still have to tab through. */}
           <div
             id="content"
             tabIndex={-1}
             className={`mx-auto w-full outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring) focus-visible:ring-inset ${!proseFace && (page === "repos" || page === "apps" || page === "members") ? "max-w-[1200px]" : "max-w-[960px]"}`}
           >
             <SupportNotice boot={boot} pathname={pathname} />
-            {/* One-shot outcome from the page just left (the delete flow): the
-                boot read and cleared its key, so this load shows it once. */}
             {flashNotice ? (
               <PageNotice kind={flashNotice.kind} message={t(boot.locale, flashNotice.key)} />
             ) : null}
@@ -167,29 +127,13 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
 
 export function Layout({ boot, pathname, flash: bootFlash, children }: LayoutProps) {
   const route = matchSpaRoute(pathname);
-  // One-shot per NAVIGATION, not per mount: the boot's flash stays on screen
-  // through any re-render of the same pathname (it rendered, so it must be
-  // seen), and the first move away clears it — which is what keeps an
-  // A → B → A walk from showing a spent outcome again.
   const [flash, setFlash] = useState(bootFlash);
   const shownOn = useRef(pathname);
-  // Layout effect, not passive: the frame that presents the NEW pathname must
-  // not still carry the previous page's outcome. A same-pathname re-render
-  // returns early, so the copy is cleared by navigation only.
   useLayoutEffect(() => {
     if (shownOn.current === pathname) return;
     shownOn.current = pathname;
     setFlash(null);
   }, [pathname]);
-  // A client-side navigation replaces the content under a static document
-  // title, and leaves focus on the sidebar link that was clicked: the tab
-  // still says the same thing and nothing tells assistive technology the page
-  // changed. Name the destination and move focus into it.
-  //
-  // Keyed on the pathname, not a "first run" latch: StrictMode's development
-  // double-invoke re-runs a mount effect with refs intact, so a one-shot flag
-  // would announce (and steal focus) on the first paint there. A same-pathname
-  // run is the only one that skips — which is what the first paint is.
   const announcedOn = useRef(pathname);
   const page = route?.page ?? null;
   useLayoutEffect(() => {
@@ -201,8 +145,6 @@ export function Layout({ boot, pathname, flash: bootFlash, children }: LayoutPro
   if (route?.page === "login") {
     return <LoginChrome>{children}</LoginChrome>;
   }
-  // Provider above the chrome: the switcher reads the live list here, and the
-  // page's rename card (rendered as `children`) writes it.
   return (
     <WorkspaceMembershipsProvider boot={boot}>
       <DashboardChrome boot={boot} pathname={pathname} flash={flash}>

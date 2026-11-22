@@ -1,16 +1,3 @@
-/** note: The maintenance-deferred replay route driven through the real
- * admin mount. What is pinned:
- *
- *   - the winner writes the audit row + the request stamp in ONE batch, sends
- *     exactly the secret-free current-head payload, then stamps `sent`;
- *   - a repeated request answers 200 from the row's own stamps with no second
- *     send and no second audit row;
- *   - a send that fails leaves durable pending state and answers 202
- *     `requested`, and the sweep — not another operator press — later sends and
- *     stamps that same row once the queue recovers;
- *   - every refusal happens before the request batch, so it writes no state
- *     and no audit row, and uses its declared status.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -27,7 +14,6 @@ const BOT_ID = "bot-replay";
 const FAILURE_ID = "failure-deferred";
 const TARGET_ID = "target-replay";
 
-/** note: One live bot + target + the deferred failure row the route replays. */
 function fixture(opts: { stage?: string; deletedTarget?: boolean } = {}): TestD1 {
   const db = createMigratedTestD1();
   const insertUser = db.raw.prepare(
@@ -139,7 +125,6 @@ describe("the maintenance replay route", () => {
       actor_login: OPERATOR,
       detail_json: JSON.stringify({ target_id: TARGET_ID }),
     });
-    // invariant: The failure row is never deleted — it is the record of the recovery.
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
   });
 
@@ -158,7 +143,6 @@ describe("the maintenance replay route", () => {
   test("a repeated request answers 200 from the row while maintenance is active or unreadable", async () => {
     const sent: Sent = { payloads: [] };
 
-    // invariant: Sent, then the window closes: the recorded state stays observable.
     const active = fixture();
     expect((await replay(active, sent)).status).toBe(202);
     await setMaintenanceMode(active, { enabled: true, reason: "upgrade", actor: OPERATOR }, "2026-11-18T02:00:00.000Z");
@@ -166,7 +150,6 @@ describe("the maintenance replay route", () => {
     expect(whileActive.status).toBe(200);
     expect(await whileActive.json()).toEqual({ failureId: FAILURE_ID, state: "sent" });
 
-    // note: Requested-but-unsent, then the setting is unreadable: same answer.
     const unreadable = fixture();
     expect((await replay(unreadable, sent, { failSend: true })).status).toBe(202);
     unreadable.raw.exec("DROP TABLE review_runtime_settings");
@@ -191,24 +174,18 @@ describe("the maintenance replay route", () => {
     expect(state.sent).toBeNull();
     expect(auditCount(db)).toBe(1);
 
-    // note: The retry is the SWEEP, not another operator press: the window is off and
-    // the queue works again, so the row the route left pending must be sent and
-    // stamped by the sweep on the SAME row it produced.
     const queue = { send: async (payload: ReviewJobPayload) => void sent.payloads.push(payload) };
     await runSweep(db, { log: { warn: () => {} }, queue: queue as never });
     expect(sent.payloads).toHaveLength(1);
     expect(sent.payloads[0]).toMatchObject({ action: "maintenance_replay", pr_number: 42, head_sha: null });
     const recovered = failureState(db);
-    // invariant: The operator's request survives its send, and the send is stamped.
     expect(recovered.requested).toBe(state.requested);
     expect(recovered.sent).not.toBeNull();
     expect(auditCount(db)).toBe(1);
 
-    // invariant: The sent stamp is the outbox's only exit: no further enqueue.
     await runSweep(db, { log: { warn: () => {} }, queue: queue as never });
     expect(sent.payloads).toHaveLength(1);
 
-    // note: A later operator press now answers from the sent stamp — no second send.
     const repeat = await replay(db, sent);
     expect(repeat.status).toBe(200);
     expect(await repeat.json()).toEqual({ failureId: FAILURE_ID, state: "sent" });
@@ -240,8 +217,6 @@ describe("the maintenance replay route", () => {
     await setMaintenanceMode(closed, { enabled: true, reason: "upgrade", actor: OPERATOR }, "2026-11-18T02:00:00.000Z");
     await expectRefusal(closed, 409, "maintenance_active");
 
-    // note: A non-operator sees the indistinguishable 404 the namespace answers
-    // every outsider — never a distinguishable refusal.
     const outsider = fixture();
     const res = await replay(outsider, sent, { login: MEMBER });
     expect(res.status).toBe(404);
@@ -250,8 +225,6 @@ describe("the maintenance replay route", () => {
 
   test("an unreadable maintenance window refuses 503 rather than replaying", async () => {
     const db = fixture();
-    // why: No settings table at all: the window cannot be read, so the route must
-    // not treat the outage as an open window.
     db.raw.exec("DROP TABLE review_runtime_settings");
     const sent: Sent = { payloads: [] };
     const res = await replay(db, sent);

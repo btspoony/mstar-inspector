@@ -25,15 +25,10 @@ export type ReconcileConfig = {
   degraded: boolean;
 };
 
-/** Request ceilings bound GitHub rate consumption per cron invocation. */
 const RECONCILE_REQUEST_HARD_MAX = 100;
-/** Keep recovery inside the cron isolate's wall-clock lifetime. */
 const RECONCILE_RUN_HARD_MAX_MS = 60_000;
-/** Bound one stalled GitHub operation without consuming the full cron lifetime. */
 const RECONCILE_REQUEST_HARD_MAX_MS = 15_000;
-/** Bound D1 selection and recovery fan-out within a cron invocation. */
 const RECONCILE_SELECT_HARD_MAX = 100;
-/** Bound repeated GitHub mutations before operator intervention is required. */
 const RECONCILE_ATTEMPTS_HARD_MAX = 10;
 
 /** Non-mutating preflight estimates; only actual dispatches spend requests. */
@@ -46,17 +41,11 @@ export const RECONCILE_REQUEST_ESTIMATES = {
 } as const;
 
 const { plan, send, discovery, credentials } = RECONCILE_REQUEST_ESTIMATES;
-/** Cold credentials, adoption/fetch, and create/update must fit one Check row. */
 const CHECK_ROW_MIN_REQUESTS = credentials + discovery + send;
-/** Cold credentials precede the publication plan and guarded send. */
 const PUBLICATION_MIN_REQUESTS = credentials + plan + send;
-/** Cold credentials, stable thread/issue captures, mutation, and post-capture. */
 const THREAD_MIN_REQUESTS = credentials + discovery + discovery + plan + discovery;
-/** Publication admission must leave room for a thread operation in the same run. */
 const LIFECYCLE_MIN_REQUESTS = PUBLICATION_MIN_REQUESTS + THREAD_MIN_REQUESTS;
-/** Reuse the terminal Check-update floor to avoid near-immediate GitHub aborts. */
 const REQUEST_MIN_MS = CHECK_UPDATE_MIN;
-/** At minimum timeouts, allow each cold-row request its full timeout window. */
 const LIFECYCLE_RUN_MIN_MS = LIFECYCLE_MIN_REQUESTS * REQUEST_MIN_MS;
 const CHECK_RUN_MIN_MS = CHECK_ROW_MIN_REQUESTS * REQUEST_MIN_MS;
 

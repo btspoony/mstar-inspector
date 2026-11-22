@@ -1,14 +1,3 @@
-/**
- * why: Incremental review rounds: the compare gate, the `since` reconFact and the
- * header marker.
- *
- * The rule under test (one sentence): only a previously REVIEWED head that
- * GitHub reports as an ancestor (`ahead`) turns a round incremental, and an
- * incremental round keeps the FULL diff for the prior-finding evidence catalog
- * while the numstat partition — and the seats' universe — becomes the delta.
- * Everything else (`behind`, `diverged`, a 404 after a force-push, any non-zero
- * exit, or an `ahead` range carrying a merge commit) keeps the full-diff round.
- */
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
@@ -44,25 +33,10 @@ beforeEach(() => {
 
 const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-/**
- * note: The round's command shapes, built by the production builders: a change to a
- * command must edit the product, not this suite. The compare read carries
- * per-round shas, so its fixed compare PATH answers "was a compare issued at
- * all" without counting the round's other repo-root `gh api` reads.
- */
 const compareCommand = (baseSha: string) => compareGateCommand(TEST_OWNER, TEST_REPO, baseSha, SHA);
 const COMPARE_PATH = `${compareCommand(SHA).split("/compare/")[0]!}/compare/`;
 const compareIssued = (): boolean => h.sandbox.calls.some((call) => call.cmd.startsWith(COMPARE_PATH));
 
-/**
- * note: One reviewed row for this PR at `headSha` (the increment base candidate).
- * The identity DEFAULTS to the canonical one `makePayload()` reviews with, so a
- * negative case can differ in exactly one field and still prove the read's
- * filter (not an identity mismatch) is what excluded the row.
- * `reviewedAt` is the ONE format the column carries in production — SQLite's
- * `datetime('now')`, i.e. `YYYY-MM-DD HH:MM:SS` — because base selection
- * ORDERS BY this text.
- */
 function seedReview(
   db: TestD1,
   headSha: string,
@@ -105,7 +79,6 @@ function seedReview(
     );
 }
 
-/** note: The identity every message under test reviews for — what `seedReview` defaults to. */
 const ROUND_IDENTITY: {
   appId: string;
   installationId: number;
@@ -120,20 +93,13 @@ const ROUND_IDENTITY: {
   prNumber: TEST_PR_NUMBER,
 };
 
-/** note: The written runner input JSON (the one `base64 -d >` write of the round). */
 function runnerInput(): Record<string, unknown> {
   return JSON.parse(h.sandbox.writtenInputJson!) as Record<string, unknown>;
 }
 
-/**
- * note: The prepared review body the round sent — and the round sent exactly ONE.
- * Taking the first call would let a duplicate-publication regression pass every
- * body assertion in this suite.
- */
 function preparedBody(): string {
   const prepared = h.commenterCalls.filter((call) => call.op === "post-prepared");
   expect(prepared).toHaveLength(1);
-  // note: The harness records `args` as `unknown`; this double is its only writer.
   const call = prepared[0]!.args as { body: string };
   return call.body;
 }
@@ -151,13 +117,10 @@ describe("incremental review rounds: the compare gate", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // invariant: The compare ran against the reviewed head, and the full diff STILL ran:
-    // the prior findings' evidence catalog needs the whole PR diff.
     expect(h.sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
     expect(
       h.sandbox.calls.some((c) => c.cmd === diffCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER, DIFF_PATH)),
     ).toBe(true);
-    // note: …and the increment capture replaced the file before numstat.
     const incrementIndex = h.sandbox.calls.findIndex(
       (c) => c.cmd === incrementDiffCommand(TEST_OWNER, TEST_REPO, PREVIOUS_SHA, SHA, DIFF_PATH),
     );
@@ -191,7 +154,6 @@ describe("incremental review rounds: the compare gate", () => {
 
       await consumer(h.makeBatch(makePayload()));
 
-      // note: No increment capture at all: the round reviewed the full diff.
       expect(
         h.sandbox.calls.some(
           (c) => c.cmd === incrementDiffCommand(TEST_OWNER, TEST_REPO, PREVIOUS_SHA, SHA, DIFF_PATH),
@@ -205,8 +167,6 @@ describe("incremental review rounds: the compare gate", () => {
       ]);
       expect(preparedBody()).toContain(`Review 1 · commit ${SHA.slice(0, 7)}`);
       expect(preparedBody()).not.toContain(" · since ");
-      // invariant: The choice is logged with the verdict, never silently — and the value
-      // IS the verdict, not merely some status.
       expect(h.logLines.filter((l) => l.fields.increment_status === (exitCode === 0 ? status : `exit ${exitCode}`))).toHaveLength(1);
     });
   }
@@ -222,8 +182,6 @@ describe("incremental review rounds: the compare gate", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // invariant: The gate ran, and its answer was rejected: the range merges a base
-    // branch, so the delta is another PR's changeset, not this branch's work.
     expect(h.sandbox.calls.some((c) => c.cmd === compareCommand(PREVIOUS_SHA))).toBe(true);
     expect(
       h.sandbox.calls.some(
@@ -241,8 +199,6 @@ describe("incremental review rounds: the compare gate", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
-    // invariant: A stopped round reviewed PREVIOUS_SHA; diffing against it would inherit
-    // the scope it never scanned, so it is not a base at all.
     seedReview(db, PREVIOUS_SHA, { verdict: "incomplete" });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
@@ -264,7 +220,6 @@ describe("incremental review rounds: the compare gate", () => {
     const db = await createSeededTestD1();
     seedReview(db, older, { reviewedAt: "2026-01-01 00:00:00" });
     seedReview(db, newestEligible, { reviewedAt: "2026-01-02 00:00:00" });
-    // invariant: Newer still, but neither scanned its scope: never a base.
     seedReview(db, stopped, { reviewedAt: "2026-01-03 00:00:00", verdict: "incomplete" });
     seedReview(db, captureFailed, { reviewedAt: "2026-01-04 00:00:00", contextIncomplete: true });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
@@ -286,17 +241,12 @@ describe("incremental review rounds: the compare gate", () => {
     const otherAppHead = "a".repeat(40);
     const db = await createSeededTestD1();
     seedOtherApp(db);
-    // invariant: Same installation, owner, repo and PR — only the App differs, and the
-    // foreign row is NEWER, so an unfiltered base read would hand this round
-    // that App's head and skip the commits THIS App never reviewed.
     seedReview(db, PREVIOUS_SHA, { reviewedAt: "2026-01-01 00:00:00" });
     seedReview(db, otherAppHead, { appId: TEST_OTHER_APP_ID, reviewedAt: "2026-01-02 00:00:00" });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     await consumer(h.makeBatch(makePayload()));
 
-    // why: Non-vacuity: both rows carry the identity this round reviews for, so
-    // `bot_id` is the only field that can explain the exclusion.
     const rows = db.raw
       .query(
         "SELECT bot_id, installation_id, owner, repo, pr_number FROM reviews WHERE head_sha IN (?, ?) ORDER BY reviewed_at",
@@ -349,10 +299,6 @@ describe("incremental review rounds: the compare gate", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
-    // invariant: The base read answers with the head being reviewed, so `base...head`
-    // would be empty and the compare must not run. The same row would hit the
-    // dedup read first, so that read is stubbed to miss — the guard is what
-    // this case is about.
     seedReview(db, SHA);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
@@ -370,9 +316,6 @@ describe("incremental review rounds: the compare gate", () => {
     h.sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
-    // note: The lookup itself rejects — a D1 hiccup or a missing column. Injected
-    // through its seam, so this never depends on the query text: a D1 hiccup
-    // must degrade to "no increment", never fail a review over its bookkeeping.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       findIncrementBase: async () => {
@@ -382,11 +325,9 @@ describe("incremental review rounds: the compare gate", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // invariant: The full-diff fallback: no compare, no `since` fact, the review published.
     expect(compareIssued()).toBe(false);
     expect(runnerInput().reconFacts).not.toContain(`since ${PREVIOUS_SHA}`);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
-    // note: …and the failure is not silent: one named warning carries the cause.
     const warn = h.logLines.filter((line) => line.level === "warn" && line.fields.increment_base === "lookup-failed");
     expect(warn).toHaveLength(1);
     expect(warn[0]!.msg).toContain("full diff");

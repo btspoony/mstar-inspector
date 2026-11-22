@@ -1,17 +1,3 @@
-/**
- * Review usage — shared-bot vs own-bot reviews per live workspace for the
- * current UTC month (spec bot-scope-and-claiming § Review usage).
- *
- * Read-only and unpaged by decision: the route answers every live workspace in
- * one statement and this screen filters the loaded rows through the shared
- * `TableSearch`, so a few hundred rows of three numbers stay a bounded read. A
- * server-side page control that always shows page 1 would be worse than a
- * search over the whole set.
- *
- * The order is the server's — shared-bot reviews descending, own-bot reviews
- * descending, then the workspace name — because the operator opens this page
- * to ask who is consuming the shared bot.
- */
 import { useState } from "react";
 import { t } from "../../i18n";
 import type { Locale } from "../../i18n";
@@ -24,7 +10,6 @@ import { TableSearch } from "./TableSearch";
 
 export function UsagePage({ locale }: { locale: Locale }) {
   const { state, reload } = useLoaded(readUsage);
-  /** Client-side filter over the loaded rows — no URL state, no request. */
   const [search, setSearch] = useState("");
 
   const columns: DataTableColumn<UsageRow>[] = [
@@ -53,8 +38,6 @@ export function UsagePage({ locale }: { locale: Locale }) {
     <section className="flex flex-col gap-6">
       <PageHeader
         title={t(locale, "admin.nav.usage")}
-        // The heading names the window, so it can only render once the read
-        // reports which month it answered for.
         description={state.status === "ready" ? t(locale, "admin.usage.window", { month: state.data.month }) : undefined}
         actions={<ConsolePath page="usage" />}
       />
@@ -81,7 +64,6 @@ export function UsagePage({ locale }: { locale: Locale }) {
                 rows={filtered}
                 rowKey={(row) => row.workspaceId}
                 empty={
-                  // No-match copy is only true when there were rows to match.
                   query && data.rows.length > 0 ? (
                     <EmptyState
                       title={t(locale, "admin.search.emptyTitle")}

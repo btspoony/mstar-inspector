@@ -1,10 +1,3 @@
-/** note: Payloads and the gated-fetch mount shared by the pull-requests suites.
- *
- * The list/detail split imports the same PR payloads; keeping them here means
- * neither file pins its own copy of the data the other one asserts on. The
- * detail split is head + counts (one read) plus three record pages (one read
- * each) — `DETAIL` is the head, `RECORDS` the first page of every family.
- */
 import { act, createElement, useState, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import type { Window } from "happy-dom";
@@ -40,7 +33,6 @@ export const ROW_HEAD: PullRequestHead = {
   head_sha: "aaa111bbb222",
   first_seen_at: "2026-10-28 08:00:00",
   last_seen_at: "2026-11-01 10:00:00",
-  // note: The base fixture is an idle PR; the reviewing-now suites override it.
   reviewing: { state: "none" },
 };
 
@@ -59,7 +51,6 @@ export const FINDINGS: PullRequestFinding[] = [
     file_path: "src/db.ts",
     line: 42,
     body: "String interpolation reaches the SQL engine.",
-    // note: First reported by the PR's first round.
     review_round: 1,
   },
   {
@@ -69,18 +60,15 @@ export const FINDINGS: PullRequestFinding[] = [
     file_path: "src/auth/session.ts",
     line: 88,
     body: "The refresh cookie is set with secure only.",
-    // note: Surfaced by the second round.
     review_round: 2,
   },
   {
     finding_id: "f-3",
     severity: "nit",
     title: "Rename tmp to pending",
-    // why: A repo-wide finding: no file_path, so the location chip disappears.
     file_path: "",
     line: null,
     body: "The variable holds the pending redirect target.",
-    // note: No stored review carries its first-seen sha, so no round chip renders.
     review_round: null,
   },
 ];
@@ -93,22 +81,17 @@ export const REVIEWS: PullRequestReview[] = [
     provider: "openrouter",
     reviewed_at: "2026-11-01 08:00:00",
     head_sha: "aaa111bbb222",
-    // note: The second round: the first is the older row below.
     round: 2,
-    // note: 1m 5s — the minutes+seconds form.
     duration_ms: 65_000,
-    // note: The per-severity breakdown the wire sends as JSON text.
     severity_counts: { "must-fix": 1, nit: 1 },
   },
   {
     verdict: "ship it",
     model: "claude-sonnet-4.5",
-    // invariant: v1 never records a provider — the separator must disappear with it.
     provider: "",
     reviewed_at: "2026-10-30 08:00:00",
     head_sha: "f00d12c1",
     round: 1,
-    // why: Historical row: no measured clock, so the row omits the time.
     duration_ms: null,
     severity_counts: { nit: 1 },
   },
@@ -117,7 +100,6 @@ export const REVIEWS: PullRequestReview[] = [
 export const FAILURES: PullRequestFailure[] = [
   {
     stage: "sandbox",
-    // invariant: Model/runtime output — must render escaped, never as HTML.
     error: "exit 1: <script>alert(1)</script>",
     created_at: "2026-10-31 23:00:00",
   },
@@ -135,10 +117,6 @@ export const RECORDS: RecordPages = {
 /** The fixture PR's own must-fix tally, as its head counts it. */
 export const MUST_FIX = FINDINGS.filter((finding) => finding.severity === "must-fix").length;
 
-/** note: The head's authoritative newest review — the same round as `REVIEWS[0]`, in
- * the shape the detail read actually sends: the five attribution fields, with
- * the round ordinal, clock and tally left to the paged reviews section.
- */
 const LATEST_REVIEW: PullRequestLatestReview | null = (() => {
   const newest = REVIEWS[0];
   if (newest === undefined) return null;
@@ -160,8 +138,6 @@ export const DETAIL: PullRequestDetailPayload = {
     failures: FAILURES.length,
     must_fix: MUST_FIX,
   },
-  // note: The head's authoritative newest review — what the headline reads, whatever
-  // page the reviews section has loaded.
   latest_review: LATEST_REVIEW,
 };
 
@@ -224,9 +200,6 @@ export function recordsOf(pages: RecordPages = RECORDS, offset = 0, severity = "
     severity,
     status: "ok",
     page,
-    // note: A first-page render IS the newest window; a paged or filtered one
-    // describes a window the caller never supplied to the aside, so it stays
-    // unknown.
     newest: offset === 0 && severity === "" ? page : null,
   });
   return {
@@ -276,15 +249,11 @@ export async function mountView(
   globalThis.fetch = fetchImpl;
   const host = win.document.createElement("div");
   win.document.body.appendChild(host);
-  // note: happy-dom's nodes cross into lib.dom's here: the queries read the same
-  // roles, attributes and `hidden` the static tests do.
   const container = host as unknown as HTMLElement;
   const root = createRoot(container as unknown as Element);
   let mounted = true;
   try {
     await act(async () => root.render(element));
-    // note: A mounted face can chain reads (head → first section): a few empty
-    // flushes drain those microtasks, so the mount lands settled.
     for (let flush = 0; flush < 3; flush += 1) await act(async () => {});
   } catch (error) {
     mounted = false;
@@ -296,8 +265,6 @@ export async function mountView(
     container,
     win,
     unmount: async () => {
-      // note: A test may unmount mid-body (the late-write case) and again on the way
-      // out; the window is restored once.
       if (!mounted) return;
       mounted = false;
       await act(async () => root.unmount());
@@ -333,8 +300,6 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
   const impl = (async (input: unknown) => {
     const url = new URL(String(input), "http://localhost");
     fetches.push(url.pathname + url.search);
-    // note: `/api/targets/<targetId>/pull-requests/...` names the target the read
-    // answers for; the workspace scope (`/api/pull-requests/...`) names none.
     const sceneValue = sceneFor(/\/targets\/([^/]+)\//.exec(url.pathname)?.[1] ?? "");
     const severity = url.searchParams.get("severity") ?? "";
     const unclassified = url.searchParams.get("unclassified") === "1";
@@ -343,7 +308,6 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
       if (section === "findings" && severity !== "" && !isFindingSeverity(severity)) {
         return jsonResponse({ error: "invalid severity" }, 400);
       }
-      // invariant: The catch-all is a mode of its own; the two filters never combine.
       if (section === "findings" && unclassified && severity !== "") {
         return jsonResponse({ error: "invalid filter" }, 400);
       }
@@ -359,20 +323,7 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
             : sceneValue.pages.failures.items;
       const offset = Number(url.searchParams.get("offset") ?? "0");
       const limit = Number(url.searchParams.get("limit") ?? "10");
-      // note: The applied page size, and the payload echoes it: a scene can state a
-      // smaller one (`pages.x.limit`), exactly as the route's clamp would, and
-      // the pager must stride on what came back rather than on what it asked.
       const applied = Math.min(limit, sceneValue.pages[section].limit ?? limit);
-      // note: The page's declared `total` is authoritative: the head was built from
-      // it, so a scene can state a total its served window never reaches. A
-      // FILTERED findings read is different: the route totals it with a
-      // family-wide COUNT, so the stub counts matched rows across the scene's
-      // declared corpus (`pages.findings.items`), never across the offset/
-      // limit window being served. A scene whose page is a window of a larger
-      // corpus cannot answer a filtered total (the unseen rows' classes are
-      // unknown), so mounted suites assert filtered pager totals only on
-      // corpus-complete scenes; the worker suite pins the route's filtered
-      // count.
       const filtered = section === "findings" && (severity !== "" || unclassified);
       return jsonResponse({
         items: rows.slice(offset, offset + applied),
@@ -380,10 +331,6 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
         limit: applied,
       });
     }
-    // invariant: The head read is the only other read this stub describes; anything else
-    // is a test asking for a read the stub cannot answer, and answering it with
-    // a head payload would let that test pass on a response the API never gave.
-    // The detail head: one target, or the workspace with no target segment.
     if (/\/api\/(?:targets\/[^/]+\/)?pull-requests\/[^/]+\/[^/]+\/\d+$/.test(url.pathname)) {
       return jsonResponse(sceneValue.detail);
     }
@@ -437,12 +384,8 @@ export async function mountDetailView(
  * `fetches`, whose counts are about the list/head reads.
  */
 export async function mountTabWithGatedFetch(initialPr: string) {
-  // note: One gate per REQUEST, not per URL: a retry re-reads a URL that was already
-  // read, and a URL-keyed gate would replace the request still pending.
   type Gate = { url: string; promise: Promise<Response>; resolve: (response: Response) => void };
   const gates: Gate[] = [];
-  // note: Every list/head URL the tab asked for, so a test can prove a read was (or
-  // was not) issued without keeping its own stub.
   const fetches: string[] = [];
   const gatedFetch = (async (input: unknown) => {
     const url = String(input);
@@ -460,8 +403,6 @@ export async function mountTabWithGatedFetch(initialPr: string) {
     gates.splice(gates.indexOf(gate), 1);
     gate.resolve(response);
   };
-  // note: The helper owns the shell's search state, so a close (`onSearch`) commits
-  // exactly as the real page's does — the deep-link test needs no harness.
   let setSearch: (next: (previous: AppDetailSearch) => AppDetailSearch) => void = () => {};
   let setTarget: (next: string) => void = () => {};
   function Harness() {
@@ -474,8 +415,6 @@ export async function mountTabWithGatedFetch(initialPr: string) {
     const [targetId, setTargetId] = useState("1");
     setSearch = set;
     setTarget = setTargetId;
-    // note: A fresh scope object every render: the tab keys its reads on the scope's
-    // KEY, not on the object's identity.
     return createElement(AppPullRequestsTab, {
       locale: "en",
       scope: { kind: "target", targetId },
@@ -488,14 +427,10 @@ export async function mountTabWithGatedFetch(initialPr: string) {
     ...mounted,
     fetches,
     text: () => mounted.container.textContent ?? "",
-    /** note: Re-render for `pr` through a fresh search object — the shell's own
-     * re-sync always hands over a new object with the same value.
-     */
     rerender: async (pr: string) => {
       await act(async () => setSearch((previous) => ({ ...previous, pr })));
       await act(async () => {});
     },
-    /** note: Move the tab to another target, keeping the same `search` (and PR). */
     switchTarget: async (targetId: string) => {
       await act(async () => setTarget(targetId));
       await act(async () => {});
@@ -538,7 +473,6 @@ export async function mountTabAcrossTargets(
     ...mounted,
     fetches: stub.fetches,
     text: () => mounted.container.textContent ?? "",
-    /** note: Move the tab to another target, keeping the same search (and PR). */
     switchTarget: async (targetId: string) => {
       await act(async () => setTarget(targetId));
       await act(async () => {});

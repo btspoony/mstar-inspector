@@ -28,11 +28,6 @@ const SHA_B = "b".repeat(40);
 describe("deploy-status.sh", () => {
   const status = (...args: string[]) => runBash(join(SCRIPTS, "deploy-status.sh"), args);
 
-  /**
-   * invariant: The invariant every block must satisfy: exactly one `deploy_status=` line,
-   * and the two shapes never mix (`deployed_sha` with `not-deployed`, or
-   * `requested_sha` with `deployed`).
-   */
   function parseSingleBlock(out: string): { status: string; lines: string[] } {
     const lines = out
       .split("\n")
@@ -82,8 +77,6 @@ describe("deploy-status.sh", () => {
   });
 
   test("the serving step's outcome gates the deployed verdict (prod publishes it last)", () => {
-    // why: Production creates the serving version in a LATER step than the first
-    // `wrangler deploy`, so the first deploy's success alone is not proof.
     for (const serving of ["failure", "skipped", "cancelled", ""]) {
       const result = status("success", SHA_A, SHA_B, serving);
       expect(result.code, serving).toBe(0);
@@ -93,7 +86,6 @@ describe("deploy-status.sh", () => {
       });
       expect(result.err, serving).toContain("the serving step did not succeed");
     }
-    // note: both deploys landed: the SHA is what this run shipped
     const both = status("success", SHA_A, SHA_B, "success");
     expect(both.code).toBe(0);
     expect(parseSingleBlock(both.out)).toEqual({
@@ -103,8 +95,6 @@ describe("deploy-status.sh", () => {
   });
 
   test("staging (no serving step) keeps its single-deploy verdict", () => {
-    // why: Staging passes three arguments only: there, the `wrangler deploy` IS the
-    // last version-creating step, so its outcome alone decides.
     const result = status("success", SHA_A, SHA_B);
     expect(result.code).toBe(0);
     expect(parseSingleBlock(result.out)).toEqual({
@@ -114,8 +104,6 @@ describe("deploy-status.sh", () => {
   });
 
   test("MUTATION: dropping the serving guard from the real script is caught by the pinned output", () => {
-    // why: The expectation above is the shipped script's own output, not a check the
-    // test invented: remove the guard and the same call reports `deployed`.
     const args = ["success", SHA_A, SHA_B, "failure"];
     const DEPLOYED = `deploy_status=deployed\ndeployed_sha=${SHA_B}\n`;
     expect(status(...args).out).toBe(`deploy_status=not-deployed\nrequested_sha=${SHA_A}\n`);
@@ -134,7 +122,7 @@ describe("deploy-status.sh", () => {
       writeFileSync(path, tampered);
       const result = runBash(path, args);
       expect(result.code).toBe(0);
-      expect(result.out).toBe(DEPLOYED); // note: the pinned expectation no longer holds
+      expect(result.out).toBe(DEPLOYED);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

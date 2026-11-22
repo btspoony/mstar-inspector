@@ -1,12 +1,3 @@
-/**
- * why: Incremental review rounds: the increment capture and the context-incomplete
- * bookkeeping that follows it.
- *
- * An incremental round keeps the FULL diff for the prior-finding evidence
- * catalog while the numstat partition — and the seats' universe — becomes the
- * delta. A lost capture is a round failure, never a silent full-diff fallback,
- * and the head it produced is never the next round's base.
- */
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 import {
@@ -39,25 +30,10 @@ beforeEach(() => {
 
 const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-/**
- * note: The round's command shapes, built by the production builders: a change to a
- * command must edit the product, not this suite. The compare read carries
- * per-round shas, so its fixed compare PATH answers "was a compare issued at
- * all" without counting the round's other repo-root `gh api` reads.
- */
 const compareCommand = (baseSha: string) => compareGateCommand(TEST_OWNER, TEST_REPO, baseSha, SHA);
 const COMPARE_PATH = `${compareCommand(SHA).split("/compare/")[0]!}/compare/`;
 const compareIssued = (): boolean => h.sandbox.calls.some((call) => call.cmd.startsWith(COMPARE_PATH));
 
-/**
- * note: One reviewed row for this PR at `headSha` (the increment base candidate).
- * The identity DEFAULTS to the canonical one `makePayload()` reviews with, so a
- * negative case can differ in exactly one field and still prove the read's
- * filter (not an identity mismatch) is what excluded the row.
- * `reviewedAt` is the ONE format the column carries in production — SQLite's
- * `datetime('now')`, i.e. `YYYY-MM-DD HH:MM:SS` — because base selection
- * ORDERS BY this text.
- */
 function seedReview(
   db: TestD1,
   headSha: string,
@@ -100,7 +76,6 @@ function seedReview(
     );
 }
 
-/** note: The stored `context_incomplete` flag for `headSha` (default: this round's head). */
 function storedContextIncomplete(db: TestD1, headSha: string = SHA): number {
   const row = db.raw.query("SELECT context_incomplete FROM reviews WHERE head_sha = ?").get(headSha) as {
     context_incomplete: number;
@@ -108,22 +83,14 @@ function storedContextIncomplete(db: TestD1, headSha: string = SHA): number {
   return row.context_incomplete;
 }
 
-/** note: The written runner input JSON (the one `base64 -d >` write of the round). */
 function runnerInput(): Record<string, unknown> {
   return JSON.parse(h.sandbox.writtenInputJson!) as Record<string, unknown>;
 }
 
-/** note: GitHub's answer when it refuses a diff over its 20,000-line API ceiling. */
 const INCREMENT_TOO_LARGE =
   "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000) " +
   "(https://api.github.com/repos/acme/widgets/compare/bbbbbbb...aaaaaaa)";
 
-/**
- * note: The double answers the increment exec with an exit code but no stderr, so
- * this case injects the stderr the compare API really writes when it refuses
- * an oversized increment — the token the consumer classifies by. Everything
- * else (call recording, the other commands) stays the shared double's.
- */
 const oversizedIncrementSandbox = () => ({
   ...h.fakeSandbox,
   runCommand: mock(async (cmd: string, opts?: unknown) => {
@@ -144,19 +111,12 @@ describe("incremental review rounds: the increment capture", () => {
     seedReview(db, PREVIOUS_SHA);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // invariant: The round failed structurally — the same channel a failed full-diff
-    // capture takes (rethrow → queue retry), never a quiet fallback to the
-    // full diff that would make the `since` fact a lie.
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/increment diff failed/);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(h.sandbox.writtenInputJson).toBeUndefined();
   });
 
   test("an increment capture failure does not carry an exact secret", async () => {
-    // safety: A credential every shape pattern misses (no token prefix, no 40-char hex
-    // run), assembled at runtime so no contiguous credential literal exists.
-    // Only the exact-value pass can remove it from the increment stage's
-    // message and its failure row.
     const secretToken = ["6b2d90f4", "a83c", "4e17", "8d05", "1f7a3c6be942"].join("-");
     h.commenterState.token = secretToken;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -175,8 +135,6 @@ describe("incremental review rounds: the increment capture", () => {
   test("an oversized increment falls back or degrades with a reason", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
-    // note: `ahead` starts an increment round, then the compare API refuses the
-    // base...head diff exactly as `gh pr diff` refuses an oversized PR.
     h.sandbox.compareStatus = "ahead";
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
@@ -185,21 +143,16 @@ describe("incremental review rounds: the increment capture", () => {
       getSandbox: async () => oversizedIncrementSandbox(),
     });
 
-    // invariant: A refusal is not a round failure: nothing is retried and no failure row
-    // is left, so the delivery never repeats the four-attempt exhaustion.
     await consumer(h.makeBatch(makePayload()));
 
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(failureRows(db)).toHaveLength(0);
-    // note: ONE structured warn names the reason and the step it stopped at.
     const degrade = h.logLines.filter((l) => l.fields.increment_capture !== undefined);
     expect(degrade).toHaveLength(1);
     expect(degrade[0]!.level).toBe("warn");
     expect(degrade[0]!.fields).toMatchObject({ increment_capture: "too_large", increment_since: PREVIOUS_SHA });
     expect(degrade[0]!.msg).toContain("increment diff capture too large");
     expect(degrade[0]!.msg).toContain("406");
-    // note: …and the `since` fact is dropped rather than faked: the round reviews the
-    // full diff its own capture already holds.
     expect(runnerInput().reconFacts).toEqual([
       "acme/widgets#42",
       `head ${SHA}`,
@@ -211,8 +164,6 @@ describe("incremental review rounds: the increment capture", () => {
 
   test("a capture-failed round still publishes, and its row is never an incremental base", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // note: Exit 0 with nothing to read: `gh pr diff` always emits a header for a
-    // real PR, so this is a capture FAILURE — the round publishes anyway.
     h.sandbox.diffStdout = "";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -227,9 +178,6 @@ describe("incremental review rounds: the increment capture", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
-    // invariant: A CONFIRMED publication of an earlier head whose payload cannot apply:
-    // the round runs with stale lifecycle context (closure/anchor state never
-    // applied), which is a SECOND way to be incomplete — not a capture failure.
     db.raw
       .prepare(
         `INSERT INTO review_publications
@@ -245,26 +193,18 @@ describe("incremental review rounds: the increment capture", () => {
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(storedContextIncomplete(db)).toBe(1);
 
-    // note: The next round at a newer head: the row above is the newest REVIEWED head
-    // of this PR, and the flag keeps it out of the base read. The stale journal
-    // is settled first so this round is otherwise clean.
     db.raw.prepare("UPDATE review_publications SET recovery_state = 'done' WHERE head_sha = ?").run(PREVIOUS_SHA);
-    // note: Round two gets its OWN instance, so its recorders, log and KV start as
-    // empty as a fresh test's and neither round can see the other's calls.
     h = createConsumerHarness();
     const nextConsumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.compareStatus = "ahead";
     h.sandbox.diffStdout = VALID_DIFF;
     const nextSha = "d".repeat(40);
-    // invariant: The round keys off the CHECKOUT sha, not the payload's: without this the
-    // second delivery would dedup on the first round's head.
     h.sandbox.resolvedSha = nextSha;
     await nextConsumer(h.makeBatch(makePayload({ head_sha: nextSha })));
 
     expect(compareIssued()).toBe(false);
     expect(runnerInput().reconFacts).not.toContain(`since ${SHA}`);
-    // note: …and the clean round writes 0 of its own.
     expect(storedContextIncomplete(db, nextSha)).toBe(0);
   });
 
@@ -282,10 +222,6 @@ describe("incremental review rounds: the increment capture", () => {
   test("an empty increment capture with a NON-empty numstat is a round failure, never a silent full diff", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
-    // note: `ahead` turns the round incremental, but the base...head capture comes
-    // back empty at exit 0 while the same round's numstat reads the increment
-    // FILE and finds a diff: the transport lost the capture, so the round is
-    // context-incomplete (an empty FILE would be nothing to review instead).
     h.sandbox.compareStatus = "ahead";
     h.sandbox.incrementDiffStdout = "";
     h.sandbox.numstatStdout = "3\t1\tsrc/auth.ts\n";
@@ -296,8 +232,6 @@ describe("incremental review rounds: the increment capture", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(h.logLines.some((l) => l.fields.increment_since === PREVIOUS_SHA)).toBe(true);
-    // invariant: Its own field, so an increment capture failure never reads as a full-diff
-    // one — and the cause is the actual outcome, not a fixed word.
     const capture = h.logLines.filter((l) => l.fields.increment_since === PREVIOUS_SHA);
     expect(capture).toHaveLength(1);
     expect(capture[0]!.fields.increment_capture).toBe("empty");
@@ -308,13 +242,6 @@ describe("incremental review rounds: the increment capture", () => {
   test("an empty increment FILE (empty capture and empty numstat) is nothing to review: ack, no publication, no context-incomplete, Check inherits the reviewed head", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
-    // note: The eligible base is an ancestor and `base...head` truly has no changes:
-    // both reads of the increment — the bounded stdout copy and the numstat of
-    // the file it wrote — are empty. `git apply --numstat` rejects an EMPTY
-    // file with the exit git really answers (128), so the ack must survive
-    // that exit rather than only an empty stdout. The prior round already
-    // covers this head's content, so a verdict here would be computed from
-    // nothing.
     h.sandbox.compareStatus = "ahead";
     h.sandbox.incrementDiffStdout = "";
     h.sandbox.numstatStdout = "";
@@ -350,30 +277,21 @@ describe("incremental review rounds: the increment capture", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // invariant: Acked with no review: no body, no paid run, no review row.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(h.sandbox.writtenInputJson).toBeUndefined();
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     const rows = db.raw.query("SELECT count(*) AS c FROM reviews WHERE head_sha = ?").get(SHA) as { c: number };
     expect(rows.c).toBe(0);
-    // invariant: …and it is NOT the capture-failure path.
     expect(h.logLines.some((l) => l.fields.increment_capture !== undefined)).toBe(false);
     expect(h.logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
-    // note: ONE structured line names the outcome.
     const noIncrement = h.logLines.filter((l) => l.fields.event === "review_no_increment");
     expect(noIncrement).toHaveLength(1);
     expect(noIncrement[0]!.fields.increment_since).toBe(PREVIOUS_SHA);
-    // note: The Check is told WHICH reviewed head it inherits — the conclusion then
-    // comes from that head's row, never from a free-standing skip.
     expect(terminalized).toEqual([{ publicationId: null, outcome: "skipped", inheritedHeadSha: PREVIOUS_SHA }]);
   });
 
   test("an empty diff file acks instead of failing the sandbox stage", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // note: A first round whose PR adds no diff: `gh pr diff` writes an EMPTY file,
-    // and `git apply --numstat` rejects it with the exit git really answers
-    // for unusable input (128). Nothing to review, so the delivery acks — no
-    // publication, no review row — instead of failing the sandbox stage.
     h.sandbox.diffStdout = "";
     h.sandbox.numstatStdout = "";
     h.sandbox.numstatExitCode = 128;
@@ -407,19 +325,14 @@ describe("incremental review rounds: the increment capture", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // invariant: Acked with no review: no body, no paid run, no review row, and no
-    // failure row — the round did not fail, there was just nothing to review.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(h.sandbox.writtenInputJson).toBeUndefined();
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     const rows = db.raw.query("SELECT count(*) AS c FROM reviews WHERE head_sha = ?").get(SHA) as { c: number };
     expect(rows.c).toBe(0);
     expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
-    // invariant: …and it is NOT the capture-failure path.
     expect(h.logLines.some((l) => l.fields.diff_capture !== undefined)).toBe(false);
     expect(h.logLines.some((l) => l.fields.increment_capture !== undefined)).toBe(false);
-    // note: ONE structured line names the outcome; there is no reviewed head to
-    // inherit, so the Check keeps the skipped outcome's neutral conclusion.
     const ack = h.logLines.filter((l) => l.fields.event === "review_no_diff");
     expect(ack).toHaveLength(1);
     expect(terminalized).toEqual([{ publicationId: null, outcome: "skipped", inheritedHeadSha: undefined }]);
@@ -429,10 +342,6 @@ describe("incremental review rounds: the increment capture", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.compareStatus = "ahead";
     h.sandbox.diffStdout = VALID_DIFF;
-    // invariant: Only the stdout COPY is byte-bounded; the increment command redirects the
-    // whole base...head diff into the file, and numstat reads THAT. Overflow is
-    // therefore the documented over-size path, not an empty capture: the round
-    // stays complete and the `since` fact keeps riding the input.
     h.sandbox.incrementDiffStdout = "x".repeat(DIFF_PREFETCH_MAX_BYTES + 1);
     h.sandbox.numstatStdout = "3\t1\tsrc/auth.ts\n";
     const db = await createSeededTestD1();
@@ -455,8 +364,6 @@ describe("incremental review rounds: the increment capture", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
     const db = await createSeededTestD1();
-    // invariant: This row published a verdict, but its own diff capture failed — diffing
-    // against it would inherit scope that was never scanned.
     seedReview(db, PREVIOUS_SHA, { contextIncomplete: true });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 

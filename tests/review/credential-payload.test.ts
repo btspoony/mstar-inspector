@@ -1,21 +1,3 @@
-/**
- * why: Credential-transport wire contract tests (runner stdin payload).
- *
- * The payload is the ONLY credential channel into the review container: the
- * consumer builds it from the App's decrypted key pools and streams it into the
- * runner exec's stdin; the runner validates it and writes the pools into the
- * run's credential store. The process environment never carries a key, so a
- * payload that does not parse, names no keys, or carries a non-string/empty
- * entry MUST be rejected before anything is written.
- *
- * Contract under test:
- *   - the encoded shape is self-describing and versioned:
- *     `{"version":1,"pools":{"<providerId>":["k1",…]}}`;
- *   - an ABSENT payload (empty / whitespace-only stdin) decodes to zero pools —
- *     the keyless run shape (a run that transports no credentials);
- *   - every rejection carries the provider id and the defect only — never a key
- *     value, and never the JSON parser's own message (which quotes the input).
- */
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -49,8 +31,6 @@ describe("credential payload — decode", () => {
   });
 
   test("unparseable payload → reject with no input echoed", () => {
-    // safety: A JSON syntax error quotes the offending input — the decoder must not
-    // forward that text: it would put key material in the diagnostics.
     for (const raw of ["not json", `{"version":1,"pools":{"ark":["${sk("leaky")}"}`, "[1,2]"]) {
       expect(() => decodeCredentialPayload(raw)).toThrow(/not valid JSON|must be a JSON object/);
     }
@@ -115,12 +95,9 @@ describe("credential payload — decode", () => {
   });
 
   test("a `!`-prefixed entry → reject (the credential store would run it as a shell command)", () => {
-    // why: The rule the decoder mirrors is the SDK's own config-value test:
-    // `valueConfig?.startsWith("!") === true` → `ptree.exec(["/bin/sh","-c",…])`.
     expect(() => decodeCredentialPayload('{"version":1,"pools":{"ark":["!touch /tmp/x"]}}')).toThrow(
       "credential pool ark entry 0 must not start with !",
     );
-    // why: Only a LEADING `!` is the command shape — a key containing one is data.
     expect(decodeCredentialPayload('{"version":1,"pools":{"ark":["sk-live-a!b"]}}')).toEqual({
       ark: ["sk-live-a!b"],
     });
@@ -133,9 +110,6 @@ describe("credential payload — decode", () => {
   });
 
   test("no declared pool is ever silently dropped (a `__proto__` key stays an own pool)", () => {
-    // safety: Assigning `__proto__` on a plain object literal re-targets the prototype,
-    // so that pool would vanish from `Object.keys` — a transported credential
-    // dropped without a word. The decoder builds a null-prototype dictionary.
     const pools = decodeCredentialPayload('{"version":1,"pools":{"__proto__":["k1"],"ark":["k2"]}}');
     expect(Object.keys(pools).sort()).toEqual(["__proto__", "ark"]);
     expect(pools.ark).toEqual(["k2"]);

@@ -1,22 +1,3 @@
-/**
- * why: The hand-measured override layer for the vendored omp provider snapshot.
- *
- * Why this exists: the snapshot used to be the package's vocabulary verbatim,
- * which made the generated catalog wrong whenever the package and the vendor's
- * live endpoint disagreed — and a hand edit to the generated JSON was destroyed
- * by the next `bun run provider:catalog`. The override file is that measurement
- * in a place regeneration READS instead of overwrites, so the pipeline stays
- * idempotent.
- *
- * A named protocol bucket replaces that record's `models` WHOLESALE, never a
- * union: the package and the vendor disagree about id dialects (one prefixes a
- * namespace, the other does not), so merging would publish ids the provider
- * rejects. Ids are carried verbatim in both directions — no prefix is invented
- * for a bare id and none is stripped from a namespaced one.
- *
- * This module is pure so it can be tested without running the extractor (whose
- * top level reads the installed package and writes files).
- */
 
 /** Protocol api → the provider's live vocabulary for that protocol, verbatim. */
 export type Override = {
@@ -35,7 +16,6 @@ export type OverrideApplied = {
   fetched: string;
 };
 
-/** note: The single-record shape this layer needs; the extractor's record is wider. */
 type RecordRow = { id: string; api: string; models: string[] };
 
 /**

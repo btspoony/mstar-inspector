@@ -1,9 +1,3 @@
-/** note: The workspace-name rename — the owner's label edit.
- *
- * A workspace's URL is its immutable `id`, so this write changes no path: the
- * route refuses every non-owner, answers the outsider/unknown-ref 404, and
- * writes the trimmed name for the owner.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -12,7 +6,6 @@ import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = ["test", "name", "write", "session", "32-bytes!"].join("-");
-/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
 function envFor(db: TestD1): Env {
@@ -72,9 +65,6 @@ function seedMembership(
   );
 }
 
-/** note: `ws-acme` (owner `dana`, admin `erin`), `beta` (`dana` is a plain member
- * there), and `mallory`, a login with no membership anywhere.
- */
 function fixture() {
   const db = createMigratedTestD1();
   const dana = seedUser(db, "dana");
@@ -116,9 +106,7 @@ describe("PUT /dashboard/<ref>/api/settings/name", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ name: "Acme Labs" });
     expect(nameOf(db, "ws-acme")).toBe("Acme Labs");
-    // invariant: A workspace write never touches the session jar.
     expect(res.headers.getSetCookie()).toEqual([]);
-    // invariant: The path segment is the id and never changes with the name.
     expect(nameOf(db, "beta")).toBe("beta-x");
   });
 
@@ -132,8 +120,8 @@ describe("PUT /dashboard/<ref>/api/settings/name", () => {
   test("non-owners are refused with 403 and nothing changes", async () => {
     const { db } = fixture();
     for (const [ref, login] of [
-      ["ws-acme", "erin"], // note: admin of ws-acme
-      ["beta-x", "dana"], // note: plain member of `beta`
+      ["ws-acme", "erin"],
+      ["beta-x", "dana"],
     ] as const) {
       const res = await putName(db, ref, login, "Hijacked");
       expect(res.status, `${ref} ${login}`).toBe(403);

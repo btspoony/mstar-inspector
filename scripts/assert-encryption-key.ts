@@ -26,7 +26,6 @@
  */
 import { createSecretbox } from "../src/dashboard/secretbox";
 
-/** why: Fixed round-trip inputs: no row, no row-dependent AAD. */
 const PLAINTEXT = "mstar-preflight";
 const AAD = "preflight:encryption-key";
 
@@ -57,8 +56,6 @@ export async function encryptionKeyVerdict(
       message: `encryption key: usable (encrypt/decrypt round-trip passed; required shape: ${REQUIRED_SHAPE})`,
     };
   } catch (err) {
-    // safety: Both failure classes carry fixed strings from the parser and the envelope
-    // code — neither ever holds the value, and this gate never formats it.
     const detail = err instanceof Error ? err.message : String(err);
     return {
       ok: false,

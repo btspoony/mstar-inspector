@@ -1,16 +1,3 @@
-/**
- * The login's workspace memberships as client state shared across the shell.
- *
- * A context rather than a callback prop: `main.tsx` renders the page as
- * `Layout`'s already-built `children` — `<Layout><Router>{DashboardPage}</Router></Layout>`
- * — so `Layout` renders the switcher from its own props yet cannot pass a
- * patcher down to a page in that child subtree (`WorkspaceSettingsPage`).
- * Only context spans it.
- *
- * The one write is a rename: the boot is a per-document snapshot and the name
- * card does not reload, so without patching this list the top-bar label would
- * keep the old name until the next document.
- */
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import type { SpaBoot } from "./boot";
 
@@ -24,8 +11,6 @@ export function WorkspaceMembershipsProvider({ boot, children }: { boot: SpaBoot
   const value = useMemo(
     () => ({
       memberships,
-      // The path segment may name the row by `id` or by a legacy `slug`; `id`
-      // is the one that never changes.
       rename: (ref: string | null, name: string) =>
         setMemberships((prev) => prev?.map((m) => (ref === m.id || ref === m.slug ? { ...m, name } : m))),
     }),

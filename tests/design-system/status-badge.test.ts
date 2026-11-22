@@ -1,16 +1,3 @@
-/**
- * why: StatusBadge — the tone × strength matrix.
- *
- * Two contracts, asserted in the same loop over the fifteen faces:
- *
- * - the semantic identity: every pair renders its own `data-tone` /
- *   `data-strength` and the caller's label, and no two faces are the same;
- * - the paint wiring: `quiet` withholds the fill, `soft` takes the tone's tint,
- *   `solid` takes the tone's solid step, and every paint names a token of the
- *   SAME tone's family. The fifteen faces are spelled in exactly one place
- *   (`patterns/status-badge.tsx`), so swapping two entries, tinting a quiet pill
- *   or dropping a literal colour in fails here instead of restyling silently.
- */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -24,20 +11,13 @@ import { PALETTE_UTILITY_SOURCE } from "../helpers/tailwind-palette";
 const TONES: readonly StatusTone[] = ["neutral", "accent", "success", "warn", "danger"];
 const STRENGTHS: readonly StatusStrength[] = ["quiet", "soft", "solid"];
 
-/** note: The palette the face must not name — the same list the both-theme pass runs. */
 const PALETTE_UTILITY = new RegExp(PALETTE_UTILITY_SOURCE);
 
 const render = (tone: StatusTone, extra: Record<string, unknown> = {}) =>
   renderToStaticMarkup(createElement(StatusBadge, { tone, ...extra }, "Active"));
 
-/** note: The class list one rendered span carries. */
 const classList = (html: string): string => / class="([^"]*)"/.exec(html)?.[1] ?? "";
 
-/**
- * why: Every paint in a class list, as the token it names or the `transparent`
- * keyword: `bg-(--tone-warn-bg)` reads as `tone-warn-bg`. A bare width utility
- * (`border`) and the typography group (`text-(length:--…)`) paint nothing.
- */
 const paints = (classes: string, property: "bg" | "border" | "text"): string[] =>
   [
     ...classes.matchAll(
@@ -61,15 +41,10 @@ describe("StatusBadge", () => {
         const [edge] = paints(classes, "border");
         const [label] = paints(classes, "text");
 
-        // why: No literal colour on any face: every paint is a token, or the
-        // withheld `transparent` keyword. This is the negative the retired
-        // component test carried, over the full Tailwind palette rather than a
-        // 13-family subset of it.
         expect(classes, face).not.toMatch(/#[0-9a-f]{3,8}\b/i);
         expect(classes, face).not.toMatch(PALETTE_UTILITY);
 
         if (strength === "quiet") {
-          // why: The edge and the label carry the meaning; the fill is withheld.
           expect(fill, face).toBe("transparent");
           expect(edge, face).toBe(`tone-${tone}-border`);
           expect(label, face).toBe(`tone-${tone}-fg`);
@@ -82,8 +57,6 @@ describe("StatusBadge", () => {
         if (strength === "solid") {
           expect(fill, face).toBe(`tone-${tone}-solid`);
           expect(edge, face).toBe("transparent");
-          // why: The label sits on its own solid step: the page ink, except accent,
-          // whose solid is the primary-action fill and takes the brand label.
           expect(label, face).toBe(tone === "accent" ? "on-brand" : "surface-page");
         }
       }
@@ -104,7 +77,6 @@ describe("StatusBadge", () => {
     expect(html).toContain('data-tone="danger" data-strength="quiet"');
     expect(html).not.toContain('data-tone="success"');
     expect(html).not.toContain('data-strength="solid"');
-    // why: Exactly one of each survives the merge.
     expect(html.split('data-tone="').length - 1).toBe(1);
     expect(html.split('data-strength="').length - 1).toBe(1);
   });

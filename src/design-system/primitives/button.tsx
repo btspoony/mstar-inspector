@@ -24,9 +24,6 @@ const buttonVariants = cva(
           "hover:bg-accent hover:text-accent-foreground active:bg-accent active:text-accent-foreground",
         link: "text-(--focus-ring) underline-offset-4 hover:underline",
       },
-      // Heights are the three named control heights. `lg`/`icon-lg` keep their
-      // call sites and share the `md` face (40px) — the system declares no
-      // fourth height.
       size: {
         default: "h-(--control-h-md) px-4 py-2 has-[>svg]:px-3",
         xs: "h-(--control-h-xs) gap-1 rounded-sm px-2 text-xs has-[>svg]:px-1.5 [&_svg:not([class*='size-'])]:size-3",
@@ -45,13 +42,6 @@ const buttonVariants = cva(
   }
 )
 
-/**
- * The save-outcome face: a leading glyph slot driven by one prop. The glyph
- * is decorative (aria-hidden — the label and the card's live region carry
- * the announcement); aria-busy carries the in-flight state; data-status
- * exposes the face for tests. Without a status the primitive renders exactly
- * what it always did.
- */
 const BUTTON_STATUS_GLYPHS = {
   loading: LoaderCircle,
   success: CircleCheck,
@@ -74,8 +64,6 @@ function Button({
     status?: ButtonStatus
   }) {
   const Comp = asChild ? Slot : "button"
-  // Slot forwards to exactly one element child, so there is no room for an
-  // extra glyph; the asChild path keeps its shape and takes no glyph.
   const StatusGlyph = status === undefined || asChild ? null : BUTTON_STATUS_GLYPHS[status]
 
   return (

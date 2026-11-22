@@ -1,12 +1,3 @@
-/** note: The global insights page is retired — /dashboard/insights is no longer a
- * SPA page and no longer dispatches to the SPA shell (neither an HTML
- * navigation GET nor any other GET reaches the SPA boot document on this
- * path). The data contract lives on the target-addressed JSON face
- * (GET /dashboard/api/targets/:targetId/insights/summary); this file also pins
- * that face: membership + the workspace owner/admin gate with target-scoped
- * data, and the removed App-addressed + cross-App endpoints with no compat
- * shim.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
@@ -20,13 +11,9 @@ import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 
-/** note: Users-store D1 double: any session login resolves to a member row. */
 function memberDbStub(): Env["DB"] {
   return {
     prepare: (sql: string) =>
-      // note: The maintenance window is answered OPEN: this double exists to fake a
-      // user row, and an unreadable window would close the dashboard gate
-      // before the retired route is reached.
       sql.includes("review_runtime_settings WHERE key IN")
         ? { bind: () => ({ all: async () => ({ results: [] }) }) }
         : {
@@ -62,8 +49,6 @@ describe("GET /dashboard/insights (retired)", () => {
       }),
       makeEnv({ DB: memberDbStub() }),
     );
-    // invariant: The route is gone from SPA_PAGES, so SPA dispatch never serves the
-    // boot-injected index on this path — the legacy app answers instead.
     expect(res.status).toBe(404);
     const body = await res.text();
     expect(body).not.toContain("window.__BOOT__=");
@@ -72,38 +57,18 @@ describe("GET /dashboard/insights (retired)", () => {
 
   test("a non-HTML GET falls through to the legacy app (guard 302, never the old HTML)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/dashboard/insights"), makeEnv());
-    // invariant: The mount-level membership guard answers before any route — the old
-    // SSR handler would have rendered 200 HTML for a session-less request
-    // only after the guard, so a 302 proves the handler is gone.
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 });
 
-// note: --- Target insights summary API -------------------------------
-// GET /dashboard/api/targets/:targetId/insights/summary — the JSON read face
-// for the insights aggregation, scoped to one review target. Gate:
-// mount-level membership → target-in-workspace lookup (unknown, soft-deleted
-// and foreign are equally invisible, 404) → workspace owner/admin (403). All
-// deny bodies are `{ error }` JSON. Both removed endpoints — the App-addressed
-// face and the former cross-App global one
-// (GET /dashboard/api/insights/summary) — answer 404, no compat shim.
 const SESSION_SECRET_API = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
-/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const API_TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
-/** note: Fixture world (per-target scoping): mallory owns "widgets-app"'s target;
- * octocat is admin; hubot is a plain member. Reviews: three on the target
- * (25d / 15d ago sharing fingerprint fp-x → recurrence count 2, plus a
- * 10d approve in acme/portal), one attributed to a DIFFERENT target (5d ago)
- * that must never leak into this target's numbers.
- */
 async function insightsWorld(): Promise<{
   db: TestD1;
   env: Env;
-  /** note: The widgets-app target id — the address every face below takes. */
   targetId: string;
-  /** note: Same seed-time helper used for the fixture's reviewed_at values. */
   daysAgo: (n: number) => string;
 }> {
   const db = createMigratedTestD1();
@@ -153,10 +118,7 @@ async function insightsWorld(): Promise<{
   insertFinding.run("f-a2", "r-a", "nit", null, "Trailing space", "fp-y");
   insertReview.run("r-b", "acme", "widgets", 2, daysAgo(15), "approve", appId, appId);
   insertFinding.run("f-b1", "r-b", "must-fix", "logic", "Null deref risk", "fp-x");
-  // note: Second repo of the SAME app — lets the repo= filter case prove the
-  // filter is applied (not merely echoed) within one App's data.
   insertReview.run("r-d", "acme", "portal", 4, daysAgo(10), "approve", appId, appId);
-  // invariant: The other App's review — must stay out of widgets-app's numbers.
   insertReview.run("r-c", "globex", "gadgets", 3, daysAgo(5), "request changes", otherAppId, otherAppId);
   insertFinding.run("f-c1", "r-c", "should-fix", "security", "Injection", "fp-z");
 
@@ -175,7 +137,6 @@ function apiCookie(sessionSecret: string, login: string): Promise<string> {
   return createSessionValue(login, null, sessionSecret);
 }
 
-/** invariant: Fixture Apps are addressed by GitHub App id (D0) — the only App address form. */
 const WIDGETS_APP_ID = 1001;
 const OTHER_APP_ID = 1002;
 
@@ -203,7 +164,6 @@ describe("GET /dashboard/api/targets/:targetId/insights/summary", () => {
       findings_distribution: unknown[];
       repos: string[];
     };
-    // note: Exact key set: store return + the echoed window (snake_case API).
     expect(Object.keys(body).sort()).toEqual(
       [
         "window_days",
@@ -217,8 +177,6 @@ describe("GET /dashboard/api/targets/:targetId/insights/summary", () => {
       ].sort(),
     );
     expect(body.window_days).toBe(30);
-    // note: r-a + r-b + r-d are this target's in-window reviews; r-c belongs to
-    // another target.
     expect(body.reviews_total).toBe(3);
     expect(body.findings_by_severity).toEqual([
       { severity: "must-fix", count: 2 },
@@ -228,12 +186,7 @@ describe("GET /dashboard/api/targets/:targetId/insights/summary", () => {
       { verdict: "approve", count: 2 },
       { verdict: "comment", count: 1 },
     ]);
-    // note: repos is opt-in: without include=repos the field is empty.
     expect(body.repos).toEqual([]);
-    // note: daily_trend (additive): a zero-filled day grid on the default 30-day
-    // window — 31 day rows (today-30 .. today) shaped {day_start, reviews,
-    // findings}. The app's three in-window reviews distribute onto their own
-    // days; r-d is the zero-findings approve (LEFT JOIN counts the review).
     expect(body.daily_trend).toHaveLength(31);
     expect(body.daily_trend.reduce((acc, row) => acc + row.reviews, 0)).toBe(3);
     expect(body.daily_trend.reduce((acc, row) => acc + row.findings, 0)).toBe(3);
@@ -249,9 +202,6 @@ describe("GET /dashboard/api/targets/:targetId/insights/summary", () => {
     const body = (await res.json()) as {
       findings_distribution: Array<{ by_severity: Record<string, number> }>;
     };
-    // note: The stacked severity chart plots one series per key of this map, so the
-    // API must carry all four merge classes — may-fix included — in class
-    // order, rather than only the ones this window observed.
     expect(body.findings_distribution.length).toBeGreaterThan(0);
     for (const bucket of body.findings_distribution) {
       expect(Object.keys(bucket.by_severity)).toEqual(["must-fix", "should-fix", "may-fix", "nit"]);
@@ -263,7 +213,6 @@ describe("GET /dashboard/api/targets/:targetId/insights/summary", () => {
     const res = await targetInsightsGet(env, targetId, await apiCookie(SESSION_SECRET_API, "mallory"), "include=repos");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { repos: string[] };
-    // invariant: Both of the target's own repos, ascending — never the other target's.
     expect(body.repos).toEqual(["acme/portal", "acme/widgets"]);
   });
 
@@ -278,8 +227,6 @@ describe("GET /dashboard/api/targets/:targetId/insights/summary", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { repo: string; reviews_total: number };
     expect(body.repo).toBe("acme/widgets");
-    // note: Applied, not just echoed: the target has 3 in-window reviews, but r-d
-    // (acme/portal) is outside the owner/repo filter.
     expect(body.reviews_total).toBe(2);
   });
 
@@ -347,8 +294,6 @@ describe("GET /dashboard/api/targets/:targetId/insights/summary", () => {
       weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
     };
     expect(body.window_days).toBe(90);
-    // invariant: The additive key returns exactly [] on week windows (no query, no
-    // buckets) — the 90d trend card reads the frozen weekly_trend key.
     expect(body.daily_trend).toEqual([]);
     expect(body.weekly_trend.length).toBeGreaterThan(0);
   });
@@ -356,8 +301,6 @@ describe("GET /dashboard/api/targets/:targetId/insights/summary", () => {
   test("the removed family answers 404, never a summary", async () => {
     const { env } = await insightsWorld();
     const cookie = await apiCookie(SESSION_SECRET_API, "mallory");
-    // note: The App-addressed face (round B removed it) and the cross-App global one
-    // are both gone with no compat shim.
     for (const path of [
       `/dashboard/default/api/apps/${WIDGETS_APP_ID}/insights/summary`,
       "/dashboard/api/insights/summary",

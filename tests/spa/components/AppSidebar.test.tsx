@@ -1,13 +1,3 @@
-/** note: AppSidebar — the platform-console footer entry, and the product nav's
- * containment (I-000253).
- *
- * The nav is three product items and nothing else: the flat three-item list is
- * the product decision (compass D5), so this suite pins that the operator entry
- * stays a footer child rather than drifting back into the product menu, and
- * that no group label appears anywhere. Rendered against the real sidebar
- * primitives, so the assertion is the containment the browser computes
- * (`contains`), not a class or slot spelling.
- */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -26,7 +16,6 @@ const render = (sidebar: SidebarModel) =>
     createElement(SidebarProvider, { defaultOpen: true }, createElement(AppSidebar, { model: sidebar })),
   );
 
-/** note: The shell's own model for an operator on a workspace-scoped Apps page. */
 const operatorModel = buildSidebarModel(
   {
     locale: "en",
@@ -38,7 +27,6 @@ const operatorModel = buildSidebarModel(
   "/dashboard/acme/apps",
 );
 
-/** note: One rendered sidebar in a live DOM, so containment is a computed fact. */
 async function mountSidebar(sidebar: SidebarModel): Promise<{ container: Element; cleanup: () => Promise<void> }> {
   const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps");
   const container = win.document.createElement("div");
@@ -78,8 +66,6 @@ describe("product nav containment (I-000253)", () => {
   test("the nav is the four product items, with no group label of any kind", async () => {
     const { container, cleanup } = await mountSidebar(operatorModel);
     try {
-      // note: Scoped to the product menu: the footer's own menu holds the operator
-      // entry and must not be counted as a product item.
       const labels = [...container.querySelectorAll('[data-slot="sidebar-content"] [data-slot="sidebar-menu-button"]')].map(
         (button) => button.textContent,
       );
@@ -89,7 +75,6 @@ describe("product nav containment (I-000253)", () => {
         t("en", "nav.members"),
         t("en", "nav.settings"),
       ]);
-      // why: No group heading, whichever slot a future one would take.
       expect(container.querySelectorAll('[data-slot="sidebar-group-label"]')).toHaveLength(0);
     } finally {
       await cleanup();
@@ -97,9 +82,6 @@ describe("product nav containment (I-000253)", () => {
   });
 
   test("every nav item renders a glyph — no family ships an icon-less entry", async () => {
-    // note: I-000639: the map is keyed by the href's last segment, so a renamed nav
-    // family silently dropped its glyph. Asserted per rendered item, not by
-    // icon name: any svg in the item's own link satisfies it.
     const { container, cleanup } = await mountSidebar(operatorModel);
     try {
       const links = [

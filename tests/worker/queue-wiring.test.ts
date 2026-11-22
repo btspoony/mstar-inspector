@@ -1,15 +1,3 @@
-/**
- * note: Production queue wiring (spec §7.10): the Worker's `queue` handler must hand
- * the batch to the consumer AND forward the consumer's detached-terminalize
- * promise to `ctx.waitUntil`, so an overrun still finishes after the handler
- * returns instead of being reclaimed with the isolate.
- *
- * The consumer reaches the handler through `runReviewQueueBatch`'s loader
- * parameter, so this suite needs NO `mock.module`: Bun cannot undo a
- * process-wide module stub (measured — `mock.restore()` and re-mocking both
- * leave the stub in place), and a stubbed consumer would leak into every later
- * file that imports it.
- */
 import { describe, expect, test } from "bun:test";
 import type { ExecutionContext, MessageBatch } from "@cloudflare/workers-types";
 import "../helpers/cloudflare-workers-mock";
@@ -23,16 +11,10 @@ const consumerRuns: Array<{
   startAttempt: ((deps: unknown, ref: unknown) => Promise<void>) | undefined;
 }> = [];
 
-/** note: The promise the fake consumer hands to the invocation context. */
 const handedByConsumer = Promise.withResolvers<void>();
 
 type QueueEnv = Parameters<typeof runReviewQueueBatch>[1];
 
-/**
- * note: The gate's D1 face. This suite exercises the queue WIRING, so the operating
- * switch reads `on`; the absent/unreadable refusals are covered by
- * `queue-route-gate.test.ts`.
- */
 function envWithGate(extra: Record<string, unknown>): QueueEnv {
   const db = {
     prepare: () => ({
@@ -42,7 +24,6 @@ function envWithGate(extra: Record<string, unknown>): QueueEnv {
   return { DB: db, ...extra } as unknown as QueueEnv;
 }
 
-/** note: The fake consumer module: records the batch, the sink and the starter. */
 function fakeConsumerModule() {
   return {
     createReviewConsumer: (
@@ -58,8 +39,6 @@ function fakeConsumerModule() {
         return { errors: 0 };
       };
     },
-    // note: The entry's starter closes over the platform binding; this stands in for
-    // the real classifier so the closure can be invoked without the module graph.
     createWorkflowInstance: async (
       workflow: { create(options: { id: string; params: unknown }): Promise<unknown> },
       ref: { attemptId: string },
@@ -79,9 +58,6 @@ describe("worker queue wiring (spec §7.10)", () => {
       },
       passThroughOnException: () => {},
     } as unknown as ExecutionContext;
-    // note: The queue handler owns the platform binding: it refuses to run without it
-    // (a deploy that cannot create an instance must not admit reviews), so the
-    // fake env carries one. The consumer arrives through the loader below.
     const env = envWithGate({ REVIEW_WORKFLOW: { create: async () => ({}) } });
 
     await runReviewQueueBatch(batch, env, ctx, async () => fakeConsumerModule());
@@ -112,8 +88,6 @@ describe("worker queue wiring (spec §7.10)", () => {
     const attempt = { attemptId: "attempt-route-1" };
     await consumerRuns.at(-1)!.startAttempt!({}, attempt);
 
-    // note: One instance, keyed by the attempt identity — the platform's own id
-    // uniqueness is a second fence under the consumer's D1 claim.
     expect(creates).toEqual([{ id: "attempt-route-1", params: attempt }]);
   });
 });

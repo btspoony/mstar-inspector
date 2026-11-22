@@ -1,23 +1,3 @@
-/**
- * why: The preview page contract.
- *
- * The page has no template beside its generator, so the only thing that can
- * fail it is its own coverage check. These assertions are the parts a check
- * run cannot state by itself:
- *
- * 1. **Every declared token is on the page, in both themes, at its resolved
- *    value.** That is what makes the page a gate rather than a brochure.
- * 2. **The gate has teeth.** Removing one entry, or printing a value the
- *    source does not hold, must fail — otherwise the check passes on a page
- *    that shows nothing, and no one finds out.
- * 3. **The grid faces the brief names are all there**: tone × strength, the
- *    control heights, the operator-surface remap.
- * 4. **Every exported component is accounted for, in both tiers** the barrel
- *    re-exports: a specimen per export, and every export either paints its own
- *    `data-slot` or is declared unpaintable (a Radix portal or a context root)
- *    with its reason — so a `patterns/` export cannot ship unexercised while
- *    only `primitives/` is enumerated.
- */
 import { describe, expect, test } from "bun:test";
 
 import { THEMES, resolveTheme, tokenNames } from "../../src/design-system/tokens";
@@ -42,7 +22,6 @@ describe("design-system preview", () => {
     expect(coverage.tonePairs).toBe(coverage.expectedTonePairs);
     expect(coverage.controlHeights).toBe(coverage.expectedControlHeights);
     expect(coverage.remaps).toBe(coverage.expectedRemaps);
-    // note: Five meanings × three strengths × two themes.
     expect(coverage.expectedTonePairs).toBe(30);
     expect(coverage.expectedControlHeights).toBe(6);
   });
@@ -54,8 +33,6 @@ describe("design-system preview", () => {
       expect(open, `${theme} section`).toBeGreaterThan(-1);
       expect(close).toBeGreaterThan(open);
     }
-    // why: The two themes must not print the same surface colour: a page that
-    // resolved both sections against one theme would still pass a name count.
     const page = resolveTheme("dark").semantic["surface-page"];
     const light = resolveTheme("light").semantic["surface-page"];
     expect(page).not.toBe(light);
@@ -76,10 +53,6 @@ describe("design-system preview", () => {
   });
 
   test("has a specimen family for every token the source declares", () => {
-    // why: Derivation lists a new token automatically, so the family is the only
-    // thing that can catch a token the page has no way to show. This asserts
-    // the generator covers the whole declared vocabulary, and that an
-    // unclassified name is reported rather than passed as plain text.
     const names = tokenNames();
     const unclassified = names.primitive
       .concat(names.semantic, names.component)
@@ -128,17 +101,11 @@ describe("design-system preview", () => {
   });
 
   test("carries a specimen for every exported component, and accounts for the impaintable ones", () => {
-    // why: The component section closes in three directions at once: one specimen
-    // per export, in either tier; every export either paints its own slot or
-    // is declared unpaintable with a reason; nothing declared outlives its
-    // export.
     const coverage = previewCoverage(html);
     expect(coverage.specimens).toBe(coverage.expectedSpecimens);
     expect(coverage.expectedSpecimens).toBe(34);
     expect(coverage.painted).toBe(coverage.expectedPainted);
     expect(coverage.unpainted).toBe(coverage.expectedUnpainted);
-    // why: The count it compares is non-zero in both directions, so a page that
-    // rendered nothing could not pass as "everything is declared".
     expect(coverage.expectedPainted).toBeGreaterThan(0);
     expect(coverage.expectedUnpainted).toBeGreaterThan(0);
   });
@@ -153,8 +120,6 @@ describe("design-system preview", () => {
   });
 
   test("fails when an exported component neither paints nor is declared", () => {
-    // why: Drop ToggleGroup's own slot: the export is still in the tier barrel, so
-    // the page owes either markup or a reason — and it now gives neither.
     const stripped = html.split('data-slot="toggle-group"').join('data-slot="toggle-group-removed"');
     expect(stripped).not.toBe(html);
 
@@ -166,8 +131,6 @@ describe("design-system preview", () => {
   });
 
   test("the export loop closes over the patterns tier too", () => {
-    // why: Same contract one tier up: FlowSection is a `patterns/` export, so a
-    // ledger that enumerated `primitives/` alone would let this through.
     const stripped = html.split('data-slot="flow-section"').join('data-slot="flow-section-removed"');
     expect(stripped).not.toBe(html);
 

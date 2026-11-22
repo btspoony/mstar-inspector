@@ -1,27 +1,3 @@
-/** note: Provider verification tests: migration 0015 (verification columns +
- * app_provider_models) + the provider verify service
- * (src/dashboard/provider-verify.ts) + the store wiring (saveVerifiedKey /
- * getVerifiedModels).
- *
- * Production-shaped sequence (the 0004/0005 + 0012 precedent): the
- * bun:sqlite double applies 0001/0002, a row is SEEDED, and only then does
- * `PROVIDER_VERIFY_MIGRATIONS` apply — the hand-listed pre-0015 provider shape
- * with the 0010/0020 tail prerequisites and the 0038-derived tail. 0015 is
- * applied SEPARATELY over the populated DB — the append-only assumption is
- * exercised against a DB that already holds data, exactly like
- * `wrangler d1 migrations apply`.
- *
- * This world stops below 0056: the suite needs the pre-0015 provider tables
- * (it applies 0015 itself), and those tables are exactly the ones the rename
- * rewrites, so the fixture keeps the pre-rename names it builds and asserts.
- *
- * Verify-service tests use a mocked fetch: success+models / 401 / timeout /
- * non-JSON / quota-class refusals (402, a generic quota body) / a 429 kept
- * apart as its own throttled reason /
- * custom-provider happy+401, plus the endpoint-map parity lock
- * (PROVIDER_VERIFY_ENDPOINTS ≡ PROVIDER_IDS — a future provider id must
- * get an explicit verify entry).
- */
 import { afterEach, describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import { PROVIDER_VERIFY_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
@@ -53,20 +29,15 @@ import ompApiKeyProviders from "../../scripts/provider-catalog/generated/omp-api
 import ompProviderVerify from "../../scripts/provider-catalog/generated/omp-provider-verify.json";
 import { sk } from "../helpers/fake-secrets";
 
-/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-test-provider-1234");
-/** note: SQLite datetime('now') format the store writes (UTC "YYYY-MM-DD HH:MM:SS"). */
 const SQLITE_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
-// note: --- fixtures ---
 
-/** note: Synchronous parameterized write on the raw bun:sqlite handle. */
 function rawRun(db: TestD1, sql: string, ...params: (string | number | null)[]): void {
   db.raw.prepare(sql).run(...params);
 }
 
-/** note: Seed a github_apps row with genuinely decryptable encrypted columns. */
 async function seedApp(db: DashboardD1, slug: string): Promise<GithubAppRow> {
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
@@ -83,13 +54,6 @@ async function seedApp(db: DashboardD1, slug: string): Promise<GithubAppRow> {
   });
 }
 
-/** note: The fixture 0015 must apply over: the pre-0015 provider tables (0006/0012)
- * on an App seeded like production, plus the physical tables a later tail
- * migration indexes (0010/0020) and the 0038-derived tail itself. 0015's own
- * columns are absent here — the test that owns that migration applies it.
- * The shape stops below 0056, so the App row is written raw in the pre-rename
- * names (the store faces would address `review_bots`).
- */
 async function createPopulatedPre0015D1(): Promise<TestD1> {
   const db = createTestD1();
   applyMigrations(db, PROVIDER_VERIFY_MIGRATIONS);
@@ -110,7 +74,6 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
   db.raw
     .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
     .run(id);
-  // invariant: A key row written BEFORE 0015 — the pre-migration column set.
   rawRun(
     db,
     `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at, updated_at)
@@ -118,7 +81,6 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
     id,
     await box.encryptSecret(PLAIN_KEY, `app_provider_keys.key_enc:${id}:anthropic`),
   );
-  // invariant: A custom-provider declaration written BEFORE 0015.
   rawRun(
     db,
     `INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
@@ -131,7 +93,6 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
 
 const configStore = (db: AppConfigD1) => createAppConfigStore(db, TEST_KEY);
 
-// note: --- mocked fetch helpers ---
 
 type FetchCall = {
   url: string;
@@ -141,7 +102,6 @@ type FetchCall = {
   signal: AbortSignal | null | undefined;
 };
 
-/** note: build a deps.fetch from a canned response, recording every call. */
 function mockFetch(response: Response, calls: FetchCall[] = []): VerifyDeps["fetch"] {
   return (async (input, init) => {
     calls.push({
@@ -159,22 +119,16 @@ function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-/** note: A response carrying the URL and redirect flag a real fetch produces when it
- *  followed a Location header (a stubbed Response cannot set either itself). */
 function redirected(response: Response, url: string): Response {
   Object.defineProperty(response, "url", { value: url });
   Object.defineProperty(response, "redirected", { value: true });
   return response;
 }
 
-/** note: Every verify request's headers: the key's auth shape plus the two client
- *  headers (an explicit Accept and User-Agent) no request may go without. */
 function verifyHeaders(auth: Record<string, string>): Record<string, string> {
   return { ...auth, accept: "application/json", "user-agent": VERIFY_USER_AGENT };
 }
 
-/** invariant: A fetch that never resolves on its own — it rejects only when the request
- *  signal aborts (the module's AbortSignal.timeout firing). */
 const TIMEOUT_FETCH: VerifyDeps["fetch"] = ((_input, init) => {
   const { promise, reject } = Promise.withResolvers<Response>();
   init?.signal?.addEventListener("abort", () => reject(new DOMException("timed out", "TimeoutError")));
@@ -185,13 +139,11 @@ const REJECT_FETCH: VerifyDeps["fetch"] = (async () => {
   throw new TypeError("fetch failed");
 }) as unknown as VerifyDeps["fetch"];
 
-// note: --- migration 0015 ---
 
 describe("migration 0015_provider_verification.sql (on a seeded production-shaped DB)", () => {
   test("applies cleanly after 0012 over existing key AND custom rows; pre-0015 rows carry NULL verification columns", async () => {
     const db = await createPopulatedPre0015D1();
     expect(() => applyMigrations(db, ["0015_provider_verification.sql"])).not.toThrow();
-    // invariant: Append-only: both pre-existing rows survive with NULL verification fields.
     const keyRow = db.raw
       .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE provider = 'anthropic'")
       .get() as { verified_at: string | null; verified_status: string | null };
@@ -202,7 +154,6 @@ describe("migration 0015_provider_verification.sql (on a seeded production-shape
       .get() as { verified_at: string | null; verified_status: string | null };
     expect(customRow.verified_at).toBeNull();
     expect(customRow.verified_status).toBeNull();
-    // note: The new columns are nullable TEXT on both tables.
     for (const table of ["app_provider_keys", "app_custom_providers"]) {
       const cols = db.raw.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string; type: string; notnull: number }>;
       for (const name of ["verified_at", "verified_status"]) {
@@ -215,7 +166,7 @@ describe("migration 0015_provider_verification.sql (on a seeded production-shape
   });
 
   test("bot_provider_models DDL: PK (bot_id, provider, key_id), FK to review_bots, NO ON DELETE", () => {
-    const db = createMigratedTestD1(); // why: the full chain, so the rename has landed
+    const db = createMigratedTestD1();
     const cols = db.raw.query("PRAGMA table_info(bot_provider_models)").all() as Array<{
       name: string;
       type: string;
@@ -227,9 +178,7 @@ describe("migration 0015_provider_verification.sql (on a seeded production-shape
     expect(byName.bot_id!.notnull).toBe(1);
     expect(byName.bot_id!.pk).toBe(1);
     expect(byName.provider!.notnull).toBe(1);
-    expect(byName.provider!.pk).toBe(2); // note: second column of the composite PK
-    // note: 0025 moved the table from one aggregate row per (bot_id, provider) to one
-    // EVIDENCE row per key: the third PK column is the credential's own id.
+    expect(byName.provider!.pk).toBe(2);
     expect(byName.key_id!.notnull).toBe(1);
     expect(byName.key_id!.pk).toBe(3);
     expect(byName.models_json!.notnull).toBe(1);
@@ -248,7 +197,6 @@ describe("migration 0015_provider_verification.sql (on a seeded production-shape
   });
 });
 
-// note: --- endpoint map parity ---
 
 describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
   test("is keyed exactly by PROVIDER_IDS (a new provider id must get an explicit verify entry)", () => {
@@ -262,9 +210,6 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
   });
 
   test("each builtin's 2xx means ok or only reachable — the shared allow-list decides", () => {
-    // note: true = the provider answers non-2xx for a bogus key (probed 2026-10-30);
-    // false = no probe at all (unsupported) OR a probe whose PUBLIC model list
-    // answers 200 for any bearer, so its 2xx proves reachability only.
     expect(Object.fromEntries(PROVIDER_IDS.map((id) => [id, builtinProbeCanRejectKey(id)]))).toEqual({
       anthropic: true,
       openai: true,
@@ -289,8 +234,6 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
   });
 
   test("the allow-list is the spec table's own marker — one definition, no copied URL list", () => {
-    // invariant: The exported set is exactly the marked spec URLs plus the one documented
-    // supplement (TypeSafe): a hand-copied second list cannot survive this.
     const marked = new Set(
       Object.values(PROVIDER_VERIFY_ENDPOINTS).flatMap((spec) =>
         spec.kind !== "unsupported" && spec.keyRejecting === true ? [spec.url] : [],
@@ -309,8 +252,6 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
         expect(spec.url.startsWith("https://")).toBe(true);
         expect(["bearer", "x-api-key"]).toContain(spec.auth);
       } else {
-        // note: unsupported — per-resource-host / undocumented-endpoint providers
-        // carry a documented note.
         expect(spec.note.length).toBeGreaterThan(10);
         expect(["azure-openai", "ai-gateway"]).toContain(provider);
       }
@@ -320,20 +261,14 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
 
 });
 
-// note: --- omp alignment: the vendored validate data and the no-inference invariant ---
 
 describe("omp validate data (vendored verify snapshot)", () => {
   test("the snapshot names its source version, extraction date and the three headers hooks", () => {
-    // invariant: The snapshot's own shape only. Comparing it to the installed package
-    // version would fail every dependabot bump; syncing the vendored data is a
-    // release-time regeneration, never a test gate.
     expect(ompProviderVerify.source.version).toMatch(/^\d+\.\d+\.\d+/);
     expect(ompProviderVerify.source.extracted).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    // invariant: The declared hook list must be exactly the hooks the entries carry.
     expect(ompProviderVerify.source.headersHooks).toEqual(
       [...new Set(ompProviderVerify.endpoints.flatMap((entry) => (entry.headersHook === undefined ? [] : [entry.headersHook])))].sort(),
     );
-    // note: Every models-endpoint entry omp carries is vendored verbatim.
     expect(ompProviderVerify.endpoints.length).toBeGreaterThan(0);
     expect(ompProviderVerify.endpoints.find((entry) => entry.id === "coreweave")).toMatchObject({
       url: "https://api.inference.wandb.ai/v1/models",
@@ -345,10 +280,8 @@ describe("omp validate data (vendored verify snapshot)", () => {
     expect(ompProviderIdFor("gemini")).toBe("google");
     expect(ompProviderIdFor("azure-openai")).toBe("azure");
     expect(ompProviderIdFor("opencode")).toBe("opencode-zen");
-    // note: A builtin whose id IS its omp id resolves to itself; an unknown id too.
     expect(ompProviderIdFor("xai")).toBe("xai");
     expect(ompProviderIdFor("not-a-provider")).toBe("not-a-provider");
-    // note: The whole map, in the alias→catalog direction the verify surface reads.
     for (const [ompId, catalogId] of Object.entries(ompApiKeyProviders.excluded.alias)) {
       expect(ompProviderIdFor(catalogId)).toBe(ompId);
     }
@@ -359,16 +292,10 @@ describe("omp validate data (vendored verify snapshot)", () => {
     let derived = 0;
     for (const [provider, spec] of Object.entries(PROVIDER_VERIFY_ENDPOINTS)) {
       const entry = byOmpId.get(ompProviderIdFor(provider));
-      // note: A headers-hook entry is omp's own request (it computes hook headers the
-      // dashboard cannot), so the documented entry answers for that id.
       if (entry === undefined || entry.headersHook !== undefined) continue;
       derived += 1;
-      // why: An omp validate entry returns 2xx only for a valid key, so it also
-      // carries the keyRejecting marker.
       expect(spec).toEqual({ kind: "models", url: entry.url, auth: "bearer", keyRejecting: true });
     }
-    // invariant: xai + wafer-serverless are supplied ONLY by that data (the documented
-    // table deliberately omits them), so a broken derivation fails here.
     expect(derived).toBe(2);
     expect(PROVIDER_VERIFY_ENDPOINTS["xai"]).toEqual({
       kind: "models",
@@ -387,10 +314,6 @@ describe("omp validate data (vendored verify snapshot)", () => {
 
 describe("validation-only invariant (no inference in the verify surface)", () => {
   test("a verification only ever requests the models/probe endpoint — never a chat/completions URL", async () => {
-    // note: I-000209: the invariant is the OUTBOUND REQUESTS, not the module's text.
-    // A stub fetch returns a 2xx for anything and records every URL it was
-    // asked for, so a verification that also tried an inference probe would
-    // show up here whatever the source reads like.
     const requested: string[] = [];
     const record: VerifyDeps["fetch"] = async (input) => {
       requested.push(String(input));
@@ -401,14 +324,10 @@ describe("validation-only invariant (no inference in the verify surface)", () =>
       if (spec.kind === "unsupported") continue;
       requested.length = 0;
       await verifyProviderKey({ fetch: record }, provider, PLAIN_KEY);
-      // invariant: Exactly one request, to the spec's own models/probe URL — and that URL
-      // is never an inference path (the retired kilo/zai/umans chat probes).
       expect(requested, provider).toEqual([spec.url]);
       expect(requested[0], provider).not.toMatch(/chat\/completions|completions|generateContent|invocations/);
     }
 
-    // note: The custom path derives its own probe URL from the declared base and
-    // requests exactly that one.
     requested.length = 0;
     const custom = await verifyProviderKey({ fetch: record }, "my-gateway", PLAIN_KEY, {
       baseUrl: "https://models.test/v1",
@@ -436,7 +355,6 @@ describe("validation-only invariant (no inference in the verify surface)", () =>
   });
 });
 
-// note: --- built-in verification ---
 
 describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
   test("openai: Bearer GET /v1/models, 2xx parses data[].id and dedupes", async () => {
@@ -520,10 +438,6 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
   });
 
   test("the quota word past the 512-byte body bound is never read — the chunk over the bound is decoded only up to it", async () => {
-    // note: 201 ASCII bytes + 400 multibyte bytes + an oversized tail chunk. The
-    // second chunk alone outruns the remaining budget (311 bytes), so the read
-    // stops inside it and never pulls the 10 KB tail — where the only quota
-    // word sits, well past the bound.
     const chunks = [
       new TextEncoder().encode("a".repeat(201)),
       new TextEncoder().encode("é".repeat(200)),
@@ -535,8 +449,6 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     const streamed = (): ReadableStream<Uint8Array> => {
       next = 0;
       return new ReadableStream<Uint8Array>({
-        // invariant: No read-ahead: one pull per reader.read(), so `pulled` is exactly what
-        // the body read consumed from the stream.
         pull(controller) {
           const chunk = chunks[next];
           if (chunk === undefined) return controller.close();
@@ -549,14 +461,9 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
         },
       }, { highWaterMark: 0 });
     };
-    // note: The retained SAMPLE is what the bound really spends: 201 ASCII bytes plus
-    // 311 of the 400 multibyte bytes — 155 whole é, and the 512th byte alone
-    // (the first half of the 156th é) flushed as U+FFFD.
     expect(await failureBodySample(new Response(streamed(), { status: 500 }))).toBe(
       "a".repeat(201) + "é".repeat(155) + "\uFFFD",
     );
-    // invariant: Two chunks pulled, and the tail one never: the sample read closed the
-    // stream at the bound.
     expect(pulled).toEqual([201, 400]);
     expect(cancels).toBe(1);
     const result = await verifyProviderKey(
@@ -568,9 +475,6 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
   });
 
   test("a code point cut by the byte bound is flushed, and the signal beside it still classifies", async () => {
-    // note: 504 ASCII bytes + " quota " + the first byte of a 2-byte code point at
-    // the 512-byte cut. The signal is complete inside the budget; the cut
-    // lands mid-code-point, which a streaming decode would otherwise drop.
     const body = (): Response =>
       new Response(new TextEncoder().encode(`x`.repeat(504) + " quota " + "é".repeat(300)), { status: 500 });
     const sample = await failureBodySample(body());
@@ -589,10 +493,6 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
   });
 
   test("probe 429 → rate_limited, even when the body names quota and billing (the status alone decides, the body is never read)", async () => {
-    // note: Gemini answers both a plain throttle and a genuinely out-of-quota key
-    // with this exact body, so no prose predicate can tell them apart: the
-    // status is the only evidence there is, and the reason says so instead of
-    // guessing a spent account.
     let pulls = 0;
     const body = new ReadableStream<Uint8Array>(
       {
@@ -638,9 +538,6 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
   });
 
   test("a stream that errors mid-body keeps the bytes already delivered", async () => {
-    // note: The provider's own words arrive in the first chunk and the connection
-    // breaks after it: the delivered prefix is the only evidence there is, and
-    // the quota signal inside it still has to classify on the generic arm.
     const partialErrorBody = (): Response => {
       const chunk = new TextEncoder().encode(`{"error":{"message":"insufficient funds`);
       let pulls = 0;
@@ -721,8 +618,6 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
       expect(calls[0]!.url, provider).toBe(url);
       expect(calls[0]!.method, provider).toBe("GET");
       expect(calls[0]!.headers, provider).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
-      // why: Public list: a 401 there is impossible, so the probe proves
-      // reachability only — the store records the weaker state.
       expect(builtinProbeCanRejectKey(provider), provider).toBe(false);
     }
   });
@@ -736,7 +631,6 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(call.url).toBe("https://api.z.ai/api/paas/v4/models");
     expect(call.method).toBe("GET");
     expect(call.headers).toEqual(verifyHeaders({ authorization: "Bearer bogus" }));
-    // invariant: Measured, not documented: only 401/403 reads as a rejected key.
     expect(await verifyProviderKey({ fetch: mockFetch(json(500, {})) }, "zai", "bogus")).toEqual({
       ok: false,
       reason: "unexpected_response",
@@ -750,15 +644,12 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
 
   test("a cross-origin redirect is unexpected_response on all three verify paths", async () => {
     const crossOrigin = (url: string) => mockFetch(redirected(json(200, { data: [{ id: "m-1" }] }), url));
-    // note: models endpoint
     expect(
       await verifyProviderKey({ fetch: crossOrigin("https://evil.example/v1/models") }, "openai", PLAIN_KEY),
     ).toEqual({ ok: false, reason: "unexpected_response" });
-    // note: identity probe
     expect(
       await verifyProviderKey({ fetch: crossOrigin("https://evil.example/user") }, "copilot", PLAIN_KEY),
     ).toEqual({ ok: false, reason: "unexpected_response" });
-    // note: custom-provider probe
     expect(
       await verifyProviderKey({ fetch: crossOrigin("https://evil.example/v1/models") }, "my-custom", PLAIN_KEY, {
         baseUrl: "https://api.example.com/v1",
@@ -859,15 +750,11 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
       "openrouter",
       PLAIN_KEY,
     );
-    // why: Models ARE cached: /api/v1/auth/key would answer account data instead,
-    // leaving the cache empty and the model picker with nothing to offer.
     expect(result).toEqual({ ok: true, models: ["openai/gpt-5", "anthropic/claude-4"] });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/models");
     expect(calls[0]!.method).toBe("GET");
     expect(calls[0]!.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
-    // why: The public catalog answers 200 for ANY bearer, so the store records the
-    // weaker reachable state — never ok.
     expect(builtinProbeCanRejectKey("openrouter")).toBe(false);
   });
 
@@ -920,11 +807,8 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
   });
 });
 
-// note: --- fetch binding contract ---
 
 describe("deps.fetch binding (workerd `Illegal invocation` regression)", () => {
-  /** note: The runtime shape that broke production: a native fetch that refuses a
-   *  receiver other than the global, exactly like workerd's. */
   const strictGlobalFetch = function (this: unknown) {
     if (this !== globalThis) throw new TypeError("Illegal invocation");
     return Promise.resolve(json(200, { data: [{ id: "gpt-5" }] }));
@@ -943,14 +827,11 @@ describe("deps.fetch binding (workerd `Illegal invocation` regression)", () => {
 
   test("a dereferenced global fetch is the bug: the same deps shape fails as unreachable", async () => {
     globalThis.fetch = strictGlobalFetch as unknown as typeof fetch;
-    // note: `deps.fetch(...)` calls the stored reference with `this = deps` — the
-    // dereference every verify call site used to pass.
     const result = await verifyProviderKey({ fetch: globalThis.fetch }, "openai", PLAIN_KEY);
     expect(result).toEqual({ ok: false, reason: "unreachable" });
   });
 });
 
-// note: --- custom-provider verification ---
 
 describe("verifyProviderKey — custom providers (mocked fetch)", () => {
   const CUSTOM = {
@@ -974,9 +855,6 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
     expect(call.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
   });
 
-  // invariant: Every documented base-URL shape resolves to EXACTLY one well-formed
-  // models URL — the string-concatenation defects (a doubled `/models`, a
-  // query/fragment riding the probe) are gone.
   test("base-URL shapes resolve to exactly one models URL (query and fragment never ride the probe)", async () => {
     const cases: Array<[string, string]> = [
       ["https://custom.example.com", "https://custom.example.com/v1/models"],
@@ -1094,7 +972,6 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
   });
 });
 
-// note: --- store wiring ---
 
 describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
   test("saveVerifiedKey encrypts the key (real AAD round-trip), writes verified bookkeeping, and caches the models", async () => {
@@ -1109,8 +986,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     expect(keyRow.verified_at).toMatch(SQLITE_TS_RE);
     expect(keyRow.verified_status).toBe("ok");
     expect(keyRow.created_at).toMatch(SQLITE_TS_RE);
-    expect(keyRow.updated_at).toBe(keyRow.created_at); // note: one clock read (0012 T1 convention)
-    // invariant: The plaintext key is only recoverable through the real composite-PK AAD.
+    expect(keyRow.updated_at).toBe(keyRow.created_at);
     const plain = await createSecretbox(TEST_KEY).decryptSecret(
       keyRow.key_enc!,
       `app_provider_keys.key_enc:${app.id}:anthropic:${keyRow.key_id!}`,
@@ -1148,16 +1024,12 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
       .query("SELECT verified_at, verified_status FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_status).toBe("ok");
-    // note: The SAME key re-submitted on the unverified path collapses onto its own
-    // pool row (a re-submission, not a second slot) and must reset the
-    // verified bookkeeping.
     await store.addProviderKey(app.id, "openai", PLAIN_KEY);
     const after = db.raw
       .query("SELECT verified_at, verified_status, key_enc, key_id FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null; key_enc: string; key_id: string };
     expect(after.verified_at).toBeNull();
     expect(after.verified_status).toBeNull();
-    // note: The unverified overwrite replaced the verified envelope (AAD round-trip).
     await expect(
       createSecretbox(TEST_KEY).decryptSecret(after.key_enc, `app_provider_keys.key_enc:${app.id}:openai:${after.key_id}`),
     ).resolves.toBe(PLAIN_KEY);
@@ -1181,8 +1053,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const app = await seedApp(db, "resave-app");
     const store = configStore(db);
     await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
-    // note: Re-saving the SAME key upserts its row in place (no duplicate slot) and
-    // refreshes the provider's cached model list.
     await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5", "gpt-5-mini"]);
 
     const keyCount = db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as { n: number };
@@ -1194,7 +1064,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const cached = await store.getVerifiedModels(app.id);
     expect(cached).toHaveLength(1);
     expect(cached[0]!.models).toEqual(["gpt-5", "gpt-5-mini"]);
-    // invariant: The row carries the same key envelope (decryptable only with the AAD).
     const row = db.raw.query("SELECT key_enc, key_id FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as {
       key_enc: string;
       key_id: string;
@@ -1208,15 +1077,12 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "public-builtin-app");
     const store = configStore(db);
-    // why: Kilo's model list is public (200 for a bogus bearer), so the 2xx proved
-    // the ENDPOINT answered; the key itself is unproven.
     await store.saveVerifiedKey(app.id, "kilo", PLAIN_KEY, ["kilo-auto/efficient"]);
     const row = db.raw
       .query("SELECT verified_at, verified_status FROM bot_provider_keys WHERE bot_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_at).toMatch(SQLITE_TS_RE);
     expect(row.verified_status).toBe("reachable");
-    // note: The model evidence is still recorded: the probe DID read the list.
     expect(await store.getVerifiedModels(app.id)).toEqual([
       { provider: "kilo", models: ["kilo-auto/efficient"], fetched_at: expect.stringMatching(SQLITE_TS_RE) },
     ]);
@@ -1237,8 +1103,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "alias-evidence-app");
     const store = configStore(db);
-    // invariant: The pool key lives under the real provider id; only the evidence row was
-    // written under the retired alias by the prior release.
     await store.addProviderKey(app.id, "ark", PLAIN_KEY);
     const keyId = (
       db.raw.query("SELECT key_id FROM bot_provider_keys WHERE bot_id = ?").get(app.id) as { key_id: string }
@@ -1265,8 +1129,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_at).toBeNull();
     expect(row.verified_status).toBeNull();
-    // note: The read faces work over the 0015 shape: the masked list carries the
-    // derived pool id, the tail and the update stamp — never key material.
     const masked = await store.listProviderKeys(app.id);
     expect(masked).toEqual([
       {
@@ -1280,7 +1142,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     ]);
     const appConfig = await store.getAppConfig(app.id);
     expect(appConfig.keys.xai).toEqual([PLAIN_KEY]);
-    expect(await store.getVerifiedModels(app.id)).toEqual([]); // note: no cache row yet
+    expect(await store.getVerifiedModels(app.id)).toEqual([]);
   });
 
   test("saveVerifiedKey rejects an over-long key before any write (ProviderKeyTooLongError)", async () => {
@@ -1313,7 +1175,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
         has_keys: true,
       },
     ]);
-    // invariant: Custom providers never write bot_provider_models rows (spec §6.1).
     expect(await store.getVerifiedModels(app.id)).toEqual([]);
   });
 
@@ -1325,9 +1186,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "public-probe-app");
     const store = configStore(db);
-    // safety: Command Code's models endpoint answers 2xx with no valid credential, so
-    // nothing there proves the key. Both of its catalog rows
-    // (openai-responses and anthropic-messages) share that host.
     for (const decl of [
       { provider_id: "commandcode", base_url: "https://api.commandcode.ai/provider/v1", api: "openai-responses" as const },
       { provider_id: "commandcode-anthropic", base_url: "https://api.commandcode.ai/provider", api: "anthropic-messages" as const },
@@ -1347,8 +1205,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
       { provider: "commandcode", verified_at: expect.stringMatching(SQLITE_TS_RE), verified_status: "reachable" },
       { provider: "commandcode-anthropic", verified_at: expect.stringMatching(SQLITE_TS_RE), verified_status: "reachable" },
     ]);
-    // why: The settings faces carry that weaker state, so the SPA never renders it
-    // as "verified at …".
     expect((await store.listCustomProviderKeys(app.id)).map((row) => row.verifiedStatus)).toEqual([
       "reachable",
       "reachable",
@@ -1356,21 +1212,14 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
   });
 
   test("the probe-rejectability allow-list never matches an Object prototype key", () => {
-    // invariant: A declaration may name any https host; these must stay unproven rather
-    // than inherit a prototype member as if it were an allow-list entry.
     for (const host of ["constructor", "toString", "__proto__"]) {
       expect(customProbeCanRejectKey(`https://${host}/v1`)).toBe(false);
     }
     expect(customProbeCanRejectKey("https://api.typesafe.ai")).toBe(true);
-    // note: Unparseable input is unproven too (the store refuses such a URL first).
     expect(customProbeCanRejectKey("not a url")).toBe(false);
   });
 
   test("the allow-list matches the PROBED URL, not the host: only shapes deriving /v1/models qualify", () => {
-    // invariant: Evidence for api.typesafe.ai names GET /v1/models exactly, and
-    // customModelsUrl normalizes whatever the declaration carries into one
-    // well-formed models URL (its query/fragment is dropped, so it cannot send
-    // the key anywhere else).
     for (const baseUrl of [
       "https://api.typesafe.ai",
       "https://api.typesafe.ai/",
@@ -1382,7 +1231,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     ]) {
       expect(customProbeCanRejectKey(baseUrl), baseUrl).toBe(true);
     }
-    // note: Same host, a different PATH → the probe lands elsewhere → unproven.
     for (const baseUrl of [
       "https://api.typesafe.ai/console",
       "https://api.typesafe.ai/v1/keys",
@@ -1397,8 +1245,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "auth-probe-app");
     const store = configStore(db);
-    // invariant: Nothing in this repo proves that an arbitrary operator-declared host
-    // rejects a bogus key, so the probe only proved the ENDPOINT answered.
     await store.upsertCustomProvider(
       app.id,
       { provider_id: "my-custom", base_url: "https://example.com/v1", api: "openai-completions", model_ids: ["m1"] },
@@ -1428,11 +1274,8 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
   });
 });
 
-// note: --- failure arms consume or cancel the response body ---
 
 describe("failure arms consume or cancel the response body", () => {
-  // invariant: A body the classifier returns past without reading must still be torn
-  // down: an unconsumed, uncancelled body pins the provider connection.
   const spyResponse = (status: number): { res: Response; cancels: () => number } => {
     let cancels = 0;
     const body = new ReadableStream<Uint8Array>({

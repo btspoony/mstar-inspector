@@ -1,19 +1,9 @@
-/**
- * why: The App icon URL contract (src/contracts/app-avatar.ts).
- *
- * Both consumers — the dashboard's metadata sync and the SPA's read-time
- * fallback — assert through the shared function, which pins the WIRING but
- * cannot notice a change to the URL itself (both sides would move together).
- * The format is therefore written out literally here, once: a change to the
- * derivation has to be a deliberate edit to this expectation.
- */
 import { describe, expect, test } from "bun:test";
 import { APP_AVATAR_BASE_URL, appAvatarUrl } from "../../src/contracts/app-avatar";
 
 describe("appAvatarUrl", () => {
   test("builds GitHub's CDN URL for the numeric App id", () => {
     expect(appAvatarUrl(1234)).toBe("https://avatars.githubusercontent.com/in/1234?s=120&v=4");
-    // why: The real-world shape the derivation was verified against.
     expect(appAvatarUrl(4803300)).toBe("https://avatars.githubusercontent.com/in/4803300?s=120&v=4");
   });
 

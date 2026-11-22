@@ -37,12 +37,6 @@ import {
 } from "./SettingsPage";
 import { ProvidersSection } from "./settings-providers";
 
-/**
- * The share route's refusals: its two recoverable causes have their own copy
- * (a stale page offering a share the designation no longer allows, and a
- * caller whose role changed under it); everything else reuses the settings
- * family's keyed resolver.
- */
 function shareRefusalMessage(locale: SpaBoot["locale"], status: number, body: string): string {
   if (status === 409) return t(locale, "botSettings.shareOutsideOfficial");
   if (status === 403) return t(locale, "botSettings.shareForbidden");
@@ -78,11 +72,6 @@ export function BotSettingsView({
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const { app } = payload;
-  // Every write below is the settings family's: the ops ride
-  // `POST /apps/:appId/settings` (and its key/delete sibling), so this page
-  // adds no second save path and the server's `can_manage` rule is the gate.
-  // The ONE exception is the share transition: it is a JSON route of the App
-  // API family (`/api/apps/:appId/bot/scope`), like the key probe beside it.
   const appPath = `${apiBase()}/apps/${app.github_app_id}`;
   const appApiPath = `${apiBase()}/api/apps/${app.github_app_id}`;
   const base = `${appPath}/settings`;
@@ -111,11 +100,6 @@ export function BotSettingsView({
     return { ...outcome, reloaded };
   }
 
-  /**
-   * The draft create's completion check: POST success alone is not done — the
-   * chain is usable only once the awaited reload lands it in the payload, so a
-   * failed reload keeps the draft open instead of claiming success.
-   */
   async function createDraftChain(fields: Record<string, string>): Promise<OpNotice> {
     const outcome = await submitSettings(fields);
     if (outcome.kind === "success" && !outcome.reloaded) {
@@ -124,7 +108,6 @@ export function BotSettingsView({
     return outcome;
   }
 
-  /** Verify-then-store: the refresh keeps a failed verify's typed key on screen. */
   async function submitVerify(fields: Record<string, string>): Promise<OpNotice> {
     let status: number;
     let body: string;
@@ -134,8 +117,6 @@ export function BotSettingsView({
         fields,
       ));
     } catch {
-      // A fetch that never reached the server: the dialog's own face for it,
-      // which also says nothing was stored.
       return { kind: "error", message: t(locale, "settings.providers.submitFailed") };
     }
     if (status >= 400) {
@@ -148,11 +129,6 @@ export function BotSettingsView({
     return outcome;
   }
 
-  /**
-   * The share transition: the server owns the guards and both audit rows, so
-   * this only posts the target scope (a revoke always confirms) and turns the
-   * refusal's named cause into the page's own copy.
-   */
   async function submitScope(scope: "owned" | "shared"): Promise<OpNotice> {
     let status: number;
     let body: string;
@@ -186,8 +162,6 @@ export function BotSettingsView({
       } else if (action.kind === "remove-chain") {
         setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }));
       } else if (action.kind === "remove-custom") {
-        // The remove outcome renders row-locally with the pre-POST row slot:
-        // the awaited reload drops the row before the outcome resolves.
         const slot = payload.configured_providers.findIndex(
           (row) => row.kind === "custom" && row.provider_id === action.providerId,
         );
@@ -233,10 +207,6 @@ export function BotSettingsView({
         </div>
       )}
       <div className="flex flex-col">
-        {/* The share switch exists for exactly one caller: the official
-            workspace's manager. Every other caller sees no section, no title
-            and no copy — a non-official workspace has no share concept, and a
-            consuming workspace's read-only face never mentions it. */}
         {payload.can_manage && payload.official_workspace === true ? (
           <FlowSection
             title={t(locale, "botSettings.shareTitle")}

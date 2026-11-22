@@ -1,11 +1,3 @@
-/** note: DataTable — the one table shell, header face, composite cell and empty slot.
- *
- * The assertions name the rendered structure, the slot attributes and the text:
- * the header band, the body rows, the alignment contract and both composite
- * lines. The hairline / row-height vocabulary belongs to the table idiom in
- * `tests/design-system/surface-idioms.test.ts`; nothing here pins a
- * design-token class, so a token rename cannot false-fail a page behaviour.
- */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -26,17 +18,14 @@ const rows: Row[] = [
 const render = (props: Parameters<typeof DataTable<Row>>[0]) =>
   renderToStaticMarkup(createElement(DataTable<Row>, props));
 
-/** note: A header cell's class list, located by its rendered label. */
 const headClass = (html: string, label: string) =>
   html.match(new RegExp(`<th [^>]*class="([^"]*)">${label}</th>`))?.[1] ?? "";
 
-/** note: A body cell's class list, located by its rendered content. */
 const cellClass = (html: string, content: string) =>
   html.match(new RegExp(`<td [^>]*class="([^"]*)">${content}</td>`))?.[1] ?? "";
 
 const rowTags = (html: string) => [...html.matchAll(/<tr[^>]*>/g)].map((m) => m[0]);
 
-/** note: A primitive palette step: `--gray-700`, `--background-200`, `--blue-700`. */
 const PRIMITIVE_STEP = /--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-[0-9a-z]+/;
 
 describe("DataTable", () => {
@@ -99,14 +88,11 @@ describe("DataTable", () => {
       rows,
       rowKey: (row) => row.slug,
     });
-    // invariant: One composite per row — the plain column stays a bare cell.
     expect((html.match(/data-slot="cell-composite"/g) ?? []).length).toBe(rows.length);
     const primary = html.indexOf('data-slot="cell-primary"');
     const meta = html.indexOf('data-slot="cell-meta"');
     expect(primary).toBeGreaterThan(-1);
     expect(primary).toBeLessThan(meta);
-    // note: Both lines are assertable, in place: the primary content above, the
-    // meta line below.
     expect(html.slice(primary, meta)).toContain("demo");
     expect(html.slice(meta)).toContain("App 3");
     expect(html).toContain("App 7");

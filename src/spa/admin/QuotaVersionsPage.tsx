@@ -1,22 +1,3 @@
-/**
- * Quota versions — the operator's view of the append-only quota profiles: the
- * table (every version, its derived interval, and the one judging this month),
- * and the create form with the impact preview that must precede a publish.
- *
- * Two rules the screen enforces because the server cannot see the operator's
- * screen:
- *
- * - every version is read-only here; the only action is creating a new one;
- * - publishing stays disabled until a preview exists for the CURRENT form
- *   values, and editing any number drops it (`previewRequired`) — a stale count
- *   is worse than none. The publish request still echoes the preview, so a
- *   server-side recompute refuses a body whose impact moved.
- *
- * The preview is a tightness check, not an eviction forecast: a version
- * published mid-month judges from the next month's 1st, and that month starts
- * at 0 RP. `previewStartsOn` states that on the screen where the operator
- * decides.
- */
 import { useState, type FormEvent } from "react";
 import { Button, CardContent, CardHeader, Input } from "@design-system";
 import { quotaStartsOn } from "../../store/quota-store";
@@ -38,25 +19,20 @@ import {
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
-/** The state tag each row carries, and the copy it reads as. */
 const STATE_COPY = {
   current: "admin.quotaVersions.statusCurrent",
   scheduled: "admin.quotaVersions.statusScheduled",
   past: "admin.quotaVersions.statusHistorical",
 } as const satisfies Record<QuotaVersionRow["state"], DictionaryKey>;
 
-/** A `YYYY-MM-DD` date as the UTC instant the server stores. */
 const instantOf = (date: string): string => `${date}T00:00:00.000Z`;
 
-/** Today in UTC — the date field's default and its earliest sensible value. */
 const todayDate = (): string => new Date().toISOString().slice(0, 10);
 
-/** A whole number of RP, or `null` when the draft is not one. */
 function wholeNumber(raw: string): number | null {
   return /^\d+$/.test(raw.trim()) && Number(raw) > 0 ? Number(raw) : null;
 }
 
-/** The form's drafts, all strings — the inputs own their invalid states. */
 type Drafts = {
   effectiveFrom: string;
   quick: string;
@@ -66,11 +42,9 @@ type Drafts = {
   shared: string;
   rpPerCredit: string;
   notes: string;
-  /** One ceiling per plan id; blank means no monthly limit. */
   ceilings: Record<string, string>;
 };
 
-/** A new version copies the current numbers — the judging version's own. */
 function seedDrafts(data: QuotaVersionsData): Drafts {
   const current = data.versions.find((row) => row.version === data.judgingVersion);
   const ceilings: Record<string, string> = {};
@@ -91,7 +65,6 @@ function seedDrafts(data: QuotaVersionsData): Drafts {
   };
 }
 
-/** The candidate the form currently describes, or `null` while it is invalid. */
 function candidateOf(drafts: Drafts, data: QuotaVersionsData): QuotaCandidate | null {
   const quick = wholeNumber(drafts.quick);
   const standard = wholeNumber(drafts.standard);
@@ -160,11 +133,6 @@ export function QuotaVersionsPage({ locale }: { locale: Locale }) {
       >
         {(data) => (
           <div className="flex flex-col gap-6">
-            {/* A plan with no ceiling row in the JUDGING version refuses every
-                delivery of its workspaces (the enqueue cannot tell "no row"
-                from "no limit", so it fails closed). Nothing on this page can
-                repair that — publishing a version that covers the plan is the
-                only fix — so this states the cause and points at the form. */}
             {data.uncoveredPlanIds.length === 0 ? null : (
               <PageNotice
                 kind="error"
@@ -177,9 +145,6 @@ export function QuotaVersionsPage({ locale }: { locale: Locale }) {
               />
             )}
             <DataTable columns={columns} rows={data.versions} rowKey={(row) => row.id} />
-            {/* Keyed by the judging version: publishing a new one re-reads the
-                list, and the form must re-seed from the numbers now in force
-                rather than keep the draft it was opened with. */}
             <CreateQuotaVersionForm
               key={data.judgingVersion}
               locale={locale}
@@ -211,8 +176,6 @@ function CreateQuotaVersionForm({
 
   const patch = (change: Partial<Drafts>) => setDrafts((previous) => ({ ...previous, ...change }));
   const candidate = candidateOf(drafts, data);
-  // The fingerprint is the candidate itself: any edited number changes it, so a
-  // preview can never outlive the values it was computed for.
   const fingerprint = candidate === null ? null : JSON.stringify(candidate);
   const fresh = preview !== null && fingerprint !== null && preview.fingerprint === fingerprint;
 
@@ -301,8 +264,6 @@ function CreateQuotaVersionForm({
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex flex-col gap-1.5">
               <span className="text-sm font-medium">{t(locale, "admin.quotaVersions.fieldVersion")}</span>
-              {/* Derived and read-only: the ordinal is minted by the insert, so
-                  two concurrent creates cannot produce the same one. */}
               <span className="text-sm tabular-nums">v{data.nextVersion}</span>
             </div>
             <div className="flex flex-col gap-1.5">
