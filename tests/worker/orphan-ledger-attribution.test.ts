@@ -1,5 +1,4 @@
-/**
- * The orphan ledger attribution item (spec operator-data-upgrade § Orphan
+/** note: The orphan ledger attribution item (spec operator-data-upgrade § Orphan
  * ledger attribution item).
  *
  * The fixture is the shape staging carries: ledger rows written before
@@ -66,7 +65,7 @@ function seedInstallation(
     .run(`inst-${botId}-${installationId}`, botId, installationId, removedAt);
 }
 
-/** An orphan review: no `target_id`, the bot known. */
+/** note: An orphan review: no `target_id`, the bot known. */
 function seedOrphanReview(
   db: TestD1,
   id: string,
@@ -88,7 +87,7 @@ function seedOrphanReview(
     );
 }
 
-/** An orphan failure: no `bot_id` column at all — resolved through the installation. */
+/** note: An orphan failure: no `bot_id` column at all — resolved through the installation. */
 function seedOrphanFailure(
   db: TestD1,
   id: string,
@@ -103,7 +102,7 @@ function seedOrphanFailure(
     .run(id, opts.installationId ?? 1, opts.owner ?? "acme", opts.repo ?? "alpha");
 }
 
-/** An orphan PR row: the bot is known, the target is not. */
+/** note: An orphan PR row: the bot is known, the target is not. */
 function seedOrphanPr(db: TestD1, id: string, owner: string, repo: string, prNumber: number): void {
   db.raw
     .prepare(
@@ -114,8 +113,7 @@ function seedOrphanPr(db: TestD1, id: string, owner: string, repo: string, prNum
     .run(id, BOT, owner, repo, prNumber);
 }
 
-/**
- * Two bots (so the single-bot fallback stays silent), one workspace each, and
+/** note: Two bots (so the single-bot fallback stays silent), one workspace each, and
  * the three repositories described in the header.
  */
 function fixture(): TestD1 {
@@ -125,7 +123,7 @@ function fixture(): TestD1 {
   seedBotWorkspace(db, BOT);
   seedBotWorkspace(db, OTHER_BOT);
   seedInstallation(db, BOT, 1);
-  // The bot's live home for `acme/alpha`, already naming it.
+  // note: The bot's live home for `acme/alpha`, already naming it.
   seedTarget(db, BOT, { id: "target-alpha", repoOwner: "acme", repoName: "alpha" });
 
   seedOrphanReview(db, "rv-alpha", { repo: "alpha" });
@@ -135,7 +133,7 @@ function fixture(): TestD1 {
   seedOrphanPr(db, "pr-beta", "acme", "beta", 2);
   seedOrphanFailure(db, "fl-beta", { repo: "beta" });
 
-  // Nothing names this installation's bot, and two bots exist: no guess.
+  // invariant: Nothing names this installation's bot, and two bots exist: no guess.
   seedOrphanFailure(db, "fl-gamma", { installationId: 99, owner: "ghost", repo: "gamma" });
   return db;
 }
@@ -155,7 +153,7 @@ function targetOf(db: TestD1, table: string, id: string): string | null {
   return row.target_id;
 }
 
-/** Step until the item reports done; returns every batch. */
+/** note: Step until the item reports done; returns every batch. */
 async function drain(db: TestD1): Promise<Array<{ processed: number; done: boolean }>> {
   const batches: Array<{ processed: number; done: boolean }> = [];
   for (let cursor: UpgradeCursor | null = null; ; ) {
@@ -195,7 +193,7 @@ describe("orphan-ledger-attribution item", () => {
     const db = fixture();
     const batch = await orphanLedgerAttribution.runBatch(db, null, OPERATOR);
 
-    // `processed` is ledger ROWS, not groups: alpha's two rows and beta's three.
+    // note: `processed` is ledger ROWS, not groups: alpha's two rows and beta's three.
     // The group count is the log's `attributed` — the unit the walk pages in.
     expect(batch.processed).toBe(5);
     expect(batch.done).toBe(true);
@@ -222,7 +220,7 @@ describe("orphan-ledger-attribution item", () => {
       workspace_id: string;
       created_by: string;
     };
-    // No fabricated numeric id: the first delivery claims it (0067). The
+    // note: No fabricated numeric id: the first delivery claims it (0067). The
     // inheritance flag is the UI-create rule (J4), never 0: a repository this
     // item creates inherits the workspace's review answers.
     expect(row).toEqual({
@@ -238,7 +236,7 @@ describe("orphan-ledger-attribution item", () => {
     expect(targetOf(db, "pull_requests", "pr-beta")).toBe(created.id);
     expect(targetOf(db, "review_failures", "fl-beta")).toBe(created.id);
 
-    // The unresolvable group is untouched, not guessed into someone's tenant.
+    // invariant: The unresolvable group is untouched, not guessed into someone's tenant.
     expect(targetOf(db, "review_failures", "fl-gamma")).toBeNull();
 
     const replay = await orphanLedgerAttribution.runBatch(db, batch.cursor, OPERATOR);
@@ -248,7 +246,7 @@ describe("orphan-ledger-attribution item", () => {
 
   test("verify blocks on an unattributed row and reports the unresolvable group as advisory", async () => {
     const db = fixture();
-    // Every orphan row of a group that RESOLVES: the gamma group does not.
+    // note: Every orphan row of a group that RESOLVES: the gamma group does not.
     expect(
       (await orphanLedgerAttribution.verify(db, { runStartedAt: null })).unattributed_ledger_rows,
     ).toBe(5);
@@ -293,12 +291,12 @@ describe("orphan-ledger-attribution item", () => {
 
     const second = await orphanLedgerAttribution.runBatch(db, first.cursor, OPERATOR);
     expect(second).toMatchObject({ processed: 1, done: true });
-    // The cursor is pushed into the worklist read, so the second batch
+    // why: The cursor is pushed into the worklist read, so the second batch
     // aggregates the one group it still has to walk — not the twenty it passed.
     expect(first.log).toMatchObject({ groups: 20 });
     expect(second.log).toMatchObject({ groups: 1 });
     expect(liveTargets(db)).toHaveLength(21);
-    // Past the last group the walk is empty: nothing more to move.
+    // invariant: Past the last group the walk is empty: nothing more to move.
     expect(await orphanLedgerAttribution.runBatch(db, second.cursor, OPERATOR)).toMatchObject({
       processed: 0,
       done: true,
@@ -319,7 +317,7 @@ describe("orphan-ledger-attribution item", () => {
     seedInstallation(db, BOT, 1);
     seedInstallation(db, OTHER_BOT, 2);
 
-    // One group, one row naming BOT explicitly, one whose installation no bot
+    // note: One group, one row naming BOT explicitly, one whose installation no bot
     // owns. The group has exactly one CANDIDATE (BOT), which is the bug shape:
     // the second row's bot was never resolved and could be OTHER_BOT's.
     seedOrphanReview(db, "rv-mixed", { repo: "mixed" });
@@ -331,7 +329,7 @@ describe("orphan-ledger-attribution item", () => {
     expect(liveTargets(db)).toHaveLength(0);
     expect(targetOf(db, "reviews", "rv-mixed")).toBeNull();
     expect(targetOf(db, "review_failures", "fl-mixed")).toBeNull();
-    // The row that COULD name a bot is left with its sibling: the group is one
+    // note: The row that COULD name a bot is left with its sibling: the group is one
     // repository, and attributing half of it would split it across tenants.
     expect(await orphanLedgerAttribution.verify(db, { runStartedAt: null })).toEqual({
       unattributed_ledger_rows: 0,
@@ -341,7 +339,7 @@ describe("orphan-ledger-attribution item", () => {
 
   test("a created target inherits the workspace's review defaults", async () => {
     const db = fixture();
-    // The workspace answers `manual` at depth `deep` with a 90 gate: the target
+    // note: The workspace answers `manual` at depth `deep` with a 90 gate: the target
     // this item creates is an ordinary repository, so those answers are what it
     // must run with.
     db.raw
@@ -367,7 +365,7 @@ describe("orphan-ledger-attribution item", () => {
       checkPassVerdicts: ["ship it", "needs fixes"],
     });
 
-    // Inheriting, not snapshotted: a later change to the workspace's answers
+    // note: Inheriting, not snapshotted: a later change to the workspace's answers
     // moves the repository with it.
     db.raw
       .prepare("UPDATE workspaces SET default_review_trigger_mode = 'open' WHERE id = 'default'")
@@ -379,7 +377,7 @@ describe("orphan-ledger-attribution item", () => {
     const db = createMigratedTestD1();
     seedBot(db, BOT, 7001);
     seedBotWorkspace(db, BOT);
-    // The failure row names an installation no bot owns and carries no bot of
+    // note: The failure row names an installation no bot owns and carries no bot of
     // its own: the group has NO evidence. One bot exists, so the fallback picks
     // it — and the batch must be able to write that resolution, or the group is
     // planned forever and verify blocks on rows nothing could move.
@@ -408,7 +406,7 @@ describe("orphan-ledger-attribution item", () => {
     seedBotWorkspace(db, BOT);
     seedInstallation(db, BOT, 1);
     seedTarget(db, BOT, { id: "target-old", repoOwner: "acme", repoName: "alpha" });
-    // A second live row for the same repository. Both are unclaimed, so 0068's
+    // note: A second live row for the same repository. Both are unclaimed, so 0068's
     // index does not cover them (it is `repo_id IS NOT NULL`), and the store's
     // own resolver refuses the pair instead of picking one.
     db.raw
@@ -436,24 +434,24 @@ describe("orphan-ledger-attribution item", () => {
 
   test("a group that becomes resolvable after a repair is picked up by a reset and a new run", async () => {
     const db = fixture();
-    // The run completes leaving the gamma group unresolved and advisory.
+    // note: The run completes leaving the gamma group unresolved and advisory.
     expect((await stepDataUpgrade(db, orphanLedgerAttribution, OPERATOR, RUN_START)).kind).toBe("ok");
     const done = await verifyDataUpgrade(db, orphanLedgerAttribution, OPERATOR, RUN_START);
     expect(done.kind === "ok" && done.state.status).toBe("completed");
     expect(targetOf(db, "review_failures", "fl-gamma")).toBeNull();
 
-    // The operator repairs the installation the gamma failures ran under.
+    // note: The operator repairs the installation the gamma failures ran under.
     seedInstallation(db, OTHER_BOT, 99);
     expect((await orphanLedgerAttribution.preflight(db)).groups_needing_target).toBe(1);
 
-    // A completed item refuses a step, and the reset is the documented way back.
+    // note: A completed item refuses a step, and the reset is the documented way back.
     expect((await stepDataUpgrade(db, orphanLedgerAttribution, OPERATOR, RUN_START)).kind).toBe(
       "refused",
     );
     expect((await resetDataUpgrade(db, orphanLedgerAttribution, OPERATOR, RUN_START)).kind).toBe("ok");
     expect((await stepDataUpgrade(db, orphanLedgerAttribution, OPERATOR, RUN_START)).kind).toBe("ok");
 
-    // The previously unattributable group is attributed now; the rows the first
+    // note: The previously unattributable group is attributed now; the rows the first
     // run moved are untouched.
     const gamma = liveTargets(db).find((row) => row.repo_name === "gamma")!;
     expect(gamma).toMatchObject({ bot_id: OTHER_BOT });
@@ -472,7 +470,7 @@ describe("orphan-ledger-attribution item", () => {
     seedInstallation(db, BOT, 1);
     seedOrphanReview(db, "rv-beta", { repo: "beta" });
 
-    // The operator's own create path lands after the worklist was read and
+    // invariant: The operator's own create path lands after the worklist was read and
     // before the batch's statements run: the insert must see it and stand
     // down, and the updates must land on the row the operator made.
     let raced = false;
@@ -505,7 +503,7 @@ describe("orphan-ledger-attribution item", () => {
     seedTarget(db, BOT, { id: "target-alpha", repoOwner: "acme", repoName: "alpha" });
     seedOrphanReview(db, "rv-alpha", { repo: "alpha" });
 
-    // The planned target is soft-deleted after the worklist read: the guarded
+    // invariant: The planned target is soft-deleted after the worklist read: the guarded
     // update must match nothing rather than pointing history at a dead row
     // that every live read filters out.
     let raced = false;
@@ -537,7 +535,7 @@ describe("orphan-ledger-attribution item", () => {
     seedInstallation(db, BOT, 1);
     seedOrphanFailure(db, "fl-only", { installationId: 1, repo: "alpha" });
 
-    // The installation is re-pointed at another bot after the group was read
+    // invariant: The installation is re-pointed at another bot after the group was read
     // as BOT's. The batch's in-transaction re-read sees the new binding and
     // stands down rather than writing the stale owner into the ledger.
     let raced = false;

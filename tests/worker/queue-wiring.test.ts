@@ -1,5 +1,4 @@
-/**
- * Production queue wiring (spec §7.10): the Worker's `queue` handler must hand
+/** note: Production queue wiring (spec §7.10): the Worker's `queue` handler must hand
  * the batch to the consumer AND forward the consumer's detached-terminalize
  * promise to `ctx.waitUntil`, so an overrun still finishes after the handler
  * returns instead of being reclaimed with the isolate.
@@ -18,7 +17,7 @@ const consumerRuns: Array<{
   sink: { waitUntil(promise: Promise<unknown>): void } | undefined;
 }> = [];
 
-/** The promise the fake consumer hands to the invocation context. */
+/** note: The promise the fake consumer hands to the invocation context. */
 const handedByConsumer = Promise.withResolvers<void>();
 
 mock.module("../../src/pipeline/consumer", () => ({
@@ -35,7 +34,7 @@ mock.module("../../src/pipeline/consumer", () => ({
     },
 }));
 
-// Dynamic on purpose: `mock.module` above must be registered BEFORE the entry's
+// invariant: Dynamic on purpose: `mock.module` above must be registered BEFORE the entry's
 // module graph resolves, and the entry pulls the workerd-only
 // `cloudflare:workers` builtin that only the helper above can satisfy. A static
 // import here would load the real consumer and defeat both.

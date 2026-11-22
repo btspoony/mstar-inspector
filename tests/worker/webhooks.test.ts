@@ -1,5 +1,4 @@
-/**
- * Webhook verification + event filtering tests.
+/** note: Webhook verification + event filtering tests.
  * Real signatures via `@octokit/webhooks` `sign()` (Web Crypto) — no mocks
  * for the crypto path; mock env is injected at the handler level (Task 2).
  *
@@ -31,7 +30,7 @@ const COMMENT_ID = 987654321;
 const APP_SLUG = "test-app";
 const EVERY_PUSH: ReviewTriggerContext = { mode: "every_push", appSlug: APP_SLUG };
 
-/** The workerd WebCrypto throw shape (mirrors tests/worker/webhooks-workerd.test.ts). */
+/** note: The workerd WebCrypto throw shape (mirrors tests/worker/webhooks-workerd.test.ts). */
 const workerdVerify = async (): Promise<boolean> => {
   throw new TypeError("Cannot read properties of null (reading 'map')");
 };
@@ -75,7 +74,7 @@ function issueCommentBody(
   });
 }
 
-/** Classify an issue_comment body as the PR author against APP_SLUG. */
+/** note: Classify an issue_comment body as the PR author against APP_SLUG. */
 function classifyMention(body: string, trigger: ReviewTriggerContext = EVERY_PUSH) {
   return classifyEvent("issue_comment", issueCommentBody({ comment: { body } }), undefined, trigger);
 }
@@ -219,11 +218,11 @@ describe("classifyWebhook — reject paths log structured warnings (B6b)", () =>
     expect(outcome.kind).toBe("reject");
     expect(log.warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = log.warn.mock.calls[0] ?? [];
-    // log hygiene: `event` carries the REAL GitHub event — no more
+    // note: log hygiene: `event` carries the REAL GitHub event — no more
     // literal "unknown" at the classifier call sites.
     expect(fields).toMatchObject({ event: "pull_request", reason: "secret_misconfigured" });
     expect(msg).toContain("500");
-    // The secret itself is never a log field — only a fixed diagnostic
+    // safety: The secret itself is never a log field — only a fixed diagnostic
     // reason/detail (which is a constant string, not the secret value).
     expect(Object.keys(fields as Record<string, unknown>)).not.toContain("secret");
     expect((fields as Record<string, unknown>).detail).toBe(
@@ -389,7 +388,7 @@ describe("classifyEvent — pull_request whitelist", () => {
 
 describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)", () => {
   const MODES = ["open", "every_push", "manual"] as const;
-  /** The §2.1 matrix cell: does mode × action enqueue the auto face? */
+  /** note: The §2.1 matrix cell: does mode × action enqueue the auto face? */
   const MATRIX: Record<(typeof MODES)[number], Record<string, boolean>> = {
     open: { opened: true, synchronize: false, reopened: false, ready_for_review: true },
     every_push: { opened: true, synchronize: true, reopened: true, ready_for_review: true },
@@ -420,7 +419,7 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
     }
   }
 
-  // Whitelist and reject checks precede the mode gate, so these two cases are
+  // note: Whitelist and reject checks precede the mode gate, so these two cases are
   // mode-invariant by construction and are pinned once, outside the loop.
   test("pull_request.closed by a [bot] author → the action reason (whitelist runs first)", () => {
     const outcome = classifyEvent(
@@ -443,7 +442,7 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
   });
 
-  // §2.1 bot-author row: every whitelisted action is ignored in EVERY mode,
+  // note: §2.1 bot-author row: every whitelisted action is ignored in EVERY mode,
   // and the bot guard outranks the mode gate (`open` × `opened` would
   // otherwise enqueue). A non-whitelisted action keeps the action reason
   // because the whitelist runs first.
@@ -480,7 +479,7 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
     });
   }
 
-  // §2.1 row: issue_comment.created (allowed actor + bot mention + on a PR)
+  // note: §2.1 row: issue_comment.created (allowed actor + bot mention + on a PR)
   // → enqueue in EVERY mode; the same row without a mention → ignore.
   for (const mode of MODES) {
     test(`${mode} × issue_comment.created with a bot mention → job`, () => {
@@ -495,7 +494,7 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
 });
 
 describe("classifyEvent — draft pull request gate (migration 0070)", () => {
-  /** A pull_request body with an explicit draft flag (or none when omitted). */
+  /** note: A pull_request body with an explicit draft flag (or none when omitted). */
   function draftBody(action: string, draft?: unknown, overrides: Record<string, unknown> = {}): string {
     const pr: Record<string, unknown> = { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" } };
     if (draft !== undefined) pr.draft = draft;
@@ -508,7 +507,7 @@ describe("classifyEvent — draft pull request gate (migration 0070)", () => {
     reviewDrafts: switchOn,
   });
 
-  // The gate's own cell: switch OFF holds a draft back, switch ON (or an
+  // note: The gate's own cell: switch OFF holds a draft back, switch ON (or an
   // absent policy) reviews it exactly as before.
   for (const switchOn of [true, false]) {
     for (const action of ["opened", "synchronize", "reopened"] as const) {
@@ -523,7 +522,7 @@ describe("classifyEvent — draft pull request gate (migration 0070)", () => {
     }
   }
 
-  // `ready_for_review` bypasses the draft gate in both switch states — and
+  // note: `ready_for_review` bypasses the draft gate in both switch states — and
   // then obeys the mode gate like every other action.
   for (const switchOn of [true, false]) {
     for (const mode of ["open", "every_push", "manual"] as const) {
@@ -534,7 +533,7 @@ describe("classifyEvent — draft pull request gate (migration 0070)", () => {
           expect(outcome.kind).toBe("job");
           if (outcome.kind === "job") expect(outcome.payload.action).toBe("ready_for_review");
         } else {
-          // Not the draft reason: the draft gate was bypassed, the mode gate
+          // note: Not the draft reason: the draft gate was bypassed, the mode gate
           // refused.
           expect(outcome).toEqual({
             kind: "ignore",
@@ -545,7 +544,7 @@ describe("classifyEvent — draft pull request gate (migration 0070)", () => {
     }
   }
 
-  // Absent or false draft is not a draft in either switch state.
+  // note: Absent or false draft is not a draft in either switch state.
   for (const switchOn of [true, false]) {
     for (const draft of [undefined, false]) {
       test(`draft=${String(draft)} with reviewDrafts=${switchOn} still yields a job`, () => {
@@ -567,7 +566,7 @@ describe("classifyEvent — draft pull request gate (migration 0070)", () => {
     }
   });
 
-  // The gate sits after the author gate and after identity validation, so
+  // invariant: The gate sits after the author gate and after identity validation, so
   // those keep their own outcome for a draft delivery.
   test("a draft by a [bot] author keeps the bot reason (author gate runs first)", () => {
     const outcome = classifyEvent(
@@ -631,9 +630,9 @@ describe("classifyEvent — every_push default reproduces current classification
       });
       expect(outcome).toEqual({
         kind: "job",
-        // The install account rides beside the payload, never inside it.
+        // invariant: The install account rides beside the payload, never inside it.
         installationAccount: "test-owner",
-        // A review delivery only infers the login from the repository owner.
+        // invariant: A review delivery only infers the login from the repository owner.
         accountAuthoritative: false,
         payload: {
           installation_id: 123,
@@ -711,7 +710,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody(), undefined, EVERY_PUSH);
     expect(outcome.kind).toBe("job");
     if (outcome.kind === "job") {
-      // The install account is a sibling, not a payload field — and it must be
+      // invariant: The install account is a sibling, not a payload field — and it must be
       // this fixture's owner login, not merely some string.
       expect(outcome.installationAccount).toBe("test-owner");
       expect(outcome.payload).toEqual({
@@ -876,7 +875,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
   });
 
   test("a plain issue with no mention reports the not-a-PR reason, not the mention miss", () => {
-    // Discriminating input for the guard order: a mention-less body on a plain
+    // note: Discriminating input for the guard order: a mention-less body on a plain
     // issue would report MENTION_MISS_REASON under the old ordering.
     const outcome = classifyEvent(
       "issue_comment",
@@ -973,17 +972,17 @@ describe("classifyEvent — bot mention grammar (spec §3 standalone token)", ()
   });
 
   test("multi-App isolation: a sibling App's mention never triggers this App", () => {
-    // This App's route (test-app), a body naming the sibling → ignore.
+    // note: This App's route (test-app), a body naming the sibling → ignore.
     expect(classifyMention("@other-app[bot]")).toEqual({
       kind: "ignore",
       reason: "comment body does not mention the App bot",
     });
-    // The sibling's route, a body naming this App → ignore.
+    // note: The sibling's route, a body naming this App → ignore.
     expect(classifyMention(`@${APP_SLUG}[bot]`, { mode: "every_push", appSlug: "other-app" })).toEqual({
       kind: "ignore",
       reason: "comment body does not mention the App bot",
     });
-    // Control: the same body DOES match the route of the App it names.
+    // note: Control: the same body DOES match the route of the App it names.
     expect(classifyMention("@other-app[bot]", { mode: "every_push", appSlug: "other-app" }).kind).toBe("job");
   });
 });
@@ -1004,15 +1003,15 @@ describe("classifyEvent — bot mention grammar: ASCII-restricted folding (QC F-
   });
 
   test("U+212A KELVIN SIGN never folds into a k of the slug (no phantom mention)", () => {
-    // In place of the leading k: String.toLowerCase() built "@k-app" in a
+    // note: In place of the leading k: String.toLowerCase() built "@k-app" in a
     // folded copy, but the ORIGINAL body never contains the mention.
     expect(classifyMention("@\u212A-app", K_SLUG)).toEqual(NOT_A_MENTION);
-    // Same for a KELVIN SIGN continuing a real leading k (still not `@k-app`).
+    // note: Same for a KELVIN SIGN continuing a real leading k (still not `@k-app`).
     expect(classifyMention("@k\u212A-app", K_SLUG)).toEqual(NOT_A_MENTION);
   });
 
   test("U+0130 never folds into the trailing i of an i-ending slug (no boundary-opening match)", () => {
-    // In place of the trailing i: the folded copy matched "@bot-i" and its
+    // note: In place of the trailing i: the folded copy matched "@bot-i" and its
     // combining dot opened the after-boundary; the original text does not
     // contain the mention at all.
     expect(classifyMention("@bot-\u0130", I_SLUG)).toEqual(NOT_A_MENTION);
@@ -1020,17 +1019,16 @@ describe("classifyEvent — bot mention grammar: ASCII-restricted folding (QC F-
   });
 
   test("a non-ASCII character before `@` is not a login continuation: a literal mention still matches", () => {
-    // Boundary characters are read from the ORIGINAL body against the ASCII
+    // note: Boundary characters are read from the ORIGINAL body against the ASCII
     // class — U+0130 is outside [A-Za-z0-9-], so it cannot close the boundary.
     expect(classifyMention("\u0130@bot-i please", I_SLUG).kind).toBe("job");
-    // A character that ASCII-folds into a continuation letter when lowercased
+    // note: A character that ASCII-folds into a continuation letter when lowercased
     // (U+212A → k) still must not close the boundary.
     expect(classifyMention("\u212A@k-app please", K_SLUG).kind).toBe("job");
   });
 });
 
-/**
- * `payloadMentionsALogin` is the unsynced-App DIAGNOSTIC, not the trigger: it
+/** note: `payloadMentionsALogin` is the unsynced-App DIAGNOSTIC, not the trigger: it
  * deliberately diverges from `bodyMentionsApp` — there is no target slug, so
  * EVERY standalone login run counts (`@acme-other` / `@acmebot` match), while
  * the trigger grammar would reject them once a slug exists. That divergence is
@@ -1038,7 +1036,7 @@ describe("classifyEvent — bot mention grammar: ASCII-restricted folding (QC F-
  * false positive only costs one extra warn.
  */
 describe("payloadMentionsALogin — the unsynced-App diagnostic (standalone login-run scan, not target-slug-relative)", () => {
-  /** Wrap a comment body in the issue_comment delivery shape the scan parses. */
+  /** note: Wrap a comment body in the issue_comment delivery shape the scan parses. */
   const commentPayload = (body: string): string => issueCommentBody({ comment: { body } });
 
   test("a standalone login mention is found (the diagnostic's whole purpose)", () => {
@@ -1048,20 +1046,20 @@ describe("payloadMentionsALogin — the unsynced-App diagnostic (standalone logi
   });
 
   test("any standalone login run matches — no target slug exists to compare against", () => {
-    // The intentional divergence from the trigger grammar: with no target
+    // note: The intentional divergence from the trigger grammar: with no target
     // slug, `@acme-other` / `@acmebot` are login runs in their own right (the
     // run extends, it does not continue past a boundary) and both match.
     expect(payloadMentionsALogin(commentPayload("ping @acme-other maybe"))).toBe(true);
     expect(payloadMentionsALogin(commentPayload("ping @acmebot maybe"))).toBe(true);
-    // The leading boundary: an email-shaped name@host is preceded by a login
+    // note: The leading boundary: an email-shaped name@host is preceded by a login
     // character and never mentions a login.
     expect(payloadMentionsALogin(commentPayload("no mention at all"))).toBe(false);
     expect(payloadMentionsALogin(commentPayload("mail me at name@acme.host"))).toBe(false);
     expect(payloadMentionsALogin(commentPayload("mail me at a@b"))).toBe(false);
-    // A run ending at the very end of the body has no after-character, which
+    // invariant: A run ending at the very end of the body has no after-character, which
     // counts as outside the set (the absent-boundary rule).
     expect(payloadMentionsALogin(commentPayload("@acme-"))).toBe(true);
-    // A bare `@` with no login run is not a mention.
+    // note: A bare `@` with no login run is not a mention.
     expect(payloadMentionsALogin(commentPayload("@ hi"))).toBe(false);
     expect(payloadMentionsALogin(commentPayload("@"))).toBe(false);
   });
@@ -1075,7 +1073,7 @@ describe("payloadMentionsALogin — the unsynced-App diagnostic (standalone logi
     expect(payloadMentionsALogin(JSON.stringify({ action: "created" }))).toBe(false);
   });
 
-  // One linear pass over the body — the per-token rescan this replaced was
+  // note: One linear pass over the body — the per-token rescan this replaced was
   // quadratic (17.6 s at 160 KB). These cases do not time anything; they keep
   // the large-body path functionally visible so a reintroduced rescan has to
   // execute it.
@@ -1088,7 +1086,7 @@ describe("payloadMentionsALogin — the unsynced-App diagnostic (standalone logi
   });
 
   test("200 KB `@`-dense body with a standalone mention at the END is true", () => {
-    // Worst case for a per-token rescan: every earlier `@` is rescanned from
+    // note: Worst case for a per-token rescan: every earlier `@` is rescanned from
     // the first `@` before the match is found.
     const body = atDense("@acme[bot]");
     expect(body.length).toBeGreaterThan(200_000);
@@ -1194,11 +1192,11 @@ describe("classifyEvent — installation event (account authority + rejects)", (
     expect(withAccount).toMatchObject({
       kind: "job",
       installationAccount: "octo-org",
-      // Even the payload's own account is INFERRED here: only an
+      // invariant: Even the payload's own account is INFERRED here: only an
       // `installation.*` event may overwrite a stored login.
       accountAuthoritative: false,
     });
-    // The existing fixtures omit `installation.account` → repository owner.
+    // note: The existing fixtures omit `installation.account` → repository owner.
     const withoutAccount = classifyEvent("pull_request", pullRequestBody("opened"));
     expect(withoutAccount).toMatchObject({
       kind: "job",
@@ -1219,7 +1217,7 @@ describe("classifyEvent — installation event (account authority + rejects)", (
   });
 
   test("an empty-string account.login is rejected at the boundary on both faces", () => {
-    // `login: z.string().min(1)` on the shared installation schema: "" is not
+    // note: `login: z.string().min(1)` on the shared installation schema: "" is not
     // a login, so it can never reach a store as a value.
     expect(
       classifyEvent("installation", JSON.stringify({ action: "created", installation: { id: 5, account: { login: "" } } })),

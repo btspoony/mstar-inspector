@@ -1,5 +1,4 @@
-/**
- * Entry visibility for the platform console (spec §5).
+/** note: Entry visibility for the platform console (spec §5).
  *
  * The boot carries ONE server-derived boolean: allowlist membership AND the
  * `saas` deployment shape. The shell reads that field only — a `self-hosted`
@@ -18,14 +17,14 @@ const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].j
 const LOGIN = "operator";
 const PAGE = "/dashboard/default/apps";
 
-/** Read the injected boot out of a shell document. */
+/** note: Read the injected boot out of a shell document. */
 function bootOf(html: string): SpaBoot {
   const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
   if (json === undefined) throw new Error("no boot in shell");
   return JSON.parse(json) as SpaBoot;
 }
 
-/** The served shell's boot for `LOGIN` in `mode`, with `operators` as the allowlist. */
+/** note: The served shell's boot for `LOGIN` in `mode`, with `operators` as the allowlist. */
 async function bootFor(mode: "saas" | "self-hosted", operators: string): Promise<SpaBoot> {
   const db = createMigratedTestD1();
   db.raw

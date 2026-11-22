@@ -1,5 +1,4 @@
-/**
- * The console's review usage read (spec bot-scope-and-claiming
+/** note: The console's review usage read (spec bot-scope-and-claiming
  * § Review usage): `GET /_internal_admin/api/usage`.
  *
  * Pinned at the product seams: one statement answers every live workspace
@@ -54,7 +53,7 @@ function seedWorkspace(db: TestD1, id: string, name: string, deletedAt: string |
   );
 }
 
-/** One review stamped at the current instant, i.e. inside the route's month. */
+/** note: One review stamped at the current instant, i.e. inside the route's month. */
 function seedReviewNow(db: TestD1, id: string, prNumber: number, targetId: string, botId: string): void {
   seed(
     db,
@@ -79,8 +78,7 @@ async function usageApi(db: TestD1, login: string | null = OPERATOR): Promise<Re
   );
 }
 
-/**
- * `ws-alpha` spends the shared bot (2) and its own bot (1); `ws-gamma` spends
+/** note: `ws-alpha` spends the shared bot (2) and its own bot (1); `ws-gamma` spends
  * only its own bot (4); `ws-beta` nothing; `ws-retired` is soft-deleted with a
  * review that must stay invisible.
  */
@@ -122,7 +120,7 @@ describe("GET /_internal_admin/api/usage", () => {
     const body: unknown = await res.json();
     expect(body).toEqual({
       month: reviewUsageMonth(new Date()).month,
-      // Shared descending, then own descending, then name ascending. The
+      // note: Shared descending, then own descending, then name ascending. The
       // retired workspace is gone; `default` (seeded by migration 0026) and
       // ws-beta answer zeros rather than disappearing.
       workspaces: [

@@ -1,5 +1,4 @@
-/**
- * Every registered data upgrade on a fresh deployment.
+/** note: Every registered data upgrade on a fresh deployment.
  *
  * A team that deploys today has none of the historical shapes these items
  * exist for: no 0067 leftover target, no NULL-target ledger row, no row pinned
@@ -15,7 +14,7 @@ import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { DATA_UPGRADES } from "../../src/admin/data-upgrades";
 import { getMaintenanceMode } from "../../src/dashboard/runtime-config-store";
 
-/** Every table an upgrade can touch. */
+/** note: Every table an upgrade can touch. */
 const TOUCHED = ["review_targets", "pull_requests", "reviews", "review_findings", "review_failures"];
 
 function snapshot(db: TestD1): Record<string, number> {
@@ -71,7 +70,7 @@ describe("data upgrades on a fresh deployment", () => {
       expect(batch.processed, item.id).toBe(0);
       expect(batch.done, item.id).toBe(true);
     }
-    // `runBatch` is the batch step, not the runner: it never claims a state row.
+    // invariant: `runBatch` is the batch step, not the runner: it never claims a state row.
     // The console is what keeps a click off a zero-worklist card (the disabled
     // start control, pinned in the page suite), so nothing here opens the
     // maintenance window a downtime item would own.

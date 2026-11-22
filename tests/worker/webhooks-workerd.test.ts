@@ -1,5 +1,4 @@
-/**
- * Workerd-equivalent signature verification tests (QC F-001 + F-005).
+/** note: Workerd-equivalent signature verification tests (QC F-001 + F-005).
  *
  * On the deployed Worker, wrangler resolves `@octokit/webhooks-methods` via
  * the `browser` condition → WebCrypto verify → `hexToUInt8Array` throws a
@@ -20,7 +19,7 @@ import type { Env } from "../../src/worker/env";
 
 const SECRET = ["s3cret", "webhook", "secret"].join("-");
 
-/** The workerd WebCrypto throw: `hexToUInt8Array` on non-hex input. */
+/** note: The workerd WebCrypto throw: `hexToUInt8Array` on non-hex input. */
 const workerdVerify = async (): Promise<boolean> => {
   throw new TypeError("Cannot read properties of null (reading 'map')");
 };
@@ -52,7 +51,7 @@ describe("verifySignature — workerd hex-decode throw path (F-001)", () => {
     expect(valid).toBe(false);
     expect(warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = warn.mock.calls[0] ?? [];
-    // log hygiene: no literal "unknown" — the direct call passes no
+    // note: log hygiene: no literal "unknown" — the direct call passes no
     // event, so the warn falls back to the stage label.
     expect(fields).toMatchObject({
       event: "signature_verification_error",
@@ -102,16 +101,16 @@ describe("module-level verifier cache (F-005 + L1)", () => {
     const second = getWebhooks("another-app-row-id", SECRET);
     const perApp = getWebhooks("some-app-row-id", SECRET);
     expect(perApp).not.toBe(second);
-    // Same key again → the memoized instance (not a third one).
+    // note: Same key again → the memoized instance (not a third one).
     expect(getWebhooks("another-app-row-id", SECRET)).toBe(second);
   });
 
   test("secret mismatch on the same cacheKey → rebuild + REPLACE (rotation evicts the old entry exactly)", () => {
     const before = getWebhooks("workerd-rotation-key", "secret-v1");
     const rotated = getWebhooks("workerd-rotation-key", "secret-v2");
-    expect(rotated).not.toBe(before); // rebuilt
-    expect(getWebhooks("workerd-rotation-key", "secret-v2")).toBe(rotated); // memoized
-    // The old secret's entry is GONE: the same cacheKey + old secret rebuilds
+    expect(rotated).not.toBe(before); // invariant: rebuilt
+    expect(getWebhooks("workerd-rotation-key", "secret-v2")).toBe(rotated); // safety: memoized
+    // safety: The old secret's entry is GONE: the same cacheKey + old secret rebuilds
     // again instead of returning the pre-rotation instance.
     expect(getWebhooks("workerd-rotation-key", "secret-v1")).not.toBe(before);
   });

@@ -1,5 +1,4 @@
-/**
- * The App write-route permission matrix (spec §2 权限矩阵).
+/** note: The App write-route permission matrix (spec §2 权限矩阵).
  *
  * The T1b audit confirmed every App write route — config (settings family:
  * add-key / save-chain / save-roles / add-custom-provider /
@@ -31,12 +30,11 @@ import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 import { testAppPem } from "../helpers/rsa-key";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
-/** base64 of exactly 32 bytes — the secretbox master-key requirement. */
+/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-matrix-9988");
 
-/**
- * The pool id the store derives from PLAIN_KEY (first 16 hex of SHA-256) — the
+/** note: The pool id the store derives from PLAIN_KEY (first 16 hex of SHA-256) — the
  * `keyId` the usage route takes, so the manager sweep can reach its 200 face.
  */
 async function keyIdOf(plainKey: string): Promise<string> {
@@ -45,25 +43,24 @@ async function keyIdOf(plainKey: string): Promise<string> {
 }
 const PLAIN_KEY_ID = await keyIdOf(PLAIN_KEY);
 
-/** The App's immutable GitHub App id — the only App address form (D0). */
+/** invariant: The App's immutable GitHub App id — the only App address form (D0). */
 const APP_ID = 1001;
-/** The App's repository target in `default` — the ledger/insights address. */
+/** note: The App's repository target in `default` — the ledger/insights address. */
 const TARGET_ID = "target-matrix";
-/** The bot the platform shares: the create-target route's subject. */
+/** note: The bot the platform shares: the create-target route's subject. */
 const SHARED_BOT_ID = "bot-shared-matrix";
-/** The shared bot's immutable GitHub App id — its App-addressed routes. */
+/** note: The shared bot's immutable GitHub App id — its App-addressed routes. */
 const SHARED_BOT_APP_ID = 1099;
-/** One pending installation of that bot, seeded with the world. */
+/** note: One pending installation of that bot, seeded with the world. */
 const SHARED_INSTALLATION_ID = 1200;
-/** A second shared bot with no target here — the create-target route's subject. */
+/** note: A second shared bot with no target here — the create-target route's subject. */
 const CREATE_BOT_ID = "bot-create-matrix";
 const CREATE_BOT_APP_ID = 1098;
 const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
 const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
 const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;
 
-/**
- * Seeded world (spec §2 actors): octocat = workspace `owner`; mallory created
+/** note: Seeded world (spec §2 actors): octocat = workspace `owner`; mallory created
  * "mallorys-app" but is a plain member; ada created a DIFFERENT app; hubot is
  * a plain member. Manage is the workspace role, so only octocat may write.
  */
@@ -73,7 +70,7 @@ async function seededWorld(): Promise<TestD1> {
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "ada", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
-  // Manage is the workspace role: `octocat` is the workspace owner, mallory a
+  // note: Manage is the workspace role: `octocat` is the workspace owner, mallory a
   // plain member — so `creator` and `admin` no longer mean the same thing.
   db.raw
     .prepare(
@@ -98,7 +95,7 @@ async function seededWorld(): Promise<TestD1> {
     workspaceId: "default",
     maxApps: null,
   });
-  // One ledger row: the detail face's 200 side needs a real tuple, and every
+  // note: One ledger row: the detail face's 200 side needs a real tuple, and every
   // deny path must still answer before the lookup. Creation writes no target
   // (D13), so the fixture seeds the App's repository target and attributes the
   // row to it.
@@ -113,7 +110,7 @@ async function seededWorld(): Promise<TestD1> {
     state: "open",
     headSha: "sha-1",
   });
-  // Two shared bots owned by a second workspace. The first already carries
+  // note: Two shared bots owned by a second workspace. The first already carries
   // THIS workspace's target and one pending installation (the bind route's
   // subject); the second carries no target here, so the create-target route's
   // 200 side is its own first write.
@@ -148,7 +145,7 @@ async function seededWorld(): Promise<TestD1> {
                datetime('now'), datetime('now'))`,
     )
     .run(SHARED_BOT_ID);
-  // One installation the bot already carries, bound to no target: the bind
+  // note: One installation the bot already carries, bound to no target: the bind
   // route's pending read is what admits it (the sweep's 200 side).
   db.raw
     .prepare(
@@ -210,7 +207,7 @@ function rawCount(db: TestD1, table: string): number {
   return row.n;
 }
 
-/** The config tables the write-route sweep may never touch on a deny path. */
+/** invariant: The config tables the write-route sweep may never touch on a deny path. */
 const MUTABLE_APP_TABLES = [
   "bot_provider_keys",
   "bot_provider_models",
@@ -220,8 +217,7 @@ const MUTABLE_APP_TABLES = [
   "bot_custom_providers",
 ] as const;
 
-/**
- * The deny path's whole mutation contract in one place: the app row keeps its
+/** note: The deny path's whole mutation contract in one place: the app row keeps its
  * status and review switch, and none of the config tables gained a row. One
  * list, so a new swept table cannot land in one sweep and not the other.
  */
@@ -229,7 +225,7 @@ function expectZeroAppMutations(db: TestD1): void {
   expect(appStatus(db, APP_ID)).toBe("active");
   expect(reviewEnabled(db, APP_ID)).toBe(1);
   for (const table of MUTABLE_APP_TABLES) expect(rawCount(db, table), table).toBe(0);
-  // The seeded world holds exactly two targets: the App's, and the one this
+  // invariant: The seeded world holds exactly two targets: the App's, and the one this
   // workspace already has on the platform bot (the bind route's subject). A
   // deny path that reached a create/bind write would show a third.
   expect(rawCount(db, "review_targets")).toBe(2);
@@ -239,21 +235,20 @@ type MatrixRoute = {
   name: string;
   path: string;
   fields?: Record<string, string>;
-  /** routes whose 200 side performs an outbound provider verification */
+  /** note: routes whose 200 side performs an outbound provider verification */
   verifies?: boolean;
 };
 
-/**
- * Every App write route, in an order that keeps each 200-side mutation valid
+/** note: Every App write route, in an order that keeps each 200-side mutation valid
  * for the allowed actors (delete soft-deletes, so it runs LAST).
  */
 const MATRIX_ROUTES: MatrixRoute[] = [
-  // --- edit family: settings POST (config) ---
+  // note: --- edit family: settings POST (config) ---
   // A provider with a usage probe, so the keys/usage entry below finds a stored
   // key and reaches its 200 face from this same sweep.
   { name: "settings add-key", path: SETTINGS, fields: { op: "add-key", provider: "zai", key: PLAIN_KEY }, verifies: true },
   { name: "settings save-chain (clear)", path: SETTINGS, fields: { op: "save-chain", model_chain: "" } },
-  // QC wave (F-002): save-roles is a FULL-map save — every seat key is
+  // note: QC wave (F-002): save-roles is a FULL-map save — every seat key is
   // required (blanks = default chain), so the matrix must post all four.
   {
     name: "settings save-roles (clear)",
@@ -266,7 +261,7 @@ const MATRIX_ROUTES: MatrixRoute[] = [
       "role_frontend-dev": "",
     },
   },
-  // Chain ops (QC wave, seat1): add-chain must also exercise the
+  // invariant: Chain ops (QC wave, seat1): add-chain must also exercise the
   // route's membership layer, so its selector names an unverified provider
   // (syntax-only check passes); remove-chain then removes it again so the
   // sweep's later routes see a clean chain table.
@@ -294,15 +289,15 @@ const MATRIX_ROUTES: MatrixRoute[] = [
   { name: "settings remove-custom-provider", path: SETTINGS, fields: { op: "remove-custom-provider", provider_id: "nope" } },
   { name: "keys/verify", path: VERIFY, fields: { provider: "anthropic", key: PLAIN_KEY }, verifies: true },
   { name: "keys/usage", path: USAGE, fields: { provider: "zai", keyId: PLAIN_KEY_ID }, verifies: true },
-  // Removes the row `settings add-key` seeded (zai + PLAIN_KEY). It runs after
+  // invariant: Removes the row `settings add-key` seeded (zai + PLAIN_KEY). It runs after
   // keys/usage — which still needs that row — so the 200 face deletes a REAL
   // row instead of finding nothing.
   { name: "settings key/delete", path: `${SETTINGS}/key/delete`, fields: { provider: "zai", key_id: PLAIN_KEY_ID } },
-  // (D5) The manager's forced metadata refresh — a manager-only write whose 200
+  // invariant: (D5) The manager's forced metadata refresh — a manager-only write whose 200
   // side additionally calls api.github.com (GET /app + the bot avatar leg), so
   // the sweep's stub answers those URLs too.
   { name: "refresh-metadata", path: `/dashboard/default/api/apps/${APP_ID}/refresh-metadata` },
-  // --- workspace-scoped installation binding ---
+  // note: --- workspace-scoped installation binding ---
   // The target page's bind entry: the world's shared bot carries one pending
   // installation.
   {
@@ -310,7 +305,7 @@ const MATRIX_ROUTES: MatrixRoute[] = [
     path: `/dashboard/default/api/apps/${SHARED_BOT_APP_ID}/bind-installation`,
     fields: { installationId: String(SHARED_INSTALLATION_ID) },
   },
-  // --- ops family: pinned action paths ---
+  // note: --- ops family: pinned action paths ---
   { name: "disable", path: `/dashboard/default/apps/${APP_ID}/disable` },
   { name: "enable", path: `/dashboard/default/apps/${APP_ID}/enable` },
   { name: "delete", path: `/dashboard/default/apps/${APP_ID}/delete` },
@@ -319,13 +314,13 @@ const MATRIX_ROUTES: MatrixRoute[] = [
 const ACTORS = [
   { name: "workspace owner", login: "octocat", expected: 200 },
   { name: "plain member", login: "hubot", expected: 403 },
-  // The App's creator is a plain workspace member: creation grants nothing.
+  // invariant: The App's creator is a plain workspace member: creation grants nothing.
   { name: "creator of the App", login: "mallory", expected: 403 },
   { name: "creator of a different app", login: "ada", expected: 403 },
 ] as const;
 
 describe("App write-route permission matrix (T1b, spec §2)", () => {
-  // Strength pin (F3–F8): before any per-actor gate can even
+  // invariant: Strength pin (F3–F8): before any per-actor gate can even
   // run, the mount-level membership guard bounces a session-less POST on
   // every App write route into the OAuth flow — 302 to login, and the
   // identical zero-mutation invariants as the member sweeps below.
@@ -334,7 +329,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
     const env = makeEnv(db);
     const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
       (async () => {
-        // The guard fires before validation, verification, or writes — no
+        // invariant: The guard fires before validation, verification, or writes — no
         // anonymous request may reach an outbound call.
         throw new Error("deny path (anonymous) must never call fetch");
       }) as unknown as typeof fetch,
@@ -367,11 +362,11 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
         (async (input: unknown) => {
           const allowedUrl = String(input);
           if (!allowed) {
-            // The deny path must short-circuit BEFORE any outbound call —
+            // invariant: The deny path must short-circuit BEFORE any outbound call —
             // the guard fires before validation, verification, or writes.
             throw new Error(`deny path (${actor.login}) must never call fetch`);
           }
-          // Models-list shape for built-in verify; any 2xx for the custom
+          // note: Models-list shape for built-in verify; any 2xx for the custom
           // probe (its body is never scraped — models = declared model_ids).
           // The refresh-metadata route's profile leg needs the GET /app shape
           // (a `name` string is its identity gate); its bot-avatar leg accepts
@@ -398,7 +393,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
         fetchSpy.mockRestore();
       }
       if (allowed) {
-        // `settings key/delete` removed the row `settings add-key` seeded (zai):
+        // note: `settings key/delete` removed the row `settings add-key` seeded (zai):
         // the delete's 200 face did real work rather than matching nothing, and
         // only the row `keys/verify` stored (anthropic) is left in the pool.
         expect(
@@ -406,7 +401,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
         ).toEqual({ n: 0 });
         expect(rawCount(db, "bot_provider_keys")).toBe(1);
       } else {
-        // Zero mutation on every deny path: the app row is untouched and no
+        // invariant: Zero mutation on every deny path: the app row is untouched and no
         // config table gained a row.
         expectZeroAppMutations(db);
       }
@@ -414,7 +409,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
   }
 });
 
-// --- Read-face matrix: GET /dashboard/default/api/apps/:appId/settings ---
+// note: --- Read-face matrix: GET /dashboard/default/api/apps/:appId/settings ---
 // Identity-only non-manager detail face: a member who is neither creator nor
 // admin gets the D4 identity set (the GET /api/apps list fields + created_at
 // + the cached public GitHub profile) and can_manage:false — NO health or
@@ -445,7 +440,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       target_id: unknown;
       app: Record<string, unknown>;
     };
-    // The derived Blocked pair rides both faces: a member must know why the
+    // invariant: The derived Blocked pair rides both faces: a member must know why the
     // target is silent, so it is part of the identity set.
     expect(Object.keys(body).sort()).toEqual([
       "app",
@@ -455,9 +450,9 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       "target_id",
       "workspace_id",
     ]);
-    // The delivery URL's workspace segment: the server-resolved stable id.
+    // note: The delivery URL's workspace segment: the server-resolved stable id.
     expect(body.workspace_id).toBe("default");
-    // The review configuration this App resolved to inside that workspace.
+    // note: The review configuration this App resolved to inside that workspace.
     const target = db.raw
       .prepare(
         "SELECT t.id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id WHERE b.github_app_id = ?",
@@ -481,12 +476,12 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
     ]);
     expect(body.app.github_app_id).toBe(APP_ID);
     expect(body.app.github_slug).toBe("mallorys-app");
-    // The local App UID is the payload's other identifier (the webhook URL's
+    // note: The local App UID is the payload's other identifier (the webhook URL's
     // app segment); its value is the caller-supplied row id.
     expect(typeof body.app.id).toBe("string");
     expect(body.app.created_by).toBe("mallory");
     expect(typeof body.app.created_at).toBe("string");
-    // ops fields never ride the non-manager payload
+    // invariant: ops fields never ride the non-manager payload
     expect(JSON.stringify(body)).not.toContain("installations");
     expect(JSON.stringify(body)).not.toContain("deliveries");
     expect(JSON.stringify(body)).not.toContain("sandbox_image_id");
@@ -512,7 +507,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       expect(body.app).toHaveProperty("last_webhook_at");
       expect(body.app).toHaveProperty("review_trigger_mode");
       expect(body.installations).toEqual([]);
-      // The delivery log has its own paged read face, so the settings payload
+      // why: The delivery log has its own paged read face, so the settings payload
       // no longer carries the fixed recent list.
       expect(body.deliveries).toBeUndefined();
       expect(body.delivery_summary.rejected24h).toBe(0);
@@ -530,7 +525,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
     expect(res.status).toBe(404);
   });
 
-  // The segment is GitHub's numeric App id, spelled in decimal digits only.
+  // invariant: The segment is GitHub's numeric App id, spelled in decimal digits only.
   // `0x1f` / `1e3` are number spellings, not ids; `0x3e9` / `1.001e3` are the
   // dangerous ones — `Number()` parses both to the seeded 1001, so a lax
   // parser would alias the App under four URLs.
@@ -547,7 +542,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
   }
 });
 
-// --- Bot settings read face: GET /api/apps/:appId/bot ---
+// note: --- Bot settings read face: GET /api/apps/:appId/bot ---
 // The page that carries the bot-owned sections renders for every member; the
 // payload's `can_manage` decides whether the SPA offers bot-scoped writes, and
 // the bot-scoped POST family refuses them for a shared bot anyway.
@@ -590,7 +585,7 @@ describe("Bot settings read-face permission matrix", () => {
   });
 });
 
-// --- PR-ledger read faces: the list and one-PR detail (migration 0039) ---
+// note: --- PR-ledger read faces: the list and one-PR detail (migration 0039) ---
 // Same canManageApp rule as every other target read: the workspace role decides,
 // and target authorship grants nothing. The address is the target plus the
 // ledger's own key (owner/repo/number).
@@ -619,7 +614,7 @@ describe("Target pull-request ledger read-face permission matrix", () => {
         const res = await getFace(path, actor.login, makeEnv(await seededWorld()));
         expect(res.status).toBe(actor.expected);
         if (actor.expected === 403) {
-          // The manager gate is what answered — not the App resolution.
+          // note: The manager gate is what answered — not the App resolution.
           expect(await res.json()).toEqual({ error: "forbidden" });
         }
       });
@@ -639,7 +634,7 @@ describe("Target pull-request ledger read-face permission matrix", () => {
   });
 });
 
-// --- Read-face matrix: GET /dashboard/default/api/targets/:targetId/insights/summary ---
+// note: --- Read-face matrix: GET /dashboard/default/api/targets/:targetId/insights/summary ---
 // The target insights data face rides the SAME workspace owner/admin rule
 // (canManageApp) as every write route above, plus the target-in-workspace
 // lookup (unknown/soft-deleted/foreign → 404). Read-only, so no zero-mutation
@@ -667,7 +662,7 @@ describe("Target insights read-face permission matrix", () => {
       const res = await getFace(actor.login, makeEnv(await seededWorld()));
       expect(res.status).toBe(actor.expected);
       if (actor.expected !== 200) {
-        // JSON-only deny body — this face never renders an HTML page.
+        // invariant: JSON-only deny body — this face never renders an HTML page.
         const body = (await res.json()) as { error?: string };
         expect(body.error).toBeDefined();
       } else {
@@ -685,7 +680,7 @@ describe("Target insights read-face permission matrix", () => {
       makeEnv(db),
     );
     expect(res.status).toBe(404);
-    // This route sets no header of its own — the 404 inherits it from the
+    // note: This route sets no header of its own — the 404 inherits it from the
     // `/:workspaceRef/api/*` prefix middleware, which is exactly what this
     // asserts.
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");

@@ -1,5 +1,4 @@
-/**
- * Task 7 — the tenant isolation matrix.
+/** note: Task 7 — the tenant isolation matrix.
  *
  * One executable table of (scenario × mode) cells that crosses the layers
  * built in T2–T6: the routing gate, the membership gate, the scoped App
@@ -46,12 +45,12 @@ import type { Env } from "../../src/worker/env";
 import { insertSupportGrant } from "../../src/dashboard/operator-store";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 
-// Dynamic AFTER the shim: the static import order would resolve the workerd
+// why: Dynamic AFTER the shim: the static import order would resolve the workerd
 // builtin before mock.module had a chance to register it.
 const { default: worker } = await import("../../src/worker/index");
 
 const SESSION_SECRET = ["test", "matrix", "session", "secret", "32-bytes!"].join("-");
-/** base64 of exactly 32 bytes — the secretbox master-key requirement. */
+/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
 function envFor(db: TestD1, operators?: string): Env {
@@ -133,13 +132,13 @@ function seedMembership(
   );
 }
 
-/** Fixture Apps are addressed by these GitHub App ids (the only App identity). */
+/** invariant: Fixture Apps are addressed by these GitHub App ids (the only App identity). */
 const ACME_APP_ID = 5001;
 const OTHER_APP_ID = 5002;
 const ORPHAN_APP_ID = 5003;
 const GONE_APP_ID = 5004;
 
-/** An App row plus its single workspace mapping (migration 0026 production shape). */
+/** note: An App row plus its single workspace mapping (migration 0026 production shape). */
 function seedApp(
   db: TestD1,
   id: string,
@@ -164,14 +163,13 @@ function seedApp(
   );
   if (workspaceId !== null) {
     seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
-    // Every bot owns exactly one target; the settings/insights/ledger gates
+    // invariant: Every bot owns exactly one target; the settings/insights/ledger gates
     // resolve it inside the session workspace before answering.
     seedTarget(db, id, { id: `target-${id}`, workspaceId });
   }
 }
 
-/**
- * The matrix fixture: two live workspaces, one soft-deleted one, and a role
+/** note: The matrix fixture: two live workspaces, one soft-deleted one, and a role
  * matrix that separates membership from App ownership.
  *
  * - `dana` manages BOTH live workspaces, so any 404 she sees is scoping, not
@@ -210,8 +208,7 @@ function matrixFixture() {
 
 type ListBody = { viewer: { login: string }; apps: Array<{ github_app_id: number; github_slug: string | null }> };
 
-/**
- * Every persisted field a management write could touch on `app-acme`, plus the
+/** note: Every persisted field a management write could touch on `app-acme`, plus the
  * key/provider row counts — one equality check per route proves refusal, not a
  * partial write.
  */
@@ -220,7 +217,7 @@ function appSnapshot(db: TestD1, appId = "app-acme") {
     app: db.raw
       .query(`SELECT status, sandbox_image_id, deleted_at, updated_at FROM review_bots WHERE id = ?`)
       .get(appId),
-    // The review-policy columns live on the target now: a management write that
+    // note: The review-policy columns live on the target now: a management write that
     // moved them must show here.
     target: db.raw
       .query(
@@ -234,8 +231,7 @@ function appSnapshot(db: TestD1, appId = "app-acme") {
   };
 }
 
-/**
- * Every management write the App routes expose, with the payload a MANAGER
+/** note: Every management write the App routes expose, with the payload a MANAGER
  * would accept (valid vocabulary, in-range values, existing default image, an
  * EXISTING key row to delete), so a 403 can only come from the role gate. Two
  * settings `op`s share one path; they are separate entries because each is its
@@ -260,22 +256,22 @@ const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string; ownerStat
     body: "provider=anthropic&key_id=seeded-key",
     ownerStatus: 200,
   },
-  // No positive control: a real 200 here needs a live provider endpoint (the
+  // note: No positive control: a real 200 here needs a live provider endpoint (the
   // route verifies with globalThis.fetch). The member-403 cell below still
   // proves the authorization decision; the success path is owned by
   // tests/worker/settings-provider-first.test.ts.
   { route: `/api/apps/${ACME_APP_ID}/keys/verify`, body: "provider=anthropic&key=sk-not-a-real-key" },
-  // Same shape for the metadata refresh: a real 200 needs a live api.github.com
+  // note: Same shape for the metadata refresh: a real 200 needs a live api.github.com
   // (the route mints an App JWT and fetches the profile). The member-403 cell
   // proves the authorization decision; the success path is owned by
   // tests/worker/settings-github-metadata.test.ts.
   { route: `/api/apps/${ACME_APP_ID}/refresh-metadata` },
-  // Last: a manager's success soft-deletes the row.
+  // note: Last: a manager's success soft-deletes the row.
   { route: `/apps/${ACME_APP_ID}/delete`, ownerStatus: 200 },
 ];
 
 describe("tenant isolation matrix (scenario × layer)", () => {
-  // row 1 — layers: route family gate → membership gate → scoped App resolve
+  // note: row 1 — layers: route family gate → membership gate → scoped App resolve
   //         → strict store read. covered by tests/worker/dashboard-tenancy.test.ts
   //         (cross-workspace 404); composed here on a manager of BOTH tenants,
   //         so the 404 can only come from the App↔workspace check. Both
@@ -307,7 +303,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     }
   });
 
-  // row 2 — layers: routing gate (workspace exists) + membership gate (role row).
+  // note: row 2 — layers: routing gate (workspace exists) + membership gate (role row).
   //         covered by tests/worker/dashboard-tenancy.test.ts (no-membership 404);
   //         composed here over BOTH faces of the tenant (list + detail) so the
   //         absence of a membership row cannot leak as 403 on either.
@@ -331,7 +327,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     }
   });
 
-  // row 3 — layers: membership gate → canManageApp(scope.role) on EVERY
+  // note: row 3 — layers: membership gate → canManageApp(scope.role) on EVERY
   //         management entry point. covered by
   //         tests/worker/dashboard-tenancy.test.ts (list 200 / settings POST
   //         403); composed as one actor reading, then every write route with a
@@ -341,7 +337,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
   test("row 3 · a workspace member reads the App list but every management write is 403 and lands nothing", async () => {
     const { db } = matrixFixture();
     const env = envFor(db);
-    // A stored chain makes the save-chain write observable: a permitted actor
+    // note: A stored chain makes the save-chain write observable: a permitted actor
     // would CLEAR it with the same empty value.
     seed(
       db,
@@ -349,7 +345,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
       "app-acme",
       "ark/deepseek-v4-flash",
     );
-    // A REAL key row for the delete target: deleting a nonexistent key is a
+    // note: A REAL key row for the delete target: deleting a nonexistent key is a
     // tolerant 2xx no-op, which would prove nothing about authorization.
     seed(
       db,
@@ -362,7 +358,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     expect(list.status).toBe(200);
     const body = (await list.json()) as ListBody;
     expect(body.viewer.login).toBe("mallory");
-    // Read access, not the full list contract (orphan exclusion is row 4's cell).
+    // note: Read access, not the full list contract (orphan exclusion is row 4's cell).
     expect(body.apps.map((app) => app.github_app_id)).toContain(ACME_APP_ID);
 
     const onboarding = await worker.fetch(
@@ -374,7 +370,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     const post = (login: string, route: string, form?: string) =>
       request(`/dashboard/acme${route}`, login, { method: "POST", body: form ?? "" });
 
-    // Denial wave: every route refuses this plain member, and the row is
+    // note: Denial wave: every route refuses this plain member, and the row is
     // byte-identical afterwards.
     const pristine = appSnapshot(db);
     for (const { route, body: form } of MANAGEMENT_WRITES) {
@@ -384,22 +380,22 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     }
     expect((pristine.config as { model_chain: string }).model_chain).toBe("ark/deepseek-v4-flash");
 
-    // Reachability wave: the workspace OWNER sends the same payloads and each
+    // note: Reachability wave: the workspace OWNER sends the same payloads and each
     // route answers its REAL success status — so every 403 above came from the
     // role, not from a payload the route would have rejected anyway.
     for (const { route, body: form, ownerStatus } of MANAGEMENT_WRITES) {
-      if (ownerStatus === undefined) continue; // no offline success path
+      if (ownerStatus === undefined) continue; // note: no offline success path
       const res = await worker.fetch(await post("dana", route, form), env);
       expect(res.status, route).toBe(ownerStatus);
     }
-    // And the writes really landed (the role gate is the only difference
+    // invariant: And the writes really landed (the role gate is the only difference
     // between the two waves): the seeded key is gone and the delete took effect.
     const after = appSnapshot(db);
     expect((after.keys as { n: number }).n).toBe(0);
     expect((after.app as { deleted_at: string | null }).deleted_at).not.toBeNull();
   });
 
-  // row 4 — layers: the INNER JOIN read face → workspace list route → detail
+  // note: row 4 — layers: the INNER JOIN read face → workspace list route → detail
   //         resolve. covered by tests/store/tenant-read-face.test.ts at the
   //         store level; composed here through the HTTP faces.
   test("row 4 · an orphan App is absent from every workspace list, on both ref forms", async () => {
@@ -415,7 +411,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
       expect(appIds, ref).toContain(ACME_APP_ID);
       expect(appIds, ref).not.toContain(ORPHAN_APP_ID);
 
-      // The detail agrees: the same unmapped row is indistinguishable from an
+      // note: The detail agrees: the same unmapped row is indistinguishable from an
       // unknown App id (no workspace can claim it).
       const detail = await worker.fetch(
         await request(`/dashboard/${ref}/apps/${ORPHAN_APP_ID}/onboarding`, "dana"),
@@ -425,7 +421,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     }
   });
 
-  // row 5 — NEW cell (no task-level owner): layers: route classification →
+  // note: row 5 — NEW cell (no task-level owner): layers: route classification →
   //         getWorkspaceByRef `deleted_at IS NULL` (after the session/user
   //         read) → scoped read. The tenant has a live membership row and a
   //         mapped App, so only the soft-delete filter can produce the 404.
@@ -444,7 +440,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
       expect(detail.status, ref).toBe(404);
     }
 
-    // The rows still exist: the 404 is the gate's filter, not missing data.
+    // note: The rows still exist: the 404 is the gate's filter, not missing data.
     const live = db.raw
       .query(
         `SELECT (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = 'ws-gone') AS members,
@@ -454,7 +450,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     expect(live).toEqual({ members: 1, apps: 1 });
   });
 
-  // row 6 — layers: workspace lifecycle × App lifecycle × route family. Row 5
+  // note: row 6 — layers: workspace lifecycle × App lifecycle × route family. Row 5
   //         pins the ref itself; this composes it with the App resolve, proving
   //         a retired workspace takes its Apps with it on the one route family.
   test("row 6 · a retired workspace serves none of its Apps", async () => {
@@ -475,7 +471,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     }
   });
 
-  // row 7 — NEW cell (workspace URL identifiers, 2026-10 — I-000059): the ref
+  // note: row 7 — NEW cell (workspace URL identifiers, 2026-10 — I-000059): the ref
   //         grammar. `ws-acme` is the row id and `acme` its slug, so both
   //         reach the SAME tenant — the layer that would silently answer 404
   //         for one of the two forms is this read.
@@ -492,14 +488,14 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     expect(await list("acme")).toEqual(await list("ws-acme"));
     expect(await list("acme")).toEqual([ACME_APP_ID]);
 
-    // Unknown and soft-deleted refs are the same invisibility, by either form.
+    // note: Unknown and soft-deleted refs are the same invisibility, by either form.
     for (const ref of ["ghost", "gone", "ws-gone"]) {
       const res = await worker.fetch(await request(`/dashboard/${ref}/api/apps`, "dana"), env);
       expect(res.status, ref).toBe(404);
     }
   });
 
-  // row 8 — layers: route family gate → App resolve segment parse. The App id
+  // note: row 8 — layers: route family gate → App resolve segment parse. The App id
   //         is GitHub's number spelled in DECIMAL DIGITS ONLY: `Number()`
   //         accepts `0x138a` / `5.002e3` too, and each would address an App
   //         under a second URL — a hidden alias form, exactly what this matrix
@@ -509,14 +505,14 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     const { db } = matrixFixture();
     const env = envFor(db);
 
-    // Positive control: the literal decimal id serves.
+    // note: Positive control: the literal decimal id serves.
     const literal = await worker.fetch(
       await request(`/dashboard/acme/apps/${ACME_APP_ID}/onboarding`, "dana"),
       env,
     );
     expect(literal.status, String(ACME_APP_ID)).toBe(200);
 
-    // `0x1389` / `5.001e3` both parse to 5001 under `Number()`; `+5001` is a
+    // note: `0x1389` / `5.001e3` both parse to 5001 under `Number()`; `+5001` is a
     // third accepted spelling. None of them is an address.
     for (const alias of ["0x1389", "5.001e3", "+5001", "0x138a", "5.002e3"]) {
       const res = await worker.fetch(await request(`/dashboard/acme/apps/${alias}/onboarding`, "dana"), env);
@@ -524,7 +520,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     }
   });
 
-  // row 9 — layers: workspace gate operator classification → support_grants
+  // note: row 9 — layers: workspace gate operator classification → support_grants
   //         workspace-keyed lookup → route access declaration. covered at the
   //         unit level by tests/worker/operator-store.test.ts (`hasValidGrant`
   //         W1 vs W2) and per-route by tests/worker/operator-matrix.test.ts;
@@ -559,7 +555,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
       expect(res.status, ref).toBe(404);
     }
 
-    // The audit rows land on the workspace each request addressed: reads on
+    // note: The audit rows land on the workspace each request addressed: reads on
     // `acme`, denials on `other`. A scoped grant would show up here as a read
     // row on the sibling workspace.
     const rows = db.raw

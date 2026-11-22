@@ -1,5 +1,4 @@
-/**
- * The boot's create-workspace capability (`canCreateWorkspace` +
+/** note: The boot's create-workspace capability (`canCreateWorkspace` +
  * `createWorkspaceBlockedReason`).
  *
  * `saas` allows one free workspace per login, so a login that already holds a
@@ -19,15 +18,14 @@ import { htmlGetRequest, withSpaAssets } from "../helpers/spa";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const LOGIN = "founder";
 
-/** Read the injected boot out of a shell document. */
+/** note: Read the injected boot out of a shell document. */
 function bootOf(html: string): SpaBoot {
   const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
   if (json === undefined) throw new Error("no boot in shell");
   return JSON.parse(json) as SpaBoot;
 }
 
-/**
- * The boot for `LOGIN` in `mode`. `freeMember: true` joins the seeded
+/** note: The boot for `LOGIN` in `mode`. `freeMember: true` joins the seeded
  * `default` workspace, which carries no subscription row and therefore
  * resolves to `free` — the state that consumes the login's one free slot.
  */
@@ -80,7 +78,7 @@ describe("boot create-workspace capability", () => {
   });
 
   test("the plan chip's data rides each membership row, in both modes", async () => {
-    // Each row names its OWN workspace's plan, because a switch only rewrites
+    // why: Each row names its OWN workspace's plan, because a switch only rewrites
     // the URL: a boot-level plan would keep naming the document's workspace
     // after the user moved to another one. Both modes carry it (D16: the mode
     // gates rendering, never the payload). The seeded `default` workspace holds

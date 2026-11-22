@@ -1,5 +1,4 @@
-/**
- * Workspace membership + invitation API — the request-level
+/** note: Workspace membership + invitation API — the request-level
  * matrix over `/:workspaceRef/api/members{,/invites,/invites/:id/{revoke,accept}}`
  * and the workspace member action POSTs.
  *
@@ -49,8 +48,7 @@ function seedMembership(
     .run(workspaceId, userId, role, new Date().toISOString());
 }
 
-/**
- * One workspace `acme` with the three-role ladder plus a signed-in outsider
+/** note: One workspace `acme` with the three-role ladder plus a signed-in outsider
  * (`bob`) who is a member of a DIFFERENT workspace — so a refusal for him is a
  * cross-workspace 404, never a 403.
  */
@@ -78,7 +76,7 @@ function envFor(db: TestD1): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
-    // `saas`: the seat cap and the free-slot rule bind that mode only. In
+    // invariant: `saas`: the seat cap and the free-slot rule bind that mode only. In
     // `self-hosted` every workspace resolves to `unlimited`, so the same
     // fixtures would correctly admit instead of refusing.
     DEPLOYMENT_MODE: "saas",
@@ -108,20 +106,20 @@ async function request(
   );
 }
 
-/** The active fixture's store — `request` reads it, so each test sets it first. */
+/** note: The active fixture's store — `request` reads it, so each test sets it first. */
 let currentDb: TestD1;
 
 function use(db: TestD1): void {
   currentDb = db;
 }
 
-/** A `COUNT(*) AS n` read through the bun:sqlite double (always one row). */
+/** note: A `COUNT(*) AS n` read through the bun:sqlite double (always one row). */
 function count(db: TestD1, sql: string, ...params: string[]): number {
   const row = db.raw.prepare(sql).get(...params);
   return row !== null && typeof row === "object" && "n" in row && typeof row.n === "number" ? row.n : 0;
 }
 
-/** One workspace member's stored role (`workspace_members.role`). */
+/** note: One workspace member's stored role (`workspace_members.role`). */
 function memberRole(db: TestD1, login: string, workspaceId = WORKSPACE): string {
   const row = db.raw
     .prepare(
@@ -134,7 +132,7 @@ function memberRole(db: TestD1, login: string, workspaceId = WORKSPACE): string 
   return row.role;
 }
 
-/** One invite's stored status, read back after the request under test. */
+/** invariant: One invite's stored status, read back after the request under test. */
 function inviteStatus(db: TestD1, id: string): string {
   const row = db.raw.prepare("SELECT status FROM workspace_invites WHERE id = ?").get(id) as {
     status: string;
@@ -171,7 +169,7 @@ describe("member list visibility (AC4)", () => {
         "mallory",
         "olive",
       ]);
-      // The payload exposes WORKSPACE roles (owner is a first-class row here).
+      // note: The payload exposes WORKSPACE roles (owner is a first-class row here).
       expect(body.members.some((row) => row.role === "owner")).toBe(true);
       expect(body.viewer.login).toBe(login);
     }
@@ -191,9 +189,9 @@ describe("member list visibility (AC4)", () => {
   test("the retired deployment-level member faces are gone", async () => {
     const { db } = fixture();
     use(db);
-    // GET /api/members has no route left at all (plain 404).
+    // note: GET /api/members has no route left at all (plain 404).
     expect((await request("/dashboard/api/members", "dana")).status).toBe(404);
-    // The retired member POSTs fall through to the placeholder catch-all: the
+    // note: The retired member POSTs fall through to the placeholder catch-all: the
     // method is not wired anywhere, so it answers 405 and writes nothing.
     for (const [path, body] of [
       ["/dashboard/members/invite", "login=hubot"],
@@ -245,7 +243,7 @@ describe("invite creation (AC2)", () => {
   test("owner and admin create one pending invite; the row carries the invited role", async () => {
     const { db, users } = fixture();
     use(db);
-    // The fixture's four members leave ONE seat and this case mints two
+    // note: The fixture's four members leave ONE seat and this case mints two
     // invites, so drop a non-actor member: the cap has its own cases below.
     db.raw
       .prepare("DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?")
@@ -286,7 +284,7 @@ describe("invite creation (AC2)", () => {
   test("a second pending invite for the same login is 409 and leaves the first row untouched", async () => {
     const { db, users } = fixture();
     use(db);
-    // Four members + the first pending invite would fill the five-seat cap and
+    // why: Four members + the first pending invite would fill the five-seat cap and
     // the cap refusal would answer first; drop a member so this stays the
     // duplicate-invite case it is named for.
     db.raw
@@ -308,7 +306,7 @@ describe("invite creation (AC2)", () => {
   test("inviting a login with a removal record is 409 invite.login_removed, no row", async () => {
     const { db } = fixture();
     use(db);
-    // The removal record denies sign-in at the write boundary (0023), so an
+    // note: The removal record denies sign-in at the write boundary (0023), so an
     // invite minted here could never be accepted. Refusing writes nothing;
     // clearing the record is the operator's decision, not this route's.
     db.raw
@@ -319,7 +317,7 @@ describe("invite creation (AC2)", () => {
     expect(res.status).toBe(409);
     expect(await res.text()).toContain("invite.login_removed");
     expect(pendingInvites(db)).toBe(0);
-    // The record survives: the refusal never re-admits the login.
+    // invariant: The record survives: the refusal never re-admits the login.
     expect(
       (db.raw.prepare("SELECT COUNT(*) AS n FROM removed_logins").get() as { n: number }).n,
     ).toBe(1);
@@ -348,7 +346,7 @@ describe("invite creation member cap", () => {
   const MEMBER_CAP_REFUSAL =
     "This invite was not sent. This workspace already has 5 people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.";
 
-  /** A live pending invite, minted at the store so the route stays the subject. */
+  /** why: A live pending invite, minted at the store so the route stays the subject. */
   function seedLiveInvite(db: TestD1, invitedBy: string, login = "newcomer") {
     const now = new Date();
     return createInvite(db, {
@@ -412,7 +410,7 @@ describe("invite creation member cap", () => {
     expect(res.status).toBe(200);
     expect(pendingInvites(db)).toBe(1);
 
-    // Five live people now (four members + ada's pending row); the lapsed row
+    // note: Five live people now (four members + ada's pending row); the lapsed row
     // is terminal and stays out of the count, so the next invite is refused.
     const refused = await request(INVITES, "carol", { method: "POST", body: "login=erin" });
     expect(refused.status).toBe(409);
@@ -445,7 +443,7 @@ describe("invite creation member cap", () => {
       )
       .run(WORKSPACE, ts, ts);
     use(db);
-    // The same five people a capped plan refuses the sixth against.
+    // note: The same five people a capped plan refuses the sixth against.
     await seedLiveInvite(db, users.owner);
     const res = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
     expect(res.status).toBe(200);
@@ -473,7 +471,7 @@ describe("invite revoke (AC6)", () => {
     const list = await request(INVITES, "dana");
     expect(((await list.json()) as { invites: unknown[] }).invites).toEqual([]);
 
-    // The invitee must already have a users row for accept to reach its
+    // invariant: The invitee must already have a users row for accept to reach its
     // terminal branch; the plan's accept joins `users`.
     seedUser(db, "hubot");
     const accept = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "hubot", {
@@ -500,7 +498,7 @@ describe("invite revoke (AC6)", () => {
     expect(memberRes.status).toBe(403);
     expect(pendingInvites(db)).toBe(1);
 
-    // Same invite id addressed through the OTHER workspace ref: not this
+    // note: Same invite id addressed through the OTHER workspace ref: not this
     // workspace's invite, so the outsider 404 (never a cross-tenant revoke).
     const foreign = await request(`/dashboard/other/api/members/invites/${invite.id}/revoke`, "bob", {
       method: "POST",
@@ -522,7 +520,7 @@ describe("invite accept (AC3)", () => {
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     }, "saas");
-    // The person signs in FIRST (C3: the invite path never creates a users row).
+    // invariant: The person signs in FIRST (C3: the invite path never creates a users row).
     seedUser(db, "hubot");
 
     const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "hubot", {
@@ -534,7 +532,7 @@ describe("invite accept (AC3)", () => {
     expect(pendingInvites(db)).toBe(0);
     expect(inviteStatus(db, invite.id)).toBe("accepted");
 
-    // The new member now reads the member list.
+    // note: The new member now reads the member list.
     expect((await request(MEMBERS, "hubot")).status).toBe(200);
   });
 
@@ -601,7 +599,7 @@ describe("invite accept (AC3)", () => {
   test("an EXPIRED invite can be re-issued to the same login and the re-invite is accepted", async () => {
     const { db, users } = fixture();
     use(db);
-    // A lapsed invite, driven through the accept route so its terminal state
+    // note: A lapsed invite, driven through the accept route so its terminal state
     // is the one the route itself produces (`expired`, not a hand-set row).
     const lapsed = await createInvite(db, {
       workspaceId: WORKSPACE,
@@ -618,7 +616,7 @@ describe("invite accept (AC3)", () => {
     expect(expired.status).toBe(409);
     expect(inviteStatus(db, lapsed.id)).toBe("expired");
 
-    // The terminal row does not block a re-invite: a new pending row is minted
+    // note: The terminal row does not block a re-invite: a new pending row is minted
     // (the pending uniqueness index only covers live invites) and the old row
     // keeps its expired state.
     const reissue = await request(INVITES, "dana", { method: "POST", body: "login=hubot&role=admin" });
@@ -630,7 +628,7 @@ describe("invite accept (AC3)", () => {
     expect(fresh.role).toBe("admin");
     expect(inviteStatus(db, lapsed.id)).toBe("expired");
 
-    // The re-invite is accepted and the membership lands at the NEW role.
+    // note: The re-invite is accepted and the membership lands at the NEW role.
     const accept = await request(`/dashboard/acme/api/members/invites/${fresh.id}/accept`, "hubot", {
       method: "POST",
     });
@@ -656,7 +654,7 @@ describe("invite accept (AC3)", () => {
     const first = await request(path, "hubot", { method: "POST" });
     expect(first.status).toBe(409);
     expect(await first.text()).toContain("invite.expired");
-    // The same request flipped the row to its terminal state.
+    // note: The same request flipped the row to its terminal state.
     expect(inviteStatus(db, lapsed.id)).toBe("expired");
     expect((await request(path, "hubot", { method: "POST" })).status).toBe(410);
     expect(memberRows(db)).toBe(4);
@@ -665,7 +663,7 @@ describe("invite accept (AC3)", () => {
   test("an over-cap pending invite from a downgraded plan is the named 409 and writes no member", async () => {
     const { db, users } = fixture();
     const ts = new Date().toISOString();
-    // The invite and the fifth member are minted under `unlimited`; the
+    // note: The invite and the fifth member are minted under `unlimited`; the
     // operator's downgrade removes neither, so the pending row has no seat left
     // and only the write-time guard can refuse it.
     db.raw
@@ -700,8 +698,7 @@ describe("invite accept (AC3)", () => {
   });
 });
 
-/**
- * The accepting login's free slot (Invite acceptance gate). `ws-acme` seeds no
+/** note: The accepting login's free slot (Invite acceptance gate). `ws-acme` seeds no
  * subscription row, so it resolves to `free`; these cases place the invitee in
  * a second live free workspace, or price the target.
  */
@@ -709,7 +706,7 @@ describe("invite accept free slot", () => {
   const FREE_SLOT_INVITE_REFUSAL =
     "You were not added. You already belong to a free workspace, and you can belong to only one at a time. Delete that workspace if you own it. If you do not, an owner or admin of that workspace must remove you. Then accept this invite. The invite is still pending.";
 
-  /** A second live free workspace (`second`, owner `erin`) with `hubot` as a member; returns hubot's user id. */
+  /** note: A second live free workspace (`second`, owner `erin`) with `hubot` as a member; returns hubot's user id. */
   function seedSecondWorkspace(db: TestD1): string {
     seedWorkspace(db, "ws-second", "second");
     seedMembership(db, "ws-second", seedUser(db, "erin"), "owner");
@@ -752,7 +749,7 @@ describe("invite accept free slot", () => {
     const path = `/dashboard/acme/api/members/invites/${invite.id}/accept`;
     expect((await request(path, "hubot", { method: "POST" })).status).toBe(409);
 
-    // The existing removal path: the second workspace's owner drops the login.
+    // note: The existing removal path: the second workspace's owner drops the login.
     const removed = await request("/dashboard/second/members/remove", "erin", {
       method: "POST",
       body: `userId=${hubotId}`,
@@ -796,7 +793,7 @@ describe("member role change and removal (AC5)", () => {
     });
     expect(res.status).toBe(200);
     expect(memberRole(db, "mallory")).toBe("admin");
-    // The legacy column is not a role surface.
+    // note: The legacy column is not a role surface.
     const legacy = db.raw.prepare("SELECT role FROM users WHERE id = ?").get(users.member) as {
       role: string;
     } | null;
@@ -813,19 +810,19 @@ describe("member role change and removal (AC5)", () => {
       });
       expect(res.status, target).toBe(403);
     }
-    // …and an admin may not promote a plain member to owner either.
+    // note: …and an admin may not promote a plain member to owner either.
     const promote = await request("/dashboard/acme/members/role", "carol", {
       method: "POST",
       body: `userId=${users.member}&role=owner`,
     });
     expect(promote.status).toBe(403);
-    // Zero writes on every refusal: the roles are exactly the seeded ones.
+    // invariant: Zero writes on every refusal: the roles are exactly the seeded ones.
     expect(memberRole(db, "mallory")).toBe("member");
     expect(memberRole(db, "dana")).toBe("owner");
   });
 
   test("the last owner cannot be demoted or removed (409, zero writes)", async () => {
-    // A workspace with exactly ONE owner: the sole-owner guard is the refusal.
+    // invariant: A workspace with exactly ONE owner: the sole-owner guard is the refusal.
     const db = createMigratedTestD1();
     seedWorkspace(db, WORKSPACE, "acme");
     const owner = seedUser(db, "dana");
@@ -838,7 +835,7 @@ describe("member role change and removal (AC5)", () => {
       method: "POST",
       body: `userId=${owner}&role=member`,
     });
-    // An admin acting on an owner is 403 before the last-owner rule applies.
+    // invariant: An admin acting on an owner is 403 before the last-owner rule applies.
     expect(demote.status).toBe(403);
 
     const remove = await request("/dashboard/acme/members/remove", "carol", {
@@ -852,7 +849,7 @@ describe("member role change and removal (AC5)", () => {
   test("an owner demoting a non-last peer owner is allowed: 200 and both roles as posted", async () => {
     const { db, users } = fixture();
     use(db);
-    // TWO owners: the guard's clause is about the LAST owner, so a peer change
+    // note: TWO owners: the guard's clause is about the LAST owner, so a peer change
     // falls outside it — the multi-owner case this guard must not block.
     expect(memberRole(db, "dana")).toBe("owner");
     expect(memberRole(db, "olive")).toBe("owner");
@@ -870,20 +867,20 @@ describe("member role change and removal (AC5)", () => {
   test("the last-owner guard does not fire for a peer: only the sole owner's own demotion is 409, both rows unchanged", async () => {
     const { db, users } = fixture();
     use(db);
-    // The peer demotion lands — the guard is silent for a non-last owner…
+    // note: The peer demotion lands — the guard is silent for a non-last owner…
     const peer = await request("/dashboard/acme/members/role", "dana", {
       method: "POST",
       body: `userId=${users.secondOwner}&role=member`,
     });
     expect(peer.status).toBe(200);
-    // …and the 409 belongs only to the now-sole owner demoting themselves.
+    // invariant: …and the 409 belongs only to the now-sole owner demoting themselves.
     const self = await request("/dashboard/acme/members/role", "dana", {
       method: "POST",
       body: `userId=${users.owner}&role=member`,
     });
     expect(self.status).toBe(409);
     expect(await self.text()).toContain("only owner");
-    // Zero writes on the refusal: both rows keep the roles they held before it.
+    // invariant: Zero writes on the refusal: both rows keep the roles they held before it.
     expect(memberRole(db, "dana")).toBe("owner");
     expect(memberRole(db, "olive")).toBe("member");
     expect(memberRows(db)).toBe(4);
@@ -892,7 +889,7 @@ describe("member role change and removal (AC5)", () => {
   test("owner removal: allowed for a non-last owner, the actor's own removal is 409", async () => {
     const { db, users } = fixture();
     use(db);
-    // Two owners exist, so removing one is allowed.
+    // note: Two owners exist, so removing one is allowed.
     const first = await request("/dashboard/acme/members/remove", "dana", {
       method: "POST",
       body: `userId=${users.secondOwner}`,
@@ -900,7 +897,7 @@ describe("member role change and removal (AC5)", () => {
     expect(first.status).toBe(200);
     expect(memberRows(db)).toBe(3);
 
-    // Now `dana` is the last owner: her own removal is the last-owner conflict.
+    // note: Now `dana` is the last owner: her own removal is the last-owner conflict.
     const second = await request("/dashboard/acme/members/remove", "dana", {
       method: "POST",
       body: `userId=${users.owner}`,
@@ -910,14 +907,14 @@ describe("member role change and removal (AC5)", () => {
       method: "POST",
       body: `userId=${users.owner}`,
     });
-    expect(third.status).toBe(403); // admin may not remove an owner
+    expect(third.status).toBe(403); // note: admin may not remove an owner
     expect(memberRows(db)).toBe(3);
   });
 
   test("removing a member deletes only the membership: identity and invites survive", async () => {
     const { db, users } = fixture();
     use(db);
-    // `mallory` created an invite, so workspace_invites.invited_by points at her.
+    // note: `mallory` created an invite, so workspace_invites.invited_by points at her.
     await createInvite(db, {
       workspaceId: WORKSPACE,
       login: "hubot",
@@ -933,13 +930,13 @@ describe("member role change and removal (AC5)", () => {
     });
     expect(res.status).toBe(200);
     expect(memberRows(db)).toBe(3);
-    // The users row stays — removal is workspace-scoped, never a login ban …
+    // invariant: The users row stays — removal is workspace-scoped, never a login ban …
     expect(count(db, "SELECT COUNT(*) AS n FROM users WHERE github_login = 'mallory'")).toBe(1);
-    // … nothing is tombstoned at the deployment level …
+    // invariant: … nothing is tombstoned at the deployment level …
     expect(count(db, "SELECT COUNT(*) AS n FROM removed_logins")).toBe(0);
-    // … and the invite she created is intact (its FK target still exists).
+    // note: … and the invite she created is intact (its FK target still exists).
     expect(count(db, "SELECT COUNT(*) AS n FROM workspace_invites WHERE invited_by = ?", users.member)).toBe(1);
-    // She is out of THIS workspace, so its pages answer the outsider 404.
+    // note: She is out of THIS workspace, so its pages answer the outsider 404.
     expect((await request(MEMBERS, "mallory")).status).toBe(404);
   });
 
@@ -955,10 +952,10 @@ describe("member role change and removal (AC5)", () => {
       ).status,
     ).toBe(200);
 
-    // Sign-in is unaffected: no tombstone, so the login is admitted.
+    // why: Sign-in is unaffected: no tombstone, so the login is admitted.
     expect((await signInDashboardUser(db, "mallory")).outcome).toBe("allow");
 
-    // …and another workspace can invite them, which they accept.
+    // note: …and another workspace can invite them, which they accept.
     const invite = await createInvite(db, {
       workspaceId: "ws-other",
       login: "mallory",
@@ -1012,7 +1009,7 @@ describe("workspace summary in the member payload", () => {
     members: Array<{ github_login: string }>;
   };
 
-  /** One metered started execution (the ledger's only required columns). */
+  /** invariant: One metered started execution (the ledger's only required columns). */
   function insertUsage(db: TestD1, reviewId: string, occurredAt: string, workspaceId = WORKSPACE): void {
     db.raw
       .prepare(
@@ -1027,7 +1024,7 @@ describe("workspace summary in the member payload", () => {
     use(db);
     const now = new Date();
     const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
-    // Two rows inside the current UTC month (the first instant counts), one
+    // note: Two rows inside the current UTC month (the first instant counts), one
     // before it, and one in another workspace — the count is this workspace's.
     insertUsage(db, "review-in-1", new Date(monthStart).toISOString());
     insertUsage(db, "review-in-2", now.toISOString());
@@ -1043,7 +1040,7 @@ describe("workspace summary in the member payload", () => {
       reviewAttemptsThisMonth: 2,
       pendingInvites: 0,
     });
-    // The existing member fields are unchanged by the addition.
+    // invariant: The existing member fields are unchanged by the addition.
     expect(body.members.map((row) => row.github_login).sort()).toEqual([
       "carol",
       "dana",
@@ -1075,7 +1072,7 @@ describe("workspace summary in the member payload", () => {
     const { db, users } = fixture();
     use(db);
     const now = new Date();
-    // Four members already hold four of the plan's five seats, so the seat
+    // why: Four members already hold four of the plan's five seats, so the seat
     // guard admits exactly one pending invite — the count the summary reports.
     const live = await createInvite(db, {
       workspaceId: WORKSPACE,
@@ -1088,30 +1085,29 @@ describe("workspace summary in the member payload", () => {
 
     const counted = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
     expect(counted.workspace.pendingInvites).toBe(1);
-    // The member fields themselves stay the member rows.
+    // note: The member fields themselves stay the member rows.
     expect(counted.members.length).toBe(4);
 
-    // The cap's own lazy-expiry predicate: a past expires_at frees the seat
+    // note: The cap's own lazy-expiry predicate: a past expires_at frees the seat
     // even before a write flips the row's status.
     db.raw
       .prepare("UPDATE workspace_invites SET expires_at = ? WHERE id = ?")
       .run(new Date(now.getTime() - 1_000).toISOString(), live.id);
     const lapsed = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
     expect(lapsed.workspace.pendingInvites).toBe(0);
-    // The GET is a pure read: the flip belongs to the sweep, so the stored
+    // why: The GET is a pure read: the flip belongs to the sweep, so the stored
     // status is still `pending` after the page load.
     expect(inviteStatus(db, live.id)).toBe("pending");
   });
 });
 
 describe("the switcher resolves each plan once", () => {
-  /** The boot's subscription read — the one the per-row resolve repeated. */
+  /** note: The boot's subscription read — the one the per-row resolve repeated. */
   const SUBSCRIPTION_READ = /FROM workspace_subscriptions/;
-  /** The `free` fallback read of the catalogue. */
+  /** note: The `free` fallback read of the catalogue. */
   const FREE_PLAN_READ = /FROM plans WHERE id = \?/;
 
-  /**
-   * The store plus every statement it prepared. Counting prepares is what makes
+  /** note: The store plus every statement it prepared. Counting prepares is what makes
    * a reinstated per-row resolve visible: the query text is the same either
    * way, only the number of executions changes.
    */
@@ -1130,8 +1126,7 @@ describe("the switcher resolves each plan once", () => {
   const countReads = (statements: string[], shape: RegExp): number =>
     statements.filter((sql) => shape.test(sql)).length;
 
-  /**
-   * One login in three workspaces: two on `pro`, one with no subscription row
+  /** note: One login in three workspaces: two on `pro`, one with no subscription row
    * at all (so it resolves to the seeded `free` plan). The two `pro` rows are
    * what a per-row resolve pays twice for no new answer.
    */
@@ -1186,7 +1181,7 @@ describe("the switcher resolves each plan once", () => {
     const { db, login } = mixedPlanWorld();
     const { observed, statements } = recording(db);
     const rows = await switcherRows(envIn(observed, "saas"), login);
-    // Reinstating the per-row resolve raises this to one read per membership.
+    // note: Reinstating the per-row resolve raises this to one read per membership.
     expect(countReads(statements, SUBSCRIPTION_READ)).toBe(1);
     expect(rows.map((row) => [row.id, row.plan])).toEqual([
       ["ws-a", "Pro"],
@@ -1199,7 +1194,7 @@ describe("the switcher resolves each plan once", () => {
     const { db, login } = mixedPlanWorld();
     const { observed, statements } = recording(db);
     const rows = await switcherRows(envIn(observed, "self-hosted"), login);
-    // The mode answers before any read: a subscription or catalogue query here
+    // invariant: The mode answers before any read: a subscription or catalogue query here
     // would mean precedence slipped below the stored rows.
     expect(countReads(statements, SUBSCRIPTION_READ)).toBe(0);
     expect(countReads(statements, FREE_PLAN_READ)).toBe(0);

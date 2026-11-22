@@ -1,5 +1,4 @@
-/**
- * The repository detail page's settings routes (product spec J4):
+/** note: The repository detail page's settings routes (product spec J4):
  *
  *   - `GET  /dashboard/:ref/api/targets/:targetId` — one live target with what
  *     it runs with plus the workspace defaults. A foreign or soft-deleted
@@ -85,8 +84,7 @@ afterEach(() => {
 
 type World = { db: TestD1; botId: string; targetId: string; workspaceId: string };
 
-/**
- * An owned bot in `default` holding one live target, plus a foreign workspace
+/** note: An owned bot in `default` holding one live target, plus a foreign workspace
  * with its own target so every read has something to exclude. The workspace
  * defaults differ from the target's own columns on every axis, so a route that
  * plays back the row's placeholders instead of the effective answers is caught.
@@ -123,7 +121,7 @@ async function seededWorld(): Promise<World> {
     repoOwner: "acme",
     repoName: "api",
   });
-  // The target inherits, and its own columns hold placeholders no reader may
+  // note: The target inherits, and its own columns hold placeholders no reader may
   // report while it does.
   db.raw
     .prepare(
@@ -163,7 +161,7 @@ async function seededWorld(): Promise<World> {
 const targetRow = (db: TestD1, id: string) =>
   db.raw.query("SELECT * FROM review_targets WHERE id = ?").get(id) as Record<string, unknown>;
 
-// --- GET /api/targets/:targetId --------------------------------------------
+// note: --- GET /api/targets/:targetId --------------------------------------------
 
 describe("GET /dashboard/:workspaceRef/api/targets/:targetId", () => {
   test("reports the effective settings while inheriting, the row's identity, and the defaults", async () => {
@@ -186,7 +184,7 @@ describe("GET /dashboard/:workspaceRef/api/targets/:targetId", () => {
         app_id: APP_ID,
         app_avatar_url: null,
       },
-      // The workspace defaults answer — never the row's inert placeholders —
+      // invariant: The workspace defaults answer — never the row's inert placeholders —
       // plus the target-owned draft switch (D12).
       effective: {
         trigger_mode: "open",
@@ -236,7 +234,7 @@ describe("GET /dashboard/:workspaceRef/api/targets/:targetId", () => {
   });
 });
 
-// --- GET /api/targets/all --------------------------------------------------
+// note: --- GET /api/targets/all --------------------------------------------------
 
 describe("GET /dashboard/:workspaceRef/api/targets/all", () => {
   test("answers the workspace defaults and this workspace's live target count", async () => {
@@ -257,11 +255,10 @@ describe("GET /dashboard/:workspaceRef/api/targets/all", () => {
   });
 });
 
-// --- POST /api/targets/:targetId -------------------------------------------
+// note: --- POST /api/targets/:targetId -------------------------------------------
 
 describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
-  /**
-   * The snapshot rule (D16/J4): a save that names ONE control must not expose
+  /** note: The snapshot rule (D16/J4): a save that names ONE control must not expose
    * the row's inert placeholders on the other three — it writes the values the
    * target was running with (the workspace defaults, while it was inheriting).
    */
@@ -299,7 +296,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { target: { follow_workspace_defaults: number } };
     expect(body.target.follow_workspace_defaults).toBe(1);
-    // The row keeps its placeholders; they are never read while inheriting.
+    // invariant: The row keeps its placeholders; they are never read while inheriting.
     expect(targetRow(db, targetId)).toMatchObject({
       follow_workspace_defaults: 1,
       review_trigger_mode: "manual",
@@ -324,8 +321,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     });
   });
 
-  /**
-   * The wire carries what the column holds: the SPA posts `0|1`, an HTML form
+  /** note: The wire carries what the column holds: the SPA posts `0|1`, an HTML form
    * posts `"0"|"1"`. Both must persist the same pause the boolean does.
    */
   test("review_enabled accepts the 0|1 wire value and its string form", async () => {
@@ -346,7 +342,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
       expect(res.status).toBe(200);
       expect((await res.json() as { target: { review_enabled: number } }).target.review_enabled).toBe(1);
     }
-    // Anything else stays a refusal with nothing written.
+    // invariant: Anything else stays a refusal with nothing written.
     const refused = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
       review_enabled: 2,
     });
@@ -354,8 +350,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     expect(targetRow(db, targetId).review_enabled).toBe(1);
   });
 
-  /**
-   * An unreadable stored gate has no values to snapshot, so a policy save would
+  /** note: An unreadable stored gate has no values to snapshot, so a policy save would
    * write the fail-closed `[]` over the manager's list. The pause is the only
    * save allowed while it is corrupt.
    */
@@ -379,7 +374,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     expect(paused.status).toBe(200);
     expect(targetRow(db, targetId)).toMatchObject({ review_enabled: 0, follow_workspace_defaults: 1 });
 
-    // The draft switch names no policy column either, so the same refusal does
+    // why: The draft switch names no policy column either, so the same refusal does
     // not reach it: it must stay operable on a target whose gate is corrupt.
     const draft = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
       review_drafts: false,
@@ -401,7 +396,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
       effective: { reviewDrafts: boolean; trigger_mode: string };
     };
     expect(body.target.review_drafts).toBe(0);
-    // Inheriting never answered this question, so the save does not flip it.
+    // why: Inheriting never answered this question, so the save does not flip it.
     expect(body.target.follow_workspace_defaults).toBe(1);
     expect(body.effective.reviewDrafts).toBe(false);
     expect(body.effective.trigger_mode).toBe("open");
@@ -455,7 +450,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
       review_drafts: false,
     });
     expect(refused.status).toBe(403);
-    // A target of another workspace, addressed from its own workspace ref.
+    // note: A target of another workspace, addressed from its own workspace ref.
     const foreignRes = await post(db, `/dashboard/${OTHER_WS}/api/targets/${targetId}`, "trudy", {
       review_drafts: false,
     });
@@ -503,7 +498,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
   });
 });
 
-// --- POST /api/targets/defaults --------------------------------------------
+// note: --- POST /api/targets/defaults --------------------------------------------
 
 describe("POST /dashboard/:workspaceRef/api/targets/defaults", () => {
   test("round-trips every default, including the gate floor", async () => {
@@ -565,8 +560,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/defaults", () => {
     expect(((await read.json()) as { defaults: { trigger_mode: string } }).defaults.trigger_mode).toBe("open");
   });
 
-  /**
-   * ONE floor writer: this legacy address delegates to the same store function
+  /** note: ONE floor writer: this legacy address delegates to the same store function
    * the defaults face above uses, so the two cannot drift — and the change is
    * still ledgered.
    */

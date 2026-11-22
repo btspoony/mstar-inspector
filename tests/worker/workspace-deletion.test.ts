@@ -1,5 +1,4 @@
-/**
- * Workspace deletion — `POST /dashboard/<ref>/api/workspace/delete`, owner only.
+/** note: Workspace deletion — `POST /dashboard/<ref>/api/workspace/delete`, owner only.
  *
  * Deletion is a SOFT retire: the `workspaces` row is never hard-deleted, only
  * `deleted_at` is stamped; every membership is dropped and every pending invite
@@ -19,7 +18,7 @@ import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
-/** base64 of exactly 32 bytes — the secretbox master-key requirement. */
+/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 const OWNER_REFUSAL = "Only the workspace owner can delete it.";
 
@@ -29,7 +28,7 @@ function envFor(db: TestD1): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
-    // `saas`: the free slot this file's creation cases assert binds that mode
+    // note: `saas`: the free slot this file's creation cases assert binds that mode
     // only (self-hosted resolves every workspace to `unlimited`).
     DEPLOYMENT_MODE: "saas",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
@@ -38,7 +37,7 @@ function envFor(db: TestD1): Env {
   } as unknown as Env;
 }
 
-/** A signed-in login sending a request through the real worker mount. */
+/** note: A signed-in login sending a request through the real worker mount. */
 async function request(
   db: TestD1,
   path: string,
@@ -104,7 +103,7 @@ function seedPendingInvite(db: TestD1, workspaceId: string, login: string): void
   );
 }
 
-/** One live App in the workspace, so the settings face has something to serve. */
+/** why: One live App in the workspace, so the settings face has something to serve. */
 function seedApp(db: TestD1, workspaceId: string): void {
   const now = new Date().toISOString();
   seed(
@@ -118,7 +117,7 @@ function seedApp(db: TestD1, workspaceId: string): void {
     now,
   );
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-acme', ?)", workspaceId);
-  // Every bot owns one target — the settings face's review configuration.
+  // note: Every bot owns one target — the settings face's review configuration.
   seed(
     db,
     `INSERT INTO review_targets
@@ -130,7 +129,7 @@ function seedApp(db: TestD1, workspaceId: string): void {
   );
 }
 
-/** The live workspace 0026 seeds (`default`) plus the role matrix. */
+/** note: The live workspace 0026 seeds (`default`) plus the role matrix. */
 function deletionFixture() {
   const db = createMigratedTestD1();
   const owner = seedUser(db, "dana");
@@ -147,7 +146,7 @@ function deletionFixture() {
 const DELETE_PATH = "/dashboard/default/api/workspace/delete";
 
 function count(db: TestD1, sql: string, ...params: Array<string | number>): number {
-  // bun:sqlite returns `unknown`; the COUNT projection is this query's shape.
+  // note: bun:sqlite returns `unknown`; the COUNT projection is this query's shape.
   const row = db.raw.prepare(sql).get(...params) as { n: number } | null;
   return row?.n ?? 0;
 }
@@ -186,14 +185,14 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ deleted: true, next: "/dashboard" });
-    // Soft delete: the row survives, only its `deleted_at` stamp is new.
+    // invariant: Soft delete: the row survives, only its `deleted_at` stamp is new.
     expect(count(db, "SELECT COUNT(*) AS n FROM workspaces WHERE id = 'default'")).toBe(1);
     expect(deletedAtOf(db)).not.toBeNull();
     expect(
       count(db, "SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = 'default'"),
     ).toBe(0);
     expect(inviteStatuses(db)).toEqual([{ status: "revoked" }]);
-    // A retired tenant must not leave an `active` plan row behind.
+    // invariant: A retired tenant must not leave an `active` plan row behind.
     expect(subscriptionStatuses(db)).toEqual([{ status: "canceled" }]);
   });
 
@@ -204,7 +203,7 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
       "/dashboard/default/api/members",
       "/dashboard/default/api/apps/4711/settings",
     ];
-    // Live tenant: the same paths answer (they do not 404 on their own).
+    // note: Live tenant: the same paths answer (they do not 404 on their own).
     for (const path of paths) {
       expect((await request(db, path, "dana")).status, `before ${path}`).not.toBe(404);
     }
@@ -215,7 +214,7 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
       const res = await request(db, path, "dana");
       expect(res.status, path).toBe(404);
     }
-    // The owner keeps a session but loses the tenant: the delete face is gone
+    // note: The owner keeps a session but loses the tenant: the delete face is gone
     // with it, so a replayed request can never resolve the workspace again.
     const replay = await request(db, DELETE_PATH, "dana", { method: "POST" });
     expect(replay.status).toBe(404);
@@ -223,7 +222,7 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
 
   test("the owner's free slot is free again, so a new workspace can be created", async () => {
     const { db } = deletionFixture();
-    // The slot is spent while the workspace is live; the delete is what frees it.
+    // note: The slot is spent while the workspace is live; the delete is what frees it.
     const before = await request(db, "/dashboard/api/workspaces", "dana", {
       method: "POST",
       body: { name: "Before" },
@@ -246,12 +245,12 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
   test("a non-owner is refused and nothing changes", async () => {
     const { db } = deletionFixture();
 
-    // An admin passes `requireAdmin` and hits the owner-only boundary.
+    // invariant: An admin passes `requireAdmin` and hits the owner-only boundary.
     const asAdmin = await request(db, DELETE_PATH, "carol", { method: "POST" });
     expect(asAdmin.status).toBe(403);
     expect(await asAdmin.text()).toBe(OWNER_REFUSAL);
 
-    // A plain member is refused by the members-family gate before it.
+    // invariant: A plain member is refused by the members-family gate before it.
     expect((await request(db, DELETE_PATH, "mallory", { method: "POST" })).status).toBe(403);
 
     expect(deletedAtOf(db)).toBeNull();
@@ -266,7 +265,7 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
     expect((await request(db, DELETE_PATH, "dana", { method: "POST" })).status).toBe(200);
     const stampedAt = deletedAtOf(db);
 
-    // A second delete carries a LATER stamp: were the batch not guarded, the
+    // note: A second delete carries a LATER stamp: were the batch not guarded, the
     // row would be re-stamped.
     const replayed = await deleteWorkspace(db, "default", new Date(Date.now() + 60_000).toISOString());
 
