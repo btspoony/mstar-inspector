@@ -10,6 +10,11 @@
 --   and the seat's outcome. Written BEFORE any effect, cleared only once both
 --   effects are durable, so a settlement rule reading it can never discharge an
 --   incomplete ledger — neither the live one nor the scheduled recovery pass.
+-- * `review_refusal_pending` — the REFUSAL INTENT itself, written at the gate
+--   refusal's entry BEFORE any accounting effect. A refusal whose duty insert
+--   never committed is then still distinguishable from an ordinary failure, and
+--   the settlement rule can require its effects instead of treating it as
+--   nothing owed.
 -- * `review_recheck_attributions` — the attribution LINE's own fact. The line is
 --   emitted at-least-once (a crash between the log call and this insert may
 --   deliver it twice, which the sink accepts); its EXISTENCE is the correctness
@@ -27,6 +32,11 @@ CREATE TABLE review_recheck_duties (
 );
 
 CREATE TABLE review_recheck_attributions (
+  attempt_id TEXT PRIMARY KEY,
+  created_ms INTEGER NOT NULL
+);
+
+CREATE TABLE review_refusal_pending (
   attempt_id TEXT PRIMARY KEY,
   created_ms INTEGER NOT NULL
 );

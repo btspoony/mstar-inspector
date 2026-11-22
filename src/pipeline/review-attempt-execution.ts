@@ -80,9 +80,11 @@ import {
 } from "../store/review-checks";
 import {
   beginAttemptSettlement,
+  clearRefusalPending,
   clearRecheckDuty,
   deliveryKeyOf,
   readRecheckAttribution,
+  markRefusalPending,
   recordRecheckAttribution,
   recordRecheckDuty,
   readAttemptCheckKey,
@@ -4856,8 +4858,10 @@ export async function readDurablePaid(deps: Pick<ProcessDeps, "env">, attemptId:
     case "persisted":
       return { kind: "persisted", persistedAtMs: verdict.persistedAtMs };
     case "never-claimed":
+      // No row at all: this attempt cannot be paid, so no config or mint work.
+      return { kind: "unpayable" };
     case "never-paid":
-      // Nothing has been paid and the row is still releasable.
+      // Provisioned and still releasable: the paid entry may proceed.
       return { kind: "payable" };
     case "paid-failed":
     case "owned-by-cleanup":
@@ -5208,6 +5212,11 @@ async function collectPhase(
     // the closure section.
     const shipped =
       recheckInput !== undefined && !roundCancelled && (recheckDoc === null || recheckOutcome === "failed");
+    // RULING 1: a REFUSAL's intent is durable before any accounting effect (the
+    // marker, then the duty with its facts). A marker-write fault throws — fail
+    // closed — and every settlement lane reads the marker instead of inferring
+    // the obligation from a duty row that may never have committed.
+    if (required) await markRefusalPending(deps.env.DB, attemptId, Date.now());
     const emitAttribution = (): void =>
       deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
         {
@@ -5278,6 +5287,8 @@ async function collectPhase(
         await recordRecheckAttribution(deps.env.DB, attemptId, Date.now());
       }
       await clearRecheckDuty(deps.env.DB, attemptId);
+      // The refusal marker is discharged with the duty: both effects are durable.
+      if (required) await clearRefusalPending(deps.env.DB, attemptId);
     };
     if (!required) {
       // The publish lane stays BEST-EFFORT end to end: nothing here may block a
@@ -5354,7 +5365,7 @@ async function collectPhase(
       // A refused degraded attempt owes its shipped round's accounting exactly
       // like a parseable refusal: there are no main findings to reconcile, so
       // the counts are conservative by construction, and the row is REQUIRED
-      // (the refusal is not settled without it).
+      // (the refusal is not settled without it). The refusal marker comes first.
       await accountRecheckRound([], true);
       const outcome = await settleGateRefusal(deps, ref, prepared, progress, degradedRefusal);
       return { kind: "settled", outcome: { kind: outcome === "unknown" ? "unknown" : "ok" } };

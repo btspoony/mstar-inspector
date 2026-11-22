@@ -384,6 +384,32 @@ ON CONFLICT(attempt_id) DO NOTHING
 `;
 const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
 const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
+const MARK_REFUSAL_PENDING_SQL = `
+INSERT INTO review_refusal_pending (attempt_id, created_ms) VALUES (?, ?)
+ON CONFLICT(attempt_id) DO NOTHING
+`;
+const READ_REFUSAL_PENDING_SQL = `SELECT 1 AS present FROM review_refusal_pending WHERE attempt_id = ?`;
+const CLEAR_REFUSAL_PENDING_SQL = `DELETE FROM review_refusal_pending WHERE attempt_id = ?`;
+
+/**
+ * Record the refusal INTENT, before any accounting effect. Its presence — not
+ * the duty's — is what tells every settlement lane downstream that this attempt
+ * refused a review and owes its round's effects.
+ */
+export async function markRefusalPending(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
+  await db.prepare(MARK_REFUSAL_PENDING_SQL).bind(attemptId, nowMs).run();
+}
+
+/** Whether this attempt refused a review and still owes its round's accounting. */
+export async function readRefusalPending(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(READ_REFUSAL_PENDING_SQL).bind(attemptId).first<{ present: number }>();
+  return row !== null;
+}
+
+/** Discharge the refusal marker — its round's effects are durable. */
+export async function clearRefusalPending(db: D1Like, attemptId: string): Promise<void> {
+  await db.prepare(CLEAR_REFUSAL_PENDING_SQL).bind(attemptId).run();
+}
 
 /**
  * Open the round's duty: written BEFORE any effect, so a host that dies mid-way
@@ -510,22 +536,23 @@ async function settlementPlan(
   } else {
     return null;
   }
-  // The refused round's two effects come from DURABLE FACTS — the duty row says
-  // what is owed, the row and the attribution fact say what landed. The live
-  // settlement and the recovery pass share this plan, so neither can discharge
-  // an incomplete ledger, and no host's claim or timestamp can stand in for it.
-  const duty = await readRecheckDuty(db, input.attemptId);
-  if (duty !== null) {
-    if (duty.failureError === null || (await recheckRowExists(db, input.attemptId))) {
-      landed.add("recheck-row");
-    } else {
-      required.push("recheck-row");
+  // The refused round's effects come from DURABLE FACTS, and only the FAILURE
+  // lane reads them: the publication lane must never be blocked by round state
+  // (a clean review's accounting is best-effort). The refusal MARKER is what says
+  // a round is owed at all — a duty row whose insert never committed cannot hide
+  // the obligation — while the duty carries what to write and the row/fact carry
+  // what already landed. The live settlement and the recovery pass share this
+  // plan, so neither can discharge an incomplete ledger.
+  if (required.includes("failure-row") && (await readRefusalPending(db, input.attemptId))) {
+    const duty = await readRecheckDuty(db, input.attemptId);
+    // A row is owed only when the duty says one was shipped (a cancelled round or
+    // one that sent nothing owes the attribution alone).
+    if (duty !== null && duty.failureError !== null) {
+      if (await recheckRowExists(db, input.attemptId)) landed.add("recheck-row");
+      else required.push("recheck-row");
     }
-    if (await readRecheckAttribution(db, input.attemptId)) {
-      landed.add("recheck-attribution");
-    } else {
-      required.push("recheck-attribution");
-    }
+    if (await readRecheckAttribution(db, input.attemptId)) landed.add("recheck-attribution");
+    else required.push("recheck-attribution");
   }
   return { deliveryKey: handoff.deliveryKey, landed: [...landed], required };
 }

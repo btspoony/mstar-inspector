@@ -38,10 +38,13 @@ import {
   landFailureEffect,
   listCommentClaimsForRecovery,
   listHandoffsForRecovery,
+  clearRefusalPending,
   clearRecheckDuty,
   listIncompleteSettlements,
+  readRefusalPending,
   readRecheckAttribution,
   readRecheckDuty,
+  recordRecheckDuty,
   recordRecheckAttribution,
   recheckRowExists,
   listOwedSuccessors,
@@ -94,6 +97,10 @@ async function landSettlementEffects(
   detail: string,
   nowMs: number,
 ): Promise<void> {
+  // The refused round's accounting comes FIRST: its writes are not part of any
+  // claim (F6), so a fault here leaves the duty for the next pass without ever
+  // orphaning a landed claim.
+  await ensureRecheckAccounting(env, handoff, nowMs);
   // The pass that LANDS the record owns the head-wide claim; an overlapping pass
   // that lost the insert race owns nothing and must not touch it.
   let owned = false;
@@ -140,9 +147,6 @@ async function landSettlementEffects(
     });
     if (stamped === "written" || stamped === "done") landed.add("claim-stamp");
   }
-  // The refused round's accounting comes first: the settlement rule requires its
-  // row and its attribution fact, so this pass lands them before re-deciding.
-  await ensureRecheckAccounting(env, handoff, nowMs);
   await settleAttemptIfDischarged(env.DB, { attemptId: handoff.attemptId, landed: [...landed] }, nowMs);
 }
 
@@ -161,8 +165,22 @@ async function ensureRecheckAccounting(
   handoff: AttemptHandoff,
   nowMs: number,
 ): Promise<void> {
-  const duty = await readRecheckDuty(env.DB, handoff.attemptId);
-  if (duty === null) return;
+  // Only a REFUSAL owes a round: the marker is the intent, the duty carries what
+  // to write, and an ordinary failure has neither.
+  if (!(await readRefusalPending(env.DB, handoff.attemptId))) return;
+  let duty = await readRecheckDuty(env.DB, handoff.attemptId);
+  if (duty === null) {
+    // The marker is all that survived: register the duty FIRST (so the row and
+    // the main failure row this pass writes can never exist without it), owing
+    // the attribution alone — the row's content was never recorded.
+    duty = {
+      attemptId: handoff.attemptId,
+      headSha: handoff.payload.head_sha ?? "",
+      failureError: null,
+      outcome: "absent",
+    };
+    await recordRecheckDuty(env.DB, duty, nowMs);
+  }
   if (duty.failureError !== null && !(await recheckRowExists(env.DB, duty.attemptId))) {
     await settlementFailureRowStatement(
       env.DB,
@@ -199,9 +217,11 @@ async function ensureRecheckAccounting(
     await recordRecheckAttribution(env.DB, duty.attemptId, nowMs);
   }
   await clearRecheckDuty(env.DB, duty.attemptId);
+  await clearRefusalPending(env.DB, duty.attemptId);
 }
 
 /**
+ * Deliver what the route owes./**
  * Deliver what the route owes. Per-row faults are isolated: one bad row never
  * stops the pass, and the row stays owed for the next one.
  */

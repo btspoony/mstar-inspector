@@ -3044,12 +3044,17 @@ describe("the SEC-01 publish gate", () => {
     deps.env = { ...deps.env, DB: faulting as never };
 
     const collected = await collectAttempt(deps, ref, prepared);
-    expect(collected.kind).toBe("collected");
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
     expect(h.logLines.some((line) => line.msg.includes("continuing to publish"))).toBe(true);
     const staged = db.raw
       .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
       .get(SHA) as { n: number };
     expect(staged.n).toBe(1);
+    // And it PUBLISHES: the accounting store never gates the publication lane.
+    const { deps: publishing } = await makeDeps({ db });
+    expect(await publishAttempt(publishing, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
+    expect(h.logLines.some((line) => line.msg.includes("publication-unknown"))).toBe(false);
   });
 
   test("a degraded warning carries the redacted diagnostic, not the short encoded form", async () => {
@@ -3068,6 +3073,120 @@ describe("the SEC-01 publish gate", () => {
     expect(warning).toBeDefined();
     expect(warning!.msg).not.toContain(shortEncoded);
     expect(warning!.msg).toContain("[REDACTED]");
+  });
+
+  test("a duty-registration fault leaves the refusal pending until recovery finishes it", async () => {
+    // note: Rulings 1+2 — the refusal MARKER is written first, so a duty that never
+    // commits cannot make the refusal look like an ordinary failure: the settlement
+    // stays open and the recovery pass discharges it.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { db, resumed, ref, steps } = await paidWorkflowThenResumed(echo, paidKey, shippedFailedRound);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(ref.payload),
+      attemptId: ATTEMPT_ID,
+      payload: ref.payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+    const faulting = new Proxy(db as object, {
+      get(target, prop) {
+        if (prop !== "prepare") return Reflect.get(target, prop);
+        return (sql: string) => {
+          if (sql.includes("INSERT INTO review_recheck_duties")) throw new Error("duty registration lost");
+          return (target as { prepare: (value: string) => unknown }).prepare(sql);
+        };
+      },
+    });
+    resumed.env = { ...resumed.env, DB: faulting as never };
+    await expect(runReviewAttemptWorkflow(resumed, ref, stepStore(steps), async () => {})).rejects.toThrow(
+      "duty registration lost",
+    );
+
+    // Marker present, duty absent, nothing settled and no row.
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_refusal_pending WHERE attempt_id = ?").get(ATTEMPT_ID)).toMatchObject({ n: 1 });
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_recheck_duties WHERE attempt_id = ?").get(ATTEMPT_ID)).toMatchObject({ n: 0 });
+    expect(recheckRows(db)).toHaveLength(0);
+    const unsettled = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(unsettled.settled_ms).toBeNull();
+
+    // Recovery registers the duty, emits the attribution and discharges.
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE attempt_id = ?")
+      .run(Date.now() - 60 * 60_000, ATTEMPT_ID);
+    await reconcileReviewRoute(
+      {
+        DB: db as never,
+        REVIEW_QUEUE: { send: async () => {} } as never,
+        IDEMPOTENCY_KV: { get: async () => null, put: async () => {}, delete: async () => {} } as never,
+        log: { info: (fields: Record<string, unknown>, msg: string) => h.testLog.info(fields as never, msg) },
+      },
+      Date.now(),
+    );
+    expect(h.logLines.filter((line) => line.msg.includes("replayed by the route recovery pass"))).toHaveLength(1);
+    const settled = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(settled.settled_ms).not.toBeNull();
+    // Both markers are discharged.
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_refusal_pending WHERE attempt_id = ?").get(ATTEMPT_ID)).toMatchObject({ n: 0 });
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_recheck_duties WHERE attempt_id = ?").get(ATTEMPT_ID)).toMatchObject({ n: 0 });
+  });
+
+  test("a recovery pass with no log sink leaves the claim unstamped", async () => {
+    // note: Ruling 6 — the round's writes come BEFORE any claim, so a fault there
+    // never orphans a stamped claim.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { db, resumed, ref, steps } = await paidWorkflowThenResumed(echo, paidKey, shippedFailedRound);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(ref.payload),
+      attemptId: ATTEMPT_ID,
+      payload: ref.payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+    const healthyStore = resumed.failureStore;
+    const faulty = failureInsertFault(healthyStore, "recheck", "fail", Number.POSITIVE_INFINITY);
+    resumed.failureStore = faulty.store;
+    await expect(runReviewAttemptWorkflow(resumed, ref, stepStore(steps), async () => {})).rejects.toThrow();
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE attempt_id = ?")
+      .run(Date.now() - 60 * 60_000, ATTEMPT_ID);
+    const stampsBefore = h.kvPuts.filter((put) => put.key.startsWith("idem:")).length;
+
+    await reconcileReviewRoute(
+      {
+        DB: db as never,
+        REVIEW_QUEUE: { send: async () => {} } as never,
+        IDEMPOTENCY_KV: { get: async () => null, put: async () => {}, delete: async () => {} } as never,
+      },
+      Date.now(),
+    );
+
+    // The round could not be finished, so the pass claimed and settled nothing.
+    expect(h.kvPuts.filter((put) => put.key.startsWith("idem:"))).toHaveLength(stampsBefore);
+    const handoff = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(handoff.settled_ms).toBeNull();
+  });
+
+  test("a never-claimed replay does no config or mint work", async () => {
+    // note: Ruling 7 — with no launch row at all the attempt cannot pay, so the
+    // phase reports it without resolving a config or minting a token.
+    const { deps } = await makeDeps();
+    deps.runnerConfigs.clear();
+    const ref = makeRef(makePayload());
+    const mintsBefore = h.commenterCalls.filter((call) => call.op === "token").length;
+
+    await expect(reviewAttempt(deps, ref, {} as PreparedAttempt)).rejects.toThrow(/non-payable/);
+    expect(h.commenterCalls.filter((call) => call.op === "token")).toHaveLength(mintsBefore);
+    expect(deps.runnerConfigs.size).toBe(0);
   });
 
   test("a resumed collect opens the paid session's sealed set and refuses the encoded echo", async () => {
