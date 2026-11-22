@@ -20,6 +20,7 @@
  * Everything runs against the real migration SQL (bun:sqlite double); no
  * GitHub, Cloudflare or Sandbox request is made (spec §7.13).
  */
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import {
   TERMINAL_FAILURE_TEXT,
@@ -491,7 +492,7 @@ describe("the category is frozen with the intent (migration 0087)", () => {
     // note: The attempt's own deadline ran out with nothing frozen, so its execution
     // lease is dead: the recovery lease is the only way to record what we know.
     const later = DEADLINE + 1;
-    const recovery = await claimCheckRecovery(db, attemptId, "recovery:fixture", later);
+    const recovery = await claimCheckRecovery(db, attemptId, "recovery:fixture", later, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(recovery).not.toBeNull();
     expect(
       await setCheckDesired(
@@ -515,7 +516,7 @@ describe("the category is frozen with the intent (migration 0087)", () => {
     expect(row.terminalFailureStatus).toBe("cap-stop");
     // note: Immediately due: a frozen intent needs no due time, so the minute lane
     // can deliver the approved wording instead of concluding an unknown failure.
-    const due = await listCheckReconcileBatch(db, later);
+    const due = await listCheckReconcileBatch(db, later, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit);
     expect(due.map((attempt) => attempt.identity.attemptId)).toContain(attemptId);
   });
 });

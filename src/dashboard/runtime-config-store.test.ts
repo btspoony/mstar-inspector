@@ -36,6 +36,7 @@
  * `REVIEW_LEVELS` reads `"default"` with `degraded: true` and never throws, and
  * a write outside the vocabulary is refused with no row and no audit row.
  */
+import { RECONCILE_DEFAULTS, RECONCILE_LIMITS, RECONCILE_RULES } from "../contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import {
   CHECK_TERMINALIZE_DEFAULT,
@@ -63,6 +64,8 @@ import {
   WORKSPACE_CONCURRENCY_MAX,
   type EffectiveConcurrency,
   getCheckBudgets,
+  getReconcileSettings,
+  setReconcileSettings,
   getCommentClaimSettings,
   getEffectiveConcurrency,
   getRecheckAssignmentMaxBytes,
@@ -1027,5 +1030,90 @@ describe("workspace check_min_score default", () => {
       degraded: true,
       reason: "read-failed",
     });
+  });
+});
+
+describe("reconciler settings snapshot", () => {
+  test("timeout minima round-trip, smaller writes fail, and stored smaller values degrade", async () => {
+    const db = createMigratedTestD1();
+    const fields = ["lifecycleRunBudgetMs", "lifecyclePerRequestMs", "checkRunBudgetMs", "checkPerRequestMs"] as const;
+    const values = { ...RECONCILE_DEFAULTS };
+    for (const field of fields) values[field] = RECONCILE_LIMITS[field].min;
+    await setReconcileSettings(db, values, "operator");
+    expect(await getReconcileSettings(db)).toEqual({ values, issue: null });
+    for (const field of fields) {
+      const lower = values[field] - 1;
+      await expect(setReconcileSettings(db, { ...values, [field]: lower }, "operator")).rejects.toMatchObject({ reason: "invalid_value" });
+      expect(await getReconcileSettings(db)).toEqual({ values, issue: null });
+      const key = RECONCILE_RULES[field].key;
+      db.raw.prepare("UPDATE review_runtime_settings SET value=? WHERE key=?").run(String(lower), key);
+      expect(await getReconcileSettings(db)).toEqual({ values: RECONCILE_DEFAULTS, issue: { kind: "invalid_rows", keys: expect.arrayContaining([key]) } });
+      db.raw.prepare("UPDATE review_runtime_settings SET value=? WHERE key=?").run(String(values[field]), key);
+    }
+    db.raw.close();
+  });
+
+  test("publication allowance leaves thread admission headroom on writes and reads", async () => {
+    const db = createMigratedTestD1();
+    const invalid = { ...RECONCILE_DEFAULTS, lifecycleMaxRequests: 80, lifecyclePublicationLaneMaxRequests: 70, lifecycleThreadOperationRequests: 15 };
+    await expect(setReconcileSettings(db, invalid, "operator")).rejects.toMatchObject({ reason: "invalid_value" });
+    expect(await getReconcileSettings(db)).toEqual({ values: RECONCILE_DEFAULTS, issue: null });
+    const valid = { ...invalid, lifecyclePublicationLaneMaxRequests: 65 };
+    await setReconcileSettings(db, valid, "operator");
+    expect(await getReconcileSettings(db)).toEqual({ values: valid, issue: null });
+    db.raw.prepare("UPDATE review_runtime_settings SET value='70' WHERE key='platform.reconcile.lifecycle.publication_lane_max_requests'").run();
+    expect(await getReconcileSettings(db)).toEqual({
+      values: RECONCILE_DEFAULTS,
+      issue: { kind: "invalid_rows", keys: ["platform.reconcile.lifecycle.publication_lane_max_requests", "platform.reconcile.lifecycle.thread_operation_requests"] },
+    });
+    db.raw.close();
+  });
+
+  test("previously accepted one-request budgets now fall back with key-only diagnostics", async () => {
+    const db = createMigratedTestD1();
+    for (const key of [
+      "platform.reconcile.check.max_requests",
+      "platform.reconcile.check.row_max_requests",
+      "platform.reconcile.lifecycle.max_requests",
+      "platform.reconcile.lifecycle.thread_operation_requests",
+      "platform.reconcile.lifecycle.publication_lane_max_requests",
+    ]) {
+      db.raw.prepare("INSERT INTO review_runtime_settings (key,value,updated_at) VALUES (?,'1','now')").run(key);
+      expect(await getReconcileSettings(db)).toEqual({
+        values: RECONCILE_DEFAULTS, issue: { kind: "invalid_rows", keys: [key] },
+      });
+      db.raw.prepare("DELETE FROM review_runtime_settings WHERE key=?").run(key);
+    }
+    db.raw.close();
+  });
+
+  test("absent rows use unchanged defaults and valid overrides round-trip", async () => {
+    const db = createMigratedTestD1();
+    expect(await getReconcileSettings(db)).toEqual({ values: RECONCILE_DEFAULTS, issue: null });
+    const values = { ...RECONCILE_DEFAULTS, checkSelectLimit: 1, lifecycleMaxAttempts: 2 };
+    await setReconcileSettings(db, values, "operator");
+    expect(await getReconcileSettings(db)).toEqual({ values, issue: null });
+    db.raw.close();
+  });
+
+  test("invalid rows and relations revert the entire snapshot with key-only diagnostics", async () => {
+    const db = createMigratedTestD1();
+    const set = (key: string, value: string) => db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value, "now");
+    await setReconcileSettings(db, { ...RECONCILE_DEFAULTS, checkSelectLimit: 1 }, "operator");
+    set("platform.reconcile.lifecycle.max_attempts", "sensitive-invalid-value");
+    expect(await getReconcileSettings(db)).toEqual({
+      values: RECONCILE_DEFAULTS, issue: { kind: "invalid_rows", keys: ["platform.reconcile.lifecycle.max_attempts"] },
+    });
+    set("platform.reconcile.lifecycle.max_attempts", "2");
+    set("platform.reconcile.lifecycle.max_requests", "1");
+    const read = await getReconcileSettings(db);
+    expect(read.values).toEqual(RECONCILE_DEFAULTS);
+    expect(read.issue?.kind).toBe("invalid_rows");
+    db.raw.close();
+  });
+
+  test("read failure is distinguished without exposing the error or stored values", async () => {
+    const db = { prepare: () => { throw new Error("sensitive database error"); } } as unknown as DashboardD1;
+    expect(await getReconcileSettings(db)).toEqual({ values: RECONCILE_DEFAULTS, issue: { kind: "read_failed" } });
   });
 });

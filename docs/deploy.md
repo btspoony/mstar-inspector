@@ -2778,6 +2778,52 @@ behave.
   stages, so the tab's number and the history under it agree. The pager is the
   only reader that adds `quota`, so extending the paging set never hides a row
   from the dashboard. The stage lists are written once.
+- Configure **Recovery reconcilers** at `/_internal_admin/runtime`. The
+  operator-only `PATCH /_internal_admin/api/runtime` accepts
+  `{ "reconcile": { ... } }` with every integer field below. Saves and the
+  `platform.reconcile.set` audit entry are atomic. Each reconciler reads one
+  settings snapshot at the start of its run. Keys use
+  `platform.reconcile.lifecycle.*` or `platform.reconcile.check.*`, with the
+  camel-case API field suffix converted to snake case.
+
+  | API field | Absent-row default | Accepted range |
+  |---|---:|---:|
+  | `lifecycleMaxRequests` | 80 | 14–100 |
+  | `lifecycleRunBudgetMs` | 45,000 | 7,000–60,000 |
+  | `lifecyclePerRequestMs` | 5,000 | 500–15,000 |
+  | `lifecycleThreadOperationRequests` | 15 | 9–100 |
+  | `lifecyclePublicationLaneMaxRequests` | 40 | 5–100 |
+  | `lifecycleSelectLimit` | 10 | 1–100 |
+  | `lifecycleMaxAttempts` | 5 | 1–10 |
+  | `checkMaxRequests` | 100 | 6–100 |
+  | `checkRunBudgetMs` | 60,000 | 3,000–60,000 |
+  | `checkPerRequestMs` | 5,000 | 500–15,000 |
+  | `checkRowMaxRequests` | 6 | 6–100 |
+  | `checkSelectLimit` | 25 | 1–100 |
+  | `checkMaxAttempts` | 5 | 1–10 |
+
+  Request minima include cold credential resolution and a single-page remote
+  operation: Check adoption/create/fetch/update, publication plan/send, or
+  thread/issue captures and resolution. The thread allowance includes its own
+  cold credentials when publication work used a different App pair. Pagination
+  can require a larger budget.
+  Per-request timeouts share the existing 500 ms terminal Check-update floor.
+  Run minima allow that floor for each minimum-budget request: 14 × 500 ms
+  for lifecycle and 6 × 500 ms for Checks. These are admission floors, not
+  latency guarantees; slower responses and pagination can require larger budgets.
+  Per-request timeouts must not exceed their run budget. Publication-lane
+  plus thread-operation request allowances must not exceed lifecycle total
+  requests, leaving room to admit a thread after the publication lane;
+  row requests must not exceed Check total requests. A read failure,
+  invalid row or invalid relation uses all documented defaults and continues
+  recovery. The `ops_lifecycle_reconcile_settings_degraded` /
+  `ops_check_reconcile_settings_degraded` warnings distinguish `read_failed`
+  from `invalid_rows`; the latter lists only key names, never stored values.
+  Retry the read in Admin → Runtime after a read fault. For invalid rows,
+  enter and save all settings in the same form. Work that exhausted its
+  attempts remains available through the existing operator recovery controls;
+  increasing the attempt setting also makes pending due work eligible again.
+
 - Configure **Scheduled failure sweep** at `/_internal_admin/runtime`. A save
   updates the six `platform.sweep.*` rows in `review_runtime_settings` and
   applies on the next sweep. The operator-only `PATCH /_internal_admin/api/runtime`
