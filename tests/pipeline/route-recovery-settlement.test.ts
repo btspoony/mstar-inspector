@@ -931,13 +931,16 @@ describe("a persisted launch that never staged a publication", () => {
     expect(unpublishedSettlement(db).settled_ms).toBeNull();
     expect(unpublishedSettlement(db).settled_effects).toBeNull();
 
-    // note: The healthy retry lands both, once — and a repeated pass adds nothing.
+    // note: The healthy retry lands both, once — and a repeated pass changes nothing:
+    // the completed settlement and the effects it records stay exactly as written.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
     expect(failureRows(db)).toHaveLength(1);
-    expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
+    const completed = unpublishedSettlement(db);
+    expect(completed.settled_ms).toEqual(expect.any(Number));
 
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 120_000);
     expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db)).toEqual(completed);
   });
 
   test("a staged publication keeps the outcome with the publication lane", async () => {
