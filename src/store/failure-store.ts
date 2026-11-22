@@ -50,7 +50,7 @@ import {
 import type { D1Like } from "./types";
 
 /**
- * The producer-side stage vocabulary (AL-1 + AL-6 extension, plus `usage` —
+ * why: The producer-side stage vocabulary (AL-1 + AL-6 extension, plus `usage` —
  * frozen): `parse` = the runner's stdout failed parseReviewOutput validation
  * (deterministic model-output failure — degrade + ack path); `runner` =
  * the in-image review run itself failed (non-zero exit / exec error);
@@ -83,14 +83,14 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "runner",
   "sandbox",
   "pipeline",
-  // A delivery refused before execution (the plan lacks the shared bot): no
+  // note: A delivery refused before execution (the plan lacks the shared bot): no
   // review ran, so the row stays paged AND attributed — it is in neither
   // exclusion list.
   SHARED_BOT_ENTITLEMENT_STAGE,
-  // A delivery refused at enqueue because the month's RP ceiling is spent: a
+  // note: A delivery refused at enqueue because the month's RP ceiling is spent: a
   // real failure on the dashboard, kept out of the global ops alert only.
   QUOTA_STAGE,
-  // A delivery the maintenance window could not defer: in neither exclusion
+  // note: A delivery the maintenance window could not defer: in neither exclusion
   // list, and kept out of the sweep's infrastructure total by its own
   // predicate — its separate existence signal has its own lane.
   MAINTENANCE_DEFERRED_STAGE,
@@ -172,7 +172,7 @@ export type AdmissionDropCounts = Record<AdmissionDropReason, number>;
 
 export type FailureStore = {
   /**
-   * Append one failure event row. Fail-loud: an off-vocabulary stage throws
+   * note: Append one failure event row. Fail-loud: an off-vocabulary stage throws
    * BEFORE any row is written (producer-side enforcement, 0009 precedent);
    * D1 errors propagate. Callers wanting best-effort semantics wrap this in
    * try/catch themselves (the consumer does — an insert failure must never
@@ -180,13 +180,13 @@ export type FailureStore = {
    */
   record(input: ReviewFailureInput): Promise<void>;
   /**
-   * Newest-first read face (the ops/test window scan). `created_at` has
+   * note: Newest-first read face (the ops/test window scan). `created_at` has
    * second precision (`datetime('now')`), so rowid breaks ties inside one
    * second — the order is total and deterministic.
    */
   listRecent(limit?: number): Promise<ReviewFailureRow[]>;
   /**
-   * Terminal admission drops in the trailing 24h, grouped by the reason token
+   * why: Terminal admission drops in the trailing 24h, grouped by the reason token
    * of the drop row's prefix. One grouped READ over the rows the pipeline
    * already writes — no new table, writer or stage; every reason is present,
    * absent ones as 0. The `stage = 'pipeline'` + `created_at` window is served
@@ -204,7 +204,7 @@ export type FailureStore = {
  */
 export type FailureStoreWithCounts = FailureStore & {
   /**
-   * GitHub secondary-rate-limit rejections in the trailing 24h, counted by the
+   * note: GitHub secondary-rate-limit rejections in the trailing 24h, counted by the
    * `error` prefix every such row starts with. No stage predicate: the
    * `rate-limit` stage's rows ARE causes of this metric, and the primary-limit
    * prefix is different text, so a primary limit never inflates this number.
@@ -212,11 +212,11 @@ export type FailureStoreWithCounts = FailureStore & {
   countGithubRateLimited24h(): Promise<number>;
 };
 
-/** Default page size for listRecent when the caller does not bound it. */
+/** note: Default page size for listRecent when the caller does not bound it. */
 const LIST_RECENT_DEFAULT_LIMIT = 50;
 
 /**
- * Matches both `review dropped after <n> refused retries: <reason> (…)` and
+ * why: Matches both `review dropped after <n> refused retries: <reason> (…)` and
  * `review dropped: comment claim restore failed: <detail>; admission refused: <reason> (…)`.
  * `%` covers the retry count or restore detail; the open paren ends the reason
  * token. New drop formats in `handleGuardHeld` must extend these LIKE predicates.
@@ -242,7 +242,7 @@ WHERE stage = 'pipeline'
 GROUP BY reason`;
 
 /**
- * The secondary-rate-limit count over the same trailing 24h window as the
+ * note: The secondary-rate-limit count over the same trailing 24h window as the
  * admission drops. The prefix is a bound value (it is a compile-time literal
  * with no wildcard of its own), so the query text stays constant.
  */

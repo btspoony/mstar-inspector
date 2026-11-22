@@ -1,5 +1,5 @@
 /**
- * Quota profile leaf (migration 0063) — the read side of the versioned quota
+ * why: Quota profile leaf (migration 0063) — the read side of the versioned quota
  * configuration: which profile judges an instant, which profile judges a
  * calendar month, and what one started review costs in RP.
  *
@@ -28,14 +28,14 @@ export type QuotaSource = "byok" | "shared";
 export type QuotaProfile = {
   id: string;
   version: number;
-  /** ISO-8601 UTC: the instant the operator chose for this profile to start. */
+  /** note: ISO-8601 UTC: the instant the operator chose for this profile to start. */
   effectiveFrom: string;
   base: Record<ReviewLevel, number>;
   source: Record<QuotaSource, number>;
   rpPerCredit: number;
 };
 
-/** The read's row shape: SQLite column names, weight columns named per level. */
+/** note: The read's row shape: SQLite column names, weight columns named per level. */
 type QuotaProfileRow = {
   id: string;
   version: number;
@@ -49,7 +49,7 @@ type QuotaProfileRow = {
 };
 
 /**
- * The stored row → the profile. `base_standard` is the `default` level's
+ * why: The stored row → the profile. `base_standard` is the `default` level's
  * weight: the level enum keeps its `default` member while every tenant-facing
  * name says Standard. The mapping is therefore spread over three sites and none
  * of them is local to this file — `REVIEW_LEVELS` in
@@ -205,7 +205,7 @@ export function quotaStartsOn(effectiveFrom: string): string {
 /** One stored profile with its operator-only notes and its per-plan ceilings. */
 export type QuotaProfileVersion = QuotaProfile & {
   notes: string | null;
-  /** This version's ceiling per plan id; `null` means that plan is unlimited. */
+  /** note: This version's ceiling per plan id; `null` means that plan is unlimited. */
   monthlyRp: Record<string, number | null>;
 };
 

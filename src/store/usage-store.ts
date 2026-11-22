@@ -1,5 +1,5 @@
 /**
- * Usage ledger leaf (migration 0031) — the single write authority for
+ * why: Usage ledger leaf (migration 0031) — the single write authority for
  * `usage_events`. One row per STARTED execution of a review; `seq` is the
  * attempt number within one `review_id`, minted by the ledger itself so
  * concurrent writers cannot agree on the same value.
@@ -17,7 +17,7 @@
 import type { D1Like } from "./types";
 
 /**
- * Which key source paid for a started execution. The same vocabulary as
+ * note: Which key source paid for a started execution. The same vocabulary as
  * `QuotaSource` in `./quota-store` (this leaf declares its own copy so the
  * ledger keeps its "type imports from ./types only" boundary).
  */
@@ -27,7 +27,7 @@ export type UsageSource = "byok" | "shared";
 export type UsageEventInput = {
   reviewId: string;
   /**
-   * One per STARTED execution attempt, minted by the producer before it writes
+   * note: One per STARTED execution attempt, minted by the producer before it writes
    * (UNIQUE in the table). It is the identity a failed insert is read back by:
    * earlier attempts for the same review must never answer for this one.
    */
@@ -35,7 +35,7 @@ export type UsageEventInput = {
   workspaceId: string;
   occurredAt: string;
   /**
-   * The RP this started execution costs, from `rpFor(level, source, profile)`.
+   * note: The RP this started execution costs, from `rpFor(level, source, profile)`.
    * `0` is reserved for rows written before migration 0064 metered the ledger:
    * `rpFor` is >= 1 by construction, so a metered row can never read as 0.
    */
@@ -69,14 +69,14 @@ export async function countUsageEventsSince(
 /** One workspace's month in RP, with the source split the card shows. */
 export type MonthlyRpUsage = {
   workspaceId: string;
-  /** `SUM(rp)` — the ceiling's own number, never the parts re-added. */
+  /** note: `SUM(rp)` — the ceiling's own number, never the parts re-added. */
   total: number;
   sharedRp: number;
   byokRp: number;
 };
 
 /**
- * THE month aggregation over `usage_events.rp`: one row per workspace that
+ * why: THE month aggregation over `usage_events.rp`: one row per workspace that
  * spent RP in the half-open window, with the `source` split of the same rows.
  * Both faces bind this one expression — the tenant face through
  * {@link readMonthlyRp}, the operator preview through

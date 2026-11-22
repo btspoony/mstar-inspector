@@ -1,5 +1,5 @@
 /**
- * Review Check attempt registry (spec review-lifecycle §7.1
+ * why: Review Check attempt registry (spec review-lifecycle §7.1
  * second block + §7.9). One row per Check ATTEMPT; this module is the only
  * place attempt identity, lease fencing and the desired/observed split live.
  *
@@ -52,7 +52,7 @@ import { suspensionCredentialOf, type Lease, type SuspensionKind } from "./findi
 import type { D1Like, ReviewCheckRow } from "./types";
 
 // ---------------------------------------------------------------------------
-// Suspension encoding (spec §7.6 — one grammar, shared with the M8 lane)
+// note: Suspension encoding (spec §7.6 — one grammar, shared with the M8 lane)
 // ---------------------------------------------------------------------------
 
 /**
@@ -116,7 +116,7 @@ export type { Scope } from "../../packages/shared/src/recheck-wire";
 export type { Lease, PublicationProof } from "./finding-lifecycle";
 
 // ---------------------------------------------------------------------------
-// §7.9 domain shapes (single CODE copy; spec §7.9 is the normative copy)
+// note: §7.9 domain shapes (single CODE copy; spec §7.9 is the normative copy)
 // ---------------------------------------------------------------------------
 
 export type CheckDesired = "in_progress" | "success" | "neutral" | "failure";
@@ -139,7 +139,7 @@ export type CheckAttempt = {
   identity: CheckIdentity;
   lease: Lease | null;
   checkRunId: number | null;
-  /** The proof link the row already carries — the selector's copy of it. */
+  /** note: The proof link the row already carries — the selector's copy of it. */
   publicationId: string | null;
   createState: CheckCreateState;
   desired: CheckDesired;
@@ -149,7 +149,7 @@ export type CheckAttempt = {
   attempts: number;
   terminalMs: number | null;
   /**
-   * When this attempt was ADMITTED. The proof wait uses it to attribute a
+   * note: When this attempt was ADMITTED. The proof wait uses it to attribute a
    * publication: only a journal row staged at or after this instant can be the
    * publication this attempt set in motion.
    */
@@ -196,7 +196,7 @@ export type ClaimAttemptResult =
 export type CheckClock = number;
 
 // ---------------------------------------------------------------------------
-// Constants (spec §7.9 / §7.11.2)
+// note: Constants (spec §7.9 / §7.11.2)
 // ---------------------------------------------------------------------------
 
 /** GitHub run name (spec §7.9: exactly this string; never per-attempt unique). */
@@ -272,14 +272,14 @@ export const CHECK_SUMMARY_MAX_CHARS = 2_000;
  */
 export const CHECK_TITLE_MAX_CHARS = 120;
 
-/** Canonical lowercase UUID syntax — the only Worker-generated ids (spec §7.0). */
+/** note: Canonical lowercase UUID syntax — the only Worker-generated ids (spec §7.0). */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A nonterminal attempt is one that has not locally completed or given up. */
+/** note: A nonterminal attempt is one that has not locally completed or given up. */
 const NONTERMINAL_WHERE = "terminal_ms IS NULL";
 
 // ---------------------------------------------------------------------------
-// Identity helpers (spec §7.9)
+// note: Identity helpers (spec §7.9)
 // ---------------------------------------------------------------------------
 
 /**
@@ -312,11 +312,11 @@ export function attemptKey(input: {
   ]);
 }
 
-/** The `MAX(generation)+1` subquery for a key (bound once per use). */
+/** note: The `MAX(generation)+1` subquery for a key (bound once per use). */
 const NEXT_GENERATION_SQL = `(SELECT COALESCE(MAX(generation), 0) + 1 FROM review_checks m WHERE m.attempt_key = ?)`;
 
 /**
- * The SQL spelling of `externalIdFor` for the row being inserted, so the
+ * note: The SQL spelling of `externalIdFor` for the row being inserted, so the
  * immutable handle is stamped by the SAME statement as the insert and no
  * untagged window opens between claim and reread. The generation subquery is
  * evaluated twice inside one statement, so both see the identical MAX+1.
@@ -343,7 +343,7 @@ export function externalIdFor(attemptId: string, generation: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Row mapping
+// note: Row mapping
 // ---------------------------------------------------------------------------
 
 function attemptOf(row: ReviewCheckRow): CheckAttempt {
@@ -385,7 +385,7 @@ export function checkReason(text: string): string {
 }
 
 /**
- * Flatten and bound frozen terminal text before it is persisted (spec §7.9).
+ * note: Flatten and bound frozen terminal text before it is persisted (spec §7.9).
  * A Check title/summary is PUBLIC: collapsing newlines/tabs and dropping
  * control characters keeps an injected multi-line payload from restructuring
  * the rendered Check, and the cut happens on the already-flattened string so
@@ -401,14 +401,14 @@ function boundText(text: string, max: number): string {
   return flat.length <= max ? flat : flat.slice(0, max);
 }
 
-/** Never persist an empty title: GitHub renders it verbatim above the summary. */
+/** note: Never persist an empty title: GitHub renders it verbatim above the summary. */
 function frozenTitle(title: string): string {
   const bounded = boundText(title, CHECK_TITLE_MAX_CHARS);
   return bounded.length === 0 ? CHECK_NAME : bounded;
 }
 
 /**
- * The one fenced-mutation executor behind every post-claim write: the exact
+ * why: The one fenced-mutation executor behind every post-claim write: the exact
  * lease triple from the caller's `Lease`, plus `terminal_ms IS NULL` so
  * finished history is never rewritten. An optional transaction clock adds the
  * §7.9 `lease_until_ms > now` condition and stamps `updated_ms`.
@@ -425,7 +425,7 @@ async function runFenced(
   values: unknown[],
   nowMs: CheckClock,
   /**
-   * Extra state predicate a transition additionally requires, bound with
+   * note: Extra state predicate a transition additionally requires, bound with
    * `guardValues` AFTER the lease params. Every legal-transition rule belongs
    * in the statement itself: proving legality by a read-then-write window
    * would let a concurrent transition land in between.
@@ -433,7 +433,7 @@ async function runFenced(
   guard?: string,
   guardValues: unknown[] = [],
 ): Promise<boolean> {
-  // The live-lease fence is MANDATORY (spec §7.9/§7.0): `lease_until_ms` is
+  // why: The live-lease fence is MANDATORY (spec §7.9/§7.0): `lease_until_ms` is
   // bound twice — once as the exact triple match, once as the `> now`
   // liveness test — so an expired-but-not-yet-reassigned lease cannot write.
   // There is no unclocked variant: the clock is the caller's single supplied
@@ -474,7 +474,7 @@ export async function getCheckOwnership(
   lease: Lease,
   nowMs: CheckClock,
 ): Promise<CheckOwnership | null> {
-  // Clock REQUIRED: an ownership read that skipped `lease_until_ms > now`
+  // why: Clock REQUIRED: an ownership read that skipped `lease_until_ms > now`
   // would authorise a send the spec forbids (§7.9 "remote sends require the
   // same check") — the adapter's send fence reads through here.
   const row = await db
@@ -500,7 +500,7 @@ export async function getCheckOwnership(
 }
 
 // ---------------------------------------------------------------------------
-// Claim (spec §7.9)
+// note: Claim (spec §7.9)
 // ---------------------------------------------------------------------------
 
 /**
@@ -541,7 +541,7 @@ export async function claimAttempt(
     nowMs: number;
     executionDeadlineMs: number;
     /**
-     * The DELIVERY that created this row (spec §7.9), recorded so a later skip
+     * note: The DELIVERY that created this row (spec §7.9), recorded so a later skip
      * settlement can tell its own released row from another delivery's. Absent
      * for claims that are not the delivery attach (the consumer's admission
      * claim, recovery) — such a row is only ever closed by the recovery lane.
@@ -568,7 +568,7 @@ export async function claimAttempt(
   });
   const attemptId = crypto.randomUUID();
 
-  // The claim is the whole race. `INSERT … SELECT` is gated on TWO facts about
+  // why: The claim is the whole race. `INSERT … SELECT` is gated on TWO facts about
   // `attempt_key`: no NONTERMINAL row exists (a live or expired-but-open
   // attempt belongs to its holder and to recovery, never to a new claim), and
   // no generation of this key ended WITH a proven publication. If two claims
@@ -708,7 +708,7 @@ export async function claimAttempt(
   try {
     await db.batch([insert]);
   } catch (error) {
-    // The designed loser path — another claimer took the key or the generation.
+    // note: The designed loser path — another claimer took the key or the generation.
     if (!isUniqueViolation(error)) throw error;
   }
 
@@ -750,7 +750,7 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Recovery claim (spec §7.9 / §7.11.2 step 1)
+// note: Recovery claim (spec §7.9 / §7.11.2 step 1)
 // ---------------------------------------------------------------------------
 
 /**
@@ -786,7 +786,7 @@ export async function claimCheckRecovery(
   nowMs: number,
   maxAttempts: number = CHECK_MAX_ATTEMPTS,
 ): Promise<Lease | null> {
-  // Suspension is a CLAIM FENCE, not merely a selector filter (spec §7.6): a
+  // why: Suspension is a CLAIM FENCE, not merely a selector filter (spec §7.6): a
   // disabled/deleted App's rows are recoverable again only after the explicit
   // re-enable that returns them to `pending`. Without this predicate a stale
   // selector result — or a direct caller — could lease a suspended App's row
@@ -848,10 +848,10 @@ export async function adoptReleasedCheckAttempt(
   db: D1Like,
   input: {
     attemptId: string;
-    /** The App these credentials authenticate as — never a foreign App's row. */
+    /** note: The App these credentials authenticate as — never a foreign App's row. */
     githubAppId: number;
     holder: string;
-    /** The execution deadline the adopting invocation owns (`now + CHECK_WINDOW_MS`). */
+    /** note: The execution deadline the adopting invocation owns (`now + CHECK_WINDOW_MS`). */
     executionDeadlineMs: number;
     nowMs: number;
   },
@@ -940,13 +940,13 @@ export async function claimAttachedCheckForSettlement(
     triggeredBy: string;
     action: string;
     /**
-     * THIS delivery's attach identity (`payload.attachDeliveryId`): the id its
+     * note: THIS delivery's attach identity (`payload.attachDeliveryId`): the id its
      * attach holder was written under. Absent → the delivery created no row of
      * its own, so nothing is claimable.
      */
     attachDeliveryId?: string;
     holder: string;
-    /** The settling invocation's execution deadline (`now + CHECK_WINDOW_MS`). */
+    /** note: The settling invocation's execution deadline (`now + CHECK_WINDOW_MS`). */
     executionDeadlineMs: number;
     nowMs: number;
   },
@@ -954,7 +954,7 @@ export async function claimAttachedCheckForSettlement(
   if (input.holder.length === 0) {
     throw new Error("review-checks: settlement requires a nonblank holder identity");
   }
-  // Defensive: a message enqueued before the identity existed carries none, and
+  // why: Defensive: a message enqueued before the identity existed carries none, and
   // the predicate below could not match its row anyway (`attach_delivery_id`
   // is NULL). The busy/terminal rule is the PREDICATE's, not this guard's: such
   // a delivery DOES carry an id, it just has no row recording it.
@@ -974,7 +974,7 @@ export async function claimAttachedCheckForSettlement(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
-  // Shared by both statements: the row must be attached, unfrozen and inside
+  // why: Shared by both statements: the row must be attached, unfrozen and inside
   // its window, and it must either be held by THIS delivery's own attach or be
   // RELEASED **and created by** it (`attach_delivery_id`). The column is what
   // makes the budget-expiry arm recoverable: the attach may still be running
@@ -1144,7 +1144,7 @@ export async function releaseExpiredCheckClaim(
 }
 
 // ---------------------------------------------------------------------------
-// Fenced mutations (spec §7.9)
+// note: Fenced mutations (spec §7.9)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1164,7 +1164,7 @@ export async function attachCheckRunId(
   if (!Number.isInteger(checkRunId) || checkRunId <= 0) {
     throw new Error(`review-checks: check_run_id must be a positive integer, got ${String(checkRunId)}`);
   }
-  // An id may only be attached to a send that was ACTUALLY attempted
+  // why: An id may only be attached to a send that was ACTUALLY attempted
   // (`sending`/`unknown`). `not-sent` proving nothing was sent, and an
   // already-`known` id being idempotently re-attached, are the two legal
   // shapes — anything else would record a run this attempt never created.
@@ -1209,7 +1209,7 @@ export async function setCheckCreateState(
   nowMs: CheckClock,
 ): Promise<boolean> {
   if (state === "not-sent") {
-    // Definitive pre-send rejection: only a state that never sent may claim it.
+    // note: Definitive pre-send rejection: only a state that never sent may claim it.
     return runFenced(
       db,
       id,
@@ -1220,7 +1220,7 @@ export async function setCheckCreateState(
       `create_state = 'not-sent' AND check_run_id IS NULL`,
     );
   }
-  // `sending`/`unknown` record that a create was attempted — always legal, and
+  // why: `sending`/`unknown` record that a create was attempted — always legal, and
   // never reachable backwards, so the row can only move toward resolution.
   return runFenced(
     db,
@@ -1306,7 +1306,7 @@ export async function setCheckDesired(
     const correction = was === "failure" && (conclusion.desired === "success" || conclusion.desired === "neutral");
     if (!correction || publicationId === null) return false;
   }
-  // Freeze BOUNDED text: the persisted row is the only source the send reads,
+  // why: Freeze BOUNDED text: the persisted row is the only source the send reads,
   // so an oversized or newline-injected title/summary cannot reach the public
   // Check surface later (spec §7.9).
   const title = frozenTitle(conclusion.title);
@@ -1388,7 +1388,7 @@ export async function markCheckQueuedBehindInflight(
     headSha: string;
     triggeredBy: string;
     action: string;
-    /** THIS delivery's attach identity — absent means it created no row. */
+    /** note: THIS delivery's attach identity — absent means it created no row. */
     attachDeliveryId?: string;
     title: string;
     summary: string;
@@ -1406,7 +1406,7 @@ export async function markCheckQueuedBehindInflight(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
-  // The relabelable row: still running, attached, wanting in_progress and not
+  // why: The relabelable row: still running, attached, wanting in_progress and not
   // suspended. Identical in both statements — the SELECT only learns the run id.
   //
   // The HOLDER arm is what keeps this honest: `attach_delivery_id` names the
@@ -1469,7 +1469,7 @@ export async function recordTerminalizeOutcome(
   outcome: "completed" | "budget-exceeded" | "hook-failed" | "no-handle",
   elapsedMs: number | null,
 ): Promise<void> {
-  // `completed` is decided HERE, from the row, not from "the hook's promise
+  // why: `completed` is decided HERE, from the row, not from "the hook's promise
   // resolved": a hook that froze nothing (fence refused) or handed the attempt
   // to recovery resolves just as normally, and only `observed = desired` proves
   // a terminal send landed. Those rows record `handed-off`.
@@ -1547,7 +1547,7 @@ export async function recordCheckObservation(
 }
 
 // ---------------------------------------------------------------------------
-// Recovery bookkeeping (spec §7.9 / §7.11.2 — consumed by the reconciler)
+// note: Recovery bookkeeping (spec §7.9 / §7.11.2 — consumed by the reconciler)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1766,7 +1766,7 @@ export async function listReenableableCheckPairs(
       }>();
     const suspended = rows.results;
     if (suspended.length === 0) continue;
-    // The resume write flips EVERY suspended row of the pair, so the decision
+    // why: The resume write flips EVERY suspended row of the pair, so the decision
     // must hold for every one of them too: one row of an unreleasable kind (a
     // credential suspension whose envelope is unchanged, or a row still held)
     // keeps the whole pair suspended. A mixed-kind pair is reachable — a
@@ -1774,15 +1774,15 @@ export async function listReenableableCheckPairs(
     // pair — so an unordered single-row probe cannot speak for the rest.
     const everyRowReleasable = suspended.every((row) => {
       if (row.app_status !== "active" || row.app_deleted !== null) return false;
-      // A live holder is never yanked out from under its owner.
+      // note: A live holder is never yanked out from under its owner.
       if (row.holder !== null) return false;
       const kind = checkSuspensionKindOf(row.last_error);
-      // A `paused` hold (P68-QC-006) is released by exactly one event: the
+      // note: A `paused` hold (P68-QC-006) is released by exactly one event: the
       // kill switch being lifted. No credential proof is owed.
       if (kind === "paused") return row.review_enabled !== 0;
-      // A disabled App resumes on status alone: no credential was in question.
+      // note: A disabled App resumes on status alone: no credential was in question.
       if (kind === "disabled") return true;
-      // Credential kinds: resume only when the CURRENT digest is readable and
+      // why: Credential kinds: resume only when the CURRENT digest is readable and
       // disagrees with the recorded one — M8's comparison, where a stored null
       // compares unequal (F-005). An unreadable digest proves nothing.
       const recorded = suspensionCredentialOf(row.last_error);
@@ -1796,7 +1796,7 @@ export async function listReenableableCheckPairs(
 }
 
 // ---------------------------------------------------------------------------
-// Reconcile selection (spec §7.11.2 predicate, verbatim)
+// note: Reconcile selection (spec §7.11.2 predicate, verbatim)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1860,7 +1860,7 @@ export async function retryCheckRecovery(
   db: D1Like,
   input: { scope: Scope; attemptId: string; nowMs: number },
 ): Promise<boolean> {
-  // ONE conditional statement, not read-then-write (spec §7.9/§7.11.2 step 6).
+  // why: ONE conditional statement, not read-then-write (spec §7.9/§7.11.2 step 6).
   // Every precondition is repeated inside the UPDATE so a concurrent
   // terminalization, a live lease, a newer active generation or a newer
   // observation landing between a preliminary read and the write can never be
@@ -1996,7 +1996,7 @@ export async function readInheritedReview(
 }
 
 /**
- * The envelope THIS publication carried, by exact App/scope/SHA identity (a
+ * note: The envelope THIS publication carried, by exact App/scope/SHA identity (a
  * row of another attempt or another App must never decide this one). `null`
  * means the payload is unreadable, not "no review was published".
  */
@@ -2042,7 +2042,7 @@ function recordOf(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-/** `envelope.tally.scorePct` when it is an integer inside the schema's 0..100 domain. */
+/** note: `envelope.tally.scorePct` when it is an integer inside the schema's 0..100 domain. */
 function tallyScore(envelope: unknown): number | null {
   const tally = recordOf(recordOf(envelope)?.tally);
   if (tally === null) return null;

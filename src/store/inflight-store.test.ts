@@ -1,5 +1,5 @@
 /**
- * Unit tests: the in-flight review store (src/store/inflight-store.ts) over the
+ * why: Unit tests: the in-flight review store (src/store/inflight-store.ts) over the
  * REAL migration DDL.
  *
  * The fixture is the bun:sqlite double in tests/store/helpers.ts with every
@@ -38,7 +38,7 @@ const KEY: InflightKey = {
   workspace_id: "ws_1",
 };
 
-/** The commit a live row was acquired for — what a `pr-held` refusal reports. */
+/** note: The commit a live row was acquired for — what a `pr-held` refusal reports. */
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
 const OPTS: AcquireInflightOptions = {
@@ -50,7 +50,7 @@ const OPTS: AcquireInflightOptions = {
   now: "2026-11-03T00:00:00Z",
 };
 
-/** One PR identity in another workspace (same cap math, distinct tenant). */
+/** note: One PR identity in another workspace (same cap math, distinct tenant). */
 function otherPr(prNumber: number, workspaceId = KEY.workspace_id): InflightKey {
   return { ...KEY, pr_number: prNumber, workspace_id: workspaceId };
 }
@@ -59,7 +59,7 @@ function freshDb(): TestD1 {
   return createMigratedTestD1();
 }
 
-/** A handle whose `prepare` throws synchronously — a dead D1 binding. */
+/** note: A handle whose `prepare` throws synchronously — a dead D1 binding. */
 const failingDb: D1Like = {
   prepare() {
     throw new Error("D1 unavailable");
@@ -88,14 +88,14 @@ describe("inflight-store", () => {
   });
 
   test("the row carries the reviewed sha; a null sha reads back as ''", async () => {
-    // Round-8 review: a held push can only be judged (duplicate vs a commit
+    // note: Round-8 review: a held push can only be judged (duplicate vs a commit
     // the live review never covers) against the sha the row was taken for.
     const db = freshDb();
     expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
     const rows = db.raw.query("SELECT head_sha FROM review_inflight").all() as Array<{ head_sha: string }>;
     expect(rows[0]!.head_sha).toBe(SHA);
 
-    // A comment trigger carries no sha; the empty-string convention keeps the
+    // note: A comment trigger carries no sha; the empty-string convention keeps the
     // comparison single-valued and tells a later attempt the row holds none.
     expect(await acquireInflight(db, otherPr(9), { ...OPTS, headSha: null })).toEqual({ ok: true });
     const commentRow = db.raw
@@ -131,12 +131,12 @@ describe("inflight-store", () => {
     expect(await acquireInflight(db, otherPr(2, "ws_2"), { ...OPTS, systemCap: 2 })).toEqual({
       ok: true,
     });
-    // System cap is spent; a third workspace gets `system-cap`, not a slot.
+    // note: System cap is spent; a third workspace gets `system-cap`, not a slot.
     expect(await acquireInflight(db, otherPr(3, "ws_3"), { ...OPTS, systemCap: 2 })).toEqual({
       ok: false,
       reason: "system-cap",
     });
-    // A second PR of ws_2 is refused by the workspace cap, not the PR lock.
+    // note: A second PR of ws_2 is refused by the workspace cap, not the PR lock.
     expect(
       await acquireInflight(db, otherPr(4, "ws_2"), {
         ...OPTS,
@@ -158,7 +158,7 @@ describe("inflight-store", () => {
         now: "2026-11-03T00:02:00Z",
       }),
     ).toEqual({ ok: true });
-    // The reclaim replaced the row in place — one row, the newer attempt's,
+    // note: The reclaim replaced the row in place — one row, the newer attempt's,
     // carrying the newer commit (a stale sha would misjudge the next push).
     const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
@@ -202,7 +202,7 @@ describe("inflight-store", () => {
   });
 
   test("a raced zero-row acquire is distinguishable from a fault", async () => {
-    // The insert reports zero rows while the follow-up read still shows room:
+    // note: The insert reports zero rows while the follow-up read still shows room:
     // the capacity was released between the two statements. That is a benign
     // race, not a dead binding, and the result must say so.
     const db = freshDb();
@@ -239,12 +239,12 @@ describe("inflight-store", () => {
     expect(malformed).toMatchObject({ reason: "error", cause: { kind: "fault" } });
     const badTtl = await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: Number.NaN });
     expect(badTtl).toMatchObject({ reason: "error", cause: { kind: "fault" } });
-    // Neither refusal wrote a row — fail-closed never admits.
+    // note: Neither refusal wrote a row — fail-closed never admits.
     expect(db.raw.query("SELECT * FROM review_inflight").all()).toHaveLength(0);
   });
 
   test("a zero or negative TTL is refused, never an already-expired success", async () => {
-    // A non-positive TTL writes `expires_at <= now`: the row holds no PR and
+    // note: A non-positive TTL writes `expires_at <= now`: the row holds no PR and
     // reserves no slot, so reporting `ok` would admit a review the lock never
     // guarded. Both must answer the fault refusal and write nothing.
     const db = freshDb();
@@ -259,7 +259,7 @@ describe("inflight-store", () => {
   });
 
   test("owner/repo case does not split or evade the per-PR lock", async () => {
-    // GitHub owner/repo are case-insensitive; the row's PRIMARY KEY is not.
+    // note: GitHub owner/repo are case-insensitive; the row's PRIMARY KEY is not.
     // Insert, refusal read and release must all land on ONE normalized key.
     const db = freshDb();
     expect(await acquireInflight(db, { ...KEY, owner: "Acme", repo: "Widgets" }, OPTS)).toEqual({
@@ -271,7 +271,7 @@ describe("inflight-store", () => {
     const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.owner).toBe("acme");
-    // Release through the OTHER spelling frees the row the first spelling wrote.
+    // note: Release through the OTHER spelling frees the row the first spelling wrote.
     await releaseInflight(db, { ...KEY, owner: "ACME", repo: "WIDGETS" }, OPTS.attemptId);
     expect(db.raw.query("SELECT * FROM review_inflight").all()).toHaveLength(0);
   });

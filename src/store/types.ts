@@ -1,5 +1,5 @@
 /**
- * Central Review Store row types (v1 caliber).
+ * why: Central Review Store row types (v1 caliber).
  *
  * Type-only module. `D1Like` (the narrow D1 face the store depends on) is
  * reused by the ArtifactStore adapter (`src/store/artifact-store.ts`) and
@@ -33,14 +33,14 @@ export type ReviewRow = {
   skill_version: string | null;
   raw_output: string | null;
   /**
-   * Complete `mstar.review/v1` envelope JSON (v1 rows); NULL on M1-era
+   * note: Complete `mstar.review/v1` envelope JSON (v1 rows); NULL on M1-era
    * rows — the row-level era marker (`envelope IS NOT NULL` ⇔ v1 path,
    * migration 0002). New (v1) rows never write `raw_output`; the envelope
    * is the authoritative, losslessly restorable document.
    */
   envelope: string | null;
   /**
-   * Publication round ordinal the consumer stamped at insert (migration
+   * note: Publication round ordinal the consumer stamped at insert (migration
    * 0050); NULL on rows written before the column — the detail read falls
    * back to the `reviewed_at` ordinal for those.
    */
@@ -70,7 +70,7 @@ export type FindingRow = {
 };
 
 /**
- * Raw rows of the finding-lifecycle tables (migration
+ * note: Raw rows of the finding-lifecycle tables (migration
  * `0020_finding_lifecycle.sql` — DDL single source; spec review-lifecycle
  * §7.1 owns the normative shapes). Snake_case D1 column names, same
  * convention as `ReviewRow` / `FindingRow`. The typed journal domain
@@ -211,9 +211,9 @@ export type ReviewCheckRow = {
   next_attempt_ms: number | null;
   last_error: string | null;
   terminal_ms: number | null;
-  /** Why the consumer's terminalize exited; NULL on a row recovery closed. */
+  /** note: Why the consumer's terminalize exited; NULL on a row recovery closed. */
   terminalize_outcome: string | null;
-  /** How long the consumer waited on its terminalize hook, in ms. */
+  /** note: How long the consumer waited on its terminalize hook, in ms. */
   terminalize_elapsed_ms: number | null;
   created_ms: number;
   updated_ms: number;

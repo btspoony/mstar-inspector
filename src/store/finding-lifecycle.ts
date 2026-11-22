@@ -1,5 +1,5 @@
 /**
- * Finding lifecycle store (spec review-lifecycle §7.1/§7.2/
+ * why: Finding lifecycle store (spec review-lifecycle §7.1/§7.2/
  * §7.7/§7.11.1) — durable lifecycle rows, fair rotation, the private
  * pre-publication journal and the resolution-queue accessors.
  *
@@ -52,7 +52,7 @@ export type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 
 // ---------------------------------------------------------------------------
-// §7.7 journal types — single normative copy lives in spec §7.7; this is the
+// note: §7.7 journal types — single normative copy lives in spec §7.7; this is the
 // single CODE copy (the wire subset of §7.3 is exported from
 // packages/shared/src/recheck-wire.ts instead — do not restate either).
 // ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ export type LineIntent = {
   associationId: string; findingRowId: string; publicationId: string;
   scope: Scope; originalSha: string; round: number;
   path: string; line: number; body: string; bodySha256: string;
-  /** First line of a multi-line anchor; absent/null = the single-line anchor at `line`. */
+  /** note: First line of a multi-line anchor; absent/null = the single-line anchor at `line`. */
   lineStart?: number | null;
 };
 export type VerifiedResolution = {
@@ -109,7 +109,7 @@ export type PublicationRow = {
 };
 
 // ---------------------------------------------------------------------------
-// Constants (spec §7.7 step 8, §7.11.1, §7.3)
+// note: Constants (spec §7.7 step 8, §7.11.1, §7.3)
 // ---------------------------------------------------------------------------
 
 /** Publication lease duration (spec §7.7 step 8: "120s, epoch-fenced"). */
@@ -130,7 +130,7 @@ export const LIFECYCLE_APPLY_BATCH_STATEMENTS = 25;
 export const PREPARED_SEND_MIN_AGE_MS = 60_000;
 
 // ---------------------------------------------------------------------------
-// Row mapping helpers
+// note: Row mapping helpers
 // ---------------------------------------------------------------------------
 
 function leaseOf(row: { holder: string | null; lease_epoch: number; lease_until_ms: number | null }): Lease | null {
@@ -164,11 +164,11 @@ function threadScope(row: { id: string; bot_id: string; installation_id: number;
 }
 
 // ---------------------------------------------------------------------------
-// Fair rotation (spec §7.2)
+// note: Fair rotation (spec §7.2)
 // ---------------------------------------------------------------------------
 
 /**
- * The RECHECKABLE predicate (spec §7.2/§7.4) — ONE copy shared by the
+ * note: The RECHECKABLE predicate (spec §7.2/§7.4) — ONE copy shared by the
  * selector and the coverage count, so `selected <= totalOpen` cannot drift
  * into a lying `capped` remainder. Binds the scope tuple TWICE (the finding
  * row, then its association probe): bind it with `recheckableScopeBinds`.
@@ -188,7 +188,7 @@ const RECHECKABLE_WHERE_SQL = `f.bot_id = ? AND f.installation_id = ? AND f.owne
            )
          )`;
 
-/** The ten binds `RECHECKABLE_WHERE_SQL` expects, in placeholder order. */
+/** note: The ten binds `RECHECKABLE_WHERE_SQL` expects, in placeholder order. */
 function recheckableScopeBinds(scope: Scope): [string, number, string, string, number, string, number, string, string, number] {
   return [
     scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
@@ -275,7 +275,7 @@ export async function countRecheckableFindings(db: D1Like, scope: Scope): Promis
 }
 
 // ---------------------------------------------------------------------------
-// Private pre-publication journal (spec §7.7)
+// note: Private pre-publication journal (spec §7.7)
 // ---------------------------------------------------------------------------
 
 /**
@@ -316,7 +316,7 @@ export async function stagePublication(
     .run();
 
   if (insert.meta.changes === 0) {
-    // Conflict: the existing immutable payload wins (same-id replay OR a
+    // why: Conflict: the existing immutable payload wins (same-id replay OR a
     // second model result for the same scope+SHA+kind).
     const existing =
       (await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(input.id).first<ReviewPublicationRow>()) ??
@@ -469,14 +469,14 @@ export async function findPublicationJournal(
     headSha: string;
     phases: readonly PublicationRow["phase"][];
     /**
-     * Which row wins when the head holds more than one (a normal row plus a
+     * note: Which row wins when the head holds more than one (a normal row plus a
      * degraded one). `oldest` is the delivery hand-off's order (first in flight
      * wins); `newest` is the Check wait's (the LATEST publication is the one
      * whose proof is still owed).
      */
     order?: "oldest" | "newest";
     /**
-     * Only rows whose LAST WRITE is at or after this instant are reported.
+     * note: Only rows whose LAST WRITE is at or after this instant are reported.
      * The Check wait passes the attempt's own admission time: one row exists
      * per scope/head/kind, and the writer reuses an existing row for a
      * re-triggered head, so a row INSERTED earlier still belongs to this
@@ -572,7 +572,7 @@ export async function applyPublishedLifecycle(
   lease: Lease,
   nowMs: number,
   /**
-   * Fresh clock for the per-chunk lease fence (§7.11.1: "every chunk of the
+   * note: Fresh clock for the per-chunk lease fence (§7.11.1: "every chunk of the
    * apply must prove the same live publication holder/epoch"). Defaults to
    * the call's fixed clock — a caller whose apply spans a real time window
    * (the M8 reconciler) passes its own clock so an expired lease is
@@ -583,8 +583,8 @@ export async function applyPublishedLifecycle(
   const nowAt = clock ?? (() => nowMs);
   const row = await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(id).first<ReviewPublicationRow>();
   if (row === null) return false;
-  if (row.phase === "applied") return true; // idempotent replay — nothing left to apply
-  // Live lease fence (holder + epoch + unexpired) and positive persisted proof.
+  if (row.phase === "applied") return true; // note: idempotent replay — nothing left to apply
+  // note: Live lease fence (holder + epoch + unexpired) and positive persisted proof.
   if (row.holder !== lease.holder || row.lease_epoch !== lease.epoch) return false;
   if (row.lease_until_ms === null || row.lease_until_ms <= nowAt()) return false;
   if (row.phase !== "confirmed" || row.proof_json === null) return false;
@@ -592,18 +592,18 @@ export async function applyPublishedLifecycle(
   const payload = JSON.parse(row.payload_json) as PublicationPayload;
 
   if (payload.kind === "degraded") {
-    // Degraded payload: artifact/lifecycle null, empty line intents — no
+    // note: Degraded payload: artifact/lifecycle null, empty line intents — no
     // normal review or lifecycle rows are created from it (spec §7.7).
     const applied = await markPublicationApplied(db, row.id, lease, nowMs).run();
     return applied.meta.changes > 0;
   }
   if (payload.kind !== "review" || payload.artifact === null || payload.lifecycle === null) {
-    // A review-kind payload without its complete artifact/lifecycle is
+    // why: A review-kind payload without its complete artifact/lifecycle is
     // malformed — fail closed, leave the confirmed row for inspection.
     return false;
   }
 
-  // Step 1 — the review artifact's statements, composed on EVERY attempt and
+  // note: Step 1 — the review artifact's statements, composed on EVERY attempt and
   // emitted as their own leading chunk(s), never mixed with the lifecycle's.
   // The review id is DERIVED from the apply key and a finding is
   // `<key>#<index>`; a finding attaches to the review that exists for the head
@@ -627,7 +627,7 @@ export async function applyPublishedLifecycle(
     )
     .map((statement) => db.prepare(statement.sql).bind(...statement.binds));
 
-  // Step 2 — the lifecycle writes in db.batches of at most
+  // note: Step 2 — the lifecycle writes in db.batches of at most
   // LIFECYCLE_APPLY_BATCH_STATEMENTS statements each (§7.11.1: "Local apply
   // batches ≤25 row transitions each; a larger payload is resumed
   // idempotently with applied-publication/association IDs, never marks
@@ -654,7 +654,7 @@ export async function applyPublishedLifecycle(
   ];
   const results: D1BatchResult[] = [];
   for (const chunk of chunks) {
-    // Per-chunk fence (§7.11.1): the apply may span a real time window, and
+    // why: Per-chunk fence (§7.11.1): the apply may span a real time window, and
     // once the 120s lease expires another invocation can claim a NEWER epoch.
     // Re-prove the SAME live holder/epoch before this chunk writes, so a
     // stale invocation stops instead of mutating findings/rounds/associations
@@ -669,7 +669,7 @@ export async function applyPublishedLifecycle(
 }
 
 /**
- * The ATOMIC live-lease fence (§7.11.1: "All local updates require
+ * note: The ATOMIC live-lease fence (§7.11.1: "All local updates require
  * `(id,holder,lease_epoch,lease_until_ms > now)`"). Every lifecycle
  * mutation statement of a chunked apply carries this predicate INLINE, so
  * the fence is evaluated by the same statement (and therefore the same
@@ -683,7 +683,7 @@ const APPLY_LEASE_GUARD_SQL = `EXISTS (SELECT 1 FROM review_publications AS appl
          AND apply_lease.lease_until_ms IS NOT NULL AND apply_lease.lease_until_ms > ?)`;
 
 /**
- * The live-binding scalar subquery — the attribution source for a NEWLY
+ * note: The live-binding scalar subquery — the attribution source for a NEWLY
  * recorded row. It is embedded in the inserting statement, so the binding is
  * read when that statement runs, inside the same batch and transaction as the
  * write it feeds: a read taken before the batch could be stranded by a
@@ -702,7 +702,7 @@ const LIVE_BINDING_TARGET_SQL = `(SELECT id FROM review_targets
        ORDER BY created_at, id LIMIT 1)`;
 
 /**
- * The live-lease fence probe (§7.11.1) — the read twin of the applied
+ * note: The live-lease fence probe (§7.11.1) — the read twin of the applied
  * marker's SQL predicate: the publication row must still carry the SAME
  * holder and epoch with an UNEXPIRED lease at `nowMs`. Returns false when
  * the row is gone, replaced, or expired, which aborts the apply before the
@@ -724,7 +724,7 @@ async function publicationLeaseIsLive(db: D1Like, id: string, lease: Lease, nowM
 }
 
 /**
- * The conditional applied-mark STATEMENT: requires the FULL live lease
+ * note: The conditional applied-mark STATEMENT: requires the FULL live lease
  * (`holder` + `lease_epoch` + `lease_until_ms > now`, not holder/epoch
  * alone) AND a persisted proof AND the confirmed phase; clears the lease on
  * success. The expiry predicate is part of this statement, so an expired
@@ -743,7 +743,7 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
     .bind(nowMs, nowMs, id, lease.holder, lease.epoch, nowMs);
 }
 
-/** Split statements into chunks of at most `size`, order preserved. */
+/** note: Split statements into chunks of at most `size`, order preserved. */
 function chunkStatements<T>(items: readonly T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let start = 0; start < items.length; start += size) chunks.push(items.slice(start, start + size));
@@ -751,7 +751,7 @@ function chunkStatements<T>(items: readonly T[], size: number): T[][] {
 }
 
 /**
- * The §7.2 state machine as ONE batch (knowledge `d1-batch-atomicity`).
+ * note: The §7.2 state machine as ONE batch (knowledge `d1-batch-atomicity`).
  * Order inside the batch matters and is replay-safe:
  *   0. Attribution — fixed at FIRST record. A statement that INSERTS a row
  *      embeds `LIVE_BINDING_TARGET_SQL`, the scalar subquery for the bot's
@@ -797,9 +797,9 @@ function lifecycleApplyBatch(
   db: D1Like,
   row: ReviewPublicationRow,
   payload: PublicationPayload,
-  /** The caller-narrowed non-null `payload.lifecycle` (review kind only). */
+  /** note: The caller-narrowed non-null `payload.lifecycle` (review kind only). */
   lifecycle: LifecycleRound,
-  /** The payload's own target — the hint a NEW row takes when nothing is bound. */
+  /** note: The payload's own target — the hint a NEW row takes when nothing is bound. */
   hintTargetId: string,
   nowMs: number,
   lease: Lease,
@@ -811,7 +811,7 @@ function lifecycleApplyBatch(
   const guard = [pubId, lease.holder, lease.epoch, nowMs] as const;
   const statements: D1StatementLike[] = [];
 
-  // 1. Seen upserts — recurrence reopen + last-seen tracking.
+  // note: 1. Seen upserts — recurrence reopen + last-seen tracking.
   for (const seen of lifecycle.seen) {
     statements.push(
       db
@@ -841,7 +841,7 @@ function lifecycleApplyBatch(
           seen.rowId, scope.appId, scope.installationId, scope.owner, scope.repo,
           scope.prNumber, seen.findingId, JSON.stringify(seen.original),
           pubId, pubId, headSha, headSha, round, round, nowMs, nowMs,
-          // The INSERT's target: the binding read in this statement, else the
+          // why: The INSERT's target: the binding read in this statement, else the
           // payload hint.
           scope.appId, scope.owner, scope.repo, hintTargetId,
           ...guard,
@@ -849,7 +849,7 @@ function lifecycleApplyBatch(
     );
   }
 
-  // 2. Assessments — state transition + round history (replay marker).
+  // note: 2. Assessments — state transition + round history (replay marker).
   for (const assessment of lifecycle.assessments) {
     const assessmentJson = JSON.stringify(assessment);
     statements.push(
@@ -884,7 +884,7 @@ function lifecycleApplyBatch(
     );
   }
 
-  // 3. Association supersede + preallocated intent inserts.
+  // note: 3. Association supersede + preallocated intent inserts.
   const supersededFindings = new Set<string>();
   for (const intent of payload.lineIntents) {
     if (supersededFindings.has(intent.findingRowId)) continue;
@@ -920,7 +920,7 @@ function lifecycleApplyBatch(
     );
   }
 
-  // 4. Fair-rotation scheduling for every selected target (monotonic).
+  // note: 4. Fair-rotation scheduling for every selected target (monotonic).
   for (const rowId of lifecycle.selectedRowIds) {
     statements.push(
       db
@@ -933,13 +933,13 @@ function lifecycleApplyBatch(
     );
   }
 
-  // 5. Mark applied under the lease — final statement, atomic with the above.
+  // why: 5. Mark applied under the lease — final statement, atomic with the above.
   statements.push(markPublicationApplied(db, row.id, lease, nowMs));
   return statements;
 }
 
 // ---------------------------------------------------------------------------
-// Recovery readers (spec §7.11.1) — M8-only surfaces
+// note: Recovery readers (spec §7.11.1) — M8-only surfaces
 // ---------------------------------------------------------------------------
 
 /**
@@ -1005,7 +1005,7 @@ export async function retryLifecycleWork(
 ): Promise<boolean> {
   const hasPublication = input.publicationId !== undefined;
   const hasAssociation = input.associationId !== undefined;
-  if (hasPublication === hasAssociation) return false; // exactly one work ID required
+  if (hasPublication === hasAssociation) return false; // note: exactly one work ID required
 
   const scopeGuard = "bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?";
   const scopeBinds = [input.scope.appId, input.scope.installationId, input.scope.owner, input.scope.repo, input.scope.prNumber];
@@ -1036,7 +1036,7 @@ export async function retryLifecycleWork(
 }
 
 // ---------------------------------------------------------------------------
-// §7.11.1 recovery bookkeeping writers (the M8 lane) — the
+// note: §7.11.1 recovery bookkeeping writers (the M8 lane) — the
 // post-failure state machine the reconciler drives: backoff after failed
 // attempts, the terminal local-error at the attempt cap, supersede on
 // newer-round evidence, App-lifecycle suspension and exact-App re-enable,
@@ -1045,7 +1045,7 @@ export async function retryLifecycleWork(
 // new assessment, never for bookkeeping") and never deletes a row.
 // ---------------------------------------------------------------------------
 
-/** Bound a durable reason string — structured, no payload/secret content. */
+/** note: Bound a durable reason string — structured, no payload/secret content. */
 function recoveryReason(reason: string): string {
   const clean = reason.replace(/\s+/g, " ").trim();
   return clean.length <= 300 ? clean : `${clean.slice(0, 299)}…`;
@@ -1062,7 +1062,7 @@ function recoveryReason(reason: string): string {
 export type SuspensionKind = "disabled" | "identity-mismatch" | "missing" | "deleted" | "decrypt-failed" | "unknown";
 
 const SUSPENSION_PREFIX = "suspend:";
-/** Token carrying the credential-envelope fingerprint inside the reason. */
+/** note: Token carrying the credential-envelope fingerprint inside the reason. */
 const CREDENTIAL_TOKEN = "cred=";
 
 /**
@@ -1114,7 +1114,7 @@ export function suspensionKindOf(lastError: string | null): SuspensionKind {
   }
 }
 
-/** Free-lease predicate bound to a now parameter position. */
+/** note: Free-lease predicate bound to a now parameter position. */
 const FREE_LEASE_SQL = "(lease_until_ms IS NULL OR lease_until_ms <= ?)";
 
 /**
@@ -1463,7 +1463,7 @@ export async function listSuspendedLifecycleApps(
   const selected = [...merged.values()];
   const last = selected.at(-1);
   if (last) {
-    // Advance even when routing/proof fails, so unchanged failures cannot
+    // why: Advance even when routing/proof fails, so unchanged failures cannot
     // monopolize the next cron's bounded batch. The scan wraps at the end.
     await db.prepare(
       `INSERT INTO lifecycle_recovery_cursor (id, bot_id, installation_id) VALUES (1, ?, ?)
@@ -1474,7 +1474,7 @@ export async function listSuspendedLifecycleApps(
     appId: entry.appId,
     installationId: entry.installationId,
     requiresIdentityProof: entry.requiresIdentityProof,
-    // Disagreeing records prove nothing about the current credentials —
+    // why: Disagreeing records prove nothing about the current credentials —
     // null forces the identity proof instead of allowing a status-only resume.
     credentialFingerprint: entry.conflicting ? null : entry.credentialFingerprint,
   }));

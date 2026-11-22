@@ -1,5 +1,5 @@
 /**
- * In-flight review store (iteration spec review-concurrency §1) — the per-PR
+ * why: In-flight review store (iteration spec review-concurrency §1) — the per-PR
  * lock and capacity reservation for one queue message (migration 0041:
  * `review_inflight`).
  *
@@ -74,7 +74,7 @@ export type InflightAcquireResult =
   | { ok: true }
   | { ok: false; reason: "system-cap" | "workspace-cap" }
   /**
-   * `heldHeadSha` is the sha the live row was taken for (`""` = a
+   * note: `heldHeadSha` is the sha the live row was taken for (`""` = a
    * comment-triggered review carried none): the terminal drop record needs it
    * to tell a duplicate of that review from a commit it never covers.
    */
@@ -89,26 +89,26 @@ export function describeInflightError(cause: InflightErrorCause): string {
 }
 
 export type AcquireInflightOptions = {
-  /** System-wide live-row ceiling (the per-message system cap the caller read). */
+  /** note: System-wide live-row ceiling (the per-message system cap the caller read). */
   systemCap: number;
-  /** This workspace's live-row ceiling (the per-message workspace cap the caller read). */
+  /** note: This workspace's live-row ceiling (the per-message workspace cap the caller read). */
   workspaceCap: number;
-  /** This attempt's release fence; release only deletes the row it wrote. */
+  /** note: This attempt's release fence; release only deletes the row it wrote. */
   attemptId: string;
-  /** Row lifetime (seconds, must be > 0) — callers pass `reviewGuardTtlSeconds(level)`. */
+  /** note: Row lifetime (seconds, must be > 0) — callers pass `reviewGuardTtlSeconds(level)`. */
   ttlSeconds: number;
   /**
-   * The commit this attempt reviews; `null` for a comment trigger, which
+   * note: The commit this attempt reviews; `null` for a comment trigger, which
    * resolves the head in-sandbox and carries none. Stored as `""` (the
    * `review_failures` convention) so the column stays single-valued.
    */
   headSha: string | null;
-  /** ISO-8601 instant the acquisition is evaluated at. */
+  /** note: ISO-8601 instant the acquisition is evaluated at. */
   now: string;
 };
 
 /**
- * Acquire the PR's lock and a capacity slot in ONE conditional insert.
+ * why: Acquire the PR's lock and a capacity slot in ONE conditional insert.
  *
  * `meta.changes === 1` is the only success signal: it means the anchor row was
  * new (or its expired predecessor was replaced). `0` means the PR is held, a
@@ -129,7 +129,7 @@ ON CONFLICT (installation_id, owner, repo, pr_number) DO UPDATE SET
 WHERE review_inflight.expires_at <= ?
 `;
 
-/** The one follow-up read a zero-row acquire owes (diagnostic only). */
+/** note: The one follow-up read a zero-row acquire owes (diagnostic only). */
 const REFUSAL_SQL = `
 SELECT
   (SELECT COUNT(*) FROM review_inflight
@@ -148,13 +148,13 @@ DELETE FROM review_inflight
 WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND attempt_id = ?
 `;
 
-/** ISO-8601 with milliseconds — the ONE text form `expires_at > now` compares correctly. */
+/** note: ISO-8601 with milliseconds — the ONE text form `expires_at > now` compares correctly. */
 function isoInstant(ms: number): string {
   return new Date(ms).toISOString();
 }
 
 /**
- * The key as it is written and compared. GitHub's owner/repo are
+ * why: The key as it is written and compared. GitHub's owner/repo are
  * case-insensitive; the row's PRIMARY KEY is not. Folding here — the one
  * key-building boundary — keeps insert, refusal read and release on the same
  * row for `Acme/Repo` and `acme/repo`.
@@ -170,7 +170,7 @@ export async function acquireInflight(
 ): Promise<InflightAcquireResult> {
   const key = normalizeKey(rawKey);
   try {
-    // Conversions live inside the try: a malformed `now` (RangeError) or a
+    // why: Conversions live inside the try: a malformed `now` (RangeError) or a
     // non-positive/non-finite TTL must answer `error` like any other
     // storage-layer refusal, never escape as a throw. A TTL of zero or less
     // would write an ALREADY-EXPIRED row: it holds no PR and reserves no
@@ -198,14 +198,14 @@ export async function acquireInflight(
         opts.headSha ?? "",
         now,
         expiresAt,
-        // System cap: live rows overall.
+        // note: System cap: live rows overall.
         now,
         opts.systemCap,
-        // Workspace cap: live rows of this tenant.
+        // note: Workspace cap: live rows of this tenant.
         key.workspace_id,
         now,
         opts.workspaceCap,
-        // Reclaim guard: only an EXPIRED row may be replaced.
+        // note: Reclaim guard: only an EXPIRED row may be replaced.
         now,
       )
       .run();
@@ -235,7 +235,7 @@ export async function acquireInflight(
     if (row.held > 0) return { ok: false, reason: "pr-held", heldHeadSha: row.held_head_sha };
     if (row.total >= opts.systemCap) return { ok: false, reason: "system-cap" };
     if (row.workspace_total >= opts.workspaceCap) return { ok: false, reason: "workspace-cap" };
-    // The capacity this attempt was refused on was released between the two
+    // why: The capacity this attempt was refused on was released between the two
     // statements. No listed reason explains it, and guessing would admit a
     // message the insert already refused.
     return { ok: false, reason: "error", cause: { kind: "released-between-statements" } };
@@ -243,7 +243,7 @@ export async function acquireInflight(
     return {
       ok: false,
       reason: "error",
-      // Threaded, never swallowed: a dead binding and a raced release are the
+      // why: Threaded, never swallowed: a dead binding and a raced release are the
       // same refusal code, and only this string tells them apart downstream.
       cause: { kind: "fault", detail: err instanceof Error ? err.message : String(err) },
     };
