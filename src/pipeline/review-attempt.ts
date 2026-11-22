@@ -2430,27 +2430,33 @@ export async function runReviewAttempt(input: {
   // values this session's own exec received, and every bounded transform of
   // them, are removed HERE, on the host that holds them; the stored and the
   // returned value are this one sanitized object, so nothing downstream can
-  // publish the raw stream either. Matching happens in DECODED string leaves
-  // (an embedded JSON envelope is parsed, not substring-matched), and the
-  // envelope's identity keys and every numeric leaf stay byte-identical.
-  const redaction = redactTransformed(
-    {
-      run: { stdout: run.stdout, stderr: "", exitCode: run.exitCode },
-      recheck,
-      report,
-      appliedProvider,
-    },
-    progress.secretValues,
-  );
-  if (redaction.skipped > 0) {
-    // Visible, never silent: these credentials were NOT applied (too short, or
-    // ambiguous with the marker), so a text echo of one would survive.
+  // publish the raw stream either. Each retained document is redacted as its
+  // own ROOT (its identity keys are host-written; anything nested under them is
+  // model text), and every numeric leaf stays byte-identical.
+  const secretValues = progress.secretValues;
+  const stdoutRedaction = redactTransformed(run.stdout, secretValues);
+  const recheckRedaction = redactTransformed(recheck, secretValues);
+  const reportRedaction = redactTransformed(report, secretValues);
+  const providerRedaction = redactTransformed(appliedProvider, secretValues);
+  const skipped =
+    stdoutRedaction.skipped +
+    recheckRedaction.skipped +
+    reportRedaction.skipped +
+    providerRedaction.skipped;
+  if (skipped > 0) {
+    // Visible, never silent: these credentials were NOT applied (each was
+    // shorter than a credential), so a text echo of one would survive.
     deps.log.warn(
-      { ...fields, skipped_credentials: redaction.skipped },
-      "credential redaction skipped a value that is too short or ambiguous with the marker",
+      { ...fields, skipped_credentials: skipped },
+      "credential redaction skipped a value shorter than a credential",
     );
   }
-  const execution = redaction.value;
+  const execution = {
+    run: { stdout: stdoutRedaction.value, stderr: "", exitCode: run.exitCode },
+    recheck: recheckRedaction.value,
+    report: reportRedaction.value,
+    appliedProvider: providerRedaction.value,
+  };
   let recorded = false;
   try {
     recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now());

@@ -52,9 +52,11 @@ const TRANSFORMED_REDACTED = "[redacted]";
 // match ordinary text (and a 3-char secret matches inside a SHA).
 const MIN_SECRET_LENGTH = 8;
 
-// why: these are host-written identity fields, not model output; rewriting one
-// (e.g. `head_sha`) turns a valid row into an unreadable one. Skipped by name at
-// every depth, `headSha` being the report wire's spelling of the same field.
+// why: these are host-written identity fields of a retained document, not model
+// output; rewriting one (e.g. `head_sha`) turns a valid row unreadable. Exempt
+// ONLY at a document root — a value under a key of that name deeper in the tree
+// is model text and IS redacted. Object KEYS are structure, never matched, so a
+// credential used as a key name is not covered.
 const IDENTITY_KEYS: Record<string, true> = {
   head_sha: true,
   headSha: true,
@@ -62,7 +64,10 @@ const IDENTITY_KEYS: Record<string, true> = {
   run_id: true,
   launch_id: true,
   check_key: true,
+  checkKey: true,
   generation: true,
+  rowId: true,
+  sliceId: true,
 };
 
 /**
@@ -99,7 +104,7 @@ export type RedactionOutcome<T> = {
   value: T;
   /** Occurrences replaced across every string leaf. */
   replaced: number;
-  /** Credential values not applied: too short, or ambiguous with the marker. */
+  /** Credential values not applied: shorter than `MIN_SECRET_LENGTH`. */
   skipped: number;
 };
 
@@ -108,10 +113,9 @@ type RedactionState = { replaced: number };
 
 /**
  * The forms the walk may replace, longest first, plus how many credential
- * values were refused. Two refusals, both visible to the caller:
- * a value shorter than `MIN_SECRET_LENGTH` (it would match ordinary text), and
- * a value that OVERLAPS the marker (`redacted`, `[redacted]`) — replacing it
- * would rewrite the marker, so a second pass would not be a no-op.
+ * values were refused: a value shorter than `MIN_SECRET_LENGTH` is skipped (it
+ * would match ordinary text), and the count is returned so the caller can say
+ * so. Marker overlap is handled per leaf, not per value — see `redactLeaf`.
  */
 function applicableForms(secrets: readonly string[]): { forms: string[]; skipped: number } {
   const forms = new Set<string>();
@@ -122,17 +126,8 @@ function applicableForms(secrets: readonly string[]): { forms: string[]; skipped
       skipped += 1;
       continue;
     }
-    // The idempotence rule, stated once: skip a value whose bytes touch the
-    // marker, in EITHER direction.
-    if (secret.includes(TRANSFORMED_REDACTED) || TRANSFORMED_REDACTED.includes(secret)) {
-      skipped += 1;
-      continue;
-    }
     for (const form of Object.values(secretTransforms(secret))) {
-      // Same reasoning per form: a form that touches the marker cannot be
-      // replaced without corrupting it.
-      if (form === "" || form.includes(TRANSFORMED_REDACTED) || TRANSFORMED_REDACTED.includes(form)) continue;
-      forms.add(form);
+      if (form !== "") forms.add(form);
     }
   }
   // A shorter form that is a substring of a longer one must not shred the
@@ -144,20 +139,22 @@ function applicableForms(secrets: readonly string[]): { forms: string[]; skipped
  * Replace every occurrence of every transform of every applicable credential in
  * the DECODED string leaves of `value`, with a fixed `[redacted]` token.
  *
- * A JSON object/array string leaf is an envelope: it is parsed first, so an
- * echo the model escaped (`\u002f`, `\/`, `\n`) is already the raw character
- * before matching, and the result is serialized again. Replacing inside decoded
- * leaves is what keeps a credential from ever matching a JSON quote or an
- * identity field's bytes. An envelope with no match keeps its original bytes.
+ * `value` is ONE document root. Its own identity keys (`IDENTITY_KEYS`) are
+ * exempt; below that depth every value is model text and is redacted — including
+ * a value under a key that happens to be named `head_sha`. Object keys are
+ * structure and are never matched, and non-string leaves pass through by
+ * identity.
  *
- * Rules, all load-bearing:
- * - non-string leaves pass through by identity;
- * - `IDENTITY_KEYS` are skipped by name at every depth (host-written, not model
- *   output — rewriting one turns a valid row invalid);
- * - values shorter than `MIN_SECRET_LENGTH` are skipped, and the count is
- *   returned in `skipped` so the caller can say so;
- * - a value that contains or is contained in the marker is skipped, which is
- *   what makes `redactTransformed` idempotent.
+ * A JSON object/array string leaf is an envelope: it is parsed first (leading
+ * and trailing whitespace ignored), so an echo the model escaped (`\u002f`,
+ * `\/`, `\n`) is already the raw character before matching, and the result is
+ * serialized again. Re-serializing drops that surrounding whitespace — only when
+ * something actually matched; an untouched envelope keeps its exact bytes.
+ *
+ * Idempotence is per leaf: a leaf that already contains the marker was produced
+ * by this function, so it is skipped whole — matching inside it can only damage
+ * it. Credentials shorter than `MIN_SECRET_LENGTH` are skipped and counted in
+ * `skipped`.
  *
  * Shape patterns (`redactSecrets`) stay OUT: their long-hex rule rewrites the
  * envelope's `head_sha`.
@@ -167,20 +164,30 @@ export function redactTransformed<T>(value: T, secrets: readonly string[]): Reda
   const applicable = applicableForms(secrets);
   const state: RedactionState = { replaced: 0 };
   const redacted =
-    applicable.forms.length === 0 ? value : (redactValue(value, applicable.forms, state) as T);
+    applicable.forms.length === 0
+      ? value
+      : (redactDocument(value, applicable.forms, state, true) as T);
   return { value: redacted, replaced: state.replaced, skipped: applicable.skipped };
 }
 
-function redactValue(value: unknown, forms: readonly string[], state: RedactionState): unknown {
-  if (typeof value === "string") return redactLeaf(value, forms, state);
+/** Walk one document; `atRoot` is the only depth whose identity keys are exempt. */
+function redactDocument(
+  value: unknown,
+  forms: readonly string[],
+  state: RedactionState,
+  atRoot: boolean,
+): unknown {
+  if (typeof value === "string") return redactLeaf(value, forms, state, atRoot);
   // A Set is not walked by `Object.entries`: `attempt.recheck.rejected` is one.
-  if (value instanceof Set) return new Set([...value].map((item) => redactValue(item, forms, state)));
-  if (Array.isArray(value)) return value.map((item) => redactValue(item, forms, state));
+  if (value instanceof Set) {
+    return new Set([...value].map((item) => redactDocument(item, forms, state, false)));
+  }
+  if (Array.isArray(value)) return value.map((item) => redactDocument(item, forms, state, false));
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        IDENTITY_KEYS[key] === true ? item : redactValue(item, forms, state),
+        atRoot && IDENTITY_KEYS[key] === true ? item : redactDocument(item, forms, state, false),
       ]),
     );
   }
@@ -188,20 +195,30 @@ function redactValue(value: unknown, forms: readonly string[], state: RedactionS
 }
 
 /** Redact one string leaf; re-serialize an envelope only when it changed. */
-function redactLeaf(text: string, forms: readonly string[], state: RedactionState): string {
+function redactLeaf(
+  text: string,
+  forms: readonly string[],
+  state: RedactionState,
+  atRoot: boolean,
+): string {
+  // Idempotence: the marker means this leaf is already this function's output.
+  if (text.includes(TRANSFORMED_REDACTED)) return text;
   const envelope = parseEnvelope(text);
   if (envelope === undefined) return replaceForms(text, forms, state);
   const before = state.replaced;
-  const redacted = redactValue(envelope, forms, state);
+  // `atRoot` carries the document-root exemption into the parsed envelope; a
+  // nested envelope is model text, so its keys get no exemption.
+  const redacted = redactDocument(envelope, forms, state, atRoot);
   // Untouched envelopes keep their exact bytes: no reformatting, no key moves.
   return state.replaced === before ? text : JSON.stringify(redacted);
 }
 
-/** The parsed value of a JSON object/array leaf, or `undefined` for anything else. */
+/** Parsed object/array of an optionally whitespace-padded JSON leaf. */
 function parseEnvelope(text: string): unknown {
-  if (!text.startsWith("{") && !text.startsWith("[")) return undefined;
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
   try {
-    const parsed: unknown = JSON.parse(text);
+    const parsed: unknown = JSON.parse(trimmed);
     return parsed !== null && typeof parsed === "object" ? parsed : undefined;
   } catch {
     return undefined;

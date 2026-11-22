@@ -185,16 +185,51 @@ describe("redactTransformed", () => {
     expect(redacted.note).toBe("[redacted]");
   });
 
-  test("is idempotent, including a credential equal to the marker's text", () => {
+  test("model text at depth ≥ 1 that looks like an identity field is redacted", () => {
+    const secret = "abcdefgh";
+    const envelope = JSON.stringify({
+      head_sha: "a".repeat(40),
+      summary_md: `{"head_sha":"${secret}"}`,
+    });
+
+    const outcome = redactTransformed(envelope, [secret]);
+    // Fixture shape is ours: the envelope serialized above.
+    const redacted = JSON.parse(outcome.value) as { head_sha: string; summary_md: string };
+
+    expect(redacted.head_sha).toBe("a".repeat(40));
+    // The nested object is model text: its `head_sha` key gets no exemption.
+    expect(JSON.parse(redacted.summary_md)).toEqual({ head_sha: "[redacted]" });
+  });
+
+  test("a whitespace-padded envelope is still decoded", () => {
+    const envelope = '\n  {"summary_md":"abc\\u002fdefg"}\n';
+
+    const outcome = redactTransformed(envelope, ["abc/defg"]);
+
+    expect(outcome.replaced).toBe(1);
+    // Documented consequence: a re-serialized envelope loses that padding.
+    expect(outcome.value).toBe('{"summary_md":"[redacted]"}');
+  });
+
+  test("is idempotent within one pass, including marker-overlapping values", () => {
     const once = redactTransformed({ text: `key ${SECRET}` }, [SECRET]);
     const twice = redactTransformed(once.value, [SECRET]);
     expect(twice.value).toEqual(once.value);
     expect(twice.replaced).toBe(0);
 
-    const ambiguous = redactTransformed({ text: "[redacted]" }, ["redacted"]);
-    expect(ambiguous.value).toEqual({ text: "[redacted]" });
-    expect(ambiguous.replaced).toBe(0);
-    expect(ambiguous.skipped).toBe(1);
+    // A leaf that already carries the marker is this function's own output.
+    const marked = redactTransformed({ text: "[redacted]" }, ["redacted"]);
+    expect(marked.value).toEqual({ text: "[redacted]" });
+    expect(marked.replaced).toBe(0);
+    expect(redactTransformed({ text: "redacted" }, ["redacted"]).value).toEqual({ text: "[redacted]" });
+
+    // Two values that overlap across the marker boundary reach a fixed point.
+    const secrets = ["x[redact", "abcdefgh"];
+    const first = redactTransformed({ text: "xabcdefgh" }, secrets);
+    expect(first.value).toEqual({ text: "x[redacted]" });
+    const second = redactTransformed(first.value, secrets);
+    expect(second.value).toEqual(first.value);
+    expect(second.replaced).toBe(0);
   });
 
   test("a payload with no secret present keeps its exact bytes", () => {
