@@ -4,10 +4,12 @@
  * buckets and a candidate cap's observed cutoff.
  *
  * Population: attempts ADMITTED in the window. The COHORT a percentile may use
- * is "`settled_ms` written, the settlement's own completion record present, and
- * the Check pair the attempt froze reading terminal at or before that instant"
- * (a Check that concludes later, or a row the database does not hold, means the
- * settlement instant truncated the interval). The record says only this much:
+ * is "`settled_ms` written and the settlement's own completion record present",
+ * with one conditional guard: where the attempt froze a Check pair, that pair
+ * must read terminal at or before that instant (a Check that concludes later,
+ * or a row the database does not hold, means the settlement instant truncated
+ * the interval). An attempt that froze no Check has no Check obligation to
+ * observe, and is measured. The record says only this much:
  * THIS SETTLEMENT considered the publication obligation discharged. It does not
  * say every obligation of the attempt was proven closed, nor that the delivery
  * idempotency key is valid — that is a transporter fact, not part of the
@@ -183,11 +185,13 @@ function hasSettlementRecord(raw: string | null): boolean {
 }
 
 /**
- * Did the Check pair the attempt froze conclude by the instant it settled? The
- * frozen pair is the only fact that says a Check exists; a terminal row is the
- * only fact that says it concluded, and it must have concluded no later than
- * the claimed settlement — otherwise the claimed end truncated the interval. A
- * missing row is not proof: the Check may simply not be written yet.
+ * Did the Check pair the attempt froze conclude by the instant it settled? An
+ * attempt that froze no pair has no Check obligation to observe, so the guard
+ * passes. Otherwise the frozen pair is the only fact that says a Check exists; a
+ * terminal row is the only fact that says it concluded, and it must have
+ * concluded no later than the claimed settlement — otherwise the claimed end
+ * truncated the interval. A missing row is not proof: the Check may simply not
+ * be written yet.
  */
 function checkClosedAt(row: DurationRow, settledMs: number): boolean {
   if (row.check_key === null) return true;

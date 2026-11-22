@@ -819,5 +819,11 @@ describe("what the surfaces claim the settlement record proves", () => {
     expect(release).toContain("that settlement recorded the publication obligation as discharged");
     expect(release).toContain("该次结算把发布义务记为已解除");
     expect(module).toContain("considered the publication obligation discharged");
+    // The Check guard is conditional — the code measures an attempt that froze
+    // no Check at all — so no surface may imply every sample has one.
+    expect(release).toContain("where the attempt has a frozen Check");
+    expect(release).toContain("尝试若有冻结的 Check");
+    expect(module).toContain("where the attempt froze a Check pair");
+    expect(module).toContain("froze no Check");
   });
 });

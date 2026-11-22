@@ -1222,7 +1222,12 @@ describe("Runtime screen", () => {
       "An attempt whose paid step failed without a durable result has no execution end and is excluded before its duration is measured: while its settlement is still owed it counts as unsettled; once settled, a frozen Check not proven closed at settlement is counted before the missing result; otherwise the missing result reads as a missing boundary. A durable result does not by itself make an attempt measurable — a later failure still excludes it when the settlement, the Check, the queue stamp, the boundary order or the settlement record is missing.",
     );
     expect(surface.container.querySelector('[data-duration="settlement-basis"]')?.textContent).toBe(
-      "A sample is measured because its settlement recorded the publication obligation as discharged; delivery idempotency is not part of the interval and is not claimed here.",
+      "A sample is measured because its settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than the settlement instant. Delivery idempotency is not part of the interval.",
+    );
+    // The Check guard is conditional: an attempt that froze no Check is still
+    // measured, so the card may not imply every sample has one.
+    expect(surface.container.querySelector('[data-duration="description"]')?.textContent).toBe(
+      "Attempts admitted in the last 30 days. Percentiles use only intervals whose settlement instant is written and whose settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than that instant. An empty window stays empty — it never reads as a zero.",
     );
     await surface.close();
   });
@@ -1289,7 +1294,10 @@ describe("Runtime screen", () => {
       "付费步骤失败且没有产出持久结果的尝试没有执行终点，因此在测量时长之前就被排除：结算时点尚未写入的计入「未结算」；已结算的，先按冻结的 Check 在结算时未被证明关闭计数；两者都不成立时，缺结果才计入「没有可测量的边界」。已经产出结果也不会让尝试自动可测：后续失败仍可能让它因缺结算时点、Check 未被证明关闭、缺队列发送时间戳、边界乱序或没有结算记录而被排除。",
     );
     expect(chinese.container.querySelector('[data-duration="settlement-basis"]')?.textContent).toBe(
-      "样本之所以可测，是因为它的这次结算把发布义务记为已解除；投递幂等性不属于该区间，这里也不对它作任何断言。",
+      "样本之所以可测，是因为它的这次结算把发布义务记为已解除；尝试若有冻结的 Check，该 Check 不晚于结算时点得出结论。投递幂等性不属于该区间。",
+    );
+    expect(chinese.container.querySelector('[data-duration="description"]')?.textContent).toBe(
+      "最近 30 天内被准入的尝试。百分位只统计已写入结算时点、且该次结算把发布义务记为已解除的区间；尝试若有冻结的 Check，该 Check 须不晚于结算时点得出结论。空窗口就显示为空，绝不当作 0。",
     );
     await chinese.close();
   });

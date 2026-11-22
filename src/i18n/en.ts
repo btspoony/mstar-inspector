@@ -1612,7 +1612,7 @@ export const en = {
       /** The duration analysis: the evidence for choosing the attempt cap. */
       durationTitle: "Review duration distribution",
       durationDescription:
-        "Attempts admitted in the last {days} days. Percentiles use only intervals whose settlement instant is written, whose settlement recorded the publication obligation as discharged, and whose Check the database shows concluded, and an empty window stays empty — it never reads as a zero.",
+        "Attempts admitted in the last {days} days. Percentiles use only intervals whose settlement instant is written and whose settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than that instant. An empty window stays empty — it never reads as a zero.",
       durationEmpty: "No attempt was admitted in this window.",
       durationEmptyExcluded:
         "No attempt was measured: all {n} admitted attempts were excluded — {checkOpen} with a Check not proven closed at settlement, {recordMissing} with no settlement record, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
@@ -1631,7 +1631,7 @@ export const en = {
       durationFailureTail:
         "An attempt whose paid step failed without a durable result has no execution end and is excluded before its duration is measured: while its settlement is still owed it counts as unsettled; once settled, a frozen Check not proven closed at settlement is counted before the missing result; otherwise the missing result reads as a missing boundary. A durable result does not by itself make an attempt measurable — a later failure still excludes it when the settlement, the Check, the queue stamp, the boundary order or the settlement record is missing.",
       durationSettlementBasis:
-        "A sample is measured because its settlement recorded the publication obligation as discharged; delivery idempotency is not part of the interval and is not claimed here.",
+        "A sample is measured because its settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than the settlement instant. Delivery idempotency is not part of the interval.",
       durationCandidateLabel: "Candidate cap (ms)",
       /** The analysis range, stated only when a typed candidate falls outside it. */
       durationCandidateRange: "The analysis accepts an integer from {min} to {max} ms.",

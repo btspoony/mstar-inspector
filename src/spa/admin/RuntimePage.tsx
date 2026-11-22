@@ -158,7 +158,7 @@ function DurationReportCard({ locale }: { locale: Locale }) {
             };
             return (
               <>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-sm text-muted-foreground" data-duration="description">
                   {t(locale, "admin.runtime.durationDescription", { days: report.window.days })}
                 </p>
                 {report.sampleSize === 0 ? (
