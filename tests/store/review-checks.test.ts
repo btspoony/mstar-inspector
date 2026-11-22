@@ -417,7 +417,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
 
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
     expect(again.kind).toBe("terminal");
@@ -496,7 +496,7 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(await setCheckDesired(db, id, stale, CONCLUSION, null, T0)).toBe(false);
     expect(await setCheckDesired(db, id, foreign, CONCLUSION, null, T0)).toBe(false);
     expect(await setCheckCreateState(db, id, foreign, "sending", undefined, T0)).toBe(false);
-    expect(await recordCheckObservation(db, id, shifted, remoteFor(attempt, {}, "success"), T0)).toBe(false);
+    expect(await recordCheckObservation(db, id, shifted, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(false);
     expect(await getCheckOwnership(db, id, stale, T0)).toBeNull();
 
     const row = await getCheckAttempt(db, id);
@@ -532,13 +532,13 @@ describe("fenced mutations (spec §7.9)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
     expect((await getCheckAttempt(db, id))?.terminalMs).not.toBeNull();
 
     // The lease is still the caller's; the row's terminality is the fence.
     expect(await setCheckDesired(db, id, lease, FAILURE, null, T0)).toBe(false);
     expect(await attachCheckRunId(db, id, lease, 9999, T0)).toBe(false);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(false);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(false);
     const after = await getCheckAttempt(db, id);
     expect(after?.desired).toBe("success");
     expect(after?.observed).toBe("success");
@@ -648,7 +648,7 @@ describe("fenced mutations (spec §7.9)", () => {
     // Terminal history is never rewritten (runFenced's NONTERMINAL_WHERE).
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
     expect((await rawRow(db, id)).terminal_ms).not.toBeNull();
     expect(await linkCheckPublication(db, id, lease, "publication-a", T0)).toBe(false);
     expect((await rawRow(db, id)).publication_id).toBeNull();
@@ -732,7 +732,7 @@ describe("fenced mutations (spec §7.9)", () => {
     await attachRun(db, id, lease);
     expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { id: 777 }, "success"), T0)).toBe(false);
     // The intended terminal state on our own run is what advances observation.
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
     const row = await rawRow(db, id);
     expect(row.observed).toBe("success");
     expect(row.recovery_state).toBe("done");
@@ -740,6 +740,28 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(row.check_run_id).toBe(4242);
     expect(row.next_attempt_ms).toBeNull();
     expect(row.last_error).toBeNull();
+  });
+
+  test("a completed reply is a delivery only when it carries the frozen text", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
+
+    // The conclusion matches, the wording does not (absent, or an earlier
+    // writer's): the user never read what this attempt froze.
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: null }, "success"), T0)).toBe(false);
+    expect((await getCheckAttempt(db, id))?.observed).toBe("unknown");
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: "Review failed." }, "success"), T0)).toBe(false);
+    const unread = await getCheckAttempt(db, id);
+    expect(unread?.observed).toBe("unknown");
+    expect(unread?.terminalMs).toBeNull();
+
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
+    const delivered = await getCheckAttempt(db, id);
+    expect(delivered?.observed).toBe("success");
+    expect(delivered?.terminalMs).toBe(T0);
   });
 
   test("an in-progress observation attaches the id but never terminalizes", async () => {
@@ -931,7 +953,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0);
+    await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0);
     expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE * 2)).toBeNull();
   });
 });
@@ -1112,7 +1134,7 @@ describe("a settled neutral row does not retire the head (spec §7.9)", () => {
           app: { id: APP_NUMERIC_ID },
           status: "completed",
           conclusion: "neutral",
-          summary: null,
+          summary: "review paused",
         },
         T0,
       ),
@@ -1377,7 +1399,7 @@ describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
     await attachRun(db, id, lease);
     expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
     expect(
-      await recordCheckObservation(db, id, lease, remoteFor(attempt), T0),
+      await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }), T0),
     ).toBe(true);
 
     expect(await queuedAs(db, "mine")).toBeNull();
@@ -1857,7 +1879,7 @@ describe("recovery claim fences (spec §7.6 / §7.9)", () => {
     // resurrected.
     const recovery = await claimCheckRecovery(db, id, "reconciler", T0 + 1);
     expect(recovery).not.toBeNull();
-    expect(await recordCheckObservation(db, id, recovery!, remoteFor(attempt, {}, "success"), T0 + 1)).toBe(true);
+    expect(await recordCheckObservation(db, id, recovery!, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0 + 1)).toBe(true);
 
     expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: id, nowMs: T0 + 2 })).toBe(false);
     const row = await rawRow(db, id);

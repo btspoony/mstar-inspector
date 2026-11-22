@@ -1647,11 +1647,12 @@ export async function recordTerminalizeOutcome(
  * conclusion"). Identity = the run's `external_id`, `head_sha`, `name`, owning
  * `app.id`, and — once attached — the persisted `check_run_id`.
  *
- * A completed run whose conclusion is not the locally persisted intent is
- * evidence of something else (a manual close, another writer), never an
- * observation of this attempt. An in-progress payload is recorded only while
- * nothing terminal is observed yet. `false` means nothing was written; the
- * caller then records `remote-unconfirmed` through `deferCheckRecovery`.
+ * A completed run is delivery only when it carries the persisted conclusion AND
+ * the frozen summary: a conclusion-only match is what an earlier writer left
+ * behind, so it is never an observation of this attempt. An in-progress payload
+ * is recorded only while nothing terminal is observed yet. `false` means nothing
+ * was written; the caller then records `remote-unconfirmed` through
+ * `deferCheckRecovery`.
  */
 export async function recordCheckObservation(
   db: D1Like,
@@ -1669,7 +1670,11 @@ export async function recordCheckObservation(
   if (remote.app === null || remote.app.id !== identity.githubAppId) return false;
   if (owned.checkRunId !== null && owned.checkRunId !== remote.id) return false;
 
-  const agrees = remote.status === "completed" && owned.desired !== "in_progress" && remote.conclusion === owned.desired;
+  const agrees =
+    remote.status === "completed" &&
+    owned.desired !== "in_progress" &&
+    remote.conclusion === owned.desired &&
+    remote.summary === owned.desiredSummary;
   const running = remote.status === "queued" || remote.status === "in_progress" || remote.status === "pending";
   if (!agrees && !running) return false;
   if (running && owned.observed !== "unknown") return false;

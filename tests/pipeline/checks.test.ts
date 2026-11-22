@@ -176,7 +176,11 @@ function fakeChecks(respond: Partial<{
         async update(params) {
           updates.push({ params, raw: { ...params } as unknown as Record<string, unknown> });
           if (respond.update === undefined) throw Object.assign(new Error("nope"), { status: 500 });
-          return { data: await respond.update(params) };
+          const payload = await respond.update(params);
+          // GitHub answers with the run it just stored, `output` included, so a
+          // responder that means "the reply carries no text" must say
+          // `output: null` explicitly (spec §7.9: delivery needs the text).
+          return { data: "output" in payload ? payload : { ...payload, output: params.output } };
         },
         async get(params) {
           if (respond.get === undefined) throw Object.assign(new Error("missing"), { status: 404 });
@@ -1109,6 +1113,68 @@ describe("completeCheck — the terminal send", () => {
     expect(released.lease_until_ms).toBeNull();
     expect(released.attempts).toBe(1);
     expect(released.next_attempt_ms).toBe(T0 + 60_000);
+  });
+
+  test("a reply without the frozen text is unconfirmed, never a delivery", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // Layer 1 — the adapter: the update landed with the right conclusion but no
+    // readable output, so the reply proves nothing about the text the user reads.
+    const first = await claimedAttempt(db);
+    await attachedRun(db, first.attempt, first.lease, 4242);
+    expect(await setCheckDesired(db, first.attempt.identity.attemptId, first.lease, SUCCESS, null, T0)).toBe(true);
+    const textless = fakeChecks({
+      update: () => runPayload(first.attempt.identity, { status: "completed", conclusion: "success", output: null }),
+    });
+    const unproven = await adapterFor(db, textless.octokit).completeCheck({
+      identity: first.attempt.identity,
+      lease: first.lease,
+      checkRunId: 4242,
+      conclusion: SUCCESS,
+    });
+    expect(unproven.kind).toBe("unavailable");
+    if (unproven.kind === "unavailable") {
+      expect(unproven.reason).toMatch(/frozen text/);
+      // It WAS a request: the run may already wear the conclusion.
+      expect(unproven.requests).toBe(1);
+    }
+
+    // Layer 2 — the lifecycle turns that into UNKNOWN, never delivery: the row
+    // keeps its frozen intent, nothing is observed, and recovery owns the run.
+    const otherSha = "89abcdef0123456789abcdef0123456789abcdef";
+    const second = await claimedAttempt(db, { headSha: otherSha });
+    await attachedRun(db, second.attempt, second.lease, 4343);
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () =>
+        adapterFor(
+          db,
+          fakeChecks({
+            update: () =>
+              runPayload(second.attempt.identity, { status: "completed", conclusion: "failure", output: null }),
+          }).octokit,
+        ),
+      getCheckGate: async () => GATE,
+    });
+    await lifecycle.terminalize({
+      handle: {
+        attemptId: second.attempt.identity.attemptId,
+        scope: SCOPE,
+        githubAppId: GITHUB_APP_ID,
+        headSha: otherSha,
+        lease: second.lease,
+      },
+      publicationId: null,
+      outcome: "publication-unknown",
+    });
+    const released = await rowOf(db, second.attempt);
+    expect(released.observed).toBe("unknown");
+    expect(released.terminal_ms).toBeNull();
+    expect(released.desired).toBe("failure");
+    expect(released.recovery_state).toBe("remote-unconfirmed");
+    expect(released.holder).toBeNull();
+    expect(released.attempts).toBe(1);
   });
 });
 

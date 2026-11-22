@@ -759,6 +759,12 @@ async function completeCheckWith(
   if (remote.status !== "completed" || remote.conclusion !== frozen.desired) {
     return { kind: "unavailable", requests: attempted.sent, reason: "check update response is not the intended terminal state" };
   }
+  // Delivery is the conclusion AND the frozen text (spec §7.9): a reply with no
+  // readable output proves nothing about what the user now reads, so it is an
+  // unconfirmed send and recovery re-reads/resends the SAME run.
+  if (remote.summary !== frozen.summary) {
+    return { kind: "unavailable", requests: attempted.sent, reason: "check update response does not carry the frozen text" };
+  }
   return { kind: "completed", remote };
 }
 
