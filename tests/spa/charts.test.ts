@@ -1,5 +1,4 @@
-/**
- * Chart primitives (B2/B3) — TrendChart on recharts (AD-621).
+/** note: Chart primitives (B2/B3) — TrendChart on recharts (AD-621).
  * The hand-rolled layout math and its direct pins
  * (linearScale/niceTicks/bandScale/… — formerly charts/layout.ts) retired
  * with the module: recharts owns the geometry now. The render faces are
@@ -59,8 +58,7 @@ const CHARTS_CSS = readFileSync(
   "utf8",
 );
 
-/**
- * The value `prop` resolves to for one element's emitted class list, read from
+/** note: The value `prop` resolves to for one element's emitted class list, read from
  * the charts.css rules — the property, not the class name. `undefined` when no
  * class in the list declares it (a fill with no rule paints recharts' default).
  */
@@ -73,11 +71,11 @@ function resolveDeclared(classList: string, prop: string): string | undefined {
   return undefined;
 }
 
-/** Every legend swatch's class list, in legend order. */
+/** note: Every legend swatch's class list, in legend order. */
 const swatchClasses = (html: string): string[] =>
   [...html.matchAll(/<span class="(chart-legend-swatch[^"]*)"/g)].map((m) => m[1]!);
 
-/** Every series path's class list (the recharts-rectangle face). */
+/** note: Every series path's class list (the recharts-rectangle face). */
 const seriesClasses = (html: string): string[] =>
   [...html.matchAll(/<path [^>]*class="([^"]*)"/g)].map((m) => m[1]!);
 
@@ -103,10 +101,10 @@ describe("TrendChart SSR (recharts face)", () => {
     const html = trendChart(weeks);
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Weekly trend"');
-    // Same svg <title> mirror pin as the BarChart face (recharts Surface
+    // note: Same svg <title> mirror pin as the BarChart face (recharts Surface
     // forwards `title` → `<title>`): dropping the prop fails here too.
     expect(html).toContain("<title>Weekly trend</title>");
-    // Legend order pins the series→slot pairing: the reviews swatch precedes
+    // note: Legend order pins the series→slot pairing: the reviews swatch precedes
     // its label, then the findings swatch and its label.
     const reviews = html.indexOf(">Reviews</span>");
     const findings = html.indexOf(">Findings</span>");
@@ -118,7 +116,7 @@ describe("TrendChart SSR (recharts face)", () => {
     expect(firstSwatch).toBeLessThan(reviews);
     expect(reviews).toBeLessThan(secondSwatch);
     expect(secondSwatch).toBeLessThan(findings);
-    // Two faces: the swatches resolve to the slots' mark token, the bars to
+    // note: Two faces: the swatches resolve to the slots' mark token, the bars to
     // the quiet fill token — a swatch that resolved to the fill is the defect
     // this split exists to prevent.
     expect(resolveDeclared(swatches[0]!, "background-color")).toBe("var(--chart-5-mark)");
@@ -133,12 +131,12 @@ describe("TrendChart SSR (recharts face)", () => {
   });
 
   test("each week carries the two grouped series bars (2 weeks × 2 series)", () => {
-    // Legend swatches are HTML spans now — every <path> is series geometry.
+    // note: Legend swatches are HTML spans now — every <path> is series geometry.
     expect(trendChart(weeks).split("<path").length - 1).toBe(4);
   });
 
   test("a non-zero bar height tracks the value scale (proportion face, F-01 class)", () => {
-    // max 4 → recharts domain [0..4]; plot height = 166 - 4 - 20 = 142 →
+    // note: max 4 → recharts domain [0..4]; plot height = 166 - 4 - 20 = 142 →
     // the findings-4 rect spans the full plot height — a collapsed height
     // can never satisfy this.
     expect(trendChart(weeks)).toMatch(
@@ -147,7 +145,7 @@ describe("TrendChart SSR (recharts face)", () => {
   });
 
   test("date labels are the pinned M/D format in every locale (2026-09-16 user-feedback pin)", () => {
-    // The locale prop is retired: the shared formatDateLabel (dateLabel.ts)
+    // note: The locale prop is retired: the shared formatDateLabel (dateLabel.ts)
     // renders numeric M/D on the axis face regardless of the app locale —
     // the zh M月D日 face never renders again.
     const html = trendChart(weeks);
@@ -156,11 +154,11 @@ describe("TrendChart SSR (recharts face)", () => {
   });
 
   test("more than 8 weeks thins to every-other-week date labels", () => {
-    // Real consecutive weeks: 6/29 .. 8/31 (10 Mondays).
+    // note: Real consecutive weeks: 6/29 .. 8/31 (10 Mondays).
     const mondays = ["06-29", "07-06", "07-13", "07-20", "07-27", "08-03", "08-10", "08-17", "08-24", "08-31"];
     const dense: TrendPoint[] = mondays.map((week) => ({ week: `2026-${week}`, reviews: 1, findings: 1 }));
     const html = trendChart(dense);
-    // Even indices labeled (6/29, 7/13, 7/27, 8/10, 8/24); odd weeks dropped.
+    // note: Even indices labeled (6/29, 7/13, 7/27, 8/10, 8/24); odd weeks dropped.
     expect(html).toContain("6/29");
     expect(html).toContain("7/13");
     expect(html).toContain("8/24");
@@ -195,7 +193,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
       by_severity: { "must-fix": 7, "should-fix": 5, "may-fix": 4, nit: 3 },
     },
   ];
-  // The production severity stack (AppInsightsTab SEVERITY_SLOTS): must-fix,
+  // invariant: The production severity stack (AppInsightsTab SEVERITY_SLOTS): must-fix,
   // should-fix, may-fix, nit — slots 4, 3, 6, 5.
   const severitySeries: StackedSeries[] = [
     { key: "must-fix", label: "must-fix", slot: 4 },
@@ -217,7 +215,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
       }),
     );
 
-  /** The y/height of one slot's stacked segment path (recharts-rectangle face). */
+  /** note: The y/height of one slot's stacked segment path (recharts-rectangle face). */
   const segment = (html: string, slot: ChartSlot): { y: number; height: number } => {
     const fill = chartClasses(slot).fill;
     const tag = new RegExp(`<path [^>]*class="recharts-rectangle ${fill}"[^>]*>`).exec(html)?.[0];
@@ -231,10 +229,10 @@ describe("StackedBarChart SSR (stacked face)", () => {
     const html = stackedChart(severityBuckets, severitySeries);
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Findings by severity"');
-    // Same svg <title> mirror pin as the TrendChart face (recharts Surface
+    // note: Same svg <title> mirror pin as the TrendChart face (recharts Surface
     // forwards `title` → `<title>`): dropping the prop fails here too.
     expect(html).toContain("<title>Findings by severity</title>");
-    // Legend order = stack order: each swatch precedes its own label (the
+    // note: Legend order = stack order: each swatch precedes its own label (the
     // HTML legend row above the chart — the TrendChart face), and each swatch
     // resolves to its slot's mark token.
     const swatches = swatchClasses(html);
@@ -255,13 +253,13 @@ describe("StackedBarChart SSR (stacked face)", () => {
 
   test("stacked segments carry the series fill faces and the tooltip series names", () => {
     const html = stackedChart(severityBuckets, severitySeries);
-    // Colors ride the charts.css class rules only — never presentation
+    // invariant: Colors ride the charts.css class rules only — never presentation
     // attributes, never raw hex (the no-raw-hex source scan below covers
     // the module). Each segment's emitted class list resolves to its slot's
     // quiet fill token; a deleted rule leaves `fill` unresolved.
     const resolved = new Set(seriesClasses(html).map((classes) => resolveDeclared(classes, "fill")));
     expect(resolved).toEqual(new Set(severitySeries.map((series) => `var(--chart-${series.slot})`)));
-    // Exact counts ride the tooltip — every segment path carries its series
+    // note: Exact counts ride the tooltip — every segment path carries its series
     // name so the hover face can name the number it holds.
     expect(html).toContain('name="must-fix"');
     expect(html).toContain('name="should-fix"');
@@ -275,13 +273,13 @@ describe("StackedBarChart SSR (stacked face)", () => {
     const should = segment(html, 3);
     const may = segment(html, 6);
     const nit = segment(html, 5);
-    // The first series sits on the axis (plot bottom = 166 - 20 axis) and
+    // note: The first series sits on the axis (plot bottom = 166 - 20 axis) and
     // every next series starts exactly where the previous one ends.
     expect(must.y + must.height).toBeCloseTo(146);
     expect(should.y + should.height).toBeCloseTo(must.y);
     expect(may.y + may.height).toBeCloseTo(should.y);
     expect(nit.y + nit.height).toBeCloseTo(may.y);
-    // Heights track the values (7/5/4/3), not the stack order — a segment
+    // note: Heights track the values (7/5/4/3), not the stack order — a segment
     // carrying the wrong key's count cannot satisfy both ratios.
     expect(must.height / nit.height).toBeCloseTo(7 / 3);
     expect(should.height / nit.height).toBeCloseTo(5 / 3);
@@ -302,17 +300,17 @@ describe("StackedBarChart SSR (stacked face)", () => {
       },
     ];
     const html = stackedChart(buckets, severitySeries);
-    // Both date ticks render — the empty day is an honest grid column,
+    // note: Both date ticks render — the empty day is an honest grid column,
     // never filtered off the axis (AC-C).
     expect(html).toContain(">8/17</tspan>");
     expect(html).toContain(">8/18</tspan>");
-    // Geometry only where counts exist: one column × four stacked
+    // invariant: Geometry only where counts exist: one column × four stacked
     // segments (zero-height rects never render).
     expect(html.split("<path").length - 1).toBe(4);
   });
 
   test("day and week buckets share one axis face; the pinned M/D label holds for both", () => {
-    // The 90d window's Monday-anchored week buckets (granularity "week")
+    // note: The 90d window's Monday-anchored week buckets (granularity "week")
     // render the identical axis grammar as day buckets.
     const weekBuckets: DistributionBucket[] = [
       {
@@ -326,7 +324,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
   });
 
   test("more than 8 buckets thin to every-other date labels; 8 or fewer keep every label", () => {
-    // The StackedBarChart twin of the TrendChart >8-weeks pin above (the
+    // note: The StackedBarChart twin of the TrendChart >8-weeks pin above (the
     // component docblock promises "the TrendChart semantics" for
     // interval={data.length > 8 ? 1 : 0}): a 90d window renders 13-14 week
     // buckets and a 30d window 31 day buckets — both thin.
@@ -337,12 +335,12 @@ describe("StackedBarChart SSR (stacked face)", () => {
       by_severity: { "must-fix": 1, "should-fix": 0, "may-fix": 0, nit: 0 },
     });
     const dense = stackedChart(days.map((day) => bucket(`2026-${day}`)), severitySeries);
-    // Even indices labeled (8/10 .. 8/18); odd days dropped.
+    // note: Even indices labeled (8/10 .. 8/18); odd days dropped.
     expect(dense).toContain("8/10");
     expect(dense).toContain("8/18");
     expect(dense).not.toContain("8/11");
     expect(dense).not.toContain("8/19");
-    // Exactly 8 buckets (the threshold) keep every label — including the
+    // invariant: Exactly 8 buckets (the threshold) keep every label — including the
     // odd-index days thinning would drop.
     const full = stackedChart(days.slice(0, 8).map((day) => bucket(`2026-${day}`)), severitySeries);
     expect(full).toContain("8/10");
@@ -352,7 +350,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
   });
 
   test("a hostile series label renders as escaped text on every label surface (legend + tooltip name)", () => {
-    // XSS pin (qc2-S-3, restated): series labels are wire strings that
+    // safety: XSS pin (qc2-S-3, restated): series labels are wire strings that
     // travel several surfaces — the HTML legend text and the tooltip series
     // name — plus the axis tick face via a hostile bucket_start (next pin).
     // All travel the React text/attribute path: hostile markup surfaces
@@ -369,19 +367,19 @@ describe("StackedBarChart SSR (stacked face)", () => {
       },
     ];
     const html = stackedChart(hostileBuckets, hostileSeries);
-    // The legend label span renders the escaped text…
+    // note: The legend label span renders the escaped text…
     expect(html).toContain(">&lt;img src=x&gt;</span>");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
-    // …and the tooltip series name attribute (the Bar's name prop, the
+    // note: …and the tooltip series name attribute (the Bar's name prop, the
     // pinned hover-face carrier) is attribute-escaped, not raw.
     expect(html).toContain('name="&lt;img src=x&gt;"');
-    // No raw element from either surface.
+    // note: No raw element from either surface.
     expect(html).not.toContain("<img");
     expect(html).not.toContain("<script");
   });
 
   test("a hostile bucket_start renders as escaped tick text — the non-ISO fallback stays a React text node", () => {
-    // formatDateLabel regex-accepts only ISO dates and falls back to
+    // invariant: formatDateLabel regex-accepts only ISO dates and falls back to
     // the raw string for anything else — the fallback must stay a React
     // text node (escaped), never raw markup on the axis face.
     const html = stackedChart(
@@ -399,7 +397,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
   });
 
   test("the tooltip is token-styled: contentStyle/labelStyle ride the SSR face, itemStyle is source-pinned", () => {
-    // Plan component ruling (BarChart.tsx precedent): the recharts default
+    // note: Plan component ruling (BarChart.tsx precedent): the recharts default
     // tooltip must be re-faced onto tokens — itemStyle is MANDATORY
     // (recharts' default list text is unreadable on the dark card).
     // contentStyle/labelStyle merge into the statically rendered wrapper
@@ -437,7 +435,7 @@ describe("chart sources keep the no-raw-hex token discipline (global constraint)
 
 describe("the closed chart vocabulary has two faces per slot (D14)", () => {
   test("every slot's fill reads --chart-{n} and its swatch reads --chart-{n}-mark", () => {
-    // Property pin, not a class pin: the emitted class list is resolved
+    // note: Property pin, not a class pin: the emitted class list is resolved
     // through charts.css and the DECLARED VALUE is asserted. A swatch that
     // resolved to the slot's fill would paint the loud bar face at 10px —
     // the exact defect the large-fill-quieter-than-small-marks split exists
@@ -448,14 +446,14 @@ describe("the closed chart vocabulary has two faces per slot (D14)", () => {
       expect(resolveDeclared(swatch, "background-color"), swatch).toBe(`var(--chart-${slot}-mark)`);
       expect(resolveDeclared(swatch, "background-color")).not.toBe(resolveDeclared(fill, "fill"));
     }
-    // The v0.3 chrome faces: tick text renders tabular figures (DESIGN.md
+    // note: The v0.3 chrome faces: tick text renders tabular figures (DESIGN.md
     // numerals rule) and the legend label carries the label-face weight.
     expect(CHARTS_CSS).toContain("font-variant-numeric: tabular-nums");
     expect(CHARTS_CSS).toContain("font-weight: 500");
   });
 
   test("the stylesheet answers exactly the six slots — no seventh family", () => {
-    // A retired family (teal/pink's `-700` pairs) must not leave a rule
+    // invariant: A retired family (teal/pink's `-700` pairs) must not leave a rule
     // behind, and a slot without a rule cannot be reached from the type.
     const declared = [...CHARTS_CSS.matchAll(/\.chart-(?:fill|swatch)-[a-z0-9-]+/g)].map((m) => m[0]);
     const expected = CHART_SLOTS.flatMap((slot) => {
@@ -467,12 +465,12 @@ describe("the closed chart vocabulary has two faces per slot (D14)", () => {
 
   test("a series value outside the six slots does not typecheck", () => {
     const inRange: StackedSeries = { key: "k", label: "k", slot: 6 };
-    // @ts-expect-error — 7 is outside chart-1..6: a chart cannot name a face
+    // note: @ts-expect-error — 7 is outside chart-1..6: a chart cannot name a face
     // the stylesheet does not answer.
     const outOfRange: StackedSeries = { key: "k", label: "k", slot: 7 };
-    // @ts-expect-error — the slot union has no zero.
+    // note: @ts-expect-error — the slot union has no zero.
     const zero: ChartSlot = 0;
-    // The teeth are the two `@ts-expect-error` lines above (a value outside
+    // note: The teeth are the two `@ts-expect-error` lines above (a value outside
     // the union is a compile error); the runtime asserts the same facts as
     // numbers, so a widened slot type shows up here too.
     expect(inRange.slot).toBe(6);

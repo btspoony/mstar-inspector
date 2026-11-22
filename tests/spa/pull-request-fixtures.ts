@@ -1,5 +1,4 @@
-/**
- * Payloads and the gated-fetch mount shared by the pull-requests suites.
+/** note: Payloads and the gated-fetch mount shared by the pull-requests suites.
  *
  * The list/detail split imports the same PR payloads; keeping them here means
  * neither file pins its own copy of the data the other one asserts on. The
@@ -41,7 +40,7 @@ export const ROW_HEAD: PullRequestHead = {
   head_sha: "aaa111bbb222",
   first_seen_at: "2026-10-28 08:00:00",
   last_seen_at: "2026-11-01 10:00:00",
-  // The base fixture is an idle PR; the reviewing-now suites override it.
+  // note: The base fixture is an idle PR; the reviewing-now suites override it.
   reviewing: { state: "none" },
 };
 
@@ -60,7 +59,7 @@ export const FINDINGS: PullRequestFinding[] = [
     file_path: "src/db.ts",
     line: 42,
     body: "String interpolation reaches the SQL engine.",
-    // First reported by the PR's first round.
+    // note: First reported by the PR's first round.
     review_round: 1,
   },
   {
@@ -70,18 +69,18 @@ export const FINDINGS: PullRequestFinding[] = [
     file_path: "src/auth/session.ts",
     line: 88,
     body: "The refresh cookie is set with secure only.",
-    // Surfaced by the second round.
+    // note: Surfaced by the second round.
     review_round: 2,
   },
   {
     finding_id: "f-3",
     severity: "nit",
     title: "Rename tmp to pending",
-    // A repo-wide finding: no file_path, so the location chip disappears.
+    // why: A repo-wide finding: no file_path, so the location chip disappears.
     file_path: "",
     line: null,
     body: "The variable holds the pending redirect target.",
-    // No stored review carries its first-seen sha, so no round chip renders.
+    // note: No stored review carries its first-seen sha, so no round chip renders.
     review_round: null,
   },
 ];
@@ -94,22 +93,22 @@ export const REVIEWS: PullRequestReview[] = [
     provider: "openrouter",
     reviewed_at: "2026-11-01 08:00:00",
     head_sha: "aaa111bbb222",
-    // The second round: the first is the older row below.
+    // note: The second round: the first is the older row below.
     round: 2,
-    // 1m 5s — the minutes+seconds form.
+    // note: 1m 5s — the minutes+seconds form.
     duration_ms: 65_000,
-    // The per-severity breakdown the wire sends as JSON text.
+    // note: The per-severity breakdown the wire sends as JSON text.
     severity_counts: { "must-fix": 1, nit: 1 },
   },
   {
     verdict: "ship it",
     model: "claude-sonnet-4.5",
-    // v1 never records a provider — the separator must disappear with it.
+    // invariant: v1 never records a provider — the separator must disappear with it.
     provider: "",
     reviewed_at: "2026-10-30 08:00:00",
     head_sha: "f00d12c1",
     round: 1,
-    // Historical row: no measured clock, so the row omits the time.
+    // why: Historical row: no measured clock, so the row omits the time.
     duration_ms: null,
     severity_counts: { nit: 1 },
   },
@@ -118,7 +117,7 @@ export const REVIEWS: PullRequestReview[] = [
 export const FAILURES: PullRequestFailure[] = [
   {
     stage: "sandbox",
-    // Model/runtime output — must render escaped, never as HTML.
+    // invariant: Model/runtime output — must render escaped, never as HTML.
     error: "exit 1: <script>alert(1)</script>",
     created_at: "2026-10-31 23:00:00",
   },
@@ -136,8 +135,7 @@ export const RECORDS: RecordPages = {
 /** The fixture PR's own must-fix tally, as its head counts it. */
 export const MUST_FIX = FINDINGS.filter((finding) => finding.severity === "must-fix").length;
 
-/**
- * The head's authoritative newest review — the same round as `REVIEWS[0]`, in
+/** note: The head's authoritative newest review — the same round as `REVIEWS[0]`, in
  * the shape the detail read actually sends: the five attribution fields, with
  * the round ordinal, clock and tally left to the paged reviews section.
  */
@@ -162,7 +160,7 @@ export const DETAIL: PullRequestDetailPayload = {
     failures: FAILURES.length,
     must_fix: MUST_FIX,
   },
-  // The head's authoritative newest review — what the headline reads, whatever
+  // note: The head's authoritative newest review — what the headline reads, whatever
   // page the reviews section has loaded.
   latest_review: LATEST_REVIEW,
 };
@@ -226,7 +224,7 @@ export function recordsOf(pages: RecordPages = RECORDS, offset = 0, severity = "
     severity,
     status: "ok",
     page,
-    // A first-page render IS the newest window; a paged or filtered one
+    // note: A first-page render IS the newest window; a paged or filtered one
     // describes a window the caller never supplied to the aside, so it stays
     // unknown.
     newest: offset === 0 && severity === "" ? page : null,
@@ -278,14 +276,14 @@ export async function mountView(
   globalThis.fetch = fetchImpl;
   const host = win.document.createElement("div");
   win.document.body.appendChild(host);
-  // happy-dom's nodes cross into lib.dom's here: the queries read the same
+  // note: happy-dom's nodes cross into lib.dom's here: the queries read the same
   // roles, attributes and `hidden` the static tests do.
   const container = host as unknown as HTMLElement;
   const root = createRoot(container as unknown as Element);
   let mounted = true;
   try {
     await act(async () => root.render(element));
-    // A mounted face can chain reads (head → first section): a few empty
+    // note: A mounted face can chain reads (head → first section): a few empty
     // flushes drain those microtasks, so the mount lands settled.
     for (let flush = 0; flush < 3; flush += 1) await act(async () => {});
   } catch (error) {
@@ -298,7 +296,7 @@ export async function mountView(
     container,
     win,
     unmount: async () => {
-      // A test may unmount mid-body (the late-write case) and again on the way
+      // note: A test may unmount mid-body (the late-write case) and again on the way
       // out; the window is restored once.
       if (!mounted) return;
       mounted = false;
@@ -335,7 +333,7 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
   const impl = (async (input: unknown) => {
     const url = new URL(String(input), "http://localhost");
     fetches.push(url.pathname + url.search);
-    // `/api/targets/<targetId>/pull-requests/...` names the target the read
+    // note: `/api/targets/<targetId>/pull-requests/...` names the target the read
     // answers for; the workspace scope (`/api/pull-requests/...`) names none.
     const sceneValue = sceneFor(/\/targets\/([^/]+)\//.exec(url.pathname)?.[1] ?? "");
     const severity = url.searchParams.get("severity") ?? "";
@@ -345,7 +343,7 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
       if (section === "findings" && severity !== "" && !isFindingSeverity(severity)) {
         return jsonResponse({ error: "invalid severity" }, 400);
       }
-      // The catch-all is a mode of its own; the two filters never combine.
+      // invariant: The catch-all is a mode of its own; the two filters never combine.
       if (section === "findings" && unclassified && severity !== "") {
         return jsonResponse({ error: "invalid filter" }, 400);
       }
@@ -361,11 +359,11 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
             : sceneValue.pages.failures.items;
       const offset = Number(url.searchParams.get("offset") ?? "0");
       const limit = Number(url.searchParams.get("limit") ?? "10");
-      // The applied page size, and the payload echoes it: a scene can state a
+      // note: The applied page size, and the payload echoes it: a scene can state a
       // smaller one (`pages.x.limit`), exactly as the route's clamp would, and
       // the pager must stride on what came back rather than on what it asked.
       const applied = Math.min(limit, sceneValue.pages[section].limit ?? limit);
-      // The page's declared `total` is authoritative: the head was built from
+      // note: The page's declared `total` is authoritative: the head was built from
       // it, so a scene can state a total its served window never reaches. A
       // FILTERED findings read is different: the route totals it with a
       // family-wide COUNT, so the stub counts matched rows across the scene's
@@ -382,7 +380,7 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
         limit: applied,
       });
     }
-    // The head read is the only other read this stub describes; anything else
+    // invariant: The head read is the only other read this stub describes; anything else
     // is a test asking for a read the stub cannot answer, and answering it with
     // a head payload would let that test pass on a response the API never gave.
     // The detail head: one target, or the workspace with no target segment.
@@ -439,11 +437,11 @@ export async function mountDetailView(
  * `fetches`, whose counts are about the list/head reads.
  */
 export async function mountTabWithGatedFetch(initialPr: string) {
-  // One gate per REQUEST, not per URL: a retry re-reads a URL that was already
+  // note: One gate per REQUEST, not per URL: a retry re-reads a URL that was already
   // read, and a URL-keyed gate would replace the request still pending.
   type Gate = { url: string; promise: Promise<Response>; resolve: (response: Response) => void };
   const gates: Gate[] = [];
-  // Every list/head URL the tab asked for, so a test can prove a read was (or
+  // note: Every list/head URL the tab asked for, so a test can prove a read was (or
   // was not) issued without keeping its own stub.
   const fetches: string[] = [];
   const gatedFetch = (async (input: unknown) => {
@@ -462,7 +460,7 @@ export async function mountTabWithGatedFetch(initialPr: string) {
     gates.splice(gates.indexOf(gate), 1);
     gate.resolve(response);
   };
-  // The helper owns the shell's search state, so a close (`onSearch`) commits
+  // note: The helper owns the shell's search state, so a close (`onSearch`) commits
   // exactly as the real page's does — the deep-link test needs no harness.
   let setSearch: (next: (previous: AppDetailSearch) => AppDetailSearch) => void = () => {};
   let setTarget: (next: string) => void = () => {};
@@ -476,7 +474,7 @@ export async function mountTabWithGatedFetch(initialPr: string) {
     const [targetId, setTargetId] = useState("1");
     setSearch = set;
     setTarget = setTargetId;
-    // A fresh scope object every render: the tab keys its reads on the scope's
+    // note: A fresh scope object every render: the tab keys its reads on the scope's
     // KEY, not on the object's identity.
     return createElement(AppPullRequestsTab, {
       locale: "en",
@@ -490,15 +488,14 @@ export async function mountTabWithGatedFetch(initialPr: string) {
     ...mounted,
     fetches,
     text: () => mounted.container.textContent ?? "",
-    /**
-     * Re-render for `pr` through a fresh search object — the shell's own
+    /** note: Re-render for `pr` through a fresh search object — the shell's own
      * re-sync always hands over a new object with the same value.
      */
     rerender: async (pr: string) => {
       await act(async () => setSearch((previous) => ({ ...previous, pr })));
       await act(async () => {});
     },
-    /** Move the tab to another target, keeping the same `search` (and PR). */
+    /** note: Move the tab to another target, keeping the same `search` (and PR). */
     switchTarget: async (targetId: string) => {
       await act(async () => setTarget(targetId));
       await act(async () => {});
@@ -541,7 +538,7 @@ export async function mountTabAcrossTargets(
     ...mounted,
     fetches: stub.fetches,
     text: () => mounted.container.textContent ?? "",
-    /** Move the tab to another target, keeping the same search (and PR). */
+    /** note: Move the tab to another target, keeping the same search (and PR). */
     switchTarget: async (targetId: string) => {
       await act(async () => setTarget(targetId));
       await act(async () => {});

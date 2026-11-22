@@ -1,5 +1,4 @@
-/**
- * The model picker dialog: one checkbox per catalog model (stored ids
+/** note: The model picker dialog: one checkbox per catalog model (stored ids
  * checked), stored ids the catalog no longer lists stay listed and checked,
  * case-insensitive filtering keeps checked state, the selected / max counter
  * states the cap and an unchecked box is unavailable at the cap, select-none
@@ -78,7 +77,7 @@ async function mount(overrides: {
         }),
     });
   await act(async () => root.render(renderTree(overrides.storedModelIds ?? [])));
-  // Simulate a background reload: a fresh array identity, equal contents.
+  // note: Simulate a background reload: a fresh array identity, equal contents.
   const reload = async (storedModelIds: string[]) => {
     await act(async () => root.render(renderTree(storedModelIds)));
   };
@@ -110,7 +109,7 @@ async function mount(overrides: {
 
   const search = () => dialog()?.querySelector('input[type="search"]') as unknown as HTMLInputElement | null;
 
-  /** The folded detail section's toggle, picker and picker-change helper. */
+  /** note: The folded detail section's toggle, picker and picker-change helper. */
   const detailsToggle = (): HTMLButtonElement | null =>
     buttonByLabel("settings.providers.models.detailsToggle");
   const detailSelect = (): HTMLSelectElement | null =>
@@ -131,7 +130,7 @@ async function mount(overrides: {
     reasoning: "settings.providers.models.fields.reasoning",
   } as const;
 
-  /** One per-model fact input, found by its model-scoped label. */
+  /** note: One per-model fact input, found by its model-scoped label. */
   const field = (modelId: string, key: keyof typeof FIELD_KEYS) =>
     dialog()?.querySelector(
       `[aria-label="${t(locale, FIELD_KEYS[key], { model: modelId })}"]`,
@@ -187,9 +186,9 @@ describe("ProviderModelsDialog", () => {
       expect(boxes).toHaveLength(5);
       const legacy = boxes.find((box) => box.nextElementSibling?.textContent === "legacy-model");
       expect(legacy?.checked).toBe(true);
-      // Saving keeps the orphan id in the POST body.
+      // note: Saving keeps the orphan id in the POST body.
       await view.click(view.saveButton());
-      // The overlay carries only stated facts: neither model states a size, so
+      // invariant: The overlay carries only stated facts: neither model states a size, so
       // the map is empty — the save lands and both models store as unstated.
       expect(view.calls).toEqual([
         {
@@ -205,7 +204,7 @@ describe("ProviderModelsDialog", () => {
   });
 
   test("a legacy id-only declaration shows the unstated note and blank size fields", async () => {
-    // The catalogue DOES cover this provider (m-2 carries sizes); it simply
+    // note: The catalogue DOES cover this provider (m-2 carries sizes); it simply
     // says nothing about m-1, which is the "unstated" case — not the
     // no-catalogue-row case, which has its own sentence.
     const view = await mount({
@@ -215,7 +214,7 @@ describe("ProviderModelsDialog", () => {
     });
     try {
       await view.click(view.detailsToggle());
-      // The sentence is a DATA statement about the declaration, never a
+      // invariant: The sentence is a DATA statement about the declaration, never a
       // runtime promise: the pinned registry back-fills its own defaults for
       // an id-only model, so claiming the save is blocked or the file blocks
       // failover would be false.
@@ -239,12 +238,12 @@ describe("ProviderModelsDialog", () => {
     const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"], storedModelsMeta: stored });
     try {
       await view.click(view.detailsToggle());
-      // Round-trip: the stored values are the seed, so an untouched save
+      // invariant: Round-trip: the stored values are the seed, so an untouched save
       // re-sends exactly what the owner stated.
       expect(view.field("m-1", "contextWindow")?.value).toBe("128000");
       expect(view.field("m-1", "maxTokens")?.value).toBe("8192");
       expect(view.field("m-1", "name")?.value).toBe("Model One");
-      // A legacy row is not shown as usable: the note disappears once stated.
+      // note: A legacy row is not shown as usable: the note disappears once stated.
       expect(view.dialog()?.textContent).not.toContain(t(locale, "settings.providers.models.sizesUnstated"));
       await view.click(view.saveButton());
       expect(view.calls).toEqual([
@@ -271,12 +270,12 @@ describe("ProviderModelsDialog", () => {
       await view.click(view.detailsToggle());
       expect(view.field("m-1", "contextWindow")?.value).toBe("111");
       expect(view.field("m-1", "maxTokens")?.value).toBe("22");
-      // The label names the source (and its snapshot), not a disclaimer.
+      // note: The label names the source (and its snapshot), not a disclaimer.
       expect(view.dialog()?.textContent).toContain(
         t(locale, "settings.providers.models.sizesFromCatalog", { snapshot: "2026-11-13" }),
       );
       expect(view.dialog()?.textContent).not.toContain(t(locale, "settings.providers.models.sizesUnstated"));
-      // Untouched: no override entry travels — the catalog still supplies both.
+      // invariant: Untouched: no override entry travels — the catalog still supplies both.
       await view.click(view.saveButton());
       expect(view.calls).toEqual([
         {
@@ -300,7 +299,7 @@ describe("ProviderModelsDialog", () => {
     });
     try {
       await view.click(view.detailsToggle());
-      // One side becomes the operator's own statement; the other keeps the
+      // note: One side becomes the operator's own statement; the other keeps the
       // catalog seed. The label must not claim the typed value came from the
       // vendor.
       await view.type(view.field("m-1", "contextWindow"), "999");
@@ -352,7 +351,7 @@ describe("ProviderModelsDialog", () => {
       expect(view.field("m-1", "contextWindow")?.value).toBe("111");
       expect(view.field("m-1", "maxTokens")?.value).toBe("22");
       await view.click(view.saveButton());
-      // The stated context window is re-sent; the catalog's max token count is not.
+      // note: The stated context window is re-sent; the catalog's max token count is not.
       expect(view.calls).toEqual([
         {
           op: "update-provider-models",
@@ -382,7 +381,7 @@ describe("ProviderModelsDialog", () => {
       expect(closed).not.toContain(t(locale, "settings.providers.models.requirements"));
       expect(closed).not.toContain(t(locale, "settings.providers.models.sizesUnstated"));
 
-      // Opening reveals the sizes statement, one picker over the selected ids
+      // note: Opening reveals the sizes statement, one picker over the selected ids
       // and exactly the picked model's fields.
       await view.click(toggle);
       expect(view.detailsToggle()?.getAttribute("aria-expanded")).toBe("true");
@@ -412,12 +411,12 @@ describe("ProviderModelsDialog", () => {
       expect(view.field("m-1", "contextWindow")).toBeNull();
       await view.type(view.field("m-2", "name"), "Model Two");
 
-      // Switching back shows what was typed, not the stored seed.
+      // note: Switching back shows what was typed, not the stored seed.
       await view.choose(view.detailSelect(), "m-1");
       expect(view.field("m-1", "name")?.value).toBe("Model One Edited");
 
-      // Unchecking a model drops its picker option and its save entry.
-      await view.click(view.checkboxes()[1]); // m-2
+      // note: Unchecking a model drops its picker option and its save entry.
+      await view.click(view.checkboxes()[1]); // note: m-2
       expect([...(view.detailSelect()?.options ?? [])].map((option) => option.value)).toEqual(["m-1"]);
       await view.click(view.saveButton());
       expect(view.calls).toEqual([
@@ -443,7 +442,7 @@ describe("ProviderModelsDialog", () => {
       expect(visible.map((box) => box.nextElementSibling?.textContent)).toEqual(["GPT-4o", "gpt-4o-mini"]);
       expect(visible[0]?.checked).toBe(true);
       expect(visible[1]?.checked).toBe(false);
-      // Clearing the filter brings everything back with state intact.
+      // note: Clearing the filter brings everything back with state intact.
       await view.type(view.search(), "");
       expect(view.checkboxes()).toHaveLength(3);
     } finally {
@@ -476,7 +475,7 @@ describe("ProviderModelsDialog", () => {
       const unchecked = view.checkboxes().filter((box) => !box.checked);
       expect(unchecked).toHaveLength(1);
       expect(unchecked[0]?.disabled).toBe(true);
-      // Select-all reflects the visible list, so the cap alone does not
+      // why: Select-all reflects the visible list, so the cap alone does not
       // disable it — and it cannot push the selection past the bound.
       const selectAll = view.buttonByLabel("settings.providers.models.selectAll");
       expect(selectAll?.disabled).toBe(false);
@@ -487,7 +486,7 @@ describe("ProviderModelsDialog", () => {
           max: MAX_CUSTOM_PROVIDER_MODEL_IDS,
         }),
       );
-      // Unchecking one re-enables the unchecked box and drops the cap note.
+      // note: Unchecking one re-enables the unchecked box and drops the cap note.
       await view.click(view.checkboxes()[0]);
       expect(view.checkboxes().at(-1)?.disabled).toBe(false);
       expect(view.dialog()?.textContent).not.toContain(
@@ -526,7 +525,7 @@ describe("ProviderModelsDialog", () => {
 
       await view.click(view.buttonByLabel("settings.providers.models.selectAll"));
       expect(view.checkboxes().every((box) => box.checked)).toBe(true);
-      // What the operator saw is what got selected: the hidden id stays out.
+      // invariant: What the operator saw is what got selected: the hidden id stays out.
       expect(view.dialog()?.textContent).toContain(
         t(locale, "settings.providers.models.counter", { selected: 2, max: MAX_CUSTOM_PROVIDER_MODEL_IDS }),
       );
@@ -558,7 +557,7 @@ describe("ProviderModelsDialog", () => {
   test("save posts the op and the joined ids, reports success and closes", async () => {
     const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"] });
     try {
-      await view.click(view.checkboxes()[3]); // m-4
+      await view.click(view.checkboxes()[3]); // note: m-4
       await view.click(view.saveButton());
       expect(view.calls).toEqual([
         {
@@ -586,7 +585,7 @@ describe("ProviderModelsDialog", () => {
       expect(view.dialog()).not.toBeNull();
       expect(view.dialog()?.textContent).toContain("The provider rejected the rewrite.");
       expect(view.checkboxes()[0]?.checked).toBe(true);
-      expect(view.calls).toHaveLength(0); // the rejecting stub records nothing
+      expect(view.calls).toHaveLength(0); // invariant: the rejecting stub records nothing
     } finally {
       await view.cleanup();
     }
@@ -595,11 +594,11 @@ describe("ProviderModelsDialog", () => {
   test("a background reload with equal stored ids does not wipe the in-progress selection", async () => {
     const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"] });
     try {
-      await view.click(view.checkboxes()[1]); // select m-2
+      await view.click(view.checkboxes()[1]); // note: select m-2
       expect(view.checkboxes()[1]?.checked).toBe(true);
-      // The settings page reloads in the background: same ids, new array identity.
+      // note: The settings page reloads in the background: same ids, new array identity.
       await view.reload(["m-1"]);
-      expect(view.checkboxes()[1]?.checked).toBe(true); // m-2 stays selected
+      expect(view.checkboxes()[1]?.checked).toBe(true); // invariant: m-2 stays selected
       expect(view.checkboxes()[0]?.checked).toBe(true);
     } finally {
       await view.cleanup();
@@ -607,7 +606,7 @@ describe("ProviderModelsDialog", () => {
   });
 
   test("the copy states the fact and the next step — never a policy disclaimer", () => {
-    // The old wording read as a policy disclaimer; both locales now name
+    // note: The old wording read as a policy disclaimer; both locales now name
     // what the fact does (or what the save left out).
     for (const loc of ["en", "zh_CN"] as const) {
       for (const key of [
@@ -620,33 +619,33 @@ describe("ProviderModelsDialog", () => {
         expect(copy).not.toContain("猜测");
       }
     }
-    // The sizes line says what the numbers do and that a blank one is not a
+    // note: The sizes line says what the numbers do and that a blank one is not a
     // save precondition.
     expect(t(locale, "settings.providers.models.requirements")).toMatch(/compacted/);
     expect(t(locale, "settings.providers.models.requirements")).toMatch(/reply/);
     expect(t(locale, "settings.providers.models.requirements")).toContain("unstated");
-    // The unstated note states the behaviour (the save lands, the runtime
+    // note: The unstated note states the behaviour (the save lands, the runtime
     // default applies) and adds no blame.
     const unstated = t(locale, "settings.providers.models.sizesUnstated");
     expect(unstated).toContain("unstated");
     expect(unstated).toMatch(/runtime/i);
     expect(unstated).not.toMatch(/not usable|failover/i);
-    // The zh copy states the same behaviour, positively: a blank size saves as
+    // note: The zh copy states the same behaviour, positively: a blank size saves as
     // unstated and the runtime's own default applies — never a requirement.
     expect(t("zh_CN", "settings.providers.models.sizesUnstated")).toContain("未声明");
     expect(t("zh_CN", "settings.providers.models.sizesUnstated")).toContain("运行时");
     expect(t("zh_CN", "settings.providers.models.requirements")).toContain("未声明");
     expect(t("zh_CN", "settings.providers.models.requirements")).not.toMatch(/都需要|必须填写/);
-    // The catalog label names the snapshot the values came from.
+    // note: The catalog label names the snapshot the values came from.
     expect(t(locale, "settings.providers.models.sizesFromCatalog", { snapshot: "2026-11-13" })).toContain("2026-11-13");
   });
 
   test("reopening re-seeds from the stored list — a cancelled edit leaves no trace", async () => {
     const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"] });
     try {
-      await view.click(view.checkboxes()[1]); // select m-2
+      await view.click(view.checkboxes()[1]); // note: select m-2
       expect(view.checkboxes()[1]?.checked).toBe(true);
-      // Cancel closes without saving; the harness's reopen control opens it again.
+      // note: Cancel closes without saving; the harness's reopen control opens it again.
       await view.click(view.buttonByLabel("common.cancel"));
       expect(view.dialog()).toBeNull();
       await view.click(view.win.document.querySelector("[data-testid=reopen]") as unknown as Element);
@@ -658,8 +657,7 @@ describe("ProviderModelsDialog", () => {
   });
 });
 
-/**
- * A provider with no catalog row (the 18 the vendor snapshot omits, I-000574)
+/** note: A provider with no catalog row (the 18 the vendor snapshot omits, I-000574)
  * has UNKNOWN sizes, not zero. The dialog says so, and blank stays the
  * ordinary, savable answer — the server accepts a partial or absent set
  * (`parseCustomProviderModelsMeta` skips an absent size before any shape
@@ -667,13 +665,13 @@ describe("ProviderModelsDialog", () => {
  */
 describe("ProviderModelsDialog — sizes no catalogue states", () => {
   test("renders the unknown-provider sentence and no catalogue-provenance line", async () => {
-    // No catalog limits at all, for a model the catalogue lists as an id.
+    // note: No catalog limits at all, for a model the catalogue lists as an id.
     const view = await mount({ catalogModelIds: CATALOG, storedModelIds: ["m-1"], catalogLimits: {} });
     try {
       await view.click(view.detailsToggle());
       const text = view.dialog()?.textContent ?? "";
       expect(text).toContain(t(locale, "settings.providers.models.sizesUnknownProvider"));
-      // The provenance line would credit a snapshot with numbers this provider
+      // why: The provenance line would credit a snapshot with numbers this provider
       // does not have, so it is absent — as is the "unstated" note, which is
       // for a catalogue that exists but says nothing about this model.
       expect(text).not.toContain(t(locale, "settings.providers.models.requirements"));
@@ -692,7 +690,7 @@ describe("ProviderModelsDialog — sizes no catalogue states", () => {
       expect(view.field("m-1", "maxTokens")?.value).toBe("");
       expect(view.field("m-1", "contextWindow")?.required).toBe(false);
       expect(view.field("m-1", "maxTokens")?.required).toBe(false);
-      // The save is available with nothing stated: blank is a valid answer.
+      // invariant: The save is available with nothing stated: blank is a valid answer.
       expect(view.saveButton()?.disabled).toBe(false);
     } finally {
       await view.cleanup();
@@ -723,7 +721,7 @@ describe("ProviderModelsDialog — sizes no catalogue states", () => {
       await view.click(view.detailsToggle());
       await view.type(view.field("m-1", "contextWindow"), "200000");
       await view.click(view.saveButton());
-      // The untouched max token count is NOT invented, defaulted or sent as 0.
+      // invariant: The untouched max token count is NOT invented, defaulted or sent as 0.
       expect(view.calls).toEqual([
         {
           op: "update-provider-models",
@@ -738,7 +736,7 @@ describe("ProviderModelsDialog — sizes no catalogue states", () => {
   });
 
   test("the round-trip: a partial set posts as-is and re-seeds as stored", async () => {
-    // What the server accepted for THAT save is what comes back — the form
+    // note: What the server accepted for THAT save is what comes back — the form
     // shows it without demanding the missing side.
     const view = await mount({
       catalogModelIds: CATALOG,
@@ -768,7 +766,7 @@ describe("ProviderModelsDialog — sizes no catalogue states", () => {
     const view = await mount({
       catalogModelIds: CATALOG,
       storedModelIds: ["m-1"],
-      // The catalogue covers the provider, but says nothing about m-1.
+      // invariant: The catalogue covers the provider, but says nothing about m-1.
       catalogLimits: { "m-2": { contextWindow: 111, maxTokens: 22 } },
     });
     try {
