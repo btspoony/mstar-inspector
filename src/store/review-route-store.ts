@@ -340,8 +340,130 @@ export async function touchAttemptHandoff(db: D1Like, deliveryKey: string, nowMs
     .run();
 }
 
-/** The effects a settlement can make durable (see `settleAttemptFailure`). */
-export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip" | "publication";
+/**
+ * The effects a settlement can make durable (see `settleAttemptFailure`).
+ *
+ * `recheck-row` and `recheck-attribution` are the refused round's two durable
+ * effects. They are REQUIRED while the attempt's duty row (`review_recheck_duties`)
+ * names them as still owed, and their existence — not a host's claim, a log call
+ * or a timestamp — is what lets the settlement rule discharge the attempt.
+ */
+export type SettlementEffect =
+  | "failure-row"
+  | "check"
+  | "claim-stamp"
+  | "skip"
+  | "publication"
+  | "recheck-row"
+  | "recheck-attribution";
+
+/** The seat's own round outcome — the vocabulary the attribution line reports. */
+export type RecheckOutcome = "ok" | "failed" | "absent" | "skipped";
+
+/** The round accounting a refusal still owes (everything a replay needs). */
+export type RecheckDuty = {
+  attemptId: string;
+  headSha: string;
+  /** The sanitized shipped-failure detail; `null` = no row owed. */
+  failureError: string | null;
+  outcome: RecheckOutcome;
+};
+
+const RECORD_RECHECK_DUTY_SQL = `
+INSERT INTO review_recheck_duties (attempt_id, head_sha, failure_error, outcome, created_ms)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(attempt_id) DO NOTHING
+`;
+const READ_RECHECK_DUTY_SQL = `
+SELECT attempt_id, head_sha, failure_error, outcome FROM review_recheck_duties WHERE attempt_id = ?
+`;
+const CLEAR_RECHECK_DUTY_SQL = `DELETE FROM review_recheck_duties WHERE attempt_id = ?`;
+const RECORD_RECHECK_ATTRIBUTION_SQL = `
+INSERT INTO review_recheck_attributions (attempt_id, created_ms) VALUES (?, ?)
+ON CONFLICT(attempt_id) DO NOTHING
+`;
+const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
+const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
+const MARK_REFUSAL_PENDING_SQL = `
+INSERT INTO review_refusal_pending (attempt_id, created_ms) VALUES (?, ?)
+ON CONFLICT(attempt_id) DO NOTHING
+`;
+const READ_REFUSAL_PENDING_SQL = `SELECT 1 AS present FROM review_refusal_pending WHERE attempt_id = ?`;
+const CLEAR_REFUSAL_PENDING_SQL = `DELETE FROM review_refusal_pending WHERE attempt_id = ?`;
+
+/**
+ * Record the refusal INTENT, before any accounting effect. Its presence — not
+ * the duty's — is what tells every settlement lane downstream that this attempt
+ * refused a review and owes its round's effects.
+ */
+export async function markRefusalPending(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
+  await db.prepare(MARK_REFUSAL_PENDING_SQL).bind(attemptId, nowMs).run();
+}
+
+/** Whether this attempt refused a review and still owes its round's accounting. */
+export async function readRefusalPending(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(READ_REFUSAL_PENDING_SQL).bind(attemptId).first<{ present: number }>();
+  return row !== null;
+}
+
+/** Discharge the refusal marker — its round's effects are durable. */
+export async function clearRefusalPending(db: D1Like, attemptId: string): Promise<void> {
+  await db.prepare(CLEAR_REFUSAL_PENDING_SQL).bind(attemptId).run();
+}
+
+/**
+ * Open the round's duty: written BEFORE any effect, so a host that dies mid-way
+ * leaves the recovery owner everything it needs. Idempotent.
+ */
+export async function recordRecheckDuty(db: D1Like, duty: RecheckDuty, nowMs: number): Promise<void> {
+  await db
+    .prepare(RECORD_RECHECK_DUTY_SQL)
+    .bind(duty.attemptId, duty.headSha, duty.failureError, duty.outcome, nowMs)
+    .run();
+}
+
+/** The attempt's open round duty, or `null` when nothing is owed. */
+export async function readRecheckDuty(db: D1Like, attemptId: string): Promise<RecheckDuty | null> {
+  const row = await db.prepare(READ_RECHECK_DUTY_SQL).bind(attemptId).first<{
+    attempt_id: string;
+    head_sha: string;
+    failure_error: string | null;
+    outcome: RecheckOutcome;
+  }>();
+  if (row === null) return null;
+  return {
+    attemptId: row.attempt_id,
+    headSha: row.head_sha,
+    failureError: row.failure_error,
+    outcome: row.outcome,
+  };
+}
+
+/** Discharge the duty — BOTH its effects are durable. */
+export async function clearRecheckDuty(db: D1Like, attemptId: string): Promise<void> {
+  await db.prepare(CLEAR_RECHECK_DUTY_SQL).bind(attemptId).run();
+}
+
+/** Whether the round's attribution line was already emitted for this attempt. */
+export async function readRecheckAttribution(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(READ_RECHECK_ATTRIBUTION_SQL).bind(attemptId).first<{ present: number }>();
+  return row !== null;
+}
+
+/**
+ * Record that the round's attribution line was emitted. Inserted AFTER the log
+ * call, so the delivery contract is at-least-once: a crash in between re-emits,
+ * and the sink accepts a duplicate; it can never claim a line that never ran.
+ */
+export async function recordRecheckAttribution(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
+  await db.prepare(RECORD_RECHECK_ATTRIBUTION_SQL).bind(attemptId, nowMs).run();
+}
+
+/** Whether the attempt's `recheck` shipped-failure row is durable. */
+export async function recheckRowExists(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(RECHECK_ROW_EXISTS_SQL).bind(`${attemptId}:recheck`).first<{ present: number }>();
+  return row !== null;
+}
 
 /**
  * Complete the settle-once mark. It is written by the settlement itself, and it
@@ -407,11 +529,30 @@ async function settlementPlan(
     required = ["skip"];
   } else if (landed.has("failure-row")) {
     required = settlementObligationsOf(handoff.payload, checkInvolved);
+    // (The refused round's two effects are read from durable facts below.)
   } else if (landed.has("publication")) {
     required = ["publication"];
     if (checkInvolved) required.push("check");
   } else {
     return null;
+  }
+  // The refused round's effects come from DURABLE FACTS, and only the FAILURE
+  // lane reads them: the publication lane must never be blocked by round state
+  // (a clean review's accounting is best-effort). The refusal MARKER is what says
+  // a round is owed at all — a duty row whose insert never committed cannot hide
+  // the obligation — while the duty carries what to write and the row/fact carry
+  // what already landed. The live settlement and the recovery pass share this
+  // plan, so neither can discharge an incomplete ledger.
+  if (required.includes("failure-row") && (await readRefusalPending(db, input.attemptId))) {
+    const duty = await readRecheckDuty(db, input.attemptId);
+    // A row is owed only when the duty says one was shipped (a cancelled round or
+    // one that sent nothing owes the attribution alone).
+    if (duty !== null && duty.failureError !== null) {
+      if (await recheckRowExists(db, input.attemptId)) landed.add("recheck-row");
+      else required.push("recheck-row");
+    }
+    if (await readRecheckAttribution(db, input.attemptId)) landed.add("recheck-attribution");
+    else required.push("recheck-attribution");
   }
   return { deliveryKey: handoff.deliveryKey, landed: [...landed], required };
 }

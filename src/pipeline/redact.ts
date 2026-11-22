@@ -188,6 +188,28 @@ function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
 }
 
 /**
+ * Redact every form of each secret from a text WE persist — an attribution log
+ * line, a durable failure row — for seat-authored text that never passes through
+ * `redactDocument`.
+ *
+ * Deliberately stricter than the publish gate's matcher: the gate REFUSES model
+ * output, so it matches a short raw value — and an encoding under its
+ * six-character substring floor — only as a whole leaf, to avoid false
+ * positives. A ledger write has the opposite cost: over-redaction is cheap, a
+ * durable leak is not. So EVERY form is removed wherever it appears — the long
+ * forms (`credentialMatcher`'s patterns) first, then the whole-leaf-only ones as
+ * substrings longest-first, then every raw value at any length.
+ */
+export function redactLedgerText(text: string, secrets: readonly string[]): string {
+  const matcher = credentialMatcher(secrets);
+  let out = redactText(text, matcher, { replaced: 0 });
+  for (const form of [...matcher.exact].sort((left, right) => right.length - left.length)) {
+    out = out.split(form).join(REDACTED);
+  }
+  return redactExactSecrets(out, secrets);
+}
+
+/**
  * Redact ONE retained document root.
  *
  * Identity is protected by traversal path (`IDENTITY_PATHS` for `document`),

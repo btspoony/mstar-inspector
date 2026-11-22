@@ -15,7 +15,7 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { MarkedRun } from "../../src/pipeline/sandbox";
 import type { D1Like } from "../../src/store/types";
 import { secretTransforms } from "../../src/pipeline/redact";
-import { failingDb } from "../helpers/consumer-fixtures";
+import { TEST_KEY, failingDb } from "../helpers/consumer-fixtures";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 // note: The shared mock must register the workerd builtin BEFORE the sandbox adapter
@@ -174,7 +174,7 @@ function sandboxDouble(
 
 function executionInput(sandbox: SandboxDouble, db: TestD1) {
   return {
-    deps: { log: log(), env: { DB: db } },
+    deps: { log: log(), env: { DB: db, DASHBOARD_ENCRYPTION_KEY: TEST_KEY } },
     deadlineMs: Date.now() + 600_000,
     sandbox: sandbox as never,
     headSha: SHA,
@@ -301,7 +301,10 @@ describe("the paid step is taken at most once per attempt", () => {
     await expect(
       runReviewAttempt({
         ...executionInput(sandbox, db),
-        deps: { log: log(), env: { DB: failingDb(db, "SET state = 'launched'") } },
+        deps: {
+          log: log(),
+          env: { DB: failingDb(db, "SET state = 'launched'"), DASHBOARD_ENCRYPTION_KEY: TEST_KEY },
+        },
       }),
     ).rejects.toBeInstanceOf(AttemptUnknownError);
 
@@ -320,7 +323,10 @@ describe("the paid step is taken at most once per attempt", () => {
     await expect(
       runReviewAttempt({
         ...executionInput(sandbox, db),
-        deps: { log: log(), env: { DB: failingDb(db, "SET state = 'persisted'") } },
+        deps: {
+          log: log(),
+          env: { DB: failingDb(db, "SET state = 'persisted'"), DASHBOARD_ENCRYPTION_KEY: TEST_KEY },
+        },
       }),
     ).rejects.toBeInstanceOf(AttemptUnknownError);
 
