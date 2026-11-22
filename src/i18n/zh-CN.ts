@@ -1250,7 +1250,7 @@ export const zhCN: Dictionary = {
       claimUnreadable:
         "无法读取已存储的评论触发恢复设置，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查这些行。",
       reconcileTitle: "恢复协调器",
-      reconcileDescription: "下一轮恢复生效；每轮仅读取一次设置。单请求预算不得超过整轮预算，发布通道与线程操作请求数（含不同 App 配对的冷启动凭据探测）之和不得超过生命周期整轮请求数，每行请求数不得超过 Check 整轮请求数。",
+      reconcileDescription: "下一轮恢复生效；每轮仅读取一次设置。单请求超时至少为 500 毫秒且不得超过整轮预算；整轮预算下限按最少请求数乘以该超时下限计算。发布通道与线程操作请求数（含不同 App 配对的冷启动凭据探测）之和不得超过生命周期整轮请求数，每行请求数不得超过 Check 整轮请求数。",
       reconcileFields: {
         lifecycleMaxRequests: "生命周期每轮请求数",
         lifecycleRunBudgetMs: "生命周期整轮预算（毫秒）",

@@ -95,6 +95,9 @@ import type { DashboardD1 } from "./users";
 import { SWEEP_FIELDS, type SweepField, type SweepLimits, type SweepValues } from "../contracts/sweep-settings";
 import { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 import { RECONCILE_FIELDS, RECONCILE_RULES, RECONCILE_DEFAULTS, invalidReconcileRelations, type ReconcileField, type ReconcileValues } from "../contracts/reconcile-settings";
+import { CHECK_UPDATE_MIN } from "../contracts/check-budgets";
+
+export { CHECK_UPDATE_MIN } from "../contracts/check-budgets";
 
 /** PK of the system row in `review_runtime_settings`. */
 export const SYSTEM_CONCURRENCY_KEY = "review.concurrency.system";
@@ -125,7 +128,6 @@ export const CHECK_UPDATE_DEFAULT = 5_000;
 export const CHECK_TERMINALIZE_MIN = 1_000;
 export const CHECK_TERMINALIZE_MAX = 30_000;
 /** Range of a stored update budget. */
-export const CHECK_UPDATE_MIN = 500;
 export const CHECK_UPDATE_MAX = 15_000;
 /** The audit ledger's target id for the pair (one operator save, one row). */
 const CHECK_BUDGETS_TARGET = "review.check.budgets";

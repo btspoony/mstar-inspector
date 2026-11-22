@@ -2789,15 +2789,15 @@ behave.
   | API field | Absent-row default | Accepted range |
   |---|---:|---:|
   | `lifecycleMaxRequests` | 80 | 14–100 |
-  | `lifecycleRunBudgetMs` | 45,000 | 1–60,000 |
-  | `lifecyclePerRequestMs` | 5,000 | 1–15,000 |
+  | `lifecycleRunBudgetMs` | 45,000 | 7,000–60,000 |
+  | `lifecyclePerRequestMs` | 5,000 | 500–15,000 |
   | `lifecycleThreadOperationRequests` | 15 | 9–100 |
   | `lifecyclePublicationLaneMaxRequests` | 40 | 5–100 |
   | `lifecycleSelectLimit` | 10 | 1–100 |
   | `lifecycleMaxAttempts` | 5 | 1–10 |
   | `checkMaxRequests` | 100 | 6–100 |
-  | `checkRunBudgetMs` | 60,000 | 1–60,000 |
-  | `checkPerRequestMs` | 5,000 | 1–15,000 |
+  | `checkRunBudgetMs` | 60,000 | 3,000–60,000 |
+  | `checkPerRequestMs` | 5,000 | 500–15,000 |
   | `checkRowMaxRequests` | 6 | 6–100 |
   | `checkSelectLimit` | 25 | 1–100 |
   | `checkMaxAttempts` | 5 | 1–10 |
@@ -2807,6 +2807,10 @@ behave.
   thread/issue captures and resolution. The thread allowance includes its own
   cold credentials when publication work used a different App pair. Pagination
   can require a larger budget.
+  Per-request timeouts share the existing 500 ms terminal Check-update floor.
+  Run minima allow that floor for each minimum-budget request: 14 × 500 ms
+  for lifecycle and 6 × 500 ms for Checks. These are admission floors, not
+  latency guarantees; slower responses and pagination can require larger budgets.
   Per-request timeouts must not exceed their run budget. Publication-lane
   plus thread-operation request allowances must not exceed lifecycle total
   requests, leaving room to admit a thread after the publication lane;

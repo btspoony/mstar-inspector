@@ -1271,6 +1271,24 @@ describe("workspace default review-gate floor", () => {
 });
 
 describe("PATCH /_internal_admin/api/runtime reconcile", () => {
+  test("accepts exact timeout minima and refuses lower values without changing saved settings", async () => {
+    const { db } = fixture();
+    const fields = ["lifecycleRunBudgetMs", "lifecyclePerRequestMs", "checkRunBudgetMs", "checkPerRequestMs"] as const;
+    const values = { ...RECONCILE_DEFAULTS };
+    for (const field of fields) values[field] = RECONCILE_LIMITS[field].min;
+    const save = (reconcile: typeof values) => runtimeApi(db, { method: "PATCH", body: JSON.stringify({ reconcile }) });
+    expect((await save(values)).status).toBe(200);
+    for (const field of fields) {
+      const response = await save({ ...values, [field]: values[field] - 1 });
+      expect(response.status).toBe(400);
+      expect((await response.json() as { error: string }).error).toContain(`reconcile.${field} must be an integer in ${RECONCILE_LIMITS[field].min}..`);
+    }
+    expect(auditRows(db)).toHaveLength(1);
+    expect(await (await runtimeApi(db, { method: "GET" })).json()).toHaveProperty("reconcile", {
+      values, limits: RECONCILE_LIMITS, degraded: false,
+    });
+  });
+
   test("rejects request budgets that cannot admit a cold recovery row", async () => {
     const { db } = fixture();
     for (const budgets of [

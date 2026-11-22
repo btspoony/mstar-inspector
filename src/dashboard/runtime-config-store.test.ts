@@ -36,7 +36,7 @@
  * `REVIEW_LEVELS` reads `"default"` with `degraded: true` and never throws, and
  * a write outside the vocabulary is refused with no row and no audit row.
  */
-import { RECONCILE_DEFAULTS } from "../contracts/reconcile-settings";
+import { RECONCILE_DEFAULTS, RECONCILE_LIMITS, RECONCILE_RULES } from "../contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import {
   CHECK_TERMINALIZE_DEFAULT,
@@ -1034,6 +1034,25 @@ describe("workspace check_min_score default", () => {
 });
 
 describe("reconciler settings snapshot", () => {
+  test("timeout minima round-trip, smaller writes fail, and stored smaller values degrade", async () => {
+    const db = createMigratedTestD1();
+    const fields = ["lifecycleRunBudgetMs", "lifecyclePerRequestMs", "checkRunBudgetMs", "checkPerRequestMs"] as const;
+    const values = { ...RECONCILE_DEFAULTS };
+    for (const field of fields) values[field] = RECONCILE_LIMITS[field].min;
+    await setReconcileSettings(db, values, "operator");
+    expect(await getReconcileSettings(db)).toEqual({ values, issue: null });
+    for (const field of fields) {
+      const lower = values[field] - 1;
+      await expect(setReconcileSettings(db, { ...values, [field]: lower }, "operator")).rejects.toMatchObject({ reason: "invalid_value" });
+      expect(await getReconcileSettings(db)).toEqual({ values, issue: null });
+      const key = RECONCILE_RULES[field].key;
+      db.raw.prepare("UPDATE review_runtime_settings SET value=? WHERE key=?").run(String(lower), key);
+      expect(await getReconcileSettings(db)).toEqual({ values: RECONCILE_DEFAULTS, issue: { kind: "invalid_rows", keys: expect.arrayContaining([key]) } });
+      db.raw.prepare("UPDATE review_runtime_settings SET value=? WHERE key=?").run(String(values[field]), key);
+    }
+    db.raw.close();
+  });
+
   test("publication allowance leaves thread admission headroom on writes and reads", async () => {
     const db = createMigratedTestD1();
     const invalid = { ...RECONCILE_DEFAULTS, lifecycleMaxRequests: 80, lifecyclePublicationLaneMaxRequests: 70, lifecycleThreadOperationRequests: 15 };
