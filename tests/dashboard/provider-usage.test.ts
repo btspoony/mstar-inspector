@@ -1,5 +1,5 @@
 /**
- * Per-key usage probe tests: the nine families' payload normalization, the
+ * why: Per-key usage probe tests: the nine families' payload normalization, the
  * shared failure vocabulary, the catalog-id table, and the "never invent a
  * limit" rules (negative counters drop, balance-only stays balance-only).
  *
@@ -21,7 +21,7 @@ import {
 
 type FetchCall = { url: string; headers: Record<string, string>; redirect?: "follow" | "error" | "manual" };
 
-/** Canned responses served in order; every call records its URL, headers and
+/** note: Canned responses served in order; every call records its URL, headers and
  *  redirect mode (the credential-origin guard's transport input). */
 function queueFetch(responses: Response[], calls: FetchCall[] = []): UsageDeps["fetch"] {
   return (async (input, init) => {
@@ -44,7 +44,7 @@ function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-// --- shared normalizers ---
+// note: --- shared normalizers ---
 
 describe("shared normalizers", () => {
   test("fractionFromUsed drops a negative count and clamps an over-100 percent", () => {
@@ -73,7 +73,7 @@ describe("shared normalizers", () => {
   });
 });
 
-// --- probe table ---
+// note: --- probe table ---
 
 describe("usage probe table", () => {
   const covered = [
@@ -98,12 +98,12 @@ describe("usage probe table", () => {
   });
 
   test("a declaration stored under a collapsed per-protocol id probes its provider's endpoint", () => {
-    // The catalog emits one row per provider, so the probe table is keyed by
+    // why: The catalog emits one row per provider, so the probe table is keyed by
     // the canonical id only; a legacy id resolves to it before the lookup.
     expect(hasUsageProbe("commandcode-anthropic")).toBe(true);
     expect(usageProbeHosts("commandcode-anthropic")).toEqual(usageProbeHosts("commandcode"));
     expect(hasUsageProbe("opencode-go-anthropic")).toBe(true);
-    // An id with no collapsed row still has none.
+    // note: An id with no collapsed row still has none.
     expect(hasUsageProbe("commandcode-nonsense")).toBe(false);
   });
 
@@ -114,7 +114,7 @@ describe("usage probe table", () => {
   });
 
   test("every mapped id advertises exactly the hosts its probe calls; an unmapped id has none", async () => {
-    // One entry per family: the endpoints its probe GETs, the canned answers
+    // why: One entry per family: the endpoints its probe GETs, the canned answers
     // that let it run, and the catalog ids sharing it. The probe executes, so
     // the advertised set is checked against REAL call sites — never a second
     // hand-kept list that could drift from the request code.
@@ -161,7 +161,7 @@ describe("usage probe table", () => {
       { ids: ["cursor"], urls: ["https://api2.cursor.sh/auth/usage"], responses: () => [json(200, {})] },
     ];
 
-    // The table above must cover the whole probe set, not a subset.
+    // why: The table above must cover the whole probe set, not a subset.
     expect(families.flatMap((family) => family.ids).sort()).toEqual([...covered].sort());
 
     for (const family of families) {
@@ -184,7 +184,7 @@ describe("usage probe table", () => {
   });
 });
 
-// --- shared failure vocabulary ---
+// note: --- shared failure vocabulary ---
 
 describe("failure classification", () => {
   const cases: Array<{ name: string; response: Response | Error; status: string; cause?: string }> = [
@@ -214,14 +214,14 @@ describe("failure classification", () => {
   }
 });
 
-// --- bounded transport ---
+// note: --- bounded transport ---
 //
 // These two cases pin the platform clock ON PURPOSE: the production bound is
 // `AbortSignal.timeout` around a real fetch, and fake timers do not drive that
 // signal, so the only faithful reproduction is a real (single-digit-ms) wait.
 
 /**
- * Answers only when the caller's budget aborts the wait — the behavior a real
+ * why: Answers only when the caller's budget aborts the wait — the behavior a real
  * fetch has under `AbortSignal.timeout`, so a hung vendor cannot hang a probe.
  */
 function hungFetch(calls: FetchCall[] = []): UsageDeps["fetch"] {
@@ -233,7 +233,7 @@ function hungFetch(calls: FetchCall[] = []): UsageDeps["fetch"] {
   }) as UsageDeps["fetch"];
 }
 
-/** Resolves `body` after `ms`. `honorAbort: false` models a vendor whose answer
+/** note: Resolves `body` after `ms`. `honorAbort: false` models a vendor whose answer
  *  arrives late anyway — only the read's own budget can cut that wait short. */
 function timedJson(
   body: unknown,
@@ -265,7 +265,7 @@ describe("bounded transport", () => {
 
   test("Command Code's two GETs share ONE budget — a slow whoami leaves no fresh window for credits", async () => {
     const calls: FetchCall[] = [];
-    // whoami answers LATE (past the shared deadline) and ignores the abort
+    // why: whoami answers LATE (past the shared deadline) and ignores the abort
     // signal; the credits read then has ~1 ms left while its answer needs 5 ms.
     // An implementation that reset the budget per request would accept it.
     const fetchImpl: UsageDeps["fetch"] = (async (input, init) =>
@@ -274,7 +274,7 @@ describe("bounded transport", () => {
         : timedJson({ data: { credits: { monthlyCredits: 10 } } }, 5, { calls })(input, init)) as UsageDeps["fetch"];
     const snapshot = await probeProviderUsage({ fetch: fetchImpl, timeoutMs: 10 }, "commandcode", "cc-key");
     expect(snapshot.status).toBe("error");
-    // whoami + one credits attempt, never a retry that spends a second budget.
+    // note: whoami + one credits attempt, never a retry that spends a second budget.
     expect(calls.map((call) => call.url)).toEqual([
       "https://api.commandcode.ai/alpha/whoami",
       "https://api.commandcode.ai/alpha/billing/credits",
@@ -282,10 +282,10 @@ describe("bounded transport", () => {
   });
 });
 
-// --- credential origin ---
+// note: --- credential origin ---
 
 describe("credential origin", () => {
-  /** A 2xx whose reported FINAL URL is `url` — what a real fetch always reports. */
+  /** note: A 2xx whose reported FINAL URL is `url` — what a real fetch always reports. */
   function responseFrom(url: string, body: unknown): Response {
     const response = json(200, body);
     Object.defineProperty(response, "url", { value: url });
@@ -299,7 +299,7 @@ describe("credential origin", () => {
     expect(snapshot.status).toBe("error");
     expect(snapshot.reason).toBe("http 302");
     expect(snapshot.limits).toEqual([]);
-    // The transport is told NOT to follow, so no request reaches the target.
+    // why: The transport is told NOT to follow, so no request reaches the target.
     expect(calls[0]!.redirect).toBe("manual");
   });
 
@@ -336,7 +336,7 @@ describe("credential origin", () => {
   });
 });
 
-// --- family: commandcode ---
+// note: --- family: commandcode ---
 
 describe("commandcode", () => {
   const whoami = json(200, { user: { id: "user-1" }, org: { id: "org-9" } });
@@ -378,7 +378,7 @@ describe("commandcode", () => {
         resetsAt: 1_760_604_800_000,
         limit: 500,
       },
-      // One month cell carries both amounts: 100 of subscription budget and the
+      // why: One month cell carries both amounts: 100 of subscription budget and the
       // 25 of on-demand credits, labelled apart — never a second row.
       {
         id: "commandcode:month",
@@ -439,14 +439,14 @@ describe("commandcode", () => {
       "commandcode",
       "cc-key",
     );
-    // 105 would be an on-demand total the payload never stated: that line is
+    // why: 105 would be an on-demand total the payload never stated: that line is
     // dropped, while the month (100) is stated and stays.
     expect(snapshot.limits).toEqual([
       { id: "commandcode:month", kind: "balance", remaining: 100, unit: "credits", shared: true },
     ]);
     expect(snapshot.status).toBe("ok");
 
-    // The drop is scoped to that balance — the windows and the month cell
+    // why: The drop is scoped to that balance — the windows and the month cell
     // still render instead of the whole snapshot collapsing.
     const withWindows = await probeProviderUsage(
       {
@@ -550,7 +550,7 @@ describe("commandcode", () => {
   });
 });
 
-// --- family: opencode-go ---
+// note: --- family: opencode-go ---
 
 describe("opencode-go", () => {
   test("keeps every window the payload reports, monthly included", async () => {
@@ -617,7 +617,7 @@ describe("opencode-go", () => {
   });
 });
 
-// --- family: zai / zhipuai ---
+// note: --- family: zai / zhipuai ---
 
 describe("zai / zhipuai", () => {
   test("maps hour/week units to windows, sends the key verbatim, and drops the month bucket", async () => {
@@ -702,7 +702,7 @@ describe("zai / zhipuai", () => {
     expect(rejected.status).toBe("unauthorized");
     expect(rejected.limits).toEqual([]);
 
-    // 500 + "no coding plan" is ACCOUNT state, not a rejected credential.
+    // why: 500 + "no coding plan" is ACCOUNT state, not a rejected credential.
     const noPlan = await probeProviderUsage(
       { fetch: stubFetch(json(200, { success: false, code: 500, msg: "no coding plan" })) },
       "zai",
@@ -713,7 +713,7 @@ describe("zai / zhipuai", () => {
   });
 });
 
-// --- family: minimax-code ---
+// note: --- family: minimax-code ---
 
 describe("minimax-code", () => {
   const payload = json(200, {
@@ -730,7 +730,7 @@ describe("minimax-code", () => {
         current_weekly_status: 1,
       },
       {
-        // Not in the plan: both windows unlimited with zero totals.
+        // note: Not in the plan: both windows unlimited with zero totals.
         model_name: "video",
         current_interval_total_count: 0,
         current_weekly_total_count: 0,
@@ -798,7 +798,7 @@ describe("minimax-code", () => {
   });
 
   test("a documented auth status_code is unauthorized; any other non-zero code is an error", async () => {
-    // platform.minimax.io documents 1004 (not authorized) and 2049 (invalid
+    // why: platform.minimax.io documents 1004 (not authorized) and 2049 (invalid
     // API key) as the CREDENTIAL's verdict — the dialog must say "key rejected",
     // not "could not read".
     for (const statusCode of [1004, 2049]) {
@@ -811,7 +811,7 @@ describe("minimax-code", () => {
       expect(rejected.limits).toEqual([]);
       expect(rejected.reason, String(statusCode)).toContain(String(statusCode));
     }
-    // 1002 is a rate-limit code: a service failure, never a rejected key.
+    // why: 1002 is a rate-limit code: a service failure, never a rejected key.
     const failed = await probeProviderUsage(
       { fetch: stubFetch(json(200, { base_resp: { status_code: 1002 }, model_remains: [] })) },
       "minimax-coding-plan",
@@ -822,7 +822,7 @@ describe("minimax-code", () => {
   });
 });
 
-// --- family: cline-pass ---
+// note: --- family: cline-pass ---
 
 describe("cline-pass", () => {
   test("sends the desktop headers and keeps the 5h / weekly / monthly windows", async () => {
@@ -863,7 +863,7 @@ describe("cline-pass", () => {
   });
 });
 
-// --- family: synthetic ---
+// note: --- family: synthetic ---
 
 describe("synthetic", () => {
   test("rolling 5h requests plus the weekly USD pool, both account-wide", async () => {
@@ -913,7 +913,7 @@ describe("synthetic", () => {
   });
 });
 
-// --- family: umans ---
+// note: --- family: umans ---
 
 describe("umans", () => {
   test("weighted request window plus the concurrency ceiling", async () => {
@@ -954,7 +954,7 @@ describe("umans", () => {
   });
 });
 
-// --- family: charm-hyper ---
+// note: --- family: charm-hyper ---
 
 describe("hyper", () => {
   test("a balance-only account yields one credits balance, shared across keys", async () => {
@@ -969,7 +969,7 @@ describe("hyper", () => {
   });
 });
 
-// --- family: kimi-for-coding ---
+// note: --- family: kimi-for-coding ---
 describe("kimi-for-coding", () => {
   test("aggregate weekly window plus limits[] classified by span, tighter wins", async () => {
     const calls: FetchCall[] = [];
@@ -1002,7 +1002,7 @@ describe("kimi-for-coding", () => {
         limit: 1000,
       },
       {
-        // Both 5h and 12h rows classify as the session window; the tighter
+        // why: Both 5h and 12h rows classify as the session window; the tighter
         // (12h, remaining-derived 400/500) wins.
         id: "kimi:session",
         kind: "window",
@@ -1015,7 +1015,7 @@ describe("kimi-for-coding", () => {
   });
 });
 
-// --- family: cursor ---
+// note: --- family: cursor ---
 
 describe("cursor", () => {
   test("one window per readable bucket: request counts and USD spend, payload-wide reset", async () => {
@@ -1037,10 +1037,10 @@ describe("cursor", () => {
     );
     expect(calls[0]!.url).toBe("https://api2.cursor.sh/auth/usage");
     expect(calls[0]!.headers.authorization).toBe("Bearer cur-key");
-    // Every read asks for JSON, so an HTML error page is never parsed as usage.
+    // why: Every read asks for JSON, so an HTML error page is never parsed as usage.
     expect(calls[0]!.headers.accept).toBe("application/json");
     expect(snapshot.status).toBe("ok");
-    // One month after `startOfMonth`, stated once for the whole account.
+    // note: One month after `startOfMonth`, stated once for the whole account.
     const resetsAt = Date.UTC(2026, 7, 1);
     expect(snapshot.limits).toEqual([
       { id: "cursor:requests:gpt-4", kind: "window", usedFraction: 0.3, unit: "requests", limit: 500, resetsAt },
@@ -1049,7 +1049,7 @@ describe("cursor", () => {
     ]);
   });
 
-  /** The start-alias fallback reset, read back through one countable bucket. */
+  /** note: The start-alias fallback reset, read back through one countable bucket. */
   async function fallbackReset(start: string): Promise<number | undefined> {
     const snapshot = await probeProviderUsage(
       { fetch: stubFetch(json(200, { plan: { used: 1, limit: 10 }, startOfMonth: start })) },
@@ -1060,13 +1060,13 @@ describe("cursor", () => {
   }
 
   test("a month-end start clamps the fallback reset to the last day of the following month", async () => {
-    // 2026 is not a leap year: Jan 29-31 must not spill past February.
+    // why: 2026 is not a leap year: Jan 29-31 must not spill past February.
     expect(await fallbackReset("2026-01-31T00:00:00.000Z")).toBe(Date.UTC(2026, 1, 28));
     expect(await fallbackReset("2026-01-30T00:00:00.000Z")).toBe(Date.UTC(2026, 1, 28));
     expect(await fallbackReset("2026-01-29T00:00:00.000Z")).toBe(Date.UTC(2026, 1, 28));
-    // A day the target month has advances exactly one month.
+    // why: A day the target month has advances exactly one month.
     expect(await fallbackReset("2026-02-28T00:00:00.000Z")).toBe(Date.UTC(2026, 2, 28));
-    // A 31-day month lands in a 30-day one.
+    // note: A 31-day month lands in a 30-day one.
     expect(await fallbackReset("2026-03-31T00:00:00.000Z")).toBe(Date.UTC(2026, 3, 30));
   });
 
@@ -1075,7 +1075,7 @@ describe("cursor", () => {
       {
         fetch: stubFetch(
           json(200, {
-            // Current plans report no legacy cap on the request bucket.
+            // note: Current plans report no legacy cap on the request bucket.
             "gpt-4": { numRequests: 12, maxRequestUsage: null },
             empty: {},
             garbled: { numRequests: "n/a", maxRequestUsage: 100 },
@@ -1104,7 +1104,7 @@ describe("cursor", () => {
   });
 });
 
-// --- shared flag scope ---
+// note: --- shared flag scope ---
 
 describe("shared flag scope", () => {
   test("a per-key family window carries no shared flag; Synthetic's two pools do", async () => {

@@ -91,7 +91,7 @@ describe("encryptSecret envelope format (lock L1)", () => {
     const parts = envelope.split(".");
     expect(parts).toHaveLength(4);
     expect(parts[0]).toBe("v1");
-    expect(parts[1]).toBe("primary"); // v1 keyId is constant; rotation reserved
+    expect(parts[1]).toBe("primary"); // note: v1 keyId is constant; rotation reserved
     const ivB64 = parts[2]!;
     const ctB64 = parts[3]!;
     // why: Standard base64 alphabet — NOT the cookie carrier's base64url.
@@ -103,7 +103,7 @@ describe("encryptSecret envelope format (lock L1)", () => {
     expect(b64Bytes(ivB64)).toHaveLength(12);
     // why: ct_b64 is the full encrypt output: ciphertext ‖ 16B tag (never split).
     expect(b64Bytes(ctB64).length).toBeGreaterThanOrEqual(16);
-    expect(b64Bytes(ctB64).length).toBeGreaterThan(16); // non-empty plaintext
+    expect(b64Bytes(ctB64).length).toBeGreaterThan(16); // note: non-empty plaintext
   });
 
   test("each encryption uses a fresh IV (same plaintext → different envelopes)", async () => {
