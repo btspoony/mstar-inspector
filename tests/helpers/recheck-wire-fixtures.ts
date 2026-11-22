@@ -1,5 +1,5 @@
 /**
- * The one recheck wire fixture both wire suites assert against. The per-rule
+ * why: The one recheck wire fixture both wire suites assert against. The per-rule
  * contract is owned by tests/contracts/recheck.test.ts; the per-row
  * degradation suite (tests/shared/recheck-wire.test.ts) shares this slice so a
  * new `EvidenceSlice` member can never be added to one copy while the other
@@ -88,7 +88,7 @@ export function maxRecheckInput(): RecheckInput {
       };
     }),
   );
-  // The declared pair cannot both be reached (50 × 1200 > 8000), so this is
+  // why: The declared pair cannot both be reached (50 × 1200 > 8000), so this is
   // the largest whole-item capture: every item AT its cap, the total inside.
   const itemsPerCapture = Math.min(MODEL_MAX_ITEMS, Math.floor(MODEL_TOTAL_MAX_CHARS / MODEL_ITEM_MAX_CHARS));
   return {

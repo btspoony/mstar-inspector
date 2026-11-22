@@ -1,5 +1,5 @@
 /**
- * What a rendered element actually paints its text in.
+ * why: What a rendered element actually paints its text in.
  *
  * A tone assertion has to survive a class-string change, so the treatment is
  * identified by the COLOUR the browser computes: this reads the one
@@ -48,7 +48,7 @@ export function slotTags(markup: string, slot: string): string[] {
 export function alertSegments(markup: string, theme: ThemeName): string[] {
   const segments: string[] = [];
   const danger = dangerFg(theme);
-  // Each opening tag is judged on its OWN class list: an outer muted span that
+  // why: Each opening tag is judged on its OWN class list: an outer muted span that
   // merely contains the coloured one is not the coloured one.
   for (const open of markup.matchAll(/<span\b[^>]*>/g)) {
     if (textColourOf(open[0], theme) !== danger) continue;
