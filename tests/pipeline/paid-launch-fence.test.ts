@@ -517,25 +517,37 @@ describe("no runner output reaches durable storage before redaction", () => {
     expect(row.run.stdout).not.toBe(stdout);
   });
 
-  test("a short credential is counted once, not once per retained document", async () => {
+  test("a 3-character provider key is redacted from the stored payload", async () => {
     const db = createMigratedTestD1();
     await claimedAttempt(db);
-    const warns: Record<string, unknown>[] = [];
-    const capture = {
-      info: () => {},
-      warn: (fields: Record<string, unknown>) => {
-        warns.push(fields);
-      },
-    };
-
-    await runReviewAttempt({
-      ...executionInput(sandboxDouble({ marker: "present", paidStdout: '{"note":"abc"}' }), db),
-      deps: { log: capture, env: { DB: db } },
-      appCfg: { keys: { ark: ["abc"] }, modelChain: "ark/deepseek-v4-flash" },
+    const key = "abc";
+    const headSha = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
+    const stdout = JSON.stringify({
+      schema: "mstar.review/v1",
+      target: { head_sha: headSha },
+      attempt_id: ATTEMPT,
+      summary_md: `leaked ${key}`,
     });
 
-    const skipWarn = warns.find((fields) => "skipped_credentials" in fields);
-    expect(skipWarn?.skipped_credentials).toBe(1);
+    await runReviewAttempt({
+      ...executionInput(sandboxDouble({ marker: "present", paidStdout: stdout }), db),
+      appCfg: { keys: { ark: [key] }, modelChain: "ark/deepseek-v4-flash" },
+    });
+
+    const stored = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT) as { result_json: string };
+    // Stored shape is the module's own `encodeExecution` contract.
+    const row = JSON.parse(stored.result_json) as { run: { stdout: string } };
+    const envelope = JSON.parse(row.run.stdout) as {
+      target: { head_sha: string };
+      summary_md: string;
+    };
+    // A key with no admin-side minimum is still deleted from the retained result.
+    expect(envelope.summary_md).toBe("leaked [REDACTED]");
+    // ...while the host identity path, which contains the same three characters,
+    // is untouched.
+    expect(envelope.target.head_sha).toBe(headSha);
   });
 
   test("a payload carrying no secret serializes byte-identically", async () => {

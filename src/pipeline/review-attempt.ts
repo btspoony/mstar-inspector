@@ -20,7 +20,7 @@ import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { resolveModelSize } from "../contracts/provider-models";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { providerEnvName } from "./provider-catalog";
-import { redactDocument, redactExactSecrets, redactSecrets, skippedSecrets } from "./redact";
+import { redactDocument, redactExactSecrets, redactSecrets } from "./redact";
 import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
 import type { D1Like } from "../store/types";
@@ -2438,15 +2438,6 @@ export async function runReviewAttempt(input: {
   const recheckRedaction = redactDocument(recheck, secretValues, "recheck");
   const reportRedaction = redactDocument(report, secretValues, "report");
   const providerRedaction = redactDocument(appliedProvider, secretValues, "text");
-  const skipped = skippedSecrets(secretValues);
-  if (skipped > 0) {
-    // Visible, never silent: these credentials were NOT applied (each was
-    // shorter than a credential), so a text echo of one would survive.
-    deps.log.warn(
-      { ...fields, skipped_credentials: skipped },
-      "credential redaction skipped a value shorter than a credential",
-    );
-  }
   const execution = {
     run: { stdout: stdoutRedaction.value, stderr: "", exitCode: run.exitCode },
     recheck: recheckRedaction.value,
