@@ -744,7 +744,7 @@ describe("a persisted launch that never staged a publication", () => {
     expect(failureRows(db)).toHaveLength(1);
   });
 
-  test("a persisted launch with an OPEN Check is recorded now and settles once the Check concludes", async () => {
+  test("a persisted launch with an OPEN Check is recorded now, and the landed failure-row leaves the lane", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     // note: The reported launch shape: the attempt froze a Check identity, so its
@@ -789,10 +789,11 @@ describe("a persisted launch that never staged a publication", () => {
     expect(failureRows(db)).toHaveLength(1);
     expect(unpublishedSettlement(db).settled_ms).toBeNull();
 
-    // note: The Check lane concludes the row (its own transition); the next pass records
-    // that fact. The settlement itself stays owed: its claim stamp never landed and no
-    // later pass can prove ownership to repair it (KV has no compare-and-set) — still a
-    // single failure row.
+    // note: The Check lane concludes the row (its own transition). The attempt's
+    // failure row already landed, so the unpublished lane no longer selects it:
+    // only its claim stamp would be left, and no later pass can prove ownership to
+    // write it (KV has no compare-and-set) — the row can never discharge, and its
+    // residual sentinel decays on its own TTL instead of occupying this batch.
     db.raw
       .prepare(`UPDATE review_checks SET terminal_ms = ?, recovery_state = 'done', desired = 'failure', observed = 'failure' WHERE id = ?`)
       .run(WINDOW_CLOSED_AT - 60_000, claimed.attempt.identity.attemptId);
@@ -800,7 +801,7 @@ describe("a persisted launch that never staged a publication", () => {
 
     expect(failureRows(db)).toHaveLength(1);
     expect(unpublishedSettlement(db).settled_ms).toBeNull();
-    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toContain("check");
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["failure-row"]);
   });
 
   test("an interrupted retry leaves exactly one failure row", async () => {

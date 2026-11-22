@@ -727,6 +727,13 @@ export async function listIncompleteSettlements(
  * invents an identity), and a headless delivery can never match that arm. A
  * headless launch with NO journal of its own is recorded with the empty-head
  * convention and without a claim write.
+ *
+ * A row whose durable effects already carry `failure-row` has LEFT this lane:
+ * the record landed, and only the head-wide claim stamp can still be owed — a KV
+ * write the owner-exclusive rule lets no later pass make (`owned === false`), so
+ * such a row can never discharge and re-selecting it every pass would let those
+ * rows monopolize the bounded oldest-first batch. Its residual sentinel decays
+ * on its own TTL (I-000688).
  */
 export async function listUnpublishedLaunchSettlements(
   db: D1Like,
@@ -741,6 +748,10 @@ export async function listUnpublishedLaunchSettlements(
         WHERE h.settled_ms IS NULL AND h.settling_ms IS NULL AND h.state = 'created'
           AND l.state = 'persisted'
           AND h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(COALESCE(h.settled_effects, '[]'))
+             WHERE value = 'failure-row'
+          )
           AND NOT EXISTS (
             SELECT 1 FROM review_publications p
              WHERE (
