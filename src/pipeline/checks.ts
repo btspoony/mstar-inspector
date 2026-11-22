@@ -1008,6 +1008,20 @@ async function markQueuedBehindInflightWith(
       // Re-proved on the last line before the request: the client resolution
       // and the relabel both awaited past the acquisition.
       if (!(await fence.verify())) return false;
+      // The ELIGIBILITY is re-read UNDER the lease. The local relabel proved it
+      // before acquisition, so a Check that concluded since would otherwise be
+      // overwritten with queued copy: the terminal send needs this same key, so
+      // while the lease is held nothing newer can be dispatched — and this read
+      // refuses the row that is already settled.
+      const current = await getCheckAttempt(deps.db, relabeled.id);
+      if (
+        current === null ||
+        current.terminalMs !== null ||
+        current.desired !== "in_progress" ||
+        current.checkRunId !== input.checkRunId
+      ) {
+        return false;
+      }
       await client.rest.checks.update({
         owner: input.scope.owner,
         repo: input.scope.repo,

@@ -1602,7 +1602,10 @@ export class PublicationDeadlineSpent extends Error {
  *
  * The publication lease of the action is re-proved on that SAME last line: the
  * scan can outlive its 120 s window or lose the row to a newer epoch, and
- * neither may reach GitHub.
+ * neither may reach GitHub. That refusal is NO authority — not proof the
+ * prepared target is wrong — so it is `PublicationAuthorityUnavailable`: the
+ * caller hands the publication back to recovery and keeps whatever link it
+ * already recorded, instead of marking the row definitively failed.
  *
  * `undefined` = no frozen instant (a caller outside an attempt, e.g. a test
  * double or a recovery action): that half of the guard does not apply.
@@ -1618,7 +1621,7 @@ function guardMutations<T extends { createComment: unknown; updateComment: unkno
     // only after that await resolves: a clock read before the verification
     // would let a slow lease read carry the mutation past `notAfterMs`.
     if (fence !== undefined && !(await fence.verify())) {
-      throw new PreparedSendRejected(
+      throw new PublicationAuthorityUnavailable(
         `${verb}: the publication lease ${fence.actionKey} is no longer held by this sender — nothing was sent`,
       );
     }

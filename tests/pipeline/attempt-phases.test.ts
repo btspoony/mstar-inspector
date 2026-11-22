@@ -1792,6 +1792,112 @@ describe("§7.9a condition 1 — a refused action lease keeps the publication li
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.terminal_ms).toBeNull();
   });
+
+  test("a re-proof refusal keeps the link and leaves the publication unconfirmed", async () => {
+    const { db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const ref = makeRef(payload);
+    const { checkId, handle } = await seedCheckRow(db);
+    const { publicationId } = await preparedPublication(db, ref, {
+      begin: async () => handle,
+      terminalize: async () => {},
+    });
+
+    // The send ACQUIRES the action, then its marker scan outlives the lease:
+    // the last-line re-proof finds it gone. That is still no authority — never
+    // proof the prepared target is wrong.
+    const attempted: unknown[] = [];
+    const transport: PostOctokit = {
+      paginate: async () => {
+        db.raw
+          .prepare(
+            `UPDATE publication_leases SET holder = NULL, lease_until_ms = NULL
+              WHERE attempt_id = ? AND action_key = ?`,
+          )
+          .run(checkId, `comment:${publicationId}`);
+        return [];
+      },
+      rest: {
+        issues: {
+          listComments: async () => ({ data: [] }),
+          createComment: async (params) => {
+            attempted.push(params);
+            return { data: { id: 9001 } };
+          },
+          updateComment: async (params) => {
+            attempted.push(params);
+            return { data: {} };
+          },
+        },
+      },
+    };
+    const publishing = await makeDeps({ db });
+    const checksOctokit: ChecksOctokit = {
+      rest: {
+        checks: {
+          update: async () => {
+            throw new Error("checks update unavailable");
+          },
+          create: async () => {
+            throw new Error("no create expected");
+          },
+          get: async () => {
+            throw new Error("no get expected");
+          },
+          listForRef: async () => {
+            throw new Error("no list expected");
+          },
+        },
+      },
+    } as ChecksOctokit;
+    const adapter = createChecksAdapter({ db, nowMs: () => Date.now(), getOctokit: async () => checksOctokit });
+    publishing.deps.checks = createCheckLifecycle({
+      db,
+      nowMs: () => Date.now(),
+      getAdapter: () => adapter,
+      getCheckGate: async () => ({ minScore: 0, passVerdicts: ["needs fixes"] }),
+    });
+    publishing.deps.appCommenters.set(TEST_APP_ID, {
+      commenter: {
+        ...h.fakeCommenter,
+        postPreparedReview: async (input: PostPreparedReviewInput) =>
+          postPreparedReviewWithOctokit(
+            transport,
+            input,
+            publicationSendGuard(db as never, () => Date.now(), input),
+          ),
+      },
+      fingerprint: "test-fingerprint",
+      githubAppId: 424242,
+    });
+
+    expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
+
+    expect(attempted).toEqual([]);
+    // The row is handed back for recovery, never marked failed on a refusal
+    // that proved nothing about the prepared target.
+    const publication = db.raw
+      .prepare(`SELECT phase, holder FROM review_publications WHERE id = ?`)
+      .get(publicationId) as { phase: string; holder: string | null };
+    expect(publication.phase).toBe("prepared");
+    expect(publication.holder).toBeNull();
+    // And the Check keeps the one publication a later confirmation corrects it from.
+    const row = db.raw
+      .prepare(`SELECT publication_id, desired, recovery_state, terminal_ms FROM review_checks WHERE id = ?`)
+      .get(checkId) as {
+      publication_id: string | null;
+      desired: string;
+      recovery_state: string;
+      terminal_ms: number | null;
+    };
+    expect(row.publication_id).toBe(publicationId);
+    expect(row.desired).toBe("failure");
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.terminal_ms).toBeNull();
+  });
 });
 
 describe("§7.9a condition 1 — no execution handle still contends for the Check lease", () => {
