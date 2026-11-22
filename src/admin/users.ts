@@ -1,5 +1,5 @@
 /**
- * The user read for `/_internal_admin` (spec operator-admin-surface §3.3).
+ * why: The user read for `/_internal_admin` (spec operator-admin-surface §3.3).
  *
  * ONE statement: the live-workspace count and the active support-grant count
  * are resolved in SQL, so the console never issues a per-row read. `isOperator`
@@ -19,7 +19,7 @@ export type AdminUserRow = {
 };
 
 /**
- * Every known user, newest first. Binds: `?1` the grant-expiry stamp (`now`).
+ * why: Every known user, newest first. Binds: `?1` the grant-expiry stamp (`now`).
  *
  * A soft-deleted workspace is not a workspace the user is still in, so the
  * count joins `workspaces` and drops it, like every other live read.

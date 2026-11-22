@@ -1,5 +1,5 @@
 /**
- * The installation-repository lookup a data upgrade uses to claim a target's
+ * why: The installation-repository lookup a data upgrade uses to claim a target's
  * numeric `repo_id` (spec operator-data-upgrade § Ledger target alignment).
  *
  * A target named only by owner/name waits for the repository's first delivery to
@@ -35,7 +35,7 @@ export function createRepoLookup(
   db: DashboardD1,
   encryptionKey: string | undefined,
 ): RepoLookup {
-  /** `installation_id` → its repositories, or `null` once the read failed. */
+  /** note: `installation_id` → its repositories, or `null` once the read failed. */
   const listings = new Map<number, Map<string, number> | null>();
   const jwts = new Map<string, string | null>();
 
@@ -44,7 +44,7 @@ export function createRepoLookup(
     let jwt: string | null = null;
     if (encryptionKey !== undefined) {
       const row = await db
-        // shortcut: tenant-bypass — internal maintenance read (the data-upgrade
+        // safety: tenant-bypass — internal maintenance read (the data-upgrade
         // runner's binding seam): it resolves one bot's App credentials by exact
         // id to mint an installation token and returns no identity, ownership or
         // response field.

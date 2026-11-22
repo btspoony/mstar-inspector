@@ -1,5 +1,5 @@
 /**
- * Workspace reads and the plan assignment write for `/_internal_admin`
+ * why: Workspace reads and the plan assignment write for `/_internal_admin`
  * (spec operator-admin-surface §3.2 / §3.3).
  *
  * The list is ONE statement: live member count, pending invite count, owner
@@ -29,13 +29,13 @@ export type AdminWorkspaceRow = {
   pendingInviteCount: number;
   planId: string;
   planName: string;
-  /** The seat cap; NULL is no cap at all, never `0` (migration 0031's contract). */
+  /** note: The seat cap; NULL is no cap at all, never `0` (migration 0031's contract). */
   includedMembers: number | null;
   createdAt: string;
 };
 
 /**
- * Every live workspace, newest first. Binds: `?1` the live-invite stamp
+ * note: Every live workspace, newest first. Binds: `?1` the live-invite stamp
  * (`now`), `?2` the free plan id the plan column falls back to.
  *
  * A workspace normally holds one owner (the removal guard refuses to leave
@@ -87,7 +87,7 @@ export type SetWorkspacePlanOutcome =
   | { kind: "unknown_workspace" };
 
 /**
- * `created_at` is written on a fresh row only: the conflict branch keeps the
+ * note: `created_at` is written on a fresh row only: the conflict branch keeps the
  * original subscription start and moves `updated_at`, and re-activates a
  * cancelled row rather than forking a second one (`workspace_id` is the PK).
  */
@@ -99,7 +99,7 @@ const SUBSCRIPTION_UPSERT_SQL = `
     status = 'active',
     updated_at = excluded.updated_at`;
 
-/** Platform-scope ledger row: the tenant is the target, the detail is before/after. */
+/** note: Platform-scope ledger row: the tenant is the target, the detail is before/after. */
 const AUDIT_INSERT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -124,7 +124,7 @@ export type SetWorkspaceSlugOutcome =
   | { kind: "unknown_workspace" };
 
 /**
- * Both guards live in the UPDATE's own WHERE, so the statement is atomic: no
+ * why: Both guards live in the UPDATE's own WHERE, so the statement is atomic: no
  * OTHER workspace may carry the slug in any case, and the value may not be any
  * workspace's id (that would make `getWorkspaceByRef` see two rows and answer
  * null). The TARGET must still be live.
@@ -136,7 +136,7 @@ const SLUG_UPDATE_SQL = `UPDATE workspaces SET slug = ?1
      AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2)`;
 
 /**
- * The ledger row carries the before/after pair and rides the same batch as the
+ * why: The ledger row carries the before/after pair and rides the same batch as the
  * UPDATE. It is declared FIRST and guarded by the UPDATE's own predicate: a
  * fixed bind cannot read the old value after the write, and the two statements
  * see the same rows inside one transaction, so the ledger row lands exactly
@@ -156,7 +156,7 @@ const SLUG_AUDIT_SQL = `
         AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?4 AND id <> ?3)
    )`;
 
-/** Which guard matched, read once after a refused write (index order = precedence). */
+/** note: Which guard matched, read once after a refused write (index order = precedence). */
 const SLUG_CONFLICT_SQL = `SELECT
      EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2) AS slug_taken,
      EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2) AS id_taken`;
@@ -175,7 +175,7 @@ export async function setWorkspaceSlug(
   let results: DashboardD1BatchResult[];
   try {
     results = await db.batch([
-      // The audit row runs FIRST so its `before` subquery still reads the old
+      // why: The audit row runs FIRST so its `before` subquery still reads the old
       // slug; its guard is the UPDATE's own predicate, so both statements agree.
       db
         .prepare(SLUG_AUDIT_SQL)
@@ -183,7 +183,7 @@ export async function setWorkspaceSlug(
       db.prepare(SLUG_UPDATE_SQL).bind(input.slug, input.workspaceId),
     ]);
   } catch (err) {
-    // Pinned to the D1 driver's message, the only conflict signal it exposes:
+    // why: Pinned to the D1 driver's message, the only conflict signal it exposes:
     // if that wording drifts this falls through to a 500 (visible, not a wrong
     // 409). Re-check when the D1 face starts carrying a structured error code.
     if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) {
@@ -199,7 +199,7 @@ export async function setWorkspaceSlug(
     .first<{ slug_taken: number; id_taken: number }>();
   if (guard?.slug_taken) return { kind: "slug_taken" };
   if (guard?.id_taken) return { kind: "slug_is_workspace_id" };
-  // Neither guard matched, so the WHERE's live-row condition hit nothing: the
+  // why: Neither guard matched, so the WHERE's live-row condition hit nothing: the
   // workspace is gone.
   return { kind: "unknown_workspace" };
 }

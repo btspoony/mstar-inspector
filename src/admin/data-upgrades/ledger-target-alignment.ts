@@ -1,5 +1,5 @@
 /**
- * Ledger target alignment — the third registered operator data upgrade
+ * why: Ledger target alignment — the third registered operator data upgrade
  * (spec operator-data-upgrade § Ledger target alignment item).
  *
  * Every ledger row carries `target_id`, and the repository detail page reads by
@@ -53,14 +53,14 @@ import type {
   UpgradeRunContext,
 } from "../data-upgrades";
 
-/** Repository groups per step. */
+/** note: Repository groups per step. */
 const GROUPS_PER_BATCH = 20;
 
-/** The four tables that carry `target_id` (all four hold `owner`/`repo`). */
+/** note: The four tables that carry `target_id` (all four hold `owner`/`repo`). */
 const LEDGER_TABLES = ["pull_requests", "reviews", "review_findings", "review_failures"] as const;
 
 /**
- * The row's live target names another repository — the worklist predicate, and
+ * why: The row's live target names another repository — the worklist predicate, and
  * the guard every UPDATE re-tests inside the transaction so a row another writer
  * just fixed is left as it is. A target with no identity (the 0067 leftover
  * shape) is NOT a mismatch: `repo-backfill` owns those rows and runs first.
@@ -71,7 +71,7 @@ const misaligned = (alias: string) => `t.deleted_at IS NULL
            OR t.repo_name <> ${alias}.repo COLLATE NOCASE)`;
 
 /**
- * The group's home target already holds a `pull_requests` row at this number:
+ * why: The group's home target already holds a `pull_requests` row at this number:
  * `idx_pull_requests_target_pr` is unique on `(target_id, owner, repo,
  * pr_number)`, so re-pointing this row would abort the whole batch. The row is
  * left where it is and reported (`conflicting_ledger_rows`) — deleting one of
@@ -95,7 +95,7 @@ const prConflict = (alias: string) => `EXISTS (
  * whose rows sit on targets of different bots is therefore unattributable.
  *
  * shortcut: the cursor floor is an expression, so each table is still scanned
- * for misaligned rows rather than seeked; upgrade when a stored/indexed
+ * for misaligned rows rather than seeked; upgrade: when a stored/indexed
  * group-key column exists to range over.
  */
 const misalignedRows = (after: string) => {
@@ -124,7 +124,7 @@ const misalignedRows = (after: string) => {
 };
 
 /**
- * One row per group: the spelling to write, the bot that owns it, the one live
+ * note: One row per group: the spelling to write, the bot that owns it, the one live
  * target naming the repository, and whether GitHub could bind that target.
  *
  * `bots` counts the DISTINCT bots the group's rows' targets name: more than one
@@ -170,7 +170,7 @@ const alignmentGroups = (after: string) => `
       LEFT JOIN homes h ON h.group_key = n.group_key)`;
 
 /**
- * A group this item can act on: one known bot, at most one live target naming
+ * note: A group this item can act on: one known bot, at most one live target naming
  * the repository, and — when none does — a tenant to create it in. Everything
  * else is left alone and reported; `{alias}` qualifies the columns where the CTE
  * is joined to another one.
@@ -179,13 +179,13 @@ const actionable = (alias: string) =>
   `${alias}bot_id IS NOT NULL AND ${alias}targets <= 1
    AND (${alias}targets = 1 OR ${alias}workspace_id IS NOT NULL)`;
 
-/** The group's one live target naming the repository. Bound as (bot, owner, repo). */
+/** note: The group's one live target naming the repository. Bound as (bot, owner, repo). */
 const homeTarget = `SELECT t.id FROM review_targets t
    WHERE t.deleted_at IS NULL AND t.bot_id = ?1
      AND t.repo_owner = ?2 COLLATE NOCASE AND t.repo_name = ?3 COLLATE NOCASE`;
 
 /**
- * Create the group's target — ONLY when no live target of that bot names the
+ * why: Create the group's target — ONLY when no live target of that bot names the
  * repository, judged INSIDE the batch transaction: an operator who added the
  * repository after the worklist read has already written the row this insert
  * would duplicate, and `repo_id IS NULL` sits outside 0068's unique index.
@@ -211,7 +211,7 @@ const INSERT_TARGET = `
      AND NOT EXISTS (${homeTarget})`;
 
 /**
- * Re-point the group's rows — ONLY while the row's target still names another
+ * why: Re-point the group's rows — ONLY while the row's target still names another
  * repository and exactly one live target of this bot names the repository. Both
  * halves re-read inside the transaction, so a target created or retired after
  * planning decides what this writes instead of being written past; two matches
@@ -227,27 +227,27 @@ const repointGroup = (table: string) => `
            WHERE t.deleted_at IS NULL AND t.bot_id = ?1
              AND t.repo_owner = ?2 COLLATE NOCASE AND t.repo_name = ?3 COLLATE NOCASE) = 1`;
 
-/** One resolved group, as the plan read states it. */
+/** note: One resolved group, as the plan read states it. */
 type Group = {
   group_key: string;
   owner: string;
   repo: string;
   bot_id: string | null;
   workspace_id: string | null;
-  /** Live targets of this bot naming the repository: 0 (create), 1 (adopt), 2+ (ambiguous). */
+  /** note: Live targets of this bot naming the repository: 0 (create), 1 (adopt), 2+ (ambiguous). */
   targets: number;
   repo_id: number | null;
-  /** Preflight only: 1 when nothing live could bind the target's numeric id. */
+  /** note: Preflight only: 1 when nothing live could bind the target's numeric id. */
   unbound: number;
 };
 
-/** One group's writes, as positions in `Plan.statements`. */
+/** note: One group's writes, as positions in `Plan.statements`. */
 type GroupWrite = { insert: number | null; updates: number[]; group: Group };
 
-/** A planned batch: the statements to commit, and what they do. */
+/** note: A planned batch: the statements to commit, and what they do. */
 type Plan = {
   statements: DashboardD1Statement[];
-  /** The last group key this batch walked; `null` when the walk ended. */
+  /** note: The last group key this batch walked; `null` when the walk ended. */
   cursor: string | null;
   done: boolean;
   groups: number;
@@ -257,7 +257,7 @@ type Plan = {
 };
 
 /**
- * Plan one batch. The target a group lands on is decided by the STATEMENTS,
+ * why: Plan one batch. The target a group lands on is decided by the STATEMENTS,
  * inside the transaction — each re-reads the bot's live targets naming the
  * repository, so a target an operator created, renamed or retired between this
  * read and the commit is what the batch acts on rather than a stale plan.
@@ -309,7 +309,7 @@ async function planBatch(
             group.repo,
             crypto.randomUUID(),
             `${group.owner}/${group.repo}`,
-            // The row must name who caused it; the runner always supplies the operator.
+            // note: The row must name who caused it; the runner always supplies the operator.
             actor ?? "data-upgrade",
           ),
       );
@@ -338,7 +338,7 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
   requiresDowntime: false,
   order: 21,
 
-  /** Six counts the operator sees before starting: no writes. */
+  /** note: Six counts the operator sees before starting: no writes. */
   async preflight(db: DashboardD1): Promise<UpgradeCounts> {
     const counts = await db
       .prepare(
@@ -368,7 +368,7 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
   },
 
   /**
-   * ONE transaction per call; a replay over aligned rows processes nothing.
+   * why: ONE transaction per call; a replay over aligned rows processes nothing.
    *
    * The counts come from the batch's own statement results, not from the plan: a
    * group whose target an operator retired between the read and the commit had
@@ -395,7 +395,7 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
       const changes = (index: number) => results[index]?.meta.changes ?? 0;
       for (const write of plan.writes) {
         if (write.insert !== null && changes(write.insert) > 0) created += 1;
-        // The four updates are per-table and disjoint, so their sum is the rows
+        // why: The four updates are per-table and disjoint, so their sum is the rows
         // this group moved — zero when the guards stood the group down.
         const touched = write.updates.reduce((sum, index) => sum + changes(index), 0);
         if (touched > 0) {
@@ -406,13 +406,13 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
       }
     }
 
-    // Bind AFTER the moves commit: a GitHub call inside the transaction would
+    // why: Bind AFTER the moves commit: a GitHub call inside the transaction would
     // hold the write lock for its whole timeout.
     let bound = 0;
     let unbound = 0;
     let bindingFailed = 0;
     for (const { group } of moved) {
-      // An adopted target that already carries its id needs no call at all.
+      // why: An adopted target that already carries its id needs no call at all.
       if (group.targets === 1 && group.repo_id !== null) continue;
       if (group.bot_id === null) {
         unbound += 1;
@@ -446,7 +446,7 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
   },
 
   /**
-   * Read-only checks. `misaligned_ledger_rows` is the crash residual: a row
+   * why: Read-only checks. `misaligned_ledger_rows` is the crash residual: a row
    * whose group the item CAN act on is work a completed run should have moved,
    * so it blocks. A group the item cannot act on — two live targets naming the
    * repository, or rows naming different bots — is not its failure: the operator

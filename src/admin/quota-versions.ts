@@ -52,10 +52,10 @@ export type QuotaVersionRow = {
   id: string;
   version: number;
   effectiveFrom: string;
-  /** The next profile's `effective_from`; `null` for the last (open) interval. */
+  /** note: The next profile's `effective_from`; `null` for the last (open) interval. */
   effectiveTo: string | null;
   /**
-   * `current` is the profile judging this month (its `effective_from` covers
+   * note: `current` is the profile judging this month (its `effective_from` covers
    * the month's 1st); `scheduled` starts after that 1st and never judges the
    * month in progress; `past` judged an earlier month.
    */
@@ -68,14 +68,14 @@ export type QuotaVersionRow = {
 };
 
 export type QuotaVersionsPayload = {
-  /** The version judging this month (the `current` marker is relative to it). */
+  /** note: The version judging this month (the `current` marker is relative to it). */
   judgingVersion: number;
-  /** The ordinal a create would mint — the form's read-only `fieldVersion`. */
+  /** note: The ordinal a create would mint — the form's read-only `fieldVersion`. */
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
   /**
-   * Plan ids the JUDGING version states no ceiling for, ordered by id. Empty is
+   * why: Plan ids the JUDGING version states no ceiling for, ordered by id. Empty is
    * the healthy state.
    *
    * `quota_profile_plans` must carry a row for every plan (a missing row would
@@ -106,7 +106,7 @@ export async function listPlans(db: DashboardD1): Promise<QuotaPlan[]> {
  */
 export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<QuotaVersionsPayload> {
   const month = quotaMonth(now);
-  // D1 returns each statement's rows at its batch position, in one transaction.
+  // note: D1 returns each statement's rows at its batch position, in one transaction.
   const [profileResult, planResult] = await db.batch([
     db.prepare(QUOTA_PROFILES_SQL),
     db.prepare(PLAN_LIST_SQL),
@@ -131,7 +131,7 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
     notes: profile.notes,
     monthlyRp: profile.monthlyRp,
   }));
-  // The JUDGING version is the one that decides today's verdicts, so its plan
+  // why: The JUDGING version is the one that decides today's verdicts, so its plan
   // coverage is what the page must report: a gap in a past or scheduled version
   // cannot refuse anything this month. `judging` comes from the same snapshot,
   // so a plan it covers can never be reported as uncovered.
@@ -147,21 +147,21 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
 
 /** The candidate numbers a preview and a publish share. */
 export type QuotaCandidate = {
-  /** ISO-8601 instant, `T00:00:00.000Z` — the form submits a UTC date. */
+  /** note: ISO-8601 instant, `T00:00:00.000Z` — the form submits a UTC date. */
   effectiveFrom: string;
-  /** One ceiling per plan id; `null` means that plan is unlimited. */
+  /** note: One ceiling per plan id; `null` means that plan is unlimited. */
   monthlyRp: Record<string, number | null>;
 };
 
 export type QuotaImpact = {
   count: number;
-  /** The same `saas` live-workspace count the numerator was drawn from. */
+  /** note: The same `saas` live-workspace count the numerator was drawn from. */
   total: number;
-  /** The first 1st this candidate judges (`quotaStartsOn`), `YYYY-MM-DD`. */
+  /** note: The first 1st this candidate judges (`quotaStartsOn`), `YYYY-MM-DD`. */
   startsOn: string;
 };
 
-/** Every live workspace with the plan id its subscription resolves to. */
+/** note: Every live workspace with the plan id its subscription resolves to. */
 async function liveWorkspacePlans(db: DashboardD1): Promise<Array<{ id: string; planId: string }>> {
   const res = await db
     .prepare(
@@ -287,7 +287,7 @@ export async function createQuotaVersion(
         ),
     ]);
   } catch (err) {
-    // A concurrent publish can take the same instant between the probe and the
+    // why: A concurrent publish can take the same instant between the probe and the
     // batch; the unique index refuses this one, and that is the same conflict.
     if (err instanceof Error && /UNIQUE constraint failed: quota_profiles\.effective_from/.test(err.message)) {
       return { kind: "effective_from_taken" };
@@ -301,13 +301,13 @@ export async function createQuotaVersion(
   return { kind: "ok", version: row?.version ?? 0 };
 }
 
-/** A `YYYY-MM-DD` date as the UTC instant the profile stores. */
+/** note: A `YYYY-MM-DD` date as the UTC instant the profile stores. */
 function utcDate(date: string): string | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
   const iso = `${date}T00:00:00.000Z`;
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return null;
-  // Reject a date the calendar does not have (2026-02-31 rolls over).
+  // note: Reject a date the calendar does not have (2026-02-31 rolls over).
   return at.toISOString().slice(0, 10) === date ? iso : null;
 }
 

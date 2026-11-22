@@ -1,5 +1,5 @@
 /**
- * Repository-id binding, shared by the upgrades that leave a target named only
+ * why: Repository-id binding, shared by the upgrades that leave a target named only
  * by `owner/name`.
  *
  * A target in that shape waits for the repository's first delivery to claim its
@@ -14,7 +14,7 @@ import type { DashboardD1 } from "../../dashboard/users";
 import type { UpgradeRunContext } from "../data-upgrades";
 
 /**
- * The one live target that names the repository and has no id. Exactly one row
+ * note: The one live target that names the repository and has no id. Exactly one row
  * is required: with two, stamping both with the same `repo_id` would violate
  * 0068's `(bot_id, repo_id)` unique index and abort the whole batch.
  */
@@ -25,7 +25,7 @@ const UNCLAIMED_TARGET = `
      AND repo_id IS NULL`;
 
 /**
- * Write the repository's numeric id onto ONE target id. Guarded twice: only
+ * note: Write the repository's numeric id onto ONE target id. Guarded twice: only
  * while the claim is still absent, and never when another live target of the
  * same bot already holds that id.
  */
@@ -37,7 +37,7 @@ const BIND_BY_ID = `
                         AND o.deleted_at IS NULL AND o.id <> review_targets.id)`;
 
 /**
- * Every live installation of this bot under `owner`, oldest first. The table's
+ * note: Every live installation of this bot under `owner`, oldest first. The table's
  * unique key is `(app_id, installation_id)`, so a re-install can leave two live
  * rows for one account; the caller tries each until one grants the repository.
  */
@@ -79,7 +79,7 @@ export async function bindRepository(
   const lookup = context?.repoLookup;
   if (lookup === undefined) return "unbound";
 
-  // Two live targets naming one repository is the shape this item refuses to
+  // why: Two live targets naming one repository is the shape this item refuses to
   // guess at: the operator merges them and runs again.
   const candidates = await db
     .prepare(UNCLAIMED_TARGET)
@@ -89,7 +89,7 @@ export async function bindRepository(
   const targetId = candidates.results[0]!.id;
 
   const installationIds = await liveInstallations(db, botId, owner);
-  // A removed installation is history: the first delivery claims the id.
+  // why: A removed installation is history: the first delivery claims the id.
   if (installationIds.length === 0) return "unbound";
 
   let sawFailure = false;

@@ -1,5 +1,5 @@
 /**
- * Effective server flags (`server_flags`, migration 0033).
+ * why: Effective server flags (`server_flags`, migration 0033).
  *
  * Read pattern (spec §3.1, architect verdict 2026-10-25): ONE prepared point
  * read per decision site. No cache, no KV, no request-scoped memo — every

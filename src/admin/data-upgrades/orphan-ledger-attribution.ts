@@ -1,5 +1,5 @@
 /**
- * Orphan ledger attribution — the second registered operator data upgrade
+ * why: Orphan ledger attribution — the second registered operator data upgrade
  * (spec operator-data-upgrade § Orphan ledger attribution item).
  *
  * `reviews`, `review_failures` and the other ledger tables gained `target_id`
@@ -57,11 +57,11 @@ import type {
   UpgradeCursor,
 } from "../data-upgrades";
 
-/** Repository groups per step. */
+/** note: Repository groups per step. */
 const GROUPS_PER_BATCH = 20;
 
 /**
- * The live targets of one bot that name the group's repository — the single
+ * why: The live targets of one bot that name the group's repository — the single
  * definition the insert, the updates and the read-only faces all agree on.
  * `repo_id IS NULL` rows are inside it: an unclaimed target IS the same
  * repository (0068's duplicate rule), so it is a candidate to adopt, and two of
@@ -74,7 +74,7 @@ const matchingTargets = (botId: string, owner: string, repo: string) => `
      AND t.repo_owner = ${owner} COLLATE NOCASE AND t.repo_name = ${repo} COLLATE NOCASE`;
 
 /**
- * The group's own orphan rows, re-read INSIDE the batch transaction, tested for
+ * why: The group's own orphan rows, re-read INSIDE the batch transaction, tested for
  * "every row still resolves to the bound bot". It is the SAME resolution the
  * planner applied, so a group the single-bot fallback resolved stays writable:
  * a group with no evidence at all names no bot in any row, and rejecting it
@@ -127,7 +127,7 @@ const groupStillUniform = (bot: string, owner: string, repo: string) => `
  * row of a group carries the same key, so the filter never splits a group.
  *
  * shortcut: the floor is an expression, so each table is still scanned for
- * NULL-target rows rather than seeked; upgrade when a stored/indexed group-key
+ * NULL-target rows rather than seeked; upgrade: when a stored/indexed group-key
  * column exists to range over.
  */
 const orphanRows = (after: string) => {
@@ -151,7 +151,7 @@ const orphanRows = (after: string) => {
 };
 
 /**
- * One row per orphan group: the spelling to write, the bot the group resolves
+ * note: One row per orphan group: the spelling to write, the bot the group resolves
  * to, the live target that already names the repository, and the cursor key.
  *
  * A group is its `(owner, repo)` case-folded spelling. Its bot is decided by
@@ -207,40 +207,40 @@ const resolvedGroups = (after: string) => `
            (SELECT COUNT(*) FROM (${matchingTargets("a.bot_id", "a.owner", "a.repo")}))
       FROM attributed a)`;
 
-/** One group's read: its spelling, what it resolved to, and its cursor key. */
+/** note: One group's read: its spelling, what it resolved to, and its cursor key. */
 type ResolvedGroup = {
   owner: string;
   repo: string;
   bot_id: string | null;
   workspace_id: string | null;
-  /** Live targets of this bot naming the repository: 0 (create), 1 (adopt), 2+ (ambiguous). */
+  /** note: Live targets of this bot naming the repository: 0 (create), 1 (adopt), 2+ (ambiguous). */
   targets: number;
   sort_key: string;
 };
 
-/** A planned batch: the statements to commit, and what they do. */
+/** note: A planned batch: the statements to commit, and what they do. */
 type Plan = {
   statements: DashboardD1Statement[];
-  /** The last group key this batch walked; `null` when the walk ended. */
+  /** note: The last group key this batch walked; `null` when the walk ended. */
   cursor: string | null;
   done: boolean;
   groups: number;
-  /** Groups left alone at planning time: no bot, no tenant, or ambiguous. */
+  /** note: Groups left alone at planning time: no bot, no tenant, or ambiguous. */
   unattributable: number;
-  /** Of those, the ones whose bot resolved but several live targets name the repository. */
+  /** note: Of those, the ones whose bot resolved but several live targets name the repository. */
   ambiguous: number;
-  /** Statement positions per group this batch does write for. */
+  /** note: Statement positions per group this batch does write for. */
   writes: GroupWrite[];
 };
 
 /**
- * The four tables that carry `target_id`, with the column set each one needs
+ * note: The four tables that carry `target_id`, with the column set each one needs
  * for the group predicate (all four hold `owner`/`repo`).
  */
 const LEDGER_TABLES = ["pull_requests", "reviews", "review_findings", "review_failures"] as const;
 
 /**
- * Insert the group's target — but ONLY when no live target names the
+ * why: Insert the group's target — but ONLY when no live target names the
  * repository, judged INSIDE the batch transaction: an operator who added the
  * repository after the worklist read has already written the row this insert
  * would duplicate, and `repo_id IS NULL` sits outside 0068's unique index.
@@ -270,7 +270,7 @@ const INSERT_TARGET = `
      AND ${groupStillUniform("?1", "?2", "?3")}`;
 
 /**
- * Attribute the group's NULL rows to whichever target names the repository —
+ * why: Attribute the group's NULL rows to whichever target names the repository —
  * ONLY while exactly one live target does and the group's rows still resolve to
  * this bot. Both halves re-read inside the transaction, so a target created or
  * retired, or a mapping repaired elsewhere, after planning decides what this
@@ -289,7 +289,7 @@ async function countRows(db: DashboardD1, sql: string): Promise<number> {
 }
 
 /**
- * A group this item can act on: its bot has a tenant AND at most one live
+ * note: A group this item can act on: its bot has a tenant AND at most one live
  * target names the repository. Everything else is left alone and reported —
  * `unattributable_groups` on the card, `advisoryChecks` on verify. Read from
  * the `resolved` CTE, so preflight, the batch and verify share one definition.
@@ -298,11 +298,11 @@ async function countRows(db: DashboardD1, sql: string): Promise<number> {
 const attributable = (alias: string) =>
   `${alias}bot_id IS NOT NULL AND ${alias}workspace_id IS NOT NULL AND ${alias}targets <= 1`;
 
-/** One group's writes, as positions in `Plan.statements`. */
+/** note: One group's writes, as positions in `Plan.statements`. */
 type GroupWrite = { insert: number | null; updates: number[] };
 
 /**
- * Plan one batch: the groups to walk and the statements that move them.
+ * why: Plan one batch: the groups to walk and the statements that move them.
  *
  * Only the BOT and its WORKSPACE are decided here. Which target a group lands
  * on is decided by the statements themselves, inside the batch transaction —
@@ -337,7 +337,7 @@ async function planBatch(
   };
 
   for (const group of groups) {
-    // No bot / no tenant / two live targets naming the repository: nothing
+    // why: No bot / no tenant / two live targets naming the repository: nothing
     // names the one tenant these rows belong to. Left untouched, walked past
     // (the cursor moves), reported.
     if (group.bot_id === null || group.workspace_id === null || group.targets > 1) {
@@ -365,7 +365,7 @@ async function planBatch(
     // NULL rows of ONE group naming the same PR would collide once both carry
     // this target. The pre-0057 ledger was unique per bot, and the group is one
     // bot's, so the shape needs a hand-edited row.
-    // shortcut: such a duplicate aborts the whole batch and verify reports it
+    // note: such a duplicate aborts the whole batch and verify reports it
     // as `unattributed_ledger_rows`; deleting one is the operator's call, so the
     // item never guesses which PR row survives.
     for (const table of LEDGER_TABLES) {
@@ -392,7 +392,7 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
   requiresDowntime: false,
   order: 20,
 
-  /** Five counts the operator sees before starting: no writes. */
+  /** note: Five counts the operator sees before starting: no writes. */
   async preflight(db: DashboardD1): Promise<UpgradeCounts> {
     const counts = await db
       .prepare(
@@ -416,7 +416,7 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
   },
 
   /**
-   * ONE transaction per call; a replay over migrated rows processes nothing.
+   * why: ONE transaction per call; a replay over migrated rows processes nothing.
    *
    * The counts come from the batch's own statement results, not from the plan:
    * a group whose target an operator retired between the read and the commit
@@ -441,13 +441,13 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
     let created = 0;
     for (const write of plan.writes) {
       if (write.insert !== null && moved(write.insert) > 0) created += 1;
-      // The four updates are per-table and disjoint, so their sum is the rows
+      // why: The four updates are per-table and disjoint, so their sum is the rows
       // this group moved — zero when the guards stood the group down.
       const touched = write.updates.reduce((sum, index) => sum + moved(index), 0);
       if (touched > 0) attributed += 1;
       rows += touched;
     }
-    // A group whose statements all matched nothing changed shape between the
+    // why: A group whose statements all matched nothing changed shape between the
     // plan and the commit (a mapping repaired mid-run, or a target retired).
     // Reported, not hidden: the next step re-reads it under the new shape.
     const changed = plan.writes.length - attributed;
@@ -467,7 +467,7 @@ export const orphanLedgerAttribution: DataUpgradeItem = {
   },
 
   /**
-   * Read-only checks. `unattributed_ledger_rows` is the crash residual: a NULL
+   * why: Read-only checks. `unattributed_ledger_rows` is the crash residual: a NULL
    * row whose group the item CAN act on is work a completed run should have
    * moved, so it blocks. A group the item cannot act on is not its failure —
    * the operator fixes the bot mapping or the duplicate target and re-runs — so

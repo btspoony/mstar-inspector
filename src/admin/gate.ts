@@ -1,5 +1,5 @@
 /**
- * The per-request operator gate for `/_internal_admin`.
+ * why: The per-request operator gate for `/_internal_admin`.
  *
  * The namespace answers only a caller that holds a valid signed session, has a
  * `users` row, and is on the `PLATFORM_OPERATORS` allowlist. Every other caller

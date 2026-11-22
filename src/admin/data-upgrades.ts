@@ -1,5 +1,5 @@
 /**
- * Operator data upgrades (spec operator-data-upgrade § Upgrade registry and
+ * why: Operator data upgrades (spec operator-data-upgrade § Upgrade registry and
  * state machine, D8).
  *
  * A data upgrade is NOT a schema migration: it moves rows that already exist
@@ -35,9 +35,9 @@ export type UpgradeCursor = Record<string, unknown>;
 /** What asking GitHub for a repository's numeric id answered. */
 export type RepoLookupOutcome =
   | { kind: "found"; repoId: number }
-  /** The installation was listed and does not grant the repository. */
+  /** note: The installation was listed and does not grant the repository. */
   | { kind: "absent" }
-  /** No usable answer: no key, an undecryptable key, a rejected mint, a bad listing. */
+  /** note: No usable answer: no key, an undecryptable key, a rejected mint, a bad listing. */
   | { kind: "failed" };
 
 /** One installation's repository lookup; the caller caches per installation, not per group. */
@@ -60,13 +60,13 @@ export type UpgradeCounts = Record<string, number>;
 
 /** What one batch did: the resume point, the rows it moved, and whether it finished. */
 export type UpgradeBatch = {
-  /** The cursor the NEXT batch starts from; `null` when nothing is left. */
+  /** note: The cursor the NEXT batch starts from; `null` when nothing is left. */
   cursor: UpgradeCursor | null;
-  /** Rows this batch moved. `0` on a replay over finished work. */
+  /** note: Rows this batch moved. `0` on a replay over finished work. */
   processed: number;
-  /** The walk is finished — the next step processes nothing. */
+  /** note: The walk is finished — the next step processes nothing. */
   done: boolean;
-  /** One JSON object describing the batch (counts, discarded work), appended to `log_json`. */
+  /** note: One JSON object describing the batch (counts, discarded work), appended to `log_json`. */
   log?: UpgradeCursor;
 };
 
@@ -76,23 +76,23 @@ export type UpgradeBatch = {
  * transaction and is replayable.
  */
 export type DataUpgradeItem = {
-  /** Stable slug; the state row's primary key. */
+  /** note: Stable slug; the state row's primary key. */
   id: string;
   title: string;
   /**
-   * One or two sentences the console renders on the item's card: which rows it
+   * note: One or two sentences the console renders on the item's card: which rows it
    * changes and what it never touches. Server-owned like `title` — the item's
    * own words, so the card holds no per-item copy.
    */
   impact: string;
-  /** Refuses `step` while the maintenance window is off (after its first step). */
+  /** note: Refuses `step` while the maintenance window is off (after its first step). */
   requiresDowntime: boolean;
-  /** Run order in the console's list. */
+  /** note: Run order in the console's list. */
   order: number;
-  /** Counts the operator sees before starting. No writes. */
+  /** note: Counts the operator sees before starting. No writes. */
   preflight(db: DashboardD1): Promise<UpgradeCounts>;
   /**
-   * Move one batch of rows. ONE transaction; a replay over migrated rows moves
+   * note: Move one batch of rows. ONE transaction; a replay over migrated rows moves
    * nothing. The runner passes the operator login as `actor`, and a row the
    * batch CREATES records it as `created_by`, so the audit trail names whoever
    * caused the row rather than the item that happened to write it.
@@ -108,13 +108,13 @@ export type DataUpgradeItem = {
     context?: UpgradeRunContext,
   ): Promise<UpgradeBatch>;
   /**
-   * Read-only checks; every entry must read `0` for the item to complete,
+   * note: Read-only checks; every entry must read `0` for the item to complete,
    * except the ones named here — those are REPORTED (in `checks`, and so on the
    * console) and never fail the item.
    */
   advisoryChecks?: readonly string[];
   /**
-   * Read-only checks; every entry must read `0` for the item to complete.
+   * note: Read-only checks; every entry must read `0` for the item to complete.
    * `runStartedAt` is when the current run began (`run_started_at`), so an item
    * can tell the rows it could have stranded from deletions that predate it.
    */
@@ -133,15 +133,15 @@ export type DataUpgradeState = {
   status: DataUpgradeStatus;
   cursor: UpgradeCursor | null;
   processed: number;
-  /** The runner opened the maintenance window, so only it may close it. */
+  /** note: The runner opened the maintenance window, so only it may close it. */
   maintenanceOwned: boolean;
-  /** The per-phase in-flight claim; NULL between phases. */
+  /** note: The per-phase in-flight claim; NULL between phases. */
   startedAt: string | null;
-  /** When the current run began retiring rows; NULL before its first step and after a reset. */
+  /** note: When the current run began retiring rows; NULL before its first step and after a reset. */
   runStartedAt: string | null;
   finishedAt: string | null;
   lastError: string | null;
-  /** One entry per batch: what it moved and what it discarded. */
+  /** note: One entry per batch: what it moved and what it discarded. */
   log: UpgradeCursor[];
 };
 
@@ -166,7 +166,7 @@ export function findDataUpgrade(id: string): DataUpgradeItem | null {
   return DATA_UPGRADES.find((item) => item.id === id) ?? null;
 }
 
-/** One state-row read. */
+/** note: One state-row read. */
 type DataUpgradeRow = {
   id: string;
   status: string;
@@ -183,7 +183,7 @@ type DataUpgradeRow = {
 const STATE_COLUMNS =
   "id, status, cursor_json, processed, maintenance_owned, started_at, run_started_at, finished_at, last_error, log_json";
 
-/** An absent row is the documented `pending` state — nothing was ever started. */
+/** note: An absent row is the documented `pending` state — nothing was ever started. */
 function pendingState(id: string): DataUpgradeState {
   return {
     id,
@@ -200,7 +200,7 @@ function pendingState(id: string): DataUpgradeState {
 }
 
 /**
- * A stored cursor that no longer parses is treated as ABSENT: the item is
+ * why: A stored cursor that no longer parses is treated as ABSENT: the item is
  * idempotent, so restarting the walk moves nothing that is already migrated.
  */
 function parseCursor(value: string | null): UpgradeCursor | null {
@@ -215,7 +215,7 @@ function parseCursor(value: string | null): UpgradeCursor | null {
   }
 }
 
-/** A stored log that no longer parses is absent evidence, never a failed read. */
+/** note: A stored log that no longer parses is absent evidence, never a failed read. */
 function parseLog(value: string | null): UpgradeCursor[] {
   if (value === null) return [];
   try {
@@ -241,7 +241,7 @@ function stateFromRow(row: DataUpgradeRow): DataUpgradeState {
   };
 }
 
-/** One upgrade's state, `pending` when it was never started. */
+/** note: One upgrade's state, `pending` when it was never started. */
 async function readDataUpgradeState(db: DashboardD1, id: string): Promise<DataUpgradeState> {
   const row = await db
     .prepare(`SELECT ${STATE_COLUMNS} FROM operator_data_upgrades WHERE id = ?1`)
@@ -286,27 +286,27 @@ export async function listDataUpgrades(db: DashboardD1): Promise<DataUpgradeList
   );
 }
 
-/** Clears the in-flight claim after a phase that threw (the stored status stays). */
+/** note: Clears the in-flight claim after a phase that threw (the stored status stays). */
 const CLAIM_RELEASE_SQL = `
   UPDATE operator_data_upgrades
      SET started_at = NULL, claim_token = NULL
    WHERE id = ?1 AND claim_token = ?2 AND started_at = ?3`;
 
-/** Drop the claim a phase took, keeping the error that is about to surface. */
+/** note: Drop the claim a phase took, keeping the error that is about to surface. */
 async function releaseClaim(db: DashboardD1, id: string, now: string, token: string): Promise<void> {
-  // A release that fails must not mask the real error: the lease self-heals.
+  // why: A release that fails must not mask the real error: the lease self-heals.
   await db.prepare(CLAIM_RELEASE_SQL).bind(id, token, now).run().catch(() => {});
 }
 
 /**
- * A claim stamp older than this is presumed dead: the worker that took it never
+ * why: A claim stamp older than this is presumed dead: the worker that took it never
  * released it (a phase is bounded — one worklist page, chunked binds). The stale
  * window IS the lease expiry, so a crashed phase never wedges the item.
  */
 const CLAIM_LEASE_MS = 5 * 60_000;
 
 /**
- * Claim the item for ONE phase — the compare-and-set `step`, `verify` and
+ * why: Claim the item for ONE phase — the compare-and-set `step`, `verify` and
  * `reset` all take, so two phases never interleave on one item.
  *
  * `started_at` is the CLAIM STAMP: non-NULL only while a phase is in flight, so
@@ -328,7 +328,7 @@ const CLAIM_LEASE_MS = 5 * 60_000;
  */
 function claimSql(allowed: readonly DataUpgradeStatus[], stampsRunStart: boolean): string {
   const list = allowed.map((status) => `'${status}'`).join(", ");
-  // Only `step` retires rows, so only its claim stamps the run: the first step
+  // why: Only `step` retires rows, so only its claim stamps the run: the first step
   // of a run sets it and every later one keeps it (`?4` is the claim stamp).
   const runColumn = stampsRunStart ? ", run_started_at" : "";
   const runValue = stampsRunStart ? ", ?4" : "";
@@ -348,14 +348,14 @@ function claimSql(allowed: readonly DataUpgradeStatus[], stampsRunStart: boolean
          OR operator_data_upgrades.started_at < ?5)`;
 }
 
-/** `verifying` is included so a verify interrupted mid-flight can be retried. */
+/** why: `verifying` is included so a verify interrupted mid-flight can be retried. */
 const VERIFIABLE_STATUSES: readonly DataUpgradeStatus[] = ["running", "verifying", "failed"];
 
 const STEP_CLAIM_SQL = claimSql(["pending", "running"], true);
 const VERIFY_CLAIM_SQL = claimSql(VERIFIABLE_STATUSES, false);
 const RESET_CLAIM_SQL = claimSql(["pending", "running", "verifying", "completed", "failed"], false);
 
-/** Take the phase's claim; `null` means another phase holds the item. */
+/** note: Take the phase's claim; `null` means another phase holds the item. */
 async function claimUpgrade(
   db: DashboardD1,
   sql: string,
@@ -379,10 +379,10 @@ async function claimUpgrade(
   return claim.meta.changes === 0 ? null : token;
 }
 
-/** One claim-guarded write's verdict: `refused` means the row no longer carries our stamp. */
+/** note: One claim-guarded write's verdict: `refused` means the row no longer carries our stamp. */
 type ClaimStep = "ok" | "refused";
 
-/** Run one claim-guarded UPDATE; `refused` when no row matched the stamp. */
+/** note: Run one claim-guarded UPDATE; `refused` when no row matched the stamp. */
 async function guardedWrite(db: DashboardD1, sql: string, ...binds: unknown[]): Promise<ClaimStep> {
   const result = await db.prepare(sql).bind(...binds).run();
   return result.meta.changes === 0 ? "refused" : "ok";
@@ -426,7 +426,7 @@ export async function settleVerifyState(
 }
 
 /**
- * Drop the ownership flag. Its `changes` is the batch's veto: every window
+ * why: Drop the ownership flag. Its `changes` is the batch's veto: every window
  * statement below is guarded by the flag this one cleared, so a claim taken
  * over between the read and the batch leaves the newer run's window untouched.
  * The claim TOKEN names the claim, so a takeover that reused the same stamp
@@ -437,14 +437,14 @@ const MAINTENANCE_RELEASE_SQL = `
      SET maintenance_owned = 0
    WHERE id = ?1 AND claim_token = ?2 AND started_at = ?3 AND maintenance_owned = 1`;
 
-/** The window is this claim's to close: the flag is down AND somebody opened it. */
+/** note: The window is this claim's to close: the flag is down AND somebody opened it. */
 const MAINTENANCE_CLOSE_GUARD = `
   EXISTS (SELECT 1 FROM operator_data_upgrades
            WHERE id = ?1 AND claim_token = ?2 AND maintenance_owned = 0)
   AND EXISTS (SELECT 1 FROM review_runtime_settings
                WHERE key = 'platform.maintenance.enabled' AND value = '1')`;
 
-/** One close, one audit row — `before` read while the window still stands. */
+/** note: One close, one audit row — `before` read while the window still stands. */
 const MAINTENANCE_CLOSE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -538,7 +538,7 @@ export async function releaseUpgradeClaim(
 }
 
 /**
- * The batch's outcome: cursor, counter, log entry AND the lease release. The
+ * why: The batch's outcome: cursor, counter, log entry AND the lease release. The
  * log is append-only JSON so the operator keeps the counts of every batch a
  * later reset would otherwise erase; clearing `started_at` is what lets the next
  * step claim again, and `claim_token` goes with it so no stale claim identity
@@ -560,11 +560,11 @@ const STEP_PROGRESS_SQL = `
                          ELSE json_insert(log_json, '$[#]', json(?4)) END
    WHERE id = ?1 AND status = 'running' AND claim_token = ?5`;
 
-/** The phases the operator console can run, as the ledger names them. */
+/** note: The phases the operator console can run, as the ledger names them. */
 type UpgradePhase = "step" | "verify" | "reset";
 
 /**
- * One ledger row per phase that ACTED (a refusal writes none, the rule every
+ * why: One ledger row per phase that ACTED (a refusal writes none, the rule every
  * console write follows). `platform_audit_events` is the platform-scope ledger:
  * `audit_events` cannot hold this row because its `workspace_id` is NOT NULL and
  * an upgrade is not workspace-scoped (migration 0033).
@@ -574,7 +574,7 @@ const UPGRADE_AUDIT_SQL = `
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   VALUES (?1, ?2, ?3, 'data_upgrade', ?4, json_object('phase', ?5, 'outcome', ?6), ?7)`;
 
-/** The audit statement for one phase, so it rides the same batch as its write. */
+/** note: The audit statement for one phase, so it rides the same batch as its write. */
 function upgradeAudit(
   db: DashboardD1,
   phase: UpgradePhase,
@@ -639,12 +639,12 @@ export async function stepDataUpgrade(
     await setMaintenanceMode(db, { enabled: true, reason: `data upgrade: ${item.title}`, actor }, now);
   }
   const batch = await item.runBatch(db, before.cursor, actor, context).catch(async (err: unknown) => {
-    // The batch is ONE transaction, so a throw moved nothing: release the claim
+    // why: The batch is ONE transaction, so a throw moved nothing: release the claim
     // (a hard process death leaves it to expire instead) and surface the real error.
     await releaseClaim(db, item.id, now, token);
     throw err;
   });
-  // Our token must still hold the row: the batch awaited, so a successor may
+  // why: Our token must still hold the row: the batch awaited, so a successor may
   // have claimed it. A refusal writes neither the page nor an audit row, and
   // leaves the successor's claim untouched.
   const progressed = await guardedWrite(
@@ -702,7 +702,7 @@ export async function verifyDataUpgrade(
   if (token === null) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
-  // A throw is NOT caught: the claim stays and its 5-minute lease expiry is the
+  // why: A throw is NOT caught: the claim stays and its 5-minute lease expiry is the
   // recovery, so a half-run phase never looks claimable to a later one.
   // The run start is read AFTER the claim: a step that finished between the read
   // above and this claim may have stamped the run, and the boundary the item
@@ -714,7 +714,7 @@ export async function verifyDataUpgrade(
   const status = failing.length > 0 ? "failed" : "completed";
   const lastError =
     failing.length > 0 ? `verify failed: ${failing.map(([name, count]) => `${name}=${count}`).join(", ")}` : null;
-  // The claim outlives the status write: cleanup below runs under the same
+  // why: The claim outlives the status write: cleanup below runs under the same
   // token, so a reset cannot claim the row and have its window closed by us.
   if ((await settleVerifyState(db, item.id, status, lastError, now, token)) === "refused") {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
@@ -733,7 +733,7 @@ export async function verifyDataUpgrade(
 }
 
 /**
- * The reset's state write: `pending` with no cursor, counter or finish.
+ * why: The reset's state write: `pending` with no cursor, counter or finish.
  * `started_at` and `claim_token` stay — the window close and ownership clear
  * below run under the same claim, and only the last step clears them and
  * re-opens the row.
@@ -771,7 +771,7 @@ export async function resetDataUpgrade(
   now: string,
 ): Promise<UpgradeResetOutcome> {
   const before = await readDataUpgradeState(db, item.id);
-  // The claim keeps a reset from clearing the row a step or verify is writing.
+  // why: The claim keeps a reset from clearing the row a step or verify is writing.
   // The bind states the row as it already is, so a refused or failed reset
   // leaves the status where it was.
   const token = await claimUpgrade(
@@ -785,7 +785,7 @@ export async function resetDataUpgrade(
   if (token === null) {
     return { kind: "refused", reason: "upgrade_running", state: await readDataUpgradeState(db, item.id) };
   }
-  // State first, window second: a reset that died between the two leaves the
+  // why: State first, window second: a reset that died between the two leaves the
   // row `pending` still holding its claim and ownership, which the next claim's
   // stale window adopts and its own cleanup closes. A throw is NOT caught here:
   // the claim stays and its lease expires, so no half-cleaned row is claimable.

@@ -1,5 +1,5 @@
 /**
- * Repository id claim — the fourth registered operator data upgrade.
+ * why: Repository id claim — the fourth registered operator data upgrade.
  *
  * A target can carry `repo_owner`/`repo_name` and still have no `repo_id`: the
  * shape `repo-backfill` leaves behind when it merges the 0067 leftover target
@@ -29,7 +29,7 @@ import type {
   UpgradeRunContext,
 } from "../data-upgrades";
 
-/** Targets visited per step. */
+/** note: Targets visited per step. */
 const TARGETS_PER_BATCH = 50;
 
 const UNCLAIMED_SQL = `
@@ -65,13 +65,13 @@ export const repoIdClaim: DataUpgradeItem = {
   requiresDowntime: false,
   order: 22,
 
-  /** One count the operator sees before starting: no writes. */
+  /** note: One count the operator sees before starting: no writes. */
   async preflight(db: DashboardD1): Promise<UpgradeCounts> {
     return { unclaimed_targets: await countUnclaimed(db) };
   },
 
   /**
-   * ONE walk over the unclaimed targets, paged by target id. Binding happens
+   * why: ONE walk over the unclaimed targets, paged by target id. Binding happens
    * outside any transaction — a GitHub call inside one would hold the write
    * lock for its whole timeout — and each bind is guarded by the id still being
    * absent, so a delivery that claims a target mid-walk is left alone.
